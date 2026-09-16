@@ -47,6 +47,7 @@ from ai_assistant.planning.effects import (
     detached_key,
     refuse_an_unsatisfiable_borrowing,
     refuse_an_unscopable_claim,
+    satisfaction_marks,
 )
 from ai_assistant.planning.execution import PlanExecution
 from ai_assistant.planning.goals import (
@@ -1305,6 +1306,12 @@ class InMemoryPlanStore:
         version and resolved the step, so a stale write is still a
         ``StaleExecutionError`` and an unknown step still a plain ``PlanningError``.
 
+        **The pair is read through a refusal rather than asserted.** The transition
+        stays the caller's object while the call is queued, so a caller that nulls
+        ``satisfied_by_step`` reaches here with half a pair — a shape the five limbs
+        cannot be decided in at all — and §9's answer is the same non-stale
+        ``PlanningError``, never an ``AssertionError``.
+
         Both values it returns are the store's: the ``output`` is the holder's own, off
         the row it has just verified, and the instant is this store's clock's rather
         than the tracker's, which may be injected independently (§9).
@@ -1320,9 +1327,11 @@ class InMemoryPlanStore:
         Raises:
             PlanningError: On any limb of the condition.
         """
-        named, borrowed_step = transition.satisfied_by_execution, transition.satisfied_by_step
-        assert named is not None  # noqa: S101 — the tracker calls this for a satisfaction alone
-        assert borrowed_step is not None  # noqa: S101 — StepTransition keeps the trio whole
+        named, borrowed_step = satisfaction_marks(
+            step_id=transition.step_id,
+            named=transition.satisfied_by_execution,
+            borrowed_step=transition.satisfied_by_step,
+        )
         plan = self._plans.get(stored.plan_id)
         assert plan is not None  # noqa: S101 — save_plan refuses an orphan execution
         held = self._executions.get(named)

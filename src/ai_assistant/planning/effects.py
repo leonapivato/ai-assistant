@@ -212,6 +212,43 @@ def refuse_an_unscopable_claim(
     return intended_action
 
 
+def satisfaction_marks(
+    *, step_id: str, named: str | None, borrowed_step: str | None
+) -> tuple[str, str]:
+    """The pair ADR-0259 §9's limbs are verified against, refusing a dissolved one.
+
+    ``StepTransition``'s validator requires the trio whole and the store's guard reads
+    ``satisfied_by_execution`` alone — but the transition stays the **caller's** object
+    for as long as the call is queued, and ``frozen=True`` does nothing about
+    ``__dict__`` (ADR-0018 §3). A caller that nulls ``satisfied_by_step`` after the call
+    is queued therefore reaches the five limbs with half a pair, which is a shape the
+    condition cannot be decided in at all. §9 fixes the answer for every such shape: the
+    **non-stale** ``PlanningError`` ADR-0255 §3 fixes for its own conjuncts, because no
+    re-read makes an absent mark present — and a refusal rather than an ``assert``,
+    which ``python -O`` removes and which is not a value the contract states.
+
+    Args:
+        step_id: The step being satisfied.
+        named: ``satisfied_by_execution``, as the store reads it.
+        borrowed_step: ``satisfied_by_step``, as the store reads it.
+
+    Returns:
+        The pair, once both are known to be present.
+
+    Raises:
+        PlanningError: If either mark is absent.
+    """
+    if named is None or borrowed_step is None:
+        msg = (
+            f"step {step_id} names a satisfaction whose marks are not whole: "
+            "satisfied_by_execution and satisfied_by_step are verified together, and a "
+            "transition that lost one after the call was queued is refused rather than "
+            "committed against half a pair"
+        )
+        raise PlanningError(msg)
+    return named, borrowed_step
+
+
 def refuse_an_unsatisfiable_borrowing(  # noqa: PLR0913 — one keyword per limb of §9's five-limbed condition; bundling them would mint a type whose only reader is this refusal
     *,
     step_id: str,

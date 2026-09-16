@@ -7424,6 +7424,62 @@ class PlanStoreContract:
             assert step.status is not StepStatus.SUCCEEDED, label
             assert step.satisfied_by_execution is None, label
 
+    async def test_a_satisfaction_whose_marks_dissolve_mid_flight_is_refused(
+        self, store: PlanStore
+    ) -> None:
+        """ADR-0259 §9 over a transition the caller moves after the call is queued.
+
+        ``StepTransition``'s validator requires the trio whole **at construction**, and
+        ``frozen=True`` refuses the assignment — but neither says anything about
+        ``__dict__``, which ADR-0018 §3 puts outside pydantic's reach, and the
+        transition stays the caller's object for as long as the call sits on the loop.
+        A caller that nulls ``satisfied_by_step`` there reaches the five limbs with half
+        a pair: ``satisfied_by_execution`` still names an execution, so the store hands
+        the tracker a satisfaction to verify, and the verification has no step to verify
+        it against.
+
+        That is a shape the condition cannot be decided in at all, and §9 fixes one
+        answer for every such shape — the **non-stale** ``PlanningError`` ADR-0255 §3
+        fixes for its own conjuncts, because no re-read makes an absent mark present.
+        An ``AssertionError`` would be neither: it is outside
+        ``commit_transition``'s stated exception contract, and ``python -O`` deletes it
+        and commits the write instead.
+
+        Driven mid-flight with :func:`asyncio.ensure_future`, which queues the call
+        without starting it — so the mutation lands between the caller's own read of the
+        trio and the store's, against **every** implementation rather than only those
+        that await a shared resource.
+        """
+        holder = await self._acting(store)
+        await store.claim_effect(execution_id=holder.id, step_id="s1", effect_key=_KEY)
+        holder = await self._to_status(store, holder, StepStatus.SUCCEEDED)
+
+        later = await self._acting(store, plan_id="p2", attempt_id="a2")
+        await store.claim_effect(execution_id=later.id, step_id="s1", effect_key=_KEY)
+
+        move = StepTransition(
+            execution_id=later.id,
+            step_id="s1",
+            to_status=StepStatus.SUCCEEDED,
+            expected_version=later.version,
+            satisfied_by_execution=holder.id,
+            satisfied_by_step="s1",
+            satisfied_by_key=_KEY,
+        )
+        committing = asyncio.ensure_future(store.commit_transition(move))
+        move.__dict__["satisfied_by_step"] = None
+
+        with pytest.raises(PlanningError) as raised:
+            await committing
+        assert not isinstance(raised.value, StaleExecutionError), (
+            "no re-read makes an absent mark present"
+        )
+        assert "marks are not whole" in str(raised.value)
+
+        step = await self._step(store, later)
+        assert step.status is not StepStatus.SUCCEEDED, "and the refusal writes nothing"
+        assert (step.satisfied_by_execution, step.satisfied_by_step) == (None, None)
+
     async def _foreign_success(self, store: PlanStore) -> ExecutionState:
         """A second goal with one ``SUCCEEDED`` step, for the another-goal limb."""
         await store.save_goal(_goal("g2"))
