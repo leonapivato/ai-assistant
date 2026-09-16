@@ -105,6 +105,10 @@ _SIDECARS = ("-journal", "-wal", "-shm")
 #: The largest value SQLite will bind as an integer parameter.
 _MAX_SQLITE_INT = 2**63 - 1
 
+#: And the smallest. Binding either side of the pair raises ``OverflowError``,
+#: which is neither ``ValueError`` nor ``AuthorizationError``.
+_MIN_SQLITE_INT = -(2**63)
+
 #: ADR-0254 §1's transition graph, whole and as data: the **seven** edges, keyed
 #: by the disposition each one leaves. **Stated once**, so ``settle``'s refusal and
 #: the conformance suite's enumeration cannot disagree about which moves exist. The
@@ -148,6 +152,50 @@ _EDGES: Final[dict[AuthorizationDisposition, frozenset[AuthorizationDisposition]
 _ANSWERS: Final[frozenset[AuthorizationDisposition]] = frozenset(
     {AuthorizationDisposition.ESTABLISHED, AuthorizationDisposition.DECLINED}
 )
+
+
+def _checked_version(goal_version: int) -> None:
+    """Hold ``goal_version`` to a value this store can hold, before any I/O.
+
+    **Refused locally and before any I/O**, which is :func:`_checked_target`'s own
+    posture one member over and is what keeps the guard from being sequenced behind
+    a store's own failure — so a caller's fail-closed branch cannot be handed the
+    wrong class for the same call.
+
+    **Two things are refused and the reasons differ.** A value outside SQLite's
+    signed 64-bit parameter range raises ``OverflowError`` on binding — neither
+    ``ValueError`` nor
+    :class:`~ai_assistant.core.errors.AuthorizationError`, so it would leave this
+    layer's error boundary **through a hole**, which is the reason ``recent``'s own
+    ``limit`` is clamped. **Clamping is wrong here**: a bound above any possible row
+    count still means *"all of them"*, while a clamped watermark is a **different**
+    watermark, and ADR-0268 §1 keys the fence on the version the caller's own status
+    write names. And ``True`` is an ``int`` in Python, so an unchecked ``bool`` would
+    be taken silently as version **one** — the allowlist of the exact ``int`` is what
+    ``recent`` already uses for the same hazard.
+
+    **What is not refused is a negative or a zero version.** ADR-0268 states no
+    floor on the value, only that the record is a watermark neither member lowers,
+    and a store refusing one would be deciding a rule the decision leaves to
+    ``PlanStore``.
+
+    **Stated identically in the canonical fake**, so the two implementations answer
+    the same call the same way; a guard only the durable store had would be the
+    substitutability divergence ADR-0084 §4 names, with the conformance suite unable
+    to state the arm at all.
+
+    Raises:
+        ValueError: If ``goal_version`` is not an exact ``int``, or is outside the
+            range SQLite can bind.
+    """
+    if type(goal_version) is not int or not _MIN_SQLITE_INT <= goal_version <= _MAX_SQLITE_INT:
+        msg = (
+            f"goal_version must be an int SQLite can hold "
+            f"({_MIN_SQLITE_INT} to {_MAX_SQLITE_INT}), got "
+            f"{describe_untrusted(goal_version)}; the type is checked because a bool "
+            f"is an int and would be taken as version one (ADR-0268 §1)"
+        )
+        raise ValueError(msg)
 
 
 async def _run_to_completion[T](fn: Callable[..., T], /, *args: object) -> T:
@@ -1235,10 +1283,14 @@ class SqliteGoalAuthorizationStore:
             How many rows this step moved.
 
         Raises:
+            ValueError: If ``goal_version`` is not an exact ``int`` this store can
+                hold (:func:`_checked_version`), refused **locally and before any
+                I/O**.
             AuthorizationError: If the store cannot be read or written. The step is
                 all-or-nothing: the transaction rolls back, so nothing is settled
                 and no record is raised.
         """
+        _checked_version(goal_version)
         async with self._lock:
             return await _run_to_completion(self._end_for_goal_sync, goal, at, goal_version)
 
@@ -1285,8 +1337,12 @@ class SqliteGoalAuthorizationStore:
             holds no record of that goal.
 
         Raises:
+            ValueError: If ``goal_version`` is not an exact ``int`` this store can
+                hold (:func:`_checked_version`), refused **locally and before any
+                I/O**.
             AuthorizationError: If the store cannot be read or written.
         """
+        _checked_version(goal_version)
         async with self._lock:
             return await _run_to_completion(self._clear_closure_sync, goal, goal_version)
 

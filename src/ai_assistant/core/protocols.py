@@ -9502,6 +9502,21 @@ class GoalAuthorizationStore(Protocol):
         open, and a lane that ended an authorization on one has breached ADR-0268
         §1.
 
+        **``goal_version`` is held to a value an implementation can hold, refused
+        locally and before any I/O.** A durable store binds it as an integer
+        parameter, and a Python ``int`` has no width — so a value outside the signed
+        64-bit range raises out of the driver as an ``OverflowError``, which is
+        neither a refusal nor an
+        :class:`~ai_assistant.core.errors.AuthorizationError` and would leave the
+        implementation's error boundary through a hole. **Clamping is refused**: a
+        clamped watermark is a **different** watermark, and the record is keyed to
+        the version the caller's own status write names. And the type is checked as
+        an allowlist of the exact ``int``, because ``True`` is an ``int`` and would
+        otherwise be taken silently as version **one** — which is ``recent``'s own
+        guard for the same hazard. **A non-representable version is not a floor
+        rule**: nothing here refuses a zero or a negative one, that being
+        ``PlanStore``'s to decide.
+
         Args:
             goal: The goal whose authorizations end and whose fence is raised.
             at: The instant the rows are settled at — the **act's own**, read once.
@@ -9512,6 +9527,11 @@ class GoalAuthorizationStore(Protocol):
             How many rows this step moved; ``0`` where it moved none.
 
         Raises:
+            ValueError: If ``goal_version`` is not an exact ``int`` an implementation
+                can hold, refused **locally and before any I/O** — and before any
+                fault an implementation would otherwise raise, so a caller's
+                fail-closed branch cannot be handed the wrong class for the same
+                call.
             AuthorizationError: If the store cannot be read or written. **The step
                 is all-or-nothing**: a fault leaves no row settled and no record
                 raised.
@@ -9542,6 +9562,21 @@ class GoalAuthorizationStore(Protocol):
         concurrent act is relying on being indistinguishable from an orphaned one at
         the same version.
 
+        **``goal_version`` is held to a value an implementation can hold, refused
+        locally and before any I/O.** A durable store binds it as an integer
+        parameter, and a Python ``int`` has no width — so a value outside the signed
+        64-bit range raises out of the driver as an ``OverflowError``, which is
+        neither a refusal nor an
+        :class:`~ai_assistant.core.errors.AuthorizationError` and would leave the
+        implementation's error boundary through a hole. **Clamping is refused**: a
+        clamped watermark is a **different** watermark, and the record is keyed to
+        the version the caller's own status write names. And the type is checked as
+        an allowlist of the exact ``int``, because ``True`` is an ``int`` and would
+        otherwise be taken silently as version **one** — which is ``recent``'s own
+        guard for the same hazard. **A non-representable version is not a floor
+        rule**: nothing here refuses a zero or a negative one, that being
+        ``PlanStore``'s to decide.
+
         Args:
             goal: The goal whose fence is lifted.
             goal_version: The version the reopen's ``ACTIVE`` write named as its
@@ -9551,6 +9586,9 @@ class GoalAuthorizationStore(Protocol):
             Whether a **standing** fence was lifted by this call.
 
         Raises:
+            ValueError: If ``goal_version`` is not an exact ``int`` an implementation
+                can hold, refused **locally and before any I/O**, for
+                :meth:`end_for_goal`'s reason.
             AuthorizationError: If the store cannot be read or written.
         """
         ...

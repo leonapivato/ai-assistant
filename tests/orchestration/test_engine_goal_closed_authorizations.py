@@ -24,13 +24,13 @@ is pinned, and the two limbs are filed against that lane (#2452).
 from __future__ import annotations
 
 from datetime import timedelta
-from typing import TYPE_CHECKING, Any, Final
+from typing import TYPE_CHECKING, Any, Final, NamedTuple
 
 import pytest
 from test_engine import AT, PATIENT, Harness, NoStepPlanner
 from test_engine_goal_association import _associating, _goal, _seed
 
-from ai_assistant.core.errors import AuthorizationError
+from ai_assistant.core.errors import AuthorizationError, StaleExecutionError
 from ai_assistant.core.types import (
     AssociationVerdict,
     AuthorizationDisposition,
@@ -38,6 +38,9 @@ from ai_assistant.core.types import (
     GoalAbandonment,
     GoalStatus,
     Ground,
+    PermissionDecision,
+    PermissionOutcome,
+    PermissionRuling,
     TurnReference,
 )
 from ai_assistant.testing import (
@@ -48,6 +51,7 @@ from ai_assistant.testing import (
 )
 
 if TYPE_CHECKING:
+    from collections.abc import Awaitable, Callable
     from datetime import datetime
 
     from ai_assistant.core.types import Authorization, Goal
@@ -60,6 +64,29 @@ _SECOND: Final = "tool_two"
 
 #: Far enough past :data:`AT` that nothing in these cases lapses on its own.
 _EXPIRES: Final = AT + timedelta(days=30)
+
+
+class _Advancing:
+    """A clock that moves on with every reading, and counts them.
+
+    **What a fixed clock cannot falsify**: an implementation reading the clock a
+    second time between its status write and its ending passes every arm stated
+    against a constant, and writes a ``settled_at`` no act happened at. A day per
+    reading, so a second one is far outside every interval these cases describe.
+    """
+
+    def __init__(self, at: datetime, *, step: timedelta) -> None:
+        """Create a clock reading ``at`` and advancing by ``step`` each reading."""
+        self._at = at
+        self._step = step
+        self.readings = 0
+
+    def __call__(self) -> datetime:
+        """Return the current reading, count it, and move on."""
+        reading = self._at
+        self._at += self._step
+        self.readings += 1
+        return reading
 
 
 def _row(goal_id: str, tool_id: str, *, row_id: str) -> Authorization:
@@ -99,6 +126,20 @@ def _dispositions(
 # --------------------------------------------------------------------------- #
 
 
+class _Raw(NamedTuple):
+    """The store's two ending members as they were before the journal wrapped them.
+
+    **Needed so a competing act does not pollute the journal**: the arm about two
+    racing reopens asserts what the **losing** act called, and a marker recorded
+    mid-wrapper would be defeated by exactly the mutation the arm exists to catch —
+    an ending hoisted above the ``ACTIVE`` write runs *before* the competing act,
+    and a reset taken after that act would wipe the evidence.
+    """
+
+    end_for_goal: Callable[..., Awaitable[int]]
+    clear_closure: Callable[..., Awaitable[bool]]
+
+
 class _Journal:
     """What each act called, in order, with the arguments ADR-0268 §1 keys on.
 
@@ -126,12 +167,20 @@ class _Journal:
         #: its own, and putting one on the shipping fake for a single arm would add a
         #: knob to every consumer's double.
         self.closing_fault: Exception | None = None
+        #: The store's own members, unwrapped. Set by :meth:`install`.
+        self.raw: _Raw
 
     def install(self, store: FakeGoalAuthorizationStore, plans: FakePlanStore) -> None:
-        """Wrap the three calls these arms are stated over."""
+        """Wrap the three calls these arms are stated over.
+
+        The unwrapped handles are kept on :attr:`raw`, so a case arranging a
+        **competing** act can drive the store without its calls landing in a journal
+        that is about the act under test.
+        """
         end_for_goal = store.end_for_goal
         clear_closure = store.clear_closure
         closing_write = plans.close_goal_abandoned
+        self.raw = _Raw(end_for_goal=end_for_goal, clear_closure=clear_closure)
 
         async def ending(goal: str, /, *, at: datetime, goal_version: int) -> int:
             self.calls.append("end_for_goal")
@@ -608,3 +657,272 @@ async def test_a_failing_closing_write_leaves_the_rows_ended_the_goal_open_and_f
         reference=TurnReference(goal_id=goal.id),
     )
     assert await store.record(_row(goal.id, "tool_three", row_id="repaired")) == "repaired"
+
+
+# --------------------------------------------------------------------------- #
+# Arm 5's concurrency limbs, which a sequential case cannot reach              #
+# --------------------------------------------------------------------------- #
+
+
+async def test_a_reopen_whose_active_write_is_refused_stale_calls_neither_member() -> None:
+    """Arm 5: *"of **two acts reopening one goal**, the one whose ``ACTIVE`` write is
+    refused stale calls **neither** member and retires **no** row the winner
+    established."*
+
+    **The compare-and-swap is what serialises two reopens** (ADR-0268 §2): both acts
+    read the goal at the same version, exactly one writes ``ACTIVE``, and exactly one
+    takes the pair. **A sequential case cannot reach this**, and an implementation
+    that hoisted either call above the ``ACTIVE`` write would pass every sequential
+    arm while letting the loser retire the winner's row — an authority established
+    for the reopened request, retired by an act that reopened nothing.
+
+    The competing act is run **inside** the losing act's own status write, so the
+    interleaving is deterministic rather than a scheduling coincidence.
+    """
+    harness, store, journal, conversation = _journalled()
+    goal = await _goal_with_two_rows(harness, store, conversation=conversation)
+    await harness.engine.abandon_goal(goal.id)
+    closed = await harness.plans.get_goal(goal.id)
+    assert closed is not None
+    journal.reset()
+
+    winner_ran = False
+    real_write = harness.plans.set_goal_status
+
+    async def racing(goal_id: str, /, **fields: Any) -> Goal:
+        """Let the *other* reopen win, then take this act's own — now stale — write."""
+        nonlocal winner_ran
+        if not winner_ran and fields.get("status") is GoalStatus.ACTIVE:
+            winner_ran = True
+            await real_write(
+                goal_id, status=GoalStatus.ACTIVE, at=AT, expected_version=closed.version
+            )
+            # **Through the unwrapped handles**, so the winner's own pair leaves the
+            # journal alone and every entry in it is the losing act's.
+            await journal.raw.end_for_goal(goal_id, at=AT, goal_version=closed.version)
+            await journal.raw.clear_closure(goal_id, goal_version=closed.version)
+            await store.record(_row(goal_id, "tool_three", row_id="winners"))
+        return await real_write(goal_id, **fields)
+
+    setattr(harness.plans, "set_goal_status", racing)  # noqa: B010 — an instance lever
+
+    second = (await harness.conversations.begin(None)).id
+    with pytest.raises(StaleExecutionError):
+        await harness.engine.converse(
+            "back to that one",
+            timeout=PATIENT,
+            conversation_id=second,
+            reference=TurnReference(goal_id=goal.id),
+        )
+
+    assert journal.calls == [], "the loser's write was refused, so it takes neither member"
+    winners = await store.resolve("winners")
+    assert winners is not None
+    assert winners.disposition is AuthorizationDisposition.ESTABLISHED, (
+        "the loser retires no row the winner established"
+    )
+    assert [row.id for row in await store.standing(goal.id)] == ["winners"]
+
+
+async def test_the_ending_takes_the_active_writes_reading_under_an_advancing_clock() -> None:
+    """Arm 5: *"asserted against a clock advanced between the two calls"*.
+
+    A fixed clock cannot see this: an implementation reading the clock a second time
+    between its status write and its ending would pass every arm, and the
+    ``GOAL_CLOSED`` row's ``settled_at`` would be an instant **no act happened at**.
+    Here every reading moves the clock a day on, so the two instants agree only if
+    there was one reading.
+
+    ADR-0268 §1: *"a ``GOAL_CLOSED`` row's ``settled_at`` is the instant of the
+    **act** that ended it and never a second reading taken between the two writes."*
+    """
+    journal = _Journal()
+    clock = _Advancing(AT, step=timedelta(days=1))
+    store = FakeGoalAuthorizationStore(now=lambda: AT)
+    plans = FakePlanStore(now=lambda: AT)
+    journal.install(store, plans)
+    harness = Harness(
+        planner=NoStepPlanner(),
+        plans=plans,
+        authorizations=store,
+        episode_retention=timedelta(days=365),
+        associator=_associating(AssociationVerdict.CONTINUES),
+        now=clock,
+    )
+    conversation = "conversation-1"
+    goal = await _goal_with_two_rows(harness, store, conversation=conversation)
+    await harness.engine.abandon_goal(goal.id)
+    closed = await harness.plans.get_goal(goal.id)
+    assert closed is not None
+    journal.reset()
+
+    written: list[datetime] = []
+    real_write = plans.set_goal_status
+
+    async def noting(goal_id: str, /, **fields: Any) -> Goal:
+        """Record the instant the ``ACTIVE`` write itself was given."""
+        if fields.get("status") is GoalStatus.ACTIVE:
+            written.append(fields["at"])
+        return await real_write(goal_id, **fields)
+
+    setattr(plans, "set_goal_status", noting)  # noqa: B010 — an instance lever
+
+    second = (await harness.conversations.begin(None)).id
+    await harness.engine.converse(
+        "back to that one",
+        timeout=PATIENT,
+        conversation_id=second,
+        reference=TurnReference(goal_id=goal.id),
+    )
+
+    assert len(written) == 1
+    assert clock.readings > 1, "the clock really is advancing, so a second read would show"
+    assert journal.endings[0][1] == written[0], (
+        "the ending carries the ACTIVE write's own instant and not a later reading"
+    )
+
+
+async def test_a_reopen_overtaken_by_a_later_closure_unfences_nothing() -> None:
+    """Arm 5: *"each act overtaken by the other changes nothing, which is what the
+    watermark is for"* — the first direction, at the act.
+
+    With the reopen's ``ACTIVE`` write landed and a closing act then fencing at its
+    own **higher** version, the reopen's delayed ``clear_closure`` answers ``False``,
+    the fence **stands**, and a ``record`` for that goal is refused. The delayed call
+    is the reopen's own, arriving after the closure — which is the state the version
+    exists to make harmless.
+    """
+    harness, store, journal, conversation = _journalled()
+    goal = await _goal_with_two_rows(harness, store, conversation=conversation)
+    await harness.engine.abandon_goal(goal.id)
+    closed = await harness.plans.get_goal(goal.id)
+    assert closed is not None
+    journal.reset()
+
+    # The reopen's ACTIVE write lands; a closing act then fences at a higher version.
+    reopened = await harness.plans.set_goal_status(
+        goal.id, status=GoalStatus.ACTIVE, at=AT, expected_version=closed.version
+    )
+    assert await harness.engine.abandon_goal(goal.id) is GoalAbandonment.ABANDONED
+    assert journal.endings[-1][2] > reopened.version - 1
+
+    assert await store.clear_closure(goal.id, goal_version=closed.version) is False
+    with pytest.raises(AuthorizationError):
+        await store.record(_row(goal.id, "tool_three", row_id="refused"))
+
+
+async def test_a_closing_act_overtaken_by_a_reopen_ends_no_row_written_since() -> None:
+    """Arm 5's other direction: *"the first act's delayed ``end_for_goal`` at its
+    **own** version answers ``0``, leaves that row ``ESTABLISHED`` and **live**, and
+    leaves the fence **lifted**"*.
+
+    A first closure fenced at its version, a reopen then lifting that fence at a
+    higher one, and a **fresh** row recorded under the reopened goal. The overtaken
+    act's delayed ending is the whole point of the watermark: the rows it would have
+    ended are of a request established **after** its read, which it never had an
+    authority over.
+    """
+    harness, store, journal, conversation = _journalled()
+    goal = await _goal_with_two_rows(harness, store, conversation=conversation)
+    await harness.engine.abandon_goal(goal.id)
+    first_version = journal.endings[0][2]
+    closed = await harness.plans.get_goal(goal.id)
+    assert closed is not None
+
+    second = (await harness.conversations.begin(None)).id
+    await harness.engine.converse(
+        "back to that one",
+        timeout=PATIENT,
+        conversation_id=second,
+        reference=TurnReference(goal_id=goal.id),
+    )
+    await store.record(_row(goal.id, "tool_three", row_id="afresh"))
+
+    assert await store.end_for_goal(goal.id, at=AT, goal_version=first_version) == 0
+    fresh = await store.resolve("afresh")
+    assert fresh is not None
+    assert fresh.disposition is AuthorizationDisposition.ESTABLISHED
+    assert await store.live_for(goal.id, "tool_three") is not None, "and still live"
+    assert await store.record(_row(goal.id, "tool_four", row_id="another")) == "another"
+
+
+async def test_a_row_recorded_in_the_unfenced_reopen_window_is_ended_with_the_rest() -> None:
+    """Arm 5's last limb: *"asserted over the ending and not over the asking"*.
+
+    Reopening a goal the store holds **no** closure record of, a ``record`` between
+    the ``ACTIVE`` write and the ending **succeeds** — there is no fence to stand in
+    that window — and **that row is then ended ``GOAL_CLOSED`` with the rest**. That
+    is the row ADR-0268 §2's meaning clause is stated over: it was written after the
+    closing act and **no closing act ended it**, which is why the member means *the
+    ending a closure of its goal takes* rather than *a closing act of its goal ended
+    this row*.
+
+    **And a route-(d) ``ALLOW`` already recorded against it with its trail written is
+    not retracted by the ending** — the row stands ``GOAL_CLOSED`` and the trail entry
+    is **unmoved**. The ending is prospective exactly as a revocation is (ADR-0254
+    §13): it *"retracts no decision already recorded and stops no request already
+    claimed"*.
+    """
+    harness, store, journal, conversation = _journalled()
+    goal = await _seed(
+        harness.plans,
+        _goal("goal-legacy", "book a campsite", conversation=conversation),
+        engaged_in=conversation,
+    )
+    # Closed without the store being told: §9's pre-decision database, or one the
+    # user has `clear`ed since. So no fence stands and the window is genuinely open.
+    await harness.plans.set_goal_status(
+        goal.id, status=GoalStatus.ABANDONED, at=AT, expected_version=goal.version
+    )
+    await store.record(_row(goal.id, _FIRST, row_id="legacy"))
+
+    window = _row(goal.id, "tool_three", row_id="window")
+    real_write = harness.plans.set_goal_status
+
+    async def windowed(goal_id: str, /, **fields: Any) -> Goal:
+        """Record a row **after** the ``ACTIVE`` write and **before** the ending."""
+        written = await real_write(goal_id, **fields)
+        if fields.get("status") is GoalStatus.ACTIVE:
+            assert await store.record(window) == "window", "no fence stands in the window"
+            # The route-(d) ``ALLOW`` is built here rather than driven through the
+            # policy: what the arm is about is what the **ending** does to a decision
+            # already recorded, not how that decision came to be recorded.
+            await harness.trail.record(
+                PermissionDecision(
+                    id="d-window",
+                    ruling=PermissionRuling(
+                        outcome=PermissionOutcome.ALLOW,
+                        reason="the user's own recorded act for this goal covers this call",
+                        authorised_by=window.id,
+                        authorised_subject=window.subject_digest,
+                        authorised_goal=window.goal,
+                    ),
+                    tool=window.tool,
+                    parameters_digest="0" * 64,
+                    decided_at=AT,
+                )
+            )
+        return written
+
+    setattr(harness.plans, "set_goal_status", windowed)  # noqa: B010 — an instance lever
+    journal.reset()
+
+    second = (await harness.conversations.begin(None)).id
+    await harness.engine.converse(
+        "back to that one",
+        timeout=PATIENT,
+        conversation_id=second,
+        reference=TurnReference(goal_id=goal.id),
+    )
+
+    held = await store.resolve("window")
+    assert held is not None
+    assert held.disposition is AuthorizationDisposition.GOAL_CLOSED, (
+        "the window's row is ended with the rows the closure never reached"
+    )
+    legacy = await store.resolve("legacy")
+    assert legacy is not None
+    assert legacy.disposition is AuthorizationDisposition.GOAL_CLOSED
+    recorded = [one for one in await harness.trail.export() if one.id == "d-window"]
+    assert len(recorded) == 1, "the ending retracts no decision already recorded"
+    assert recorded[0].ruling.authorised_by == "window"
