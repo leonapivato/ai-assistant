@@ -88,6 +88,7 @@ from datetime import UTC, datetime, timedelta
 from enum import StrEnum
 from functools import partial
 from itertools import count
+from types import MappingProxyType
 from typing import TYPE_CHECKING, Any, Final, TypeVar, assert_never
 
 import structlog
@@ -95,6 +96,7 @@ import structlog
 from ai_assistant.core.clock import ClockReadingError, checked_clock
 from ai_assistant.core.errors import (
     AuthorizationError,
+    ClaimRefused,
     ConfigurationError,
     ConversationStoreError,
     MemoryStoreError,
@@ -133,6 +135,7 @@ from ai_assistant.core.types import (
     CoverageUnrecordedBinding,
     DeferralAdmissionOutcome,
     Disposition,
+    DriveWithheld,
     EngagementDisposition,
     Evidence,
     ExchangeDisposition,
@@ -1682,6 +1685,86 @@ _PAUSED_ATTEMPT_STATES: Final[frozenset[AttemptState]] = frozenset(
         AttemptState.BLOCKED,
     }
 )
+
+
+#: ADR-0261 §7's three **goal** tests, which take priority over the attempt's three.
+#:
+#: Stated as a mapping so the three cannot drift apart from the three members that name
+#: them. ``ACTIVE`` is absent deliberately: an open goal says nothing about why a claim
+#: was refused, and the attempt's own state answers for it below.
+_GOAL_WITHHELD: Final[Mapping[GoalStatus, DriveWithheld]] = MappingProxyType(
+    {
+        GoalStatus.ABANDONED: DriveWithheld.GOAL_CANCELLED,
+        GoalStatus.ACHIEVED: DriveWithheld.GOAL_ACHIEVED,
+        GoalStatus.BLOCKED: DriveWithheld.GOAL_BLOCKED,
+    }
+)
+
+#: ADR-0261 §7's three **attempt** tests, read after the goal's and before the plan's.
+#:
+#: ``ATTEMPT_PAUSED`` covers the three states ADR-0249 §5 derives *paused* from, which is
+#: why the set is spelled from :data:`_PAUSED_ATTEMPT_STATES` rather than restated —
+#: "no lane collapses any two of the seven", and the converse, that no member quietly
+#: loses a state, is what sharing the set buys.
+_ATTEMPT_WITHHELD: Final[Mapping[AttemptState, DriveWithheld]] = MappingProxyType(
+    {
+        AttemptState.CANCELLED: DriveWithheld.ATTEMPT_CANCELLED,
+        AttemptState.ENDED: DriveWithheld.ATTEMPT_ENDED,
+        **dict.fromkeys(_PAUSED_ATTEMPT_STATES, DriveWithheld.ATTEMPT_PAUSED),
+    }
+)
+
+
+def _withheld_member(
+    attempt: GoalAttempt | None, plan: ActionPlan | None, goal: Goal | None
+) -> DriveWithheld | None:
+    """Which state the post-refusal read established, or ``None`` (ADR-0261 §7).
+
+    **The goal's three tests first, then the attempt's three, then the plan's one**, and
+    **where none holds no member is chosen and the refusal propagates**: *"a turn
+    reporting one of those as a withheld drive would assert something about the step
+    that nothing established"*.
+
+    **The priority is not the read order and is not free.** The reads are taken in
+    :meth:`Engine._withheld_state` — the attempt, the plan, then the **goal last**, so
+    that an abandonment landing between two of them is seen by the later one — while the
+    *tests* run goal-first, so a goal that has since closed answers ``GOAL_CANCELLED``
+    rather than an attempt member asserting the goal is still open.
+
+    **A goal's disposition and its attempt's state are two facts and get two members.**
+    A ``CANCELLED`` attempt under an **open** goal is ADR-0250 §13's reopen and answers
+    ``ATTEMPT_CANCELLED``, because a member saying ``GOAL_CANCELLED`` there *"would say
+    the goal was given up when the user has just taken it up again"*; ``BLOCKED`` is an
+    **open** goal (ADR-0250 §1) and ``ATTEMPT_ENDED`` leaves its goal open (ADR-0249 §4),
+    so neither asserts a closure.
+
+    **The plan's test is last and is the only one that needs two records**: a plan whose
+    ``targets_revision`` is not the goal's current ``revision`` is a plan a **correction**
+    has overtaken (ADR-0249 §8). A goal the read could not find decides nothing, here as
+    above — the member would be about a record nothing established.
+
+    **It names the state the goal is in and never the reason the store refused.** One
+    class covers both liveness raisers and says which of the two fired, so a claim
+    refused on the attempt conjunct over a goal a correction had meanwhile revised
+    answers ``UNDERSTANDING_CHANGED`` — true of the goal while naming the wrong
+    conjunct — and that is the field working rather than failing. **No member is derived
+    from the class and none is added per conjunct.**
+
+    Args:
+        attempt: The attempt the claim named, as the store now holds it.
+        plan: The plan the execution runs.
+        goal: That plan's goal, read **after** both.
+
+    Returns:
+        The member the read established, or ``None`` where it established none.
+    """
+    if goal is not None and (member := _GOAL_WITHHELD.get(goal.status)) is not None:
+        return member
+    if attempt is not None and (member := _ATTEMPT_WITHHELD.get(attempt.state)) is not None:
+        return member
+    if goal is not None and plan is not None and plan.targets_revision != goal.revision:
+        return DriveWithheld.UNDERSTANDING_CHANGED
+    return None
 
 
 def _driving(opened: OpenedAttempt | None, state: ExecutionState) -> str:
@@ -11117,7 +11200,7 @@ class Engine:
         """
         return opened is not None and opened.attempt.state in _PAUSED_ATTEMPT_STATES
 
-    async def _run_turn(  # noqa: C901, PLR0913, PLR0915 — C901: ADR-0250 §3 and §10 add two branches to one sequence — a turn that could not decide which goal it was about returns before the loop, and a turn that raised a question takes the undriven path whatever its plan proposed — and each is a fact about *this* pass that a helper could only take back by threading this pass's whole local state through a parameter list. PLR0913: the utterance, the budget, the conversation, the two composers, the supply filter and the spoken capture; every one is a distinct fact about the pass, and collapsing any pair would put a flag where a value belongs. PLR0915: one pass is one sequence — admit, persist, authorise, drive, compose, capture — and the four statements ADR-0249 §12's authorization boundary adds are a closure over this pass's own attempt carrier, which a helper could only take back by putting that carrier in a mutable cell
+    async def _run_turn(  # noqa: C901, PLR0912, PLR0913, PLR0915 — C901/PLR0912: ADR-0250 §3 and §10 add two branches to one sequence, and ADR-0261 §7 adds the third — a claim a user act refused, which ends the walk and composes without acting; like the other two it is a fact about *this* pass, and its composition reads eleven of this pass's own locals, so a helper could only take it back by threading them through a parameter list. The first two are a turn that could not decide which goal it was about, which returns before the loop, and a turn that raised a question, which takes the undriven path whatever its plan proposed. PLR0913: the utterance, the budget, the conversation, the two composers, the supply filter and the spoken capture; every one is a distinct fact about the pass, and collapsing any pair would put a flag where a value belongs. PLR0915: one pass is one sequence — admit, persist, authorise, drive, compose, capture — and the four statements ADR-0249 §12's authorization boundary adds are a closure over this pass's own attempt carrier, which a helper could only take back by putting that carrier in a mutable cell
         self,
         utterance: str,
         *,
@@ -11655,6 +11738,8 @@ class Engine:
         # is also the continuation token, minted here before the runner can park so
         # a raising id factory fails with no durable state committed (#287).
         handle = self._admit_and_reserve()
+        # ADR-0261 §7's carrier, `None` on every turn that dispatched (below).
+        drive_withheld: DriveWithheld | None = None
         try:
             version = await self._save_goal(goal_record)
             engagement = await self._engagement(
@@ -11727,28 +11812,122 @@ class Engine:
             # test resolve. The ordering fails closed: an execution whose append has
             # not landed carries no attempt that names it, so the claim is refused and
             # nothing is invoked.
-            disposition = await self._runner.run(
-                state,
-                first.id,
-                attempt_id=_driving(attempt, state),
-                timeout=timeout,
-                origin=origin,
-                on_ruled=ruled,
-            )
-            step = await self._step_outcome(
-                turn,
-                disposition,
-                step_id=first.id,
-                handle=handle,
-                supplied_withheld=withheld,
-                modality=modality,
-                derived_from_external=external,
-            )
+            claiming = _driving(attempt, state)
+            try:
+                disposition = await self._runner.run(
+                    state,
+                    first.id,
+                    attempt_id=claiming,
+                    timeout=timeout,
+                    origin=origin,
+                    on_ruled=ruled,
+                )
+            except ClaimRefused:
+                # ADR-0261 §7: **a refused claim ends the walk**, and it is not a sixth
+                # member of ADR-0255 §2's stop list — that list is "what a disposal
+                # *this walk* performed leaves", and a refused claim leaves no disposal.
+                # The claim is **not retried**, nothing further is dispatched, and the
+                # step keeps the status and version it stood at, the store's own step
+                # being all-or-nothing. Both raisers of this class are liveness
+                # conjuncts the store evaluates on a `→ RUNNING` transition alone, so
+                # the claim this drive made is the only call under this `await` that
+                # can produce one — "and that call alone".
+                #
+                # **A refusal the read cannot explain propagates**, and so does every
+                # other exception: a `StaleExecutionError`, an `IllegalTransitionError`,
+                # a bare `PlanningError` for an unknown execution. Reporting one of
+                # those as a withheld drive "would assert something about the step that
+                # nothing established".
+                drive_withheld = await self._withheld_state(state, attempt_id=claiming)
+                if drive_withheld is None:
+                    raise
+            else:
+                step = await self._step_outcome(
+                    turn,
+                    disposition,
+                    step_id=first.id,
+                    handle=handle,
+                    supplied_withheld=withheld,
+                    modality=modality,
+                    derived_from_external=external,
+                )
         finally:
             # The reservation held the slot across the awaits. It is now either in
             # the parked table (the step parked, which counts it) or unused (it did
             # not); either way the in-flight reservation is released.
             self._reserved.discard(handle)
+        if drive_withheld is not None:
+            # ADR-0261 §7: **the turn composes without acting, and does not replan.**
+            # No second `Planner.plan` call is taken on account of the refusal, no walk
+            # is re-entered and no plan is selected — "what causes that later turn is a
+            # user act" — and the refusal **does not fail the turn**, because every
+            # cause of it is *the user changed something* rather than a fault.
+            #
+            # **And nothing is written to the attempt here**, which is the one thing
+            # this branch does that the driven branch below does not. The attempt is
+            # the record the user act has just moved: on four of the seven members it
+            # now stands terminal or paused, and ADR-0249 §12's `commit_attempt` would
+            # refuse a phase stamp over it — turning a turn ADR-0261 §7 requires to
+            # *return* into one that raises. ADR-0249 §6 stamps a phase for the work a
+            # responsibility performed, and this pass claimed nothing, invoked nothing
+            # and answered no goal, so there is no phase to stamp and no `ENDED` to
+            # earn. The `AUTHORIZE` stamp this pass already took stands, truthfully:
+            # its work — the ruling — was done before the claim was refused.
+            outbound = outbound_statement(
+                search=searched_reach,
+                forecast=forecast_reach,
+                # The drive reached nothing: the claim never landed, so no callable was
+                # entered and this turn's egress contribution is `None` exactly as it is
+                # on the branch that drove no step at all (ADR-0264 §6).
+                egress=None,
+                records=searched_records,
+                composes=True,
+            )
+            composed = await compose(
+                turn,
+                # **No `StepOutcome`**: nothing was driven, so there is none to project,
+                # and the step the walk left `PENDING` reaches composing the way every
+                # undriven step does (ADR-0255 §11). ADR-0261 §7's own clause is that a
+                # driver *skip* gains no carrier here either.
+                None,
+                conversation.id,
+                deliveries,
+                hop_reached,
+                stopped_while_asking,
+                structured,
+                search_not_serviced,
+                outbound,
+                _GoalPass(
+                    facts=GoalFacts(elided=elided),
+                    engagement=engagement,
+                    reference=association.reference,
+                    uncertain_effect=bool(reconciled.uncertain),
+                ),
+            )
+            return await self._capture(
+                conversation.id,
+                turn=turn,
+                step=None,
+                resumed=False,
+                composed=composed,
+                asked=turn.utterance,
+                supplied_withheld=withheld,
+                modality=modality,
+                derived_from_external=external,
+                spoken=spoken,
+                search_not_serviced=search_not_serviced,
+                forecast_not_read=forecast_not_read,
+                outbound_statement=outbound,
+                read_confirmation=read_confirmation,
+                goal_engagement=engagement,
+                reference=association.reference,
+                # ADR-0261 §7's field, and the whole of what this outcome says about
+                # the drive: **where the goal stands**, never why the store refused and
+                # never anything about the step. ADR-0254 §11's announcement is absent
+                # for the reason it is absent on every undriven pass — this drive
+                # reached no ruling it could have opened a row under.
+                drive_withheld=drive_withheld,
+            )
         # A turn that parked records the binding it parked on, which is the *only*
         # thing a later resumption — possibly in another process, with no live turn
         # behind its token — has to find its way back to this conversation
@@ -13920,6 +14099,7 @@ class Engine:
         authorizations: tuple[AuthorizationView, ...] = (),
         satisfied_from_earlier: tuple[str, ...] | None = None,
         attempt_report: AttemptReport | None = None,
+        drive_withheld: DriveWithheld | None = None,
     ) -> TurnOutcome:
         """Record the exchange and fold what became of it into the outcome (§3, §9).
 
@@ -14133,6 +14313,17 @@ class Engine:
             # stayed live, and every turn whose ending commit was **refused**, which §6
             # makes a silence rather than a false claim.
             attempt_report=attempt_report,
+            # ADR-0261 §7's field, folded in at the one place a ``TurnOutcome`` is
+            # built and carried **by value** from the site that read it. Non-``None``
+            # on exactly the turns that returned after a ``ClaimRefused`` whose
+            # post-refusal read established one of ``DriveWithheld``'s seven states,
+            # and ``None`` on every other returned outcome: every turn that dispatched,
+            # that stopped on one of ADR-0255 §2's five, that drove nothing at all, and
+            # ADR-0198 §1's restatement. **A refusal that propagates returns no outcome
+            # at all**, so it is outside the invariant rather than a case of it, and a
+            # driver *skip* never sets it — that reaches composing through the undriven
+            # set (ADR-0255 §11).
+            drive_withheld=drive_withheld,
         )
 
     async def _learn(self, event: FeedbackEvent) -> LearnOutcome:
@@ -14292,6 +14483,49 @@ class Engine:
         page_argument(limit, name="limit")
         page_argument(offset, name="offset")
         check_arguments(method, max_bytes=self._max_payload_bytes, limit=limit, offset=offset)
+
+    async def _withheld_state(
+        self, state: ExecutionState, /, *, attempt_id: str
+    ) -> DriveWithheld | None:
+        """ADR-0261 §7's post-refusal read, in the order that is normative.
+
+        **The attempt the claim named, the plan the execution runs, and the goal
+        last** — *"the order is normative, and it is the one that cannot compose a
+        false report"*. ADR-0261 §2's act moves an attempt to ``CANCELLED`` and its
+        goal to ``ABANDONED`` in **one** store step, so an abandonment landing between
+        two of these reads is seen by the **later** one. Reading the goal last makes
+        the goal fact at least as fresh as the attempt fact, and :func:`_withheld_member`
+        gives the goal's tests priority, so a goal that has since closed answers
+        ``GOAL_CANCELLED`` rather than an attempt member asserting the goal is still
+        open. **The reverse order is what a false report is composed from**: it would
+        answer ``ATTEMPT_CANCELLED`` over a goal the same act closed, and tell the user
+        the goal was still theirs to pursue. A goal *reopened* between the reads is the
+        case ``ATTEMPT_CANCELLED`` is for and is answered correctly by this same order.
+
+        **Nothing is dispatched, claimed, committed or decided on this read.** It fills
+        a report *after* the store has refused, so it is not the read-then-claim
+        ADR-0249 §8 and ADR-0255 §3 forbid — there is no claim left to make, and the
+        walk has ended.
+
+        **Every test is a field of a record this read already holds**, which is what
+        keeps the member list and the read in step: a member this read could not decide
+        would be a member ADR-0261 §7 does not admit. The attempt is fetched rather than
+        taken from the turn's own carrier precisely because the carrier is what a user
+        act has just made stale — :func:`_driving` supplies the claim's ``attempt_id``
+        from memory, and it is that row's *current* state this asks about.
+
+        Args:
+            state: The execution whose claim was refused.
+            attempt_id: The attempt that claim named (ADR-0255 §3).
+
+        Returns:
+            The member the read established, or ``None`` where it established none —
+            in which case the refusal **propagates** rather than being reported.
+        """
+        attempt = await self._plans.get_attempt(attempt_id)
+        plan = await self._plans.get_plan(state.plan_id)
+        goal = None if plan is None else await self._plans.get_goal(plan.goal_id)
+        return _withheld_member(attempt, plan, goal)
 
     async def _step_outcome(  # noqa: PLR0913 — the turn, the raw disposition, the step it names, the pre-minted handle, and the three values a park retains for its resolution's capture; every one is a distinct fact about the pass
         self,
