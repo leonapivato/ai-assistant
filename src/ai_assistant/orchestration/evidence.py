@@ -461,7 +461,31 @@ def composed_row(  # noqa: PLR0913 — one parameter per thing a row is composed
 
     Returns:
         The row to persist.
+
+    Raises:
+        ValueError: If a ``source`` is supplied for any kind but ``FORECAST_READ``.
+            ADR-0252 §1 rules the field *"absent on every row this decision's producers
+            write"* and forbids filling it *"with a provider name, a host, an address, a
+            path, a ``Settings`` field name or a credential identity"*; ADR-0260 §9 opens
+            it for exactly one kind, whose value §4 confines to the **source instance**.
+            **Refused rather than dropped**, which is this module's own posture one
+            field over: silently discarding it would leave a producer believing it had
+            recorded an identity the row does not carry, where dropping a *region* is a
+            narrowing the row discloses through ``supported_elided``. And refused here
+            rather than on the model, because ADR-0252 §1 does not close the set of
+            kinds that may declare one — it names a ``Reader``'s ``SourceReading.source``
+            as a producer not built yet — so the enumeration is the composing site's and
+            not the shared type's.
     """
+    if source is not None and ask.kind is not ReadKind.FORECAST_READ:
+        msg = (
+            f"a {ask.kind.value} evidence row declares no source: that field is the "
+            f"reading's own declared identity, absent on every row ADR-0252 §1's "
+            f"producers write, and ADR-0260 §9 opens it for FORECAST_READ alone — "
+            f"a value here would put a provider name, a host or an address into a "
+            f"durable row (ADR-0252 §1)"
+        )
+        raise ValueError(msg)
     supported, supported_elided = supported_of(records)
     return GoalEvidence(
         id=row_id,
