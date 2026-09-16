@@ -859,9 +859,19 @@ class SqliteBookingStore:
             with conn:  # commits on success, rolls back on any exception
                 conn.execute("BEGIN IMMEDIATE")
                 conn.execute(_META_SCHEMA)
-                labelled = self._check_schema_version(conn)
+                # **Both metadata rows and the table's prior existence are read
+                # *before* anything is written**, because "is this store new?" is a
+                # question about the state the open found and not about the state the
+                # open leaves. Reading the version first and writing it immediately —
+                # which is what this used to do — made the answer to the *second*
+                # question depend on the first write, so a store that had lost only its
+                # version row was mistaken for a new one and its surviving count
+                # overwritten.
+                version = self._meta(conn, _SCHEMA_VERSION_KEY)
+                count = self._meta(conn, _COMMIT_COUNT_KEY)
+                established = self._table_exists(conn)
                 conn.execute(_BOOKINGS_SCHEMA)
-                self._stamp_or_check_count(conn, labelled=labelled)
+                self._initialise(conn, version=version, count=count, established=established)
                 # ADR-0273 §2's bound, enforced on the open path as well as the commit
                 # path, so that a bound lowered between two runs is honoured at once.
                 self._prune(conn)
@@ -918,8 +928,35 @@ class SqliteBookingStore:
             raise BookingStoreError(msg, may_have_committed=False)
         return str(rows[0][0])
 
-    def _stamp_or_check_count(self, conn: sqlite3.Connection, *, labelled: bool) -> None:
-        """Stamp the commit count on a new store; refuse an established one without it.
+    @staticmethod
+    def _table_exists(conn: sqlite3.Connection) -> bool:
+        """Whether the ``bookings`` table was already there when this open began.
+
+        Read **before** ``CREATE TABLE IF NOT EXISTS`` runs, which is the whole point:
+        afterwards the answer is always yes. A table present while **both** metadata
+        rows are absent is a store whose ``meta`` was emptied, not a new one — the two
+        are written in one transaction, so no interruption can produce that state.
+
+        Args:
+            conn: The store's connection.
+
+        Returns:
+            Whether the table existed.
+        """
+        rows = conn.execute(
+            "SELECT name FROM sqlite_master WHERE type = 'table' AND name = 'bookings'"
+        ).fetchall()
+        return bool(rows)
+
+    def _initialise(
+        self,
+        conn: sqlite3.Connection,
+        *,
+        version: str | None,
+        count: str | None,
+        established: bool,
+    ) -> None:
+        """Stamp a genuinely new store; refuse an established one that is incomplete.
 
         **ADR-0273 §2's count is what carries the act's irreversibility, so a silent
         reset is the one failure this store must not have.** That clause requires the
@@ -930,53 +967,55 @@ class SqliteBookingStore:
         figure and make ``IRREVERSIBLE`` a false claim about every booking the store had
         already forgotten the detail of.
 
-        So the stamp is conditional on the store being **genuinely new** — which is
-        exactly what ``schema_version`` having been absent tells us, because the two are
-        written in one transaction and neither this code nor any operation of it removes
-        either.
+        So the stamp is conditional on the store being **genuinely new**, and newness is
+        decided from the whole state the open found: **both** metadata rows absent *and*
+        no ``bookings`` table. Every other shape is refused, and the incomplete pair is
+        the one that matters — either row surviving alone is a store somebody edited, and
+        writing the missing one would either reset a surviving count or bless a version
+        this code never stamped. The rows are written in **one** transaction with the
+        table, so no interruption of this code can produce an incomplete pair.
 
         Args:
             conn: The store's connection, inside the setup transaction.
-            labelled: Whether the store already carried a ``schema_version``.
+            version: The ``schema_version`` row as the open found it, or ``None``.
+            count: The ``commit_count`` row as the open found it, or ``None``.
+            established: Whether the ``bookings`` table was already there.
 
         Raises:
-            BookingStoreError: If an established store holds no commit count.
+            BookingStoreError: If the store is established and its metadata is
+                incomplete, or if the stored version is not one this code understands.
         """
-        if not labelled:
+        if version is None and count is None and not established:
+            conn.execute(_WRITE_META, (_SCHEMA_VERSION_KEY, str(_SCHEMA_VERSION)))
             conn.execute(_WRITE_META, (_COMMIT_COUNT_KEY, "0"))
             return
-        if self._meta(conn, _COMMIT_COUNT_KEY) is not None:
-            return
-        msg = (
-            f"the booking store at {self._path!r} is an established store holding no "
-            f"commit count; the figure only rises and cannot be reconstructed from the "
-            f"records still retained (ADR-0273 §2), so the store is corrupt and is not "
-            f"opened rather than reset to zero"
-        )
-        raise BookingStoreError(msg, may_have_committed=False)
+        missing = [
+            name
+            for name, value in ((_SCHEMA_VERSION_KEY, version), (_COMMIT_COUNT_KEY, count))
+            if value is None
+        ]
+        if missing:
+            msg = (
+                f"the booking store at {self._path!r} is an established store holding no "
+                f"{' and no '.join(missing)}; the commit count only rises and cannot be "
+                f"reconstructed from the records still retained (ADR-0273 §2), so the "
+                f"store is corrupt and is not opened rather than stamped afresh"
+            )
+            raise BookingStoreError(msg, may_have_committed=False)
+        if version is not None:
+            # ``missing`` being empty already establishes this; the test is written out
+            # so the narrowing is the code's rather than a reader's.
+            self._checked_version(version)
 
-    def _check_schema_version(self, conn: sqlite3.Connection) -> bool:
-        """Refuse a labelled schema this code cannot read; say whether one is labelled.
-
-        Runs inside the setup transaction, after ``meta`` exists and **before** the
-        ``bookings`` table is created or read (ADR-0049 §1's ordering).
+    def _checked_version(self, stored: str) -> None:
+        """Refuse a labelled schema this code cannot read (ADR-0049 §1).
 
         Args:
-            conn: The store's connection.
-
-        Returns:
-            Whether the database already carried a ``schema_version``. ``False`` means
-            the store is **new**, which is what
-            :meth:`_stamp_or_check_count` reads to decide whether a missing commit count
-            is an initialisation or a corruption.
+            stored: The ``schema_version`` row's value.
 
         Raises:
-            BookingStoreError: If the stored version is not one this code understands.
+            BookingStoreError: If it is not a version this code understands.
         """
-        stored = self._meta(conn, _SCHEMA_VERSION_KEY)
-        if stored is None:
-            conn.execute(_WRITE_META, (_SCHEMA_VERSION_KEY, str(_SCHEMA_VERSION)))
-            return False
         try:
             version = int(stored)
         except ValueError as exc:
@@ -991,7 +1030,6 @@ class SqliteBookingStore:
                 f"rather than read it blindly"
             )
             raise BookingStoreError(msg, may_have_committed=False)
-        return True
 
     # --- the commit, and the boundary it is classified against -----------
 
