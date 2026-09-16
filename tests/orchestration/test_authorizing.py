@@ -1071,3 +1071,40 @@ async def test_a_quote_the_answerer_kept_cannot_move_the_figure_on_the_row() -> 
     assert projection_of(row).quote == QuoteView(
         amount=Decimal("120"), currency="EUR", read_at=answers.quote.read_at
     )
+
+
+async def test_the_answer_is_about_the_operands_the_row_carries() -> None:
+    """ADR-0270 §1: the question is about *"the coverage a row this system would
+    write would carry"*, and the row is written for the subject that was asked about.
+
+    Adversarial review, round 5, ``blocker``. The seam's operands were built from
+    the caller's values a *second* time rather than derived from the writer's own
+    copies. Two independent copies of one original are equal only for as long as
+    nothing moves the original between them — an argument about interleaving, where
+    what the clause needs is a fact about the values. Deriving the seam's pair from
+    ``subject`` and ``written`` makes them one value by construction.
+
+    **This is the arm that survives the fix**, because the gap it closed has no
+    interleaving point a test could land a mutation in: two adjacent synchronous
+    statements admit none. So what is pinned is the property itself — the request
+    the answer was taken over and the row that answer authorised describe the same
+    call, field for field — which a future refactor back to two independent copies
+    would leave true only by accident.
+    """
+    answers = FakeCoverageAnswers()
+    covered = (coverage_member(BoundKind.TERMS, bound=terms_bound("hotel-1")),)
+
+    row = await _proposed(
+        request_kwargs={"tool": SITED_TOOL, "parameters": {"site": "hotel-1"}},
+        coverage=covered,
+        answers=answers,
+    )
+
+    assert row is not None
+    ((asked, coverage),) = answers.calls
+    assert asked.tool == row.tool
+    assert asked.goal == row.goal
+    assert asked.egress_binding is not None
+    assert asked.egress_binding.account == row.account
+    assert asked.egress_binding.canonical_destination_set == row.destinations
+    assert coverage == row.coverage
