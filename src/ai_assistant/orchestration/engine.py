@@ -244,6 +244,7 @@ from ai_assistant.orchestration.payloads import (
 )
 from ai_assistant.orchestration.questions import question_state
 from ai_assistant.orchestration.reads import StructuredFacts, outbound_statement
+from ai_assistant.orchestration.reconciling import Reconciled, ReconciliationStage
 from ai_assistant.orchestration.routing import (
     FORGET_LOOKUP_KINDS,
     Resolved,
@@ -1498,12 +1499,19 @@ class _GoalPass:
         engagement: What this turn did with its goal, or ``None``.
         clarification: The question it raised, or ``None``.
         reference: What became of its reference, or ``None``.
+        uncertain_effect: Whether this turn's reconciliation check found an effect of
+            this goal standing ``INDETERMINATE`` (ADR-0259 §3). It rides here rather
+            than beside :attr:`facts` for the reason the three members below it do: it
+            is a fact about **this turn's goal**, and the composer is the one stage
+            that says it. ``False`` on every turn that found none and on every
+            deployment with no reconciliation stage wired.
     """
 
     facts: GoalFacts = field(default_factory=GoalFacts)
     engagement: GoalEngagement | None = None
     clarification: Clarification | None = None
     reference: ReferenceOutcome | None = None
+    uncertain_effect: bool = False
 
 
 @dataclass(frozen=True, slots=True)
@@ -2347,6 +2355,7 @@ class Engine:
         notification_outbox: DeliveryOutbox | None = None,
         recovery: RecoveryScan | None = None,
         routing: RoutingStage | None = None,
+        reconciliation: ReconciliationStage | None = None,
         parked_reads: ParkedReadOperations | None = None,
         authorization_operations: AuthorizationOperations | None = None,
         transcriber: SpeechTranscriber | None = None,
@@ -2765,6 +2774,14 @@ class Engine:
                 ADR-0197 §9 puts the write-only ``RoutingRecorder`` on the *stage*, so the
                 façade never holds a trail seam of any width and cannot be wired into the
                 half-configured state where a stage could route without recording.
+            reconciliation: ADR-0259 §4's turn-start pass and §3's check, or ``None``
+                where this deployment wired neither — where the pipeline is exactly
+                what it was before that decision, and a goal's residual is repaired by
+                no turn. **Optional because the check needs a ``ToolInvoker``** and
+                this façade holds none: the seam is ``StepRunner``'s, and ADR-0259 §11
+                rules L3 *"touches ``StepRunner`` in nothing"*, so the stage is built
+                by the composition root beside the runner rather than assembled here
+                from parts this object happens to hold.
             parked_reads: ADR-0244's parked-read operations — the enumeration, the
                 answer and the cancellation — or ``None`` where this deployment wired
                 none. **Passed rather than defaulted**, so a composition root states the
@@ -3074,6 +3091,7 @@ class Engine:
             )
             raise ConfigurationError(msg)
         self._routing = routing
+        self._reconciliation = reconciliation
         self._parked_reads = parked_reads
         # ADR-0254 §11's read side. **Optional, and its absence is fail-closed**:
         # a deployment with no authorization store proposes no row (ADR-0254 §1,
@@ -4767,6 +4785,7 @@ class Engine:
             # it in terms, because it "is composed on that turn over that supply" and
             # crosses none of the line §15 draws, which is about *stored* goal content.
             goal=goal.facts,
+            uncertain_effect=goal.uncertain_effect,
         )
         # ADR-0250 §5's announcement, taken through the same helper the other two
         # composers take it through. §15 makes it **always** ``None`` here — no
@@ -10764,6 +10783,24 @@ class Engine:
             return await self._undecided(
                 association, conversation=conversation.id, asked=request, spoken=spoken
             )
+        # ADR-0259 §4, §3, §7: the reconciliation pass and then the investigation
+        # phase's check, over the goal this turn engaged and no other, **wholly before
+        # this turn's first `Planner.plan` call** — which is what makes §7's stated
+        # sequence mechanical: "§4's acts 1-4 run first and leave the uncertain step
+        # standing `INDETERMINATE` with its attempt repaired to `EFFECT_UNRESOLVED` by
+        # act 3; the turn's investigation phase then surfaces and checks it (§3); and
+        # **both are before the turn's first `Planner.plan` call**, so the planner reads
+        # the record settled where the check resolved it and still `INDETERMINATE` where
+        # it did not — never a goal whose uncertainty is hidden."
+        #
+        # **It sits here rather than in the loop** because the loop holds no
+        # `PlanStore` (ADR-0249 §11) and no `ToolInvoker`, and because this is the one
+        # site on this pass that is after ADR-0250 §3's association — the turn's goal,
+        # resolved before it plans — and before `respond`. A turn that opens a goal has
+        # no residual to repair and takes neither half.
+        reconciled = Reconciled()
+        if self._reconciliation is not None and association.goal is not None:
+            reconciled = await self._reconciliation.run(association.goal.id, budget=timeout)
         # ADR-0251 §12's second case, wired as a callable and never as a store (#2294).
         # `charged` follows the stored row, because each charge advances the attempt's
         # `version` and the next compare-and-swap is computed against what the last one
@@ -11022,6 +11059,11 @@ class Engine:
                     engagement=engagement,
                     clarification=clarification,
                     reference=association.reference,
+                    # ADR-0259 §3: the surfacing, carried by value from the check this
+                    # pass ran before it planned. It is `True` whether or not the check
+                    # then established the effect — what the user is told is that the
+                    # assistant was unsure.
+                    uncertain_effect=bool(reconciled.uncertain),
                 ),
             )
             # §5, §6: written **after the answer exists**, and only where §5's own
@@ -11271,6 +11313,8 @@ class Engine:
                 facts=GoalFacts(elided=elided),
                 engagement=engagement,
                 reference=association.reference,
+                # ADR-0259 §3's surfacing, as the undriven branch above carries it.
+                uncertain_effect=bool(reconciled.uncertain),
             ),
         )
         # §5, §6: `VERIFY` is stamped once the answer exists, and the attempt **ends**
@@ -12199,6 +12243,7 @@ class Engine:
             search_not_serviced=search_not_serviced,
             outbound=statement,
             goal=carried.facts,
+            uncertain_effect=carried.uncertain_effect,
         )
         # ADR-0250 §5's announcement, placed in the reply here and at the streaming
         # twin, which are the two seams every composed answer passes through.
@@ -12291,6 +12336,7 @@ class Engine:
             search_not_serviced=search_not_serviced,
             outbound=statement,
             goal=carried.facts,
+            uncertain_effect=carried.uncertain_effect,
         )
         async with closing_stream(stream) as composing:
             async for produced in composing:

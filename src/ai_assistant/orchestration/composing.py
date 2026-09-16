@@ -354,6 +354,36 @@ what you can answer, say that you stopped short, and offer to look again if the 
 asks."""
 
 
+#: ADR-0259 §3's **surfacing**, as one clause of this system's own text.
+#:
+#: **What it discharges.** §3 rules that an effect left ``INDETERMINATE`` is *"surfaced
+#: to the user in the next turn's investigation phase — the assistant says it is unsure
+#: whether the action went through"*, and arm 9 asserts the surfacing and not only the
+#: write: *"an implementation that resolved the step silently … fails this arm"*.
+#:
+#: **The phrasing is this module's and not the decision's.** ADR-0259 §10 books *what the
+#: user is told* about an uncertain effect to A9 and says in terms that *"this decision
+#: fixes no reply, no phrasing and no channel"*. So what the ADR fixes is that the fact
+#: reaches the answer; the words are replaceable, and A9 is the decision that replaces
+#: them and that rules *told once*.
+#:
+#: **It carries no step, no tool, no count and no time**, so this text is written here,
+#: by this module, out of material it was never given — the construction
+#: :data:`_STOPPED_ASKING_PROMPT` already uses one fact over.
+#:
+#: **And it states neither that the act happened nor that it did not.** That is the whole
+#: of what ``INDETERMINATE`` means (ADR-0014 §4): *"Automatically retrying it would risk
+#: acting twice; automatically failing it would risk reporting a completed action as
+#: failed."* A clause that resolved the ambiguity in either direction would report as
+#: settled exactly the thing the record says is unsettled.
+_UNCERTAIN_EFFECT_PROMPT: Final = """\
+Something this request already set in motion did not report back, so you do not know \
+whether it went through. Say so plainly, in one short clause, before the rest of your \
+answer — "I am not sure whether that went through" is the shape. Do not say it \
+succeeded, do not say it failed, do not guess which, and do not say what it was, when \
+it was, or why you do not know: you have not been told any of that. Offer to check \
+if the user asks."""
+
 #: ADR-0240 §8's **reach** fact, as one clause of this system's own text.
 #:
 #: **What it discharges.** ADR-0237 §6 puts the obligation on the surface performing a
@@ -640,6 +670,7 @@ class ComposingStage:
         search_not_serviced: SearchNotServiced | None = None,
         outbound: OutboundStatement | None = None,
         goal: GoalFacts | None = None,
+        uncertain_effect: bool = False,
     ) -> ComposedReply:
         """Compose the answer for one turn, or say that composing it failed.
 
@@ -748,6 +779,12 @@ class ComposingStage:
                 like every other span this system did not author (:func:`_render_request`);
                 the instruction that its answer *is* the question is a clause of this
                 stage's own prompt.
+            uncertain_effect: Whether this turn's reconciliation check found an
+                effect of this goal standing ``INDETERMINATE`` (ADR-0259 §3), handed
+                over as the fact rather than as a step, a tool or a count. The
+                assistant says it is unsure whether the action went through; it says
+                neither that it happened nor that it did not, which is what the status
+                means.
 
         Returns:
             The answer, or a degraded report where the call raised a ``ModelError``
@@ -771,6 +808,7 @@ class ComposingStage:
                     search_not_serviced=search_not_serviced,
                     outbound=outbound,
                     goal=goal,
+                    uncertain_effect=uncertain_effect,
                 ),
             ),
             Message(
@@ -948,6 +986,7 @@ class ComposingStage:
         search_not_serviced: SearchNotServiced | None = None,
         outbound: OutboundStatement | None = None,
         goal: GoalFacts | None = None,
+        uncertain_effect: bool = False,
     ) -> AsyncIterator[ReplyChunk | ComposedReply]:
         """Compose the answer as it arrives, yielding chunks then one report.
 
@@ -1024,6 +1063,8 @@ class ComposingStage:
             goal: ADR-0250 §10's and §14's two facts about this turn's goal, or
                 ``None`` where the caller has neither to give, as :meth:`compose`
                 takes it and for its reasons (:func:`_system_prompt`).
+            uncertain_effect: ADR-0259 §3's surfacing, as :meth:`compose` takes it
+                and for its reasons.
 
         Yields:
             Each :class:`~ai_assistant.core.types.ReplyChunk` as it is composed, and
@@ -1054,6 +1095,7 @@ class ComposingStage:
                     search_not_serviced=search_not_serviced,
                     outbound=outbound,
                     goal=goal,
+                    uncertain_effect=uncertain_effect,
                 ),
             ),
             Message(
@@ -1404,6 +1446,7 @@ def _system_prompt(  # noqa: C901, PLR0913 — the pass's own instruction plus o
     search_not_serviced: SearchNotServiced | None = None,
     outbound: OutboundStatement | None = None,
     goal: GoalFacts | None = None,
+    uncertain_effect: bool = False,
 ) -> str:
     """The instruction for this pass, given the channel it is for and what it lost.
 
@@ -1463,6 +1506,14 @@ def _system_prompt(  # noqa: C901, PLR0913 — the pass's own instruction plus o
             ADR-0264's header. A routed pass is given nothing here, so ADR-0197 §6's
             closure of the routed composer's inputs at "exactly two" stands unnarrowed.
 
+        uncertain_effect: Whether this turn's reconciliation check found an effect of
+            this goal standing ``INDETERMINATE`` (ADR-0259 §3). ``False`` on every turn
+            that found none, and on every turn of a deployment with no reconciliation
+            stage wired, so the assembled prompt is then byte-identical to what it is
+            without ADR-0259. It is a fact about **an earlier** turn's act rather than
+            about this turn's material, which is why its clause is appended after every
+            clause about what this pass looked up.
+
     Returns:
         The system message's content.
     """
@@ -1507,6 +1558,14 @@ def _system_prompt(  # noqa: C901, PLR0913 — the pass's own instruction plus o
         clauses.append(CLARIFICATION_PROMPT)
     if about.elided:
         clauses.append(ELISION_PROMPT)
+    # ADR-0259 §3's surfacing, appended last because it is a fact about an act an
+    # **earlier** turn started rather than about anything this pass looked up or did
+    # with the user's objective — which a reader has to have met both to place. It is
+    # owed whether or not this turn's check then established the effect: what the user
+    # is told is that the assistant was unsure, and a step the check resolved is one it
+    # was unsure about when the turn began.
+    if uncertain_effect:
+        clauses.append(_UNCERTAIN_EFFECT_PROMPT)
     return "\n\n".join(clauses)
 
 
