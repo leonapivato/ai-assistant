@@ -1,9 +1,16 @@
 """Shared conformance suite for the ``GoalQuotes`` Protocol (ADR-0267 §5).
 
 Every :class:`~ai_assistant.core.protocols.GoalQuotes` implementation must pass
-:class:`GoalQuotesContract`. A concrete test subclasses it and supplies
-:meth:`GoalQuotesContract.holding`, which returns a seam holding the quotes it is
-given, **in that order**, for :data:`GOAL`.
+:class:`GoalQuotesContract`. A concrete test subclasses it and supplies the
+``quotes`` fixture: the subject, **holding :data:`HELD` in that order** for
+:data:`GOAL`.
+
+**One fixed corpus rather than a seeding hook per case.** The seam does one thing —
+filter by two identifiers and answer in the order it holds them — so every question
+this suite asks can be asked of one history, and a subject that has to be rebuilt per
+case is a subject a binding class cannot supply as a plain fixture. ``HELD`` is
+deliberately awkward: two acts, a re-quote, two **equal** readings, and ``read_at``
+values decades apart in both directions.
 
 **Here rather than under ``tests/core/``.** The corpus puts a suite beside the
 subsystem that implements it, and ADR-0267 §11 puts the implementation in
@@ -35,36 +42,46 @@ from __future__ import annotations
 
 from datetime import UTC, datetime
 from decimal import Decimal
-from typing import TYPE_CHECKING
+from typing import TYPE_CHECKING, Final
 
 import pytest
 
 from ai_assistant.core.types import ActionQuote, StepOutputRef
 
 if TYPE_CHECKING:
-    from collections.abc import Sequence
-
     from ai_assistant.core.protocols import GoalQuotes
 
-#: The goal every seeded quote of this suite belongs to.
-GOAL = "g1"
+#: The goal every quote of this suite belongs to.
+GOAL: Final = "g1"
 
 #: The two acts the suite keys on. **Two rather than one**, because the whole of what
 #: the seam does is filter: a suite holding quotes for one act could not tell a
 #: conforming filter from a member that returned everything it held.
-ACTION = "ia1"
-OTHER_ACTION = "ia2"
+ACTION: Final = "ia1"
+OTHER_ACTION: Final = "ia2"
 
 #: A well-formed arguments digest. The seam compares it against **nothing** (§5), so
 #: what matters here is only that a quote is constructible.
-DIGEST = "a" * 64
+DIGEST: Final = "a" * 64
 
-#: When a scripted quote was read. Fixed, and **no case orders by it** (§1): the order
-#: this seam answers in is the goal's own tuple order.
-READ_AT = datetime(2026, 1, 2, tzinfo=UTC)
+#: When a scripted quote was read. **No case orders by it** (§1): the order this seam
+#: answers in is the goal's own tuple order, and §6 refuses every reading of age.
+READ_AT: Final = datetime(2026, 1, 2, tzinfo=UTC)
+
+#: A reading far in the past, and one far in the future. Both are in :data:`HELD`
+#: because §6's refusal runs in **both** directions: a seam applying a validity window
+#: either way would drop one of them.
+LONG_AGO: Final = datetime(2001, 1, 1, tzinfo=UTC)
+FAR_AHEAD: Final = datetime(2099, 1, 1, tzinfo=UTC)
 
 
-def quote(*, action: str = ACTION, amount: str = "120", currency: str = "EUR") -> ActionQuote:
+def quote(
+    *,
+    action: str = ACTION,
+    amount: str = "120",
+    currency: str = "EUR",
+    read_at: datetime = READ_AT,
+) -> ActionQuote:
     """One quote for ``action``, at the shape ADR-0267 §1 declares."""
     return ActionQuote(
         intended_action=action,
@@ -73,22 +90,39 @@ def quote(*, action: str = ACTION, amount: str = "120", currency: str = "EUR") -
         currency=currency,
         plan="p1",
         read_from=StepOutputRef(step="s1", field="price"),
-        read_at=READ_AT,
+        read_at=read_at,
     )
+
+
+#: The history every subject of this suite holds, **oldest first**.
+#:
+#: A re-quote for one act, a quote for another interleaved with it, a **second equal
+#: reading** — because ADR-0267 §2 makes a refresh a position in the tuple rather than
+#: a predicate, so a seam that de-duplicated would be evaluating one — and two
+#: ``read_at`` values decades apart, because §6 expires nothing.
+HELD: Final[tuple[ActionQuote, ...]] = (
+    quote(amount="120", read_at=LONG_AGO),
+    quote(action=OTHER_ACTION, amount="80"),
+    quote(amount="135"),
+    quote(amount="135"),
+    quote(amount="200", read_at=FAR_AHEAD),
+)
+
+#: :data:`HELD`'s members naming :data:`ACTION`, in the order the goal holds them.
+FOR_ACTION: Final[tuple[ActionQuote, ...]] = tuple(
+    one for one in HELD if one.intended_action == ACTION
+)
 
 
 class GoalQuotesContract:
     """``GoalQuotes.for_action``'s clauses (ADR-0267 §5)."""
 
-    async def holding(self, quotes: Sequence[ActionQuote]) -> GoalQuotes:
-        """A seam holding ``quotes`` for :data:`GOAL`, **in the order given**.
-
-        Args:
-            quotes: The quotes, oldest first — the order ADR-0267 §2 makes the total
-                order the governing-quote rule reads.
+    @pytest.fixture
+    def quotes(self) -> GoalQuotes:
+        """The subject, holding :data:`HELD` in that order for :data:`GOAL`.
 
         Returns:
-            The subject under test, at its narrow face.
+            The implementation under test, at its narrow face.
 
         Raises:
             NotImplementedError: If a subclass has not supplied one.
@@ -96,7 +130,7 @@ class GoalQuotesContract:
         raise NotImplementedError
 
     async def test_for_action_answers_that_actions_quotes_in_the_goals_own_order(
-        self,
+        self, quotes: GoalQuotes
     ) -> None:
         """§5: "returning that goal's quotes naming that action **in the order the goal
         holds them**".
@@ -106,22 +140,24 @@ class GoalQuotesContract:
         the caller takes the last member, and a seam that returned only it would be
         the second implementation of ADR-0266 §7's governing rule.
         """
-        seam = await self.holding(
-            [
-                quote(amount="120"),
-                quote(action=OTHER_ACTION, amount="80"),
-                quote(amount="135"),
-            ]
+        assert await quotes.for_action(GOAL, ACTION) == FOR_ACTION
+        assert await quotes.for_action(GOAL, OTHER_ACTION) == (
+            quote(action=OTHER_ACTION, amount="80"),
         )
 
-        assert [one.amount for one in await seam.for_action(GOAL, ACTION)] == [
-            Decimal("120"),
-            Decimal("135"),
-        ]
-        assert [one.amount for one in await seam.for_action(GOAL, OTHER_ACTION)] == [Decimal("80")]
+    async def test_two_equal_readings_both_come_back(self, quotes: GoalQuotes) -> None:
+        """§2: a refresh is **position in the tuple** and not a predicate.
+
+        There is nothing here for an implementation to evaluate, so a seam that
+        collapsed two equal readings into one would be evaluating a rule the store is
+        expressly forbidden to have — and would move ``quotes_elided``'s arithmetic
+        out from under the caller.
+        """
+        answered = await quotes.for_action(GOAL, ACTION)
+        assert answered.count(quote(amount="135")) == 2
 
     async def test_for_action_answers_empty_for_an_action_the_goal_has_no_quote_for(
-        self,
+        self, quotes: GoalQuotes
     ) -> None:
         """§5: "possibly empty", and an empty tuple means exactly that.
 
@@ -129,57 +165,37 @@ class GoalQuotesContract:
         **asked about** — which is the fail-closed direction, and is a different fact
         from the fault the seam raises on.
         """
-        seam = await self.holding([quote()])
-
-        assert await seam.for_action(GOAL, "ia-none") == ()
+        assert await quotes.for_action(GOAL, "ia-none") == ()
 
     async def test_for_action_answers_empty_for_a_goal_the_subject_does_not_hold(
-        self,
+        self, quotes: GoalQuotes
     ) -> None:
         """§5: a goal with no quotes is an absence and never a fault.
 
         A goal a store has never seen holds no quote for any act, which is the same
         answer ADR-0266 §7 reads as *"no quote governs"* — the act asks.
         """
-        seam = await self.holding([quote()])
-
-        assert await seam.for_action("g-none", ACTION) == ()
-
-    async def test_for_action_answers_every_quote_of_that_action_and_not_the_last(
-        self,
-    ) -> None:
-        """§5: "``permissions`` takes the last member of what comes back".
-
-        So the seam returns **all** of them, including two readings that are equal:
-        ADR-0267 §2 makes a refresh a position in the tuple rather than a predicate,
-        and a seam that de-duplicated would be evaluating one.
-        """
-        seam = await self.holding([quote(amount="120"), quote(amount="120")])
-
-        answered = await seam.for_action(GOAL, ACTION)
-        assert len(answered) == 2
-        assert answered[0] == answered[1]
+        assert await quotes.for_action("g-none", ACTION) == ()
 
     async def test_for_action_reads_no_clock_and_refuses_no_quote_for_its_age(
-        self,
+        self, quotes: GoalQuotes
     ) -> None:
         """§6: "nothing in this decision expires a quote", and this seam least of all.
 
         A quote governs until a later one for the same action displaces it, however
         long ago it was read — *"no lane refuses a quote for being old, computes a
         validity window from ``read_at``, compares ``read_at`` to the instant of
-        dispatch, or adds an expiry field"*. Driven with a ``read_at`` far in the past
-        and one far in the future, because a seam applying a window in **either**
-        direction would drop one of them.
+        dispatch, or adds an expiry field"*. :data:`HELD` carries a reading from 2001
+        and one from 2099, because a seam applying a window in **either** direction
+        would drop one of them.
         """
-        old = quote().model_copy(update={"read_at": datetime(2001, 1, 1, tzinfo=UTC)})
-        ahead = quote().model_copy(update={"read_at": datetime(2099, 1, 1, tzinfo=UTC)})
-        seam = await self.holding([old, ahead])
-
-        assert await seam.for_action(GOAL, ACTION) == (old, ahead)
+        answered = await quotes.for_action(GOAL, ACTION)
+        assert [one.read_at for one in answered] == [one.read_at for one in FOR_ACTION], (
+            "no reading is dropped, reordered or preferred for its age"
+        )
 
     async def test_for_action_is_a_read_and_leaves_the_subject_where_it_found_it(
-        self,
+        self, quotes: GoalQuotes
     ) -> None:
         """§5: the seam answers, and **no lane appends through it**.
 
@@ -187,19 +203,17 @@ class GoalQuotesContract:
         advanced a version would show here, and a policy holding this face has no
         ``record_quote`` to reach for.
         """
-        seam = await self.holding([quote(amount="120"), quote(amount="135")])
+        first = await quotes.for_action(GOAL, ACTION)
+        assert await quotes.for_action(GOAL, ACTION) == first
 
-        first = await seam.for_action(GOAL, ACTION)
-        assert await seam.for_action(GOAL, ACTION) == first
-
-    @pytest.mark.parametrize("act", ["ia1 ", " ia1", "IA1", "ia11"])
-    async def test_the_key_is_compared_whole_and_never_by_prefix_or_fold(self, act: str) -> None:
+    @pytest.mark.parametrize("act", ["ia1 ", " ia1", "IA1", "ia11", "ia"])
+    async def test_the_key_is_compared_whole_and_never_by_prefix_or_fold(
+        self, quotes: GoalQuotes, act: str
+    ) -> None:
         """§5: the filter is equality of the identifier and nothing looser.
 
         No case folding, no trimming, no prefix match. A looser key would answer a
         quote read for a **different act**, and the whole of ADR-0266 §7's proof is
         that the amount was quoted for *that* act.
         """
-        seam = await self.holding([quote()])
-
-        assert await seam.for_action(GOAL, act) == ()
+        assert await quotes.for_action(GOAL, act) == ()
