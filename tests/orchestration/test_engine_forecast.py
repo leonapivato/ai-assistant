@@ -19,6 +19,7 @@ from __future__ import annotations
 from typing import TYPE_CHECKING, Any, Final, final
 
 import pytest
+import structlog
 from forecast_servicing_harness import (
     FORECAST_DECLARATION,
     NOW,
@@ -33,6 +34,7 @@ from test_engine_read_envelope import _AskingPlanner
 from test_forecast_servicing import _CapturingBinder
 from test_loop_search import _CostedSearcher, _servicer
 
+from ai_assistant.core.errors import MemoryStoreError
 from ai_assistant.core.types import (
     AssociationVerdict,
     EvidenceBasis,
@@ -49,10 +51,14 @@ from ai_assistant.core.types import (
     TimeWindow,
 )
 from ai_assistant.orchestration import reads
+from ai_assistant.orchestration.reads import READ_AUDIT_EVENT, ForecastDisposition
 from ai_assistant.permissions import ThresholdActionPolicy
 from ai_assistant.testing import (
     DEFAULT_FORECAST_DAYS,
     FakeActionPolicy,
+    FakeFetcher,
+    FakeForecaster,
+    FakeMemoryStore,
     FakePlanStore,
     FakeRecipientGrants,
     FakeWebSearcher,
@@ -580,3 +586,289 @@ async def test_a_row_carries_a_region_per_returned_day_although_the_budget_admit
     assert row.verdict == ReadOutcomeKind.TRUNCATED.value, (
         "ADR-0251 §2: TRUNCATED displaces RETURNED_RECORDS where the budget cut the yield"
     )
+
+
+# --------------------------------------------------------------------------- #
+# (h)'s pre-execution refusal and (n)'s three shapes, through to the turn       #
+# --------------------------------------------------------------------------- #
+
+
+@final
+class _ProposingOneReadingAnother:
+    """A forecaster that proposes one declaration and checks the call against another.
+
+    **The canonical fake's own second pre-execution check, reached genuinely** (ADR-0029
+    §2, ADR-0260 §6): ``FakeForecaster.read`` compares the call's definition against *its
+    own* registered declaration and refuses an unequal one with ``ToolBindingError``,
+    which §6 names as the check "``authorises`` would otherwise pass". Splitting the
+    proposal and the read across two fakes is what gives that check a subject from
+    outside, the servicing building the call from whatever ``request`` returned.
+
+    **Which of the three checks fired is ADR-0260 §13's arm (c) and is L1's**, asserted
+    there over the production forecaster and ending "at the forecaster boundary, which is
+    where L1 ends". What arm (h) owes, and what this drives, is the sentence after it:
+    such a failure "**is recorded by the servicing as** ``BINDING_FAILED``" — through to
+    the turn.
+    """
+
+    __slots__ = ("_proposing", "_reading")
+
+    def __init__(self) -> None:
+        """Propose a costed declaration and read against an uncosted one."""
+        self._proposing = forecaster()
+        self._reading = FakeForecaster(reported_at=NOW)
+
+    @property
+    def name(self) -> str:
+        """The configured source's own identity, one value for both halves."""
+        return self._proposing.name
+
+    async def request(self) -> Any:
+        """Propose the declaration the binder holds a registration for.
+
+        Returns:
+            The proposal.
+        """
+        return await self._proposing.request()
+
+    async def read(self, call: Any, /, *, timeout: Any) -> Any:  # noqa: ASYNC109 — the seam owns the deadline (ADR-0241 §1); this carries the production signature
+        """Refuse: this call names a declaration this half did not register.
+
+        Args:
+            call: The authorised call.
+            timeout: The bound.
+
+        Returns:
+            Never — the fake's own check raises first.
+        """
+        return await self._reading.read(call, timeout=timeout)
+
+
+async def test_a_pre_execution_refusal_reaches_the_turn_as_binding_failed() -> None:
+    """§13's arm (h)'s last case, **asserted through to the turn**.
+
+    "§6's three pre-execution checks are asserted through to the turn: ``BINDING_FAILED``
+    in the audit, ``UNAVAILABLE`` in ``forecast_not_read``, and **no** contact, because a
+    path recording nothing would leave §10's ``None`` saying the provider answered."
+
+    The last clause is why this is a **decline** and not ADR-0226 §5's degradation: a
+    degraded servicing carries no disposition, and an absent disposition is §10's
+    *answered* case — so a lane that let the raise fall through to the degradation would
+    tell the user the provider answered a read it refused to make.
+    """
+    with structlog.testing.capture_logs() as captured:
+        harness = Harness(
+            planner=_AskingPlanner(_asks(), rounds=1),
+            forecast=servicer(seam=_ProposingOneReadingAnother()),
+        )
+        outcome = await harness.engine.converse(_UTTERANCE, timeout=PATIENT)
+
+    [record] = [one for one in captured if one["event"] == READ_AUDIT_EVENT]
+    (serviced,) = record["servicings"]
+    assert serviced["forecast"] == ForecastDisposition.BINDING_FAILED.value
+    assert serviced["forecast_serviced"] is True
+    assert serviced["failed"] is False, "a decline is not a degradation"
+    assert outcome.forecast_not_read is ForecastNotRead.UNAVAILABLE
+    statement = outcome.outbound_statement
+    assert statement is not None
+    assert statement.reach is OutboundReach.NOT_REACHED
+    assert statement.destinations == (), "no channel was opened, so no class is named"
+
+
+@final
+class _RaisingAfterTheForecast:
+    """A store whose ``search`` raises, failing the servicing **after** the forecast.
+
+    ADR-0260 §7 services the sighted query **last**, so a store that raises there fails a
+    servicing whose forecast has already been performed — the shape §13's arm (n) is
+    stated over.
+    """
+
+    __slots__ = ("_inner",)
+
+    def __init__(self, inner: FakeMemoryStore) -> None:
+        """Wrap a store whose other members answer normally.
+
+        Args:
+            inner: The store to delegate to.
+        """
+        self._inner = inner
+
+    def __getattr__(self, name: str) -> Any:
+        """Delegate everything this class does not name.
+
+        Args:
+            name: The member being reached for.
+
+        Returns:
+            The wrapped store's member.
+        """
+        return getattr(self._inner, name)
+
+    async def search(self, *args: Any, **kwargs: Any) -> Any:
+        """Fail the servicing, after the forecast was serviced.
+
+        Args:
+            *args: Ignored.
+            **kwargs: Ignored.
+
+        Raises:
+            MemoryStoreError: Always.
+        """
+        _ = args, kwargs
+        msg = "the store went away after the forecast was read"
+        raise MemoryStoreError(msg)
+
+
+async def _then_failed(*, seam: Any) -> TurnOutcome:
+    """A turn whose forecast is serviced and whose later sighted query then raises.
+
+    Args:
+        seam: The forecaster the forecast is answered by.
+
+    Returns:
+        The outcome the capture point built.
+    """
+    harness = Harness(
+        planner=_AskingPlanner(
+            ReadRequest(
+                asks=(
+                    ReadAsk(kind=ReadKind.FORECAST_READ),
+                    ReadAsk(kind=ReadKind.SIGHTED_QUERY, query="anything at all"),
+                )
+            ),
+            rounds=1,
+        ),
+        memory=_RaisingAfterTheForecast(FakeMemoryStore(now=lambda: AT)),  # type: ignore[arg-type]  # a MemoryStore face, which is what the loop holds
+        forecast=servicer(seam=seam),
+    )
+    return await harness.engine.converse(_UTTERANCE, timeout=PATIENT)
+
+
+async def test_the_turn_keeps_a_contact_its_failed_servicing_established() -> None:
+    """§13's arm (n)'s first case, **through the turn**.
+
+    "A servicing whose forecast read was **answered** and whose **later** read of another
+    kind then raises carries ``FORECAST_PROVIDER`` ``REACHED`` with ``records`` ``0`` and
+    ``forecast_not_read`` ``None`` — ADR-0226 §5 discarded the servicing's records, and
+    §10's quoted clause, *nothing that happens to the enclosing servicing afterwards
+    unmakes it*, is what survives them."
+
+    Driven whole because the survival happens in the **wiring**: the servicing carries the
+    contact out on its failing path, the loop folds it, and the engine assembles it — and
+    a loop that stopped folding carriers from failed servicings would leave the
+    servicing-level arm green while the turn lost the contact.
+    """
+    outcome = await _then_failed(seam=forecaster())
+
+    statement = outcome.outbound_statement
+    assert statement is not None
+    assert statement.reach is OutboundReach.REACHED
+    assert statement.destinations == (OutboundDestination.FORECAST_PROVIDER,)
+    assert statement.records == 0, "ADR-0226 §5 left the supply as planning saw it"
+    assert outcome.forecast_not_read is None, "the provider answered"
+
+
+async def test_an_unattested_read_before_the_failure_reaches_the_turn_as_both() -> None:
+    """§13's arm (n)'s second case, through the turn: the contact **and** the member.
+
+    "The same servicing having recorded ``UNATTESTED`` **before** that later failure
+    carries the contact **and** ``UNAVAILABLE``" — ADR-0264 §8's both-statements rule
+    riding out on a record ADR-0226 §5 emptied.
+    """
+    outcome = await _then_failed(seam=forecaster(refusal=ForecastRefusal.UNATTESTED))
+
+    statement = outcome.outbound_statement
+    assert statement is not None
+    assert statement.reach is OutboundReach.REACHED
+    assert statement.destinations == (OutboundDestination.FORECAST_PROVIDER,)
+    assert statement.records == 0
+    assert outcome.forecast_not_read is ForecastNotRead.UNAVAILABLE
+
+
+#: What a root the planner can name holds, so ``F1`` resolves to an entry the servicing
+#: then fails on rather than to nothing (ADR-0226 §3's silent discard is a different
+#: shape and reaches no fetcher).
+_ROOT: Final = {"quarter.md": "the quarter went well enough"}
+
+
+@final
+class _RaisingFetcher:
+    """A ``Fetcher`` that lists normally and whose ``fetch`` raises.
+
+    The listing is read at the **start** of the turn, before planning, so a fetcher
+    that refused there would take the turn down before a plan existed to carry a
+    request. What this fails is the **fetch**, which ADR-0260 §7 services first — ahead
+    of the forecast, which is the position §13's arm (n)'s third case turns on.
+    """
+
+    __slots__ = ("_inner",)
+
+    def __init__(self) -> None:
+        """List over a real root and fail every fetch against it."""
+        self._inner = FakeFetcher(_ROOT, read_at=AT)
+
+    @property
+    def name(self) -> str:
+        """This fetcher's identity."""
+        return self._inner.name
+
+    async def listing(self) -> Any:
+        """The root's own listing, so the planner has an entry to name.
+
+        Returns:
+            The listing.
+        """
+        return await self._inner.listing()
+
+    async def fetch(self, *args: Any, **kwargs: Any) -> Any:
+        """Fail before the forecast's position in §7's order.
+
+        Args:
+            *args: Ignored.
+            **kwargs: Ignored.
+
+        Raises:
+            MemoryStoreError: Always.
+        """
+        _ = args, kwargs
+        msg = "the file went away"
+        raise MemoryStoreError(msg)
+
+
+async def test_a_turn_whose_servicing_failed_before_the_forecast_names_no_class() -> None:
+    """§13's arm (n)'s third case, through the turn: **no** contact and ``None``.
+
+    "One that raised **before** the forecast was serviced, having opened no channel,
+    carries **no** contact and ``None``. An implementation computing the fact off the
+    ended servicing rather than at the performing site passes every other arm here and
+    fails all three."
+
+    The **local file** is serviced ahead of the forecast (§7), so a fetcher that raises
+    there fails the servicing before the forecast is reached — and the turn then reports
+    reaching nothing, which is what tells this shape from the two above.
+    """
+    seam = forecaster()
+    harness = Harness(
+        planner=_AskingPlanner(
+            ReadRequest(
+                asks=(
+                    ReadAsk(kind=ReadKind.LOCAL_FILE, entry="F1"),
+                    ReadAsk(kind=ReadKind.FORECAST_READ),
+                )
+            ),
+            rounds=1,
+        ),
+        fetcher=_RaisingFetcher(),
+        forecast=servicer(seam=seam),
+    )
+
+    outcome = await harness.engine.converse(_UTTERANCE, timeout=PATIENT)
+
+    statement = outcome.outbound_statement
+    assert statement is not None
+    assert statement.reach is OutboundReach.NOT_REACHED
+    assert statement.destinations == ()
+    assert outcome.forecast_not_read is None
+    assert seam.requested == [], "no request was composed and no channel was opened"
+    assert seam.read_calls == []
