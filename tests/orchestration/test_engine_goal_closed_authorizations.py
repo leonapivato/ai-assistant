@@ -8,17 +8,14 @@ each is driven through the production engine over a real ``PlanStore`` and a rea
 are ``tests/permissions/goal_authorization_contract.py``'s; arm 10's *database*
 half is about bytes on disk and is the durable store's.
 
-**Two limbs of arm 4 have no tree to run against, and that is recorded rather than
-skipped.** Arm 4 states the act's answer is *"``ABANDONED`` or
-``ABANDONED_EFFECT_IN_FLIGHT`` exactly as ADR-0261 §6 fixes it"* and that *"a
-``StaleExecutionError`` retry calls ``end_for_goal`` **once per attempt it
-makes**"*. ``AssistantEngine._abandon_goal`` takes **neither** on this tree: it
-discards the ``bool`` ``close_goal_abandoned`` answers and takes no retry, both
-booked to ADR-0261 L2 by that decision's §13 and recorded on #2435. ADR-0268 §9
-anticipates exactly this — *"the lane above wires ``end_for_goal`` on the
-``ABANDONED`` close alone, that being the one closing write that exists"* — so what
-is asserted here is the act as it is, the per-attempt structure the retry will wrap
-is pinned, and the two limbs are filed against that lane (#2452).
+**Arm 4's last two limbs land here with ADR-0261's L2** (#2452, closed by it). Arm 4
+states the act's answer is *"``ABANDONED`` or ``ABANDONED_EFFECT_IN_FLIGHT`` exactly as
+ADR-0261 §6 fixes it"* and that *"a ``StaleExecutionError`` retry calls ``end_for_goal``
+**once per attempt it makes**, each carrying **that attempt's own instant**"*. Until that
+lane the engine discarded the ``bool`` and took no retry (#2435), so neither limb had a
+tree; both are now asserted in this module's last section — the per-attempt call count,
+the re-read's two branches, ``clear_closure`` called not at all on either, and the
+``ABANDONED_EFFECT_IN_FLIGHT`` answer with the ending fired beside it.
 """
 
 from __future__ import annotations
@@ -28,6 +25,7 @@ from typing import TYPE_CHECKING, Any, Final, NamedTuple
 
 import pytest
 from test_engine import AT, PATIENT, Harness, NoStepPlanner
+from test_engine_cancellation_act import _an_attempt_with_a_claimed_step
 from test_engine_goal_association import _associating, _goal, _seed
 
 from ai_assistant.core.errors import AuthorizationError, StaleExecutionError
@@ -41,6 +39,7 @@ from ai_assistant.core.types import (
     PermissionDecision,
     PermissionOutcome,
     PermissionRuling,
+    StepStatus,
     TurnReference,
 )
 from ai_assistant.testing import (
@@ -175,6 +174,15 @@ class _Journal:
         #: its own, and putting one on the shipping fake for a single arm would add a
         #: knob to every consumer's double.
         self.closing_fault: Exception | None = None
+        #: One-shot faults for the closing write, consumed in order, so ADR-0261 §2's
+        #: single retry can be driven: a scripted ``StaleExecutionError`` on the first
+        #: attempt and nothing on the second. Distinct from :attr:`closing_fault`, which
+        #: stays armed and is what arm 7's *"the act propagates"* needs.
+        self.closing_faults: list[Exception | None] = []
+        #: Run as a closing write leaves, which is ADR-0261 §2's window *"between the
+        #: stale refusal and the re-read"* — where a second act, a deletion or a reopen
+        #: lands. It is given the harness's stores by the case that arms it.
+        self.after_closing: Callable[[], Awaitable[None]] | None = None
         #: Armed to fault **one** ending member rather than the store. ADR-0268 §9
         #: arm 10 injects each reopen call *separately*, and the canonical fake's
         #: ``fail_writes`` is store-wide — so arming it before the reopen faults the
@@ -219,6 +227,13 @@ class _Journal:
             self.closings.append(fields["at"])
             if self.closing_fault is not None:
                 raise self.closing_fault
+            if self.closing_faults:
+                queued = self.closing_faults.pop(0)
+                if queued is not None:
+                    if self.after_closing is not None:
+                        after, self.after_closing = self.after_closing, None
+                        await after()
+                    raise queued
             return await closing_write(goal_id, **fields)
 
         setattr(store, "end_for_goal", ending)  # noqa: B010 — an instance lever, not an attribute
@@ -1206,3 +1221,132 @@ async def test_a_reopen_call_faulting_on_a_goal_closed_under_this_decision_leave
     assert await harness.engine.abandon_goal(goal.id) is GoalAbandonment.ABANDONED
     await _reopen(harness, goal.id)
     assert await store.record(_row(goal.id, "tool_four", row_id="repaired")) == "repaired"
+
+
+# --------------------------------------------------------------------------- #
+# Arm 4's two limbs that presupposed ADR-0261 L2 (#2452)                      #
+# --------------------------------------------------------------------------- #
+
+
+async def test_the_retry_takes_its_own_ending_under_its_own_version_and_instant() -> None:
+    """Arm 4: ``end_for_goal`` **once per attempt the act makes**, asserted over the count.
+
+    "A ``StaleExecutionError`` retry calls ``end_for_goal`` **once per attempt it makes**,
+    each carrying **that attempt's own instant**" (ADR-0268 §1) — so the second attempt is
+    not the first one's write re-issued: it re-reads the goal, takes a fresh ending under
+    the version its own closing write will name, and only then writes.
+
+    **And a fresh row a reopen admitted between the attempts is ended with the rest.** The
+    interference here is that reopen's two halves — the fence lifted, a row recorded —
+    followed by a write that moves ``Goal.version``, which is what makes the act's first
+    call stale in the first place.
+    """
+    harness, store, journal, conversation = _journalled()
+    goal = await _goal_with_two_rows(harness, store, conversation=conversation)
+    first_version = goal.version
+
+    async def _reopened_between_the_attempts() -> None:
+        # The reopen's own pair, taken through the **unwrapped** members so the arm's
+        # "the act clears nothing" assertion is about the act and not about this setup.
+        await journal.raw.clear_closure(goal.id, goal_version=first_version)
+        await store.record(_row(goal.id, _FIRST, row_id="a3"))
+        await harness.plans.engage_goal(
+            goal.id, at=AT, conversation_id=conversation, expected_version=first_version
+        )
+
+    journal.closing_faults = [StaleExecutionError("the goal has advanced"), None]
+    journal.after_closing = _reopened_between_the_attempts
+
+    assert await harness.engine.abandon_goal(goal.id) is GoalAbandonment.ABANDONED
+
+    assert journal.calls == [
+        "end_for_goal",
+        "close_goal_abandoned",
+        "end_for_goal",
+        "close_goal_abandoned",
+    ]
+    # Each attempt's ending carries the version that attempt's own closing write names,
+    # and the second is the **re-read** version rather than the first one again.
+    assert [version for _, _, version in journal.endings] == [first_version, first_version + 1]
+    # One clock reading per attempt, serving that attempt's two writes.
+    assert [at for _, at, _ in journal.endings] == journal.closings
+    # "`clear_closure` is called **not at all** on either path."
+    assert journal.clears == []
+    ended = _dispositions(await store.export())
+    assert {ended[row][0] for row in ("a1", "a2", "a3")} == {AuthorizationDisposition.GOAL_CLOSED}
+
+
+async def test_a_retry_whose_re_read_finds_the_goal_closed_ends_nothing_further() -> None:
+    """Arm 4: "one whose re-read finds the goal **closed** calls it once in the whole act".
+
+    It "answers ``ALREADY_CLOSED`` and **leaves the fence standing**" — the first attempt's
+    ending is not compensated, because a fence lifted here could not be told from one a
+    concurrent act is relying on.
+    """
+    harness, store, journal, conversation = _journalled()
+    goal = await _goal_with_two_rows(harness, store, conversation=conversation)
+
+    async def _closed_by_somebody_else() -> None:
+        await harness.plans.set_goal_status(
+            goal.id, status=GoalStatus.ABANDONED, at=AT, expected_version=goal.version
+        )
+
+    journal.closing_faults = [StaleExecutionError("the goal has advanced"), None]
+    journal.after_closing = _closed_by_somebody_else
+
+    assert await harness.engine.abandon_goal(goal.id) is GoalAbandonment.ALREADY_CLOSED
+
+    assert journal.calls == ["end_for_goal", "close_goal_abandoned"]
+    assert journal.clears == []
+    # The fence the first attempt raised stands: every later `record` of this goal asks.
+    with pytest.raises(AuthorizationError):
+        await store.record(_row(goal.id, _SECOND, row_id="a4"))
+
+
+async def test_a_retry_whose_re_read_finds_no_goal_makes_no_second_call() -> None:
+    """Arm 4 and ADR-0261 §14 arm 6's deleter, over the ending's own call count.
+
+    The act "answers ``NO_SUCH_GOAL`` and **makes no second call at all**", which is what
+    pins the retry to re-taking the act's first-read *decision* rather than its call.
+    """
+    harness, store, journal, conversation = _journalled()
+    goal = await _goal_with_two_rows(harness, store, conversation=conversation)
+
+    async def _deleted_by_somebody_else() -> None:
+        await harness.plans.delete_goal(goal.id)
+
+    journal.closing_faults = [StaleExecutionError("the goal has advanced"), None]
+    journal.after_closing = _deleted_by_somebody_else
+
+    assert await harness.engine.abandon_goal(goal.id) is GoalAbandonment.NO_SUCH_GOAL
+
+    assert journal.calls == ["end_for_goal", "close_goal_abandoned"]
+    assert journal.clears == []
+
+
+async def test_an_effect_in_flight_answer_fires_the_ending_like_any_other_close() -> None:
+    """Arm 4's first limb: the answer is §6's member, and the ending is taken all the same.
+
+    ADR-0268 §4: *"the ending fires there like any other"* — an authority ends when its
+    goal closes, whatever the closing act had to report about what was outstanding, and
+    what was already dispatched is unaffected by that (ADR-0261 §2: the act "does not end
+    an execution and does not cancel anything in flight").
+    """
+    harness, store, journal, conversation = _journalled()
+    goal = await _goal_with_two_rows(harness, store, conversation=conversation)
+    await _an_attempt_with_a_claimed_step(
+        harness.plans,
+        harness.trail,
+        goal_id=goal.id,
+        attempt_id="a-running",
+        plan_ordinal=1,
+        status=StepStatus.RUNNING,
+    )
+
+    answer = await harness.engine.abandon_goal(goal.id)
+
+    assert answer is GoalAbandonment.ABANDONED_EFFECT_IN_FLIGHT
+    assert journal.calls == ["end_for_goal", "close_goal_abandoned"]
+    assert journal.clears == []
+    ended = _dispositions(await store.export())
+    assert {ended[row][0] for row in ("a1", "a2")} == {AuthorizationDisposition.GOAL_CLOSED}

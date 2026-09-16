@@ -48,7 +48,7 @@ from ai_assistant.testing import FakeAuditTrail, FakePlanStore
 if TYPE_CHECKING:
     from collections.abc import Mapping
 
-    from ai_assistant.core.protocols import PlanStore
+    from ai_assistant.core.protocols import AuditTrail, PlanStore
     from ai_assistant.core.types import ExecutionState, FrozenJson, ToolDefinition, UtcInstant
 
 _GOAL: Final = "goal-booking"
@@ -74,7 +74,7 @@ def _reading() -> ToolDefinition:
 
 async def _an_attempt_with_a_claimed_step(  # noqa: PLR0913 — the store, the trail the ruling is recorded in, and the four facts that identify one seeded attempt; every one is a distinct fact about the row being built
     plans: PlanStore,
-    trail: FakeAuditTrail,
+    trail: AuditTrail,
     *,
     goal_id: str,
     attempt_id: str,
