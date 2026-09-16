@@ -12899,8 +12899,9 @@ class Engine:
             step: The step it will carry, or ``None``.
             conversation_id: The conversation it will name — the one
                 ``ConversationLifecycle.capture`` reports back for this turn.
-            goal: ADR-0250 §5's members the outcome will carry, or ``None`` where it
-                will carry none. **They are measured and not omitted**: each adds bytes
+            goal: ADR-0250 §5's members the outcome will carry, and ADR-0262 §6's two
+                values, or ``None`` where it will carry none. **They are measured and
+                not omitted**: each adds bytes
                 to the terminal frame, and a probe that left them out would reserve
                 room for an outcome smaller than the one it is reserving for — which is
                 the one thing ADR-0173 §3's ceiling exists to prevent.
@@ -12931,6 +12932,22 @@ class Engine:
             # The value is this pass's own, assembled before composing begins, so the
             # probe carries what the outcome will carry rather than an estimate of it.
             outbound_statement=outbound,
+            # ADR-0262 §6's member, **measured and not omitted**, for that same reason
+            # and with the same value: §1 puts the comparison wholly before this stage,
+            # so by the time a stream is measured the member's content is already fixed
+            # and the probe carries it rather than an estimate.
+            #
+            # **Where the attempt then does not end the outcome carries ``None``**, which
+            # is *smaller* — so the probe over-states the fixed cost and under-states the
+            # room, which "can only … stop a stream a byte or two early and can never
+            # publish text the terminal frame would then refuse". The opposite direction
+            # is the one ADR-0173 §3's ceiling exists to prevent, and omitting the member
+            # is exactly that direction.
+            attempt_report=(
+                None
+                if carried.facts.outcome is None
+                else AttemptReport(outcome=carried.facts.outcome, continues=carried.facts.continues)
+            ),
         )
         fixed = len(canonical_payload(probe)) - encoded_text_bytes(_ROOM_PROBE)
         return self._max_payload_bytes - fixed - JSON_STRING_QUOTE_BYTES

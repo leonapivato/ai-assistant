@@ -235,15 +235,21 @@ async def test_a_revising_turn_drives_its_step(  # §16 item 20 at the engine
     assert stored.revision == 2
 
 
-async def test_a_failed_step_ends_no_attempt() -> None:
-    """§5: ``ANSWERED`` "asserts … that **no step failed**", read off the execution.
+async def test_a_failed_step_ends_the_attempt_failed() -> None:
+    """§5's ``ANSWERED`` "asserts … that **no step failed**" — and A10 now says what it earns.
 
     :attr:`~ai_assistant.core.types.Disposition.EXECUTED` says the tool was *reached*,
     not that it succeeded — a tool that raises leaves that disposition beside a step
-    whose :class:`~ai_assistant.core.types.StepStatus` is ``FAILED``. **Which
-    ``AttemptOutcome`` such an attempt earns is A10's** (§13), so this lane writes none:
-    the attempt stands at ``VERIFY``, still ``RUNNING``, which is §4's stated cost taken
-    rather than an outcome nothing established.
+    whose :class:`~ai_assistant.core.types.StepStatus` is ``FAILED``. §13 left **which**
+    ``AttemptOutcome`` such an attempt earns to A10, and ADR-0262 §4's limb 1 answers it:
+    no criterion is met, ``failed`` holds, and the attempt is **not** at rung 2 — the
+    tool here is ``side_effecting`` and ``REVERSIBLE``, discloses nothing and carries no
+    egress binding — so the member is ``FAILED``.
+
+    **This case asserted ``RUNNING`` and no outcome before A10 landed**, which was §4's
+    stated cost taken rather than an outcome nothing established. The cost is now paid
+    rather than taken: the record says the work failed, and §6's statement for that
+    member says exactly that and *"no criterion of this goal was established"*.
     """
 
     async def _fails(parameters: object, *, idempotency_key: str | None) -> None:
@@ -263,9 +269,12 @@ async def test_a_failed_step_ends_no_attempt() -> None:
     attempt = await harness.plans.get_attempt(stored.id)
     assert attempt is not None
     assert attempt.phase is AttemptPhase.VERIFY, "the phase says where it stands"
-    assert attempt.state is AttemptState.RUNNING, "and it did not end"
-    assert attempt.outcome is None
-    assert attempt.ended_at is None
+    assert attempt.state is AttemptState.ENDED, "and ADR-0262 §4's limb 1 ended it"
+    assert attempt.outcome is AttemptOutcome.FAILED
+    assert attempt.ended_at is not None
+    goal = await harness.plans.get_goal(stored.goal_id)
+    assert goal is not None
+    assert goal.status is GoalStatus.ACTIVE, "R53: an attempt ending closes no goal"
 
 
 async def test_a_turn_whose_composition_failed_ends_no_attempt() -> None:
@@ -332,8 +341,17 @@ async def test_a_parked_attempt_waits_and_then_moves_on_when_the_user_approves()
     assert moved is not None
     assert moved.phase is AttemptPhase.VERIFY, "EXECUTE and VERIFY, in §6's order"
     assert moved.state is AttemptState.ENDED
-    assert moved.outcome is AttemptOutcome.ANSWERED
+    # ADR-0262 §4's limb 3, which this case reaches once A10 decides the member rather
+    # than ADR-0249 §5's `ANSWERED` being the only answer a pass can write. The tool
+    # that parked did so because it discloses off-device, which is §3's **rung 2**; the
+    # goal carries no criterion, so `fully_met` is false and nothing is `unmet`. "A
+    # consequential act ran and nothing verified it, which is what `UNCERTAIN` says and
+    # what `ANSWERED` would deny."
+    assert moved.outcome is AttemptOutcome.UNCERTAIN
     assert moved.ended_at == AT
+    assert resumed.attempt_report is not None
+    assert resumed.attempt_report.outcome is AttemptOutcome.UNCERTAIN
+    assert resumed.attempt_report.continues is True, "§6: an open goal whose work is unfinished"
 
 
 async def test_a_cancellation_during_composition_leaves_the_attempt_out_of_waiting() -> None:
@@ -387,12 +405,18 @@ async def test_a_cancellation_during_composition_leaves_the_attempt_out_of_waiti
     assert claimed.approval_ref in attempt.authorization_ids, "the approval survived"
 
 
-async def test_a_refused_confirmation_leaves_the_attempt_unended() -> None:
-    """§5: a condition blocked, so ``ANSWERED`` is not true of this pass.
+async def test_a_refused_confirmation_ends_the_attempt_condition_prevented() -> None:
+    """§5: a condition blocked, so ``ANSWERED`` is not true of this pass — and A10 says what is.
 
-    The attempt still leaves ``AWAITING_AUTHORIZATION`` — the user answered, so it is no
-    longer waiting on them — and stands at ``VERIFY`` with no outcome, because **which
-    ``AttemptOutcome`` a refused act earns is A10's** (§13).
+    §13 left **which** ``AttemptOutcome`` a refused act earns to A10, and ADR-0262 §4's
+    limb 2 answers it: no criterion is met, none is ``unmet``, ``blocked`` holds — the
+    step is ``SKIPPED`` carrying ``SkipReason.APPROVAL_DENIED`` — nothing failed, and
+    nothing was claimed, so the attempt is at **rung 0**. The member is
+    ``CONDITION_PREVENTED``, whose §6 statement says the action was *"prevented before it
+    ran"* — true of the user's own refusal, which is one of ``blocked``'s two sources.
+
+    **This case asserted ``RUNNING`` and no outcome before A10 landed.** What ends the
+    attempt now is the comparison rather than the answer being ``ANSWERED``-shaped.
     """
     plans = _Recording()
     harness = Harness(tools=(confirmable(),), plans=plans)
@@ -410,8 +434,12 @@ async def test_a_refused_confirmation_leaves_the_attempt_unended() -> None:
     moved = await harness.plans.get_attempt(stored.id)
     assert moved is not None
     assert moved.phase is AttemptPhase.VERIFY
-    assert moved.state is AttemptState.RUNNING, "no longer waiting, and not ended"
-    assert (moved.outcome, moved.ended_at) == (None, None)
+    assert moved.state is AttemptState.ENDED, "no longer waiting, and §4's limb 2 ended it"
+    assert moved.outcome is AttemptOutcome.CONDITION_PREVENTED
+    assert moved.ended_at is not None
+    assert resumed.attempt_report is not None
+    assert resumed.attempt_report.outcome is AttemptOutcome.CONDITION_PREVENTED
+    assert resumed.attempt_report.continues is False, "§6: a prevented attempt offers nothing"
 
 
 def test_the_ledger_never_decreases_when_the_clock_goes_backwards() -> None:
@@ -825,7 +853,15 @@ async def test_a_step_that_reached_no_ruling_is_still_stamped_execute() -> None:
     attempt = await harness.plans.get_attempt(stored.id)
     assert attempt is not None
     assert attempt.authorization_ids == (), "nothing allowed anything"
-    assert attempt.outcome is None, "and no step succeeded, so nothing is ANSWERED"
+    # ADR-0262 §4's limb 6. Nothing was claimed, so the attempt is at **rung 0**; the
+    # step is `SKIPPED` carrying `SkipReason.NO_CAPABLE_TOOL`, which is neither of the
+    # two reasons §4's `blocked` reads, and nothing failed. ADR-0249 §5's `ANSWERED`
+    # asserts "a reply exists, no step failed and no condition blocked" — each true here
+    # — and "it asserts nothing about whether the reply is correct", which is what makes
+    # it honest of a turn that found no tool and said so.
+    assert attempt.outcome is AttemptOutcome.ANSWERED
+    assert outcome.attempt_report is not None
+    assert outcome.attempt_report.outcome is AttemptOutcome.ANSWERED
 
 
 async def test_a_replay_racing_a_resolution_does_not_move_the_attempt_twice() -> None:
@@ -1198,16 +1234,22 @@ async def test_a_failed_boundary_write_leaves_the_attempt_paused_and_the_claim_r
     assert len(resolving) == 1, "the resolving ruling was recorded before the refused claim"
 
 
-async def test_a_refused_boundary_write_is_recovered_on_an_answer_that_earns_nothing() -> None:
-    """The recovery's other half: an answer that earns no ``AttemptOutcome``.
+async def test_a_refused_boundary_write_is_recovered_on_a_declining_answer() -> None:
+    """The recovery's other half: a declining answer, over a row the boundary never moved.
 
     ``ANSWERED`` asserts a reply exists, no step failed and no condition blocked (§5),
-    and a **declining** answer fails the first. **Which member such an attempt earns
-    instead is A10's** (§13), so none is written — but the attempt is not *waiting*
-    either: the user answered, and the token is settled. An implementation that only
-    wrote the state alongside a terminal outcome would leave a row saying
-    ``AWAITING_AUTHORIZATION`` at ``VERIFY`` wherever the boundary's write was refused,
-    which is §5's paused state over a question nobody can answer again.
+    and a **declining** answer fails the third. §13 left which member such an attempt
+    earns to A10, and ADR-0262 §4's limb 2 answers it — ``CONDITION_PREVENTED``, the
+    user's own refusal being one of ``blocked``'s two sources.
+
+    **What this arm is about is unchanged, and it is the state rather than the member**:
+    wherever the boundary's write was refused the stored row still says
+    ``AWAITING_AUTHORIZATION``, and the finishing commit is what repairs it. §4's second
+    ending condition asks whether the attempt is *paused*, and this resumption **is** the
+    user's answer — the token is settled and nothing is waiting on it — so the commit
+    reads that condition off the pass rather than off a row it is itself repairing. An
+    implementation that declined here on the strength of the stale row would leave §5's
+    paused state at ``VERIFY`` over a question nobody can answer again.
 
     **The two approving answers this arm used to carry — the tool failing and the
     composition producing nothing — are unreachable behind a refused boundary write
@@ -1239,6 +1281,6 @@ async def test_a_refused_boundary_write_is_recovered_on_an_answer_that_earns_not
     attempt = await harness.plans.get_attempt(stored.id)
     assert attempt is not None
     assert attempt.phase is AttemptPhase.VERIFY, "the phase says where it stands"
-    assert attempt.state is AttemptState.RUNNING, "and it is no longer waiting on the user"
-    assert attempt.outcome is None, "which member it earns is A10's, so none is written"
-    assert attempt.ended_at is None
+    assert attempt.state is AttemptState.ENDED, "and it is no longer waiting on the user"
+    assert attempt.outcome is AttemptOutcome.CONDITION_PREVENTED
+    assert attempt.ended_at is not None
