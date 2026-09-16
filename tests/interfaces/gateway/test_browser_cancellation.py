@@ -30,6 +30,7 @@ import pytest
 from browser_drive import DESKTOP, PHONE, driving
 from playwright.async_api import expect
 from rich.console import Console
+from test_browser_answers import _stop_substituting, _substitute
 
 from ai_assistant.core.types import (
     DriveWithheld,
@@ -290,6 +291,100 @@ async def test_the_statement_reaches_the_owner_through_the_fakes_own_lever(
             "expected => document.getElementById('answer-body').textContent.includes(expected)",
             arg=_STATEMENTS[DriveWithheld.UNDERSTANDING_CHANGED],
         )
+
+
+async def test_a_value_outside_the_seven_is_said_rather_than_shown_raw(
+    gateway_browser: Browser, tmp_path: Path
+) -> None:
+    """A value that is not one of §7's seven is reported as one the page has no words for.
+
+    §7 closes the vocabulary at seven, so no conforming hub sends an eighth — but a
+    browser can be sent any string at all, and ADR-0168 §6 makes what the page does with
+    one this surface's decision rather than the hub's.
+
+    **Not a bare identifier and not silence**, which is ``ATTEMPT_REPORT_UNREADABLE``'s
+    ratified position one vocabulary over, and **not an eighth fixed statement**: minting
+    one for a member §7 does not name would be this surface deciding a vocabulary.
+
+    **And the notice is *not* suppressed here**, which is the arm that decides how the
+    guard is written. The unreadable sentence "asserts nothing the page has not been
+    told", so there is nothing for "No action was needed." to contradict — and the same
+    branch is what an **absent** member reaches, which is what a hub at another version
+    sends. A guard testing ``=== null`` would suppress a true notice on both; the
+    membership test is why it does not, and the case that found it is
+    ``test_a_member_outside_the_six_is_said_rather_than_shown_raw`` one vocabulary over.
+
+    Driven by substituting the response body, because a value outside the enumeration is
+    one no conforming gateway sends and ``_outcome_view`` cannot be made to send it. The
+    stream is switched off first so that the substituted path is the one the page asks.
+    """
+    async with driving(gateway_browser, tmp_path) as drive:
+        await drive.page.uncheck("#stream-answer")
+        await _substitute(
+            drive,
+            path="/ask",
+            body=(
+                '{"outcome": {"conversation_id": "c-1", "capture_degraded": false, '
+                '"memory_degraded": false, "reply": "Right.", "reply_degraded": false, '
+                '"rationale": null, "steps": [], "step": null, "routed": null, '
+                '"read_confirmation": null, "read_answer": null, "goal_engagement": null, '
+                '"clarification": null, "reference": null, "disambiguation": null, '
+                '"forecast_not_read": null, "attempt_report": null, '
+                '"drive_withheld": "a_later_member", "authorizations": []}}'
+            ),
+        )
+        await drive.page.fill("#utterance", _QUESTION)
+        await drive.page.click("#ask-button")
+        await drive.page.wait_for_selector("#answer:not([hidden])")
+        said = await drive.answer()
+        await _stop_substituting(drive)
+
+        assert "no words for" in said
+        assert "a_later_member" not in said
+        for statement in _STATEMENTS.values():
+            assert statement not in said
+        assert "No action was needed." in said
+
+
+async def test_an_outcome_carrying_no_such_member_at_all_still_shows_the_true_notice(
+    gateway_browser: Browser, tmp_path: Path
+) -> None:
+    """The **absent** member, which is the shape a hub at an earlier version sends.
+
+    ``undefined`` is not ``null`` in JavaScript, and a guard written as ``=== null``
+    treats an absent key as a *present* member — suppressing "No action was needed." on a
+    turn that genuinely needed no action, with no statement on the screen to replace it.
+    That is a true line silently removed, which is the opposite direction from the
+    contradiction the guard exists to prevent, and it is why the term is a membership
+    test.
+
+    ``renderDriveWithheld`` already treats the two alike (§7's silence); this pins that the
+    guard does too, over a body carrying no ``drive_withheld`` key at all.
+    """
+    async with driving(gateway_browser, tmp_path) as drive:
+        await drive.page.uncheck("#stream-answer")
+        await _substitute(
+            drive,
+            path="/ask",
+            body=(
+                '{"outcome": {"conversation_id": "c-1", "capture_degraded": false, '
+                '"memory_degraded": false, "reply": "Right.", "reply_degraded": false, '
+                '"rationale": null, "steps": [], "step": null, "routed": null, '
+                '"read_confirmation": null, "read_answer": null, "goal_engagement": null, '
+                '"clarification": null, "reference": null, "disambiguation": null, '
+                '"forecast_not_read": null, "attempt_report": null, "authorizations": []}}'
+            ),
+        )
+        await drive.page.fill("#utterance", _QUESTION)
+        await drive.page.click("#ask-button")
+        await drive.page.wait_for_selector("#answer:not([hidden])")
+        said = await drive.answer()
+        await _stop_substituting(drive)
+
+        assert "No action was needed." in said
+        assert "no words for" not in said
+        for statement in _STATEMENTS.values():
+            assert statement not in said
 
 
 # --- ADR-0261 §6: the listing row --------------------------------------------
