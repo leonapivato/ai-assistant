@@ -2309,7 +2309,78 @@ from ai_assistant.wire.errors import (
 #: is registered, the promoted method set does not move, no gateway route is added, and
 #: the error mapping gains nothing. **No compatibility shim, negotiation or lenient
 #: decode is added** — ADR-0084 §3's exact-match handshake is the mechanism.
-PROTOCOL_VERSION: Final[int] = 51
+#: **52 since ADR-0271 §8**, and the ground is stated rather than weighed: *"``
+#: PermissionRuling`` and ``ToolDefinition`` each cross the wire inside a
+#: ``PermissionDecision`` a client decodes, so P1 widens a decoded shape and **owes the
+#: bump and its ``wire/envelope.py`` log entry in the same change**"*. **Two grounds, one
+#: bump, and there is no third.**
+#:
+#: **The first.** :class:`~ai_assistant.core.types.PermissionRuling` gains
+#: ``proved_quote``, defaulted ``None`` and — because ``wire/codec.py`` renders a model
+#: by ``model_dump()`` and that model sets ``extra="forbid"`` — emitted on **every**
+#: ruling that crosses, which a client at 51 fails with ``extra_forbidden``. It crosses
+#: because :class:`~ai_assistant.core.types.PermissionDecision` embeds the ruling whole
+#: — ``from_request`` transcribing it, ADR-0271 §1 — and three promoted methods return
+#: decisions: ``recent_decisions``, ``grantable_decisions`` and ``export_decisions``.
+#: That is the entry at 8's own reading, stated over one more member.
+#:
+#: **The second.** :class:`~ai_assistant.core.types.ToolDefinition` gains
+#: ``charged_output``, and it crosses on the entry at 51's own ground for
+#: ``postconditions``: ``ActionRequest.tool`` and ``PermissionDecision.tool`` embed the
+#: **whole** definition by value — ADR-0021 §1's *"There is no name left to rebind"* —
+#: so the new member rides every decision a promoted method returns, and
+#: ``ToolDefinition`` sets ``extra="forbid"`` too.
+#:
+#: **What earns no ground of its own, said rather than left to inference.**
+#: :class:`~ai_assistant.core.types.ChargedOutput` is minted and reaches a frame only
+#: **inside** the declaration's new member, so it rides the second ground rather than
+#: adding to it, and its two encoded keys are exactly
+#: :class:`~ai_assistant.core.types.QuotedOutput`'s, which has crossed on that same
+#: declaration since 48. :class:`~ai_assistant.core.types.ActionQuote` reaches a frame
+#: **for the first time** here, whole, and it likewise rides the **first** ground rather
+#: than adding a third: it crossed nowhere before, ``AuthorizationProjection.quote``
+#: carrying a three-field :class:`~ai_assistant.core.types.QuoteView` rather than a quote
+#: and ``Authorization`` crossing whole in no frame (the entry at 48's own reading). So
+#: unlike the entry at 51 this bump **does** put a new class of content on a seam, which
+#: is said rather than assumed away — its inner
+#: :class:`~ai_assistant.core.types.StepOutputRef` is not new, already crossing on a
+#: ``PlanStep``, and nothing resolves the reference at either end (ADR-0267 §1).
+#: **No enumeration gains a member** — ``PermissionOutcome``, ``RiskLevel``,
+#: ``Reversibility``, ``Idempotency`` and ``VerificationKind`` are untouched — so no peer
+#: emits a value another's closed enumeration refuses, and ``core/errors.py`` gains no
+#: class. **``PermissionDecision`` itself gains no field** (ADR-0271 §1): both members
+#: ride records it already embeds.
+#:
+#: **No integer is fixed in the ADR** (§8): *"The integer is chosen at P1's own base
+#: against the bumps other lanes of this batch land, and a number written into this
+#: document would be a claim about an order nobody controls."* This lane branched at 51
+#: and is written **52**. A lane that lands after this one re-bumps rather than reusing
+#: the figure.
+#:
+#: **No stored-record version moves with this lane and no migration is owed here**
+#: (ADR-0271 §8). Both widened shapes **are** stored shapes — a ``PermissionDecision``
+#: carrying either is written into ``SqliteAuditTrail``'s JSON record — but that store's
+#: ``_SCHEMA_VERSION`` moved in **P0**, the ``permissions`` lane before this one, so that
+#: it is a stored shape is answered there and not by this bump; *"P1 carries no part of
+#: it."* ``PlanExport.schema_version`` and the plan store's ``_SCHEMA_VERSION`` **do not
+#: move**: neither the export nor any shape that store persists carries a
+#: ``ToolDefinition``, a ``PermissionRuling`` or a ``PermissionDecision`` at any depth —
+#: ``Goal`` is not touched by this lane at all. The parked-read store's marker stays at
+#: **3**, the goal-authorization store's at **1** and ``ConversationExport.
+#: schema_version`` at **2**, and ``core.config.Settings`` gains nothing: ADR-0271 §8
+#: says so in as many words — *"``core/config.py`` gains nothing"*.
+#:
+#: **Nothing else under** ``wire/`` **changes** (ADR-0271 §8): the connect exchange gains
+#: no member, no existing frame's encoding changes, no :class:`FrameKind` or codec entry
+#: is registered, the promoted method set does not move, no gateway route is added, and
+#: the error mapping gains nothing — this lane mints no error class. **No compatibility
+#: shim, optional-member negotiation, per-member capability flag or lenient decode is
+#: added** — ADR-0084 §3's exact-match handshake is the mechanism, *"whose refusal naming
+#: both versions is the intended outcome"*. **And no decision record is rewritten,
+#: back-filled or re-decided**: a stored ``PermissionDecision`` decodes with
+#: ``proved_quote`` absent and a stored ``ToolDefinition`` with ``charged_output`` absent,
+#: each defaulting to ``None``.
+PROTOCOL_VERSION: Final[int] = 52
 
 #: ADR-0085 §8a: "The correlation id is a UUID string and is at most 36 bytes.
 #: Bounding it is what makes the reserve a constant rather than an aspiration; a
