@@ -178,8 +178,9 @@ act it stands in for; that they come out differently is the whole content of §2
 > `idempotency: Idempotency.NATURAL`, `reversibility: Reversibility.REVERSIBLE`
 > (which `_effects_are_consistent` requires of anything not side-effecting),
 > **`risk_level: RiskLevel.LOW`**, **`cost: ToolCost(basis=CostBasis.FREE)`**, and a
-> **`quoted_output`** naming, at depth one, the key carrying **the whole charge the
-> booking will make** and the key carrying its ISO-4217 code (ADR-0267 §3). It
+> **`quoted_output`** naming, at depth one, the key carrying **the whole price this
+> provider quotes for the booking** — `QuotedOutput.amount` in ADR-0267 §3's own
+> sense — and the key carrying its ISO-4217 code. It
 > declares **`charged_output: None`**: a read charges nothing, and ADR-0271 §2's
 > *"A declaration carrying `None` reports no charge ever"* is the true statement
 > here.
@@ -229,16 +230,28 @@ act it stands in for; that they come out differently is the whole content of §2
 > **Normative — the store is an ordinary store of this deployment and this
 > decision invents no regime for it.** It sits **in the data directory**, so
 > `ai-assistant-purge` (ADR-0126, ADR-0153) destroys it with every other store; it
-> carries a **bound on how much it retains**, which ADR-0004 §6 requires of
-> retained data and which this decision states as a requirement rather than as a
-> number; it **validates a booking's arguments against the declaration's own
+> **validates a booking's arguments against the declaration's own
 > `parameters_schema` before it writes, and persists only the fields that schema
 > names**, so that nothing a caller supplied off-schema is ever stored; and the
 > **lane owes it exactly what every store's lane owes, and nothing more**. **This
-> decision fixes no schema, no format, no path, no retention figure and no
-> pruning rule**, and **no lane reads its silence on any of those as permission to
-> omit them** — they are the lane's under the rules that already govern every
-> store here.
+> decision fixes no schema, no format and no path**, and **no lane reads its
+> silence on any of those as permission to omit them** — they are the lane's under
+> the rules that already govern every store here.
+
+> **Normative — no retention or pruning rule is imposed on this store, and the
+> ground is that ADR-0004 §6's retention sentence is not addressed to it.** That
+> sentence reads *"**Memory** supports retention rules (e.g. TTLs, size caps) so
+> data does not accumulate indefinitely; specifics are set per memory type when
+> `memory/` is designed"* — a rule about `memory/`, stated in `memory/`'s own
+> terms. **No store in this tree carries a corpus-imposed retention rule** — not
+> the audit trail, not the plan store, not the connection store, which ADR-0149 §3
+> makes append-only outright — and inventing one for this store alone would be a
+> regime nobody else follows, written into the ADR that can least justify it.
+> **And a pruning rule would take the declaration with it**: this provider's
+> booking *is* its record, so a rule that pruned records would be a rule that
+> undid bookings, which is `RECOVERABLE` and not what §2 declares. **A decision
+> that gives any store here a retention regime states how a pruned effect is
+> reconciled with its tool's `reversibility` in the same change**; §8 books it.
 
 > **Normative — and it claims no exemption from ADR-0004 §6.** A **per-subject**
 > view, export or deletion surface exists for **no** store in this tree —
@@ -325,6 +338,16 @@ of ADR-0016: it says what *"undone"* has always meant there, over every tool.
 > zero"* for a charge, and **neither declaration's `cost` is derived from,
 > defaulted from or kept in step with the configured prices** — the price the
 > booking charges is a fact about the act, not about calling it.
+
+> **Normative — a quote is prospective, and a charge that disagrees with it does
+> not falsify it.** ADR-0267 §3's `amount` is *"the whole charge the act will
+> make"* **as the provider states it at the read**; ADR-0271 §2 fixes the other
+> half — *"A charge is **retrospective**"* — and §3 of that decision exists
+> precisely for the case where the two differ, *"the quote was true when it was
+> read and false when the charge was made"*. **So §5's disagreeing-charge
+> configuration is not a provider whose `quoted_output` lies**; it is the case the
+> corpus wrote a finding for, and **no lane reads either declaration as an
+> obligation that the charge equal the quote.**
 
 > **Normative — `risk_level` is `LOW` on the read and `HIGH` on the act, and the
 > gap between them is the whole point of the field.** The read performs nothing,
@@ -630,6 +653,12 @@ clearance it was never granted.
   footing rather than claiming an exemption from it. **Fired by** ADR-0101 §7's
   own two conditions, and the lane that satisfies either owes this store's rows in
   the same change.
+- **A retention or pruning regime for any store in this tree.** **Not decided**
+  (§2), and declined for this store rather than deferred silently: ADR-0004 §6's
+  retention sentence is addressed to `memory/`, no other store here carries one,
+  and pruning this provider's records would undo its bookings and so change its
+  declared `reversibility`. **Fired by** a decision that gives the stores a
+  retention regime, which owes that reconciliation in the same change.
 - **A structured carrier for metadata on an unsuccessful outcome.** **Not
   decided** (§6). `ToolResult` refuses an `output` on a non-`SUCCEEDED` result and
   `ToolFailure` carries `kind` and `message` alone; adding one is a `core/types.py`
@@ -671,8 +700,11 @@ clauses more widely than it now holds?*
 - **ADR-0004 §6, ADR-0101 §7, ADR-0126, ADR-0153** — no. §2 adds a store on the
   same footing as every other, purged by the same act, and owed to the same
   deferred surface; it claims no exemption, so no sentence of any of them becomes
-  false or over-wide. **A reader holding only ADR-0004 §6 is not misled**,
-  because §2 says in terms that it claims no exemption and §8 books the surface.
+  false or over-wide. **A reader holding only ADR-0004 §6 is not misled**, because
+  §2 says in terms that it claims no exemption and §8 books the surface. **Its
+  retention sentence is read as written** — addressed to `memory/`, in `memory/`'s
+  own terms — which is not a narrowing: §2 imposes no rule that sentence does not
+  reach and claims no exemption from one it does.
 - **ADR-0016, ADR-0148 §6, ADR-0149 §4, ADR-0151 §18, ADR-0267 §3, ADR-0271 §2** —
   no. Each is a declaration, a condition or an open question this decision
   **satisfies** or **leaves open**; a new integration that declares honestly is
