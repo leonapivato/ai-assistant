@@ -87,6 +87,7 @@ from ai_assistant.permissions.goal_authorizations import SqliteGoalAuthorization
 from ai_assistant.permissions.grants import SqliteSourceGrantStore
 from ai_assistant.permissions.parked_reads import SqliteParkedReads
 from ai_assistant.permissions.policy import (
+    ConfiguredForecastDestination,
     ConfiguredSearchDestination,
     ThresholdActionPolicy,
 )
@@ -95,6 +96,7 @@ from ai_assistant.permissions.recipient_grants import SqliteRecipientGrantStore
 from ai_assistant.permissions.routing import SqliteRoutingTrail
 
 __all__ = [
+    "ConfiguredForecastDestination",
     "ConfiguredSearchDestination",
     "SqliteAuditTrail",
     "SqliteDestinationTrustStore",

@@ -95,6 +95,7 @@ from ai_assistant.orchestration import (
 )
 from ai_assistant.orchestration.payloads import ENVELOPE_RESERVE_BYTES
 from ai_assistant.permissions import (
+    ConfiguredForecastDestination,
     ConfiguredSearchDestination,
     SqliteAuditTrail,
     SqliteDestinationTrustStore,
@@ -397,6 +398,70 @@ def _configured_search(
     if connection is None or not destinations:
         return None
     return ConfiguredSearchDestination(reference=connection, destinations=frozenset(destinations))
+
+
+def _forecast_destinations(origin: str | None) -> tuple[CanonicalDestination, ...]:
+    """The canonical destination set a forecast read of this deployment would bind to.
+
+    :func:`_search_destinations` one kind along (ADR-0260 §6, §11), through the
+    **same** :func:`~ai_assistant.tools.egress_binder.canonical_destination` and the
+    same protocol mapping, because ``tools/forecast.py`` declares its ``origin``
+    argument ``x-egress-destination: "https"`` exactly as ``tools/web_search.py``
+    does — so a forecast binding's spans carry the one destination this tuple holds.
+
+    **Stated beside its twin rather than shared with it**, which is §11's own
+    posture: the forecast settings are ``web_search_*``'s *"own shape field for
+    field"*, and the two reads are of two independent configuration facts. The rule
+    itself is stated once, in the canonicaliser both call.
+
+    Args:
+        origin: ``Settings.forecast_origin``, or ``None`` where this deployment
+            configured no forecast provider.
+
+    Returns:
+        The one-member set, or an empty one — :func:`_search_destinations`' own
+        answer in both cases and for its own reasons.
+    """
+    if origin is None:
+        return ()
+    try:
+        return (canonical_destination(DestinationProtocol.HTTPS, origin),)
+    except DestinationCanonicalisationError:
+        return ()
+
+
+def _configured_forecast(
+    connection: str | None, destinations: tuple[CanonicalDestination, ...]
+) -> ConfiguredForecastDestination | None:
+    """What ADR-0260 §6's widened route (c) rests on for a forecast read, or ``None``.
+
+    :func:`_configured_search` one kind along, word for word in what it does and in
+    why: the connection reference the forecast integration is registered against and
+    the canonical destination set its origin canonicalises to, **both passed through
+    rather than derived**, because §6 compares recorded values and forbids either
+    side being re-canonicalised.
+
+    **The result is its own type** (:class:`ConfiguredForecastDestination`), so this
+    root cannot hand the policy the search pair for the forecast kind or the reverse
+    — the crosswise wiring §6 gives **no** route at all, caught here by the type
+    checker rather than by a ruling that quietly matched the wrong configuration.
+
+    Args:
+        connection: ``Settings.forecast_connection``, or ``None`` where this
+            deployment configured no forecast provider.
+        destinations: :func:`_forecast_destinations`' answer for
+            ``Settings.forecast_origin``.
+
+    Returns:
+        The pair, or ``None`` where this deployment has no forecast destination to
+        compare against — no connection, or an origin this seam asserts no canonical
+        form for. A policy given ``None`` takes the *at the configured provider* fact
+        as false for every forecast read, which is §6's fail-closed direction; **an
+        empty set is not passed as a pair**, for :func:`_configured_search`' reason.
+    """
+    if connection is None or not destinations:
+        return None
+    return ConfiguredForecastDestination(reference=connection, destinations=frozenset(destinations))
 
 
 def build_engine(settings: Settings, *, data_dir: Path | None = None) -> Engine:
@@ -1552,6 +1617,24 @@ def build_composition(  # noqa: PLR0915 — one statement per resource this root
             # would be a value that reads as a configuration and authorises nothing.
             configured_search=_configured_search(
                 settings.web_search_connection, search_destinations
+            ),
+            # **The configured forecast destination, which makes route (c) reachable
+            # for the second kind** (ADR-0260 §6, §12's L2). The same two values in
+            # the same shape, read from this deployment's *forecast* pair — and a
+            # second argument rather than a widening of the one above, because §6
+            # compares each kind against its own configured pair and gives "a
+            # forecast request bound to the search provider's account or origin, or
+            # the reverse" no route at all. `ConfiguredForecastDestination` is its
+            # own type for that reason: the crosswise wiring is the one mistake this
+            # site could make, and here it does not compile.
+            #
+            # **`None` where this deployment configured no forecast provider**, and
+            # `None` too where the configured origin is one this seam asserts no
+            # canonical form for — the fact is then false for every forecast read,
+            # which is §6's fail-closed direction and what `forecast_reach`'s own
+            # restrictive default already gives a site that never computed it.
+            configured_forecast=_configured_forecast(
+                settings.forecast_connection, _forecast_destinations(settings.forecast_origin)
             ),
         )
 

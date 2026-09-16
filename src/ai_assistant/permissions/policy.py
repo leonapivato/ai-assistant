@@ -200,6 +200,22 @@ _CONFIGURED_SEARCH_PROVIDER = (
     "the destination they chose and the recipient they granted"
 )
 
+#: The ground a route-(c) ``ALLOW`` **at the configured forecast provider** is
+#: rendered with (ADR-0260 §6). Its sibling above, one kind along, and stated
+#: separately rather than generalised into one sentence for both: the ruling's
+#: ``reason`` is what a surface renders and what the decision carries, so a single
+#: sentence covering both kinds would change the text of every search ruling this
+#: deployment already makes — and ADR-0260 §12 gives this lane "no live behaviour on
+#: its own". It names the same **basis** — that this deployment's owner configured
+#: the provider this read is going to, which §6 carries to this kind in ADR-0247
+#: §1's own words: the destination is the one the owner chose, and the configured
+#: provider is also the granted recipient — and quotes no origin, no host, no
+#: connection reference, no coordinate, no credential and no ``Settings`` field.
+_CONFIGURED_FORECAST_PROVIDER = (
+    "this deployment's owner configured this forecast provider, so reading it is "
+    "the destination they chose and the recipient they granted"
+)
+
 #: The ground a route-(d) ``ALLOW`` is rendered with (ADR-0254 §6). It names the
 #: **basis** — that a recorded act of the user about this goal fixed or bounded
 #: every user-facing argument of this call — and quotes **no argument key, no
@@ -334,12 +350,15 @@ class ConfiguredSearchDestination:
     """The search destination this deployment is configured with (ADR-0247 §1, §2).
 
     The two values ``Settings.web_search_connection`` and
-    ``Settings.web_search_origin`` amount to, as the one argument §2 gives
-    :class:`ThresholdActionPolicy`: the connection reference the search is
-    registered against, and the canonical destination set that origin canonicalises
-    to. **Not a store handle, a trail read, a grant seam or a conversation
-    identity**, so ADR-0238 §5's clause forbidding a policy any of those is
-    untouched and its trust boundary is unmoved.
+    ``Settings.web_search_origin`` amount to, as the argument §2 gives
+    :class:`ThresholdActionPolicy` for this kind: the connection reference the
+    search is registered against, and the canonical destination set that origin
+    canonicalises to. **It is the search pair and only ever the search pair** —
+    ADR-0260 §6 widens route (c) to a closed two-member set in which each kind is
+    compared against its own configured pair, and the forecast kind's is
+    :class:`ConfiguredForecastDestination`. **Not a store handle, a trail read, a
+    grant seam or a conversation identity**, so ADR-0238 §5's clause forbidding a
+    policy any of those is untouched and its trust boundary is unmoved.
 
     **Neither value is derived here.** The composition root builds both — the
     reference is the configured string, and the set comes from the *same*
@@ -367,49 +386,164 @@ class ConfiguredSearchDestination:
     destinations: frozenset[CanonicalDestination]
 
 
+@dataclass(frozen=True, slots=True)
+class ConfiguredForecastDestination:
+    """The forecast destination this deployment is configured with (ADR-0260 §6, §11).
+
+    :class:`ConfiguredSearchDestination` one kind along, and **its own type rather
+    than that one reused**. ADR-0260 §6 compares *"each kind against its own
+    configured pair"* and takes **no** route at all for *"a forecast request bound
+    to the search provider's account or origin, or the reverse"*; two types make the
+    crosswise wiring a type error at the composition root — the one site that could
+    make it — where one type shared by both pairs would leave it a runtime mismatch
+    that only a test can catch. The shape is deliberately identical because §11
+    gives the forecast settings ``web_search_*``'s *"own shape field for field"*.
+
+    Everything :class:`ConfiguredSearchDestination` says about what this is **not**
+    holds here word for word: not a store handle, not a trail read, not a grant
+    seam, not a conversation identity and never a ``Settings`` object, so ADR-0238
+    §5's clause forbidding a policy any of those is untouched at this kind too.
+
+    Attributes:
+        reference: ``Settings.forecast_connection`` — the connection record the
+            forecast integration is registered against (ADR-0149 §4, ADR-0260 §6).
+            Compared against a binding's ``account.reference`` as a recorded value,
+            never inferred, folded or matched by domain.
+        destinations: The canonical destination set ``Settings.forecast_origin``
+            canonicalises to, a ``frozenset`` for :class:`ConfiguredSearchDestination`'s
+            own reason. **Neither coordinate is here**: ADR-0260 §6's comparison is
+            over the account and the origin, and a policy holding a place would be
+            holding a value no clause of this corpus lets it rule on.
+    """
+
+    reference: str
+    destinations: frozenset[CanonicalDestination]
+
+
+#: Either kind's configured pair, where a step is stated over both alike. The union
+#: rather than a shared base class, so that neither pair is ever a subtype of the
+#: other and the crosswise wiring :class:`ConfiguredForecastDestination` describes
+#: stays a type error at the one site that could commit it.
+_ConfiguredPair = ConfiguredSearchDestination | ConfiguredForecastDestination
+
+
+@dataclass(frozen=True, slots=True)
+class _ConfiguredProviderMatch:
+    """A request found to be *at its kind's configured provider* (ADR-0260 §6).
+
+    The binding the comparison was taken over, and the ground the ``ALLOW`` route
+    (c) reaches is rendered with — carried together because §6 widens route (c) to a
+    **closed two-member set** and the kind that matched is what decides both which
+    pair was compared and which sentence the user reads. A second derivation of the
+    kind at the rendering site would be the second shape ADR-0150 is named after.
+    """
+
+    binding: EgressBinding
+    """The request's own binding, where the three comparisons held of it."""
+
+    ground: str
+    """The reason a route-(c) ``ALLOW`` on this kind is rendered with."""
+
+
+@dataclass(frozen=True, slots=True)
+class _ConfiguredAuthority:
+    """Route (c)'s authority, **read before the ruling's first suspension** (ADR-0065).
+
+    Both values are read off :class:`_ConfiguredProviderMatch` while :meth:`decide`
+    is still inside its one pre-suspension observation of the request. A frozen
+    pydantic model is rewritable through ``__dict__``, so reading
+    ``binding.account.reference`` after the seam has had a turn would put into the
+    ``ALLOW`` a reference this ruling never compared.
+    """
+
+    reference: str
+    """The binding's ``account.reference``, which the ``ALLOW`` names."""
+
+    ground: str
+    """The sentence the ``ALLOW`` is rendered with."""
+
+
 def _at_configured_provider(
-    binding: EgressBinding | None, configured: ConfiguredSearchDestination | None
-) -> EgressBinding | None:
-    """``binding`` where the request is *at the configured provider*, else ``None``.
+    binding: EgressBinding | None,
+    configured_search: ConfiguredSearchDestination | None,
+    configured_forecast: ConfiguredForecastDestination | None,
+) -> _ConfiguredProviderMatch | None:
+    """The match where the request is *at its kind's configured provider*, else ``None``.
 
-    ADR-0247 §2's one derived fact, over which every relaxation of §3 is stated. It
-    is three conjuncts and no more: the binding carries ``closed_loop``, its
-    ``account.reference`` equals the configured connection reference, and its
-    canonical destination set equals the configured one.
+    ADR-0247 §2's one derived fact, **widened by ADR-0260 §6 to a closed two-member
+    set** and to nothing else. Per kind it is three conjuncts and no more: the
+    binding carries that kind's own carried fact — ``closed_loop`` for a
+    ``WEB_SEARCH``, ``forecast_reach`` for a forecast read — its
+    ``account.reference`` equals that kind's configured connection reference, and
+    its canonical destination set equals that kind's configured one.
 
-    **``closed_loop`` alone is never the condition of any relaxation** (§2). §4
-    writes that fact before the binding exists, so it asserts *"this deployment's
-    own search"* and cannot assert which account and origin the binding carries; a
-    lane reading it alone reopens the hole §3's limbs are stated to close.
+    **Each kind is compared against its own configured pair** (ADR-0260 §6): "a
+    forecast request bound to the search provider's account or origin, or the
+    reverse, takes no route at all". The pair is selected by the carried fact and
+    never by which pair happens to match, so a deployment that configured both
+    providers cannot have one kind's authority answer for the other's.
 
-    **Both comparisons are over recorded values** (§1): ``DurableIdentifier``
-    equality and ``CanonicalDestination`` equality, every field and never across
-    protocols. Neither side is inferred, folded, matched by domain or
-    re-canonicalised here — the canonical forms were computed once, by one
+    **A binding carrying both facts is at no configured provider.** ADR-0260 §11
+    writes ``forecast_reach`` *"exactly where the request's kind is a forecast
+    read"* and leaves ``closed_loop`` meaning *"this deployment's own search and
+    nothing else"*, so the two are one kind each and a binding asserting both
+    asserts a kind route (c)'s closed set does not contain. Selecting either pair
+    for it would authorise a forecast read from the search configuration or the
+    reverse, which is the one thing §6 states route (c) must not do — so the
+    ambiguity fails closed and is the whole of what this branch decides.
+
+    **The carried fact alone is never the condition of any relaxation** (ADR-0247
+    §2). Both facts are written before the binding exists, so each asserts *which
+    act this is* and neither *"can assert which account and origin the binding
+    carries"*; a lane reading one alone reopens the hole ADR-0247 §3's limbs are
+    stated to close, at whichever kind it read it on.
+
+    **Both comparisons are over recorded values** (ADR-0247 §1, ADR-0260 §6):
+    ``DurableIdentifier`` equality and ``CanonicalDestination`` equality, every
+    field and never across protocols. Neither side is inferred, folded, matched by
+    domain or re-canonicalised here — the canonical forms were computed once, by one
     canonicaliser, before either reached this function.
 
-    **A policy constructed with no configured destination takes the fact as false
-    for every request** (§2), which is the fail-closed direction and the same shape
-    ADR-0021 §3 gives a policy with no authorisation source.
+    **A policy constructed with no configured destination for a kind takes the fact
+    as false for every request of it** (ADR-0247 §2), which is the fail-closed
+    direction and the same shape ADR-0021 §3 gives a policy with no authorisation
+    source. The two pairs are independent: a deployment configured for search alone
+    reaches route (c) on a search and on no forecast read, and the reverse.
 
     Args:
         binding: The request's own binding, or ``None`` where it carries none — a
             request that is not an egress call, and so at no provider.
-        configured: What this deployment is configured with, or ``None``.
+        configured_search: The search pair this deployment holds, or ``None``.
+        configured_forecast: The forecast pair this deployment holds, or ``None``.
 
     Returns:
-        The binding itself where the request is at the configured provider, so a
-        caller that then needs its ``account.reference`` reads it off the value the
-        comparison was taken over rather than off a second lookup; ``None``
-        otherwise.
+        The match where the request is at its kind's configured provider — carrying
+        the binding itself, so a caller that then needs its ``account.reference``
+        reads it off the value the comparison was taken over rather than off a second
+        lookup, and carrying that kind's ground; ``None`` otherwise.
     """
-    if binding is None or configured is None or not binding.closed_loop:
+    if binding is None:
         return None
-    if binding.account.reference != configured.reference:
+    configured: _ConfiguredPair | None
+    if binding.closed_loop and binding.forecast_reach:
         return None
-    if frozenset(binding.canonical_destination_set) != configured.destinations:
+    if binding.closed_loop:
+        configured, ground = configured_search, _CONFIGURED_SEARCH_PROVIDER
+    elif binding.forecast_reach:
+        configured, ground = configured_forecast, _CONFIGURED_FORECAST_PROVIDER
+    else:
         return None
-    return binding
+    if configured is None:
+        return None
+    # The two comparisons in one statement rather than two, which changes nothing
+    # about either: both are still taken over recorded values and `or` still stops
+    # at the first that fails, so neither is ever inferred from the other.
+    if (
+        binding.account.reference != configured.reference
+        or frozenset(binding.canonical_destination_set) != configured.destinations
+    ):
+        return None
+    return _ConfiguredProviderMatch(binding=binding, ground=ground)
 
 
 class ThresholdActionPolicy:
@@ -469,19 +603,25 @@ class ThresholdActionPolicy:
     thresholds still fire, a ``DENY`` still stands, and the egress clause above
     still confirms. A policy constructed with no seam behaves exactly as it did.
 
-    **A ``ConfiguredSearchDestination`` changes the same one row, by a second
-    route that consults no seam at all** (ADR-0247 §2, §3). Where the request is a
-    ``WEB_SEARCH`` at the destination this deployment is configured with — its
-    binding carrying ``closed_loop``, its account's connection reference and its
-    canonical destination set equal to the configured ones — ADR-0148 §3's route
-    (c) answers it: an ``ALLOW`` naming that reference, fingerprinting nothing, and
-    taken **before** the grant seam is reached, so ``covering`` is called zero
-    times. The two limbs ADR-0238 opened over ``closed_loop`` are restated over
-    that whole fact rather than over ``closed_loop`` alone, which is what keeps
-    both floors on a binding whose account or origin is not the configured one:
+    **A ``ConfiguredSearchDestination`` or a ``ConfiguredForecastDestination``
+    changes the same one row, by a second route that consults no seam at all**
+    (ADR-0247 §2, §3; ADR-0260 §6). Where the request is a ``WEB_SEARCH`` at the
+    search destination this deployment is configured with, **or a forecast read at
+    the forecast destination it is configured with** — its binding carrying that
+    kind's own fact, ``closed_loop`` or ``forecast_reach``, and its account's
+    connection reference and canonical destination set equal to **that kind's**
+    configured ones — ADR-0148 §3's route (c) answers it: an ``ALLOW`` naming that
+    reference, fingerprinting nothing, and taken **before** the grant seam is
+    reached, so ``covering`` is called zero times. ADR-0260 §6 widens that route's
+    population to a **closed two-member set** and adds no fourth route, and a
+    request of one kind bound to the other kind's configured pair takes no route at
+    all. The two limbs ADR-0238 opened over ``closed_loop`` are restated over that
+    whole fact rather than over either carried fact alone, which is what keeps both
+    floors on a binding whose account or origin is not its kind's configured pair:
     such a request reaches no ``ALLOW`` of either route, however many grants the
     store holds. Every other row is untouched here too, and a policy constructed
-    with no configured destination behaves exactly as it did.
+    with no configured destination for a kind behaves, on that kind, exactly as it
+    did.
 
     The defaults are deliberately unremarkable and are **not** a decision the
     contract makes for the user (ADR-0021 §5): confirm at or above ``MEDIUM``
@@ -489,7 +629,7 @@ class ThresholdActionPolicy:
     deployment wanting something stricter passes it in.
     """
 
-    def __init__(  # noqa: PLR0913 — four thresholds the user sets, and one seam and one configured value the composition root supplies; each is one thing a deployment decides on its own
+    def __init__(  # noqa: PLR0913 — four thresholds the user sets, and the seams and configured values the composition root supplies; each is one thing a deployment decides on its own
         self,
         *,
         confirm_at_risk: RiskLevel | None = RiskLevel.MEDIUM,
@@ -498,6 +638,7 @@ class ThresholdActionPolicy:
         deny_at_reversibility: Reversibility | None = None,
         grants: RecipientGrants | None = None,
         configured_search: ConfiguredSearchDestination | None = None,
+        configured_forecast: ConfiguredForecastDestination | None = None,
         authorizations: GoalAuthorizations | None = None,
         quotes: GoalQuotes | None = None,
     ) -> None:
@@ -531,10 +672,21 @@ class ThresholdActionPolicy:
                 the canonical destination set, and never a ``Settings`` object,
                 a store handle, a trail read, a grant seam or a conversation
                 identity. ``None`` — the default — makes the *at the configured
-                provider* fact false for every request, which is the fail-closed
-                direction: such a policy reaches no route-(c) ``ALLOW``, and a
-                request that would have taken one draws the ``CONFIRM`` it draws
-                at ``origin/main``.
+                provider* fact false for every ``WEB_SEARCH``, which is the
+                fail-closed direction: such a policy reaches no route-(c) ``ALLOW``
+                on that kind, and a request that would have taken one draws the
+                ``CONFIRM`` it draws at ``origin/main``.
+            configured_forecast: The forecast destination this deployment is
+                configured with (ADR-0260 §6, §11) — the connection reference and
+                the canonical destination set, in ``configured_search``'s own shape
+                and subject to every word of its description. **It is a second
+                argument rather than a widening of the first** because §6 compares
+                each kind against its own configured pair and gives a forecast read
+                bound to the search provider's account or origin, or the reverse,
+                **no** route at all. ``None`` — the default — makes the *at the
+                configured provider* fact false for every forecast read, and a
+                deployment configured for one kind and not the other reaches route
+                (c) on the kind it configured and on no other.
             authorizations: The goal authorizations this policy may consult
                 (ADR-0254 §6, §16). **The query face and never the store**: a
                 policy handed the whole store is one ``record`` call away from
@@ -570,6 +722,7 @@ class ThresholdActionPolicy:
         """
         self._grants = grants
         self._configured_search = configured_search
+        self._configured_forecast = configured_forecast
         self._authorizations = authorizations
         self._quotes = quotes
         rules = list(_FLOORS)
@@ -723,24 +876,32 @@ class ThresholdActionPolicy:
         covering grant then yields an ``ALLOW`` naming the grant's ``id`` and its
         recomputed ``subject_digest``.
 
-        **Route (c), where this policy was given a configured search destination**
-        (ADR-0247 §2, §3). ADR-0148 §3's enumeration of what an ``ALLOW`` on an
-        egress request may rest on gains a third route: the request is a
-        ``WEB_SEARCH`` at the destination this deployment's owner configured, which
-        is §1's two recorded comparisons taken over the binding beside the
-        ``closed_loop`` ``orchestration`` wrote. It is reachable **exactly where
-        route (b) is reachable and on the same five conditions**, with two of them
-        restated over that fact and one — a grant seam at all — no longer required;
-        and where both would answer one request, **(c) answers it first** and
-        ``covering`` is called zero times. The ``ALLOW`` names the binding's
-        ``account.reference`` and fingerprints nothing, which is what tells the two
-        standing routes apart from the row alone.
+        **Route (c), where this policy was given a configured destination for the
+        request's kind** (ADR-0247 §2, §3; ADR-0260 §6). ADR-0148 §3's enumeration
+        of what an ``ALLOW`` on an egress request may rest on gains a third route,
+        and ADR-0260 §6 widens that route's population to a **closed two-member
+        set** while adding no fourth route: the request is a ``WEB_SEARCH`` at the
+        search destination this deployment's owner configured, **or a forecast read
+        at the forecast destination they configured**, which is ADR-0247 §1's two
+        recorded comparisons taken over the binding beside the carried fact
+        ``orchestration`` wrote for that kind — ``closed_loop`` for a search,
+        ``forecast_reach`` for a forecast read. **Each kind is compared against its
+        own configured pair**, so a forecast read bound to the search provider's
+        account or origin, or the reverse, takes no route at all. It is reachable
+        **exactly where route (b) is reachable and on the same five conditions**,
+        with two of them restated over that fact and one — a grant seam at all — no
+        longer required; and where both would answer one request, **(c) answers it
+        first** and ``covering`` is called zero times. The ``ALLOW`` names the
+        binding's ``account.reference`` and fingerprints nothing, which is what tells
+        the two standing routes apart from the row alone. **No confirmation is sought
+        and no grant seam is consulted on either kind** (ADR-0260 §6's no-new-question
+        clause).
 
-        **A request carrying ``closed_loop`` that is not at the configured provider
-        keeps every floor** (ADR-0247 §2). Because the two limbs read the derived
-        fact rather than ``closed_loop``, such a request planned over external
-        content, or carrying covered content, fails
-        :meth:`_only_the_disclosure_floor` outright: the grant seam is consulted
+        **A request carrying its kind's fact that is not at that kind's configured
+        provider keeps every floor** (ADR-0247 §2, ADR-0260 §6). Because the two
+        limbs read the derived fact rather than ``closed_loop`` or ``forecast_reach``,
+        such a request planned over external content, or carrying covered content,
+        fails :meth:`_only_the_disclosure_floor` outright: the grant seam is consulted
         **zero** times, no ``ALLOW`` of either route is reachable however many
         grants the store holds, and the ruling is the ``CONFIRM`` ADR-0181 §5 and
         ADR-0233 §9 require. That is the case a reading which put the configuration
@@ -767,9 +928,9 @@ class ThresholdActionPolicy:
             ``authorised_subject`` together, and only from the record its own
             ``covering`` read returned; a route-(c) one sets ``authorised_by`` to
             the binding's own ``account.reference`` and leaves
-            ``authorised_subject`` unset (ADR-0247 §2). A policy constructed with
-            **neither** a ``RecipientGrants`` nor a
-            :class:`ConfiguredSearchDestination` leaves both unset on every ruling,
+            ``authorised_subject`` unset, on either kind (ADR-0247 §2, ADR-0260 §6).
+            A policy constructed with **neither** a ``RecipientGrants`` nor a
+            configured destination of either kind leaves both unset on every ruling,
             which is ADR-0021 §3's requirement of a policy with no authorisation
             source; ADR-0247 §2 supersedes that requirement in the limb reaching a
             request at the configured provider, and in no other.
@@ -790,7 +951,9 @@ class ThresholdActionPolicy:
                 ),
             )
         outcome = max(ruled for ruled, _ in grounds)
-        at_configured = _at_configured_provider(request.egress_binding, self._configured_search)
+        at_configured = _at_configured_provider(
+            request.egress_binding, self._configured_search, self._configured_forecast
+        )
         if self._only_the_disclosure_floor(
             request, fired, outcome=outcome, external=external, at_configured=at_configured
         ):
@@ -801,7 +964,14 @@ class ThresholdActionPolicy:
             # them: past ``_authority`` the caller has had a turn, and a rewritten
             # ``egress_binding.account`` would otherwise put a reference this ruling
             # never checked into the ``ALLOW`` the trail then compares.
-            configured = None if at_configured is None else at_configured.account.reference
+            configured = (
+                None
+                if at_configured is None
+                else _ConfiguredAuthority(
+                    reference=at_configured.binding.account.reference,
+                    ground=at_configured.ground,
+                )
+            )
             barred, record, account, quotes = await self._authority(subject)
             if not barred:
                 standing = await self._standing_allow(
@@ -835,7 +1005,7 @@ class ThresholdActionPolicy:
         record: Authorization | None,
         *,
         subject: CoverageSubject,
-        configured: str | None,
+        configured: _ConfiguredAuthority | None,
         external: bool,
         quotes: tuple[ActionQuote, ...],
     ) -> PermissionRuling | None:
@@ -880,9 +1050,11 @@ class ThresholdActionPolicy:
             record: The row the one ``live_for`` read returned, or ``None``.
             subject: The one pre-suspension observation of the request, which §§3
                 and 4's comparisons are decided over.
-            configured: The binding's ``account.reference`` where ADR-0247 §2's
-                derived fact holds of it — read before the suspension, like every
-                other value here — and ``None`` otherwise.
+            configured: Route (c)'s authority where ADR-0247 §2's derived fact
+                holds of the request, as ADR-0260 §6 widens it — the binding's
+                ``account.reference`` and the matched kind's own ground, both read
+                before the suspension, like every other value here — and ``None``
+                otherwise.
             external: Whether the binding records that the call was planned over
                 external content.
             quotes: The goal's quotes naming this request's act, as the **same** step
@@ -893,9 +1065,15 @@ class ThresholdActionPolicy:
         """
         if configured is not None:
             # **Route (c), taken before the grant seam is consulted** (ADR-0247
-            # §2): where both routes would be reachable for one request this
-            # answers it, ``_covering`` is called **zero** times, and no ruling
-            # at the configured provider ever cites a grant again.
+            # §2, ADR-0260 §6): where both routes would be reachable for one
+            # request this answers it, ``_covering`` is called **zero** times, and
+            # no ruling at either configured provider ever cites a grant again.
+            #
+            # **The ground is the matched kind's own** and is carried here rather
+            # than chosen here: ``_at_configured_provider`` is where the kind was
+            # decided, and a second reading of the binding at this site would be
+            # one rule stated twice — and would be read *after* the suspension,
+            # which is exactly what the pointer below is pre-read to avoid.
             #
             # ``authorised_by`` is **owed** rather than a matter of taste
             # (ADR-0021 §5, ADR-0247 §2): §5's disclosure floor forbids an
@@ -908,8 +1086,8 @@ class ThresholdActionPolicy:
             # standing routes apart from the row alone.
             return PermissionRuling(
                 outcome=PermissionOutcome.ALLOW,
-                reason=_CONFIGURED_SEARCH_PROVIDER,
-                authorised_by=configured,
+                reason=configured.ground,
+                authorised_by=configured.reference,
             )
         recipient: RecipientGrant | None = None
         consulted = False
@@ -940,8 +1118,10 @@ class ThresholdActionPolicy:
             # request carries a ``goal`` and the policy holds a
             # ``GoalAuthorizations``", and that disjunct **admits a request rather
             # than deciding it**. Route (c) does not answer on it, because ADR-0247
-            # §3's retirement is for a ``WEB_SEARCH`` at the configured provider and
-            # for nothing else; route (b) does not, because ADR-0193 §4 is unmoved
+            # §3's retirement, as ADR-0260 §6 widens it, is for a request at its
+            # kind's configured provider and for nothing else — and this branch is
+            # reached only where it was not at one; route (b) does not, because
+            # ADR-0193 §4 is unmoved
             # and **no** ``RecipientGrant`` covers a tainted call. So a request the
             # goal's record does not cover in full reaches **no** route at all and
             # ``_covering`` is called **zero** times.
@@ -1168,45 +1348,52 @@ class ThresholdActionPolicy:
         *,
         outcome: PermissionOutcome,
         external: bool,
-        at_configured: EgressBinding | None,
+        at_configured: _ConfiguredProviderMatch | None,
     ) -> bool:
         """Whether a standing route is reachable at all for this request.
 
         Five conditions (ADR-0193 §7), **two of them restated over ADR-0247 §2's
-        derived fact** and a third widened by it. Each is a path on which the grant
-        seam must be consulted **zero** times rather than consulted and ignored:
+        derived fact as ADR-0260 §6 generalises it** and a third widened by it.
+        Each is a path on which the grant seam must be consulted **zero** times
+        rather than consulted and ignored:
 
-        * this policy has a source at all, **or the request is at the configured
-          provider** — with neither it reaches no standing ``ALLOW`` and asks about
-          no grant (ADR-0021 §3). ADR-0247 §2 supersedes that clause "in the limb
-          that reaches a request carrying ``closed_loop``, and in no other": the
-          authority route (c) cites is the deployment's own configuration, which
-          this policy is handed no seam for and needs none, so **a policy
-          constructed with no ``RecipientGrants`` reaches route (c)**. On every
-          other request a sourceless policy still sets neither field;
+        * this policy has a source at all, **or the request is at its kind's
+          configured provider** — with neither it reaches no standing ``ALLOW`` and
+          asks about no grant (ADR-0021 §3). ADR-0247 §2 supersedes that clause "in
+          the limb that reaches a request carrying ``closed_loop``, and in no
+          other", and ADR-0260 §6 carries the supersession to a forecast read at the
+          configured forecast provider and to no further kind: the authority route
+          (c) cites is the deployment's own configuration, which this policy is
+          handed no seam for and needs none, so **a policy constructed with no
+          ``RecipientGrants`` reaches route (c)** on either kind. On every other
+          request a sourceless policy still sets neither field;
         * the request is an egress call, so its ``egress_binding`` is not
           ``None``. A request carrying none names no account and no destination
           set, and no grant can cover it;
         * its binding does not carry ``planned_with_external_content``, **or the
-          request is at the configured provider** (ADR-0247 §3, superseding
-          ADR-0238 §6's first clause). §4's bar is the ``ActionPolicy`` contract's
-          and is applied **here** rather than on the seam, so ``covering`` never has
-          to read the fact and the two statements cannot drift apart. A call
-          carrying the taint keeps its confirmation whatever grants exist —
-          **unless** it is a ``WEB_SEARCH`` at the destination the owner configured,
-          which is the one exception this corpus admits and which ADR-0247 §1 states
-          over two recorded comparisons taken per request. **The limb is stated over
-          the derived fact and never over ``closed_loop`` alone** (§2): a binding
-          carrying ``closed_loop`` whose account or origin is not the configured one
-          fails this limb, so the seam is consulted zero times and no ``ALLOW`` is
-          reachable for it however many grants the store holds. **This policy
-          re-derives none of the facts behind that** (ADR-0238 §5): "no
-          ``ActionPolicy`` acquires a store handle, a trail read, a grant seam or a
-          conversation identity", and it compares two configured values against what
-          ``orchestration`` wrote onto the binding — the same trust boundary this
-          corpus already accepts for ``planned_with_external_content`` itself;
-        * its binding carries no covered content, **or the request is at the
-          configured provider** (ADR-0233 §9, ADR-0238 §7, ADR-0247 §3). ADR-0233
+          request is at its kind's configured provider** (ADR-0247 §3 as ADR-0260
+          §6 restates it, superseding ADR-0238 §6's first clause). §4's bar is the
+          ``ActionPolicy`` contract's and is applied **here** rather than on the
+          seam, so ``covering`` never has to read the fact and the two statements
+          cannot drift apart. A call carrying the taint keeps its confirmation
+          whatever grants exist — **unless** it is a ``WEB_SEARCH`` at the search
+          destination the owner configured or a forecast read at the forecast
+          destination they configured, which is the whole of the exception this
+          corpus admits and which ADR-0247 §1 and ADR-0260 §6 each state over two
+          recorded comparisons taken per request. **The limb is stated over the
+          derived fact and never over ``closed_loop`` or ``forecast_reach`` alone**
+          (ADR-0247 §2): a binding carrying its kind's fact whose account or origin
+          is not **that kind's** configured pair fails this limb, so the seam is
+          consulted zero times and no ``ALLOW`` is reachable for it however many
+          grants the store holds. **This policy re-derives none of the facts behind
+          that** (ADR-0238 §5): "no ``ActionPolicy`` acquires a store handle, a trail
+          read, a grant seam or a conversation identity", and it compares two
+          configured values against what ``orchestration`` wrote onto the binding —
+          the same trust boundary this corpus already accepts for
+          ``planned_with_external_content`` itself;
+        * its binding carries no covered content, **or the request is at its
+          kind's configured provider** (ADR-0233 §9, ADR-0238 §7, ADR-0247 §3,
+          ADR-0260 §6). ADR-0233
           §9's second clause is absolute about the class: "**no** standing
           authorisation, standing policy, standing recipient grant, configuration,
           connected account, tool declaration or approved payload description covers
@@ -1218,7 +1405,10 @@ class ThresholdActionPolicy:
           supply carrying any record at all is a model-composed span over covered
           content, so a deployment that retired the lineage floor alone would still
           be stopped here on every query the milestone exists to compose. "Where any
-          of the three fails, the clause forbids the span exactly as written";
+          of the three fails, the clause forbids the span exactly as written".
+          **ADR-0260 §6 retires both limbs at the forecast kind for ADR-0247 §3's
+          reason and not a new one**: "both limbs are satisfied by one fact and are
+          not two decisions";
         * the outcome is ``CONFIRM``. A ``DENY`` is not something a grant or a
           configuration converts, and an ``ALLOW`` needs neither;
         * and the **only** clause that fired is :data:`_DISCLOSURE_FLOOR`. That
@@ -1226,8 +1416,9 @@ class ThresholdActionPolicy:
           every other firing clause is an independent floor or a threshold the
           user configured, so a request that tripped one of those is settled by
           its own facts and reaches no route. An ``UNKNOWN`` cost still draws
-          ``CONFIRM`` at the configured provider, and so does a ``risk_level`` or
-          a ``reversibility`` at this policy's own threshold (ADR-0247 §2).
+          ``CONFIRM`` at either configured provider, and so does a ``risk_level``
+          or a ``reversibility`` at this policy's own threshold (ADR-0247 §2, and
+          ADR-0260 §11 leaving the unknown-cost floor untouched at this kind).
 
         Args:
             request: The action being ruled on.
@@ -1236,15 +1427,16 @@ class ThresholdActionPolicy:
             external: Whether the binding records that the call was planned over
                 external content. Read beside ``at_configured``, because ADR-0247
                 §3 supersedes ADR-0181 §5's second clause and ADR-0193 §4's first
-                clause **for a request at the configured provider alone**, and for
-                no other request of any kind: an email, a fetch, a tool call and a
-                search bound anywhere else in the very same conversation each keep
-                the floor exactly as written (ADR-0238 §5's last clause, ADR-0247
-                §3's last).
-            at_configured: The binding where ADR-0247 §2's derived fact holds of
-                it, and ``None`` otherwise. Passed in rather than recomputed here,
-                so the fact the ruling is taken over and the fact the limbs read
-                are one value.
+                clause **for a request at its kind's configured provider alone**,
+                and for no other request of any kind: an email, a fetch, a tool
+                call, a search bound anywhere else **and a forecast read bound
+                anywhere else** in the very same conversation each keep the floor
+                exactly as written (ADR-0238 §5's last clause, ADR-0247 §3's last,
+                ADR-0260 §6's last).
+            at_configured: The match where ADR-0247 §2's derived fact holds of the
+                request, as ADR-0260 §6 widens it, and ``None`` otherwise. Passed in
+                rather than recomputed here, so the fact the ruling is taken over and
+                the fact the limbs read are one value.
 
         Returns:
             Whether a standing route is reachable — route (c) where
@@ -1267,15 +1459,18 @@ class ThresholdActionPolicy:
         *"``_only_the_disclosure_floor``'s lineage limb gains a third disjunct, and
         that disjunct admits a request rather than deciding it."* It becomes *"the
         binding does not carry ``planned_with_external_content``, **or** the request
-        is at the configured provider, **or** the request carries a ``goal`` and the
-        policy holds a ``GoalAuthorizations``"*.
+        is at its kind's configured provider, **or** the request carries a ``goal``
+        and the policy holds a ``GoalAuthorizations``"* — the second disjunct in the
+        text ADR-0260 §6 restates it in, which widens what satisfies it and leaves
+        this third one exactly where ADR-0254 §6 put it.
 
         **Where this disjunct is what admitted the request, route (d) is the only
         route that may answer**: route (c) does not, because ADR-0247 §3's
-        retirement is for a ``WEB_SEARCH`` at the configured provider and for
-        nothing else; route (b) does not, because ADR-0193 §4 is unmoved and **no**
-        ``RecipientGrant`` covers a tainted call. :meth:`_standing_allow` is where
-        that is kept.
+        retirement as ADR-0260 §6 widens it is for a request **at its kind's
+        configured provider** and for nothing else — and a request admitted by this
+        disjunct is by construction at neither; route (b) does not, because ADR-0193
+        §4 is unmoved and **no** ``RecipientGrant`` covers a tainted call.
+        :meth:`_standing_allow` is where that is kept.
 
         **The coverage limb gains no disjunct**, and the predicate is not made to
         depend on a seam read: this admits, and ADR-0254 §3's six conditions decide.
