@@ -33,6 +33,7 @@ from ai_assistant.tools.booking import (
     BOOKING_ACT_ID,
     BOOKING_AVAILABILITY,
     BOOKING_AVAILABILITY_ID,
+    BookingStoreError,
     BoundConnection,
     SimulatedBookingAct,
     SqliteBookingStore,
@@ -175,14 +176,31 @@ async def test_the_store_lives_in_the_data_directory_and_closes_with_the_engine(
 
     It sits **in the data directory**, so ``ai-assistant-purge`` (ADR-0126, ADR-0153)
     destroys it with every other store; and its ``close`` is in the root's ordered
-    shutdown path, so the engine's ``aclose`` releases it. The second half is asserted by
-    reopening the same file afterwards — a connection the root had left open would make
-    that the second handle on one store rather than the only one.
+    shutdown path, so the engine's ``aclose`` releases it.
+
+    **The second half is asserted over the connection the root actually wired**, and it
+    has to be. Reopening the file afterwards proves nothing: SQLite permits a second
+    connection to the same database, so a reopen succeeds whether or not the root's
+    handle was released — and this arm would have stayed green through exactly the leak
+    it is written for. So the wired store itself is held, shown to answer while the
+    engine is up, and shown to be closed afterwards: ``commit_count`` reaches the store's
+    own connection, and a closed one raises out of the driver, which the store reports in
+    its own vocabulary.
     """
     engine = build_engine(_settings(configured=True), data_dir=tmp_path)
-    await engine.aclose()
+    registry = _wired_registry(engine)
+    implementation = cast("SimulatedBookingAct", registry._live[BOOKING_ACT_ID].implementation)
+    store = implementation._store
 
     assert (tmp_path / "bookings.db").exists()
+    assert await store.commit_count() == 0, "the wired store answers while the engine is up"
+
+    await engine.aclose()
+
+    with pytest.raises(BookingStoreError):
+        await store.commit_count()
+
+    # And the ordered shutdown left a readable store behind rather than a torn one.
     reopened = SqliteBookingStore(path=tmp_path / "bookings.db", retained=RETAINED)
     try:
         assert await reopened.records() == ()

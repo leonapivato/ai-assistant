@@ -1423,6 +1423,11 @@ def build_composition(  # noqa: PLR0915 — one statement per resource this root
             )
         )
         if booking is not None:
+            # **The build-failure list, and the ordered shutdown below.** This one is
+            # the failure path only: a build that raises after this point closes what it
+            # opened. Registering it *here alone* would close the store when the build
+            # **failed** and never when it succeeded, which is #1903 exactly — so its
+            # `close` is in `closers` too (ADR-0042 §2, ADR-0083 ruling 4).
             opened.append(booking.store.close)
 
         tools = build_default_registry(egress=egress, booking=booking, ledger=trail, gate=trail)
@@ -2786,6 +2791,32 @@ def build_composition(  # noqa: PLR0915 — one statement per resource this root
                 # outbox able to remove an entry whose dismissal could not commit —
                 # the one order §3b rules unsafe.
                 _as_async(outbox.close),
+                # And the simulated booking provider's store, where a deployment
+                # configured one (ADR-0273 §2). It is an *"ordinary store of this
+                # deployment"* and owes the same ordered shutdown as the rest, and it
+                # has to be **here** as well as on the build-failure list above:
+                # registered there alone, it would be closed when the build failed and
+                # never when it succeeded, which is #1903 exactly — and here it would
+                # leave a `-wal` holding booking records behind, which carry what the
+                # user asked (§2's Tier 1 half).
+                #
+                # **Nothing constrains its position** among the stores: no store reads
+                # it and it reads none — it is reached only by this provider's own act,
+                # which the façade has drained before any of these run.
+                *([_as_async(booking.store.close)] if booking is not None else []),
+                # And the simulated booking provider's store, where a deployment
+                # configured one (ADR-0273 §2). It is an *"ordinary store of this
+                # deployment"* and owes the same ordered shutdown as the rest, and it
+                # has to be **here** as well as on the build-failure list above:
+                # registered there alone, it would be closed when the build failed and
+                # never when it succeeded, which is #1903 exactly — and here it would
+                # leave a `-wal` holding booking records behind, which carry what the
+                # user asked (§2's Tier 1 half).
+                #
+                # **Nothing constrains its position** among the stores: no store reads
+                # it and it reads none — it is reached only by this provider's own act,
+                # which the façade has drained before any of these run. Beside the
+                # connection store, because the same provider reads that one per call.
                 # And the trace store as the seventh (ADR-0119 §6). Closed **last
                 # although it is now opened first**, which is the one place this
                 # list deliberately departs from open order: the memory store and

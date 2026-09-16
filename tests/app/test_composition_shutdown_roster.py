@@ -15,6 +15,14 @@ connections is still usable once ``Engine.aclose`` has returned. A fifteenth sto
 wired without a closer fails this test on the day it is added, naming its own
 database file, and no list here has to be kept in step for that to happen.
 
+**And the roster the build opens depends on what the deployment configured**, which is
+how the fourth instance of #1903 got past this file anyway: the simulated booking
+provider's store (ADR-0273 §2) is opened only where a deployment named its settings, so
+a sweep over a **default** ``Settings`` never saw it and its closer sat on the
+build-failure list alone. So the sweep runs over a default deployment *and* over one
+that configured every optional store this root can open — the roster is discovered in
+both, and a conditional store is inside the guard rather than beside it.
+
 Three anti-vacuity guards sit beside it, because a census that silently stopped seeing
 anything would pass every assertion it makes: the census is non-empty, every ``*.db``
 file the build leaves in the data directory appears in it, and something in it was
@@ -31,15 +39,56 @@ Refs: ADR-0042 §2; ADR-0083 §4; #1903.
 
 from __future__ import annotations
 
+from datetime import date
+from decimal import Decimal
 from pathlib import Path
+
+import pytest
 
 from ai_assistant.app.composition import build_engine
 from ai_assistant.core.config import EmbedderKind, Settings
 from sqlite_census import connection_census, is_open
 
 
+def _settings(*, booking: bool) -> Settings:
+    """A default deployment, or one that configured every optional store this root opens.
+
+    The booking connection need not be provisioned — connectability is decided per call
+    and never carried over from registration (ADR-0152 §6) — so a whole configuration
+    here needs no keyring and no connection record (ADR-0273 §5).
+
+    Args:
+        booking: Whether to name the nine ``booking_*`` settings.
+
+    Returns:
+        The settings.
+    """
+    if not booking:
+        return Settings(embedder=EmbedderKind.HASHING)
+    return Settings(
+        embedder=EmbedderKind.HASHING,
+        booking_connection="conn-booking-0001",
+        booking_endpoint="https://bookings.example.invalid",
+        booking_available_from=date(2026, 10, 1),
+        booking_available_to=date(2026, 10, 7),
+        booking_price_amount=Decimal("120.00"),
+        booking_price_currency="EUR",
+        booking_billed_amount=Decimal("120.00"),
+        booking_billed_currency="EUR",
+        booking_retained_records=2,
+    )
+
+
+@pytest.mark.parametrize(
+    ("booking", "why"),
+    [
+        (False, "a default deployment"),
+        (True, "a deployment that configured every optional store this root opens"),
+    ],
+    ids=["default", "configured"],
+)
 async def test_every_database_the_build_opens_is_closed_by_the_engines_shutdown(
-    tmp_path: Path,
+    tmp_path: Path, booking: bool, why: str
 ) -> None:
     """ADR-0042 §2's ordered shutdown, held against the roster the build actually opens.
 
@@ -53,7 +102,7 @@ async def test_every_database_the_build_opens_is_closed_by_the_engines_shutdown(
     the second half — and none of them is open after it.
     """
     with connection_census() as recorded:
-        engine = build_engine(Settings(embedder=EmbedderKind.HASHING), data_dir=tmp_path)
+        engine = build_engine(_settings(booking=booking), data_dir=tmp_path)
 
     assert recorded, "the census saw no connection at all, so nothing below is evidence"
     # The directory listing is a synchronous read of a temporary directory this test
@@ -77,3 +126,4 @@ async def test_every_database_the_build_opens_is_closed_by_the_engines_shutdown(
         f"(ADR-0042 §2, ADR-0083 §4), and one registered only on the build-failure "
         f"cleanup list is closed when the build *fails* and never when it succeeds (#1903)"
     )
+    assert why
