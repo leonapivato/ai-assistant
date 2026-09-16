@@ -876,10 +876,15 @@ class _AuthorizationLog:
         closure = self._closures.get(row.goal)
         if closure is None or not closure.fenced:
             return
+        # **Rendered base 16**, as the durable store renders it and for that store's
+        # reason: ``str(int)`` refuses an integer of more than
+        # ``sys.get_int_max_str_digits()`` decimal digits, so a message naming a
+        # version in decimal would raise while building the message for a version the
+        # store holds perfectly well.
         msg = (
             f"authorization {row.id!r} names goal {row.goal!r}, which this store holds "
-            f"fenced at version {closure.version} by the ending its closure took; no "
-            f"row of it comes into being while that fence stands (ADR-0268 §1)"
+            f"fenced at version 0x{closure.version:x} by the ending its closure took; "
+            f"no row of it comes into being while that fence stands (ADR-0268 §1)"
         )
         raise InvalidAuthorizationError(msg)
 

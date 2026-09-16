@@ -119,6 +119,14 @@ _ENDING_OPS: Final = ("end_for_goal", "clear_closure")
 #: number.
 _MAX_INT64: Final = 2**63 - 1
 
+#: A magnitude past **CPython's own** integer-conversion limit — ``str(int)`` and
+#: ``int(str)`` refuse anything over ``sys.get_int_max_str_digits()`` decimal digits,
+#: 4300 by default. An implementation encoding the watermark in base 10 would have
+#: reimposed a ceiling here and leaked a bare ``ValueError`` doing it; the limit is
+#: documented as base-10-only, so a base-16 encoding is exact at every magnitude.
+#: Adversarial review, round 3, ``blocker``.
+_PAST_DECIMAL: Final = 16**4400
+
 
 class _Deceptive(int):
     """An ``int`` subclass that answers ``<=`` with a lie, and carries its value.
@@ -2354,8 +2362,8 @@ class GoalAuthorizationStoreContract(GoalAuthorizationsContract, AuthorizationRe
 
     @pytest.mark.parametrize(
         "version",
-        [0, 1, _MAX_INT64, _MAX_INT64 + 1, 2**70, -1, -(2**70)],
-        ids=str,
+        [0, 1, _MAX_INT64, _MAX_INT64 + 1, 2**70, -1, -(2**70), _PAST_DECIMAL, -_PAST_DECIMAL],
+        ids=lambda version: format(version, "x")[:12],
     )
     async def test_the_watermark_holds_any_int_the_goal_domain_admits(
         self, store: GoalAuthorizationStore, version: int

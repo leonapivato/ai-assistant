@@ -155,7 +155,7 @@ _ANSWERS: Final[frozenset[AuthorizationDisposition]] = frozenset(
 
 
 def _canonical_version(goal_version: int) -> str:
-    """``goal_version`` as the canonical decimal text this store holds it in.
+    """``goal_version`` as the canonical **base-16** text this store holds it in.
 
     **Text and not an ``INTEGER`` column, because ADR-0268 §1's watermark is an
     unrestricted Python ``int`` and SQLite's is not.** ``Goal.version`` is
@@ -184,17 +184,37 @@ def _canonical_version(goal_version: int) -> str:
     Args:
         goal_version: The version to render.
 
+    **Base 16 and not base 10, because CPython caps decimal conversion.**
+    ``str(int)`` and ``int(str)`` refuse an integer of more than
+    ``sys.get_int_max_str_digits()`` digits — 4300 by default — and raise a bare
+    ``ValueError`` doing it. A decimal encoding would therefore have reimposed a
+    ceiling, in the same breath as this function's whole purpose is not to have one,
+    and leaked that ``ValueError`` past the boundary on the way. **The limit is
+    documented as applying to base 10 alone**, so ``format(…, "x")`` and
+    ``int(…, 16)`` are exact at every magnitude. Adversarial review, round 3,
+    ``blocker``.
+
+    **No global is touched to get there.** ``sys.set_int_max_str_digits`` is
+    process-wide, so a store raising it would be changing how every other component
+    in the process renders an integer.
+
+    Args:
+        goal_version: The version to render.
+
     Returns:
-        Its canonical decimal text — no leading zeros, no ``+``, no padding.
+        Its canonical base-16 text — lowercase, no leading zeros, no ``0x``, no
+        padding, a leading ``-`` where negative.
 
     Raises:
         TypeError: If ``goal_version`` is not an integer by Python's own test.
     """
-    return str(index(goal_version))
+    return format(index(goal_version), "x")
 
 
 def _decoded_version(raw: object, goal: str, path: str) -> int:
     """One stored watermark, or refuse the record as corrupt (ADR-0268 §1).
+
+    **Base-16 canonical text** (:func:`_canonical_version`).
 
     **Validated exactly rather than coerced**, and the reason is the invariant:
     the watermark is one *"neither member lowers"*, so a value read back as
@@ -217,30 +237,32 @@ def _decoded_version(raw: object, goal: str, path: str) -> int:
         The watermark.
 
     Raises:
-        AuthorizationError: If the stored value is not canonical decimal text.
+        AuthorizationError: If the stored value is not canonical base-16 text.
             **Nothing is mutated on the way out**, the read happening inside the
             caller's transaction and before any write.
     """
-    if isinstance(raw, str) and _is_decimal(raw) and raw == str(int(raw)):
-        return int(raw)
+    if isinstance(raw, str) and _is_hex(raw) and raw == format(int(raw, 16), "x"):
+        return int(raw, 16)
     msg = (
         f"the authorization store at {path!r} holds a closure record for goal "
         f"{goal!r} whose version is {describe_untrusted(raw)} rather than canonical "
-        f"decimal text; the watermark is never lowered, so a record that cannot be "
+        f"base-16 text; the watermark is never lowered, so a record that cannot be "
         f"read exactly is not read at all (ADR-0268 §1)"
     )
     raise AuthorizationError(msg)
 
 
-def _is_decimal(raw: str) -> bool:
-    """Whether ``raw`` is a run of digits, optionally signed — and nothing else.
+def _is_hex(raw: str) -> bool:
+    """Whether ``raw`` is a run of lowercase hex digits, optionally signed.
 
-    ``str.isdigit`` is not this test: it answers ``True`` for superscripts and
-    other Unicode digit forms, which ``int`` then accepts, so two spellings of one
-    number would both decode and only one would compare equal to what was written.
+    Written out rather than left to ``int(raw, 16)``, which accepts an ``0x``
+    prefix, underscores, surrounding whitespace, uppercase and Unicode digit forms
+    — so several spellings of one number would decode and only one would compare
+    equal to what was written. The round-trip in the caller is what makes the test
+    exact; this is what keeps ``int`` from being handed something surprising first.
     """
     body = raw[1:] if raw.startswith("-") else raw
-    return bool(body) and all("0" <= character <= "9" for character in body)
+    return bool(body) and all(character in "0123456789abcdef" for character in body)
 
 
 async def _run_to_completion[T](fn: Callable[..., T], /, *args: object) -> T:
@@ -397,7 +419,7 @@ _CREATE_TABLE = (
 #: disagree with the record it describes (below); there is no blob here and nothing
 #: to disagree with, the record being exactly these three values.
 #:
-#: **``version`` is canonical decimal TEXT and not an ``INTEGER``**, and the reason
+#: **``version`` is canonical base-16 TEXT and not an ``INTEGER``**, and the reason
 #: is ADR-0268 §1's own domain: ``Goal.version`` is an ``int`` with ``ge=0`` and no
 #: ceiling, and a goal above ``2**63 - 1`` is one this store must be able to fence.
 #: See :func:`_canonical_version` for why the alternative — refusing such a version —
@@ -410,11 +432,15 @@ _CREATE_TABLE = (
 #: record is for. ``typeof`` pins the storage class and the ``GLOB`` pins the
 #: characters; :func:`_decoded_version` then pins the exact value on the way out, so
 #: a file this store did not write is refused rather than misread.
+#:
+#: **Base 16**, because CPython caps *decimal* integer conversion at 4300 digits and
+#: a base-10 encoding would have reimposed the very ceiling this column exists not to
+#: have (:func:`_canonical_version`).
 _CREATE_CLOSURES = (
     "CREATE TABLE IF NOT EXISTS goal_authorization_closures("
     "goal TEXT PRIMARY KEY NOT NULL, "
     "version TEXT NOT NULL CHECK ("
-    "typeof(version) = 'text' AND version NOT GLOB '*[^0-9-]*' "
+    "typeof(version) = 'text' AND version NOT GLOB '*[^0-9a-f-]*' "
     "AND version NOT GLOB '?*-*' AND version NOT GLOB '-' AND length(version) > 0), "
     "fenced INTEGER NOT NULL CHECK (fenced IN (0, 1)))"
 )
@@ -1318,9 +1344,13 @@ class SqliteGoalAuthorizationStore:
         if found is None or not int(found[1]):
             return
         standing = _decoded_version(found[0], row.goal, self._path)
+        # **Named base 16**, as it is stored and for the same reason: ``str(int)``
+        # refuses an integer of more than ``sys.get_int_max_str_digits()`` decimal
+        # digits, so rendering the version in decimal would raise while building the
+        # message for a version this store holds perfectly well.
         msg = (
             f"authorization {row.id!r} names goal {row.goal!r}, which this store holds "
-            f"fenced at version {standing} by the ending its closure took; no row "
+            f"fenced at version 0x{standing:x} by the ending its closure took; no row "
             f"of it comes into being while that fence stands (ADR-0268 §1)"
         )
         raise InvalidAuthorizationError(msg)
@@ -1348,10 +1378,10 @@ class SqliteGoalAuthorizationStore:
         Raises:
             TypeError: If ``goal_version`` is not an integer by Python's own test
                 (:func:`_canonical_version`). **No ceiling is imposed**: the
-                watermark is stored as canonical decimal text, so the whole
-                ``Goal.version`` domain round-trips.
+                watermark is stored as canonical base-16 text, so the whole
+                ``Goal.version`` domain round-trips, at every magnitude.
             AuthorizationError: If the store cannot be read or written, **or holds a
-                closure record whose version is not canonical decimal text**, which
+                closure record whose version is not canonical base-16 text**, which
                 is refused rather than misread (:func:`_decoded_version`). The step
                 is
                 all-or-nothing: the transaction rolls back, so nothing is settled
@@ -1411,7 +1441,7 @@ class SqliteGoalAuthorizationStore:
             TypeError: If ``goal_version`` is not an integer by Python's own test
                 (:func:`_canonical_version`). **No ceiling is imposed.**
             AuthorizationError: If the store cannot be read or written, **or holds a
-                closure record whose version is not canonical decimal text**
+                closure record whose version is not canonical base-16 text**
                 (:func:`_decoded_version`).
         """
         normalised = index(goal_version)
