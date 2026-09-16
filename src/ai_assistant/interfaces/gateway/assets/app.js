@@ -7872,12 +7872,16 @@ async function readDeliveries(half, era) {
       // the absence of an ending already says. It restarts the deadline above and
       // that is the whole of its effect here — which is what §4 spends it on.
     }
-    // Not this session's ending to report (#2455). It covers the cut as well as the
-    // terminal value, and for the reason #2404's own round-1 finding gives: `fault`
-    // reveals the panel it writes into, so a stream whose body ended under a session
-    // this page no longer holds would re-open the notifications panel — and where the
-    // half went because *this* page re-entered, that is a control panel beside the
-    // bootstrap form.
+    // Not this session's ending to report (#2455). It stands in front of the whole
+    // ending rather than only the `report` that can end a session, and that is a
+    // decision rather than the wider of two equal options: a cut and a terminal fault
+    // evict nothing, but `fault` reveals the panel it writes into, so either would
+    // open the notifications panel with a condition about a stream that is no longer
+    // the one serving this browser — "the connection carrying notifications ended
+    // before the gateway finished it" reads as a statement about the notifications
+    // this page would deliver *now*, and it is not one. What the owner is owed here is
+    // the fact that supersedes all of them, and it is one sentence for both doors,
+    // which is also the reading with no race in it.
     if (!sameSession(half, era)) {
       stopWatching(OUTLIVED_ITS_SESSION);
       return;

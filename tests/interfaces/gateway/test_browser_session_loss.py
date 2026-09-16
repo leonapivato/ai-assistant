@@ -131,14 +131,51 @@ _AUDITED: Final = (
 #: than about a panel that happens to still be showing.
 _HEADER_HALF: Final = "assistant.session.header-half"
 
-#: The two endings of a delivery stream that reach ``sessionLost``, as the gateway writes
-#: them: the refusal on the head, and ADR-0175 §4's terminal value on the body. They are
-#: different code in ``readDeliveries`` — one is ``refused`` before a single value is
-#: read, the other ``report`` after the loop — and each is a door of its own, which is why
-#: every case below is driven through both rather than through whichever is easier.
+#: Every ending a delivery stream can reach *after* its head is decided, as the gateway
+#: really writes each one — a refusal on the head, ADR-0175 §2's terminal fault value on
+#: the body, and a body that simply stops.
+#:
+#: They are four because ``readDeliveries`` has three separate lines for them and each is
+#: its own door: ``refused`` before a single value is read, ``report`` after the loop, and
+#: ``fault(DELIVERY_STREAM_CUT, …)`` beside it.
+#:
+#: **Only the two head refusals can end a session**, which is what ``sessionLost`` is
+#: conditioned on — and ``cookie-half-mismatch`` is the two-tab case's own shape: a
+#: request sent under the old header half carrying the new session's cookie is what the
+#: gateway really meets, and it is a refusal it decides at the door. The other two carry
+#: no session condition at all and are here because the guard sits in front of the whole
+#: ending, so what they say about a superseded stream is part of the claim.
+#:
+#: **``hub-unreachable`` rather than ``no-live-session`` on the body**, because that is
+#: what this gateway writes there: a session that ends under an open stream ends the
+#: stream without a terminal value (``test_gateway_streams.py``'s
+#: ``test_an_open_stream_is_not_use_of_the_session_and_dies_with_it``), which is the
+#: ``cut`` row. A terminal value naming a session condition would be a value no gateway
+#: in this tree emits, and a case driving one would be about nothing.
 _DELIVERY_ENDINGS: Final = {
     "refused": (401, "application/json", '{"fault": "no-live-session"}'),
-    "terminal": (200, "application/x-ndjson", '{"kind": "fault", "fault": "no-live-session"}\n'),
+    "mismatch": (409, "application/json", '{"fault": "cookie-half-mismatch"}'),
+    "terminal": (
+        200,
+        "application/x-ndjson",
+        '{"kind": "fault", "fault": "hub-unreachable", "detail": "no hub there"}\n',
+    ),
+    "cut": (200, "application/x-ndjson", ""),
+}
+
+#: The endings above that mean *this browser's session is gone* — the only two
+#: ``sessionLost`` acts on, and therefore the only two that could ever have evicted a
+#: half. Every other ending is a condition about a stream and about nothing else.
+_ENDS_THE_SESSION: Final = ("refused", "mismatch")
+
+#: What the page says about each of those two conditions, quoted from ``FAULTS`` in
+#: ``app.js``. Read back so that "the condition was restated rather than flattened into
+#: the re-entry sentence" is a claim about what the owner sees (ADR-0168 §6: the
+#: cookie-half fault is "never flattened into an expiry, a ceiling refusal or an ordinary
+#: absent session").
+_CONDITION_SAID: Final = {
+    "refused": "This browser has no live session.",
+    "mismatch": "The two halves of this browser's session no longer match.",
 }
 
 _KILLER: Final = ("#sources-button", "**/sources")
@@ -875,7 +912,7 @@ async def test_a_delivery_stream_that_outlived_its_session_ends_no_other(
 
 
 @pytest.mark.parametrize("viewport", [DESKTOP, PHONE], ids=["desktop", "phone"])
-@pytest.mark.parametrize("ending", list(_DELIVERY_ENDINGS), ids=list(_DELIVERY_ENDINGS))
+@pytest.mark.parametrize("ending", _ENDS_THE_SESSION, ids=_ENDS_THE_SESSION)
 async def test_a_delivery_stream_whose_own_session_ended_still_asks_for_a_new_one(
     gateway_browser: Browser, tmp_path: Path, viewport: ViewportSize, ending: str
 ) -> None:
@@ -904,18 +941,12 @@ async def test_a_delivery_stream_whose_own_session_ended_still_asks_for_a_new_on
         await drive.page.wait_for_selector("#bootstrap:not([hidden])")
         await expect(drive.page.locator("#console")).to_be_hidden()
         await expect(drive.page.locator("#notifications")).to_be_hidden()
-        # The re-entry sentence, and -- on the ending that has earned it -- the one
-        # explanation nobody guesses right: watching does not keep a session alive
-        # (ADR-0175 §7). ``describeDeliveryEnd`` adds it to a terminal value and to
-        # nothing else, because a refusal on the *head* is a request the gateway looked
-        # at, which refreshed the idle timeout on its way in: the hour passing is not
-        # what happened there, and saying it was would be a wrong explanation rather
-        # than a missing one. The guard sits in front of both and must leave that
-        # distinction exactly where it is.
+        # The re-entry sentence, and the condition restated in its own words rather
+        # than flattened into it (ADR-0182 §6): the two conditions are different facts
+        # about the gateway and the page has separate sentences for them.
         said = await drive.page.inner_text("#reentry")
         assert "That session has ended" in said
-        idle = "Watching does not keep a session alive"
-        assert (idle in said) is (ending == "terminal"), said
+        assert _CONDITION_SAID[ending] in said, said
         # The half really is gone, which is what re-entry means.
         assert (
             await drive.page.evaluate("(key) => window.localStorage.getItem(key)", _HEADER_HALF)
