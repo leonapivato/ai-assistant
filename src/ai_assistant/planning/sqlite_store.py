@@ -99,6 +99,7 @@ from ai_assistant.planning.goals import (
     refuse_a_superseded_plan,
     refuse_a_wrong_cancellation_outcome,
     refuse_an_unclaimable_attempt,
+    refuse_an_unendable_attempt,
     refuse_an_unsubstituted_action,
     refuse_an_unsubstituted_condition,
     revalidated_evidence,
@@ -2156,9 +2157,47 @@ class SqlitePlanStore:
             One status per step, over the executions this store holds. Read on the
             caller's own connection, so the statuses and the write are one step.
         """
+        return [
+            step.status for held in self._executions_named(conn, attempt) for step in held.steps
+        ]
+
+    def _execution_versions(self, conn: sqlite3.Connection, attempt: GoalAttempt) -> dict[str, int]:
+        """The stored ``version`` of every execution ``attempt`` names (ADR-0262 §4).
+
+        :meth:`_step_statuses`' companion over the same walk and the same connection,
+        so ADR-0262 §4's two ``→ ENDED`` conjuncts and the write see one fact — which
+        is the whole of why that section puts them in the store.
+
+        Args:
+            conn: The connection the caller's transaction is running on.
+            attempt: The attempt whose ``execution_ids`` are walked.
+
+        Returns:
+            One entry per execution this store holds, keyed by id. An ``execution_ids``
+            entry the store does not hold contributes none, which
+            :meth:`_refuse_a_dangling_execution` makes unreachable through the contract.
+        """
+        return {held.id: held.version for held in self._executions_named(conn, attempt)}
+
+    def _executions_named(
+        self, conn: sqlite3.Connection, attempt: GoalAttempt
+    ) -> list[ExecutionState]:
+        """Every execution ``attempt`` names, as this store holds it.
+
+        **Read in bounded batches, because ``execution_ids`` is unbounded** — the
+        reasoning :meth:`_step_statuses` states, held here so that the two readers over
+        this walk cannot disagree about the bound or about what they saw.
+
+        Args:
+            conn: The connection the caller's transaction is running on.
+            attempt: The attempt whose ``execution_ids`` are walked.
+
+        Returns:
+            One decoded row per execution this store holds, in no particular order.
+        """
         held = attempt.execution_ids
         size = max(1, min(_EXECUTION_BATCH, conn.getlimit(sqlite3.SQLITE_LIMIT_VARIABLE_NUMBER)))
-        found: list[StepStatus] = []
+        found: list[ExecutionState] = []
         for start in range(0, len(held), size):
             batch = held[start : start + size]
             placeholders = ", ".join("?" for _ in batch)
@@ -2168,7 +2207,7 @@ class SqlitePlanStore:
                 f"SELECT data FROM executions WHERE id IN ({placeholders})",  # noqa: S608 — `placeholders` is generated from the batch's own length and every id is bound
                 tuple(batch),
             ).fetchall()
-            found.extend(step.status for row in rows for step in _decode_execution(row[0]).steps)
+            found.extend(_decode_execution(row[0]) for row in rows)
         return found
 
     def _outstanding(self, conn: sqlite3.Connection, goal_id: str) -> bool:
@@ -2993,9 +3032,19 @@ class SqlitePlanStore:
         every other is refused. That is the rule for every caller *other* than
         :meth:`close_goal_abandoned`, which computes the limbs itself.
 
+        **A ``→ ENDED`` transition carries ADR-0262 §4's two conjuncts** — no step of
+        any execution the attempt names still unsettled, and an ``execution_versions``
+        naming exactly its ``execution_ids`` at the versions this store holds — both
+        read in that same transaction, after the compare-and-swap above and in the order
+        :func:`refuse_an_unendable_attempt` states.
+
         Raises:
-            StaleExecutionError: If the stored version has moved on, or a
-                ``→ CANCELLED`` transition proposes the wrong outcome (ADR-0261 §3).
+            StaleExecutionError: If the stored version has moved on, a
+                ``→ CANCELLED`` transition proposes the wrong outcome (ADR-0261 §3), or
+                a ``→ ENDED`` transition meets an unsettled step or a stale execution
+                snapshot (ADR-0262 §4).
+            ValueError: If a ``→ ENDED`` transition's ``execution_versions`` is not
+                exactly the attempt's ``execution_ids`` (ADR-0262 §4).
             IllegalTransitionError: If the move is not legal from where it stands.
             PlanningError: If the attempt does not exist, the result is not a shape
                 ADR-0249 §5 admits, or the execution it names is already another
@@ -3034,6 +3083,14 @@ class SqlitePlanStore:
                     attempt_id=stored.id,
                     proposed=transition.outcome,
                     yielded=cancellation_outcome(self._step_statuses(conn, stored)),
+                )
+            if transition.to_state is AttemptState.ENDED:
+                refuse_an_unendable_attempt(
+                    attempt_id=stored.id,
+                    named=stored.execution_ids,
+                    declared=transition.execution_versions,
+                    statuses=self._step_statuses(conn, stored),
+                    versions=self._execution_versions(conn, stored),
                 )
             updated = advanced(stored, transition)
             conn.execute(

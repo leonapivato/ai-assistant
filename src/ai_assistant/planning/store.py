@@ -69,6 +69,7 @@ from ai_assistant.planning.goals import (
     refuse_a_superseded_plan,
     refuse_a_wrong_cancellation_outcome,
     refuse_an_unclaimable_attempt,
+    refuse_an_unendable_attempt,
     refuse_an_unsubstituted_action,
     refuse_an_unsubstituted_condition,
     revalidated_evidence,
@@ -940,9 +941,19 @@ class InMemoryPlanStore:
         other is refused. That is the rule for every caller *other* than
         :meth:`close_goal_abandoned`, which computes the limbs itself.
 
+        **A ``→ ENDED`` transition carries ADR-0262 §4's two conjuncts** — no step of
+        any execution the attempt names still unsettled, and an ``execution_versions``
+        naming exactly its ``execution_ids`` at the versions this store holds — both
+        read in this same step, after the compare-and-swap above and in the order
+        :func:`refuse_an_unendable_attempt` states.
+
         Raises:
-            StaleExecutionError: If the stored version has moved on, or a
-                ``→ CANCELLED`` transition proposes the wrong outcome (ADR-0261 §3).
+            StaleExecutionError: If the stored version has moved on, a
+                ``→ CANCELLED`` transition proposes the wrong outcome (ADR-0261 §3), or
+                a ``→ ENDED`` transition meets an unsettled step or a stale execution
+                snapshot (ADR-0262 §4).
+            ValueError: If a ``→ ENDED`` transition's ``execution_versions`` is not
+                exactly the attempt's ``execution_ids`` (ADR-0262 §4).
             IllegalTransitionError: If the move is not legal from where it stands.
             PlanningError: If the attempt does not exist, the result is not a shape
                 ADR-0249 §5 admits, or the execution it names is already another
@@ -973,9 +984,40 @@ class InMemoryPlanStore:
                 proposed=transition.outcome,
                 yielded=cancellation_outcome(self._step_statuses(stored)),
             )
+        if transition.to_state is AttemptState.ENDED:
+            refuse_an_unendable_attempt(
+                attempt_id=stored.id,
+                named=stored.execution_ids,
+                declared=transition.execution_versions,
+                statuses=self._step_statuses(stored),
+                versions=self._execution_versions(stored),
+            )
         updated = advanced(stored, transition)
         self._attempts[updated.id] = updated
         return updated.model_copy(deep=True)
+
+    def _execution_versions(self, attempt: GoalAttempt) -> dict[str, int]:
+        """The stored ``version`` of every execution ``attempt`` names (ADR-0262 §4).
+
+        :meth:`_step_statuses`' companion over the same walk, read with no ``await``
+        between it and the write it decides — so the versions, the statuses and the
+        write are one step, which is the whole of why §4 puts this conjunct in the
+        store.
+
+        Args:
+            attempt: The attempt whose ``execution_ids`` are walked.
+
+        Returns:
+            One entry per execution this store holds, keyed by id. An ``execution_ids``
+            entry the store does not hold contributes none, which
+            :meth:`_refuse_a_dangling_execution` makes unreachable through the contract
+            — the same posture :meth:`_step_statuses` takes for the same reason.
+        """
+        return {
+            execution_id: held.version
+            for execution_id in attempt.execution_ids
+            if (held := self._executions.get(execution_id)) is not None
+        }
 
     def _refuse_a_dangling_plan(self, attempt: GoalAttempt, plan_id: str) -> None:
         """Refuse a plan reference that does not resolve under this attempt's goal.
