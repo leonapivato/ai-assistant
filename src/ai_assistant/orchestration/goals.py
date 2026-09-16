@@ -493,10 +493,19 @@ CONTINUES_PROMPT: Final[str] = (
 )
 
 #: The second of §6's two clauses; see :data:`CONTINUES_PROMPT`.
+#:
+#: **It speaks of the objective and never of an individual result**, because the member
+#: it is appended for is the *attempt's* and says nothing about which criteria stood.
+#: ``PARTIAL`` has at least one criterion **met** by construction, and a rung-2 attempt
+#: with a met criterion beside an unestablished one is ``UNCERTAIN`` — §6's own fixed
+#: statements call both *partly established*. A clause telling either turn that nothing
+#: was established, or that no result was checked, would instruct the model to deny what
+#: the same comparison established. Adversarial review, round 4, ``blocker``.
 UNVERIFIED_PROMPT: Final[str] = (
-    "Nothing about this objective has been established as done on this turn. Do not "
-    "say or imply that it was achieved, confirmed, verified or completed, and do not "
-    "restate an action's result as if it had been checked."
+    "This turn did not establish that the objective was reached. Do not say or imply "
+    "that it was achieved, confirmed, verified or completed, and do not describe the "
+    "objective as done. Report what was actually done only as the record above states "
+    "it, and claim nothing beyond that."
 )
 
 

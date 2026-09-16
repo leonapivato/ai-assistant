@@ -695,6 +695,17 @@ async def test_an_indeterminate_step_ends_no_attempt_and_reports_nothing() -> No
     The step reaches ``INDETERMINATE`` the way ADR-0029 §8 makes it reachable in a live
     executor: a ``side_effecting`` tool whose ``idempotency`` is not ``NATURAL``, over a
     deadline that passed while the callable was inside the provider.
+
+    **The ending is refused before any member is consulted**, which is asserted here as
+    the absence of a proposed ``→ ENDED`` transition at all rather than as an outcome
+    that happened not to be ``VERIFIED``: §4 reaches that *"by the attempt not ending
+    rather than by a conjunct on limbs 4 and 5"*. Arm 7's pair — the same record with
+    **every criterion met** — is stated at the comparison, where the member is decided
+    (``test_verification_comparison.py``'s
+    ``test_every_criterion_met_beside_an_indeterminate_step_is_still_verified``): that
+    arm shows limb 5 really is what such a record earns, and this one shows the attempt
+    does not end regardless. An ``INDETERMINATE`` step is never *satisfying* under §2, so
+    the two halves cannot be driven through one step and are not pretended to be.
     """
 
     async def _hangs(parameters: object, *, idempotency_key: str | None) -> None:
