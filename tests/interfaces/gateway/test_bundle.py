@@ -7098,15 +7098,15 @@ def test_a_refusal_the_gateway_answered_is_not_always_one_it_did_not_land() -> N
     # takes the not-known branch below and strands a consent token over a request the
     # gateway refused at the door. Adversarial review of #2404, round 1, `major`.
     assert relay.index("noticed(body);") < relay.index("refused(panelId, body, response.status);")
-    # **And the condition is written rather than withheld**, by the one writer that opens
-    # no panel. Withholding it altogether is the mistake at the other end, and the case
-    # that shows it is two tabs: a ceremony open in one, a session started in the other,
-    # the consent then sent under a half the gateway no longer admits — a page looking
-    # straight at the panel it pressed the control in, told nothing at all. Adversarial
-    # review, round 3, `major`.
-    assert "writeCondition(describe(body, response.status), panelId);" in relay
-    writing = _functions(_code("app.js"))["writeCondition"]
-    assert "show(" not in writing
+    # **And nothing is written in its place.** Two rounds answered that in opposite
+    # directions — round 3: a page whose ceremony outlived its session is looking at the
+    # panel it pressed the control in, and telling it nothing leaves the owner believing
+    # a destruction happened; round 4: a panel's fault slot is one slot, so a condition
+    # written there after a newer session has re-filled that panel sits above rows it is
+    # not about. A per-panel slot cannot be both, and neither ADR settles it, so what
+    # ships is the uniform rule with no race in it and #2451 carries the question.
+    withheld = relay[relay.index("if (!sameSession(half, era)) {") :]
+    assert withheld[: withheld.index("}")].strip().endswith("return null;")
     # And exactly one caller asks. Every other entry point reaching `relay` is unchanged
     # by this, which is the whole reason it is a callback.
     # And exactly one call site passes it, asserted over the *shape* rather than over
