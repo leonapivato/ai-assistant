@@ -307,13 +307,12 @@ async def test_a_refusal_answered_to_a_dead_session_opens_no_panel(
     after its session has ended re-opens its panel beside the bootstrap form carrying
     the condition.
 
-    **This is the one path where the condition goes with the opening**, and it is the
-    narrower claim of the two. A refusal ``relay`` read is written into the panel's own
-    slot without opening it (``writeCondition``), because a page still looking at that
-    panel is owed it. Nothing was read here: the request failed in transit, so what is
-    withheld is ``GATEWAY_GONE`` — a sentence about a gateway that "may have stopped",
-    written over a session that has already ended, into a panel the owner has closed.
-    What became of a request nobody read is not known, and #2451 is where that is put.
+    **The condition goes with the opening**, which is the rule this lane ships whole: a
+    resumed continuation whose session has ended puts nothing on the screen. What is
+    withheld here is ``GATEWAY_GONE`` — a sentence about a gateway that "may have
+    stopped", over a session that had already ended, into a panel the owner has closed.
+    Whether a page still *looking* at that panel is owed the condition anyway is #2451,
+    which two rounds of review answered in opposite directions.
     """
     loop = asyncio.get_running_loop()
     release: asyncio.Future[None] = loop.create_future()
@@ -579,10 +578,10 @@ async def test_a_record_read_to_be_confirmed_over_is_not_put_after_its_session_e
 
 
 @pytest.mark.parametrize("viewport", [DESKTOP, PHONE], ids=["desktop", "phone"])
-async def test_a_destruction_consented_under_a_session_that_ended_is_told_about(
+async def test_a_destruction_consented_under_a_session_that_ended_ends_no_other(
     gateway_browser: Browser, tmp_path: Path, viewport: ViewportSize
 ) -> None:
-    """Two tabs, and the case that decides how a stale refusal is reported.
+    """Two tabs, which is how a live session meets a request from a dead one.
 
     ``window.confirm`` blocks *this page's* script thread and nothing else, and a session
     belongs to the browser rather than to a tab. So: the destroy ceremony is on screen in
@@ -590,17 +589,21 @@ async def test_a_destruction_consented_under_a_session_that_ended_is_told_about(
     tab's requests carry — and the consent then goes out under a header half the gateway
     no longer admits. It is refused at the door.
 
-    Two things must be true of that refusal and the first draft of this lane had neither.
-    It must not be reported as **re-entry**: ``sessionLost`` would forget the half of the
-    session the other tab has just started, which is a dead request ending a live one.
-    And it must not be **withheld**: this tab is looking straight at the panel it pressed
-    the control in, having just consented to a destruction, and silence there leaves the
-    owner believing it happened. Adversarial review, round 3, ``major``.
+    What that refusal must not do is end the session the other tab has just started.
+    ``refused`` → ``report`` → ``sessionLost`` would forget the new half and throw this
+    tab back to the bootstrap form: a dead request ending a live one, from the one door a
+    comparison after the ``await`` cannot reach, which is why the guard is inside
+    ``relay``. And the destruction must not be *reported*, because it did not happen.
+
+    Whether this tab — looking straight at the panel it pressed the control in — is owed
+    the condition as well is **#2451**, and this lane does not decide it: rounds 3 and 4
+    answered it in opposite directions over the same per-panel fault slot, so what ships
+    is the uniform rule with no race in it.
 
     Nothing here turns on the first tab *noticing* the storage change — it cannot, and
     that is measured rather than assumed: its renderer is blocked by the ceremony, so a
     cross-tab write to the shared half is not visible to it until after the script that
-    reads it has run. What it acts on is the answer it gets.
+    would read it has run. What it acts on is the answer it gets.
     """
     loop = asyncio.get_running_loop()
     answering: list[asyncio.Task[None]] = []
@@ -637,11 +640,12 @@ async def test_a_destruction_consented_under_a_session_that_ended_is_told_about(
             .click()
         )
 
-        # The condition, in the panel the owner is looking at.
-        await expect(drive.page.locator("#conversations")).to_contain_text(
-            "The two halves of this browser's session no longer match."
-        )
-        # And the session the other tab holds is still theirs: this tab was not thrown
-        # back to the bootstrap form by a request that belonged to the session before it.
+        # The session the other tab holds is still theirs: this tab was not thrown back
+        # to the bootstrap form by a request that belonged to the session before it, and
+        # the conversation it did not destroy is not reported as gone. The listing is
+        # what orders the assertions -- only a page still holding a session makes it.
+        async with drive.page.expect_response("**/conversations"):
+            await drive.page.click("#conversations-button")
         await expect(drive.page.locator("#bootstrap")).to_be_hidden()
+        await expect(drive.page.locator("#console")).to_be_visible()
         assert "is gone" not in await drive.page.inner_text("#conversations")
