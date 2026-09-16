@@ -110,6 +110,23 @@ if TYPE_CHECKING:
         UtcInstant,
     )
 
+#: How many ``execution_ids`` one ``SELECT ... IN (...)`` binds at a time
+#: (:meth:`SqlitePlanStore._step_statuses`). An attempt's references are
+#: **append-only and unbounded** (ADR-0249 §5, §12), and every SQLite connection has a
+#: finite ``SQLITE_LIMIT_VARIABLE_NUMBER`` — 32,766 on the shipped build, and as low as
+#: 999 on builds predating 3.32 — so a single list over the whole tuple has a cliff
+#: beyond which the query raises *too many SQL variables* instead of answering.
+#:
+#: **A ceiling and not the bound itself**: the connection's own
+#: ``getlimit(SQLITE_LIMIT_VARIABLE_NUMBER)`` is read at each call and the smaller of
+#: the two wins, because a constant chosen against one build is a smaller cliff rather
+#: than none — the limit belongs to the library the connection was opened by, and is
+#: settable on the connection. This figure keeps the statement count sane on a build
+#: whose limit is enormous. It is **not** a page size a caller sees: the batches run on
+#: one connection inside one transaction, so what they return is one snapshot however
+#: many there are.
+_EXECUTION_BATCH: Final[int] = 256
+
 _OWNER_ONLY = 0o600
 
 #: The sidecars SQLite may keep beside a database file. Each holds the same pages
@@ -1862,8 +1879,7 @@ class SqlitePlanStore:
             )
         return updated
 
-    @staticmethod
-    def _attempts_under(conn: sqlite3.Connection, goal_id: str) -> list[GoalAttempt]:
+    def _attempts_under(self, conn: sqlite3.Connection, goal_id: str) -> list[GoalAttempt]:
         """Every stored attempt of ``goal_id``, decoded, inside the caller's step.
 
         Args:
@@ -1878,8 +1894,7 @@ class SqlitePlanStore:
         ).fetchall()
         return [_decode_attempt(row[0]) for row in rows]
 
-    @staticmethod
-    def _live_attempts(conn: sqlite3.Connection, goal_id: str) -> list[GoalAttempt]:
+    def _live_attempts(self, conn: sqlite3.Connection, goal_id: str) -> list[GoalAttempt]:
         """``goal_id``'s attempts standing in a non-terminal state (ADR-0261 §2).
 
         Args:
@@ -1891,13 +1906,28 @@ class SqlitePlanStore:
         """
         return [
             one
-            for one in SqlitePlanStore._attempts_under(conn, goal_id)
+            for one in self._attempts_under(conn, goal_id)
             if one.state not in TERMINAL_ATTEMPT_STATES
         ]
 
-    @staticmethod
-    def _step_statuses(conn: sqlite3.Connection, attempt: GoalAttempt) -> list[StepStatus]:
+    def _step_statuses(self, conn: sqlite3.Connection, attempt: GoalAttempt) -> list[StepStatus]:
         """Every step status of every execution ``attempt`` names (ADR-0261 §3).
+
+        **Read in bounded batches, because ``execution_ids`` is unbounded.** ADR-0249
+        §5 and §12 leave an attempt's references **append-only and unbounded** — which
+        is ADR-0261 §6's own reason for the goal-wide member existing at all — so a
+        single ``IN`` list over the whole tuple has a cliff at the connection's
+        ``SQLITE_LIMIT_VARIABLE_NUMBER`` (32,766 on the shipped build) beyond which
+        every caller of this helper raises *too many SQL variables* instead of
+        answering.
+
+        **The bound is read off the connection rather than assumed**, because a
+        constant chosen against one build is a smaller cliff rather than none: the
+        limit belongs to the library the connection was opened by and is settable on
+        the connection, so :data:`_EXECUTION_BATCH` is a ceiling and the connection's
+        own figure is what binds. Every batch runs on the caller's connection inside
+        the caller's transaction, so the batching changes **which statements** are
+        issued and not **what they see**.
 
         Args:
             conn: The connection the caller's transaction is running on.
@@ -1907,19 +1937,22 @@ class SqlitePlanStore:
             One status per step, over the executions this store holds. Read on the
             caller's own connection, so the statuses and the write are one step.
         """
-        if not attempt.execution_ids:
-            return []
-        placeholders = ", ".join("?" for _ in attempt.execution_ids)
-        rows = conn.execute(
-            # The `IN` list is generated from the tuple's own length; every id is
-            # bound, so nothing of the caller's reaches the SQL text.
-            f"SELECT data FROM executions WHERE id IN ({placeholders})",  # noqa: S608 — `placeholders` is generated from the tuple's own length and every id is bound
-            tuple(attempt.execution_ids),
-        ).fetchall()
-        return [step.status for row in rows for step in _decode_execution(row[0]).steps]
+        held = attempt.execution_ids
+        size = max(1, min(_EXECUTION_BATCH, conn.getlimit(sqlite3.SQLITE_LIMIT_VARIABLE_NUMBER)))
+        found: list[StepStatus] = []
+        for start in range(0, len(held), size):
+            batch = held[start : start + size]
+            placeholders = ", ".join("?" for _ in batch)
+            rows = conn.execute(
+                # The `IN` list is generated from the batch's own length; every id is
+                # bound, so nothing of the caller's reaches the SQL text.
+                f"SELECT data FROM executions WHERE id IN ({placeholders})",  # noqa: S608 — `placeholders` is generated from the batch's own length and every id is bound
+                tuple(batch),
+            ).fetchall()
+            found.extend(step.status for row in rows for step in _decode_execution(row[0]).steps)
+        return found
 
-    @staticmethod
-    def _outstanding(conn: sqlite3.Connection, goal_id: str) -> bool:
+    def _outstanding(self, conn: sqlite3.Connection, goal_id: str) -> bool:
         """ADR-0261 §6's predicate over ``goal_id``, inside the caller's step.
 
         Args:
@@ -1932,8 +1965,8 @@ class SqlitePlanStore:
         """
         return any(
             status in OUTSTANDING_STEP_STATUSES
-            for attempt in SqlitePlanStore._attempts_under(conn, goal_id)
-            for status in SqlitePlanStore._step_statuses(conn, attempt)
+            for attempt in self._attempts_under(conn, goal_id)
+            for status in self._step_statuses(conn, attempt)
         )
 
     async def close_goal_abandoned(
