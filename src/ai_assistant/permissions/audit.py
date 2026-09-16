@@ -13,8 +13,8 @@ The on-disk schema carries a ``meta("schema_version")`` marker, the same shape
 shared; the *mechanism* is not — evolution here stays the additive,
 column-presence ``ALTER`` of :meth:`SqliteAuditTrail._migrate`, which is what an
 append-only trail with existing rows can afford. A database predating the marker
-is stamped once this code has migrated it, and a version-1 one is restamped, never
-refused; see :meth:`SqliteAuditTrail._check_schema_version`.
+is stamped once this code has migrated it, and one at any older openable version is
+restamped, never refused; see :meth:`SqliteAuditTrail._check_schema_version`.
 
 Local-first (ADR-0002), and **locally only**: ADR-0021 §4 applies ADR-0004 §2's
 residency clause to this store by name, so nothing here may reach a remote
@@ -212,25 +212,41 @@ _MIN_SQLITE_INT = -(2**63)
 #: reader has a marker to judge the file by — the seam ADR-0049 §1 describes and
 #: the ``SqlitePlanStore`` pattern this follows.
 #:
+#: **Version 3 is the record carrying a postcondition-bearing tool declaration**
+#: (ADR-0262 §8). Nothing about the *tables* changes at this step: what changes is
+#: the JSON a ``decisions`` row holds. ``ActionRequest.tool`` and
+#: ``PermissionDecision.tool`` embed the whole ``ToolDefinition`` by value
+#: (ADR-0021 §1), that model sets ``extra="forbid"``, and the definition grows a
+#: ``postconditions`` field — so version-2 code opening a file newer code has
+#: written decisions into **cannot decode those rows at all**, while its marker
+#: still tells it it may. ADR-0049 §1 rules that a downgrade is a fault to report;
+#: moving the marker is what lets it be reported at *open*, before any read,
+#: rather than at the first row that fails to validate. The field itself lands in
+#: ADR-0262's next lane — this one moves the marker ahead of it, so that the code
+#: predating the widening already refuses such a trail (ADR-0262 §11's LA).
+#:
 #: **Version 2 is the invocation shape** (ADR-0192 §2): the ``invocations`` table
 #: beside ``decisions``, one identifier space over both, and a ``clear()`` that
-#: erases both. Version 1 is the decisions-only shape, and the bump is not
-#: bookkeeping. Version-1 code opening a version-1 file it has since grown
+#: erases both. Version 1 is the decisions-only shape, and that bump was not
+#: bookkeeping either. Version-1 code opening a version-1 file it has since grown
 #: invocation rows in **cannot maintain either invariant**: its ``clear()`` deletes
 #: decisions and leaves the invocation rows behind — an erasure ADR-0192 §6
 #: requires to be total, silently partial — and its uniqueness check sees only
 #: ``decisions``, so it can record a decision under an id an invocation already
 #: holds, which the joined reads then resolve to two rows under one identifier.
-#: ADR-0049 §1 already rules that "a downgrade is a fault to report"; leaving the
-#: marker at 1 is what would make it unreportable.
-_SCHEMA_VERSION = 2
+_SCHEMA_VERSION = 3
 
 #: The versions this code can *open*. Anything else is refused, newer or older
-#: (ADR-0049 §1). A version-1 file is opened and brought to :data:`_SCHEMA_VERSION`
-#: by the same additive create-and-migrate every open runs, then restamped — so no
-#: trail already on disk becomes unopenable, which is the failure
-#: :meth:`SqliteAuditTrail._check_schema_version` exists to avoid.
-_OPENABLE_VERSIONS: Final[frozenset[int]] = frozenset({1, _SCHEMA_VERSION})
+#: (ADR-0049 §1). Every previously openable value stays openable: a version-1 or
+#: version-2 file is opened and brought to :data:`_SCHEMA_VERSION` by the same
+#: additive create-and-migrate every open runs, then restamped — so no trail
+#: already on disk becomes unopenable, which is the failure
+#: :meth:`SqliteAuditTrail._check_schema_version` exists to avoid. A version-2
+#: file needs no table work at all to reach version 3 (the step is the record
+#: shape, not the schema), and gets the restamp regardless, because the restamp is
+#: what stops version-2 code opening it afterwards and failing on the first row it
+#: cannot decode (ADR-0262 §8).
+_OPENABLE_VERSIONS: Final[frozenset[int]] = frozenset({1, 2, _SCHEMA_VERSION})
 
 #: Created first and on its own, so a database labelled with a schema this code
 #: cannot read is refused *before* the ``decisions`` table is created, migrated or
@@ -377,8 +393,8 @@ _DECISION_COMPARED: Final[tuple[str, ...]] = (
 #: this store did not define is refused wherever it is attached.
 #:
 #: ``meta`` is here for the same reason ADR-0049 §1's restamp exists: an ignored
-#: ``UPDATE`` would leave a version-1 marker standing over a version-2 shape, which
-#: is the downgrade the marker is what makes reportable.
+#: ``UPDATE`` would leave an older marker standing over the shape this open just
+#: brought the file to, which is the downgrade the marker is what makes reportable.
 #:
 #: **Keyed lower-case, and looked up that way**, because SQLite folds an identifier's
 #: case while ``sqlite_master`` keeps the spelling it was declared with: a table
@@ -406,15 +422,16 @@ _ORDERED = "SELECT data FROM decisions ORDER BY decided_at_us DESC, id ASC"
 # completed act stop being the most recent one. Allocated inside the same
 # transaction as the insert, from the table's own maximum.
 #
-# **This table is what version 2 is** (:data:`_SCHEMA_VERSION`). ``CREATE TABLE IF
-# NOT EXISTS`` is additive and idempotent exactly as
+# **This table is what version 2 was** (:data:`_SCHEMA_VERSION` has since moved on).
+# ``CREATE TABLE IF NOT EXISTS`` is additive and idempotent exactly as
 # :meth:`SqliteAuditTrail._migrate`'s ``ALTER``s are, so a version-1 file opens and
-# gains it — and is then *restamped* 2 rather than left at 1. Leaving the marker
-# alone would cost nothing here and everything to the next reader: version-1 code
-# accepts a version-1 marker, and its ``clear()`` and its id-uniqueness check both
-# know only ``decisions``, so it erases half of what ADR-0192 §6 says is one record
-# and can mint a decision over an invocation's id. The restamp is what makes that
-# downgrade the reported fault ADR-0049 §1 already calls for.
+# gains it — and is then *restamped* to the current version rather than left at 1.
+# Leaving the marker alone would cost nothing here and everything to the next
+# reader: version-1 code accepts a version-1 marker, and its ``clear()`` and its
+# id-uniqueness check both know only ``decisions``, so it erases half of what
+# ADR-0192 §6 says is one record and can mint a decision over an invocation's id.
+# The restamp is what makes that downgrade the reported fault ADR-0049 §1 already
+# calls for.
 # **Four of the six columns are `GENERATED ALWAYS ... VIRTUAL` over the blob, and
 # that is the whole of their integrity.** A stored projection is a second copy of a
 # value the record already carries, and a filter narrowing by one decides on a value
@@ -861,9 +878,9 @@ class SqliteAuditTrail:
                     conn.execute(_WRITE_SCHEMA_VERSION, (str(_SCHEMA_VERSION),))
                 elif stored != _SCHEMA_VERSION:
                     # An openable older marker, moved up by the same rule and in
-                    # the same transaction: the file now *has* the invocation
-                    # shape, so it says so. Restamping before the create would
-                    # label a file this open had not yet brought up.
+                    # the same transaction: the file now *has* every shape the
+                    # current version names, so it says so. Restamping before the
+                    # create would label a file this open had not yet brought up.
                     conn.execute(_RESTAMP_SCHEMA_VERSION, (str(_SCHEMA_VERSION),))
         except AuditError:
             # A migration reporting a corrupt legacy row is already this layer's
@@ -1143,14 +1160,18 @@ class SqliteAuditTrail:
         exactly the shape this code maintains. The stamp records what this open has
         just established, not an assumption about what was there before.
 
-        **A version-1 database is opened and restamped, for the same reason.** The
-        step from 1 to 2 is the ``invocations`` table, which
+        **An older openable database is opened and restamped, for the same
+        reason.** The step from 1 to 2 is the ``invocations`` table, which
         ``CREATE TABLE IF NOT EXISTS`` adds to any file at all, so the migration is
         the open — and refusing here would strand every trail written before
-        ADR-0192 landed. The restamp is not decoration: it is what stops the
-        *previous* version of this code from opening the file afterwards and
-        maintaining neither ADR-0192 §6's total erasure nor §2's single identifier
-        space over both row kinds.
+        ADR-0192 landed. The step from 2 to 3 needs no table work whatever: what
+        version 3 names is the *record* a ``decisions`` row holds, a
+        ``ToolDefinition`` carrying ``postconditions`` (ADR-0262 §8). The restamp is
+        not decoration in either case: it is what stops a *previous* version of this
+        code from opening the file afterwards — maintaining neither ADR-0192 §6's
+        total erasure nor §2's single identifier space over both row kinds at the
+        older step, and at the newer one failing to decode an ``extra="forbid"``
+        record it was still told it could read.
 
         **Any other stored version is refused**, newer or older, matching
         ``SqlitePlanStore`` (ADR-0049 §1). A stored value outside
@@ -2666,7 +2687,7 @@ class SqliteAuditTrail:
 
         Only ``decisions`` is emptied: the ``meta`` schema marker describes the
         file's shape rather than the user's history, so burning the book leaves a
-        database this code can still open (and would still count as version 1).
+        database this code can still open, still labelled with the version it was.
         """
         with self._transaction("clear the audit trail") as conn:
             # Invocations first: a decision whose invocation rows outlived it

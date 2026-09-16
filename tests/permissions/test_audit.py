@@ -46,7 +46,7 @@ from ai_assistant.core.types import (
     PermissionOutcome,
     SpanCoverage,
 )
-from ai_assistant.permissions import SqliteAuditTrail
+from ai_assistant.permissions import SqliteAuditTrail, audit
 from ai_assistant.permissions.audit import (
     COVERAGE_UNRECORDED,
     ORIGIN_UNRECORDED,
@@ -657,14 +657,15 @@ async def test_a_fresh_trail_records_the_schema_version(ephemeral: SqliteAuditTr
     """A database created here is labelled, so a future migration has a marker to read.
 
     The marker ``SqlitePlanStore`` writes from day one (ADR-0049 §1), which this
-    store had none of. Exactly one row, so the label is unambiguous. Version 2 is
-    the invocation shape (ADR-0192 §2), which is what this code writes.
+    store had none of. Exactly one row, so the label is unambiguous. Version 3 is
+    the postcondition-bearing tool declaration inside the stored record
+    (ADR-0262 §8), which is what this code writes.
     """
     rows = ephemeral._conn.execute(
         "SELECT key, value FROM meta WHERE key = 'schema_version'"
     ).fetchall()
 
-    assert rows == [("schema_version", "2")]
+    assert rows == [("schema_version", "3")]
 
 
 @pytest.mark.integration
@@ -695,7 +696,7 @@ async def test_a_pre_marker_database_is_stamped_rather_than_refused(tmp_path: Pa
     finally:
         reopened.close()
 
-    assert _stored_schema_version(path) == "2"
+    assert _stored_schema_version(path) == "3"
 
 
 def _write_version_one_trail(path: Path, decision_id: str) -> PermissionDecision:
@@ -772,8 +773,128 @@ async def test_a_version_one_database_is_opened_and_restamped(tmp_path: Path) ->
     finally:
         reopened.close()
 
-    assert _stored_schema_version(path) == "2"
+    assert _stored_schema_version(path) == "3"
     assert "invocations" in _tables(path)
+
+
+def _downstamp(path: Path, version: str) -> None:
+    """Relabel an existing trail, leaving every table and every row alone.
+
+    A version-2 trail is *schema*-identical to a version-3 one: the step ADR-0262
+    §8 makes is to the record a ``decisions`` row holds, not to any table. So the
+    honest way to seed one is to let this code write the file and then move the
+    marker back — which is also what a real version-2 file on disk is, a file this
+    store wrote before the declaration widened.
+    """
+    raw = sqlite3.connect(str(path))
+    try:
+        raw.execute("UPDATE meta SET value = ? WHERE key = 'schema_version'", (version,))
+        raw.commit()
+    finally:
+        raw.close()
+
+
+@pytest.mark.integration
+async def test_a_version_two_database_is_opened_and_restamped(tmp_path: Path) -> None:
+    """A pre-ADR-0262 trail opens, keeps its history, and is relabelled 3.
+
+    **Opened**, because the previous value stays openable: nothing about the file
+    is wrong, and refusing would strand every trail written before ADR-0262 — the
+    Tier 1 record ADR-0004 §7 entitles the user to keep. **Restamped**, because the
+    marker is the only thing that will stop version-2 code opening it afterwards.
+    That code cannot decode a ``decisions`` row whose embedded ``ToolDefinition``
+    carries ``postconditions`` — ``extra="forbid"`` — so left at 2 the file would
+    be accepted and then fail at the first such row, which is precisely the
+    deferred, unreportable fault ADR-0049 §1 rules out.
+
+    No table work is involved and none is asserted: the step is the record shape.
+    """
+    path = tmp_path / "audit.db"
+    trail = SqliteAuditTrail(path=path)
+    try:
+        await trail.record(decision("c-old", request=action(step_id="step-old")))
+        old = await trail.get("c-old")
+    finally:
+        trail.close()
+    _downstamp(path, "2")
+    assert _stored_schema_version(path) == "2"
+
+    reopened = SqliteAuditTrail(path=path)
+    try:
+        assert await reopened.get("c-old") == old  # the history survives the restamp
+        await reopened.record(decision("c-new", request=action(execution_id="exec-a")))
+        assert len(await reopened.export()) == 2
+    finally:
+        reopened.close()
+
+    assert _stored_schema_version(path) == "3"
+
+
+@pytest.mark.integration
+async def test_the_current_marker_is_refused_at_open_by_code_at_the_previous_one(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """ADR-0262 §11's LA, from the other side: the downgrade this bump makes reportable.
+
+    The marker moves ahead of the widening so that code *predating* it refuses such
+    a trail at **open** rather than at the first row it cannot decode. Only the
+    openable set is moved back, because that constant is the whole of what "code at
+    the previous version" means to this check — ``_SCHEMA_VERSION`` itself is what
+    that code would *write*, and nothing here writes.
+
+    **Refused, and before any read.** The decisions this trail holds are still
+    there afterwards and still decode for code that may open the file, and the
+    marker is untouched: the refusal runs inside the setup transaction, ahead of
+    the create, the migration and every read of a row.
+    """
+    path = tmp_path / "audit.db"
+    trail = SqliteAuditTrail(path=path)
+    try:
+        await trail.record(decision("c-1", request=action(step_id="step-old")))
+        kept = await trail.get("c-1")
+    finally:
+        trail.close()
+    assert _stored_schema_version(path) == "3"
+
+    monkeypatch.setattr(audit, "_OPENABLE_VERSIONS", frozenset({1, 2}))
+    with pytest.raises(AuditError, match="can open only version 1, 2"):
+        SqliteAuditTrail(path=path)
+
+    monkeypatch.undo()
+    assert _stored_schema_version(path) == "3", "a refused open leaves the marker alone"
+    reopened = SqliteAuditTrail(path=path)
+    try:
+        assert await reopened.get("c-1") == kept  # ...and leaves the records alone
+    finally:
+        reopened.close()
+
+
+@pytest.mark.integration
+async def test_the_current_marker_is_refused_before_a_decisions_table_is_made(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """The same refusal on a bare file, where "before any read" is checkable directly.
+
+    A marked file with no ``decisions`` table yet proves the ordering the populated
+    case can only assert the consequences of: the refusal precedes the create, so
+    code that cannot account for the label writes nothing to the file at all
+    (ADR-0049 §1's ordering).
+    """
+    path = tmp_path / "audit.db"
+    raw = sqlite3.connect(str(path))
+    try:
+        raw.execute("CREATE TABLE meta(key TEXT PRIMARY KEY, value TEXT NOT NULL)")
+        raw.execute("INSERT INTO meta(key, value) VALUES ('schema_version', '3')")
+        raw.commit()
+    finally:
+        raw.close()
+
+    monkeypatch.setattr(audit, "_OPENABLE_VERSIONS", frozenset({1, 2}))
+    with pytest.raises(AuditError, match="schema_version=3"):
+        SqliteAuditTrail(path=path)
+
+    assert "decisions" not in _tables(path)
+    assert _stored_schema_version(path) == "3"
 
 
 @pytest.mark.integration
@@ -1058,7 +1179,7 @@ async def test_reopening_a_labelled_trail_keeps_the_one_marker(tmp_path: Path) -
     finally:
         reopened.close()
 
-    assert rows == [("schema_version", "2")]
+    assert rows == [("schema_version", "3")]
 
 
 @pytest.mark.integration
@@ -1130,7 +1251,7 @@ async def test_a_newer_marker_on_a_populated_trail_is_refused_rather_than_read(
 
     The same rule the trail applies to a row that no longer validates: a database
     this code cannot account for is a fault to report, not records to hand on. The
-    marker is moved past the current version rather than to it: ``'2'`` would name
+    marker is moved past the current version rather than to it: ``'3'`` would name
     the shape this code writes, and the refusal under test is for the one it does
     not know.
     """
@@ -1143,7 +1264,7 @@ async def test_a_newer_marker_on_a_populated_trail_is_refused_rather_than_read(
 
     raw = sqlite3.connect(str(path))
     try:
-        raw.execute("UPDATE meta SET value = '3' WHERE key = 'schema_version'")
+        raw.execute("UPDATE meta SET value = '4' WHERE key = 'schema_version'")
         raw.commit()
     finally:
         raw.close()
@@ -1234,7 +1355,7 @@ async def test_an_integer_marker_of_the_supported_version_is_accepted(tmp_path: 
     finally:
         trail.close()
 
-    assert _stored_schema_version(path) == "2"
+    assert _stored_schema_version(path) == "3"
 
 
 @pytest.mark.integration
@@ -1288,7 +1409,7 @@ async def test_clearing_the_trail_leaves_it_openable(tmp_path: Path) -> None:
     finally:
         trail.close()
 
-    assert _stored_schema_version(path) == "2"
+    assert _stored_schema_version(path) == "3"
     reopened = SqliteAuditTrail(path=path)
     try:
         assert await reopened.export() == []
