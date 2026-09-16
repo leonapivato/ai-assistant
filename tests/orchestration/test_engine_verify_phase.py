@@ -33,6 +33,7 @@ from test_engine import (
 from test_engine_attempts import _Recording
 from test_engine_composing import _refusing, _TwoStepPlanner
 from verification_builders import (
+    BINDING,
     Rows,
     a_member,
     a_row,
@@ -155,6 +156,13 @@ class _Established:
             update={
                 "ruling": a_ruling(goal=self._goal, subject=row.subject_digest),
                 "tool": declaring,
+                # A route-(d) `ALLOW` is an **egress** decision: the trail's own shape
+                # test refuses a ruling that names an authorisation beside no binding,
+                # so a double that rewrote the ruling and left the binding absent would
+                # stand in for a record `record` could not have held. The binding is
+                # over the same account the row names (ADR-0254 §7). Adversarial
+                # review, round 6, `blocker`.
+                "egress_binding": BINDING,
             }
         )
 

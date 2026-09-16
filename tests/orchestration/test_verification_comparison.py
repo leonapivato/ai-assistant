@@ -39,6 +39,7 @@ from verification_builders import (
     a_tool,
     an_attempt,
     an_execution,
+    an_unbound_ruling,
     field_equals,
     field_present,
     paired,
@@ -804,11 +805,21 @@ async def test_a_step_no_walk_claimed_leaves_the_rung_where_it_was() -> None:
 
 
 async def test_a_reversible_non_disclosing_act_is_rung_one() -> None:
-    """§3's rung 1: a side-effecting act declared ``REVERSIBLE`` that discloses nothing."""
+    """§3's rung 1: a side-effecting act declared ``REVERSIBLE`` that discloses nothing.
+
+    **And transmitting nothing**, which is the limb the decision carries rather than the
+    declaration: a route-(d) ``ALLOW`` is an egress decision and reaches rung 2 on its
+    binding alone, so the act that stays at rung 1 is one the policy allowed on its own
+    rules (:func:`~verification_builders.an_unbound_ruling`).
+    """
     comparison = await _compared(
         a_goal(),
         a_step("s-1", output=_HOLDS),
-        decisions=(a_decision("d-1", definition=a_tool(postconditions=_BOOKED)),),
+        decisions=(
+            a_decision(
+                "d-1", definition=a_tool(postconditions=_BOOKED), ruling=an_unbound_ruling()
+            ),
+        ),
     )
 
     assert comparison.rung is Rung.ACTED
@@ -844,7 +855,9 @@ async def test_risk_level_alone_never_reaches_rung_two() -> None:
     """§3: *"``risk_level`` is **not** read"*, and no lane adds a limb for it."""
     risky = a_tool(risk_level=RiskLevel.CRITICAL, reversibility=Reversibility.REVERSIBLE)
     comparison = await _compared(
-        a_goal(), a_step("s-1"), decisions=(a_decision("d-1", definition=risky),)
+        a_goal(),
+        a_step("s-1"),
+        decisions=(a_decision("d-1", definition=risky, ruling=an_unbound_ruling()),),
     )
 
     assert comparison.rung is Rung.ACTED
@@ -1022,7 +1035,9 @@ async def test_a_goal_carrying_no_criterion_at_rung_one_is_answered() -> None:
     as *every criterion met*.
     """
     comparison = await _compared(
-        a_goal(), a_step("s-1"), decisions=(a_decision("d-1", definition=a_tool()),)
+        a_goal(),
+        a_step("s-1"),
+        decisions=(a_decision("d-1", definition=a_tool(), ruling=an_unbound_ruling()),),
     )
 
     assert comparison.outcome is AttemptOutcome.ANSWERED
@@ -1075,9 +1090,21 @@ async def test_a_failed_read_at_rung_one_is_failed_and_never_answered() -> None:
 
 async def test_a_failed_step_beside_a_met_criterion_is_partial() -> None:
     """§4: limb 1 requires *"no criterion is met"*, so a met one takes it out of reach."""
+    # The met criterion's own act is a **read** authorised against the row, so the
+    # attempt stays at rung 1 and limb 3 is out of reach — §3's rung-2 test reads
+    # `side_effecting` first. The failed step is about something else and ran under the
+    # policy's own rules, which is what "unrelated" means and what §7 requires: one row
+    # cannot have admitted two different declarations.
     decisions = (
-        a_decision("d-1", definition=a_tool(postconditions=_BOOKED), digest=DIGEST),
-        a_decision("d-2", definition=a_tool(side_effecting=False), digest=OTHER_DIGEST),
+        a_decision(
+            "d-1", definition=a_tool(postconditions=_BOOKED, side_effecting=False), digest=DIGEST
+        ),
+        a_decision(
+            "d-2",
+            definition=a_tool(side_effecting=False),
+            digest=OTHER_DIGEST,
+            ruling=an_unbound_ruling(),
+        ),
     )
     comparison = await _compared(
         a_goal(a_criterion(RIVERSIDE), a_criterion(SUNDAY)),
@@ -1086,6 +1113,7 @@ async def test_a_failed_step_beside_a_met_criterion_is_partial() -> None:
         decisions=decisions,
     )
 
+    assert comparison.rung is Rung.ACTED
     assert comparison.outcome is AttemptOutcome.PARTIAL
 
 
@@ -1172,7 +1200,12 @@ async def test_an_unrelated_failure_beside_a_consequential_success_is_uncertain(
     """
     decisions = (
         a_decision("d-1", definition=_booking().tool, digest=DIGEST),
-        a_decision("d-2", definition=a_tool(side_effecting=False), digest=OTHER_DIGEST),
+        a_decision(
+            "d-2",
+            definition=a_tool(side_effecting=False),
+            digest=OTHER_DIGEST,
+            ruling=an_unbound_ruling(),
+        ),
     )
     failing = await _compared(
         a_goal(a_criterion(SUNDAY)),
@@ -1228,12 +1261,16 @@ async def test_a_reversible_side_effecting_failure_at_rung_one_is_failed() -> No
     writing = await _compared(
         a_goal(a_criterion(RIVERSIDE)),
         failing,
-        decisions=(a_decision("d-1", definition=a_tool(side_effecting=True)),),
+        decisions=(
+            a_decision("d-1", definition=a_tool(side_effecting=True), ruling=an_unbound_ruling()),
+        ),
     )
     reading = await _compared(
         a_goal(a_criterion(RIVERSIDE)),
         failing,
-        decisions=(a_decision("d-1", definition=a_tool(side_effecting=False)),),
+        decisions=(
+            a_decision("d-1", definition=a_tool(side_effecting=False), ruling=an_unbound_ruling()),
+        ),
     )
 
     assert writing.outcome is AttemptOutcome.FAILED
@@ -1268,7 +1305,12 @@ async def test_every_criterion_met_beside_an_unrelated_failure_is_verified() -> 
     """
     decisions = (
         a_decision("d-1", definition=_booking().tool, digest=DIGEST),
-        a_decision("d-2", definition=a_tool(side_effecting=False), digest=OTHER_DIGEST),
+        a_decision(
+            "d-2",
+            definition=a_tool(side_effecting=False),
+            digest=OTHER_DIGEST,
+            ruling=an_unbound_ruling(),
+        ),
     )
     comparison = await _compared(
         a_goal(a_criterion(RIVERSIDE)),
