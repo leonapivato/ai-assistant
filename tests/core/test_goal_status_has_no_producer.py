@@ -1,4 +1,4 @@
-"""``GoalStatus.ACHIEVED`` gets no producer, asserted over the shipped tree.
+"""``GoalStatus.ACHIEVED`` has exactly one producer, asserted over the shipped tree.
 
 ADR-0249 §16 item 7 asks for this as "a test over the shipped tree, not as a review
 convention, so that a later lane cannot supply one without the ADR that decides it".
@@ -7,8 +7,17 @@ clause of this ADR, and no lane implementing it, writes ``ACHIEVED``, and **prod
 reply never by itself establishes that a goal was achieved**" — A10 of #2255 is its only
 producer, and it is named there so no later lane supplies one by inference.
 
-**What this costs is stated rather than hidden** (§4): until A10 lands, a goal that was
-fully served stays ``ACTIVE``. That is a legible gap and an honest one.
+**A10 has landed, so the guard narrows rather than being dropped** — which is what its
+own closing clause asks for: a later lane may not supply a producer *"without the ADR
+that decides it"*, and ADR-0262 §5 is that ADR. It rules that ``GoalStatus.ACHIEVED``
+has **exactly one** producer — ``orchestration``'s ``VERIFY`` phase, on §4's limb 5
+alone, immediately after the ``commit_attempt`` that ended the attempt — and that *"no
+expiry, no silence, no timeout, no sweep, no reclaim, no model output, no inference and
+no other member of any Protocol writes ``ACHIEVED``"*. So the scan below asserts **that
+one file and that one site**, and every other shape it can see stays refused everywhere.
+
+**What the gap cost while it stood is left recorded** (§4): until A10 landed, a goal that
+was fully served stayed ``ACTIVE``. That was a legible gap and an honest one.
 
 **The scan is over shapes, not over one spelling.** What §4 refuses is the *producer*,
 however it is written, so a guard keyed on ``GoalStatus.ACHIEVED`` alone would go green
@@ -32,6 +41,9 @@ _SRC: Final = Path(__file__).resolve().parents[2] / "src" / "ai_assistant"
 
 #: The one file that may name the member: its own declaration.
 _DECLARATION: Final = "core/types.py"
+
+#: The one file that may **produce** it, and the one site in it (ADR-0262 §5).
+_PRODUCER: Final = "orchestration/engine.py"
 
 #: The member's own value, read off the enum rather than written out, so a rename of
 #: the value — which ADR-0249 §4's vocabulary forbids, but which this scan must not
@@ -131,18 +143,28 @@ def test_the_scan_reports_no_producer_where_there_is_none(innocent: str) -> None
     assert producers_in(innocent) == []
 
 
-def test_no_source_file_but_the_declaration_writes_achieved() -> None:
-    """``GoalStatus.ACHIEVED`` is produced nowhere under ``src/``."""
-    offenders = {
+def test_only_the_verify_phase_produces_achieved() -> None:
+    """``GoalStatus.ACHIEVED`` is produced in one file under ``src/``, at one site.
+
+    ADR-0262 §5's one producer, and no other — *"no expiry, no silence, no timeout, no
+    sweep, no reclaim, no model output, no inference and no other member of any Protocol
+    writes ``ACHIEVED``"*. **The count is asserted as well as the file**, because a
+    second producer inside that same module is the one this guard would otherwise miss.
+    """
+    producers = {
         path.relative_to(_SRC).as_posix(): producers_in(path.read_text(encoding="utf-8"))
         for path in sorted(_SRC.rglob("*.py"))
         if path.relative_to(_SRC).as_posix() != _DECLARATION
     }
+    found = {name: writes for name, writes in producers.items() if writes}
 
-    assert {name: found for name, found in offenders.items() if found} == {}, (
-        "ADR-0249 §4 gives ACHIEVED no producer, and A10 of #2255 is its only one: a "
+    assert sorted(found) == [_PRODUCER], (
+        "ADR-0262 §5 gives ACHIEVED exactly one producer, the VERIFY phase's own act: a "
         "composed reply establishes nothing about the requested outcome, so a status "
-        "claiming otherwise would assert a comparison nothing performed"
+        f"claiming otherwise would assert a comparison nothing performed. Found: {found}"
+    )
+    assert len(found[_PRODUCER]) == 1, (
+        f"and it writes it once, on §4's limb 5 alone. Found: {found[_PRODUCER]}"
     )
 
 
