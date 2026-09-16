@@ -79,7 +79,7 @@ requires-dist = [
 [package.metadata.requires-dev]
 dev = [
     { name = "editables", specifier = ">=0.5" },
-    { name = "hatchling", specifier = ">=1.27" },
+    { name = "hatchling", specifier = ">=1.27,<1.32" },
     { name = "import-linter", specifier = ">=2.0" },
     { name = "mypy", specifier = ">=1.18.0" },
     { name = "pip-audit", specifier = ">=2.7" },
