@@ -20,6 +20,7 @@ import pytest
 from coverage_answers_contract import (
     BARE,
     DATED,
+    DISPLACING_QUOTE,
     GOVERNING_QUOTE,
     MONEY_COVERAGE,
     PERIOD_COVERAGE,
@@ -59,6 +60,15 @@ class TestFakeCoverageAnswersContract(CoverageAnswersContract):
             The subject.
         """
         return FakeCoverageAnswers(met=False)
+
+    def displace(self, answers: CoverageAnswers) -> None:
+        """Reconfigure the fake onto the later quote.
+
+        The fake holds no goal, so *"the governing quote moved"* is reconfiguration
+        here — which is exactly the state a memoising fake would be replaying past.
+        """
+        assert isinstance(answers, FakeCoverageAnswers)
+        answers.answer(met=True, quote=DISPLACING_QUOTE)
 
 
 async def test_a_quote_rides_back_only_where_a_money_member_is_in_play() -> None:

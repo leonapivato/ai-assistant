@@ -26,6 +26,7 @@ ADR-0254 §20's Lane 2's, briefed after this lane (ADR-0270 §§5, 6).
 from __future__ import annotations
 
 import asyncio
+import contextlib
 from decimal import Decimal
 from typing import TYPE_CHECKING, Final
 
@@ -35,6 +36,7 @@ from coverage_answers_contract import (
     ACT,
     BARE,
     DATED,
+    DISPLACING_QUOTE,
     GOVERNING_QUOTE,
     MONEY_COVERAGE,
     PERIOD_COVERAGE,
@@ -103,6 +105,42 @@ def quote_over(
     )
 
 
+class _SuppressingQuotes:
+    """A ``GoalQuotes`` that **catches** a cancellation and answers an empty tuple.
+
+    The collaborator ADR-0060's propagation clause is stated over, and it cannot be
+    ``FakeGoalQuotes``: the canonical fake is cancellation-cooperative, which is what
+    makes it a *conforming* seam. What is under test here is the policy's own conduct
+    when a seam is not, and the rule is *"stated in the weaker, true form: no seam can
+    stop work that declines to be cancelled"*.
+    """
+
+    def __init__(self) -> None:
+        """Create the seam, with the gate a case waits on before it cancels."""
+        self.entered = asyncio.Event()
+        self.absorbed = False
+
+    async def for_action(self, goal: str, intended_action: str) -> tuple[ActionQuote, ...]:
+        """Wait to be cancelled, swallow it, and answer as if the goal held nothing.
+
+        Args:
+            goal: Unread — this seam answers one way.
+            intended_action: Unread, likewise.
+
+        Returns:
+            An empty tuple, which is exactly the shape *"the goal holds no quote for
+            this act"* takes.
+        """
+        del goal, intended_action
+        self.entered.set()
+        try:
+            await asyncio.sleep(3600)
+        except asyncio.CancelledError:
+            self.absorbed = True
+            return ()
+        return ()  # pragma: no cover — the case always cancels
+
+
 def answering(
     quotes: Sequence[ActionQuote] | None = (GOVERNING_QUOTE,), **kwargs: object
 ) -> tuple[ThresholdActionPolicy, FakeGoalQuotes | None]:
@@ -121,6 +159,11 @@ def answering(
 class TestThresholdActionPolicyCoverageAnswersContract(CoverageAnswersContract):
     """Runs the one implementation through the shared suite (ADR-0270 §1)."""
 
+    #: The seam the ``answers`` subject was built over, so :meth:`displace` can move
+    #: the goal's quotes **underneath** it rather than rebuilding the policy — the
+    #: subject of that assertion being that this policy re-reads.
+    seam: FakeGoalQuotes
+
     @pytest.fixture
     def answers(self) -> CoverageAnswers:
         """The policy over a goal holding the governing quote.
@@ -128,7 +171,10 @@ class TestThresholdActionPolicyCoverageAnswersContract(CoverageAnswersContract):
         Returns:
             The subject, at its narrow face.
         """
-        return answering()[0]
+        gate, seam = answering()
+        assert seam is not None
+        self.seam = seam
+        return gate
 
     @pytest.fixture
     def unmet_answers(self) -> CoverageAnswers:
@@ -138,6 +184,17 @@ class TestThresholdActionPolicyCoverageAnswersContract(CoverageAnswersContract):
             The subject, at its narrow face.
         """
         return answering([quote_over(PRICED, amount="170")])[0]
+
+    def displace(self, answers: CoverageAnswers) -> None:
+        """Append the later quote to the goal the policy reads.
+
+        ADR-0267 §2's refresh — *"a position in the tuple"* — landing between two
+        calls, and §7 then makes it the governing one. Reached through the seam the
+        policy holds rather than by rebuilding the policy, because the subject of the
+        assertion is that this policy **re-reads**.
+        """
+        assert answers is not None
+        self.seam.hold_for(GOAL, DISPLACING_QUOTE)
 
 
 # --- arm 1: the vacuous case, preserved exactly -------------------------------
@@ -348,6 +405,53 @@ class TestItRulesNothingRecordsNothingAndCachesNothing:
         seam.fail_for_action()
         with pytest.raises(AuthorizationError):
             await gate.coverage_met(PRICED, MONEY_COVERAGE)
+
+    async def test_a_cancellation_the_seam_absorbed_is_delivered_onward(self) -> None:
+        """ADR-0060: *"never lets a collaborator's suppressed cancellation stand in
+        for its own"*.
+
+        Nothing forces a ``GoalQuotes`` to let a ``CancelledError`` through, and one
+        that catches it and answers ``()`` hands this member an **empty tuple** —
+        which is the seam's word for *the goal holds no quote for this act*. Without
+        the count check the caller would get an ordinary unmet answer after asking
+        for the work to stop, and a proposal would be declined for a reason that
+        never happened. Adversarial review, round 5, ``blocker``.
+        """
+        seam = _SuppressingQuotes()
+        gate = ThresholdActionPolicy(quotes=seam)
+        pending = asyncio.ensure_future(gate.coverage_met(PRICED, MONEY_COVERAGE))
+        await seam.entered.wait()
+        pending.cancel()
+        with pytest.raises(asyncio.CancelledError):
+            await pending
+        assert seam.absorbed, "the arm is vacuous unless the seam really swallowed it"
+
+    async def test_a_cancellation_count_standing_from_before_the_call_is_not_read_as_one(
+        self,
+    ) -> None:
+        """The same check read as *"a baseline and a delta, never a boolean"*.
+
+        ``Task.cancelling()`` is a lifetime count only ``uncancel()`` lowers, so a
+        caller that absorbed an earlier cancellation to finish some work and then
+        asked this policy a question still reports a positive count with nothing
+        about **this** call cancelled. Read as a flag it would refuse every later
+        question on that task.
+        """
+        gate, _ = answering()
+
+        async def asked() -> CoverageAnswer:
+            inner = asyncio.current_task()
+            assert inner is not None
+            inner.cancel()
+            # Absorbed, and **no** ``uncancel()`` — which is what leaves the count
+            # standing for the rest of this task's life.
+            with contextlib.suppress(asyncio.CancelledError):
+                await asyncio.sleep(0)
+            assert inner.cancelling() == 1
+            return await gate.coverage_met(PRICED, MONEY_COVERAGE)
+
+        answer = await asyncio.ensure_future(asked())
+        assert (answer.met, answer.quoted) == (True, GOVERNING_QUOTE)
 
     async def test_a_coverage_rewritten_mid_call_does_not_move_the_answer(self) -> None:
         """ADR-0065, over the argument ``coverage_subject`` does not reach.

@@ -31,6 +31,7 @@ without standing anything up.
 
 from __future__ import annotations
 
+import asyncio
 from dataclasses import dataclass
 from typing import TYPE_CHECKING, NamedTuple
 
@@ -270,6 +271,25 @@ def _planned_with_external_content(request: ActionRequest) -> bool:
     """
     binding = request.egress_binding
     return binding is not None and binding.planned_with_external_content
+
+
+def _pending_cancellations() -> int:
+    """How many cancellation requests the running task is currently carrying.
+
+    Read as a **baseline and a delta, never as a boolean** — ``tools/consume.py``'s
+    ``pending_cancellations`` and ``models/streaming.py``'s ``_cancellations`` state
+    the same reading, and this is that reading stated locally rather than imported
+    across a subsystem boundary (golden rule 1). ``Task.cancelling()`` is a lifetime
+    count only ``uncancel()`` lowers, so a caller that absorbed an earlier
+    cancellation to finish some work and then asked this policy a question still
+    reports a positive count with nothing about *this* call cancelled. **An unmoved
+    count means no cancellation request reached this task during the call; an
+    increased one means one did**, from a party the count cannot name.
+
+    Outside a task there is nothing to have been cancelled, and the answer is zero.
+    """
+    task = asyncio.current_task()
+    return 0 if task is None else task.cancelling()
 
 
 class _Authority(NamedTuple):
@@ -1390,6 +1410,18 @@ class ThresholdActionPolicy:
         quotes. A component that asked writes no row, and the one call is confirmed
         under ADR-0148 §3's route (a).
 
+        **And a cancellation the seam absorbed is delivered onward** (ADR-0060).
+        ``core/protocols.py``'s cancellation clause is explicit that a method *"never
+        converts such a cancellation into a return value, and never lets a
+        collaborator's suppressed cancellation stand in for its own"*. Nothing forces
+        a ``GoalQuotes`` to let a ``CancelledError`` through: one that caught it and
+        answered ``()`` would leave this member holding an empty tuple, and an empty
+        tuple is this seam's word for *the goal holds no quote for this act* — so an
+        unmet answer would be returned to a caller that had already asked for the
+        work to stop, and a proposal would be declined for a reason that never
+        happened. The cancellation count is read before the await and compared after
+        it, and an increase re-raises. Adversarial review, round 5, ``blocker``.
+
         **A policy holding no ``GoalQuotes`` answers unmet** for any ``coverage``
         carrying a ``MONEY`` member (§4), the empty tuple leaving the evidence route
         met by nothing — the fail-closed direction, and the same arithmetic that
@@ -1416,7 +1448,10 @@ class ThresholdActionPolicy:
             and subject.intended_action is not None
             and any(member.kind is BoundKind.MONEY for member in members)
         ):
+            entered = _pending_cancellations()
             quotes = await self._quotes.for_action(subject.goal, subject.intended_action)
+            if _pending_cancellations() > entered:
+                raise asyncio.CancelledError
         return coverage_answer(members, subject, quotes)
 
 
