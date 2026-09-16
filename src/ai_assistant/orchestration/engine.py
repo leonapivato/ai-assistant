@@ -1607,7 +1607,11 @@ _NEVER_ENGAGED: Final = datetime.min.replace(tzinfo=UTC)
 
 
 def _summary_of(
-    goal: Goal, attempt: GoalAttempt | None, question: GoalQuestion | None
+    goal: Goal,
+    attempt: GoalAttempt | None,
+    question: GoalQuestion | None,
+    *,
+    effect_in_flight: bool,
 ) -> GoalSummary:
     """Project one goal onto what a surface is shown (ADR-0250 §15).
 
@@ -1622,10 +1626,21 @@ def _summary_of(
     no attempt is not paused, and neither is a ``BLOCKED`` **goal** — §5's derivation is
     over the attempt's state and ADR-0249 §4 keeps the two vocabularies apart.
 
+    **``effect_in_flight`` is ADR-0261 §6's predicate and reaches here as a *fact***,
+    for ``paused``'s own reason one fact over: *"the engine computes it, so that two
+    surfaces cannot render it differently"*, and **no adapter derives it**. It arrives
+    already answered by ``PlanStore.has_outstanding_effect`` rather than being computed
+    from the attempt this function is handed — the predicate is **goal-wide**, so an
+    ``INDETERMINATE`` step on an *older* attempt makes it true while the current
+    attempt says nothing about it, and it is **never** derived from an
+    :class:`~ai_assistant.core.types.AttemptOutcome`, which is what lets it clear.
+
     Args:
         goal: The goal to project.
         attempt: Its current attempt — the latest by ``opened_at`` — or ``None``.
         question: Its open question, where one stands.
+        effect_in_flight: Whether an action of this goal is outstanding, as the store
+            answered it for **this** goal (ADR-0261 §6).
 
     Returns:
         The summary.
@@ -1649,6 +1664,7 @@ def _summary_of(
                 expires_at=question.expires_at,
             )
         ),
+        effect_in_flight=effect_in_flight,
     )
 
 
@@ -5136,9 +5152,24 @@ class Engine:
         engaged = [goal for goal in by_id if goal.last_engaged_at is not None]
         engaged.sort(key=lambda goal: goal.last_engaged_at or _NEVER_ENGAGED, reverse=True)
         ordered = engaged + [goal for goal in by_id if goal.last_engaged_at is None]
+        # ADR-0261 §6: **one `has_outstanding_effect` call per listed goal** — per goal
+        # of the page this call returns, and not per goal the export held, because
+        # "listed" is what a surface is shown. The engine takes the member rather than
+        # walking `attempts_of` and `get_execution`, over a history ADR-0249 §5 and §12
+        # leave append-only and unbounded: what the member buys is a bound on *this*
+        # engine's reads "and an answer that is correct at all", which the walk could
+        # not be. The answer is read per call and **never cached across calls**.
+        page = ordered[offset : offset + limit]
         return tuple(
-            _summary_of(goal, current.get(goal.id), standing.get(goal.id))
-            for goal in ordered[offset : offset + limit]
+            [
+                _summary_of(
+                    goal,
+                    current.get(goal.id),
+                    standing.get(goal.id),
+                    effect_in_flight=await self._plans.has_outstanding_effect(goal.id),
+                )
+                for goal in page
+            ]
         )
 
     async def withdraw_clarification(self, question_id: Identifier, /) -> ClarificationWithdrawal:
@@ -5259,16 +5290,36 @@ class Engine:
         and one computed after separate attempt commits misses a step that resolved in
         between.
 
-        **What this lane does *not* do, and why it is a widening rather than L2's
-        work** (issue #2435). ADR-0261 §13 books this call on L2, but §2's conjunct
-        lands with the contract in L1 — so on the cut as written ``main`` cannot
-        abandon a goal holding a live attempt between the two merges. The call is
-        therefore taken here and **nothing else of L2 is**: the answer is mapped to
-        ``GoalAbandonment.ABANDONED`` unconditionally, the ``bool`` the member returns
-        is **discarded**, and §2's single ``StaleExecutionError`` re-read-and-retry is
-        not taken. Mapping the ``bool`` onto ADR-0261 §6's
-        ``ABANDONED_EFFECT_IN_FLIGHT``, that retry, ``GoalSummary.effect_in_flight``'s
-        computation and §7's refusal catch are all still L2's.
+        **The answer is ADR-0261 §6's fourth member where the call reports one**, and
+        ``ABANDONED`` in every other abandoning case: *"It is returned **exactly where**
+        ``close_goal_abandoned`` **answers true**"*, that answer being the predicate
+        evaluated in the same indivisible step that ends the goal's attempts and closes
+        it, *"so it is the state of the whole goal at the one instant the act had"*.
+        **No second read is taken for it, it is assembled from no second call, and it is
+        derived from no** :class:`~ai_assistant.core.types.AttemptOutcome`. It is a
+        **snapshot** and is not made durable: a listing that later reads
+        ``effect_in_flight`` false *"is the accurate answer to a different question"*,
+        and nothing here re-reads to keep the answer current.
+
+        **The single ``StaleExecutionError`` retry, and what it re-takes** (§2). A lost
+        ``Goal.version`` is the only way the member takes that class, and the class
+        directs a caller to re-read and retry. **What is re-taken is this act's own
+        first-read decision and not the call**: a re-read finding the goal **closed**
+        answers ``ALREADY_CLOSED``, one finding **none** answers ``NO_SUCH_GOAL``, and
+        only where the goal is still open is the call made again, under the version just
+        read. **A second refusal propagates** and the act ends there, having written
+        nothing either time — *"the bound being deliberate, because a writer that raced
+        the act once can race it again and an unbounded act would spin against it"*. The
+        retry is a second **attempt**, so it carries its own ending: ADR-0268 §1 takes
+        ``end_for_goal`` *"once per closing-write attempt"*, and the pair is structured
+        in :meth:`_ending_then_close` so that an attempt is never made without one
+        (#2452).
+
+        **This path still commits no attempt, computes no ``AttemptOutcome`` and takes
+        no outstanding-effect read of its own** (§13): §2 and §3 put all three inside the
+        one call, *"and a lane that split them out would rebuild the window the member
+        exists to remove"*. The listing's ``has_outstanding_effect`` call is a different
+        path and is untouched by that prohibition.
 
         **The question is settled first**, so a call that dies between the two writes
         leaves an open goal whose question is gone rather than a closed goal still
@@ -5289,12 +5340,13 @@ class Engine:
             goal_id: The goal to abandon.
 
         Returns:
-            Which of the three states this call reached. ``ABANDONED_EFFECT_IN_FLIGHT``
-            is L2's to produce and is never returned here (above).
+            Which of ADR-0261 §6's four states this call reached.
 
         Raises:
             StaleExecutionError: As ``close_goal_abandoned`` raises it (ADR-0014 §5,
-                ADR-0261 §2), on a lost ``Goal.version`` and on nothing else.
+                ADR-0261 §2), on a lost ``Goal.version`` and on nothing else — **on the
+                retry's own call**, the first refusal of that class being the one this
+                act re-reads for.
         """
         goal = await self._plans.get_goal(goal_id)
         if goal is None:
@@ -5302,14 +5354,31 @@ class Engine:
         if not is_open(goal):
             return GoalAbandonment.ALREADY_CLOSED
         await self._withdraw_open_question(goal.id)
-        await self._ending_then_close(goal.id, goal_version=goal.version)
+        try:
+            outstanding = await self._ending_then_close(goal.id, goal_version=goal.version)
+        except StaleExecutionError:
+            # §2's one retry, re-taking the act's **first-read decision**: the goal has
+            # advanced under this act, so what is asked again is whether there is still
+            # an abandonment to perform — not merely whether the write lands. A goal
+            # closed meanwhile is `ALREADY_CLOSED` and one deleted meanwhile is
+            # `NO_SUCH_GOAL`, and **neither makes a second call at all**; a second
+            # refusal of the call below propagates and the act ends there.
+            reread = await self._plans.get_goal(goal_id)
+            if reread is None:
+                return GoalAbandonment.NO_SUCH_GOAL
+            if not is_open(reread):
+                return GoalAbandonment.ALREADY_CLOSED
+            outstanding = await self._ending_then_close(reread.id, goal_version=reread.version)
         # §12 again, over the window the goal's compare-and-swap does not cover: a
         # question admitted while the status write was in flight is still this goal's
         # open question, and the goal is now closed.
         await self._withdraw_open_question(goal.id)
-        return GoalAbandonment.ABANDONED
+        # §6's mapping, over the one call's own answer and nothing else.
+        return (
+            GoalAbandonment.ABANDONED_EFFECT_IN_FLIGHT if outstanding else GoalAbandonment.ABANDONED
+        )
 
-    async def _ending_then_close(self, goal_id: str, /, *, goal_version: int) -> None:
+    async def _ending_then_close(self, goal_id: str, /, *, goal_version: int) -> bool:
         """One abandonment attempt: the ending, then the closing write (ADR-0268 §1).
 
         **The two writes of one attempt, in the one order ADR-0268 §1 admits**, and
@@ -5338,11 +5407,13 @@ class Engine:
 
         **Why this is a method and not two lines at the call site.** ADR-0268 §1
         takes the ending *"once per closing-write attempt"*, ADR-0261 §2's
-        re-read-and-retry included, *"each carrying that attempt's own instant"*. The
-        retry is ADR-0261 L2's and is not in this tree (#2435, #2452), so the act
-        makes exactly one attempt today — and the pair is stated here so that the
-        lane adding the retry wraps an attempt that already carries its ending,
-        rather than having to remember to add a second call.
+        re-read-and-retry included, *"each carrying that attempt's own instant"*.
+        :meth:`_abandon_goal`'s retry therefore calls this method a **second** time
+        rather than re-issuing the closing write alone, which is how arm 4's *"once per
+        attempt it makes"* is satisfied by construction instead of by memory: an
+        attempt cannot be made here without its own ending, its own instant and its own
+        version. A fresh row a reopen admitted between the two attempts is ended by the
+        second call with the rest.
 
         **What each failure leaves** (§1). Where ``end_for_goal`` faults the act ends
         here having written nothing on this attempt — its step is all-or-nothing —
@@ -5360,6 +5431,12 @@ class Engine:
             goal_version: The version this attempt's own closing write names as its
                 ``expected_version``.
 
+        Returns:
+            Whether any step of any execution of any attempt of this goal stood
+            ``INDETERMINATE`` or ``RUNNING`` at the instant the closing write took —
+            ADR-0261 §6's predicate, answered by the write itself and never by a read
+            this engine takes.
+
         Raises:
             StaleExecutionError: As ``close_goal_abandoned`` raises it, on a lost
                 ``Goal.version`` and on nothing else.
@@ -5367,10 +5444,7 @@ class Engine:
         """
         at = self._clock()
         await self._end_authorizations(goal_id, at=at, goal_version=goal_version)
-        # The answer is deliberately discarded: what it reports is ADR-0261 §6's
-        # fourth `GoalAbandonment` member, which L2 owes together with the retry and
-        # the listing's field (issue #2435).
-        await self._plans.close_goal_abandoned(
+        return await self._plans.close_goal_abandoned(
             goal_id,
             at=at,
             expected_version=goal_version,
