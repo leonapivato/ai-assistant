@@ -8298,6 +8298,7 @@ class GoalAuthorizations(Protocol):
         ...
 
 
+@runtime_checkable
 class GoalQuotes(Protocol):
     """The quotes one goal holds for one intended action, in order (ADR-0267 §5).
 
