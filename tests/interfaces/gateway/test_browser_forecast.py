@@ -140,6 +140,48 @@ async def test_a_turn_that_read_its_forecast_says_nothing_about_one(
         assert "forecast" not in said.lower()
 
 
+@pytest.mark.parametrize("member", list(ForecastNotRead))
+async def test_no_action_was_needed_is_not_shown_beside_a_forecast_statement(
+    gateway_browser: Browser, tmp_path: Path, member: ForecastNotRead
+) -> None:
+    """Adversarial review, round 1, ``major``: the contradiction on one screen.
+
+    A forecast read is serviced in context assembly and not as a plan step, so a turn
+    whose planner then declined every capability reaches ``renderOutcome`` with an empty
+    plan while ``forecast_not_read`` says a read it asked for did not happen. "No action
+    was needed." above "That forecast read was begun and stopped" says both that nothing
+    was owed and that something was attempted and stopped.
+
+    **All six, because this vocabulary has no member for having attempted nothing** —
+    ADR-0260 §10 fixes the absence as that state, so ``null`` is where the guard stays
+    off. Driven rather than read, because the guard is a condition over an outcome and a
+    substring assertion over ``app.js`` is as green over one nothing evaluates.
+    """
+    async with driving(gateway_browser, tmp_path) as drive:
+        base = await _composed(drive)
+        assert base.turn is not None
+        assert not base.turn.plan.steps, "the arm is about a turn that planned nothing"
+        said = await _ask(
+            drive, base.model_copy(update={"reply": "I cannot say.", "forecast_not_read": member})
+        )
+
+        assert "No action was needed." not in said, member
+        assert _SAID[member] in said, member
+
+
+async def test_no_action_was_needed_is_still_shown_where_no_forecast_was_asked_for(
+    gateway_browser: Browser, tmp_path: Path
+) -> None:
+    """The control the arm above needs to mean anything: a guard that suppressed the
+    notice unconditionally would pass every case there and would have taken a true
+    statement off every ordinary turn."""
+    async with driving(gateway_browser, tmp_path) as drive:
+        base = await _composed(drive)
+        said = await _ask(drive, base.model_copy(update={"reply": "Sunny, most likely."}))
+
+        assert "No action was needed." in said
+
+
 async def test_only_the_awaited_statement_names_a_command(
     gateway_browser: Browser, tmp_path: Path
 ) -> None:

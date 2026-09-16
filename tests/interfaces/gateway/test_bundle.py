@@ -8160,6 +8160,33 @@ def test_the_page_renders_the_forecast_statement_beside_the_reply_and_not_in_pla
     assert render.index("member === undefined") < render.index("line(body,")
 
 
+def test_the_no_action_notice_is_guarded_on_the_forecast_member() -> None:
+    """Adversarial review, round 1, ``major``, pinned where the condition is written.
+
+    "No action was needed." above "That forecast read was begun and stopped" is the
+    contradiction on one screen that notice's guard exists to prevent, and this lane is
+    what would have created it: before ADR-0260 §10's statement the refused read reached
+    this page through no route, so the two lines could not sit together.
+
+    Asserted over the condition's own text, beside the executed arms in
+    ``test_browser_forecast.py``: a driven case says the notice is absent on the outcomes
+    it was driven over, and this says the guard is a term of the condition rather than an
+    accident of the shapes those cases happened to use.
+
+    **``search_not_serviced`` is deliberately not a term here.** It is rendered by no
+    route on this page at all (ADR-0242 §9's deferral, #2237), so there is no statement
+    for the notice to contradict — which is the "a lane closes its own and no more"
+    triage ``interfaces/cli.py``'s guard records for ``read_confirmation`` and
+    ``read_answer`` (#2329).
+    """
+    outcome = _functions(_code("app.js"))["renderOutcome"]
+
+    guard = outcome[outcome.index("outcome.steps.length === 0") :]
+    guard = guard[: guard.index('line(body, "No action was needed."')]
+    assert "outcome.forecast_not_read === null" in guard
+    assert "search_not_serviced" not in guard
+
+
 def test_no_forecast_statement_says_why_a_ruling_went_the_way_it_did() -> None:
     """ADR-0242 §9's bar, which ADR-0260 §10 binds on this vocabulary word for word.
 

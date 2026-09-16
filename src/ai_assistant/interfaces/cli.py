@@ -7899,15 +7899,36 @@ def _render_turn(outcome: TurnOutcome, *, streamed: _StreamedReply | None = None
         # and on neither of the other two**, because a turn that reached nothing is
         # exactly a turn of which "no action was needed" may well be true.
         #
+        # **And not a turn that asked for a forecast it did not get** (ADR-0260 §10).
+        # A forecast read is serviced where a search is — in context assembly and not
+        # as a plan step (§7) — so a turn whose planner then declined every capability
+        # reaches here with an empty plan while `forecast_not_read` says a read this
+        # turn asked for did not happen. "No action was needed." one line from "that
+        # forecast read was begun and stopped" is the same contradiction on one screen
+        # this guard exists to prevent, and it is one **this lane would otherwise have
+        # created**: before §10's statement the refused read was invisible here, so the
+        # two lines could not sit together. Adversarial review, round 1, `major`.
+        #
+        # **The guard is on the member's presence and on all six of it**, which is
+        # where this differs from `_reached_outside`'s arm one vocabulary over. That
+        # one guards `REACHED` alone "because a turn that reached nothing is exactly a
+        # turn of which 'no action was needed' may well be true" — `OutboundReach` has
+        # a member for having attempted nothing. `ForecastNotRead` has none: §10 fixes
+        # the absence as the state where "the servicing recorded no
+        # `ForecastDisposition`", so **every** member means a read this turn asked for
+        # produced nothing, and `None` is already exactly where this guard stays off.
+        #
         # **The two members #2329 records are deliberately still unguarded**, and that
         # is the triage rule rather than an oversight: `read_confirmation` and
         # `read_answer` are pre-existing, neither is rendered by this lane, and PR
         # #2325 — which closed the two its own members created and deferred those two
         # out — is the ratified precedent for a lane closing its own and no more.
+        # `search_not_serviced` is unguarded here for that same reason and is #2329's.
         if (
             not plan.steps
             and outcome.clarification is None
             and outcome.disambiguation is None
+            and outcome.forecast_not_read is None
             and not _reached_outside(outcome)
         ):
             _print("[dim]No action was needed.[/]")

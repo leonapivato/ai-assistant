@@ -1228,6 +1228,23 @@ function renderOutcome(outcome, chosenAt, provenance) {
   // action was needed." above a question the owner is being asked to answer is the same
   // contradiction on one screen, two members further on. It is the *opposite* of what
   // each of those turns says: action was needed and is waiting on an answer.
+  //
+  // **And not a turn that asked for a forecast it did not get** (ADR-0260 §10). A
+  // forecast read is serviced in context assembly and not as a plan step, so a turn
+  // whose planner then declined every capability reaches here with an empty plan while
+  // `forecast_not_read` says a read this turn asked for did not happen — and "No action
+  // was needed." one line above "That forecast read was begun and stopped" is the same
+  // contradiction on one screen, one member further on. It is one **this lane would
+  // otherwise have created**: before §10's statement the refused read reached this page
+  // through no route, so the two lines could not sit together (adversarial review,
+  // round 1, `major`).
+  //
+  // **On the member's presence and on all six of it.** §10 fixes the absence as the
+  // state where the servicing "recorded no `ForecastDisposition`, and means nothing
+  // else", so every member means a read this turn asked for produced nothing and `null`
+  // is already where this guard stays off. `search_not_serviced` is not here because it
+  // is rendered by no route on this page at all (#2237), which is the entry
+  // `_outcome_view` records.
   if (
     outcome.steps.length === 0 &&
     outcome.step === null &&
@@ -1235,7 +1252,8 @@ function renderOutcome(outcome, chosenAt, provenance) {
     outcome.read_confirmation === null &&
     outcome.read_answer === null &&
     outcome.clarification === null &&
-    outcome.disambiguation === null
+    outcome.disambiguation === null &&
+    outcome.forecast_not_read === null
   ) {
     line(body, "No action was needed.", "notice");
   }
