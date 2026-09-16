@@ -2575,11 +2575,14 @@ class FakePlanStore:
             PlanningError: If the execution is unknown, the step is not a step of it,
                 or that step names no intended action. **Nothing is written** in any.
         """
+        # Snapshotted **before the first await**, not inside the held resource: a caller
+        # that mutates the key while this call is queued would otherwise have the
+        # mutation picked up, so the key the row records would not be the key the stage
+        # holds and is about to dispatch (ADR-0018 §3). Re-implemented rather than
+        # imported from ``ai_assistant.planning``, for the module docstring's reason.
+        snapshot = _revalidated_key(effect_key)
         async with self._resource.held():
-            # Detached first, so the value the answer is decided by is the value stored
-            # and neither is the caller's mutable instance (ADR-0018 §3). Re-implemented
-            # rather than imported, for the module docstring's reason.
-            return self._claim_effect_locked(execution_id, step_id, _revalidated_key(effect_key))
+            return self._claim_effect_locked(execution_id, step_id, snapshot)
 
     def _claim_effect_locked(  # noqa: C901, PLR0911 — one return per row of ADR-0259 §2's second limb, so the totality that clause claims is visible; collapsing them would hide it
         self, execution_id: str, step_id: str, effect_key: EffectKey

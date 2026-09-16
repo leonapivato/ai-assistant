@@ -387,6 +387,35 @@ def test_the_key_reads_the_decision_and_not_the_mutable_request() -> None:
     assert call.effect_key != before, "and the decision is"
 
 
+def test_the_key_is_a_projection_of_the_binding_and_not_a_second_handle_on_it() -> None:
+    """§1: mutating the derived key rewrites neither the decision nor the request.
+
+    Pydantic passes an already-valid nested model through without copying, so a key
+    built straight from the binding would share the decision's :class:`BoundAccount` —
+    and a mutation of the *derived* value would rewrite the authorisation record while
+    the request kept its original, moving the two sides of ``authorises`` apart under a
+    caller who touched neither. ``from_request`` deep-copies the binding for exactly
+    this reason at the moment the value stops being the caller's; this is the one other
+    place a caller is handed a piece of it.
+    """
+    call = _call(binding=_binding())
+    key = call.effect_key
+    assert key is not None
+    assert key.egress_account is not None
+
+    key.egress_account.__dict__["identity"] = "someone.else@example.com"
+    key.egress_destinations[0].__dict__["canonical"] = "elsewhere@example.com"
+
+    assert call.decision.egress_binding is not None
+    assert call.decision.egress_binding.account.identity == "work@example.com"
+    assert call.request.egress_binding is not None
+    assert call.request.egress_binding.account.identity == "work@example.com"
+    assert call.decision.egress_binding.canonical_destination_set[0].canonical == ("a@example.com")
+    assert call.effect_key == _call(binding=_binding()).effect_key, (
+        "and a freshly derived key is unaffected, so the projection is per-access"
+    )
+
+
 def test_the_effect_key_is_a_plain_property_and_not_a_computed_field() -> None:
     """§9: a computed field enters ``model_dump()``, and ADR-0018 §4's rebuild runs
     against ``extra="forbid"`` — ``idempotency_key``'s own recorded reason."""

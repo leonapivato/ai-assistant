@@ -7744,3 +7744,49 @@ class PlanStoreContract:
         assert (
             await store.claim_effect(execution_id=state.id, step_id="s1", effect_key=_KEY)
         ).claim is EffectClaim.CLAIMED, "and leaves the pair free for a well-formed one"
+
+    async def test_a_key_mutated_while_the_claim_is_queued_does_not_reach_the_row(
+        self,
+    ) -> None:
+        """The key is snapshotted **before the first await**, not inside the resource.
+
+        A claim queued behind an occupied lock is a claim whose caller still holds the
+        :class:`EffectKey` it passed, and ``frozen=True`` does nothing about
+        ``key.__dict__`` (ADR-0018 §3). A store that snapshotted inside its worker would
+        record the **mutated** value while the stage went on to dispatch the unchanged
+        :class:`~ai_assistant.core.types.ToolCall` — so the goal's row would name an act
+        nobody performed, the act that *was* performed would answer
+        ``COMPLETED_OTHERWISE`` for ever, and a later step asking for the mutated key
+        would be satisfied from it.
+
+        Driven mid-flight rather than before or after the call, for the reason ADR-0065
+        §3 gives of its own cases: "each case must establish mid-flight observation, not
+        post-call isolation", because a post-call check passes on torn code.
+        """
+        if self.acquires_no_shared_resource:
+            pytest.skip("implementation awaits nothing between the call and the snapshot")
+
+        async with self.store_suspended_mid_write() as harness:
+            store = harness.store
+            held = await self._acting(store)
+            # A second **act** of the same goal, so the row under test is free and this
+            # arm is about the snapshot rather than about who holds the pair.
+            occupied = await self._acting(store, plan_id="p2", attempt_id="a2", actions=("ia2",))
+            await store.claim_effect(execution_id=occupied.id, step_id="s1", effect_key=_OTHER_KEY)
+            suspended = harness.arm("claim_effect")
+
+            mutable = _KEY.model_copy(deep=True)
+            claiming = asyncio.ensure_future(
+                store.claim_effect(execution_id=held.id, step_id="s1", effect_key=mutable)
+            )
+            try:
+                await suspended.reached()
+                # The caller mutates what it passed, mid-flight, to another valid key.
+                mutable.__dict__["parameters_digest"] = _OTHER_KEY.parameters_digest
+                await settle()
+            finally:
+                suspended.release()
+            assert (await claiming).claim is EffectClaim.CLAIMED
+
+            rows = {row.intended_action_id: row for row in (await store.export()).effects}
+            assert rows["ia1"].key == _KEY, "the row records the key the call was made with"

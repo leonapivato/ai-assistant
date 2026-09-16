@@ -22669,6 +22669,16 @@ class ToolCall(BaseModel):
         ToolInvoker, tool or component outside this system is ever passed
         this value** — the one seam it crosses is :meth:`PlanStore.claim_effect`.
 
+        **And what it hands back is a projection, not a second handle on the decision.**
+        The binding's account and destination set are **deep-copied** into the key, for
+        :meth:`PermissionDecision.from_request`'s own reason: pydantic passes an
+        already-valid nested model through without copying, so a key sharing the
+        decision's :class:`BoundAccount` would let a mutation of the *derived* value
+        rewrite the authorisation record while the request kept its original — the two
+        sides of ``authorises`` moving apart under a caller who touched neither.
+        "Copying here is the same discipline ADR-0018 §3 applied to registry queries",
+        at the one other place a caller is handed a piece of the binding.
+
         A plain ``property`` and specifically **not** a ``computed_field``, for the
         reason :attr:`idempotency_key` records: a computed field enters
         ``model_dump()``, and ADR-0018 §4's registration rebuild runs against
@@ -22680,12 +22690,18 @@ class ToolCall(BaseModel):
         binding = decision.egress_binding
         if binding is None:
             return EffectKey(tool_id=decision.tool.id, parameters_digest=decision.parameters_digest)
+        # Deep-copied, so the key is a **projection** of the binding and not a second
+        # handle onto it: pydantic passes an already-valid nested model through without
+        # copying, and a mutation of the derived value would otherwise rewrite the
+        # authorisation record — `from_request`'s own reason for deep-copying it.
         return EffectKey(
             tool_id=decision.tool.id,
             parameters_digest=decision.parameters_digest,
-            egress_account=binding.account,
+            egress_account=binding.account.model_copy(deep=True),
             egress_endpoint=binding.transport_endpoint,
-            egress_destinations=binding.canonical_destination_set,
+            egress_destinations=tuple(
+                member.model_copy(deep=True) for member in binding.canonical_destination_set
+            ),
         )
 
 
