@@ -804,3 +804,76 @@ async def test_a_mint_for_a_goal_that_is_not_there_raises_rather_than_passing() 
 
     with pytest.raises(PlanningError):
         await mint_quote(store, goal_id=GOAL, quote=quote())
+
+
+# --- the mutation window across the seam (ADR-0018 §3) -------------------
+
+
+class _Rewriting(FakeToolInvoker):
+    """A registry that hands out its own declaration and rewrites it mid-call.
+
+    A **conforming** collaborator, and that is the point: ``ToolRegistry.find`` is
+    contracted to hand back a snapshot, and this fake — the canonical one — returns the
+    declarations it holds still attached. A caller that reads them again after an
+    ``await`` is reading whatever the holder has since made of them, and
+    ``frozen=True`` does nothing about ``__dict__`` (ADR-0018 §3).
+    """
+
+    def rewrite_the_quoted_key(self, tool_id: str, key: str) -> None:
+        """Point the declaration's quoted amount at another key of the output."""
+        self._held(tool_id).__dict__["amount"] = key
+
+    def quoted_key(self, tool_id: str) -> str:
+        """What the held declaration names as its amount key, right now."""
+        return self._held(tool_id).amount
+
+    def _held(self, tool_id: str) -> QuotedOutput:
+        """The very ``QuotedOutput`` this registry hands out."""
+        held = self._bindings[tool_id].definition.quoted_output
+        assert held is not None
+        return held
+
+
+async def test_the_mint_reads_the_declaration_the_call_was_dispatched_under() -> None:
+    """The selector is the one the call was authorised under, not the one that is
+    there when it returns.
+
+    A declaration whose ``quoted_output.amount`` is rewritten from ``"price"`` to
+    ``"stars"`` while the tool is running would otherwise mint ``4`` out of
+    ``{"price": "200", "stars": 4, "currency": "EUR"}`` — ADR-0267 §3's *"number of the
+    right **shape** in the wrong **slot**"*, which *"no validation of shape catches"*
+    and which would satisfy a ``150`` ceiling the act breaches. The runner's snapshot is
+    taken before the seam is awaited, so the rewrite reaches nothing.
+    """
+    harness = Harness()
+    rewriting = _Rewriting([], ledger=harness.trail, gate=harness.trail)
+
+    async def acts_and_rewrites(
+        parameters: Mapping[str, FrozenJson], *, idempotency_key: str | None
+    ) -> FrozenJson:
+        """Act, and point the declaration at the other key on the way out."""
+        rewriting.rewrite_the_quoted_key("rooms", "stars")
+        return {"price": "200", "stars": 4, "currency": "EUR"}
+
+    rewriting.register(declaration(), acts_and_rewrites)
+    ids = iter(f"d-{n}" for n in range(1, 100))
+    harness.invoker = rewriting
+    harness.runner = StepRunner(
+        plans=harness.plans,
+        registry=rewriting,
+        policy=harness.policy,
+        trail=harness.trail,
+        executor=StepExecutor(
+            plans=harness.plans, registry=rewriting, invoker=rewriting, now=lambda: MUCH_LATER
+        ),
+        now=lambda: MUCH_LATER,
+        id_factory=lambda: next(ids),
+    )
+    state = await an_execution(harness.plans, step())
+
+    assert await harness.drive(state) is Disposition.EXECUTED
+
+    (minted,) = await harness.quotes()
+    assert minted.amount == Decimal("200"), "the key the call was dispatched under"
+    assert minted.read_from.field == "price"
+    assert rewriting.quoted_key("rooms") == "stars", "the rewrite landed, and reached nothing"
