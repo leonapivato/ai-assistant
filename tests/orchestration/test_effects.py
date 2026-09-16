@@ -13,6 +13,7 @@ supplies more than one row supplies them to find out which one the answer came f
 
 from __future__ import annotations
 
+from collections.abc import Mapping
 from datetime import UTC, datetime, timedelta
 from typing import TYPE_CHECKING, Final
 
@@ -39,12 +40,15 @@ from ai_assistant.core.types import (
     VerificationKind,
 )
 from ai_assistant.orchestration.effects import (
+    _identical,
     condition_elements,
     conditions_hold,
     verification_holds,
 )
 
 if TYPE_CHECKING:
+    from collections.abc import Iterator
+
     from ai_assistant.core.types import FrozenJson
 
 AT: Final = datetime(2026, 9, 16, 9, 0, tzinfo=UTC)
@@ -557,3 +561,69 @@ def test_field_equals_walks_a_container_rather_than_comparing_its_top_level(
     predicate = StepVerification(kind=VerificationKind.FIELD_EQUALS, field="booking", equals=equals)
 
     assert verification_holds(predicate, {"booking": value}) is holds
+
+
+class _CountingMapping(Mapping[str, "FrozenJson"]):
+    """A mapping that counts key lookups, as ``FrozenDict`` makes them cost.
+
+    ``FrozenDict`` holds its pairs as a tuple and *"lookup is therefore a linear
+    scan"*, so what decides whether a wide object is affordable is **how many lookups
+    the comparison makes**, not how fast one is. Counting them is deterministic where
+    a wall-clock assertion would be flaky, and it is the same shape ``ItemsView``
+    gives a mapping that overrides no view: iterating ``items()`` is one lookup per
+    key.
+    """
+
+    def __init__(self, pairs: Mapping[str, FrozenJson]) -> None:
+        """Wrap ``pairs`` with a lookup counter starting at zero."""
+        self._pairs = dict(pairs)
+        self.lookups = 0
+
+    def __getitem__(self, key: str) -> FrozenJson:
+        """Count the lookup, then answer it."""
+        self.lookups += 1
+        return self._pairs[key]
+
+    def __iter__(self) -> Iterator[str]:
+        """Iterate the keys, which costs no lookup."""
+        return iter(self._pairs)
+
+    def __len__(self) -> int:
+        """The size, which costs no lookup."""
+        return len(self._pairs)
+
+
+def test_two_objects_of_different_sizes_are_refused_without_a_single_lookup() -> None:
+    """The one comparison that is free is made first (adversarial review, round 2).
+
+    A wide output object compared against a literal of another size must not cost a
+    scan per key: an implementation comparing key **sets** first, or building a plain
+    mapping from either side, makes thousands of lookups here and this row catches it
+    whatever the machine is doing.
+
+    **Asserted at the comparison rather than through the predicate**, because
+    ``StepVerification`` validates ``equals`` and refuses a mapping whose nesting it
+    cannot measure the way pydantic reads it — so a counting stand-in cannot ride on
+    one. The two rows above this pair are what tie ``verification_holds`` to this
+    function.
+    """
+    wide = _CountingMapping({f"k{n}": n for n in range(2000)})
+    narrow = _CountingMapping({"k0": 0})
+
+    assert not _identical(wide, narrow)
+    assert (wide.lookups, narrow.lookups) == (0, 0)
+
+
+def test_two_objects_of_one_size_are_walked_with_one_lookup_per_key_per_side() -> None:
+    """And within one size the walk is linear in lookups, not quadratic.
+
+    ``2n`` and not ``n²``: one lookup on the left through ``items()``, one on the right
+    to find the member it is compared against, and **no key-set comparison beside
+    them** — which is where the quadratic the review found actually lived.
+    """
+    size = 500
+    left = _CountingMapping({f"k{n}": n for n in range(size)})
+    right = _CountingMapping({f"k{n}": n for n in range(size)})
+
+    assert _identical(left, right)
+    assert (left.lookups, right.lookups) == (size, size)
