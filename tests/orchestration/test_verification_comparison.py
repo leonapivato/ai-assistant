@@ -1348,3 +1348,34 @@ async def test_continues_is_true_on_exactly_three_members_over_an_open_goal() ->
             assert continues_on(outcome, status) is (outcome in unfinished), (outcome, status)
         for closed in (GoalStatus.ACHIEVED, GoalStatus.ABANDONED):
             assert continues_on(outcome, closed) is False, (outcome, closed)
+
+
+async def test_every_criterion_met_beside_an_indeterminate_step_is_still_verified() -> None:
+    """Arm 7's pair, at the seam that decides the member: limbs 4 and 5 gain no conjunct.
+
+    An ``INDETERMINATE`` step is not decisive under §2 — it neither satisfies nor
+    contradicts — so a criterion another step's own answer established stays **met**
+    beside one, and §4's limbs yield **``VERIFIED``**. *"``VERIFIED`` is therefore
+    unreachable beside a possible effect, and with it ``ACHIEVED`` — reached by the
+    attempt **not ending** rather than by a conjunct on limbs 4 and 5"*, which is also
+    what keeps ADR-0259 §4's acts 3 and 4 reachable.
+
+    **This is the arm that fails against an implementation closing the gap in the wrong
+    place** — one that quietly withheld ``VERIFIED`` here would take the ending rule's
+    work into the limbs, and ADR-0259's reconciliation route with it. The engine's own
+    half, that such an attempt ends nothing at all, is
+    ``test_engine_verify_phase.py``'s.
+    """
+    decisions = (
+        a_decision("d-1", definition=a_tool(postconditions=_BOOKED), digest=DIGEST),
+        a_decision("d-2", definition=a_tool(postconditions=_BOOKED), digest=OTHER_DIGEST),
+    )
+    comparison = await _compared(
+        a_goal(a_criterion(RIVERSIDE)),
+        a_step("s-1", output=_HOLDS, approval_ref="d-1"),
+        a_step("s-2", status=StepStatus.INDETERMINATE, output=None, approval_ref="d-2"),
+        decisions=decisions,
+    )
+
+    assert _one(comparison) is CriterionResult.MET, "§2: an INDETERMINATE step is not decisive"
+    assert comparison.outcome is AttemptOutcome.VERIFIED

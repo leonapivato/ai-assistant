@@ -296,13 +296,14 @@ def a_step(  # noqa: PLR0913 — one keyword per field of the stored step an arm
         approval_ref=approval_ref,
         skip_reason=skip_reason,
         # The model's own invariants: a step that ran carries both instants, and a
-        # `FAILED` one carries a failure. They are supplied here rather than asserted
-        # away so that every record an arm compares is one the store could have written.
+        # `FAILED` or `INDETERMINATE` one carries a failure. They are supplied here
+        # rather than asserted away so that every record an arm compares is one the
+        # store could have written.
         started_at=AT if ran or (attempts > 0 and status is StepStatus.RUNNING) else None,
         finished_at=AT if ran or (attempts == 0 and satisfied_by is not None) else None,
         failure=(
             StepFailure(kind=ToolFailureKind.UNAVAILABLE, message="the provider was unreachable")
-            if status is StepStatus.FAILED
+            if status in {StepStatus.FAILED, StepStatus.INDETERMINATE}
             else None
         ),
         satisfied_by_execution=None if satisfied_by is None else satisfied_by[0],
