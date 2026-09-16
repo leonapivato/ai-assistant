@@ -276,7 +276,47 @@ function headerHalf() {
   }
 }
 
+// --- which session a request belongs to (#2404) -------------------------------
+//
+// **How many sessions this page has been handed**, so that a request sent under one can
+// say whether it is still the one this browser holds when its answer comes back.
+//
+// The generation counters a panel over order two *listings*; they say nothing about the
+// session under them. Let a listing hang, let any other request meet `no-live-session` —
+// `sessionLost` forgets the header half and puts the bootstrap entry back — and the
+// hanging run is still the latest, so it resumes, renders, and reveals its panel: the
+// owner's rows on screen beside a form asking them to start a session. PR #2393's
+// adversarial review found it at round 9 in one listing and fixed it there; #2404 is the
+// same shape at every other one.
+//
+// **It is counted inside the two functions that write the stored half**, rather than at
+// their callers, so it cannot fall out of step with what it counts: there is no third
+// place a session begins or ends.
+let sessionEra = 0;
+
+// **Whether the session a request was sent under is still the one this page holds.**
+//
+// Both halves are asked and neither subsumes the other. The count catches a session this
+// page lost and re-entered under a value that happens to be identical, where comparing
+// the stored half alone would see nothing changed. The half catches a session *another
+// tab* started, where the storage this page reads changed under it and nothing here
+// counted anything.
+//
+// **It governs what a resumed continuation renders and reveals, and nothing else.** A
+// *condition* is still reported where it was before: `relay` writes a refusal into its
+// panel before it returns, and each caller's `catch` writes a transport failure. A panel
+// carrying nothing but a fault says nothing about the owner, so ADR-0168 §9's rule
+// against flattening a condition into silence keeps that path and does not reach this
+// one, where what would be revealed is the owner's own rows.
+function sameSession(half, era) {
+  return era === sessionEra && headerHalf() === half;
+}
+
 function rememberHeaderHalf(value) {
+  // A session handed to this page is a different session from the one before it,
+  // whatever the value turns out to be — counted before the write, so that a store
+  // which refuses still ends the era every request in flight was sent under.
+  sessionEra += 1;
   try {
     window.localStorage.setItem(STORAGE_KEY, value);
     return true;
@@ -316,6 +356,7 @@ function usableCadence(microseconds) {
 }
 
 function forgetHeaderHalf() {
+  sessionEra += 1;
   try {
     window.localStorage.removeItem(STORAGE_KEY);
   } catch (_) {
@@ -3990,8 +4031,13 @@ async function readPending(quiet) {
   }
   pendingRun += 1;
   const run = pendingRun;
+  const era = sessionEra;
   try {
     const body = await relay(half, "/confirmations", {}, "confirmations");
+    // Not this session's answer (#2404).
+    if (!sameSession(half, era)) {
+      return;
+    }
     if (body === null || run !== pendingRun) {
       return;
     }
@@ -7697,6 +7743,7 @@ async function readDeliveries(half) {
 // lives, so that is what a caller classifying an outcome is given — and handing the
 // status beside it would invite reading the condition off the wrong half.
 async function relay(half, path, payload, panelId, stopping, noticed) {
+  const era = sessionEra;
   const response = await fetch(path, {
     method: "POST",
     headers: admitted(half, true),
@@ -7755,6 +7802,31 @@ async function relay(half, path, payload, panelId, stopping, noticed) {
   // Every other request that names a conversation goes through here — the digest, the
   // forget, and `observe`, which sends this view's selection exactly as `ask` does.
   conversationLost(body, payload.conversation_id);
+  // **A refusal answered to a request sent under a session this page no longer holds is
+  // not reported at all** (#2404). Everywhere else the guard sits at the caller, after
+  // this function returns; here it cannot, because `refused` renders *before* the return
+  // — which is the shape adversarial review recorded at round 12 of PR #2393, one panel
+  // over, and closed there by aborting the superseded listing.
+  //
+  // **What is at stake is a live session, not a stale panel.** Let a listing hang, let
+  // the session end, let the owner re-enter, and then let the held request go: it
+  // carries the old header half and the *new* cookie, so the gateway answers
+  // `cookie-half-mismatch` — and `refused` → `report` → `sessionLost` forgets the half
+  // of the session the owner has just started and throws them back to the bootstrap
+  // form. A dead request ending a live session, from the one door a comparison after the
+  // `await` cannot reach.
+  //
+  // **`conversationLost` above it and `noticed` below it are deliberately outside this.**
+  // A conversation "belongs to the hub and outlives every session", which is what the
+  // re-entry sentence tells the owner, so `no-such-conversation` is as true of the
+  // conversation this view holds whichever session asked — and it guards itself anyway,
+  // on a selection `forgetHeaderHalf` has already cleared. `noticed` is the one caller
+  // being told *which* refusal its act met (ADR-0177 §7's not-known branch): that is a
+  // fact about the act rather than about the panel, and withholding it would strand a
+  // consent token rather than protect anything.
+  if (!sameSession(half, era)) {
+    return null;
+  }
   refused(panelId, body, response.status);
   if (noticed !== undefined) {
     noticed(body);
@@ -7816,8 +7888,13 @@ async function listConversations() {
   }
   const stopping = new AbortController();
   listing = stopping;
+  const era = sessionEra;
   try {
     const body = await relay(half, "/conversations", {}, "conversations", stopping);
+    // Not this session's answer (#2404).
+    if (!sameSession(half, era)) {
+      return mine;
+    }
     if (body === null || mine !== listed) {
       return mine;
     }
@@ -8204,8 +8281,13 @@ async function listSources() {
     showBootstrap();
     return;
   }
+  const era = sessionEra;
   try {
     const body = await relay(half, "/sources", {}, "sources");
+    // Not this session's answer (#2404).
+    if (!sameSession(half, era)) {
+      return;
+    }
     if (body === null) {
       return;
     }
@@ -8447,8 +8529,13 @@ async function listStanding() {
   }
   el("standing-state").textContent = "";
   show("standing", true);
+  const era = sessionEra;
   try {
     const body = await relay(half, "/grants/standing", {}, "standing");
+    // Not this session's answer (#2404).
+    if (!sameSession(half, era)) {
+      return;
+    }
     const list = el("standing-list");
     clearNode(list);
     if (body === null) {
@@ -8506,8 +8593,13 @@ async function listGrantHistory() {
     showBootstrap();
     return;
   }
+  const era = sessionEra;
   try {
     const body = await relay(half, "/grants/recent", {}, "history");
+    // Not this session's answer (#2404).
+    if (!sameSession(half, era)) {
+      return;
+    }
     if (body === null) {
       return;
     }
@@ -8630,12 +8722,17 @@ async function readBeliefs(more, run) {
     return;
   }
   const bands = bandFilter();
+  const era = sessionEra;
   const asked = { limit: PAGE, offset: readSoFar.beliefs };
   if (bands !== null) {
     asked.bands = bands;
   }
   try {
     const body = await relay(half, "/beliefs", asked, "beliefs");
+    // Not this session's answer (#2404).
+    if (!sameSession(half, era)) {
+      return;
+    }
     if (body === null || run !== runs.beliefs) {
       return;
     }
@@ -9053,8 +9150,13 @@ async function readQuestions(path, more, run) {
     return;
   }
   const offset = readSoFar[listing.counter];
+  const era = sessionEra;
   try {
     const body = await relay(half, path, { limit: PAGE, offset }, "questions");
+    // Not this session's answer (#2404).
+    if (!sameSession(half, era)) {
+      return;
+    }
     if (body === null || run !== runs[listing.counter]) {
       return;
     }
@@ -9541,8 +9643,13 @@ async function readNotifications(more, run) {
     return;
   }
   const offset = readSoFar.notifications;
+  const era = sessionEra;
   try {
     const body = await relay(half, "/notifications", { limit: PAGE, offset }, "review");
+    // Not this session's answer (#2404).
+    if (!sameSession(half, era)) {
+      return;
+    }
     if (body === null || run !== runs.notifications) {
       return;
     }
@@ -9724,8 +9831,13 @@ async function readGoals(more, run) {
     return;
   }
   const offset = readSoFar.goals;
+  const era = sessionEra;
   try {
     const body = await relay(half, "/goals", { limit: PAGE, offset }, "goals");
+    // Not this session's answer (#2404).
+    if (!sameSession(half, era)) {
+      return;
+    }
     if (body === null || run !== runs.goals) {
       return;
     }
@@ -10558,6 +10670,7 @@ async function listAuthorizations(goal) {
     showBootstrap();
     return;
   }
+  const era = sessionEra;
   const stopping = new AbortController();
   authorizationListing = stopping;
   try {
@@ -10568,20 +10681,17 @@ async function listAuthorizations(goal) {
       "authorizations",
       stopping
     );
+    // Not this session's answer (#2404). This is the listing adversarial review found
+    // the shape at (round 9, `major`); what was three lines local to this function is
+    // now the one check every listing makes, and it asks a question the local
+    // comparison could not: a session this page lost and re-entered under an identical
+    // value is a different session, and `sessionEra` is what counts it.
+    if (!sameSession(half, era)) {
+      return;
+    }
     // A response that is not the latest is dropped whole: the run that overtook it owns
     // the panel, and rendering this one would draw one goal's rows under another's name.
-    //
-    // **And a response admitted under a session this page no longer holds is dropped on
-    // the same terms.** The generation counter orders two *listings*; it says nothing
-    // about the session under them. Let this request hang, let any other request meet
-    // `no-live-session`, and `sessionLost` forgets the header half and puts the
-    // bootstrap entry back — but this run is still the latest, so resuming would call
-    // `show("authorizations", true)` and reveal a goal's standing authorities beside a
-    // form asking the owner to start a session. Comparing the half this request was
-    // sent under closes it in the one direction that matters and also covers re-entry:
-    // rows fetched under the old session are not this session's answer, and the new one
-    // asks for its own. Adversarial review, round 9, `major`.
-    if (body === null || run !== authorizationRuns || headerHalf() !== half) {
+    if (body === null || run !== authorizationRuns) {
       return;
     }
     authorizationListing = null;
@@ -10816,8 +10926,13 @@ async function listTuning() {
     showBootstrap();
     return;
   }
+  const era = sessionEra;
   try {
     const body = await relay(half, "/notification/preferences", {}, "tuning");
+    // Not this session's answer (#2404).
+    if (!sameSession(half, era)) {
+      return;
+    }
     if (body === null) {
       return;
     }
@@ -10837,8 +10952,17 @@ async function writePreferences(change) {
     showBootstrap();
     return;
   }
+  const era = sessionEra;
   try {
     const read = await relay(half, "/notification/preferences", {}, "tuning");
+    // Not this session's answer (#2404) — and here the check comes before the *write*
+    // as well as before the render. A read that resumes under a session this page no
+    // longer holds would otherwise send the modified value back under the old half:
+    // a request answered `no-live-session`, which `sessionLost` would then act on and
+    // throw a freshly re-entered session back to the bootstrap form.
+    if (!sameSession(half, era)) {
+      return;
+    }
     if (read === null) {
       return;
     }
@@ -10847,6 +10971,10 @@ async function writePreferences(change) {
       "/notification/preferences/set",
       change(read.preferences)
     );
+    // Not this session's answer (#2404).
+    if (!sameSession(half, era)) {
+      return;
+    }
     if (written === null) {
       return;
     }
@@ -11297,6 +11425,7 @@ async function listConnections() {
   }
   const panel = el("connection-list");
   const form = el("connect-form");
+  const era = sessionEra;
   try {
     // The form is taken down before the read and put back only if the read answered.
     // A gateway that has started refusing — because its own hub moved to the remote
@@ -11304,6 +11433,10 @@ async function listConnections() {
     // not (ADR-0177 §4's fourth clause).
     clearNode(form);
     const held = await relay(half, "/connections", {}, "connections");
+    // Not this session's answer (#2404).
+    if (!sameSession(half, era)) {
+      return;
+    }
     if (held === null) {
       show("connections", true);
       clearNode(panel);
@@ -11696,8 +11829,13 @@ async function listConnectionLog() {
     showBootstrap();
     return;
   }
+  const era = sessionEra;
   try {
     const held = await relay(half, "/connections/recent", { limit: PAGE }, "connection-log");
+    // Not this session's answer (#2404).
+    if (!sameSession(half, era)) {
+      return;
+    }
     if (held === null) {
       return;
     }
@@ -11750,8 +11888,13 @@ async function observe() {
     return;
   }
   const asked = conversationId === null ? {} : { conversation_id: conversationId };
+  const era = sessionEra;
   try {
     const body = await relay(half, "/observe", asked, "observation");
+    // Not this session's answer (#2404).
+    if (!sameSession(half, era)) {
+      return;
+    }
     if (body === null) {
       return;
     }
@@ -11825,6 +11968,12 @@ const CONTROL_PANELS = [
   "connections",
   "connection-log",
   "observation",
+  // ADR-0250's listing, omitted here when it was written (#2395) although `readGoals`
+  // reveals it and it renders goal outcome statements, clarification text and goal ids
+  // — Tier 1 content about the owner's outstanding work, which is exactly what a page
+  // with no session may not be showing. `test_bundle.py` takes the census that would
+  // have caught it.
+  "goals",
   // ADR-0254 §11's listing. It is hidden when a session ends for every other panel's
   // reason: what it shows is one goal's standing authorities, which is exactly the
   // content a page with no session may not be showing.
