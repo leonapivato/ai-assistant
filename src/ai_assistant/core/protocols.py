@@ -7263,6 +7263,12 @@ class AuditTrail(Protocol):
         making a contract change to how a row in this scope is read rather than
         inheriting an "add your own arm" permission.
 
+        **``record`` checks existence, kind, unrevokedness, liveness as of the
+        ruling, and subject match, and nothing else.** It does not re-rule, does
+        not consult a clock, does not call ``covering``, does not rank grants, and
+        returns no outcome. ADR-0021 §3's division is unchanged: the policy rules,
+        the caller records, the trail validates what it holds both halves of.
+
         **Validates a route-(c) standing row against the binding on the row, and
         reads nothing else for it** (ADR-0247 §2, ADR-0272 §1). A non-resolving
         ``ALLOW`` carrying an ``egress_binding`` and an ``authorised_by`` with
@@ -7286,12 +7292,6 @@ class AuditTrail(Protocol):
         other's. The digest remains the *discriminator* and neither fact does its
         work: **which** rows are route (c) is unchanged, and what this states is
         what makes a route-(c) row **eligible**.
-
-                **``record`` checks existence, kind, unrevokedness, liveness as of the
-        ruling, and subject match, and nothing else.** It does not re-rule, does
-        not consult a clock, does not call ``covering``, does not rank grants, and
-        returns no outcome. ADR-0021 §3's division is unchanged: the policy rules,
-        the caller records, the trail validates what it holds both halves of.
 
         Raises:
             AuditError: If the decision is not a valid record, which includes one
