@@ -115,13 +115,20 @@ class _SuppressingQuotes:
     stop work that declines to be cancelled"*.
     """
 
-    def __init__(self) -> None:
-        """Create the seam, with the gate a case waits on before it cancels."""
+    def __init__(self, *, then_raise: Exception | None = None) -> None:
+        """Create the seam.
+
+        Args:
+            then_raise: What to raise **after** swallowing the cancellation. ``None``
+                returns an empty tuple instead. The two are the seam's two exits, and
+                ADR-0060's clause reaches both.
+        """
         self.entered = asyncio.Event()
         self.absorbed = False
+        self._then_raise = then_raise
 
     async def for_action(self, goal: str, intended_action: str) -> tuple[ActionQuote, ...]:
-        """Wait to be cancelled, swallow it, and answer as if the goal held nothing.
+        """Wait to be cancelled, swallow it, and then answer or fault.
 
         Args:
             goal: Unread — this seam answers one way.
@@ -130,6 +137,9 @@ class _SuppressingQuotes:
         Returns:
             An empty tuple, which is exactly the shape *"the goal holds no quote for
             this act"* takes.
+
+        Raises:
+            Exception: ``then_raise``, where one was given.
         """
         del goal, intended_action
         self.entered.set()
@@ -137,6 +147,8 @@ class _SuppressingQuotes:
             await asyncio.sleep(3600)
         except asyncio.CancelledError:
             self.absorbed = True
+            if self._then_raise is not None:
+                raise self._then_raise from None
             return ()
         return ()  # pragma: no cover — the case always cancels
 
@@ -425,6 +437,42 @@ class TestItRulesNothingRecordsNothingAndCachesNothing:
         with pytest.raises(asyncio.CancelledError):
             await pending
         assert seam.absorbed, "the arm is vacuous unless the seam really swallowed it"
+
+    async def test_a_fault_raised_after_swallowing_a_cancellation_does_not_stand_in_for_it(
+        self,
+    ) -> None:
+        """The same clause on the seam's **other** exit (ADR-0060).
+
+        A seam that absorbs the cancellation and then raises
+        :class:`AuthorizationError` leaves that error standing in for the
+        cancellation one step over from an unmet answer: the caller is told the
+        request could not be read when what happened is that it asked for the work to
+        stop. The cancellation takes precedence and the fault rides out as its
+        ``__cause__``. Adversarial review, round 6, ``blocker``.
+        """
+        fault = AuthorizationError("the goal's quotes could not be read")
+        seam = _SuppressingQuotes(then_raise=fault)
+        gate = ThresholdActionPolicy(quotes=seam)
+        pending = asyncio.ensure_future(gate.coverage_met(PRICED, MONEY_COVERAGE))
+        await seam.entered.wait()
+        pending.cancel()
+        with pytest.raises(asyncio.CancelledError) as raised:
+            await pending
+        assert seam.absorbed
+        assert raised.value.__cause__ is fault, "the fault is carried, not discarded"
+
+    async def test_a_fault_with_no_cancellation_behind_it_still_leaves_as_itself(self) -> None:
+        """The control, and the reason the check is a **delta**.
+
+        An ordinary unreadable seam is ADR-0270 §4's own case and propagates as
+        :class:`AuthorizationError` — the guard must not convert every fault into a
+        cancellation on the strength of a count that never moved.
+        """
+        gate, seam = answering()
+        assert seam is not None
+        seam.fail_for_action()
+        with pytest.raises(AuthorizationError):
+            await gate.coverage_met(PRICED, MONEY_COVERAGE)
 
     async def test_a_cancellation_count_standing_from_before_the_call_is_not_read_as_one(
         self,
