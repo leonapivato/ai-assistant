@@ -525,3 +525,35 @@ def test_field_equals_compares_byte_exactly_and_coerces_nothing(
     predicate = StepVerification(kind=VerificationKind.FIELD_EQUALS, field="booking", equals=equals)
 
     assert verification_holds(predicate, {"booking": value}) is holds
+
+
+@pytest.mark.parametrize(
+    ("equals", "value", "holds"),
+    [
+        pytest.param({"count": 1}, {"count": 1}, True, id="a-nested-integer"),
+        pytest.param({"count": 1}, {"count": True}, False, id="nor-one-as-true-inside-an-object"),
+        pytest.param({"count": 1}, {"count": 1.0}, False, id="nor-an-integer-as-a-float-inside"),
+        pytest.param({"count": 1}, {"other": 1}, False, id="a-different-key"),
+        pytest.param({"count": 1}, {"count": 1, "b": 2}, False, id="an-extra-key"),
+        pytest.param((1,), (1,), True, id="a-nested-integer-in-an-array"),
+        pytest.param((1,), (True,), False, id="nor-one-as-true-inside-an-array"),
+        pytest.param((1,), (1.0,), False, id="nor-an-integer-as-a-float-in-an-array"),
+        pytest.param((1,), (1, 2), False, id="a-longer-array"),
+        pytest.param((1,), {"0": 1}, False, id="an-array-is-never-an-object"),
+        pytest.param({"a": {"b": 1}}, {"a": {"b": True}}, False, id="two-levels-down"),
+        pytest.param({"a": ({"b": 1},)}, {"a": ({"b": 1},)}, True, id="an-object-in-an-array"),
+        pytest.param("1", (1,), False, id="a-string-is-a-scalar-and-never-an-array"),
+    ],
+)
+def test_field_equals_walks_a_container_rather_than_comparing_its_top_level(
+    equals: FrozenJson, value: FrozenJson, *, holds: bool
+) -> None:
+    """``equals`` is a ``FrozenJsonValue``, so §4's coercions have to be refused inside it.
+
+    ``{"count": true} == {"count": 1}`` and ``[1] == [1.0]`` are both true under Python's
+    own ``==``, which is exactly the *"treats ``1`` as ``true``"* §4 names, one level
+    down. Adversarial review, round 1, ``blocker``.
+    """
+    predicate = StepVerification(kind=VerificationKind.FIELD_EQUALS, field="booking", equals=equals)
+
+    assert verification_holds(predicate, {"booking": value}) is holds
