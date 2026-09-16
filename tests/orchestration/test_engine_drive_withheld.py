@@ -20,6 +20,7 @@ every arm deterministic rather than probabilistic.
 
 from __future__ import annotations
 
+from datetime import timedelta
 from typing import TYPE_CHECKING, Any, Final
 
 import pytest
@@ -31,6 +32,7 @@ from test_engine import (
     OneStepPlanner,
     bound_binder,
     confirmable,
+    egress_confirmable,
     tool,
 )
 
@@ -53,7 +55,7 @@ from ai_assistant.core.types import (
     ToolFailureKind,
 )
 from ai_assistant.orchestration.engine import _GOAL_WITHHELD
-from ai_assistant.testing import FakePlanStore
+from ai_assistant.testing import FakePlanStore, FakeRecipientGrantStore
 
 if TYPE_CHECKING:
     from collections.abc import Awaitable, Callable
@@ -681,3 +683,49 @@ async def test_a_resumption_whose_claim_a_cancellation_refused_composes_and_retu
     step = execution.step("step-1")
     assert step is not None
     assert step.status is StepStatus.AWAITING_APPROVAL, "the step is at its entry status"
+
+
+async def test_a_withheld_resumption_still_performs_the_establishing_act_it_collected() -> None:
+    """ADR-0235 §6 over §7's exceptional return, which is the one exit that could lose it.
+
+    That section's rule for ``resume`` is stated *"over the **answer** and not over the
+    send"*: *"``resume`` raises only where no answer was recorded, and returns wherever
+    one was"*, and the returned outcome carries *"a ``RecipientGrantOutcome`` naming what
+    became of the standing request"*. A resolving answer is recorded **before** the claim
+    (ADR-0037 §4's steps 5 and 6), so a claim ADR-0261 §7 then refuses leaves the answer
+    on the trail and the standing request unanswered for — and §4's ``None`` is reserved
+    for a call that performed **no** establishing act, which this is not.
+
+    The pair is published on the runner's :class:`DriveObservation` before the claim, so
+    it survives the exit that carries no disposition.
+    """
+    definition = egress_confirmable()
+    grants = FakeRecipientGrantStore(now=lambda: AT)
+    harness = Harness(
+        tools=(definition,),
+        binder=bound_binder(definition),
+        recipient_grants=grants,
+    )
+
+    parked = await harness.engine.converse("send it to the address in the invite", timeout=PATIENT)
+    assert parked.step is not None
+    assert parked.step.confirmation is not None
+    assert parked.turn is not None
+    assert await harness.engine.abandon_goal(parked.turn.goal.goal_id) is GoalAbandonment.ABANDONED
+
+    resumed = await harness.engine.resume(
+        parked.step.confirmation.token,
+        approved=True,
+        timeout=PATIENT,
+        remember_recipients_until=AT + timedelta(days=1),
+    )
+
+    assert resumed.drive_withheld is DriveWithheld.GOAL_CANCELLED
+    assert resumed.step is None
+    assert resumed.recipient_grant is not None, "an answer was recorded, so one is owed"
+    held = await grants.export()
+    assert len(held) == 1
+    assert resumed.recipient_grant.established == held[0]
+    # Nothing was dispatched under the refused claim, which is what makes this the
+    # combination the arm exists for rather than an ordinary resolution.
+    assert harness.invoker.invocations == []
