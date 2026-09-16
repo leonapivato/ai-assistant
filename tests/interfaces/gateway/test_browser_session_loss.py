@@ -649,3 +649,58 @@ async def test_a_destruction_consented_under_a_session_that_ended_ends_no_other(
         await expect(drive.page.locator("#bootstrap")).to_be_hidden()
         await expect(drive.page.locator("#console")).to_be_visible()
         assert "is gone" not in await drive.page.inner_text("#conversations")
+
+
+@pytest.mark.parametrize("viewport", [DESKTOP, PHONE], ids=["desktop", "phone"])
+async def test_a_destruction_that_lands_after_its_session_ended_opens_nothing(
+    gateway_browser: Browser, tmp_path: Path, viewport: ViewportSize
+) -> None:
+    """The *second* request of a two-request flow, held (adversarial review, round 5).
+
+    The ceremony is answered while the session is live, the destruction goes out, and the
+    session ends under it — so what resumes is the act's own continuation rather than a
+    prerequisite read's. It re-reads the listing, and that read is a listing like any
+    other: it renders nothing and reveals nothing once the session it was asked under is
+    gone.
+
+    What it *does* say is written into the panel rather than onto the screen:
+    ``sayForgotten`` fills a node inside the conversations panel and reveals nothing, so
+    the account of a destruction that really happened waits there for an owner who opens
+    that panel again. Which is #2451's first reading, arrived at here by construction
+    rather than by ruling — the ruling is still owed, and what is asserted is only that
+    nothing opened.
+    """
+    loop = asyncio.get_running_loop()
+    release, hang = _held(loop)
+    answering: list[asyncio.Task[None]] = []
+
+    async def consent(one: Dialog) -> None:
+        await one.accept()
+
+    async with driving(gateway_browser, tmp_path, viewport=viewport) as drive:
+        drive.page.on("dialog", lambda one: answering.append(loop.create_task(consent(one))))
+        _seed_conversation(drive, "c-1", turns=3)
+        await _open_listing(drive)
+
+        await drive.page.route("**/conversation/forget", hang)
+        async with drive.page.expect_request("**/conversation/forget"):
+            await (
+                drive.page.locator("#conversation-list .conversation-row")
+                .first.get_by_role("button", name="Forget")
+                .click()
+            )
+
+        await drive.page.route("**/sources", _ends_the_session)
+        await drive.page.click("#sources-button")
+        await drive.page.wait_for_selector("#bootstrap:not([hidden])")
+
+        async with drive.page.expect_response("**/conversation/forget") as stale:
+            release.set_result(None)
+        await (await stale.value).finished()
+        await drive.admit()
+
+        # The panel the act belonged to is closed and stays closed. Its rows are the ones
+        # the listing rendered *before* the session ended -- the late continuation's own
+        # re-read renders nothing, which is the listing rule one case up -- so what is
+        # asserted here is the opening, which is this case's claim.
+        await expect(drive.page.locator("#conversations")).to_be_hidden()
