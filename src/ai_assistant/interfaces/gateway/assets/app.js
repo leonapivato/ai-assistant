@@ -8081,8 +8081,18 @@ async function forgetConversation(id) {
     showBootstrap();
     return;
   }
+  const era = sessionEra;
   try {
     const digest = await relay(half, "/conversation", { conversation_id: id }, "conversations");
+    // Not this session's answer (#2404). **The confirmation is the display here**: this
+    // read exists only to put the record in front of the owner before it is destroyed,
+    // and a `window.confirm` carrying a belief's content, a conversation's turn count or
+    // a notification's summary is that content on screen over a form asking for a
+    // session. Nothing has been destroyed at this point, so there is nothing this owes
+    // an account of. Adversarial review, round 2, `major`.
+    if (!sameSession(half, era)) {
+      return;
+    }
     if (digest === null) {
       return;
     }
@@ -8114,6 +8124,10 @@ async function forgetConversation(id) {
       sayForgotten(statedForget(id, held, done.destroyed));
     }
   } catch (_) {
+    // Not this session's condition to report (#2404).
+    if (!sameSession(half, era)) {
+      return;
+    }
     fault(GATEWAY_GONE, "conversations");
   }
 }
@@ -9097,8 +9111,18 @@ async function forgetBelief(id) {
     showBootstrap();
     return;
   }
+  const era = sessionEra;
   try {
     const held = await relay(half, "/belief", { record_id: id }, "beliefs");
+    // Not this session's answer (#2404). **The confirmation is the display here**: this
+    // read exists only to put the record in front of the owner before it is destroyed,
+    // and a `window.confirm` carrying a belief's content, a conversation's turn count or
+    // a notification's summary is that content on screen over a form asking for a
+    // session. Nothing has been destroyed at this point, so there is nothing this owes
+    // an account of. Adversarial review, round 2, `major`.
+    if (!sameSession(half, era)) {
+      return;
+    }
     if (held === null) {
       return;
     }
@@ -9131,6 +9155,10 @@ async function forgetBelief(id) {
     }
     await listBeliefs();
   } catch (_) {
+    // Not this session's condition to report (#2404).
+    if (!sameSession(half, era)) {
+      return;
+    }
     fault(GATEWAY_GONE, "beliefs");
   }
 }
@@ -9575,8 +9603,18 @@ async function forgetQuestion(id, path, offset) {
     showBootstrap();
     return;
   }
+  const era = sessionEra;
   try {
     const body = await relay(half, path, { limit: PAGE, offset }, "questions");
+    // Not this session's answer (#2404). **The confirmation is the display here**: this
+    // read exists only to put the record in front of the owner before it is destroyed,
+    // and a `window.confirm` carrying a belief's content, a conversation's turn count or
+    // a notification's summary is that content on screen over a form asking for a
+    // session. Nothing has been destroyed at this point, so there is nothing this owes
+    // an account of. Adversarial review, round 2, `major`.
+    if (!sameSession(half, era)) {
+      return;
+    }
     if (body === null) {
       return;
     }
@@ -9602,6 +9640,10 @@ async function forgetQuestion(id, path, offset) {
     }
     await listQuestions();
   } catch (_) {
+    // Not this session's condition to report (#2404).
+    if (!sameSession(half, era)) {
+      return;
+    }
     fault(GATEWAY_GONE, "questions");
   }
 }
@@ -10932,8 +10974,18 @@ async function forgetNotification(id, offset) {
     showBootstrap();
     return;
   }
+  const era = sessionEra;
   try {
     const body = await relay(half, "/notifications", { limit: PAGE, offset }, "review");
+    // Not this session's answer (#2404). **The confirmation is the display here**: this
+    // read exists only to put the record in front of the owner before it is destroyed,
+    // and a `window.confirm` carrying a belief's content, a conversation's turn count or
+    // a notification's summary is that content on screen over a form asking for a
+    // session. Nothing has been destroyed at this point, so there is nothing this owes
+    // an account of. Adversarial review, round 2, `major`.
+    if (!sameSession(half, era)) {
+      return;
+    }
     if (body === null) {
       return;
     }
@@ -10960,6 +11012,10 @@ async function forgetNotification(id, offset) {
     }
     await listNotifications();
   } catch (_) {
+    // Not this session's condition to report (#2404).
+    if (!sameSession(half, era)) {
+      return;
+    }
     fault(GATEWAY_GONE, "review");
   }
 }
