@@ -162,6 +162,46 @@ async def test_a_coverage_rewritten_mid_call_does_not_move_the_answer() -> None:
     assert seam.calls[0][1][0].kind is BoundKind.MONEY, "the record is the presented coverage too"
 
 
+async def test_the_published_call_record_is_not_the_snapshot_the_answer_is_read_from() -> None:
+    """A record a test can rewrite is not a snapshot this fake still reads.
+
+    :attr:`calls` exists so a consumer's test can assert what the **writer** asked
+    about, and it hands back models. Were it the same tuple the answer is computed
+    from, rewriting the record mid-call would move the answer — the same
+    one-observation failure as round 2's, reached through the fake's own published
+    surface rather than through the caller's argument. Adversarial review, round 3,
+    ``blocker``.
+    """
+    seam = FakeCoverageAnswers(met=True, quote=GOVERNING_QUOTE)
+    held = seam.suspend_next_operation()
+    pending = asyncio.ensure_future(seam.coverage_met(PRICED, MONEY_COVERAGE))
+    await held.reached()
+    seam.calls[0][1][0].__dict__["kind"] = BoundKind.PERIOD
+    held.release()
+    answer = await pending
+    assert (answer.met, answer.quoted) == (True, GOVERNING_QUOTE)
+
+
+async def test_reconfiguring_does_not_reach_a_call_already_in_flight() -> None:
+    """``answer`` configures *the next calls*, which is what its name says.
+
+    A suspended call answers what was configured when it was made. Reading the
+    configuration after the await would make a concurrent test's outcome a question
+    about the scheduler. Adversarial review, round 3, ``major``.
+    """
+    seam = FakeCoverageAnswers(met=True, quote=GOVERNING_QUOTE)
+    held = seam.suspend_next_operation()
+    pending = asyncio.ensure_future(seam.coverage_met(PRICED, MONEY_COVERAGE))
+    await held.reached()
+    seam.answer(met=False)
+    held.release()
+    answer = await pending
+    assert (answer.met, answer.quoted) == (True, GOVERNING_QUOTE)
+    assert (await seam.coverage_met(PRICED, MONEY_COVERAGE)).met is False, (
+        "and the reconfiguration does reach the next call"
+    )
+
+
 async def test_an_injected_fault_still_leaves_as_the_declared_class() -> None:
     """ADR-0270 §4: *"**No new error class is minted**"*, and the Protocol declares one.
 
