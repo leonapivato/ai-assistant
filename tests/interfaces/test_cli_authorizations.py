@@ -14,6 +14,7 @@ than left to two readings.
 from __future__ import annotations
 
 from datetime import timedelta
+from decimal import Decimal
 from io import StringIO
 from typing import Final
 
@@ -29,6 +30,7 @@ from ai_assistant.core.types import (
     AuthorizationView,
     BoundKind,
     CoverageView,
+    QuoteView,
     ToolDefinition,
 )
 from ai_assistant.interfaces import cli
@@ -191,6 +193,89 @@ def test_the_projection_is_rendered_before_the_answer_is_collected(output: Strin
     assert cli._render_confirmation(confirmation) is True
     rendered = _flat(output.getvalue())
     assert rendered.index("Why:") < rendered.index("standing authority")
+
+
+#: The figure a proposed row was built over, and the instant it was read (ADR-0267 §7).
+#:
+#: **An amount with a fractional part and a currency that is not the bound's**, so an arm
+#: asserting the figure cannot pass on the ceiling beside it: a quote of ``50 GBP`` under a
+#: ceiling of ``up to 50 GBP`` would be satisfied by a surface that rendered the bound twice.
+QUOTE: Final = QuoteView(
+    amount=Decimal("45.50"), currency="EUR", read_at=AUTHORIZATION_NOW - timedelta(hours=2)
+)
+
+
+def test_the_confirmation_names_the_figure_the_act_was_quoted_at(output: StringIO) -> None:
+    """ADR-0267 §7, beside the ceiling: *"A confirmation that renders a ceiling without
+    the figure the act was quoted at is not a confirmation of that charge"*.
+
+    **All three values of the** :class:`~ai_assistant.core.types.QuoteView`, because §6
+    rests the disclosure on the number *and* on how old it is: a figure with no instance
+    of when it was read is half of what the clause requires on the screen.
+
+    **Beside and not in place of**: the bound the answer would establish is still
+    rendered, which is why the quote here is a different amount in a different currency
+    from the ceiling above it.
+    """
+    cli._render_confirmation_authorization(
+        AuthorizationProjection(
+            coverage=(
+                CoverageView(kind=BoundKind.MONEY, bound=money_bound("60"), span="under sixty"),
+            ),
+            expires_at=AUTHORIZATION_EXPIRES_AT,
+            quote=QUOTE,
+        )
+    )
+
+    rendered = _flat(output.getvalue())
+    assert "45.50" in rendered
+    assert "EUR" in rendered
+    assert "2026-09-13 08:00 UTC" in rendered
+    # The ceiling is still there, in the currency the *bound* carries.
+    assert "the amount: up to 60 GBP" in rendered
+
+
+def test_the_figure_is_disclosed_and_is_never_offered_as_a_check(output: StringIO) -> None:
+    """ADR-0267 §6: *"That is a disclosure and not a check"*.
+
+    **No sentence makes the owner's answer a warrant that the price is still current**,
+    and the surface says so rather than leaving a bare figure to be read as one: nothing
+    expires a quote, no comparison reads its age, and the window between the reading and
+    the charge is open (§6). What is asserted here is the fact stated, not its wording —
+    the rendering must not claim the figure is held, guaranteed or current.
+    """
+    cli._render_confirmation_authorization(
+        AuthorizationProjection(coverage=(), expires_at=AUTHORIZATION_EXPIRES_AT, quote=QUOTE)
+    )
+
+    rendered = _flat(output.getvalue())
+    assert "not a warrant that it is still current" in rendered
+    for claim in ("guaranteed", "held for you", "price is current", "locked"):
+        assert claim not in rendered, claim
+
+
+def test_no_quote_prints_no_line_about_one(output: StringIO) -> None:
+    """ADR-0178 §4, one member in: absence prints nothing at all.
+
+    ADR-0267 §7 gives the field three absent cases on the one write path that sets it —
+    no ``MONEY`` member, no intended action, or no quote of the goal naming that action —
+    and none of them is a figure this surface could invent. The projection around it
+    still renders whole.
+    """
+    cli._render_confirmation_authorization(
+        AuthorizationProjection(
+            coverage=(
+                CoverageView(kind=BoundKind.MONEY, bound=money_bound("60"), span="under sixty"),
+            ),
+            expires_at=AUTHORIZATION_EXPIRES_AT,
+            quote=None,
+        )
+    )
+
+    rendered = _flat(output.getvalue())
+    assert "quoted at" not in rendered
+    assert "still current" not in rendered
+    assert "the amount: up to 60 GBP" in rendered
 
 
 # --- §11's listing ------------------------------------------------------------
