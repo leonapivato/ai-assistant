@@ -402,8 +402,13 @@ dev = [
 # build hooks, and the embedding model has to be fetched and verified during the
 # build. `huggingface-hub` is a build requirement because the acquisition seam in
 # `models/` uses it — see `hatch_build.py`.
+#
+# `hatchling` is capped below 1.32 because 1.32.0 made `BuildHookInterface`
+# generic over two parameters, and `hatch_build.py` subscripts it with one — so
+# an isolated build that resolves fresh raises `TypeError` before any hook runs.
+# Adapting the hook and lifting the cap is #2509.
 [build-system]
-requires = ["hatchling>=1.27", "huggingface-hub>=0.34,<2"]
+requires = ["hatchling>=1.27,<1.32", "huggingface-hub>=0.34,<2"]
 build-backend = "hatchling.build"
 
 [tool.hatch.build.targets.wheel]
