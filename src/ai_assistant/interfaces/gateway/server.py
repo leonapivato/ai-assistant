@@ -3193,9 +3193,10 @@ class Gateway:
             request: The admitted request, carrying ``goal_id``.
 
         Returns:
-            Which of :class:`~ai_assistant.core.types.GoalAbandonment`'s three states
-            the act reached, as its own value. An unknown id is ``NO_SUCH_GOAL`` and
-            never a raise.
+            Which of :class:`~ai_assistant.core.types.GoalAbandonment`'s **four**
+            states the act reached, as its own value — ADR-0261 §6 closed the
+            vocabulary at four with ``ABANDONED_EFFECT_IN_FLIGHT``. An unknown id is
+            ``NO_SUCH_GOAL`` and never a raise.
         """
         abandoned = await self._relayed(
             partial(self._engine.abandon_goal, _required_string(_payload(request), "goal_id"))
@@ -4769,6 +4770,22 @@ def _outcome_view(outcome: TurnOutcome) -> dict[str, Any]:
     renders no statement for a member has not implemented this section and is not a
     permitted degradation" — with ADR-0262 §11 placing **both** surfaces in one lane,
     "since a member rendered on one and not the other is the parity failure M4 recorded".
+
+    **``drive_withheld`` crosses, and it is the third vocabulary to reach this page under
+    that same rule.** ADR-0261 §13 books it on **L3** by name — "the fixed statements §6
+    and §7 name, on the CLI's abandon and goals surfaces and **on the reply**" — and this
+    is that lane, so the entry that read "not rendered" while L1 and L2 ran is taken here.
+    §7 requires one fixed statement per member of a closed **seven**, beside the reply and
+    never in place of it, and ADR-0242 §9's all-or-nothing clause binds on the vocabulary:
+    a page rendering six of the seven has not implemented §7.
+
+    **The member crosses and nothing is derived from it here** (§7). It "names the state
+    the goal is in, and never the reason the store refused" — one ``ClaimRefused`` covers
+    both liveness raisers and says which of the two fired, and the engine's own read
+    cannot establish it either — so this view carries the value ``orchestration``
+    computed and asks it no question. It is not read off ``step``, which a withheld drive
+    leaves at the status and version it stood at, nor off ``attempt_report``, which §7's
+    turn does not write at all.
     """
     turn = outcome.turn
     plan = None if turn is None else turn.plan
@@ -4819,6 +4836,17 @@ def _outcome_view(outcome: TurnOutcome) -> dict[str, Any]:
         # computed, by value and never a second computation.
         "attempt_report": (
             None if outcome.attempt_report is None else outcome.attempt_report.outcome.value
+        ),
+        # ADR-0261 §7's member: **where the goal stands** on a turn whose claim a store
+        # refused, by value and never a second computation. It is carried as its own
+        # value and is read off nothing — not `attempt_report`, which §7's turn does not
+        # write at all, and not `step`, which a withheld drive leaves at the status and
+        # version it stood at. §7 fixes what it is *not*: the member "names the state the
+        # goal is in, and never the reason the store refused", so the page receives where
+        # the goal stands and cannot compose why, which is `ClaimRefused`'s own posture —
+        # one class covering both liveness raisers and saying which of the two fired.
+        "drive_withheld": (
+            None if outcome.drive_withheld is None else outcome.drive_withheld.value
         ),
         # ADR-0254 §11's announcement: one view per authority this turn opened
         # **without putting a question**, in the order the rows were written, and an
@@ -5039,6 +5067,18 @@ def _goal_summary_view(summary: GoalSummary) -> dict[str, Any]:
     render it differently — and no adapter derives it". So this copies the boolean it
     was handed and compares no status against any attempt state.
 
+    **``effect_in_flight`` is carried on exactly that ground** (ADR-0261 §6), which
+    names ``paused`` as its own precedent — "ADR-0250 §15's own clause for ``paused``,
+    one fact over". It is true "where any step of any execution any attempt of that goal
+    opened stands ``INDETERMINATE`` or ``RUNNING``", computed per read and never stored,
+    and the engine takes one ``PlanStore.has_outstanding_effect`` call per listed goal.
+    So this copies the boolean and walks nothing.
+
+    **It is goal-wide and not per-attempt** (§6): a goal reopened after a cancellation
+    that left an ``INDETERMINATE`` step carries that uncertainty on an **older** attempt,
+    and a per-attempt answer would report an outstanding effect beside an act that said
+    there was none.
+
     **The id crosses because the resume act takes it** (§13): the cross-conversation
     resumption is "a ``TurnReference`` carrying a ``goal_id``, performed from a surface
     listing the user was shown (§15)", and there is no other route to one.
@@ -5051,6 +5091,13 @@ def _goal_summary_view(summary: GoalSummary) -> dict[str, Any]:
         "outcome": summary.outcome,
         "status": summary.status.value,
         "paused": summary.paused,
+        # ADR-0261 §6's field, carried on `paused`'s own ground: "the engine computes
+        # it, so that two surfaces cannot render it differently, and no adapter derives
+        # it" — ADR-0250 §15's clause for `paused`, one fact over. So this copies the
+        # boolean it was handed and walks no attempt, execution or step. It is goal-wide
+        # and not per-attempt (§6), and it is a **query** rather than a stored record:
+        # "computed per read and never stored", which is why nothing here caches it.
+        "effect_in_flight": summary.effect_in_flight,
         "last_engaged_at": (
             None if summary.last_engaged_at is None else summary.last_engaged_at.isoformat()
         ),
