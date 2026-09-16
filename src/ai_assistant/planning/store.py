@@ -1174,8 +1174,10 @@ class InMemoryPlanStore:
             PlanningError: If the execution is unknown, the step is not a step of it,
                 or that step names no intended action. **Nothing is written** in any.
         """
-        # Detached first, so the value the answer is decided by is the value persisted
-        # and neither is the caller's mutable instance (ADR-0018 §3).
+        # Snapshotted before anything else, so the value the answer is decided by is
+        # the value persisted and neither is the caller's mutable instance (ADR-0018
+        # §3). This store awaits nothing here, so there is no window to close — it is
+        # written at the same place as its siblings' so the three read as one rule.
         effect_key = detached_key(effect_key)
         stored = self._executions.get(execution_id)
         plan = None if stored is None else self._plans.get(stored.plan_id)

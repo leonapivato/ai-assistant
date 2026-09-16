@@ -3335,18 +3335,19 @@ class SqlitePlanStore:
             PlanningError: If the execution is unknown, the step is not a step of it,
                 or that step names no intended action. **Nothing is written** in any.
         """
+        # Snapshotted **before the first await**, not inside the worker: a caller that
+        # mutates the key while this call is queued behind the lock would otherwise have
+        # the mutation picked up, so the key the row records would not be the key the
+        # stage holds and is about to dispatch (ADR-0018 §3).
+        snapshot = detached_key(effect_key)
         async with self._lock:
             return await _run_to_completion(
-                self._claim_effect_sync, execution_id, step_id, effect_key
+                self._claim_effect_sync, execution_id, step_id, snapshot
             )
 
     def _claim_effect_sync(
         self, execution_id: str, step_id: str, effect_key: EffectKey
     ) -> EffectOutcome:
-        # Detached first, so the value the answer is decided by is the value persisted
-        # and neither is the caller's mutable instance (ADR-0018 §3). Before the
-        # transaction, because a refused key writes nothing and needs no write lock.
-        effect_key = detached_key(effect_key)
         with self._transaction(f"claim an effect for execution {execution_id!r}") as conn:
             row = conn.execute(
                 "SELECT e.data, p.data FROM executions e JOIN plans p ON e.plan_id = p.id "
