@@ -1296,6 +1296,18 @@ def test_the_promoted_surface_and_the_protocol_version_are_both_pinned() -> None
     — on both those entries' own instruction, and the reason every entry above them
     gives.
 
+    **51 is ADR-0262 §8's L1, and it is under the second limb alone, on two grounds.**
+    ``TurnOutcome`` gains ``attempt_report``, defaulted ``None`` and emitted on every
+    outcome that crosses, which a client at 50 fails with ``extra_forbidden``; and
+    ``ToolDefinition`` gains ``postconditions``, which crosses because
+    ``ActionRequest.tool`` and ``PermissionDecision.tool`` embed the whole definition by
+    value. ``AttemptTransition``'s ``execution_versions`` is **not** a third ground — it
+    is ``PlanStore``'s write command and no wire operation takes one — and no enumeration
+    gains a member at all. **The method set does not move and stays at 63**: L1 adds no
+    ``AssistantEngine`` member and no gateway route, so the two numbers part company for a
+    **sixth** consecutive entry. §8 fixes no numeral either — it records **44** as a dated
+    observation — and this lane was written **51** at a base holding 50.
+
     **ADR-0124 §9 decides no mechanical check and creates none**, saying one is
     owed and leaving its shape open. This is not that check — it is a *pin*, and
     a deliberately crude one: it fails when either number moves, which is the
@@ -1304,7 +1316,7 @@ def test_the_promoted_surface_and_the_protocol_version_are_both_pinned() -> None
     """
     from ai_assistant.wire.envelope import PROTOCOL_VERSION  # noqa: PLC0415 — asserted about
 
-    assert (len(_method_names()), PROTOCOL_VERSION) == (63, 50), (
+    assert (len(_method_names()), PROTOCOL_VERSION) == (63, 51), (
         "the promoted method set and the protocol version are pinned together "
         "(ADR-0124 §9); move either and this pin makes you name the limb you are "
         "under — the method set, or a wire-carried core type"
