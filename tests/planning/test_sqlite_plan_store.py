@@ -3456,8 +3456,13 @@ class _PausingScan(SqlitePlanStore):
     #: Released by the case once the second connection has had its chance.
     resume: threading.Event
 
+    #: Whether the connection stood inside a transaction at each attempt's read, in
+    #: the order the scan walked them.
+    inside: list[bool]
+
     def _step_statuses(self, conn: sqlite3.Connection, attempt: GoalAttempt) -> list[StepStatus]:
         """Read as the store does, then hold the scan open after the first attempt."""
+        self.inside.append(conn.in_transaction)
         found = super()._step_statuses(conn, attempt)
         if attempt.id == "a1":
             self.paused.set()
@@ -3487,10 +3492,28 @@ async def test_the_scan_is_one_snapshot_against_a_second_connection(tmp_path: Pa
     can"**: with ``busy_timeout`` at zero the write is refused *immediately* rather
     than waiting, so the case decides in microseconds and never hangs. A scan holding
     no snapshot lets that same commit through.
+
+    **And every attempt of the walk is asserted to be read inside a transaction**, not
+    only the first, which the refusal above does not say on its own.
+
+    **What this case does not decide, stated rather than left to be discovered**
+    (issue #2441). A store opening a transaction **per attempt** would hold one while
+    ``a1``'s read was paused, lock the outsider exactly as this does, satisfy the
+    ``in_transaction`` pair, and still read ``a2`` in a newer snapshot — and it is not
+    excluded here, because under this store's **rollback-journal** mode a concurrent
+    commit cannot land mid-scan at all, so the semantic interleaving that would expose
+    it is unreachable. That is precisely the case ADR-0261 §14 arm 9 offers this
+    witness for: "a read taken whole under one transaction or one held lock … has no
+    intermediate read for the hook and yet cannot claim the literal escape, demonstrated
+    by **showing the concurrent transitions are blocked until the snapshot completes**".
+    **A move to WAL would invert both halves** — the outsider's commit would be admitted
+    rather than refused, so this assertion would have to go, and the semantic
+    interleaving would become both reachable and the right thing to drive.
     """
     path = tmp_path / "plans.db"
     scanning = _PausingScan(path=path, now=_fixed_now)
     scanning.paused, scanning.resume = threading.Event(), threading.Event()
+    scanning.inside = []
     try:
         await scanning.save_goal(_goal())
         await scanning.save_plan(_plan(plan_id="p1"))
@@ -3528,6 +3551,10 @@ async def test_the_scan_is_one_snapshot_against_a_second_connection(tmp_path: Pa
         assert await asking is True, (
             "something was outstanding at every instant, so the scan must answer true "
             "— ADR-0261 §14 arm 9's 'answer true or block until it can'"
+        )
+
+        assert scanning.inside == [True, True], (
+            "every attempt of the walk was read inside a transaction, not only the first"
         )
     finally:
         scanning.resume.set()
