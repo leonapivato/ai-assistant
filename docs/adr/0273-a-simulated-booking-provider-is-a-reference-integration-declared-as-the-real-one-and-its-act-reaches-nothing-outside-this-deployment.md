@@ -886,17 +886,7 @@ clauses more widely than it now holds?*
 >     either no record and no advance, or the record present with the count
 >     advanced by one and the bound respected. **A half-applied commit surviving a
 >     restart fails this arm**, and it is what §2's one-transaction clause is
->     stated for. **Each injection point asserts what was *told* beside what was
->     left**: every one of them is at or after *"the point at which it may have
->     landed"*, so the provider raises
->     `ClassifiedToolError(effect_may_have_committed=True)` and the step completes
->     **`INDETERMINATE`** — **including where the transaction rolled wholly back**,
->     because a provider interrupted inside its own commit cannot know which side
->     it left and §2 forbids reporting a certain failure there. **An arm that
->     accepts a certain failure at an internal injection point is not an
->     implementation of this one**: the `FAILED` half is arm 15's *before*-the-commit
->     fault alone, and arm 19's pessimism caveat is likewise about a provider that
->     never reached the boundary.
+>     stated for.
 > 17. **The four conditions** — a binding whose connectability, endpoint,
 >     connection reference or recorded identity does not match refuses the call,
 >     **one arm per condition** (ADR-0148 §6).
