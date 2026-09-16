@@ -95,6 +95,7 @@ from ai_assistant.orchestration import (
     UpcomingEventStage,
 )
 from ai_assistant.orchestration.payloads import ENVELOPE_RESERVE_BYTES
+from ai_assistant.orchestration.reconciling import ReconciliationStage
 from ai_assistant.permissions import (
     ConfiguredForecastDestination,
     ConfiguredSearchDestination,
@@ -1988,6 +1989,43 @@ def build_composition(  # noqa: PLR0915 — one statement per resource this root
             plans=plans,
             now=_utcnow,
         )
+        # **ADR-0259 §4's turn-start pass and §3's check, over the objects this root
+        # already built** (#2486). `Engine` takes the stage as an *optional*
+        # constructor parameter because the check reaches `ToolInvoker.invoke` and the
+        # façade holds no invoker: the seam is `StepRunner`'s, and §11 rules that the
+        # pass "touches `StepRunner` in nothing", so the stage is assembled **beside**
+        # the runner here rather than inside the façade out of parts it happens to
+        # hold. This line is the whole of what makes the pass run in a deployment:
+        # without it a goal's superseded steps stay undisposed, a recorded `DENY` is
+        # never applied, an attempt left `RUNNING` beside an `INDETERMINATE` step is
+        # never repaired to `EFFECT_UNRESOLVED`, and no uncertain effect is ever
+        # reconciled — with every arm of §12 green, because every one of them injects
+        # a stage.
+        #
+        # **The same `PlanStore` and the same `AuditTrail` the runner and the executor
+        # write through** (ADR-0192 §9's wiring clause): the pass's every write is a
+        # compare-and-swap against a version the runner also advances, so a second
+        # store would compute its `expected_version` from rows nothing else writes and
+        # lose every swap; and §3's check resolves a step by the decision the runner
+        # recorded, so a second trail would answer `resolution_of` about a goal that
+        # never ran.
+        #
+        # **And the same object that is both the selecting registry and the acting
+        # invoker** — `tools`, handed to `StepExecutor` one wiring above as `invoker`.
+        # The invoker is constructed once at this root and handed to both holders
+        # rather than reached for through the runner, which is what keeps §11's "touches
+        # `StepRunner` in nothing" true of this file as well as of `orchestration/`.
+        # It matters beyond tidiness: ADR-0152 §1's registry-original comparison and
+        # ADR-0029 §8's ledger are that one object's, so a check invoking through a
+        # second registry would rule its one read against a different table of
+        # declarations and charge it to a ledger no one totals.
+        #
+        # **`monotonic` is left at its default** (:func:`time.monotonic`). ADR-0255 §9
+        # requires a monotonic source and this root configures no clock that is one:
+        # `_utcnow` is a wall clock, which §9 rules out in terms, and there is no
+        # deployment value to read. The stage's own default *is* the production
+        # reading, so naming it here would restate it rather than decide it.
+        reconciliation = ReconciliationStage(plans=plans, trail=trail, invoker=tools)
         engine = Engine(
             loop=loop,
             # ADR-0250 §4's one seam, over the **same** model seam the planner and the
@@ -2011,6 +2049,12 @@ def build_composition(  # noqa: PLR0915 — one statement per resource this root
             # goal's next question for ever.
             goal_question_ttl=settings.goal_question_ttl,
             runner=runner,
+            # ADR-0259 §7's stage, built above. Optional on `Engine` and supplied
+            # **here**: a `None` is the deployment that runs no reconciliation at all
+            # (ADR-0259 §12, #2486), and this root is the only place that can say
+            # otherwise, since it is the only holder of both the plan store and the
+            # invoker the two halves need.
+            reconciliation=reconciliation,
             plans=plans,
             trail=trail,
             # The **ledger** face of that same object, and never the gate
