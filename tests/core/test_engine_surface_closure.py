@@ -758,536 +758,536 @@ def test_a_streaming_method_declares_its_union_chunk_first_terminal_last() -> No
 def test_the_promoted_surface_and_the_protocol_version_are_both_pinned() -> None:
     """ADR-0124 §9: changing the promoted method set bumps ``PROTOCOL_VERSION``.
 
-        The rule reaches "any change to the promoted surface's method set", and its
-        prose is explicit that this is not an oversight to be forgiven: "adding a
-        method bumps… A sixteenth method on the promoted surface is a request an
-        older hub answers with a failure the client did not ask for." ADR-0130 §9's
-        five took the surface to twenty-four and the version to 3; ADR-0131 §4's
-        ``next_notification`` takes it to twenty-five and the version to 4.
+    The rule reaches "any change to the promoted surface's method set", and its
+    prose is explicit that this is not an oversight to be forgiven: "adding a
+    method bumps… A sixteenth method on the promoted surface is a request an
+    older hub answers with a failure the client did not ask for." ADR-0130 §9's
+    five took the surface to twenty-four and the version to 3; ADR-0131 §4's
+    ``next_notification`` takes it to twenty-five and the version to 4.
 
-        **The two numbers do not move in lockstep, and this pin never asserted that
-        they did.** ADR-0124 §9 has a second limb — "a change to a wire-carried
-        ``core`` type that makes a value one peer emits invalid for the other" — and
-        ADR-0133 §6 fires it for the ``NOTIFY`` member of ``GrantScope``, taking the
-        version to 5 with the method set unmoved at twenty-five. So a mismatch here
-        is not evidence of a fault in either direction: it is a lane being made to
-        look at ADR-0124 §9 and say which limb it is under. ADR-0139 §2's
-        ``standing_grants`` is back under the **first** limb, and takes the surface to
-        twenty-six and the version to 6. ADR-0170 §3 is under the **second** limb again,
-        and it is the clearest case the corpus has: ``TurnOutcome`` gains ``reply`` and
-        ``reply_degraded``, ``TurnOutcome`` is ``extra="forbid"``, and
-        ``wire.surface.return_adapter`` validates a result against the method's declared
-        return annotation — so an older client handed a ``TurnOutcome`` carrying
-        ``reply`` fails with ``extra_forbidden`` on that member. The method set does not
-        move for it and the version goes to 8.
+    **The two numbers do not move in lockstep, and this pin never asserted that
+    they did.** ADR-0124 §9 has a second limb — "a change to a wire-carried
+    ``core`` type that makes a value one peer emits invalid for the other" — and
+    ADR-0133 §6 fires it for the ``NOTIFY`` member of ``GrantScope``, taking the
+    version to 5 with the method set unmoved at twenty-five. So a mismatch here
+    is not evidence of a fault in either direction: it is a lane being made to
+    look at ADR-0124 §9 and say which limb it is under. ADR-0139 §2's
+    ``standing_grants`` is back under the **first** limb, and takes the surface to
+    twenty-six and the version to 6. ADR-0170 §3 is under the **second** limb again,
+    and it is the clearest case the corpus has: ``TurnOutcome`` gains ``reply`` and
+    ``reply_degraded``, ``TurnOutcome`` is ``extra="forbid"``, and
+    ``wire.surface.return_adapter`` validates a result against the method's declared
+    return annotation — so an older client handed a ``TurnOutcome`` carrying
+    ``reply`` fails with ``extra_forbidden`` on that member. The method set does not
+    move for it and the version goes to 8.
 
-        **ADR-0173 §11 is the first bump under both limbs at once**, and it moves both
-        numbers: ``converse_streaming`` takes the method set to thirty-two (first limb),
-        and ``FrameKind.CHUNK`` is a frame an old peer cannot decode at all — an unknown
-        ``kind`` closes the connection with no response (ADR-0084 §3) — which is the
-        second limb reached at the framing layer rather than inside a payload. So the
-        version goes to 9, and a lane that moved only one of these two numbers would
-        still be made to read ADR-0124 §9 by this pin.
+    **ADR-0173 §11 is the first bump under both limbs at once**, and it moves both
+    numbers: ``converse_streaming`` takes the method set to thirty-two (first limb),
+    and ``FrameKind.CHUNK`` is a frame an old peer cannot decode at all — an unknown
+    ``kind`` closes the connection with no response (ADR-0084 §3) — which is the
+    second limb reached at the framing layer rather than inside a payload. So the
+    version goes to 9, and a lane that moved only one of these two numbers would
+    still be made to read ADR-0124 §9 by this pin.
 
-        **ADR-0178 §6 is under the second limb alone**, and it moves only the version.
-        ``Confirmation`` gains ``egress`` — the account identity and payload description
-        ADR-0148 §8's fourth clause requires a ``CONFIRM`` on an egress call to name.
-        ``Confirmation`` is ``extra="forbid"``, ``return_adapter`` validates every result
-        against the declared return annotation, and ``wire.codec``'s ``project`` renders a
-        model by ``model_dump()``, which includes a ``None`` member rather than omitting it
-        — so a version 10 hub emits ``"egress": null`` on **every** confirmation and a
-        version 9 client fails ``extra_forbidden`` on it. The promoted method set does not
-        move, so the version goes to 10 against thirty-two methods, and ADR-0178 §6 states
-        the bump in the deciding ADR rather than leaving a lane to discover it here.
+    **ADR-0178 §6 is under the second limb alone**, and it moves only the version.
+    ``Confirmation`` gains ``egress`` — the account identity and payload description
+    ADR-0148 §8's fourth clause requires a ``CONFIRM`` on an egress call to name.
+    ``Confirmation`` is ``extra="forbid"``, ``return_adapter`` validates every result
+    against the declared return annotation, and ``wire.codec``'s ``project`` renders a
+    model by ``model_dump()``, which includes a ``None`` member rather than omitting it
+    — so a version 10 hub emits ``"egress": null`` on **every** confirmation and a
+    version 9 client fails ``extra_forbidden`` on it. The promoted method set does not
+    move, so the version goes to 10 against thirty-two methods, and ADR-0178 §6 states
+    the bump in the deciding ADR rather than leaving a lane to discover it here.
 
-        **ADR-0181 §3 is under the second limb too**, and moves only the version.
-        ``ConfirmationEgress`` gains ``planned_with_external_content``, **required with
-        no default**, so it bites in both directions: a version 11 client decoding a
-        version 10 hub's confirmation fails ``missing``, and a version 10 client decoding
-        a version 11 hub's fails ``extra_forbidden`` on the member it does not declare.
-        The promoted method set does not move, so the version goes to 11 against
-        thirty-two methods, and ADR-0181's Consequences state the bump in the deciding
-        ADR rather than leaving a lane to discover it here.
+    **ADR-0181 §3 is under the second limb too**, and moves only the version.
+    ``ConfirmationEgress`` gains ``planned_with_external_content``, **required with
+    no default**, so it bites in both directions: a version 11 client decoding a
+    version 10 hub's confirmation fails ``missing``, and a version 10 client decoding
+    a version 11 hub's fails ``extra_forbidden`` on the member it does not declare.
+    The promoted method set does not move, so the version goes to 11 against
+    thirty-two methods, and ADR-0181's Consequences state the bump in the deciding
+    ADR rather than leaving a lane to discover it here.
 
-        **ADR-0186 §1 is back under the first limb**, and it is the first change since
-        ADR-0173 §11 to move the method set at all. ``recent_decisions`` and
-        ``export_decisions`` take it to thirty-four, so the version goes to 12 —
-        ``wire/surface.METHODS`` is derived from the Protocol, so a version 12 client
-        sending ``export_decisions`` to a version 11 hub is refused there. **No
-        wire-carried ``core`` type changes for it**, which is what makes this the first
-        limb alone: ``PermissionDecision`` is untouched and reaches the surface by being
-        named in a return annotation rather than by being minted, so a version 11 peer's
-        trouble is the unknown *method*, never an unknown member. ADR-0186 §5 states the
-        bump in the deciding ADR and §11 puts it on the implementing lane, rather than
-        leaving either to be discovered here.
+    **ADR-0186 §1 is back under the first limb**, and it is the first change since
+    ADR-0173 §11 to move the method set at all. ``recent_decisions`` and
+    ``export_decisions`` take it to thirty-four, so the version goes to 12 —
+    ``wire/surface.METHODS`` is derived from the Protocol, so a version 12 client
+    sending ``export_decisions`` to a version 11 hub is refused there. **No
+    wire-carried ``core`` type changes for it**, which is what makes this the first
+    limb alone: ``PermissionDecision`` is untouched and reaches the surface by being
+    named in a return annotation rather than by being minted, so a version 11 peer's
+    trouble is the unknown *method*, never an unknown member. ADR-0186 §5 states the
+    bump in the deciding ADR and §11 puts it on the implementing lane, rather than
+    leaving either to be discovered here.
 
-        **ADR-0189 §2 is under the second limb again**, and moves only the version, to
-        13 against the same thirty-four methods. The four user-facing projections gain
-        the origin of what they show — ``attestation`` and
-        ``rests_on_recorded_external_content`` on ``Belief``, ``BeliefSummary`` and
-        ``Question``, and ``warrant`` on ``Retirement`` — and ADR-0178 §6's reading of
-        the tree carries over unchanged: all four set ``extra="forbid"``,
-        ``return_adapter`` validates every result against the declared return
-        annotation, and ``wire.codec``'s ``project`` renders a model by ``model_dump()``,
-        which includes a ``None`` member rather than omitting it. So a version 13 hub
-        emits the new members on **every** belief, question and retirement, and a version
-        12 client fails ``extra_forbidden`` on them. It is 10's shape rather than 11's:
-        every field is additive with a default (ADR-0189 §9), so the reverse direction
-        decodes to the defaults instead of failing ``missing``, and one direction biting
-        is all ADR-0124 §9 asks for. ADR-0189 §9 states the bump in the deciding ADR and
-        puts it on the contract lane.
+    **ADR-0189 §2 is under the second limb again**, and moves only the version, to
+    13 against the same thirty-four methods. The four user-facing projections gain
+    the origin of what they show — ``attestation`` and
+    ``rests_on_recorded_external_content`` on ``Belief``, ``BeliefSummary`` and
+    ``Question``, and ``warrant`` on ``Retirement`` — and ADR-0178 §6's reading of
+    the tree carries over unchanged: all four set ``extra="forbid"``,
+    ``return_adapter`` validates every result against the declared return
+    annotation, and ``wire.codec``'s ``project`` renders a model by ``model_dump()``,
+    which includes a ``None`` member rather than omitting it. So a version 13 hub
+    emits the new members on **every** belief, question and retirement, and a version
+    12 client fails ``extra_forbidden`` on them. It is 10's shape rather than 11's:
+    every field is additive with a default (ADR-0189 §9), so the reverse direction
+    decodes to the defaults instead of failing ``missing``, and one direction biting
+    is all ADR-0124 §9 asks for. ADR-0189 §9 states the bump in the deciding ADR and
+    puts it on the contract lane.
 
-        **ADR-0186 §10 is back under the first limb**, and takes the method set to
-        thirty-six and the version to 14. ``recent_reads`` and ``export_reads`` are the
-        read trail's half of the same decision, so the reasoning at 12 carries over
-        without amendment: ``wire.surface``'s ``METHODS`` is derived from the Protocol,
-        so a version 14 client sending ``export_reads`` to a version 13 hub is refused
-        there, and **no wire-carried ``core`` type changes for it** —
-        ``SourceReadRecord`` and ``ReadOutcome`` were promoted by ADR-0185 and reach
-        this surface by being named in a return annotation rather than by being minted,
-        so a version 13 peer's trouble is the unknown *method* and never an unknown
-        member. The obligation is ADR-0124 §9's own — it reaches any change to the
-        promoted method set directly — and ADR-0186 §5's third clause is the precedent
-        for putting the note on the change that adds the methods, not a clause §10
-        carries over.
+    **ADR-0186 §10 is back under the first limb**, and takes the method set to
+    thirty-six and the version to 14. ``recent_reads`` and ``export_reads`` are the
+    read trail's half of the same decision, so the reasoning at 12 carries over
+    without amendment: ``wire.surface``'s ``METHODS`` is derived from the Protocol,
+    so a version 14 client sending ``export_reads`` to a version 13 hub is refused
+    there, and **no wire-carried ``core`` type changes for it** —
+    ``SourceReadRecord`` and ``ReadOutcome`` were promoted by ADR-0185 and reach
+    this surface by being named in a return annotation rather than by being minted,
+    so a version 13 peer's trouble is the unknown *method* and never an unknown
+    member. The obligation is ADR-0124 §9's own — it reaches any change to the
+    promoted method set directly — and ADR-0186 §5's third clause is the precedent
+    for putting the note on the change that adds the methods, not a clause §10
+    carries over.
 
-        **ADR-0192 §4 is under the first limb, and under the second as well** — the
-        second time a bump has had two grounds rather than one, ADR-0173 §11 being the
-        first. ``recent_invocations`` and ``export_invocations`` take the method set to
-        thirty-eight and the version to 15, and the first limb decides it on 12's and
-        14's reasoning without amendment: ``wire/surface.METHODS`` is derived from the
-        Protocol, so a version 15 client sending ``export_invocations`` to a version 14
-        hub is refused there. The second limb is reached because a wire-carried ``core``
-        type really did change — ``ToolResult`` gained ``incurred_cost`` in ADR-0192's
-        paired lane — and ADR-0192 §9 puts that arithmetic here rather than there: "a
-        bump is owed at the surface group whether or not the field reached the wire
-        earlier — ADR-0124 §9's obligation is on whoever moves the set." So this entry
-        carries no "no ``core`` type changes for it" sentence, unlike 12's and 14's.
-        ``ToolInvocation`` and ``RecordedInvocation`` are new *promoted* types rather
-        than new wire declarations, reaching the surface by being named in a return
-        annotation, exactly as ``Warrant`` did at 13.
+    **ADR-0192 §4 is under the first limb, and under the second as well** — the
+    second time a bump has had two grounds rather than one, ADR-0173 §11 being the
+    first. ``recent_invocations`` and ``export_invocations`` take the method set to
+    thirty-eight and the version to 15, and the first limb decides it on 12's and
+    14's reasoning without amendment: ``wire/surface.METHODS`` is derived from the
+    Protocol, so a version 15 client sending ``export_invocations`` to a version 14
+    hub is refused there. The second limb is reached because a wire-carried ``core``
+    type really did change — ``ToolResult`` gained ``incurred_cost`` in ADR-0192's
+    paired lane — and ADR-0192 §9 puts that arithmetic here rather than there: "a
+    bump is owed at the surface group whether or not the field reached the wire
+    earlier — ADR-0124 §9's obligation is on whoever moves the set." So this entry
+    carries no "no ``core`` type changes for it" sentence, unlike 12's and 14's.
+    ``ToolInvocation`` and ``RecordedInvocation`` are new *promoted* types rather
+    than new wire declarations, reaching the surface by being named in a return
+    annotation, exactly as ``Warrant`` did at 13.
 
-        **ADR-0194 §5 is under both limbs too, and says so itself** — the third bump
-        with two grounds, and the first where the deciding ADR enumerates them rather
-        than leaving a lane to. ``spend_totals`` takes the method set to thirty-nine and
-        the version to 16 under the first limb, on 12's, 14's and 15's reasoning
-        unchanged. The second limb is the **codec's domain widening**: ``project``
-        raised ``TypeError`` on a ``Decimal`` before and encodes one after, so a version
-        16 peer may emit a ``PER_CALL`` ``Decimal`` inside a ``PermissionDecision`` that
-        a version 15 peer refuses. ADR-0194 §11 forbids splitting the codec widening
-        into an earlier change for exactly this reason: two bumps where the topology
-        needs one. ADR-0087 §8's first case is **not** met — no conforming encoder
-        emitted any bytes for a ``Decimal`` before, so no ratified vector's spelling
-        moves — and §5 states that it is not a defence, because ADR-0124 §9 asks what a
-        new peer may *send* rather than whether an old spelling moved.
+    **ADR-0194 §5 is under both limbs too, and says so itself** — the third bump
+    with two grounds, and the first where the deciding ADR enumerates them rather
+    than leaving a lane to. ``spend_totals`` takes the method set to thirty-nine and
+    the version to 16 under the first limb, on 12's, 14's and 15's reasoning
+    unchanged. The second limb is the **codec's domain widening**: ``project``
+    raised ``TypeError`` on a ``Decimal`` before and encodes one after, so a version
+    16 peer may emit a ``PER_CALL`` ``Decimal`` inside a ``PermissionDecision`` that
+    a version 15 peer refuses. ADR-0194 §11 forbids splitting the codec widening
+    into an earlier change for exactly this reason: two bumps where the topology
+    needs one. ADR-0087 §8's first case is **not** met — no conforming encoder
+    emitted any bytes for a ``Decimal`` before, so no ratified vector's spelling
+    moves — and §5 states that it is not a defence, because ADR-0124 §9 asks what a
+    new peer may *send* rather than whether an old spelling moved.
 
-        **ADR-0197 §8 is under the second limb alone**, and moves only the version, to 17
-        against the same thirty-nine methods. ``TurnOutcome`` gains ``routed``, and 10's
-        and 13's reading of the tree carries over unchanged: ``TurnOutcome`` is
-        ``extra="forbid"``, ``return_adapter`` validates every result against the method's
-        declared return annotation, and ``wire.codec``'s ``project`` renders a model by
-        ``model_dump()``, which includes a ``None`` member rather than omitting it — so a
-        version 17 hub emits ``"routed": null`` on **every** turn and a version 16 client
-        fails ``extra_forbidden`` on it. The field is additive with a default, so the
-        reverse direction decodes to the default instead of failing ``missing``, and one
-        direction biting is all ADR-0124 §9 asks for. The promoted **method set does not
-        move**: ADR-0197 §9 mints a routing trail and gives ``AssistantEngine`` no method
-        for it, and §11 is explicit that this decision changes no method signature on the
-        surface — what it moves is one method's *contract*, ``resume``'s, which is a
-        different claim and not one ADR-0124 §9 reaches. ADR-0197 §8 states the bump in
-        the deciding ADR and §12 puts it on the implementing lane, rather than leaving
-        either to be discovered here.
+    **ADR-0197 §8 is under the second limb alone**, and moves only the version, to 17
+    against the same thirty-nine methods. ``TurnOutcome`` gains ``routed``, and 10's
+    and 13's reading of the tree carries over unchanged: ``TurnOutcome`` is
+    ``extra="forbid"``, ``return_adapter`` validates every result against the method's
+    declared return annotation, and ``wire.codec``'s ``project`` renders a model by
+    ``model_dump()``, which includes a ``None`` member rather than omitting it — so a
+    version 17 hub emits ``"routed": null`` on **every** turn and a version 16 client
+    fails ``extra_forbidden`` on it. The field is additive with a default, so the
+    reverse direction decodes to the default instead of failing ``missing``, and one
+    direction biting is all ADR-0124 §9 asks for. The promoted **method set does not
+    move**: ADR-0197 §9 mints a routing trail and gives ``AssistantEngine`` no method
+    for it, and §11 is explicit that this decision changes no method signature on the
+    surface — what it moves is one method's *contract*, ``resume``'s, which is a
+    different claim and not one ADR-0124 §9 reaches. ADR-0197 §8 states the bump in
+    the deciding ADR and §12 puts it on the implementing lane, rather than leaving
+    either to be discovered here.
 
-        **ADR-0200 §3 is under the first limb**, and moves both numbers: the method set
-        to forty and the version to 18. It is the first-limb reading 12, 14, 15 and
-        ADR-0194 §5 all took — ``wire.surface``'s ``METHODS`` is derived from the
-        Protocol, so a version 18 client sending ``converse_spoken`` to a version 17 hub
-        is refused at the handshake rather than at the call. The **second** limb is
-        deliberately not met and ADR-0200 §9 is why: audio crosses as
-        :data:`~ai_assistant.core.types.Base64Audio`, which is text, so ADR-0087 §2c's
-        scalar table gains no row, ``project`` gains no branch, and no existing frame's
-        encoding moves. One limb is all ADR-0124 §9 needs, and naming which one is what
-        this pin exists to make a lane do.
+    **ADR-0200 §3 is under the first limb**, and moves both numbers: the method set
+    to forty and the version to 18. It is the first-limb reading 12, 14, 15 and
+    ADR-0194 §5 all took — ``wire.surface``'s ``METHODS`` is derived from the
+    Protocol, so a version 18 client sending ``converse_spoken`` to a version 17 hub
+    is refused at the handshake rather than at the call. The **second** limb is
+    deliberately not met and ADR-0200 §9 is why: audio crosses as
+    :data:`~ai_assistant.core.types.Base64Audio`, which is text, so ADR-0087 §2c's
+    scalar table gains no row, ``project`` gains no branch, and no existing frame's
+    encoding moves. One limb is all ADR-0124 §9 needs, and naming which one is what
+    this pin exists to make a lane do.
 
-        **ADR-0205 §1 is under the first limb, and moves only the version, to 19 against
-        the same forty methods.** That limb reaches "any change to the promoted surface's
-        method set **or to a method's arguments or results**", and this decision changes
-        both halves of the second clause on one method: ``converse_spoken`` gains a fifth
-        argument, ``delivery``, and ``SpokenTurn`` gains a fifth member, ``episode_id``.
-        It bites in both directions, which no earlier entry's argument half did.
-        ``wire.surface``'s argument adapter is derived from the method's own signature, so
-        a version 19 client sending ``delivery`` to a version 18 hub is refused there; and
-        ``SpokenTurn`` is ``extra="forbid"`` while ``project`` renders a model by
-        ``model_dump()``, so a version 19 hub emits ``"episode_id": null`` on **every**
-        spoken turn and a version 18 client fails ``extra_forbidden`` on it — 13's reading
-        of the tree, on a result 18 had just added. The method **set** does not move:
-        ADR-0205 §1 adds an argument to an operation that already exists and §10 records
-        ADR-0177 §1 as untouched, since its enumeration counts operations. The
-        **second** limb is deliberately not met and ADR-0205 §9 is why: the report is "a
-        frozen model of scalars, with ``timedelta`` on ADR-0087 §2e's duration form and a
-        ``StrEnum`` as ``SpokenAudioFormat`` already is", so ADR-0087 §2c's scalar table
-        gains no row and ``project`` gains no branch.
+    **ADR-0205 §1 is under the first limb, and moves only the version, to 19 against
+    the same forty methods.** That limb reaches "any change to the promoted surface's
+    method set **or to a method's arguments or results**", and this decision changes
+    both halves of the second clause on one method: ``converse_spoken`` gains a fifth
+    argument, ``delivery``, and ``SpokenTurn`` gains a fifth member, ``episode_id``.
+    It bites in both directions, which no earlier entry's argument half did.
+    ``wire.surface``'s argument adapter is derived from the method's own signature, so
+    a version 19 client sending ``delivery`` to a version 18 hub is refused there; and
+    ``SpokenTurn`` is ``extra="forbid"`` while ``project`` renders a model by
+    ``model_dump()``, so a version 19 hub emits ``"episode_id": null`` on **every**
+    spoken turn and a version 18 client fails ``extra_forbidden`` on it — 13's reading
+    of the tree, on a result 18 had just added. The method **set** does not move:
+    ADR-0205 §1 adds an argument to an operation that already exists and §10 records
+    ADR-0177 §1 as untouched, since its enumeration counts operations. The
+    **second** limb is deliberately not met and ADR-0205 §9 is why: the report is "a
+    frozen model of scalars, with ``timedelta`` on ADR-0087 §2e's duration form and a
+    ``StrEnum`` as ``SpokenAudioFormat`` already is", so ADR-0087 §2c's scalar table
+    gains no row and ``project`` gains no branch.
 
-        **ADR-0207 §7 is under the second limb alone**, and moves only the version, to
-        20 against the same forty methods. ``SpokenTurn`` gains no member and loses none
-        (ADR-0207 §5); what moves is **which of its shapes the type admits** — on a live
-        confirmation park, ``spoken`` may carry a rendering beside an ``outcome`` whose
-        ``reply`` is ``None``, and ``spoken_degraded`` may be ``True`` there. That is a
-        limb the corpus has been caught by before, and ADR-0124 §9 names the case: the
-        rule bumps "whether the change **widens or narrows** the type", because read as
-        "narrowing bumps, widening is safe" it would have got ADR-0122's widening wrong.
-        The bite is one-directional and one direction is all §9 asks for: a version 20 hub
-        emitting a parked turn that carries a rendering is reconstructed through a version
-        19 client's copy of the *old* validator — ``wire/client.py``'s ``converse_spoken``
-        is annotated ``-> SpokenTurn`` and "a result payload takes the shape of the
-        method's own declared return annotation" (ADR-0085 §10) — and raises there. The
-        **first** limb is deliberately not met: no method is added, and no method's
-        arguments or results change type. ADR-0207 §7 states the bump in the deciding ADR
-        and puts it on the implementing lane, and it also fixes the arithmetic against
-        ADR-0205's concurrent bump — "whichever lands second reads the constant as it then
-        stands and adds one, and each writes its own note".
+    **ADR-0207 §7 is under the second limb alone**, and moves only the version, to
+    20 against the same forty methods. ``SpokenTurn`` gains no member and loses none
+    (ADR-0207 §5); what moves is **which of its shapes the type admits** — on a live
+    confirmation park, ``spoken`` may carry a rendering beside an ``outcome`` whose
+    ``reply`` is ``None``, and ``spoken_degraded`` may be ``True`` there. That is a
+    limb the corpus has been caught by before, and ADR-0124 §9 names the case: the
+    rule bumps "whether the change **widens or narrows** the type", because read as
+    "narrowing bumps, widening is safe" it would have got ADR-0122's widening wrong.
+    The bite is one-directional and one direction is all §9 asks for: a version 20 hub
+    emitting a parked turn that carries a rendering is reconstructed through a version
+    19 client's copy of the *old* validator — ``wire/client.py``'s ``converse_spoken``
+    is annotated ``-> SpokenTurn`` and "a result payload takes the shape of the
+    method's own declared return annotation" (ADR-0085 §10) — and raises there. The
+    **first** limb is deliberately not met: no method is added, and no method's
+    arguments or results change type. ADR-0207 §7 states the bump in the deciding ADR
+    and puts it on the implementing lane, and it also fixes the arithmetic against
+    ADR-0205's concurrent bump — "whichever lands second reads the constant as it then
+    stands and adds one, and each writes its own note".
 
-        **ADR-0206 §1 and §6 are under both limbs at once**, the fourth bump with two
-        grounds after 9, 15 and 16, and they move only the version, to 21 against the
-        same forty methods. The **first** limb reaches "any change to the promoted
-        surface's method set **or to a method's arguments or results**", which is the
-        clause ADR-0205 §1's entry at 19 is the precedent for, and this decision changes
-        both halves of it on one method: ``next_notification`` gains a keyword-only
-        ``plays``, and ``NotificationDelivery`` gains ``spoken`` and ``spoken_rendering``.
-        It bites in both directions for 19's reasons — ``wire.surface``'s argument adapter
-        is derived from the signature, so a version 21 client sending ``plays`` to a
-        version 20 hub is refused there; and ``NotificationDelivery`` is ``extra="forbid"``
-        while ``project`` renders a model by ``model_dump()``, so a version 21 hub emits
-        both members on **every** delivery and a version 20 client fails
-        ``extra_forbidden`` on them. The **second** limb is reached as well, because
-        ``SpokenRendering`` is a new wire-carried ``core`` type minted by this decision
-        rather than one already crossing — ADR-0087 §2c's scalar table gains no row for it,
-        a ``StrEnum`` being a shape the codec already carries, which is why naming the limb
-        costs nothing beyond saying so. The **method set does not move**: §1 adds an
-        argument to an operation that already exists and declines a sibling operation
-        outright, and ADR-0177 §1's browser enumeration stands at thirty-one, since
-        ``next_notification`` "is not one" of those and ADR-0206 §2 keeps it that way.
+    **ADR-0206 §1 and §6 are under both limbs at once**, the fourth bump with two
+    grounds after 9, 15 and 16, and they move only the version, to 21 against the
+    same forty methods. The **first** limb reaches "any change to the promoted
+    surface's method set **or to a method's arguments or results**", which is the
+    clause ADR-0205 §1's entry at 19 is the precedent for, and this decision changes
+    both halves of it on one method: ``next_notification`` gains a keyword-only
+    ``plays``, and ``NotificationDelivery`` gains ``spoken`` and ``spoken_rendering``.
+    It bites in both directions for 19's reasons — ``wire.surface``'s argument adapter
+    is derived from the signature, so a version 21 client sending ``plays`` to a
+    version 20 hub is refused there; and ``NotificationDelivery`` is ``extra="forbid"``
+    while ``project`` renders a model by ``model_dump()``, so a version 21 hub emits
+    both members on **every** delivery and a version 20 client fails
+    ``extra_forbidden`` on them. The **second** limb is reached as well, because
+    ``SpokenRendering`` is a new wire-carried ``core`` type minted by this decision
+    rather than one already crossing — ADR-0087 §2c's scalar table gains no row for it,
+    a ``StrEnum`` being a shape the codec already carries, which is why naming the limb
+    costs nothing beyond saying so. The **method set does not move**: §1 adds an
+    argument to an operation that already exists and declines a sibling operation
+    outright, and ADR-0177 §1's browser enumeration stands at thirty-one, since
+    ``next_notification`` "is not one" of those and ADR-0206 §2 keeps it that way.
 
-        **ADR-0219 §6 is under the first limb alone**, and moves only the version, to 22
-        against the same forty methods — the first entry here whose ground is an **error
-        class** rather than a method, an argument or a result. ``core/errors.py`` gains
-        :class:`~ai_assistant.core.errors.MemoryStoreStaleError`, which
-        ``AssistantEngine.learn`` can emit under the ``MemoryStoreError`` it already
-        declares (ADR-0219 §5); ``wire/errors.py`` renders a code as the exception type's
-        own *concrete* class name, never flattened to a declared base, because doing so
-        would hand a client "a classification the server did not make" (ADR-0077 §3); and
-        the decode side resolves that code with ``getattr(core_errors, code, None)``,
-        raising ``ProtocolError`` when it cannot. So a version 22 hub emits a frame a
-        version 21 peer refuses, one-directionally, which is all §9 asks. The **field**
-        beside it is deliberately *not* a ground, and ADR-0219 §6 runs the test on it
-        separately: ``MemoryBase.revision`` is additive and defaulted on a type that does
-        not set ``extra="forbid"``, which is ADR-0213 §11's ruling on the same envelope,
-        and the reverse direction does not exist because no ``AssistantEngine`` method
-        takes a ``MemoryRecord`` as an argument. The **second** limb is not met: no
-        wire-carried type is minted and ADR-0087 §2c's scalar table gains no row.
+    **ADR-0219 §6 is under the first limb alone**, and moves only the version, to 22
+    against the same forty methods — the first entry here whose ground is an **error
+    class** rather than a method, an argument or a result. ``core/errors.py`` gains
+    :class:`~ai_assistant.core.errors.MemoryStoreStaleError`, which
+    ``AssistantEngine.learn`` can emit under the ``MemoryStoreError`` it already
+    declares (ADR-0219 §5); ``wire/errors.py`` renders a code as the exception type's
+    own *concrete* class name, never flattened to a declared base, because doing so
+    would hand a client "a classification the server did not make" (ADR-0077 §3); and
+    the decode side resolves that code with ``getattr(core_errors, code, None)``,
+    raising ``ProtocolError`` when it cannot. So a version 22 hub emits a frame a
+    version 21 peer refuses, one-directionally, which is all §9 asks. The **field**
+    beside it is deliberately *not* a ground, and ADR-0219 §6 runs the test on it
+    separately: ``MemoryBase.revision`` is additive and defaulted on a type that does
+    not set ``extra="forbid"``, which is ADR-0213 §11's ruling on the same envelope,
+    and the reverse direction does not exist because no ``AssistantEngine`` method
+    takes a ``MemoryRecord`` as an argument. The **second** limb is not met: no
+    wire-carried type is minted and ADR-0087 §2c's scalar table gains no row.
 
-        **ADR-0217 §9 is under the second limb alone**, and moves only the version, to 23
-        against the same forty methods — its own §7 adds two methods, but those are a
-        later change with a bump of their own (§11's ordering). What fires the limb here
-        is a **removal**: ``MemoryBase`` gains ``placement`` and ``Provenance`` loses
-        ``supplied_withheld_content``. ADR-0213 §11 ruled no bump for *adding* ``topics``
-        to the same envelope, because "an older peer decoding a newer hub's record ignores
-        a member it does not know" — and a removed member is not ignored, its default is
-        *read*. Neither type sets ``extra="forbid"``, so no decode fails in either
-        direction, which is precisely the hazard: a peer at 22 reads
-        ``supplied_withheld_content`` as its ``False`` default on a record whose placement
-        is ``OWNER``, and a peer at 23 reads the default placement on a record an older
-        hub had narrowed. Both are §9's "accepted with a different meaning", on the one
-        value where the meaning lost is the restrictive one. The types are wire-carried
-        through ``TurnResult.memories``, which ADR-0210 §8 reasons from in terms.
+    **ADR-0217 §9 is under the second limb alone**, and moves only the version, to 23
+    against the same forty methods — its own §7 adds two methods, but those are a
+    later change with a bump of their own (§11's ordering). What fires the limb here
+    is a **removal**: ``MemoryBase`` gains ``placement`` and ``Provenance`` loses
+    ``supplied_withheld_content``. ADR-0213 §11 ruled no bump for *adding* ``topics``
+    to the same envelope, because "an older peer decoding a newer hub's record ignores
+    a member it does not know" — and a removed member is not ignored, its default is
+    *read*. Neither type sets ``extra="forbid"``, so no decode fails in either
+    direction, which is precisely the hazard: a peer at 22 reads
+    ``supplied_withheld_content`` as its ``False`` default on a record whose placement
+    is ``OWNER``, and a peer at 23 reads the default placement on a record an older
+    hub had narrowed. Both are §9's "accepted with a different meaning", on the one
+    value where the meaning lost is the restrictive one. The types are wire-carried
+    through ``TurnResult.memories``, which ADR-0210 §8 reasons from in terms.
 
-        **ADR-0217 §7 is under the second limb too**, and moves only the version, to 24
-        against the same forty methods — the second of the three bumps §9 spends, and
-        the first here whose ground is a member of an **argument** rather than of a
-        result. ``FeedbackEvent`` gains ``guarded``, the owner's explicit act placing
-        what a piece of feedback establishes for themselves alone, and
-        ``AssistantEngine.learn`` takes a whole ``FeedbackEvent``. ``FeedbackEvent``
-        does not set ``extra="forbid"``, so a client at 24 sending ``guarded: true`` to
-        a hub at 23 is **not refused** — it is accepted with the member ignored, the
-        owner's act recorded nowhere and the record left speakable on a channel of
-        unbounded audience. That is §9's "accepted with a different meaning" again,
-        with the direction reversed: 23's hazard is an old peer misreading a result,
-        and this one is an old hub misreading an instruction. ADR-0213 §11's ruling on
-        a defaulted addition is not reached, because it reasons about a *result* an
-        older peer merely ignores and nothing acts on. The **method set does not
-        move** — ``learn`` already exists and its signature is unchanged, the member
-        riding the event the Protocol already takes — and ADR-0087 §2c's scalar table
-        gains no row, ``bool`` being a shape ``project`` already carries.
+    **ADR-0217 §7 is under the second limb too**, and moves only the version, to 24
+    against the same forty methods — the second of the three bumps §9 spends, and
+    the first here whose ground is a member of an **argument** rather than of a
+    result. ``FeedbackEvent`` gains ``guarded``, the owner's explicit act placing
+    what a piece of feedback establishes for themselves alone, and
+    ``AssistantEngine.learn`` takes a whole ``FeedbackEvent``. ``FeedbackEvent``
+    does not set ``extra="forbid"``, so a client at 24 sending ``guarded: true`` to
+    a hub at 23 is **not refused** — it is accepted with the member ignored, the
+    owner's act recorded nowhere and the record left speakable on a channel of
+    unbounded audience. That is §9's "accepted with a different meaning" again,
+    with the direction reversed: 23's hazard is an old peer misreading a result,
+    and this one is an old hub misreading an instruction. ADR-0213 §11's ruling on
+    a defaulted addition is not reached, because it reasons about a *result* an
+    older peer merely ignores and nothing acts on. The **method set does not
+    move** — ``learn`` already exists and its signature is unchanged, the member
+    riding the event the Protocol already takes — and ADR-0087 §2c's scalar table
+    gains no row, ``bool`` being a shape ``project`` already carries.
 
-        **ADR-0217 §7's two acts are under the first limb**, and they are the first
-        change since ADR-0200 §3 to move the method set: ``guard`` and ``unguard`` take it
-        to **forty-two** and the version to 25. ADR-0210 §8 names that limb in terms —
-        "§9's reach is the frame — its encoding, the validity of a wire-carried ``core``
-        type, and **the promoted surface's method set**" — and ``wire.surface.METHODS`` is
-        derived from the Protocol, so a peer at 25 naming ``guard`` reaches a hub at 24
-        that does not serve it. It is the **third and last** of the three bumps ADR-0217
-        §9 spends, each on its own ground and in its own change, and the only one of them
-        under this limb.
+    **ADR-0217 §7's two acts are under the first limb**, and they are the first
+    change since ADR-0200 §3 to move the method set: ``guard`` and ``unguard`` take it
+    to **forty-two** and the version to 25. ADR-0210 §8 names that limb in terms —
+    "§9's reach is the frame — its encoding, the validity of a wire-carried ``core``
+    type, and **the promoted surface's method set**" — and ``wire.surface.METHODS`` is
+    derived from the Protocol, so a peer at 25 naming ``guard`` reaches a hub at 24
+    that does not serve it. It is the **third and last** of the three bumps ADR-0217
+    §9 spends, each on its own ground and in its own change, and the only one of them
+    under this limb.
 
-        **The return type is deliberately not the ground**, and the distinction is worth
-        stating because it is a ``core`` model: ``Placement`` has crossed the wire since
-        23, inside ``MemoryBase.placement``, so it is minted here by nothing and ADR-0087
-        §2c's scalar table gains no row. What is new is a *method* that returns it. A
-        member added to ``Placement`` itself would be the second limb again and would owe
-        the test afresh.
+    **The return type is deliberately not the ground**, and the distinction is worth
+    stating because it is a ``core`` model: ``Placement`` has crossed the wire since
+    23, inside ``MemoryBase.placement``, so it is minted here by nothing and ADR-0087
+    §2c's scalar table gains no row. What is new is a *method* that returns it. A
+    member added to ``Placement`` itself would be the second limb again and would owe
+    the test afresh.
 
-        **ADR-0225 §14's seven are under the first limb too**, and they take the set to
-        **forty-nine** and the version to 26: four reads, two destroys and a size report,
-        all on the transcript archive. §14 states the obligation rather than weighing it —
-        "Lane C moves ``PROTOCOL_VERSION``. Adding a method to the engine surface is a
-        method-set change, and the obligation falls on the change that adds the method, in
-        that same change" — and it states the other half too, that the archive's own store
-        lane "moves it not at all: no type it adds crosses ``wire/`` or ``service/``".
+    **ADR-0225 §14's seven are under the first limb too**, and they take the set to
+    **forty-nine** and the version to 26: four reads, two destroys and a size report,
+    all on the transcript archive. §14 states the obligation rather than weighing it —
+    "Lane C moves ``PROTOCOL_VERSION``. Adding a method to the engine surface is a
+    method-set change, and the obligation falls on the change that adds the method, in
+    that same change" — and it states the other half too, that the archive's own store
+    lane "moves it not at all: no type it adds crosses ``wire/`` or ``service/``".
 
-        **The three new ``core`` models are not a second ground**, and it is worth
-        separating because ADR-0124 §9's second limb is about exactly this shape.
-        ``TranscriptEntry``, ``TranscriptHit`` and ``TranscriptArchiveSize`` arrive **on
-        the new methods only**, so no value a version 25 peer emits or decodes changes
-        shape: an old hub cannot be sent one, because it declines the method first. A
-        member added to any of the three later would be the second limb and would owe this
-        test afresh.
+    **The three new ``core`` models are not a second ground**, and it is worth
+    separating because ADR-0124 §9's second limb is about exactly this shape.
+    ``TranscriptEntry``, ``TranscriptHit`` and ``TranscriptArchiveSize`` arrive **on
+    the new methods only**, so no value a version 25 peer emits or decodes changes
+    shape: an old hub cannot be sent one, because it declines the method first. A
+    member added to any of the three later would be the second limb and would owe this
+    test afresh.
 
-        **ADR-0228 §6 is under the second limb and moves the version alone**, to **27**,
-        with the method set unmoved at forty-nine. ``ActionPlan`` gains ``supersedes``
-        (§5); ``ActionPlan`` is carried to a client inside ``TurnOutcome.turn.plan``;
-        ``wire/codec.py``'s projection dumps **every** field of a model, defaults
-        included; and ``ActionPlan`` sets ``extra="forbid"``. So a peer whose
-        ``ActionPlan`` predates the field fails to decode every ``TurnOutcome`` a newer
-        hub sends, on every turn rather than on a revising one. ADR-0228 §12 adds no
-        Protocol, no member to one and no parameter to any signature, which is why the
-        first limb is not reached — and §6 is explicit that no lane reads it as authority
-        for bumping on a defaulted addition *alone*: what obliges the move is the
-        conjunction, and ADR-0213 §11's no-bump ruling stands for the case it decided,
-        which the version log distinguishes on the express ground that neither type there
-        sets ``extra="forbid"``.
+    **ADR-0228 §6 is under the second limb and moves the version alone**, to **27**,
+    with the method set unmoved at forty-nine. ``ActionPlan`` gains ``supersedes``
+    (§5); ``ActionPlan`` is carried to a client inside ``TurnOutcome.turn.plan``;
+    ``wire/codec.py``'s projection dumps **every** field of a model, defaults
+    included; and ``ActionPlan`` sets ``extra="forbid"``. So a peer whose
+    ``ActionPlan`` predates the field fails to decode every ``TurnOutcome`` a newer
+    hub sends, on every turn rather than on a revising one. ADR-0228 §12 adds no
+    Protocol, no member to one and no parameter to any signature, which is why the
+    first limb is not reached — and §6 is explicit that no lane reads it as authority
+    for bumping on a defaulted addition *alone*: what obliges the move is the
+    conjunction, and ADR-0213 §11's no-bump ruling stands for the case it decided,
+    which the version log distinguishes on the express ground that neither type there
+    sets ``extra="forbid"``.
 
-        **ADR-0233 §15 is under the second limb and moves the version alone**, to
-        **29**, with the method set unmoved at forty-nine. ``ConfirmationEgress`` gains
-        ``coverage`` (§4); that model is carried to a client on
-        ``TurnOutcome.step.confirmation`` and as the element type of
-        ``pending_confirmations``; the projection dumps every field; and the model sets
-        ``extra="forbid"``. It is the same model and the same route that moved 11 for
-        ``planned_with_external_content``, so the arithmetic is checked again rather
-        than inherited. ADR-0233 §13's first clause adds no Protocol, no method and no
-        gateway route, which is why the first limb is not reached, and the ``core``
-        models it adds beside the confirmation shape —
-        :class:`~ai_assistant.core.types.SpanCoverage`'s carrier on ``EgressBinding``
-        and :class:`~ai_assistant.core.types.CoverageUnrecordedBinding` — are not a
-        second ground: ``PermissionDecision`` is named nowhere under ``wire/`` and is
-        returned by no promoted method, so widening its union changes no value a peer
-        emits or decodes.
+    **ADR-0233 §15 is under the second limb and moves the version alone**, to
+    **29**, with the method set unmoved at forty-nine. ``ConfirmationEgress`` gains
+    ``coverage`` (§4); that model is carried to a client on
+    ``TurnOutcome.step.confirmation`` and as the element type of
+    ``pending_confirmations``; the projection dumps every field; and the model sets
+    ``extra="forbid"``. It is the same model and the same route that moved 11 for
+    ``planned_with_external_content``, so the arithmetic is checked again rather
+    than inherited. ADR-0233 §13's first clause adds no Protocol, no method and no
+    gateway route, which is why the first limb is not reached, and the ``core``
+    models it adds beside the confirmation shape —
+    :class:`~ai_assistant.core.types.SpanCoverage`'s carrier on ``EgressBinding``
+    and :class:`~ai_assistant.core.types.CoverageUnrecordedBinding` — are not a
+    second ground: ``PermissionDecision`` is named nowhere under ``wire/`` and is
+    returned by no promoted method, so widening its union changes no value a peer
+    emits or decodes.
 
-        **ADR-0231 §16 is under the second limb and moves the version alone**, to
-        **30**, with the method set unmoved at forty-nine. ``ReadKind`` gains
-        ``WEB_SEARCH`` (§1); a ``ReadAsk`` is carried to a client inside
-        ``TurnOutcome.turn.plan``; and the projection renders an ``Enum`` as its
-        ``value``, so the string ``"web_search"`` crosses to a peer whose enumeration is
-        closed against it. **What it does *not* rest on is the limb the two entries above
-        share**: §1 gives this kind no field at all, so there is no defaulted member for
-        ``extra="forbid"`` to refuse, and the closed enumeration is the whole of the
-        break. ADR-0231 §17's Lane 4 adds no Protocol, no method and no gateway route,
-        which is why the first limb is not reached — and the two Protocols ADR-0231
-        decides, :class:`~ai_assistant.core.protocols.QueryComposer` and
-        :class:`~ai_assistant.core.protocols.WebSearcher`, are on neither the promoted
-        surface nor any earlier bump's ground.
+    **ADR-0231 §16 is under the second limb and moves the version alone**, to
+    **30**, with the method set unmoved at forty-nine. ``ReadKind`` gains
+    ``WEB_SEARCH`` (§1); a ``ReadAsk`` is carried to a client inside
+    ``TurnOutcome.turn.plan``; and the projection renders an ``Enum`` as its
+    ``value``, so the string ``"web_search"`` crosses to a peer whose enumeration is
+    closed against it. **What it does *not* rest on is the limb the two entries above
+    share**: §1 gives this kind no field at all, so there is no defaulted member for
+    ``extra="forbid"`` to refuse, and the closed enumeration is the whole of the
+    break. ADR-0231 §17's Lane 4 adds no Protocol, no method and no gateway route,
+    which is why the first limb is not reached — and the two Protocols ADR-0231
+    decides, :class:`~ai_assistant.core.protocols.QueryComposer` and
+    :class:`~ai_assistant.core.protocols.WebSearcher`, are on neither the promoted
+    surface nor any earlier bump's ground.
 
-        **ADR-0235 §10 is the first entry under both limbs at once**, and it moves the
-        set to **fifty-four** and the version to **31**. The first limb twice over: the
-        promoted method set grows by five (§4), and ``resume``'s declared arguments grow
-        by one, ``remember_recipients_until`` (§2) — an argument a version 30 hub's own
-        adapter does not know. The second limb beside them: ``TurnOutcome`` gains
-        ``recipient_grant``, which crosses on **every** turn call's result payload, and
-        that model sets ``extra="forbid"`` while the projection dumps every field, so a
-        version 30 client fails ``extra_forbidden`` on the first turn a version 31 hub
-        answers. Each ground obliges the move on its own and §10 requires the entry to
-        record all three rather than fold them into one.
+    **ADR-0235 §10 is the first entry under both limbs at once**, and it moves the
+    set to **fifty-four** and the version to **31**. The first limb twice over: the
+    promoted method set grows by five (§4), and ``resume``'s declared arguments grow
+    by one, ``remember_recipients_until`` (§2) — an argument a version 30 hub's own
+    adapter does not know. The second limb beside them: ``TurnOutcome`` gains
+    ``recipient_grant``, which crosses on **every** turn call's result payload, and
+    that model sets ``extra="forbid"`` while the projection dumps every field, so a
+    version 30 client fails ``extra_forbidden`` on the first turn a version 31 hub
+    answers. Each ground obliges the move on its own and §10 requires the entry to
+    record all three rather than fold them into one.
 
-        **ADR-0235 fixes no number and says why**: "any figure written here is a fact
-        about a tree that may move again before the lane does", so the lane read the
-        constant at 30 and moved it by one. That is what this pin is for.
+    **ADR-0235 fixes no number and says why**: "any figure written here is a fact
+    about a tree that may move again before the lane does", so the lane read the
+    constant at 30 and moved it by one. That is what this pin is for.
 
-        **32 is ADR-0240 §11**, and the method set does not move with it: that decision
-        admits ``STRUCTURED_READ`` to ``ReadKind`` and gives ``ReadAsk`` a ``structure``
-        field, so it is under ADR-0124 §9's **second** limb on both halves at once — a
-        closed enumeration gaining a member, and a defaulted field the projection emits
-        on every ask that ``extra="forbid"`` then refuses. The one Protocol it widens is
-        ``Planner``, which is on neither promoted surface. §11 fixes no number either,
-        and for the sharper reason that another lane had 31 → 32 already scheduled.
+    **32 is ADR-0240 §11**, and the method set does not move with it: that decision
+    admits ``STRUCTURED_READ`` to ``ReadKind`` and gives ``ReadAsk`` a ``structure``
+    field, so it is under ADR-0124 §9's **second** limb on both halves at once — a
+    closed enumeration gaining a member, and a defaulted field the projection emits
+    on every ask that ``extra="forbid"`` then refuses. The one Protocol it widens is
+    ``Planner``, which is on neither promoted surface. §11 fixes no number either,
+    and for the sharper reason that another lane had 31 → 32 already scheduled.
 
-        **35 is ADR-0244 §17**, and the method set moves with it — the **only** entry on
-        this pin since ADR-0242 §11 where both numbers move, and §17 states the move up
-        front rather than leaving the implementing lane to find it. It meets ADR-0124 §9
-        three times over: ``Confirmation`` gains a **required** member on an
-        ``extra="forbid"`` model (so **both** directions fail to decode, where every
-        ``TurnOutcome`` entry above fails in one), ``TurnOutcome`` gains two members a
-        projection emits, and ``AssistantEngine`` gains ``cancel_read``. §17 fixes no
-        numeral, for the reason every section above it does not.
+    **35 is ADR-0244 §17**, and the method set moves with it — the **only** entry on
+    this pin since ADR-0242 §11 where both numbers move, and §17 states the move up
+    front rather than leaving the implementing lane to find it. It meets ADR-0124 §9
+    three times over: ``Confirmation`` gains a **required** member on an
+    ``extra="forbid"`` model (so **both** directions fail to decode, where every
+    ``TurnOutcome`` entry above fails in one), ``TurnOutcome`` gains two members a
+    projection emits, and ``AssistantEngine`` gains ``cancel_read``. §17 fixes no
+    numeral, for the reason every section above it does not.
 
-        **36 is ADR-0247 §10, and it is under the second limb alone** — the first entry on
-        this pin where the wire-carried type is **narrowed** rather than widened.
-        ``SearchNotServiced`` loses ``SEARCH_DISABLED`` and ``NOT_ADMITTED``, it is carried
-        on ``TurnOutcome.search_not_serviced``, and a peer at 36 handed either value by a
-        peer at 35 fails to decode it — "a change to a wire-carried ``core`` type that makes
-        a value one peer emits invalid for the other", read in the direction a default
-        cannot cover. The method set does **not** move and stands at fifty-eight: the three
-        ``ConversationStore`` members ADR-0247 §5 removes are in-process reads no peer
-        emits, and that store is on neither promoted surface. §10 fixes the numeral, which
-        is why this entry names one.
+    **36 is ADR-0247 §10, and it is under the second limb alone** — the first entry on
+    this pin where the wire-carried type is **narrowed** rather than widened.
+    ``SearchNotServiced`` loses ``SEARCH_DISABLED`` and ``NOT_ADMITTED``, it is carried
+    on ``TurnOutcome.search_not_serviced``, and a peer at 36 handed either value by a
+    peer at 35 fails to decode it — "a change to a wire-carried ``core`` type that makes
+    a value one peer emits invalid for the other", read in the direction a default
+    cannot cover. The method set does **not** move and stands at fifty-eight: the three
+    ``ConversationStore`` members ADR-0247 §5 removes are in-process reads no peer
+    emits, and that store is on neither promoted surface. §10 fixes the numeral, which
+    is why this entry names one.
 
-        **37 is ADR-0248 §7, and it is under the second limb alone** — the wire-carried
-        type **widened**, which is this pin's ordinary shape rather than 36's. ``TurnResult``
-        gains ``utterance``, the user's own words carried as a value of their own;
-        ``TurnResult`` rides ``TurnOutcome.turn``, ``TurnOutcome`` is what the promoted
-        surface returns, ``TurnResult`` is ``extra="forbid"``, and ``project`` renders a
-        model by ``model_dump()`` — so a hub at 37 emits an ``"utterance"`` member on every
-        turn and a client at 36 fails it with ``extra_forbidden``. ``ParkedRead`` gaining the
-        same field is **not** a second ground: it is an in-process store record no peer
-        emits. The method set does **not** move and stands at fifty-eight: ADR-0248 changes
-        no Protocol at all (§7). §7 fixes the numeral, which is why this entry names one.
+    **37 is ADR-0248 §7, and it is under the second limb alone** — the wire-carried
+    type **widened**, which is this pin's ordinary shape rather than 36's. ``TurnResult``
+    gains ``utterance``, the user's own words carried as a value of their own;
+    ``TurnResult`` rides ``TurnOutcome.turn``, ``TurnOutcome`` is what the promoted
+    surface returns, ``TurnResult`` is ``extra="forbid"``, and ``project`` renders a
+    model by ``model_dump()`` — so a hub at 37 emits an ``"utterance"`` member on every
+    turn and a client at 36 fails it with ``extra_forbidden``. ``ParkedRead`` gaining the
+    same field is **not** a second ground: it is an in-process store record no peer
+    emits. The method set does **not** move and stands at fifty-eight: ADR-0248 changes
+    no Protocol at all (§7). §7 fixes the numeral, which is why this entry names one.
 
-        **39 is ADR-0251 §16, and it is under the second limb alone** — the wire-carried
-        type widened by exactly one defaulted member. ``AttemptEffort`` gains ``kind``, an
-        ``AttemptKind | None``; ``AttemptEffort`` rides ``GoalAttempt``, ``GoalAttempt`` is
-        what the promoted surface's attempt-facing methods return, both models are
-        ``extra="forbid"``, and ``project`` renders a model by ``model_dump()`` — so a hub
-        at 39 emits a ``"kind"`` member on every attempt and a client at 38 fails it with
-        ``extra_forbidden``. ``ReadOutcomeKind`` and the outcome model are **not** a second
-        ground: both exist only as an in-process argument to ``Planner.plan``, and no
-        wire-carried type gains a field of either. The method set does **not** move and
-        stands at fifty-eight: ``Planner`` changes — BREAKING under golden rule 5 — and is
-        on neither promoted surface. §16 fixes the numeral, which is why this entry names
-        one.
+    **39 is ADR-0251 §16, and it is under the second limb alone** — the wire-carried
+    type widened by exactly one defaulted member. ``AttemptEffort`` gains ``kind``, an
+    ``AttemptKind | None``; ``AttemptEffort`` rides ``GoalAttempt``, ``GoalAttempt`` is
+    what the promoted surface's attempt-facing methods return, both models are
+    ``extra="forbid"``, and ``project`` renders a model by ``model_dump()`` — so a hub
+    at 39 emits a ``"kind"`` member on every attempt and a client at 38 fails it with
+    ``extra_forbidden``. ``ReadOutcomeKind`` and the outcome model are **not** a second
+    ground: both exist only as an in-process argument to ``Planner.plan``, and no
+    wire-carried type gains a field of either. The method set does **not** move and
+    stands at fifty-eight: ``Planner`` changes — BREAKING under golden rule 5 — and is
+    on neither promoted surface. §16 fixes the numeral, which is why this entry names
+    one.
 
-        **41 is ADR-0253 §10, and it is under the second limb alone** — the wire-carried
-        type widened, which is this pin's ordinary shape. ``PlanStep`` gains five defaulted
-        members and ``ActionPlan`` gains ``interpretations``; an ``ActionPlan`` rides
-        ``TurnResult.plan``, ``TurnResult`` rides ``TurnOutcome.turn``, all three models are
-        ``extra="forbid"``, and ``project`` renders a model by ``model_dump()`` — so a hub
-        at 41 emits six members on every plan and a client at 40 fails each with
-        ``extra_forbidden``. ``GoalElement`` gaining ``id`` and ``applicability`` is **not**
-        a second ground (§10): ``TurnResult.goal`` is a ``GoalBrief``, whose
-        ``BriefElement`` carries "exactly ``text`` and ``ground``", and a
-        ``GoalInterpretation`` crosses no frame. Neither is ``GoalEvidence`` gaining
-        ``interpreted_output``, which ADR-0252 §12 already ruled moves no wire version. The
-        method set does **not** move and stands at sixty-one: ``Planner`` and ``PlanStore``
-        change — BREAKING under golden rule 5 — and neither is on a promoted surface, and
-        ``PlanStore`` gains no member at all. §10 fixes no numeral and says why: "the figure
-        is the tree's and not this decision's".
+    **41 is ADR-0253 §10, and it is under the second limb alone** — the wire-carried
+    type widened, which is this pin's ordinary shape. ``PlanStep`` gains five defaulted
+    members and ``ActionPlan`` gains ``interpretations``; an ``ActionPlan`` rides
+    ``TurnResult.plan``, ``TurnResult`` rides ``TurnOutcome.turn``, all three models are
+    ``extra="forbid"``, and ``project`` renders a model by ``model_dump()`` — so a hub
+    at 41 emits six members on every plan and a client at 40 fails each with
+    ``extra_forbidden``. ``GoalElement`` gaining ``id`` and ``applicability`` is **not**
+    a second ground (§10): ``TurnResult.goal`` is a ``GoalBrief``, whose
+    ``BriefElement`` carries "exactly ``text`` and ``ground``", and a
+    ``GoalInterpretation`` crosses no frame. Neither is ``GoalEvidence`` gaining
+    ``interpreted_output``, which ADR-0252 §12 already ruled moves no wire version. The
+    method set does **not** move and stands at sixty-one: ``Planner`` and ``PlanStore``
+    change — BREAKING under golden rule 5 — and neither is on a promoted surface, and
+    ``PlanStore`` gains no member at all. §10 fixes no numeral and says why: "the figure
+    is the tree's and not this decision's".
 
-        **42 is ADR-0254 §16 and §20's Lane 1, and it is under the second limb twice
-        over.** ``PermissionRuling`` gains ``authorised_goal`` and ``ToolDefinition``
-        gains ``system_supplied``; a ``PermissionRuling`` rides inside a
-        ``PermissionDecision``, a ``ToolDefinition`` rides inside the same decision, a
-        decision crosses the promoted surface today, both models are ``extra="forbid"``
-        and ``project`` renders a model by ``model_dump()`` — so a hub at 42 emits both
-        members on every decision it sends and a client at 41 fails each with
-        ``extra_forbidden``. ``ActionRequest`` gaining ``goal`` is **not** a third
-        ground: it crosses no frame. The method set does **not** move and stands at
-        sixty-one: Lane 1 adds three Protocols — BREAKING under golden rule 5 — and none
-        of them is promoted; ``AssistantEngine``'s two new members are **Lane 3's** and
-        move it then. §20 fixes no numeral and says why — other lanes of that batch move
-        the same constant, so "a number written in this document would be a claim about
-        an order nobody controls".
+    **42 is ADR-0254 §16 and §20's Lane 1, and it is under the second limb twice
+    over.** ``PermissionRuling`` gains ``authorised_goal`` and ``ToolDefinition``
+    gains ``system_supplied``; a ``PermissionRuling`` rides inside a
+    ``PermissionDecision``, a ``ToolDefinition`` rides inside the same decision, a
+    decision crosses the promoted surface today, both models are ``extra="forbid"``
+    and ``project`` renders a model by ``model_dump()`` — so a hub at 42 emits both
+    members on every decision it sends and a client at 41 fails each with
+    ``extra_forbidden``. ``ActionRequest`` gaining ``goal`` is **not** a third
+    ground: it crosses no frame. The method set does **not** move and stands at
+    sixty-one: Lane 1 adds three Protocols — BREAKING under golden rule 5 — and none
+    of them is promoted; ``AssistantEngine``'s two new members are **Lane 3's** and
+    move it then. §20 fixes no numeral and says why — other lanes of that batch move
+    the same constant, so "a number written in this document would be a claim about
+    an order nobody controls".
 
-        **43 is ADR-0264 §7's lane 1, and it is under the second limb alone.**
-        ``TurnOutcome`` gains ``outbound_statement``, that model is ``extra="forbid"``,
-        ``project`` renders a model by ``model_dump()`` and a ``TurnOutcome`` is what every
-        turn call returns — so a hub at 43 emits ``"outbound_statement": null`` on every
-        turn it sends and a client at 42 fails it with ``extra_forbidden``. A defaulted
-        member is still a shape change, exactly as the entries at 39, 40 and 42 say. The
-        method set does **not** move: lane 1 adds no ``AssistantEngine`` member, and lane 2
-        renders the statement in ``interfaces/cli.py`` and changes no ``core`` type at all.
-        ADR-0264 fixes no numeral, so 42 is what the tree held when that lane branched.
+    **43 is ADR-0264 §7's lane 1, and it is under the second limb alone.**
+    ``TurnOutcome`` gains ``outbound_statement``, that model is ``extra="forbid"``,
+    ``project`` renders a model by ``model_dump()`` and a ``TurnOutcome`` is what every
+    turn call returns — so a hub at 43 emits ``"outbound_statement": null`` on every
+    turn it sends and a client at 42 fails it with ``extra_forbidden``. A defaulted
+    member is still a shape change, exactly as the entries at 39, 40 and 42 say. The
+    method set does **not** move: lane 1 adds no ``AssistantEngine`` member, and lane 2
+    renders the statement in ``interfaces/cli.py`` and changes no ``core`` type at all.
+    ADR-0264 fixes no numeral, so 42 is what the tree held when that lane branched.
 
-        **44 is ADR-0260 §11's L1, and it is under the second limb alone.**
-        ``TurnOutcome`` gains ``forecast_not_read`` on the same argument
-        ``outbound_statement`` moved it on one version back, and three more ``core`` shapes
-        move with it: ``ReadKind`` gains a member, ``OutboundDestination`` gains a member,
-        and ``CarriedProvenance`` and ``EgressBinding`` each gain ``forecast_reach``, which
-        an ``extra="forbid"`` decode at 43 refuses on every binding a hub at 44 renders. The
-        method set does **not** move: ADR-0260's L1 adds no ``AssistantEngine`` member and
-        no gateway route. §11 fixes no numeral and says why — "more than one lane in flight
-        moves it and a number written here would be a claim that goes stale silently" — so
-        43 is what the tree held when this lane branched.
+    **44 is ADR-0260 §11's L1, and it is under the second limb alone.**
+    ``TurnOutcome`` gains ``forecast_not_read`` on the same argument
+    ``outbound_statement`` moved it on one version back, and three more ``core`` shapes
+    move with it: ``ReadKind`` gains a member, ``OutboundDestination`` gains a member,
+    and ``CarriedProvenance`` and ``EgressBinding`` each gain ``forecast_reach``, which
+    an ``extra="forbid"`` decode at 43 refuses on every binding a hub at 44 renders. The
+    method set does **not** move: ADR-0260's L1 adds no ``AssistantEngine`` member and
+    no gateway route. §11 fixes no numeral and says why — "more than one lane in flight
+    moves it and a number written here would be a claim that goes stale silently" — so
+    43 is what the tree held when this lane branched.
 
-        **45 is where both numbers move together for ADR-0254 §20's Lane 3**, which is the
-        first entry in this docstring's run where they do: that lane adds **two** methods to
-        the promoted surface — ADR-0124 §9's first limb — **and** a member to
-        ``Confirmation`` and one to ``TurnOutcome`` — its second, twice — so 61 becomes 63
-        and 44 becomes 45. ADR-0254 §16 and §20 fix no numeral either, for the reason they
-        state: other lanes of the batch move the same constant and a number in the document
-        would be a claim about an order nobody controls — which is exactly what happened
-        here, this lane having been written at 44 and re-bumped once ADR-0260's L1 landed
-        first.
+    **45 is where both numbers move together for ADR-0254 §20's Lane 3**, which is the
+    first entry in this docstring's run where they do: that lane adds **two** methods to
+    the promoted surface — ADR-0124 §9's first limb — **and** a member to
+    ``Confirmation`` and one to ``TurnOutcome`` — its second, twice — so 61 becomes 63
+    and 44 becomes 45. ADR-0254 §16 and §20 fix no numeral either, for the reason they
+    state: other lanes of the batch move the same constant and a number in the document
+    would be a claim about an order nobody controls — which is exactly what happened
+    here, this lane having been written at 44 and re-bumped once ADR-0260's L1 landed
+    first.
 
-        **46 is ADR-0265 §5's L1, and it is straight back under the second limb alone** —
-        the entry above being the run's one both-limbs move rather than a new normal. Two
-        wire-carried ``core`` shapes move: ``GoalBrief`` gains ``actions`` and is what
-        ``TurnResult.goal`` carries, and ``PlanStep`` gains ``intended_action`` and rides
-        inside ``ActionPlan``, which is ``TurnResult.plan``. Both set ``extra="forbid"``
-        and ``project`` renders a model by ``model_dump()``, so a hub at 46 emits
-        ``"actions": []`` on every turn and ``"intended_action": null`` on every step, and
-        a client at 45 refuses each. **The method set does not move and stays at 63**:
-        ADR-0265's L1 adds no ``AssistantEngine`` member and no gateway route, so the two
-        numbers part company again immediately — which is what this pin exists to make a
-        lane say out loud rather than discover. §5 fixes no numeral, so this lane was
-        written 45 and re-bumped to 46 when ADR-0254 §20's Lane 3 landed first, on that
-        entry's own instruction. **``Goal`` is not the ground**, though §5 names it:
-        ``TurnResult.goal`` is a ``GoalBrief`` (ADR-0249 §11) and no frame carries a
-        ``Goal`` — the correction is a dated note on ADR-0265 and closes #2400.
+    **46 is ADR-0265 §5's L1, and it is straight back under the second limb alone** —
+    the entry above being the run's one both-limbs move rather than a new normal. Two
+    wire-carried ``core`` shapes move: ``GoalBrief`` gains ``actions`` and is what
+    ``TurnResult.goal`` carries, and ``PlanStep`` gains ``intended_action`` and rides
+    inside ``ActionPlan``, which is ``TurnResult.plan``. Both set ``extra="forbid"``
+    and ``project`` renders a model by ``model_dump()``, so a hub at 46 emits
+    ``"actions": []`` on every turn and ``"intended_action": null`` on every step, and
+    a client at 45 refuses each. **The method set does not move and stays at 63**:
+    ADR-0265's L1 adds no ``AssistantEngine`` member and no gateway route, so the two
+    numbers part company again immediately — which is what this pin exists to make a
+    lane say out loud rather than discover. §5 fixes no numeral, so this lane was
+    written 45 and re-bumped to 46 when ADR-0254 §20's Lane 3 landed first, on that
+    entry's own instruction. **``Goal`` is not the ground**, though §5 names it:
+    ``TurnResult.goal`` is a ``GoalBrief`` (ADR-0249 §11) and no frame carries a
+    ``Goal`` — the correction is a dated note on ADR-0265 and closes #2400.
 
-        **47 is ADR-0266 §11's L1, and it is under the second limb alone.**
-        ``ToolDefinition`` gains ``bounded_arguments`` and crosses the promoted surface
-        inside a ``PermissionDecision``, and that record itself gains ``intended_action``
-        — two ``core`` shapes, one bump, and ADR-0266 §11 says there is no third:
-        ``CoverageView``'s ``kind`` and ``ValueBound``'s ``maximum_exclusive`` cross only
-        inside a ``Confirmation``, which the entry at 45 landed, so they ride this bump
-        rather than adding to it, and ``ActionRequest`` crosses no frame at all. **The
-        method set does not move and stays at 63**: L1 adds no ``AssistantEngine`` member
-        and no gateway route, so the two numbers part company for a second consecutive
-        entry. §11 fixes no numeral either, and this lane was written **46** and re-bumped
-        to **47** when ADR-0265's L1 landed first — on that entry's own instruction, and
-        the reason every entry above it gives.
+    **47 is ADR-0266 §11's L1, and it is under the second limb alone.**
+    ``ToolDefinition`` gains ``bounded_arguments`` and crosses the promoted surface
+    inside a ``PermissionDecision``, and that record itself gains ``intended_action``
+    — two ``core`` shapes, one bump, and ADR-0266 §11 says there is no third:
+    ``CoverageView``'s ``kind`` and ``ValueBound``'s ``maximum_exclusive`` cross only
+    inside a ``Confirmation``, which the entry at 45 landed, so they ride this bump
+    rather than adding to it, and ``ActionRequest`` crosses no frame at all. **The
+    method set does not move and stays at 63**: L1 adds no ``AssistantEngine`` member
+    and no gateway route, so the two numbers part company for a second consecutive
+    entry. §11 fixes no numeral either, and this lane was written **46** and re-bumped
+    to **47** when ADR-0265's L1 landed first — on that entry's own instruction, and
+    the reason every entry above it gives.
 
-        **48 is ADR-0267 §11's Q1, and it is under the second limb alone.**
-        ``ToolDefinition`` gains ``quoted_output`` and crosses the promoted surface inside
-        a ``PermissionDecision``, and ``AuthorizationProjection`` gains ``quote`` and
-        crosses one inside a ``Confirmation`` — two ``core`` shapes, one bump, and §11 says
-        there is no third: ``QuoteView`` reaches a frame only inside the projection,
-        ``Goal`` reaches none at all (``TurnResult.goal`` is a ``GoalBrief``, and
-        ``PlanExport`` crosses no frame), and ``Authorization`` crosses whole in no frame
-        either, so ``quoted`` adds no ground. **The method set does not move and stays at
-        63**: Q1 adds no ``AssistantEngine`` member and no gateway route, so the two
-        numbers part company for a third consecutive entry. §11 fixes no numeral either,
-        and this lane was written **48** at a base holding 47.
-        **49 is ADR-0261 §10's L1, and it is under the second limb alone, four times
-        over.** ``GoalAbandonment`` gains ``ABANDONED_EFFECT_IN_FLIGHT`` and is returned by
-        the promoted ``abandon_goal``, so a client one version back validates a value
-        against a three-member enumeration; ``GoalSummary`` gains ``effect_in_flight`` and
-        ``TurnOutcome`` gains ``drive_withheld``, both ``extra="forbid"`` models a promoted
-        method returns, so an older peer refuses **every** listed goal and **every** turn;
-        and ``ClaimRefused`` is minted, which can cross as an error payload whose unknown
-        ``code`` ADR-0085 §10a makes a protocol violation rather than a widening — the
-        handshake being what keeps that safe, and this bump being what keeps the handshake
-        true. ``AttemptOutcome``'s new member is **not** among them: it rides a
-        ``GoalAttempt``, which no peer emits, so its version ground is
-        ``PlanExport.schema_version`` alone. **The method set does not move and stays at
-        63**: L1 adds no ``AssistantEngine`` member and no gateway route, so the two numbers
-        part company for a **fourth** consecutive entry. ADR-0261 §10 fixes no numeral —
-        *"the figure is the tree's"* — and this lane was written **48** at a base holding
-        47, then re-bumped to **49** when ADR-0267's Q1 landed 48 first, on that entry's
-        own instruction. ADR-0259's L1 also moves it and re-bumps in its turn.
+    **48 is ADR-0267 §11's Q1, and it is under the second limb alone.**
+    ``ToolDefinition`` gains ``quoted_output`` and crosses the promoted surface inside
+    a ``PermissionDecision``, and ``AuthorizationProjection`` gains ``quote`` and
+    crosses one inside a ``Confirmation`` — two ``core`` shapes, one bump, and §11 says
+    there is no third: ``QuoteView`` reaches a frame only inside the projection,
+    ``Goal`` reaches none at all (``TurnResult.goal`` is a ``GoalBrief``, and
+    ``PlanExport`` crosses no frame), and ``Authorization`` crosses whole in no frame
+    either, so ``quoted`` adds no ground. **The method set does not move and stays at
+    63**: Q1 adds no ``AssistantEngine`` member and no gateway route, so the two
+    numbers part company for a third consecutive entry. §11 fixes no numeral either,
+    and this lane was written **48** at a base holding 47.
+    **49 is ADR-0261 §10's L1, and it is under the second limb alone, four times
+    over.** ``GoalAbandonment`` gains ``ABANDONED_EFFECT_IN_FLIGHT`` and is returned by
+    the promoted ``abandon_goal``, so a client one version back validates a value
+    against a three-member enumeration; ``GoalSummary`` gains ``effect_in_flight`` and
+    ``TurnOutcome`` gains ``drive_withheld``, both ``extra="forbid"`` models a promoted
+    method returns, so an older peer refuses **every** listed goal and **every** turn;
+    and ``ClaimRefused`` is minted, which can cross as an error payload whose unknown
+    ``code`` ADR-0085 §10a makes a protocol violation rather than a widening — the
+    handshake being what keeps that safe, and this bump being what keeps the handshake
+    true. ``AttemptOutcome``'s new member is **not** among them: it rides a
+    ``GoalAttempt``, which no peer emits, so its version ground is
+    ``PlanExport.schema_version`` alone. **The method set does not move and stays at
+    63**: L1 adds no ``AssistantEngine`` member and no gateway route, so the two numbers
+    part company for a **fourth** consecutive entry. ADR-0261 §10 fixes no numeral —
+    *"the figure is the tree's"* — and this lane was written **48** at a base holding
+    47, then re-bumped to **49** when ADR-0267's Q1 landed 48 first, on that entry's
+    own instruction. ADR-0259's L1 also moves it and re-bumps in its turn.
 
-        **ADR-0124 §9 decides no mechanical check and creates none**, saying one is
-        owed and leaving its shape open. This is not that check — it is a *pin*, and
-        a deliberately crude one: it fails when either number moves, which is the
-        moment a lane touching either has to read that rule rather than discover it
-        in review. The real check is #872's and is still owed.
+    **ADR-0124 §9 decides no mechanical check and creates none**, saying one is
+    owed and leaving its shape open. This is not that check — it is a *pin*, and
+    a deliberately crude one: it fails when either number moves, which is the
+    moment a lane touching either has to read that rule rather than discover it
+    in review. The real check is #872's and is still owed.
     """
     from ai_assistant.wire.envelope import PROTOCOL_VERSION  # noqa: PLC0415 — asserted about
 
