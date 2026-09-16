@@ -434,6 +434,17 @@ _PAUSED_ATTEMPT_STATES: Final[frozenset[AttemptState]] = frozenset(
 #: ADR-0261 §3's limb 1 and §6's predicate, one statement of *outstanding* so the two
 #: cannot disagree: "any step of any execution … stands ``INDETERMINATE`` or
 #: ``RUNNING``". Mirrored here rather than imported, as the transition graph above is.
+#: ADR-0262 §4's third ending condition, as the **complement** of the three statuses
+#: that satisfy it: "every step of every execution it names stands ``SUCCEEDED``,
+#: ``FAILED`` or ``SKIPPED``". Written that way round so a member added to
+#: ``StepStatus`` later is **unsettled** until some decision says otherwise. It is
+#: deliberately not the pair below, which is ADR-0261 §3's narrower *outstanding*: a
+#: set testing only ``RUNNING`` and ``INDETERMINATE`` "is silent by the time it runs"
+#: over a step still ``PENDING``, and the two answer different questions on purpose.
+_SETTLED_STEP_STATUSES: Final[frozenset[StepStatus]] = frozenset(
+    {StepStatus.SUCCEEDED, StepStatus.FAILED, StepStatus.SKIPPED}
+)
+
 _OUTSTANDING_STEP_STATUSES: Final[frozenset[StepStatus]] = frozenset(
     {StepStatus.INDETERMINATE, StepStatus.RUNNING}
 )
@@ -1491,13 +1502,15 @@ class FakePlanStore:
         caller's rule. **It is no longer the only route to** ``ABANDONED``:
         :meth:`close_goal_abandoned` writes that member too (ADR-0261 §2).
 
-        **A ``→ ABANDONED`` write over a goal holding a non-terminal attempt is
-        refused**, decided in this same step (ADR-0261 §2). What is refused is a write
-        that would leave two records inconsistent, not a status member.
+        **A write that *closes* the goal over one holding a non-terminal attempt is
+        refused**, decided in this same step — ``→ ABANDONED`` (ADR-0261 §2) and its
+        **exact mirror** ``→ ACHIEVED`` (ADR-0262 §5). What is refused is a write that
+        would leave two records inconsistent, not a status member: ``BLOCKED`` is
+        constrained by neither and ``ACTIVE`` on a reopen is untouched.
 
         Raises:
-            StaleExecutionError: If the stored version has moved on, or the write is
-                ``→ ABANDONED`` over a goal holding a live attempt.
+            StaleExecutionError: If the stored version has moved on, or the write
+                closes the goal over one holding a live attempt.
             PlanningError: If ``goal_id`` names no stored goal.
         """
         async with self._resource.held():
@@ -1697,23 +1710,120 @@ class FakePlanStore:
         )
         raise StaleExecutionError(msg)
 
-    def _refuse_a_live_attempt(self, goal_id: str, status: GoalStatus) -> None:
-        """Refuse a ``→ ABANDONED`` write over a goal holding a live attempt (§2).
+    def _refuse_an_unendable_attempt(
+        self, attempt: GoalAttempt, declared: Sequence[tuple[str, int]]
+    ) -> None:
+        """Refuse a ``→ ENDED`` transition ADR-0262 §4 does not admit, in two conjuncts.
 
-        ADR-0261 §2's first closure conjunct, one limb, over **every** caller of
-        ``set_goal_status``. It binds on ``ABANDONED`` alone: ``ACHIEVED`` is A10's,
-        ``BLOCKED`` is A3's, and ``ACTIVE`` on a reopen is untouched.
+        Spelled out here rather than imported from ``ai_assistant.planning``, for the
+        reason this module's docstring gives for the transition graph. **The order is
+        part of the rule**, so it is stated whole in one place: the caller's
+        ``expected_version`` compare-and-swap has already run — which is the edge §4
+        fixes, so an execution **appended** after the caller's read is reported as the
+        race it is and never as a malformed set — then the **malformed** snapshot, the
+        caller's own construction error which no re-read repairs, then the two races.
+
+        **Neither conjunct subsumes the other**: "the versions say nothing about a step
+        nobody has moved yet, the statuses nothing about a step moved twice". Both exist
+        because a claim advances no ``GoalAttempt.version``, so the attempt's own
+        compare-and-swap cannot see one land.
+
+        Args:
+            attempt: The attempt as stored.
+            declared: The transition's ``execution_versions``, as the caller built it.
+
+        Raises:
+            ValueError: If ``declared``'s ids are not exactly the attempt's
+                ``execution_ids`` — a missing id, an extra id, a duplicate or a partial
+                snapshot. **Never** ``StaleExecutionError``: nothing advanced, so a
+                class promising a fruitful retry would be a false statement.
+            StaleExecutionError: If any step of any execution the attempt names is not
+                yet settled ``SUCCEEDED``, ``FAILED`` or ``SKIPPED``, or if any declared
+                ``version`` is not the stored one — the retry the status set cannot see,
+                a ``FAILED`` step being terminal at both instants.
+        """
+        seen: set[str] = set()
+        for execution_id, _ in declared:
+            if execution_id in seen:
+                msg = (
+                    f"attempt {attempt.id} is being ended with execution {execution_id} "
+                    f"named twice in execution_versions: the field is a snapshot of the "
+                    f"set the comparison read, and no read yields a duplicate — rebuild "
+                    f"it from the attempt's own execution_ids (ADR-0262 §4)"
+                )
+                raise ValueError(msg)
+            seen.add(execution_id)
+        wanted = set(attempt.execution_ids)
+        if seen != wanted:
+            msg = (
+                f"attempt {attempt.id} is being ended with an execution_versions naming "
+                f"{sorted(seen)}, but the attempt names {sorted(wanted)}: the field is "
+                f"the complete set the comparison read, because an omitted execution is "
+                f"free to move between the comparison and the commit — a malformed "
+                f"command, not a lost race (ADR-0262 §4)"
+            )
+            raise ValueError(msg)
+        live = sorted(
+            {one.value for one in self._step_statuses(attempt) if one not in _SETTLED_STEP_STATUSES}
+        )
+        if live:
+            msg = (
+                f"attempt {attempt.id} cannot end while a step of its executions stands "
+                f"{', '.join(live)}: an attempt ends only where every step has settled "
+                f"SUCCEEDED, FAILED or SKIPPED, because a claim advances no "
+                f"GoalAttempt.version and is invisible to this transition's own "
+                f"compare-and-swap (ADR-0262 §4)"
+            )
+            raise StaleExecutionError(msg)
+        stored = {
+            execution_id: held.version
+            for execution_id in attempt.execution_ids
+            if (held := self._executions.get(execution_id)) is not None
+        }
+        moved = sorted(
+            f"{execution_id} stands at {stored[execution_id]}, not {version}"
+            for execution_id, version in declared
+            if execution_id in stored and stored[execution_id] != version
+        )
+        if moved:
+            msg = (
+                f"attempt {attempt.id} cannot end against a stale execution snapshot "
+                f"({'; '.join(moved)}): the comparison was computed over a version the "
+                f"store has since moved past, which the step statuses cannot see "
+                f"because a retried step is terminal at both instants — re-read and "
+                f"recompute (ADR-0262 §4)"
+            )
+            raise StaleExecutionError(msg)
+
+    def _refuse_a_live_attempt(self, goal_id: str, status: GoalStatus) -> None:
+        """Refuse a **closing** status write over a goal holding a live attempt.
+
+        ADR-0261 §2's first closure conjunct and ADR-0262 §5's, which that decision
+        calls the **exact mirror** of it. **One limb over both closing members**, over
+        **every** caller of ``set_goal_status``: that a closed goal never carries a
+        live attempt is the store's invariant and not one member's. ``BLOCKED`` is
+        A3's and is constrained by neither; ``ACTIVE`` on a reopen is untouched, which
+        is what keeps the reopen sequence — status first, then the new attempt — the
+        one sequence that works.
+
+        **Stated over** :data:`_CLOSED_GOAL_STATUSES` **rather than over the two
+        members**, for that constant's own reason: naming the achieved member here
+        would register as a producer of it under
+        ``tests/core/test_goal_status_has_no_producer.py``'s deliberately
+        over-approximating scan, and this is a read.
 
         Args:
             goal_id: The goal being moved.
             status: The status being written.
 
         Raises:
-            StaleExecutionError: If the write is ``→ ABANDONED`` and the goal holds a
-                non-terminal attempt — the ground **moves** under a re-read, the
-                caller's correct response being to end that attempt and write again.
+            StaleExecutionError: If the write closes the goal and it holds a
+                non-terminal attempt — the ground **moves** under a re-read. What the
+                caller does next is its own rule: ADR-0261 §2's abandoning caller ends
+                the attempt and writes again, while ADR-0262 §5's achieving act never
+                retries at all.
         """
-        if status is not GoalStatus.ABANDONED:
+        if status not in _CLOSED_GOAL_STATUSES:
             return
         live = sorted(
             one.id
@@ -1723,10 +1833,10 @@ class FakePlanStore:
         if not live:
             return
         msg = (
-            f"goal {goal_id} cannot be abandoned while it holds live attempts "
-            f"({', '.join(live)}): an ABANDONED goal never carries a claimable attempt, "
-            f"so end them in the step that closes it — which is close_goal_abandoned — "
-            f"and write again (ADR-0261 §2)"
+            f"goal {goal_id} cannot be moved to {status.value} while it holds live "
+            f"attempts ({', '.join(live)}): a closed goal never carries a claimable "
+            f"attempt, and open_attempt advances no Goal.version, so this write is the "
+            f"only place the pair can be seen at once (ADR-0261 §2, ADR-0262 §5)"
         )
         raise StaleExecutionError(msg)
 
@@ -2150,9 +2260,18 @@ class FakePlanStore:
         is refused. That is the rule for every caller *other* than
         :meth:`close_goal_abandoned`, which computes the limbs itself.
 
+        **A ``→ ENDED`` transition carries ADR-0262 §4's two conjuncts**, read in this
+        same step and after the compare-and-swap above: no step of any execution the
+        attempt names still unsettled, and an ``execution_versions`` naming exactly its
+        ``execution_ids`` at the versions this store holds.
+
         Raises:
-            StaleExecutionError: If the stored version has moved on, or a
-                ``→ CANCELLED`` transition proposes the wrong outcome (ADR-0261 §3).
+            StaleExecutionError: If the stored version has moved on, a
+                ``→ CANCELLED`` transition proposes the wrong outcome (ADR-0261 §3), or
+                a ``→ ENDED`` transition meets an unsettled step or a stale execution
+                snapshot (ADR-0262 §4).
+            ValueError: If a ``→ ENDED`` transition's ``execution_versions`` is not
+                exactly the attempt's ``execution_ids`` (ADR-0262 §4).
             IllegalTransitionError: If the move is not legal from where it stands.
             PlanningError: If the attempt does not exist, the result is not a shape
                 ADR-0249 §5 admits, or the execution it names is already another
@@ -2176,6 +2295,8 @@ class FakePlanStore:
                 self._refuse_a_second_owner(stored.id, stored.goal_id, transition.add_execution_id)
             if transition.to_state is AttemptState.CANCELLED:
                 self._refuse_a_wrong_cancellation_outcome(stored, transition.outcome)
+            if transition.to_state is AttemptState.ENDED:
+                self._refuse_an_unendable_attempt(stored, transition.execution_versions)
             updated = self._advanced_attempt(stored, transition)
             self._attempts[updated.id] = updated
             return updated.model_copy(deep=True)

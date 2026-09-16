@@ -52,7 +52,7 @@ from ai_assistant.core.types import (
 )
 
 if TYPE_CHECKING:
-    from collections.abc import Iterable, Sequence
+    from collections.abc import Iterable, Mapping, Sequence
 
     from ai_assistant.core.types import (
         ActionQuote,
@@ -1299,6 +1299,210 @@ CLOSED_GOAL_STATUSES: Final[frozenset[GoalStatus]] = frozenset(GoalStatus) - {
 }
 
 
+#: ADR-0262 §4's third ending condition, as the **complement** of the three statuses
+#: that satisfy it: "every step of every execution it names stands ``SUCCEEDED``,
+#: ``FAILED`` or ``SKIPPED`` — so none stands ``PENDING``, ``AWAITING_APPROVAL``,
+#: ``RUNNING`` or ``INDETERMINATE``". Written that way round so a member added to
+#: ``StepStatus`` later is **unsettled** until some decision says otherwise, which is
+#: the direction ADR-0014 §4 refuses to guess in; enumerating the four would silently
+#: admit it. It is deliberately **not** :data:`OUTSTANDING_STEP_STATUSES`, which is
+#: ADR-0261 §3's narrower pair: a set testing only ``RUNNING`` and ``INDETERMINATE``
+#: "is silent by the time it runs" over a step still ``PENDING`` (§4), and the two sets
+#: answer different questions on purpose.
+SETTLED_STEP_STATUSES: Final[frozenset[StepStatus]] = frozenset(
+    {StepStatus.SUCCEEDED, StepStatus.FAILED, StepStatus.SKIPPED}
+)
+
+
+def refuse_an_unendable_attempt(
+    *,
+    attempt_id: str,
+    named: Sequence[str],
+    declared: Sequence[tuple[str, int]],
+    statuses: Iterable[StepStatus],
+    versions: Mapping[str, int],
+) -> None:
+    """Refuse a ``→ ENDED`` transition ADR-0262 §4 does not admit, in two conjuncts.
+
+    Stated once for the same reason :func:`cancellation_outcome` is: §4 fixes an
+    **order** over these tests, and two statements of an ordered rule are two places to
+    get the order wrong. Every caller's ``expected_version`` compare-and-swap is decided
+    **before** this function runs, which is the one edge §4 fixes by name: an execution
+    **appended** after the caller's read advances ``GoalAttempt.version``, "so an
+    execution appended after the caller's read is reported as the race it is and never
+    as a malformed set — the set can only be wrong because the caller built it wrongly".
+
+    **Past that point the remaining order is this function's, and it puts the malformed
+    command first.** A snapshot whose id set is not the attempt's is the caller's own
+    construction error, which no re-read repairs and which is therefore diagnosed as
+    itself whatever the store's transient state; only then are the two **races** tested,
+    the statuses on sight and the versions for the retry the statuses cannot see.
+
+    **Neither conjunct subsumes the other** (§4): "the versions say nothing about a step
+    nobody has moved yet, the statuses nothing about a step moved twice". Both exist
+    because a ``commit_transition`` advances no ``GoalAttempt.version``, so the
+    attempt's own compare-and-swap cannot see a claim land.
+
+    **Both bind on ``to_state=ENDED`` and on nothing else**, so every caller tests
+    ``to_state`` before calling this: ``→ CANCELLED`` ignores ``execution_versions``
+    whatever it carries (ADR-0261 §2 is unaffected), and a phase stamp, an effort
+    counter or a reference append writes exactly as it did before this decision.
+
+    Args:
+        attempt_id: The attempt being ended, for the messages.
+        named: The attempt's own ``execution_ids``, as stored.
+        declared: The transition's ``execution_versions``, as the caller built it.
+        statuses: The status of every step of every execution ``named`` lists, read
+            **inside the same indivisible step as the write**. Order is irrelevant.
+        versions: The ``ExecutionState.version`` of each execution ``named`` lists, read
+            in that same step. An id ``named`` lists that the store does not hold
+            contributes no entry and is compared against nothing — unreachable through
+            the contract, which refuses a dangling reference at the write that adds it.
+
+    Raises:
+        ValueError: If ``declared``'s ids are not **exactly** ``named`` — a missing id,
+            an extra id, a duplicate or a partial snapshot. A malformed command: no
+            write is taken and nothing advanced, so the class promises no retry.
+        StaleExecutionError: If any step is not yet settled, or if any declared
+            ``version`` is not the stored one. Both mean *re-read and recompute*, which
+            is what the class says and what the caller's next turn does.
+    """
+    _refuse_a_malformed_snapshot(attempt_id=attempt_id, named=named, declared=declared)
+    _refuse_a_live_step(attempt_id=attempt_id, statuses=statuses)
+    _refuse_a_stale_snapshot(attempt_id=attempt_id, declared=declared, versions=versions)
+
+
+def _refuse_a_malformed_snapshot(
+    *, attempt_id: str, named: Sequence[str], declared: Sequence[tuple[str, int]]
+) -> None:
+    """Refuse an ``execution_versions`` that is not exactly the attempt's set (§4).
+
+    **The completeness half is the load-bearing one**: "a subset would leave the omitted
+    execution free to move between the comparison and the commit, which is the whole of
+    the race", so the field is a snapshot of the set the comparison read rather than a
+    list of the ones the caller chose to protect. An attempt naming **no** execution
+    takes the empty tuple and one that names an execution is refused for carrying it —
+    both fall out of the equality below rather than being cased separately.
+
+    **A duplicate id is refused before the sets are compared**, because set equality
+    cannot see one: ``(("e1", 3), ("e1", 3))`` over an attempt naming ``e1`` alone has
+    the right *set* and is still a command nobody could have built from a read.
+
+    Args:
+        attempt_id: The attempt, for the message.
+        named: The attempt's own ``execution_ids``.
+        declared: The transition's ``execution_versions``.
+
+    Raises:
+        ValueError: If the two do not name exactly the same ids, or ``declared`` repeats
+            one — **never** ``StaleExecutionError``, which would promise a fruitful
+            retry the store cannot offer, nothing having moved.
+    """
+    seen: set[str] = set()
+    for execution_id, _ in declared:
+        if execution_id in seen:
+            msg = (
+                f"attempt {attempt_id} is being ended with execution {execution_id} "
+                f"named twice in execution_versions: the field is a snapshot of the set "
+                f"the comparison read, and no read yields a duplicate — rebuild it from "
+                f"the attempt's own execution_ids (ADR-0262 §4)"
+            )
+            raise ValueError(msg)
+        seen.add(execution_id)
+    wanted = set(named)
+    if seen == wanted:
+        return
+    missing = sorted(wanted - seen)
+    extra = sorted(seen - wanted)
+    msg = (
+        f"attempt {attempt_id} is being ended with an execution_versions naming "
+        f"{sorted(seen)}, but the attempt names {sorted(wanted)}"
+        f"{f' (missing {missing})' if missing else ''}"
+        f"{f" (not the attempt's: {extra})" if extra else ''}: the field is the "
+        f"complete set the comparison read, because an omitted execution is free to "
+        f"move between the comparison and the commit — a malformed command, not a lost "
+        f"race, so no re-read makes it valid (ADR-0262 §4)"
+    )
+    raise ValueError(msg)
+
+
+def _refuse_a_live_step(*, attempt_id: str, statuses: Iterable[StepStatus]) -> None:
+    """Refuse a ``→ ENDED`` transition over a step that is not yet settled (§4).
+
+    ADR-0262 §4's third ending condition, and the reason it is the **store's** rather
+    than the engine's: "a claim landing beside the engine's read is invisible to the
+    attempt's own compare-and-swap". It reaches ``PENDING`` and ``AWAITING_APPROVAL`` as
+    well as the outstanding pair, because "a set testing only ``RUNNING`` and
+    ``INDETERMINATE`` is silent by the time it runs".
+
+    **This is what makes ``VERIFIED`` unreachable beside a possible effect**, and with
+    it ``ACHIEVED``: an ``INDETERMINATE`` step reaches no outcome limb at all, the
+    attempt simply does not end, and ADR-0259 §4's acts 3 and 4 — neither reachable from
+    a terminal member — stay reachable on the next turn.
+
+    Args:
+        attempt_id: The attempt, for the message.
+        statuses: Every step status of every execution the attempt names, read inside
+            the same indivisible step as the write.
+
+    Raises:
+        StaleExecutionError: If any of them is unsettled — the class that means *re-read
+            and recompute*, which is exactly the caller's correct response, deferred to
+            the next turn by §4's no-second-bite rule.
+    """
+    live = sorted({one.value for one in statuses if one not in SETTLED_STEP_STATUSES})
+    if not live:
+        return
+    msg = (
+        f"attempt {attempt_id} cannot end while a step of its executions stands "
+        f"{', '.join(live)}: an attempt ends only where every step has settled "
+        f"SUCCEEDED, FAILED or SKIPPED, because a claim advances no GoalAttempt.version "
+        f"and is invisible to this transition's own compare-and-swap — the next turn "
+        f"reconciles and recomputes (ADR-0262 §4)"
+    )
+    raise StaleExecutionError(msg)
+
+
+def _refuse_a_stale_snapshot(
+    *, attempt_id: str, declared: Sequence[tuple[str, int]], versions: Mapping[str, int]
+) -> None:
+    """Refuse a ``→ ENDED`` transition whose snapshot the store has moved past (§4).
+
+    **What the status set alone would not close**: ``FAILED`` is outside
+    ``TERMINAL_STEP_STATUSES`` "(it may still be retried)", so a
+    ``FAILED → RUNNING → SUCCEEDED`` retry landing between the comparison and the commit
+    leaves every step terminal at **both** instants and the status conjunct silent. The
+    version pairs close it, and an implementation carrying the field and not comparing
+    it fails exactly here.
+
+    Args:
+        attempt_id: The attempt, for the message.
+        declared: The transition's ``execution_versions``, already established by
+            :func:`_refuse_a_malformed_snapshot` to name exactly the attempt's set.
+        versions: The stored version of each execution the attempt names, read inside
+            the same indivisible step as the write.
+
+    Raises:
+        StaleExecutionError: If any declared version is not the stored one — "the stored
+            execution has advanced since the caller read it … the caller should re-read
+            and retry", which is precisely what happened.
+    """
+    moved = sorted(
+        f"{execution_id} stands at {versions[execution_id]}, not {version}"
+        for execution_id, version in declared
+        if execution_id in versions and versions[execution_id] != version
+    )
+    if not moved:
+        return
+    msg = (
+        f"attempt {attempt_id} cannot end against a stale execution snapshot "
+        f"({'; '.join(moved)}): the comparison was computed over a version the store "
+        f"has since moved past, which the step statuses cannot see because a retried "
+        f"step is terminal at both instants — re-read and recompute (ADR-0262 §4)"
+    )
+    raise StaleExecutionError(msg)
+
+
 def cancellation_outcome(statuses: Iterable[StepStatus]) -> AttemptOutcome:
     """Which outcome a cancelled attempt earns, by ADR-0261 §3's four ordered limbs.
 
@@ -1419,22 +1623,40 @@ def refuse_a_wrong_cancellation_outcome(
 
 
 def refuse_a_live_attempt(*, goal_id: str, status: GoalStatus, live: Sequence[str]) -> None:
-    """Refuse a ``→ ABANDONED`` write over a goal holding a live attempt (§2).
+    """Refuse a **closing** status write over a goal holding a live attempt.
 
-    ADR-0261 §2's first closure conjunct, **one limb**, stated over **every** caller of
-    ``set_goal_status``: that an ``ABANDONED`` goal never carries a live attempt is the
-    *store's* invariant and not one member's. ``close_goal_abandoned`` satisfies it by
-    construction and needs no refusal of its own.
+    ADR-0261 §2's first closure conjunct and ADR-0262 §5's, which that decision calls
+    the "**exact mirror**" of it and which ADR-0261 §11 books to it by name. **One limb
+    over both closing members**, stated over **every** caller of ``set_goal_status``:
+    that a *closed* goal never carries a live attempt is the **store's** invariant and
+    not one member's. ``close_goal_abandoned`` satisfies it by construction, ending the
+    goal's live attempts in the step that closes it, and needs no refusal of its own.
 
-    **It binds on ``ABANDONED`` alone and decides no vocabulary.** ``ACHIEVED`` is
-    A10's and ``BLOCKED`` is A3's, and neither is constrained by it; ``ACTIVE`` on
-    ADR-0250 §13's reopen is untouched, which is what keeps the reopen sequence —
-    status first, then the new attempt — the one sequence that works. What is refused
-    is a **write that would leave two records inconsistent**, so ADR-0250 §9's "which
-    acts may write which member is the caller's rule" stays true word for word.
+    **Stated over** :data:`CLOSED_GOAL_STATUSES` **rather than over the two members**,
+    for that constant's own reason: naming the achieved member here would register as a
+    producer of it under ``tests/core/test_goal_status_has_no_producer.py``'s
+    deliberately over-approximating scan, and this is a **read**. It is also the honest
+    statement of the rule — ADR-0250 §1's *closed* half is exactly what both limbs are
+    about, and each is the other's mirror.
+
+    **The two limbs together with ``open_attempt``'s closed-goal limb are exhaustive
+    over the interleaving** (ADR-0261 §2, ADR-0262 §5): an ``open_attempt`` landing
+    **before** the status write is one this conjunct sees and refuses the write for, and
+    one landing **after** meets a goal closed in that same step. Neither goal-level
+    compare-and-swap could see it, ``open_attempt`` advancing no ``Goal.version``.
+
+    **It decides no vocabulary.** ``BLOCKED`` is A3's and is constrained by neither
+    limb; ``ACTIVE`` on ADR-0250 §13's reopen is untouched, which is what keeps the
+    reopen sequence — status first, then the new attempt — the one sequence that works.
+    What is refused is a **write that would leave two records inconsistent**, so
+    ADR-0250 §9's "which acts may write which member is the caller's rule" stays true
+    word for word.
 
     **It refuses with ``StaleExecutionError``** because the ground **moves** under a
-    re-read: the caller's correct response is to end that attempt and write again.
+    re-read. What the caller does next differs by member and is the caller's own rule,
+    not this one's: ADR-0261 §2's abandoning caller ends the attempt and writes again,
+    while ADR-0262 §5's achieving act **never retries at all**, a lost race there
+    meaning the goal may have moved to criteria the comparison never saw.
 
     Args:
         goal_id: The goal being moved, for the message.
@@ -1443,15 +1665,16 @@ def refuse_a_live_attempt(*, goal_id: str, status: GoalStatus, live: Sequence[st
             inside the same indivisible step as the write.
 
     Raises:
-        StaleExecutionError: If the write is ``→ ABANDONED`` and ``live`` is non-empty.
+        StaleExecutionError: If the write closes the goal and ``live`` is non-empty.
     """
-    if status is not GoalStatus.ABANDONED or not live:
+    if status not in CLOSED_GOAL_STATUSES or not live:
         return
     held = ", ".join(sorted(live))
     msg = (
-        f"goal {goal_id} cannot be abandoned while it holds live attempts ({held}): an "
-        f"ABANDONED goal never carries a claimable attempt, so end them in the step that "
-        f"closes it — which is close_goal_abandoned — and write again (ADR-0261 §2)"
+        f"goal {goal_id} cannot be moved to {status.value} while it holds live attempts "
+        f"({held}): a closed goal never carries a claimable attempt, and open_attempt "
+        f"advances no Goal.version, so this write is the only place the pair can be "
+        f"seen at once (ADR-0261 §2, ADR-0262 §5)"
     )
     raise StaleExecutionError(msg)
 
