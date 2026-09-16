@@ -43,6 +43,8 @@ from ai_assistant.core.types import (
     MemoryKind,
     ReadAnswerOutcome,
     RoutableOperation,
+    RoutedOperation,
+    RouteOutcome,
     SpokenAudio,
     SpokenAudioFormat,
     TimeOfDay,
@@ -296,6 +298,50 @@ async def test_a_pass_that_made_no_plan_is_given_none() -> None:
 
     assert outcome.turn is None
     assert outcome.attempt_report is None
+
+
+async def test_a_reply_that_did_not_complete_is_given_none() -> None:
+    """§4's first ending condition is a ``ComposedReply`` *"carrying text and **not
+    degraded**"* (ADR-0173 §6).
+
+    Streaming makes a shape ADR-0170 could not have — an answer that **began and did not
+    finish** — which carries the text actually yielded beside ``reply_degraded`` ``True``.
+    Text alone is therefore not the test: such a turn ended no attempt, so it carries no
+    report, and a lever gated on prose would say it did.
+    """
+    engine = FakeAssistantEngine()
+    engine.attempt_report = VERIFIED
+    engine.turn_outcome = _scripted(reply_degraded=True)
+
+    outcome = await engine.converse("book it", timeout=PATIENT)
+
+    assert outcome.reply is not None
+    assert outcome.reply_degraded is True
+    assert outcome.attempt_report is None
+
+
+async def test_a_report_scripted_onto_an_ineligible_pass_is_refused() -> None:
+    """The arrangement mistake refused rather than dropped.
+
+    A consumer that scripted a report onto a pass which ended no attempt has built an
+    outcome no engine returns; dropping it silently would leave their test green against
+    the outcome they believed they had built, and the shape they are actually certifying
+    a surface over would be the opposite one. Refusing says which of §6's shapes it is.
+
+    Asserted over a **routed** pass carrying its own report, which is the case the lever
+    gate alone would not catch — the report is on the outcome and never passes through
+    the lever at all.
+    """
+    engine = FakeAssistantEngine()
+    engine.turn_outcome = TurnOutcome(
+        turn=None,
+        routed=RoutedOperation(operation=RoutableOperation.FORGET, outcome=RouteOutcome.PERFORMED),
+        reply="I forgot that.",
+        attempt_report=VERIFIED,
+    )
+
+    with pytest.raises(ValueError, match="ended no attempt"):
+        await engine.converse("forget that", timeout=PATIENT)
 
 
 async def test_a_scripted_outcome_keeps_the_report_it_carries() -> None:
