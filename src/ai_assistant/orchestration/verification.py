@@ -44,16 +44,25 @@ propagates with its cause; what fails *closed* is a record that could be read an
 nothing — a decision the trail does not hold, a row the resolution answers ``None``
 for, a definition declaring no postcondition.
 
-**A ``MONEY`` criterion reads ``unestablished`` here, and exactly one function says
-so.** ADR-0262 §2 rules that *"no criterion about an amount is ever ``met`` here"*
-because *"the charge is not an operand this decision has"*. ADR-0271 lands that operand
-and restates §2's classification of a **bound step** as three ordered limbs over the
-charge and the pinned quote; its **P3** lane is briefed after this one.
-:func:`classify_bound_step` is the whole of what that lane replaces — the ``MONEY``
-early-out below is the fail-closed direction stated as a step that decides nothing, so
-that a criterion resting on one falls to §2's *"otherwise"* and reads
-``unestablished``. No other function in this module reads
+**A ``MONEY`` criterion is compared against the charge the act reported, and exactly one
+function says how** (ADR-0271 §§2-4). ADR-0262 §2 ruled every such criterion
+``unestablished`` *"whatever else holds"*, on the ground that *"the charge is not an
+operand this decision has"*; ADR-0271 lands that operand — the quote the dispatch was
+proved against, pinned to the ruling by value (§1) — and **reverses that blanket**, so
+such a criterion now takes §2's own three results over §2's own calls.
+:func:`classify_bound_step` is where that lands: §2's classification of a **bound step**
+restated as ADR-0271 §3's **three ordered limbs**, with the charge read and tested by
+:mod:`ai_assistant.orchestration.charges`. **No other function in this module reads**
 :class:`~ai_assistant.core.types.BoundKind`.
+
+**The finding is a report and never a prevention** (ADR-0271 §3). A charge that
+disagrees with its pin makes its step *contradicting*, and what the user is told is the
+criterion's own result by the route ADR-0262 already fixes — §4's limbs to an
+``AttemptOutcome`` and §6's two-field ``AttemptReport``. **No ``Authorization`` is
+written, settled or revoked, no decision is recorded, no dispatch is refused, nothing is
+retried, reversed or refunded, and no statement names a figure**: the act has already
+run by the time this comparison is taken, and what binds spending stays ADR-0266 §7's
+proof **before** it.
 """
 
 from __future__ import annotations
@@ -74,6 +83,7 @@ from ai_assistant.core.types import (
     SkipReason,
     StepStatus,
 )
+from ai_assistant.orchestration.charges import ChargeTest, charge_test
 from ai_assistant.orchestration.effects import verification_holds
 
 if TYPE_CHECKING:
@@ -81,6 +91,7 @@ if TYPE_CHECKING:
 
     from ai_assistant.core.protocols import AuthorizationResolution
     from ai_assistant.core.types import (
+        ActionQuote,
         Authorization,
         CoverageMember,
         ExecutionState,
@@ -249,12 +260,22 @@ class _BoundStep:
             now (§2).
         digest: The ``ActionRequest.parameters_digest`` the policy computed over the
             concrete request, which is what groups two steps into **one call**.
+        pinned: The quote ``ActionPolicy.decide`` proved this dispatch against
+            (:attr:`~ai_assistant.core.types.PermissionRuling.proved_quote`, ADR-0271
+            §1), carried by value on the ruling and read here and nowhere else.
+            ``None`` where the decision carries none — *"a decision recorded without
+            one is a decision whose dispatch was not proved against a quote"*, and
+            **nothing back-fills, refreshes, re-selects or repairs it**. It is an
+            operand and never the verdict of a comparison: ADR-0254 §13's *"no cached
+            coverage verdict anywhere"* is untouched, and reading it establishes no
+            authority.
     """
 
     status: StepStatus
     output: FrozenJson
     definition: ToolDefinition
     digest: str
+    pinned: ActionQuote | None
 
 
 class _Verdict(StrEnum):
@@ -265,50 +286,92 @@ class _Verdict(StrEnum):
     NEITHER = "neither"
 
 
-def classify_bound_step(bound: _BoundStep, *, kind: BoundKind) -> _Verdict:
-    """Classify one bound step, which is the whole of what ADR-0271 P3 replaces.
+def classify_bound_step(bound: _BoundStep, *, member: CoverageMember) -> _Verdict:
+    """Classify one bound step: ADR-0262 §2, as ADR-0271 §3 restates it.
 
-    **ADR-0262 §2, word for word.** A bound step is **satisfying** where it stands
-    ``SUCCEEDED``, its operative definition declares **at least one** postcondition,
-    and **every** declaration of that definition holds over its stored ``output``;
-    **contradicting** where it stands ``SUCCEEDED`` and **some** declaration of that
-    definition does **not** hold — *"and in no other case"*; and neither otherwise. **A
-    ``FAILED`` bound step is never decisive**: a failure returns no answer to hold a
-    declaration against (ADR-0029 §3), and *"no failure proves non-occurrence"*.
+    **ADR-0262 §2's own two tests, word for word** (:func:`_declared_verdict`). A bound
+    step is **satisfying** where it stands ``SUCCEEDED``, its operative definition
+    declares **at least one** postcondition, and **every** declaration of that
+    definition holds over its stored ``output``; **contradicting** where it stands
+    ``SUCCEEDED`` and **some** declaration does **not** hold — *"and in no other case"*;
+    and neither otherwise. **A ``FAILED`` bound step is never decisive**: a failure
+    returns no answer to hold a declaration against (ADR-0029 §3), and *"no failure
+    proves non-occurrence"*.
 
-    **The ``MONEY`` limb is the fail-closed direction stated here rather than as a
-    caveat at the criterion.** ADR-0262 §2 rules a criterion whose confirmed member is
-    a ``MONEY`` one ``unestablished`` *"whatever else holds"*, on the ground that
-    *"the charge is not an operand this decision has"*. Making every such step decide
-    **nothing** yields exactly that: no call is satisfying, none is contradicting, none
-    is ambiguous, and the criterion falls to §2's *"otherwise"*. It is the same answer
-    the enumerated ``BoundKind.MONEY`` limb of §2's ``unestablished`` list gives, taken
-    one level down so that **one** function carries it.
+    **For a criterion whose confirmed member is a ``MONEY`` one, that classification is
+    ADR-0271 §3's three ordered limbs** — total and disjoint by construction, taken in
+    this order and stopping at the first that holds. A step is **(1) contradicting**
+    where §2's own contradicting test holds **or** where the charge test **fails**;
+    **(2) satisfying** where §2's own satisfying test holds **and** the charge test
+    **holds**; **(3) neither**, in every remaining case — which is where the charge test
+    was **not taken** over a step §2 would otherwise have called satisfying, and every
+    case §2 already called neither. **A ``FAILED`` step reaches limb 3 in every case**,
+    the charge test being taken over a ``SUCCEEDED`` step alone.
 
-    **This is the function ADR-0271 P3 extends and no other.** That decision restates
-    this classification as three ordered limbs, total and disjoint, in this order: a
-    step is contradicting where §2's own contradicting test holds **or** where the
-    charge test **fails**; otherwise satisfying where §2's own satisfying test holds
-    **and** the charge test **holds**; otherwise neither — the charge being read from a
-    ``SUCCEEDED`` step's own stored output at a key the operative declaration names and
-    measured against the quote pinned to the dispatch
-    (:attr:`~ai_assistant.core.types.PermissionRuling.proved_quote`, ADR-0271 §1). The
-    ``MONEY`` early-out below is what that lane removes; the two tests beside it are
-    the ones it wraps. **No other function in this module reads ``kind``.**
+    **The order is the whole of the answer to a step that would qualify twice**, and it
+    is ordered this way because *"a step whose own tool's declaration refuses its output
+    is contradicting on the record's own evidence, which the absence of a readable
+    charge neither supplies nor erases"*. An implementation taking the *charge test not
+    taken* case first would answer ``neither`` where §3 answers ``contradicting``, and
+    its criterion ``unestablished`` where §3 reaches ``unmet``.
+
+    **The charge test is taken over no step of any other criterion** (§3), so a
+    ``PERIOD`` or a ``TERMS`` criterion is classified by §2's two tests alone and this
+    function reads no charge for one. That is not the limbs disapplied: limb 2 requires
+    the charge test to *hold*, and a test that is never taken over such a step would
+    make every one of them ``neither``.
+
+    **No other clause of §2 moves** (§3): its grouping of bound steps into **calls** by
+    ``ActionRequest.parameters_digest``, its satisfying/contradicting/**ambiguous** rule
+    over a call, its three results, its *"no fourth result exists"* and its *"a
+    ``FAILED`` bound step is never decisive"* all bind entire, and these limbs are
+    stated inside them. A failed charge test *"makes a step contradicting and overrides
+    neither §2's grouping nor its ambiguity rule"* — a mismatch inside an ambiguous call
+    is reported as that call's ambiguity, *"the record declining to say what happened
+    rather than a finding suppressed"* — and it is never promoted straight to a
+    criterion-level ``unmet``.
 
     Args:
-        bound: The bound step, with its pinned declaration and its stored output.
-        kind: The **confirmed member's** kind, which §2 makes the criterion's kind.
+        bound: The bound step, with its pinned declaration, its stored output and the
+            quote its dispatch was proved against.
+        member: The **confirmed member**, whose ``kind`` §2 makes the criterion's kind
+            and whose bound §3's third conjunct reads.
 
     Returns:
         Which of §2's three the step is.
     """
-    if kind is BoundKind.MONEY:
-        # ADR-0262 §2's `MONEY` rule, pre-ADR-0271: the charge is not an operand this
-        # decision has, so such a step establishes and refuses nothing and its
-        # criterion reads `unestablished` whatever else holds. **No lane reads this as
-        # licence to compare a charge against a ceiling, a quote or anything else.**
-        return _Verdict.NEITHER
+    declared = _declared_verdict(bound)
+    if member.kind is not BoundKind.MONEY:
+        return declared
+    charge = charge_test(
+        status=bound.status,
+        definition=bound.definition,
+        output=bound.output,
+        pinned=bound.pinned,
+        member=member,
+    )
+    if declared is _Verdict.CONTRADICTING or charge is ChargeTest.FAILS:
+        return _Verdict.CONTRADICTING
+    if declared is _Verdict.SATISFYING and charge is ChargeTest.HOLDS:
+        return _Verdict.SATISFYING
+    return _Verdict.NEITHER
+
+
+def _declared_verdict(bound: _BoundStep) -> _Verdict:
+    """ADR-0262 §2's classification of a bound step against its own declarations.
+
+    The half of :func:`classify_bound_step` that reads the **tool author's** declared
+    postconditions against the **provider's** returned output, and nothing else. It is
+    stated apart from the limbs so that ADR-0271 §3's *"§2's own contradicting test"*
+    and *"§2's own satisfying test"* name one thing each rather than a condition spelled
+    twice at two positions of an ordered chain.
+
+    Args:
+        bound: The bound step, with its pinned declaration and its stored output.
+
+    Returns:
+        Which of §2's three the step is, before any charge is read.
+    """
     if bound.status is not StepStatus.SUCCEEDED:
         return _Verdict.NEITHER
     declared = bound.definition.postconditions
@@ -768,8 +831,9 @@ def _result(
             output=act.output,
             definition=act.decision.tool,
             digest=act.decision.parameters_digest,
+            pinned=act.decision.ruling.proved_quote,
         )
-        calls[bound.digest].append(classify_bound_step(bound, kind=member.kind))
+        calls[bound.digest].append(classify_bound_step(bound, member=member))
     contradicting = False
     ambiguous = False
     satisfying = False
