@@ -1255,6 +1255,19 @@ function renderOutcome(outcome, chosenAt, provenance) {
   // is already where this guard stays off. `search_not_serviced` is not here because it
   // is rendered by no route on this page at all (#2237), which is the entry
   // `_outcome_view` records.
+  //
+  // **And not a turn whose attempt ended having attempted work** (ADR-0262 §6). The
+  // comparison runs after the plan, so a turn that planned nothing still ends an attempt
+  // and still carries a report — an established contradiction read off the goal's own
+  // earlier records is limb 1's first arm and needs no step of this turn. "No action was
+  // needed." one line above "The work failed, and no criterion of this goal was
+  // established." is the same contradiction on one screen, and it is one **this lane
+  // would otherwise have created**.
+  //
+  // **On four of the seven and not on the member's presence**, which is where this term
+  // differs from the one above it: `ATTEMPT_OUTCOMES_THAT_ASSERT_WORK` carries the split
+  // and the reason. `verified` and `answered` each say something a turn that needed no
+  // step may truthfully say, and ADR-0262 §12's first arm is a turn of the second kind.
   if (
     outcome.steps.length === 0 &&
     outcome.step === null &&
@@ -1263,7 +1276,8 @@ function renderOutcome(outcome, chosenAt, provenance) {
     outcome.read_answer === null &&
     outcome.clarification === null &&
     outcome.disambiguation === null &&
-    outcome.forecast_not_read === null
+    outcome.forecast_not_read === null &&
+    !ATTEMPT_OUTCOMES_THAT_ASSERT_WORK.has(outcome.attempt_report)
   ) {
     line(body, "No action was needed.", "notice");
   }
@@ -1307,6 +1321,15 @@ function renderOutcome(outcome, chosenAt, provenance) {
   // reply and never in place of it, which is `renderRouted`'s own placement.
   renderReferenceOutcome(body, outcome.reference);
   renderGoalEngagement(body, outcome.goal_engagement);
+  // ADR-0262 §6's statement, below the reply and never in place of it — `renderRouted`'s
+  // own placement — and **after** ADR-0250 §5's announcement for the reader's sake alone:
+  // that one says which goal this turn is about and this says what the attempt produced.
+  // "A turn may owe both, one or neither ... and no lane derives either from the other or
+  // collapses them", so neither is guarded on the other and the order between them
+  // carries no meaning beyond putting the goal in front of the reader before what became
+  // of it. The page receives the **outcome word alone**: `continues` crosses through no
+  // route, because §6 puts the offer in the reply and not on a surface.
+  renderAttemptReport(body, outcome.attempt_report);
   // ADR-0254 §11's announcement, beside the reply and never in place of it: an
   // authority a turn opened without putting a question is a fact about what the turn
   // did, composed by the hub and not by a model, and it carries the withdrawal handle
@@ -1842,6 +1865,145 @@ function renderForecastNotRead(body, member) {
     return;
   }
   line(body, forecastNotReadWords(member), "notice");
+}
+
+// --- the attempt report (ADR-0262 §6) ---------------------------------------
+//
+// **One fixed statement per member, written out as a literal**, which is
+// `FORECAST_NOT_READ_WORDS`' ratified shape one vocabulary over and §6's own clause:
+// "one fixed statement per member, rendered beside the reply and never in place of it".
+// Nothing here is assembled from a member's value, a format string over the vocabulary,
+// or a mapping a later member would silently join — a member added without its sentence
+// is a member with no rendering, which §6 makes "not a permitted degradation".
+//
+// **What each names is fixed and the wording is the lane's** (§6), and these are byte
+// for byte the terminal's. ADR-0262 §11 put both surfaces in one lane "since a member
+// rendered on one and not the other is the parity failure M4 recorded", so identical
+// prose is what makes that parity checkable rather than argued.
+//
+// **No statement says the goal is closed, and `verified`'s least of all.** §6 puts the
+// comparison before the composing stage and the two commits after it: "no statement of
+// this section asserts that an attempt was ended, that a status was written, or that a
+// goal is now closed", because "a statement that could be falsified by a commit taken
+// after it was composed is one this decision does not write". That is why `verified`
+// speaks of *the criteria this attempt compared*.
+//
+// **`answered` is not a weaker `verified`**: it says an answer was produced and that
+// nothing was verified, and says nothing about whether the answer is correct.
+//
+// **`failed` speaks of the criteria and never of the acts** (§6). It is true of both of
+// limb 1's arms and true where one call satisfied a criterion while another
+// contradicted it, so it does not say nothing was done — "a statement saying *nothing
+// was done* would be false of the record and this one is not".
+//
+// **`uncertain` says nothing about whether the call left** (ADR-0261 §6, binding here),
+// and **`condition_prevented` names no cause**, being true of an unmet dependency and of
+// a denied approval alike, and of one that followed a read that succeeded.
+//
+// **None of them names a criterion, a tool, a destination, a figure, a setting or a
+// cause**, and none says that an effect did not happen (§6, ADR-0242 §9's bar).
+//
+// **Two name `assistant goals` and four name nothing.** §6 fixes that half: `verified`
+// and `uncertain` point at where the goal's own state is read, for the reason above —
+// the statement cannot speak for the status, so it says where the status is. Naming the
+// terminal's command from this page is this surface's own ratified practice
+// (`UNREADABLE_RULINGS`, `FORECAST_NOT_READ_WORDS`).
+//
+// **The offer is not here** (§6). `continues` reaches this page through no route at all:
+// "the **reply** carries the offer and the **surface** the outcome word", because "an
+// offer a surface printed would reach neither the browser's transcript nor the spoken
+// channel as part of what was said" and the reply's own offer is what the next turn's
+// bare "Yes" binds to (ADR-0250 §3).
+const ATTEMPT_OUTCOME_WORDS = {
+  verified:
+    "The criteria this attempt compared were checked, and they hold. " +
+    "'assistant goals' is where you read how the goal stands.",
+  answered:
+    "An answer was produced, and nothing was verified. Nothing here says whether it is correct.",
+  partial: "Part of what you asked for was established, and part of it was not established.",
+  failed: "The work failed, and no criterion of this goal was established.",
+  uncertain:
+    "An action was taken, and its outcome is not established. " +
+    "'assistant goals' is where you read how the goal stands.",
+  condition_prevented: "The action was prevented before it ran.",
+};
+
+// The four members whose statement **asserts that work was attempted**, which is the
+// term `renderOutcome`'s "No action was needed." guard is written over.
+//
+// **Four of `AttemptOutcome`'s seven and not the member's presence**, which is where
+// this differs from the forecast guard and follows `_reached_outside`'s split instead.
+// `ForecastNotRead` "has no member for having attempted nothing"; this vocabulary has
+// two — `verified` says criteria were checked and hold, `answered` says an answer was
+// produced and nothing was verified — and ADR-0262 §12's first arm is exactly a turn of
+// the second kind, one composing call with no step claimed, of which "No action was
+// needed." is **true**. `cancelled` and any value outside the six reach only
+// `ATTEMPT_REPORT_UNREADABLE`, which asserts nothing about what was attempted and so
+// contradicts nothing.
+//
+// A `Set` rather than a chain of comparisons, and membership rather than truthiness: the
+// value arrives from the wire, so `null` and `undefined` must both answer `false` here,
+// which `Set.prototype.has` gives without a guard of its own.
+const ATTEMPT_OUTCOMES_THAT_ASSERT_WORK = new Set([
+  "partial",
+  "failed",
+  "uncertain",
+  "condition_prevented",
+]);
+
+// What the page says for a value that is not one of the six.
+//
+// `AttemptOutcome` is closed at **seven** and §6's report admits **six**: `cancelled`
+// "is reached by no limb" of the comparison (§4). **But the type admits it** —
+// `AttemptReport` constrains `continues` and not `outcome` — so a hub at another version
+// can put one on this screen, and any string at all can reach a browser.
+//
+// **Not a bare identifier and not silence**, which is `FORECAST_NOT_READ_UNREADABLE`'s
+// position one vocabulary over: an enum value on the screen is this surface reporting an
+// internal vocabulary to a person, and silence is a turn that ended an attempt reading
+// exactly like one that ended none.
+//
+// **And not a seventh fixed statement.** §6 fixes six; minting one for a member it
+// excludes would be this surface deciding a vocabulary, and a cancelled attempt is
+// ADR-0261 §2's act with its own statements. So this says what is known and no more, and
+// asserts nothing about what the attempt produced.
+//
+// **Rendered rather than thrown for**, which is `forecastNotReadWords`' own arrangement:
+// nothing on this page is spent, given back or settled by this statement.
+const ATTEMPT_REPORT_UNREADABLE =
+  "What this turn's comparison produced arrived as something this surface has no words " +
+  "for, so it is not reported here rather than reported as something it may not be.";
+
+// Whether a value is one of the six members ADR-0262 §6's report admits.
+//
+// `isForecastNotRead`'s test one vocabulary over and for its reasons: `Object.hasOwn`
+// rather than a truthiness test, because a value naming an inherited property —
+// `toString`, `constructor` — would otherwise pass as a member and put a function's
+// source text on the screen; and `typeof` in front of it because a property key is a
+// coerced one, so `String(["failed"])` spells a member.
+function isAttemptOutcome(member) {
+  return typeof member === "string" && Object.hasOwn(ATTEMPT_OUTCOME_WORDS, member);
+}
+
+// The sentence for one member, or the refusal above. Total over whatever it is handed,
+// which is `forecastNotReadWords`' own arrangement.
+function attemptOutcomeWords(member) {
+  return isAttemptOutcome(member) ? ATTEMPT_OUTCOME_WORDS[member] : ATTEMPT_REPORT_UNREADABLE;
+}
+
+// ADR-0262 §6's statement, beside the reply and never in place of it.
+//
+// **`null` and an absent member are silence and not a refusal** (§6). The member is
+// non-`null` "exactly on a turn that ended an attempt under §4", so its absence is every
+// turn that engaged no goal, every routed operation, ADR-0198 §1's restatement, every
+// turn whose attempt stayed live — **and a turn whose `commit_attempt` was refused**,
+// which §6 fixes as "a silence rather than a false claim" with the composed reply
+// standing as composed.
+function renderAttemptReport(body, member) {
+  if (member === null || member === undefined) {
+    return;
+  }
+  line(body, attemptOutcomeWords(member), "notice");
 }
 
 // --- the goal vocabularies (ADR-0250 §5, §11, §12, §15) ----------------------

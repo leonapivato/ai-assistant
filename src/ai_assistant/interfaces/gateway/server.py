@@ -4569,6 +4569,22 @@ def _outcome_view(outcome: TurnOutcome) -> dict[str, Any]:
     and does not try" — so this view carries the value the servicing computed and asks it
     no question, which is `search_not_serviced`'s own posture at the layer that does
     carry it.
+
+    **``attempt_report`` crosses as the outcome word and not as the whole value, and that
+    is ADR-0262 §6's own split** rather than this enumeration trimming a model. §6 puts
+    the offer in the **reply** — the answer ends with one where ``continues`` is set, so
+    that the next turn's bare "Yes" binds to the goal by reply reference (ADR-0250 §3) —
+    and states why it cannot be a surface's: "an offer a surface printed would reach
+    neither the browser's transcript nor the spoken channel as part of what was said. So
+    the **reply** carries the offer and the **surface** the outcome word." ``continues``
+    is therefore the half this page is forbidden to render, and a field carried to a page
+    that must never render it is one an editor is invited to render. What may appear on
+    the page is decided here (ADR-0168 §6), so it is decided here that it does not.
+
+    **And the six reach the page under §6's own all-or-nothing rule** — "a surface that
+    renders no statement for a member has not implemented this section and is not a
+    permitted degradation" — with ADR-0262 §11 placing **both** surfaces in one lane,
+    "since a member rendered on one and not the other is the parity failure M4 recorded".
     """
     turn = outcome.turn
     plan = None if turn is None else turn.plan
@@ -4606,6 +4622,19 @@ def _outcome_view(outcome: TurnOutcome) -> dict[str, Any]:
         # holding one of these cannot compute the other and does not try.
         "forecast_not_read": (
             None if outcome.forecast_not_read is None else outcome.forecast_not_read.value
+        ),
+        # ADR-0262 §6's member, carried as **the outcome word alone**. §6 splits the
+        # report between the two channels by name — "the **reply** carries the offer and
+        # the **surface** the outcome word" — because an offer a surface printed "would
+        # reach neither the browser's transcript nor the spoken channel as part of what
+        # was said", and the reply's own offer is what the next turn's bare "Yes" binds
+        # to (ADR-0250 §3). So `continues` reaches this page through no route: it is the
+        # half this surface is forbidden to render, and this enumeration is where what
+        # may appear on the page is decided rather than in the renderer that reads it.
+        # Nothing is derived from the value here — it is the member `orchestration`
+        # computed, by value and never a second computation.
+        "attempt_report": (
+            None if outcome.attempt_report is None else outcome.attempt_report.outcome.value
         ),
         # ADR-0254 §11's announcement: one view per authority this turn opened
         # **without putting a question**, in the order the rows were written, and an
