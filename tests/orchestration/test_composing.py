@@ -21,6 +21,7 @@ import structlog
 from ai_assistant.core.errors import ModelError, ModelUnavailableError
 from ai_assistant.core.types import (
     ActionPlan,
+    AttemptOutcome,
     Attestation,
     BeliefBand,
     CalendarFacet,
@@ -51,6 +52,7 @@ from ai_assistant.core.types import (
 )
 from ai_assistant.orchestration import composing, payloads
 from ai_assistant.orchestration.composing import ComposingStage
+from ai_assistant.orchestration.goals import CONTINUES_PROMPT, UNVERIFIED_PROMPT, GoalFacts
 from ai_assistant.planning.planner import ModelBackedPlanner
 from ai_assistant.testing import FakeModelProvider, FakeStreamingCompleter, StreamAttempt
 
@@ -2239,3 +2241,77 @@ async def test_a_tail_that_fits_leaves_the_answer_whole() -> None:
     assert chunks == ["ok"]
     assert report.text == "ok"
     assert report.degraded is False
+
+
+# --- ADR-0262 §6's two instructions, appended to the composing stage's own --
+
+
+def _goal_clauses(**facts: object) -> str:
+    """The instruction this pass would carry, over ``facts`` and nothing else."""
+    return composing._system_prompt(
+        composing._SYSTEM_PROMPT,
+        unbounded_audience=False,
+        withheld=False,
+        goal=GoalFacts(**facts),  # type: ignore[arg-type]  # heterogeneous test kwargs
+    )
+
+
+def test_a_turn_that_ran_no_comparison_carries_neither_clause() -> None:
+    """ADR-0262 §6: a turn with no comparison is told nothing about one.
+
+    On a turn given neither value the assembled instruction is byte-identical to what
+    it is without this decision — the same property ADR-0250 §10's own two facts have,
+    and what makes every pass that engages no goal unaffected by the phase.
+    """
+    plain = _goal_clauses()
+
+    assert UNVERIFIED_PROMPT not in plain
+    assert CONTINUES_PROMPT not in plain
+    assert plain == composing._system_prompt(
+        composing._SYSTEM_PROMPT, unbounded_audience=False, withheld=False
+    )
+
+
+def test_a_verified_outcome_is_the_one_member_not_told_it_verified_nothing() -> None:
+    """§6: the instruction *"requires it not to narrate as verified an outcome that was not"*.
+
+    Every member but ``VERIFIED`` carries the prohibition, and ``VERIFIED`` does not —
+    which is the one outcome of which the claim would be true. **The arm that fails
+    against an implementation appending the clause unconditionally**, which would forbid
+    a verified attempt from saying what its own fixed statement says.
+    """
+    for outcome in AttemptOutcome:
+        carried = UNVERIFIED_PROMPT in _goal_clauses(outcome=outcome)
+        assert carried is (outcome is not AttemptOutcome.VERIFIED), outcome
+
+
+def test_the_offer_to_continue_rides_continues_and_nothing_else() -> None:
+    """§6: the instruction *"requires the answer to end with an offer to continue"* where set.
+
+    §12's arm 10 asks for exactly this. It is keyed on ``continues`` alone and on no
+    member: §6 computes that value from the outcome **and the goal's status**, so a
+    clause keyed on the outcome would offer to continue a goal a revision had closed.
+    """
+    assert CONTINUES_PROMPT in _goal_clauses(outcome=AttemptOutcome.PARTIAL, continues=True)
+    assert CONTINUES_PROMPT not in _goal_clauses(outcome=AttemptOutcome.PARTIAL, continues=False)
+
+
+def test_the_two_clauses_are_independent_and_a_prevented_attempt_owes_only_one() -> None:
+    """§6: the two obligations are independent, and ``CONDITION_PREVENTED`` is the pair.
+
+    A prevented attempt offers **nothing** to continue — §6 fixes ``continues`` ``False``
+    on that member unconditionally — and must still not be narrated as done. So it
+    carries the prohibition and not the offer, which is the case an implementation
+    deriving either clause from the other gets wrong.
+    """
+    prevented = _goal_clauses(outcome=AttemptOutcome.CONDITION_PREVENTED)
+
+    assert UNVERIFIED_PROMPT in prevented
+    assert CONTINUES_PROMPT not in prevented
+
+    both = _goal_clauses(outcome=AttemptOutcome.UNCERTAIN, continues=True)
+    assert UNVERIFIED_PROMPT in both
+    assert CONTINUES_PROMPT in both
+    assert both.index(UNVERIFIED_PROMPT) < both.index(CONTINUES_PROMPT), (
+        "the offer is what the answer ends with, so it is appended last"
+    )
