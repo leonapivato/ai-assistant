@@ -14,6 +14,20 @@ than spread through a dispatch path. The writer that calls them is
 :class:`~ai_assistant.orchestration.runner.StepRunner`, which is ADR-0254 §15's
 *"written and settled by `orchestration` and by nothing else"*.
 
+**The completeness condition is asked and never re-implemented** (ADR-0270 §1, §3).
+ADR-0266 §7 puts condition 6's *"One implementation, in `permissions`"*, ADR-0254
+§15 makes this package the only writer of an `Authorization`, and golden rule 1
+forbids this package importing `permissions`. `CoverageAnswers.coverage_met` is
+what joins the three: :func:`proposed_authorization` hands it the request and the
+coverage the row would carry and reads the answer. It **re-implements no conjunct**
+of condition 6 — it evaluates no member, takes neither of §7's two routes, selects
+no governing quote, compares no arguments digest and takes no `ValueBound`
+comparison — and it **records** `Authorization.quoted` from the answer, performing
+no selection of its own (ADR-0270 §2, superseding ADR-0267 §7's selection limb).
+Nothing here caches the answer or carries it to a dispatch: ADR-0254 §13's recheck
+at `ActionPolicy.decide` is untouched and reads the current governing quote at
+every dispatch as if the field were not there.
+
 **What is deliberately absent, and why it is a hole rather than an omission.**
 ADR-0254 requires a row's `coverage` to be minted from the user's own recorded
 words — a `CoverageMember` naming an argument and fixing or bounding it, on a basis
@@ -24,11 +38,16 @@ ADR-0266). §10's three resolutions each turn a span into a *value* and none sel
 the span or names the argument; §9 clause (ii) states the property the association
 must have rather than a procedure; and §9's no-model clause forecloses the planner.
 So this module mints **no member at all**, which is §10's own fail-closed sentence —
-*"A resolution the loop cannot take is not taken, and no member is minted"* — and
-ADR-0254 §1's completeness condition therefore holds only where it holds
-**vacuously**, on a request carrying no user-facing argument. That is §20's arm 54
-and arm 59's third case, and it is an authority over an argument-free call rather
-than a wildcard over anything (§3).
+*"A resolution the loop cannot take is not taken, and no member is minted"*. **That
+hole is now one place narrower than it was**: the coverage a proposal is taken over
+is this module's *argument* rather than a literal it writes, so a minter landing at
+:meth:`~ai_assistant.orchestration.runner.StepRunner._propose` reaches a writer that
+already asks about what it minted. Until one does, every caller on this tree passes
+an empty tuple, ADR-0254 §1's completeness condition holds only where it holds
+**vacuously** — on a request carrying no user-facing argument, §20's arm 54 and arm
+59's third case — and no row carries a `quoted`, the evidence route deciding nothing
+about a coverage that carries no `MONEY` member. It is an authority over an
+argument-free call rather than a wildcard over anything (§3).
 """
 
 from __future__ import annotations
@@ -46,35 +65,19 @@ if TYPE_CHECKING:
     from collections.abc import Sequence
     from datetime import datetime, timedelta
 
-    from ai_assistant.core.types import ActionRequest, Goal, PermissionDecision
+    from ai_assistant.core.protocols import CoverageAnswers
+    from ai_assistant.core.types import (
+        ActionRequest,
+        CoverageMember,
+        Goal,
+        PermissionDecision,
+    )
 
 
 #: The namespace every id derived from a confirmation is written under
 #: (:func:`authorization_id_for`). One literal, defined once, because the writer
 #: and the reader must agree on it exactly or a settlement silently finds nothing.
 _DERIVED_ID_PREFIX: Final = "goal-authorization-for-confirmation:"
-
-
-def user_facing_arguments(request: ActionRequest, /) -> tuple[str, ...]:
-    """The request's arguments that are **not** system-supplied (ADR-0254 §3).
-
-    *"`ToolDefinition` gains one field: `system_supplied` … naming the keys of
-    `parameters` the **system** fills … Every key it does not name is
-    **user-facing**"*, and *"A declaration that classifies no argument
-    system-supplied has every argument user-facing"*.
-
-    The classification is read off the request's own declaration, which is the
-    one embedded whole in the row a proposal would carry (ADR-0254 §1), so the
-    two facts a completeness test needs cannot come apart.
-
-    Args:
-        request: The concrete request being ruled on.
-
-    Returns:
-        The user-facing keys, in the request's own iteration order.
-    """
-    supplied = frozenset(request.tool.system_supplied)
-    return tuple(key for key in request.parameters if key not in supplied)
 
 
 def horizon(
@@ -143,11 +146,13 @@ def horizon(
     return reached if reached > proposed_at else None
 
 
-def proposed_authorization(
+async def proposed_authorization(  # noqa: PLR0913 — one parameter per operand of ADR-0254 §1's four conditions; collapsing any pair would hide which condition reads what
     request: ActionRequest,
     decision: PermissionDecision,
     /,
     *,
+    answers: CoverageAnswers,
+    coverage: tuple[CoverageMember, ...],
     goal: Goal | None,
     retention: timedelta | None,
     standing: Sequence[Authorization],
@@ -165,12 +170,16 @@ def proposed_authorization(
       `destinations` are `EgressBinding.canonical_destination_set` in that type's
       one canonical order, and a shape that cannot state the set cannot found an
       authority over it;
-    - **the coverage would be complete for this request** — every user-facing
-      argument named by a member. **Here that is only ever vacuous** (module
-      docstring, #2373): a request carrying a user-facing argument proposes
-      nothing, which is §20 arm 59's third case, *"a `CONFIRM` on an egress request
-      one of whose arguments no resolution minted a member for → no row is
-      written"*;
+    - **the coverage would satisfy condition 6 for this request** — ADR-0266 §7's
+      restatement of §1's completeness condition, **obtained from
+      :meth:`~ai_assistant.core.protocols.CoverageAnswers.coverage_met` and by no
+      other means** (ADR-0270 §1, §3). This function evaluates no conjunct of it and
+      selects no governing quote; where the answer is met it **records** the quote
+      the answer carries on the row (ADR-0270 §2). On this tree every caller passes
+      an empty ``coverage``, so the condition holds only vacuously — a request
+      carrying a user-facing argument proposes nothing, which is §20 arm 59's third
+      case, *"a `CONFIRM` on an egress request one of whose arguments no resolution
+      minted a member for → no row is written"*;
     - **and the ladder yields an `expires_at`** (:func:`horizon`).
 
     Failing any of the four, **no row is proposed**, `Confirmation.authorization` is
@@ -195,10 +204,34 @@ def proposed_authorization(
     `planned_with_external_content` authorises no such dispatch and may still cover
     a later request of that goal that carries none.
 
+    **The seam is asked at most once per proposal, and its answer outlives the call
+    only as the row's ``quoted``** (ADR-0270 §3). The question is put where the
+    third condition is taken, so a `CONFIRM` an earlier condition already refused
+    asks nothing at all and no durable read is taken for a row that was never going
+    to be written. Nothing memoises the answer, nothing hands it to a later
+    `decide`, and ADR-0254 §13's recheck reads the current governing quote at every
+    dispatch as if ``quoted`` were not there.
+
+    **An unreadable seam propagates** (ADR-0270 §4). ``coverage_met`` raises
+    `AuthorizationError` where `GoalQuotes.for_action` does, and this function
+    converts it into neither a met answer nor an unmet one: the caller writes no row,
+    `Confirmation.authorization` is absent (§11) and the one call is confirmed under
+    ADR-0148 §3's route (a) — §1's own disposition for a failed completeness
+    condition, reached by one further case.
+
     Args:
         request: The request the ruling was taken over.
         decision: The recorded `CONFIRM` the question rides. Its ``decided_at`` is
             the row's ``proposed_at`` and its ``id`` is the row's ``confirmation``.
+        answers: Condition 6's one answerer (ADR-0270 §1). **The policy's third
+            face and not a second implementation**: the composition root passes the
+            object that already answers `ActionPolicy` under this annotation, which
+            is golden rule 1 rather than an exception to it.
+        coverage: The coverage the row would carry — condition 6's fourth operand,
+            and what the row is written with. **This module mints none** (#2373),
+            so every caller on this tree passes an empty tuple; it is a parameter
+            rather than a literal so that the writer asks about what a minter
+            minted rather than about what this function assumed.
         goal: The goal, for rung 2 of the ladder.
         retention: The deployment's turn-retention window, for rung 3.
         standing: The `ESTABLISHED` rows of that goal, live and lapsed, as
@@ -207,16 +240,17 @@ def proposed_authorization(
     Returns:
         The row to record `PROPOSED`, or ``None`` where this `CONFIRM` proposes
         none.
+
+    Raises:
+        AuthorizationError: If ``coverage_met`` does. It is not caught here.
     """
     if request.goal is None:
         return None
     binding = request.egress_binding
     if not isinstance(binding, EgressBinding):
         return None
-    if user_facing_arguments(request):
-        # #2373: no member can be minted, so the completeness condition can only
-        # hold vacuously. This is the fail-closed direction and the ruled one --
-        # the concrete call is confirmed under route (a) exactly as it is today.
+    answer = await answers.coverage_met(request, coverage)
+    if not answer.met:
         return None
     expires_at = horizon(decision.decided_at, goal=goal, retention=retention)
     if expires_at is None:
@@ -228,7 +262,8 @@ def proposed_authorization(
         account=binding.account,
         destinations=binding.canonical_destination_set,
         origin=AuthorizationOrigin.CONFIRMED,
-        coverage=(),
+        coverage=coverage,
+        quoted=answer.quoted,
         proposed_at=decision.decided_at,
         expires_at=expires_at,
         confirmation=decision.id,
@@ -302,5 +337,4 @@ __all__ = [
     "authorization_id_for",
     "horizon",
     "proposed_authorization",
-    "user_facing_arguments",
 ]

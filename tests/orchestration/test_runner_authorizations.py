@@ -36,6 +36,7 @@ from ai_assistant.core.types import (
 from ai_assistant.orchestration import StepExecutor, StepRunner
 from ai_assistant.orchestration.authorizing import authorization_id_for
 from ai_assistant.orchestration.origin import NOTHING_EXTERNAL
+from ai_assistant.permissions.policy import ThresholdActionPolicy
 from ai_assistant.testing import (
     FakeActionPolicy,
     FakeAuditTrail,
@@ -48,6 +49,7 @@ from ai_assistant.testing import (
 if TYPE_CHECKING:
     from datetime import datetime
 
+    from ai_assistant.core.protocols import CoverageAnswers
     from ai_assistant.core.types import ExecutionState, Goal, ToolDefinition
 
 #: The one step every test here disposes of. It carries **no argument**, which is
@@ -75,19 +77,30 @@ def a_confirmable_tool() -> ToolDefinition:
 class Harness:
     """A wired ``StepRunner`` with a binder and a goal-authorization store."""
 
-    def __init__(
+    def __init__(  # noqa: PLR0913 — one parameter per collaborator the cases vary
         self,
         *,
         tool: ToolDefinition | None = None,
         retention: timedelta | None = RETENTION,
         authorizations: FakeGoalAuthorizationStore | None = None,
+        answers: CoverageAnswers | None = None,
         wired: bool = True,
+        answering: bool = True,
         now: datetime = AT,
     ) -> None:
         """Wire the stage over canonical fakes.
 
         ``wired=False`` builds the stage with **no** store, which is ADR-0254
         §15's fail-closed default: it proposes nothing and settles nothing.
+        ``answering=False`` is the same default one seam over (ADR-0270 §1): a
+        stage holding no condition-6 answerer cannot obtain §1's completeness
+        condition by any other means, so it proposes nothing either.
+
+        ``answers`` defaults to condition 6's **one** implementation, holding no
+        `GoalQuotes` — the real comparison, so what these cases pin is the answer
+        `permissions` gives rather than a fake's configuration. A case that needs
+        the answer counted, faulted or set to something this tree cannot produce
+        passes `FakeCoverageAnswers`.
         """
         self.tool = a_confirmable_tool() if tool is None else tool
         self.plans = FakePlanStore(now=lambda: now)
@@ -99,6 +112,7 @@ class Harness:
         self.authorizations = (
             FakeGoalAuthorizationStore() if authorizations is None else authorizations
         )
+        self.answers: CoverageAnswers = ThresholdActionPolicy() if answers is None else answers
         self.ids = iter(f"d-{n}" for n in range(1, 100))
         self.runner = StepRunner(
             plans=self.plans,
@@ -110,6 +124,7 @@ class Harness:
             ),
             binder=self.binder,
             authorizations=self.authorizations if wired else None,
+            coverage_answers=self.answers if answering else None,
             episode_retention=retention,
             now=lambda: now,
             id_factory=lambda: next(self.ids),
@@ -317,6 +332,7 @@ async def test_an_answer_at_or_after_the_expiry_establishes_nothing() -> None:
         ),
         binder=parking.binder,
         authorizations=store,
+        coverage_answers=parking.answers,
         episode_retention=RETENTION,
         now=lambda: AT + timedelta(hours=1),
         id_factory=lambda: "d-late",
