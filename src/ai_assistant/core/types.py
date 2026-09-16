@@ -16277,6 +16277,83 @@ class QuotedOutput(BaseModel):
         return self
 
 
+class ChargedOutput(BaseModel):
+    """Where a declaration says an act reports what it **charged** (ADR-0271 §2).
+
+    **Exactly two fields**, each a key of the step's ``output`` at depth **one**:
+    ``amount``, whose value is **the whole amount that invocation charged**, and
+    ``currency``, whose value is that amount's ISO-4217 code. ADR-0267 §3's rule
+    stated once more where it governs — neither names a dotted expression, an index,
+    a wildcard or a selector, and **no lane adds an addressing syntax to either**.
+    Depth is one because nothing splits the string, so a provider's flat
+    ``"total.charged"`` is an ordinary key and a nested value is unreachable however
+    the key is spelled.
+
+    **It is its own type and not** :class:`QuotedOutput` **reused, and the reason is
+    that the two name different facts** (§2). ``QuotedOutput.amount`` is a
+    **prospective** price on offer, the number ADR-0267 §4's mint appends an
+    :class:`ActionQuote` from; a charge is **retrospective**, and one output may
+    carry both — an estimate at one key and a settled total at another. Reusing the
+    type would make one of those two readings wrong at every declaration that carries
+    both: selecting the estimate hides the very mismatch ADR-0271 exists to report,
+    and selecting the total makes ``QuotedOutput``'s own accepted meaning false. So
+    ADR-0267 §3 is left binding entire, and the price of that is one ``core`` type of
+    identical shape and different semantics — ADR-0251 §3's *"one carrier for two
+    facts"* refused rather than paid for twice.
+
+    **The two fields are read for their own fact and never for each other's** (§2).
+    **No lane reads** :attr:`ToolDefinition.quoted_output` **as a charge, reads**
+    :attr:`ToolDefinition.charged_output` **as a quote, mints an** ``ActionQuote``
+    **from a charge, appends anything to a goal's quotes on this decision's
+    authority, or defaults either field from the other.** Reading a charge at
+    ``quoted_output`` would make the acting step's own appended reading the operand,
+    which is the defect issue #2409 names. A declaration may carry both, one or
+    neither; where it carries both they may name the same key or different ones, and
+    **no clause compares them, requires them to agree, or refuses either on the
+    other's account**.
+
+    Attributes:
+        amount: The key of the step's ``output`` whose value is the **whole amount
+            that invocation charged** (§2). **No code checks that it is**, exactly as
+            ``QuotedOutput.amount``'s totality obligation is unchecked; what the
+            reading does check is the shape at that key, and ADR-0271 §2 states it by
+            reference to ADR-0267 §4 rather than re-specifying it.
+        currency: The key at depth one carrying that amount's ISO-4217 code.
+    """
+
+    model_config = ConfigDict(extra="forbid", frozen=True)
+
+    amount: EncodableText = Field(
+        description="The output key carrying the whole amount the act charged (ADR-0271 §2)."
+    )
+    currency: EncodableText = Field(
+        description="The output key carrying that amount's ISO-4217 code (ADR-0271 §2)."
+    )
+
+    @model_validator(mode="after")
+    def _the_two_keys_are_different(self) -> ChargedOutput:
+        """Refuse ``amount`` equal to ``currency`` (ADR-0271 §2).
+
+        :class:`QuotedOutput`'s refusal one record over, and for its reason: one key
+        cannot carry both a number and a three-letter code, so a declaration naming
+        one for both describes an output §2's reading can succeed against in no case
+        — it would report **no charge at every act**, silently, and a call under it
+        would never be satisfying. Refusing at construction is where the integration
+        author sees it.
+
+        Raises:
+            ValueError: If the two keys are equal.
+        """
+        if self.amount == self.currency:
+            msg = (
+                f"a charged output names two different keys of the step's output, and "
+                f"{self.amount!r} is named for both the amount and the currency "
+                f"(ADR-0271 §2)"
+            )
+            raise ValueError(msg)
+        return self
+
+
 class ToolDefinition(BaseModel):
     """A declaration of what a tool is and what invoking it risks (ADR-0016 §1).
 
@@ -16385,6 +16462,34 @@ class ToolDefinition(BaseModel):
             "refuse every definition written before it. **Authored by the "
             "integration** and by nothing this system runs: no component writes, "
             "edits, infers or repairs one at run time (§8)."
+        ),
+    )
+    charged_output: ChargedOutput | None = Field(
+        default=None,
+        description=(
+            "Where this declaration's output reports what an invocation **charged**, "
+            "and the whole of what a declaration says about that (ADR-0271 §2). **A "
+            "declaration carrying ``None`` reports no charge ever**, so no call under "
+            "it is ever **satisfying** and it establishes no ``MONEY`` criterion (§4) "
+            "— the fail-closed default, and ADR-0016 §1's *“Declared, not "
+            "inferred”*. **It is read for its own fact and never for "
+            ":attr:`quoted_output`'s**: a charge is retrospective and a quote "
+            "prospective, one output may carry both, and **no lane reads either as the "
+            "other, mints an ``ActionQuote`` from a charge, or defaults either field "
+            "from the other** (§2). A declaration may carry both, one or neither; "
+            "where it carries both they may name the same key or different ones, and "
+            "no clause compares them or requires them to agree.\n\n"
+            "**This is a fifth exception to this class's required-field rule, recorded "
+            "rather than argued away** (ADR-0271 §9's ADR-0016 scope, taken on §1's own "
+            "test applied afresh and not on the four records beside it): absent makes "
+            "the **opposite** claim to the one ADR-0016 §1 refuses — a declaration "
+            "naming no charged output reports no charge at all, so the default can "
+            "only refuse to establish a ``MONEY`` criterion and never establish one. "
+            "Requiring it would oblige every declaration and fixture in the tree to "
+            "write ``None`` for a fact absent on almost all of them, and would refuse "
+            "every definition written before it. **Authored by the integration** and "
+            "by nothing this system runs: no component writes, edits, infers or "
+            "repairs one at run time (§2)."
         ),
     )
     parameters_schema: FrozenJsonMapping = Field(
@@ -18876,6 +18981,20 @@ class PermissionRuling(BaseModel):
     records supplies both. That leaves ``decide`` a genuine function of its
     argument, which is in turn what makes the monotonicity obligations in
     ADR-0021 §5 checkable at all.
+
+    :attr:`proved_quote` (ADR-0271 §1) is the one field that reaches past that
+    absence, and it is recorded here rather than left for a reader to notice. An
+    :class:`ActionQuote` carries ``plan`` and a ``read_from`` naming the **reading**
+    step, so the roster's *"no field naming ... a step"* is now *"no field naming the
+    step this ruling is about"*. The hazard the split closes is untouched: the value
+    names **no tool and no payload**, so nothing in it can make
+    :meth:`PermissionDecision.authorises` approve a declaration the policy was not
+    handed — that method compares ``tool``, ``parameters_digest`` and
+    ``intended_action``, and reads this field in no case. It is an **operand and never
+    a verdict** (§1), carried so that a later comparison can say which price the
+    dispatch was proved against; the two provenance fields are read by no clause of
+    ADR-0266, no route of ADR-0267 and no test of either, and **nothing resolves the
+    reference**.
     """
 
     model_config = ConfigDict(extra="forbid", frozen=True)
@@ -18916,6 +19035,48 @@ class PermissionRuling(BaseModel):
             "**unset** and route (d) a digest with it **set**, which narrows ADR-0247 "
             "§2's discriminator in its route-(b) limb alone, by one conjunct, and "
             "breaks none of it."
+        ),
+    )
+    proved_quote: ActionQuote | None = Field(
+        default=None,
+        description=(
+            "The :class:`ActionQuote` the coverage comparison at ``ActionPolicy.decide`` "
+            "took ADR-0266 §7's **evidence route** over for this request, carried **by "
+            "value** and read a second time by nobody (ADR-0271 §1). Set **only** on a "
+            "**route-(d)** ``ALLOW`` — ADR-0254 §7's discriminator — whose coverage "
+            "carried a ``MONEY`` member met through that route, and set **only** to the "
+            "governing quote the route was taken over: of the quotes "
+            ":meth:`~ai_assistant.core.protocols.GoalQuotes.for_action` returned, the "
+            "**last** of them (ADR-0267 §5), and no other. It is **absent in every other "
+            "case** — every ruling that is not a route-(d) ``ALLOW``, a coverage carrying "
+            "no ``MONEY`` member, a request carrying no ``intended_action``, a goal no "
+            "quote of which names that action.\n\n"
+            "**It is the operand a comparison was taken over and never the verdict of "
+            "one** (§1). It states **which** quote condition 6 was evaluated against at "
+            "this dispatch and asserts nothing about coverage, completeness or "
+            "authority. **No component covers a request against it, re-tests it, "
+            "refreshes it, compares it to a later quote, carries it to a further "
+            "dispatch, or reads it — or its absence — as evidence of anything a "
+            "comparison decided.** ADR-0254 §13's “no cached coverage verdict anywhere” "
+            "is untouched: the recheck reads the **current** governing quote through "
+            "ADR-0267 §5's seam at every dispatch, as if this field were not there.\n\n"
+            "**By value, and named by nothing** (§1). The record is the ``ActionQuote`` "
+            "itself, on ADR-0021 §1's own ground for embedding a ``ToolDefinition`` whole "
+            "— “There is no name left to rebind”. Naming it by the act and the digest "
+            "would name **the governing** quote for that pair **at the instant of the "
+            "read**, which a later append displaces and ADR-0267 §2's elision can drop, so "
+            "the pin would drift off the reading it exists to fix. **No lane mints a "
+            "quote id, adds a field to** :class:`ActionQuote`**, keys a record on one, or "
+            "reconciles the pinned value against the goal's tuple.**\n\n"
+            "**``permissions`` writes it, at the ruling, and nothing else writes or "
+            "repairs one** (§1). No ``AuditTrail``, no store, no reader, no interface "
+            "adapter, no tool and no model output constructs, writes, edits or repairs "
+            "it; **a planner envelope carrying one has that value discarded silently**; "
+            "and **it is never back-filled** — a decision recorded without one is a "
+            "decision whose dispatch was not proved against a quote, and no pass supplies "
+            "one afterwards. It reaches the durable :class:`PermissionDecision` by the "
+            "path that exists today, :meth:`PermissionDecision.from_request` transcribing "
+            "the ruling whole, so **``PermissionDecision`` gains no field**."
         ),
     )
 
@@ -19001,6 +19162,42 @@ class PermissionRuling(BaseModel):
             msg = (
                 f"a ruling that names no authorisation scopes none, got "
                 f"authorised_goal={self.authorised_goal!r} (ADR-0254 §7)"
+            )
+            raise ValueError(msg)
+        return self
+
+    @model_validator(mode="after")
+    def _a_pin_needs_the_goal_scope_it_was_proved_under(self) -> PermissionRuling:
+        """Refuse a ``proved_quote`` where ``authorised_goal`` is unset (ADR-0271 §1).
+
+        ``authorised_goal`` is ADR-0254 §7's own route-(d) discriminating field, and
+        this is **that field's own refusal one field over**: a quote proved for a
+        goal-scoped authority the row names no goal for is incoherent. The pin is set
+        exactly where ADR-0266 §7's evidence route decided something, and that route is
+        reached on route (d) alone.
+
+        **It gates on ``authorised_goal`` and not on ``authorised_by``**, which is the
+        whole of what it adds over the three refusals beside it: a validator reading
+        ``authorised_by`` alone would admit a pin on a **route-(b)** ``ALLOW``
+        (``authorised_by`` and ``authorised_subject`` set, ``authorised_goal`` unset)
+        and on a **route-(c)** one (``authorised_by`` set, the other two unset) — two
+        rows no evidence route was taken over. Gating here refuses both, and refuses
+        the ``authorised_by``-unset row as well, because
+        :meth:`_a_scope_needs_the_authorisation_it_scopes` already makes a scope
+        without a pointer unconstructible.
+
+        **It does not require the converse**, and the asymmetry is this type's
+        already: a route-(d) ``ALLOW`` whose coverage carried no ``MONEY`` member sets
+        ``authorised_goal`` and pins nothing, which is the ordinary shape.
+
+        Raises:
+            ValueError: If ``proved_quote`` is set and ``authorised_goal`` is not.
+        """
+        if self.proved_quote is not None and self.authorised_goal is None:
+            msg = (
+                f"a ruling that names no goal-scoped authority was proved against no "
+                f"quote, got a proved_quote for intended_action="
+                f"{self.proved_quote.intended_action!r} (ADR-0271 §1)"
             )
             raise ValueError(msg)
         return self
