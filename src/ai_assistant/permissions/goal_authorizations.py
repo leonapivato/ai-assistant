@@ -201,14 +201,32 @@ def _canonical_version(goal_version: int) -> str:
     Args:
         goal_version: The version to render.
 
+    **Tagged with an ``x``, because untagged hex overlaps SQLite's own rendering.**
+    The column has ``TEXT`` affinity, so an integer planted into it is stored as its
+    **decimal** text — a planted ``10`` becomes ``"10"``, which is perfectly good
+    untagged hexadecimal and decodes as **16**. A closure intended at version 10
+    would then be held at 16, and the reopen's ``clear_closure`` at 10 would answer
+    ``False`` and leave a live goal fenced for good: a *silent misread*, which is the
+    one thing the exact-decode rule exists to prevent. The tag makes the two
+    languages disjoint — SQLite never renders an integer with an ``x`` in it — so
+    such a value is refused rather than misread. Adversarial review, round 4,
+    ``blocker``; and the round-3 note claiming a planted integer round-trips was true
+    of base 10 and was carried over to base 16 without rechecking, which is why it
+    only held for ``0``-``9``.
+
+    Args:
+        goal_version: The version to render.
+
     Returns:
-        Its canonical base-16 text — lowercase, no leading zeros, no ``0x``, no
-        padding, a leading ``-`` where negative.
+        Its canonical tagged base-16 text — ``x`` then lowercase hex digits, no
+        leading zeros, no padding, a leading ``-`` before the tag where negative.
 
     Raises:
         TypeError: If ``goal_version`` is not an integer by Python's own test.
     """
-    return format(index(goal_version), "x")
+    normalised = index(goal_version)
+    sign = "-" if normalised < 0 else ""
+    return f"{sign}x{abs(normalised):x}"
 
 
 def _decoded_version(raw: object, goal: str, path: str) -> int:
@@ -241,27 +259,34 @@ def _decoded_version(raw: object, goal: str, path: str) -> int:
             **Nothing is mutated on the way out**, the read happening inside the
             caller's transaction and before any write.
     """
-    if isinstance(raw, str) and _is_hex(raw) and raw == format(int(raw, 16), "x"):
-        return int(raw, 16)
+    if isinstance(raw, str):
+        negative = raw.startswith("-")
+        body = raw[1:] if negative else raw
+        if body.startswith("x") and _is_hex(body[1:]):
+            value = -int(body[1:], 16) if negative else int(body[1:], 16)
+            # **The round-trip is the exact test**, and it is what refuses a second
+            # spelling of one number: ``x007``, ``-x0`` and ``x`` alone all decode
+            # and none of them is what this store writes.
+            if _canonical_version(value) == raw:
+                return value
     msg = (
         f"the authorization store at {path!r} holds a closure record for goal "
         f"{goal!r} whose version is {describe_untrusted(raw)} rather than canonical "
-        f"base-16 text; the watermark is never lowered, so a record that cannot be "
-        f"read exactly is not read at all (ADR-0268 §1)"
+        f"tagged base-16 text (x1f, -x1f); the watermark is never lowered, so a "
+        f"record that cannot be read exactly is not read at all (ADR-0268 §1)"
     )
     raise AuthorizationError(msg)
 
 
-def _is_hex(raw: str) -> bool:
-    """Whether ``raw`` is a run of lowercase hex digits, optionally signed.
+def _is_hex(body: str) -> bool:
+    """Whether ``body`` is a non-empty run of lowercase hex digits and nothing else.
 
-    Written out rather than left to ``int(raw, 16)``, which accepts an ``0x``
+    Written out rather than left to ``int(body, 16)``, which accepts an ``0x``
     prefix, underscores, surrounding whitespace, uppercase and Unicode digit forms
     — so several spellings of one number would decode and only one would compare
     equal to what was written. The round-trip in the caller is what makes the test
     exact; this is what keeps ``int`` from being handed something surprising first.
     """
-    body = raw[1:] if raw.startswith("-") else raw
     return bool(body) and all(character in "0123456789abcdef" for character in body)
 
 
@@ -433,15 +458,20 @@ _CREATE_TABLE = (
 #: characters; :func:`_decoded_version` then pins the exact value on the way out, so
 #: a file this store did not write is refused rather than misread.
 #:
-#: **Base 16**, because CPython caps *decimal* integer conversion at 4300 digits and
-#: a base-10 encoding would have reimposed the very ceiling this column exists not to
-#: have (:func:`_canonical_version`).
+#: **Tagged base 16** (``x1f``, ``-x1f``), because CPython caps *decimal* integer
+#: conversion at 4300 digits — so a base-10 encoding would have reimposed the very
+#: ceiling this column exists not to have — and because untagged hex **overlaps
+#: SQLite's own rendering**: a planted integer ``10`` is stored by this column's
+#: ``TEXT`` affinity as ``"10"``, which is good untagged hex for **16**. The tag
+#: makes the two languages disjoint, so such a value is refused rather than misread
+#: (:func:`_canonical_version`).
 _CREATE_CLOSURES = (
     "CREATE TABLE IF NOT EXISTS goal_authorization_closures("
     "goal TEXT PRIMARY KEY NOT NULL, "
     "version TEXT NOT NULL CHECK ("
-    "typeof(version) = 'text' AND version NOT GLOB '*[^0-9a-f-]*' "
-    "AND version NOT GLOB '?*-*' AND version NOT GLOB '-' AND length(version) > 0), "
+    "typeof(version) = 'text' AND version NOT GLOB '*[^0-9a-fx-]*' "
+    "AND (version GLOB 'x[0-9a-f]*' OR version GLOB '-x[0-9a-f]*') "
+    "AND version NOT GLOB '?*x*x*'), "
     "fenced INTEGER NOT NULL CHECK (fenced IN (0, 1)))"
 )
 
