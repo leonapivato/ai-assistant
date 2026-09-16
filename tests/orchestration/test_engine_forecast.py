@@ -65,6 +65,8 @@ from ai_assistant.testing import (
 )
 
 if TYPE_CHECKING:
+    from collections.abc import Callable
+
     from ai_assistant.core.types import TurnOutcome
 
 _UTTERANCE: Final = "what does the weekend look like"
@@ -597,18 +599,13 @@ async def test_a_row_carries_a_region_per_returned_day_although_the_budget_admit
 class _ProposingOneReadingAnother:
     """A forecaster that proposes one declaration and checks the call against another.
 
-    **The canonical fake's own second pre-execution check, reached genuinely** (ADR-0029
-    §2, ADR-0260 §6): ``FakeForecaster.read`` compares the call's definition against *its
-    own* registered declaration and refuses an unequal one with ``ToolBindingError``,
-    which §6 names as the check "``authorises`` would otherwise pass". Splitting the
-    proposal and the read across two fakes is what gives that check a subject from
-    outside, the servicing building the call from whatever ``request`` returned.
-
-    **Which of the three checks fired is ADR-0260 §13's arm (c) and is L1's**, asserted
-    there over the production forecaster and ending "at the forecaster boundary, which is
-    where L1 ends". What arm (h) owes, and what this drives, is the sentence after it:
-    such a failure "**is recorded by the servicing as** ``BINDING_FAILED``" — through to
-    the turn.
+    **§6's second check, reached genuinely through the canonical fake's own
+    implementation of it** (ADR-0029 §2, ADR-0260 §6): ``FakeForecaster.read`` compares
+    the call's definition against *its own* registered declaration and refuses an
+    unequal one, which §6 names as the check "``authorises`` would otherwise pass".
+    Splitting the proposal and the read across two fakes is what gives that check a
+    subject from outside the seam, the servicing building the call from whatever
+    ``request`` returned.
     """
 
     __slots__ = ("_proposing", "_reading")
@@ -639,27 +636,129 @@ class _ProposingOneReadingAnother:
             timeout: The bound.
 
         Returns:
-            Never — the fake's own check raises first.
+            Never — the fake's own second check raises first.
         """
         return await self._reading.read(call, timeout=timeout)
 
 
-async def test_a_pre_execution_refusal_reaches_the_turn_as_binding_failed() -> None:
-    """§13's arm (h)'s last case, **asserted through to the turn**.
+@final
+class _MutatingTheCall:
+    """A forecaster whose caller's call is rewritten after the servicing constructed it.
 
-    "§6's three pre-execution checks are asserted through to the turn: ``BINDING_FAILED``
-    in the audit, ``UNAVAILABLE`` in ``forecast_not_read``, and **no** contact, because a
-    path recording nothing would leave §10's ``None`` saying the provider answered."
+    ``ToolCall``'s validator runs at construction and a ``__dict__`` write defeats
+    ``frozen=True``, which is the shape §6's **first** check exists for — "a mutation
+    landed after construction cannot survive into the read" — and is how ADR-0260 §13's
+    arm (c) drives it over the production forecaster. Delegating to the canonical fake
+    afterwards means the refusal comes from a real implementation of the check rather
+    than from a raise this test wrote.
+
+    **Two of §6's three origins land on this one check from outside the seam, and that
+    is the checks' stated order rather than a gap here**: §6 revalidates *before*
+    re-evaluating ``authorises``, and ``ToolCall``'s own validator runs ``authorises``
+    itself — so a substituted request is refused at check one with the explicit
+    re-evaluation standing behind it, which is exactly what arm (c)'s own third case
+    records. Separating the three is that arm's, at the seam, over the production
+    forecaster; what arm (h) owes is what each **records through to the turn**.
+    """
+
+    __slots__ = ("_inner", "_rewrite")
+
+    def __init__(self, rewrite: Callable[[Any], Any]) -> None:
+        """Wrap the canonical fake behind one rewriting of the call.
+
+        Args:
+            rewrite: Given the call the servicing built, answers the request to put in
+                its place.
+        """
+        self._inner = forecaster()
+        self._rewrite = rewrite
+
+    @property
+    def name(self) -> str:
+        """The configured source's own identity."""
+        return self._inner.name
+
+    async def request(self) -> Any:
+        """Propose exactly what the wrapped forecaster proposes.
+
+        Returns:
+            The proposal.
+        """
+        return await self._inner.request()
+
+    async def read(self, call: Any, /, *, timeout: Any) -> Any:  # noqa: ASYNC109 — the seam owns the deadline (ADR-0241 §1); this carries the production signature
+        """Rewrite the call, then hand it to a real implementation of §6's checks.
+
+        Args:
+            call: The authorised call the servicing built.
+            timeout: The bound.
+
+        Returns:
+            Never — the fake's own checks raise on the rewritten call.
+        """
+        call.__dict__["request"] = self._rewrite(call)
+        return await self._inner.read(call, timeout=timeout)
+
+
+def _elsewhere(call: Any) -> Any:
+    """§6's first origin: arguments rewritten after the call was constructed.
+
+    Args:
+        call: The call the servicing built.
+
+    Returns:
+        Its request with another origin in place of the configured one.
+    """
+    return call.request.model_copy(update={"parameters": {"origin": "https://elsewhere"}})
+
+
+def _another_place(call: Any) -> Any:
+    """§6's third origin: a request the recorded decision does not authorise.
+
+    Args:
+        call: The call the servicing built.
+
+    Returns:
+        Its request naming another coordinate, which the decision was not taken over.
+    """
+    parameters = {**call.request.parameters, "latitude": 0.0, "longitude": 0.0}
+    return call.request.model_copy(update={"parameters": parameters})
+
+
+@pytest.mark.parametrize(
+    "seam",
+    [
+        pytest.param(lambda: _MutatingTheCall(_elsewhere), id="mutated_after_construction"),
+        pytest.param(_ProposingOneReadingAnother, id="foreign_declaration"),
+        pytest.param(lambda: _MutatingTheCall(_another_place), id="unauthorised_request"),
+    ],
+)
+async def test_each_pre_execution_refusal_reaches_the_turn_as_binding_failed(
+    seam: Callable[[], Any],
+) -> None:
+    """§13's arm (h)'s last case, over each of §6's three origins, **through the turn**.
+
+    "§6's three pre-execution checks are asserted through to the turn:
+    ``BINDING_FAILED`` in the audit, ``UNAVAILABLE`` in ``forecast_not_read``, and
+    **no** contact, because a path recording nothing would leave §10's ``None`` saying
+    the provider answered."
 
     The last clause is why this is a **decline** and not ADR-0226 §5's degradation: a
     degraded servicing carries no disposition, and an absent disposition is §10's
     *answered* case — so a lane that let the raise fall through to the degradation would
     tell the user the provider answered a read it refused to make.
+
+    **Which check each origin lands on is the seam's own ordering and is arm (c)'s**, at
+    the seam and over the production forecaster; what is asserted here is that every one
+    of them records the same triple at the turn.
+
+    Args:
+        seam: Builds the forecaster this row drives.
     """
     with structlog.testing.capture_logs() as captured:
         harness = Harness(
             planner=_AskingPlanner(_asks(), rounds=1),
-            forecast=servicer(seam=_ProposingOneReadingAnother()),
+            forecast=servicer(seam=seam()),
         )
         outcome = await harness.engine.converse(_UTTERANCE, timeout=PATIENT)
 
