@@ -1,6 +1,6 @@
 # 273. A simulated booking provider is a reference integration declared as the real one, and its act reaches nothing outside this deployment
 
-- Status: Proposed
+- Status: Accepted
 - Date: 2026-09-16
 
 ## Context
