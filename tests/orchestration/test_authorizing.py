@@ -24,7 +24,8 @@ function's parameter**, which is the shape a minter will fill.
 from __future__ import annotations
 
 from datetime import UTC, datetime, timedelta
-from typing import TYPE_CHECKING
+from decimal import Decimal
+from typing import TYPE_CHECKING, Final, final
 
 import pytest
 from authorizing_builders import (
@@ -39,26 +40,42 @@ from authorizing_builders import (
     a_tool,
 )
 
+from ai_assistant.core.errors import AuthorizationError
 from ai_assistant.core.types import (
+    ActionQuote,
+    ActionRequest,
     Authorization,
     AuthorizationDisposition,
     AuthorizationOrigin,
+    BoundKind,
     CoverageMember,
     Goal,
     PermissionOutcome,
     PermissionRuling,
+    QuoteView,
     SpanCoverage,
+    StepOutputRef,
 )
 
 if TYPE_CHECKING:
     from ai_assistant.core.protocols import CoverageAnswers, GoalQuotes
 
+from ai_assistant.orchestration.authorization_surface import projection_of
 from ai_assistant.orchestration.authorizing import (
     authorization_id_for,
     horizon,
     proposed_authorization,
 )
 from ai_assistant.permissions.policy import ThresholdActionPolicy
+from ai_assistant.testing import (
+    FakeCoverageAnswers,
+    FakeGoalQuotes,
+    authorization_basis,
+    coverage_member,
+    money_bound,
+    period_bound,
+    terms_bound,
+)
 
 # --- ADR-0256 §1's ladder ------------------------------------------------
 
@@ -362,3 +379,463 @@ async def test_the_outcome_test_is_the_writers_and_not_this_functions() -> None:
     )
 
     assert row is not None
+
+
+# --- the figure the row records (ADR-0267 §11 arm 7; ADR-0270 §2) --------
+
+
+#: The act every priced call below is an attempt at (ADR-0265 §1). A request
+#: carrying none is met by ADR-0266 §7's evidence route in no case.
+ACT: Final = "ia-1"
+
+#: A declaration carrying one user-facing argument the argument route can meet,
+#: and **no** ``MONEY`` argument — so a ``MONEY`` member here is proved against
+#: the quote alone, which is ADR-0266 §7's *"a declaration declaring no amount
+#: keeps its ceiling proved against the quote"*.
+PRICED_TOOL: Final = a_tool(
+    bounded_arguments=({"argument": "nights", "kind": "period", "currency_argument": None},)
+)
+
+
+#: A declaration whose one user-facing argument is declared at ``TERMS``, so a
+#: ``TERMS`` member can actually reach it. ADR-0266 §7's argument route is
+#: available only where the declaration carries **exactly one**
+#: ``BoundedArgument`` at the member's kind; a member names no argument itself.
+SITED_TOOL: Final = a_tool(
+    bounded_arguments=({"argument": "site", "kind": "terms", "currency_argument": None},)
+)
+
+
+def a_priced_request(**overrides: object) -> ActionRequest:
+    """A booking call carrying one user-facing argument and naming its act."""
+    fields: dict[str, object] = {
+        "tool": PRICED_TOOL,
+        "parameters": {"site": "hotel-1"},
+        "intended_action": ACT,
+    }
+    fields.update(overrides)
+    return a_request(**fields)  # type: ignore[arg-type]  # heterogeneous test kwargs
+
+
+def a_quote(request: ActionRequest, *, amount: str = "120", currency: str = "EUR") -> ActionQuote:
+    """A quote naming ``request``'s act, read over ``request``'s own arguments.
+
+    ``arguments_digest`` is taken from the call rather than written as a literal,
+    because it is the request's **own** property (ADR-0267 §1) — so a case that
+    varies an argument gets a different digest for free.
+    """
+    return ActionQuote(
+        intended_action=ACT,
+        arguments_digest=request.parameters_digest,
+        amount=Decimal(amount),
+        currency=currency,
+        plan="p-1",
+        read_from=StepOutputRef(step="s-1", field="price"),
+        read_at=AT,
+    )
+
+
+#: A ceiling of 150 EUR — one ``MONEY`` member, the one kind the evidence route
+#: meets, and the coverage every priced case below is taken over.
+PRICE_CEILING: Final[tuple[CoverageMember, ...]] = (
+    coverage_member(BoundKind.MONEY, bound=money_bound("150", currency="EUR")),
+)
+
+
+async def test_a_priced_row_records_the_governing_quote_field_for_field() -> None:
+    """ADR-0267 §11 arm 7's first case, and ADR-0270 §2's *"a row is written from this value"*.
+
+    The writer **records** and selects nothing: what lands on the row is the
+    object ``coverage_met`` returned, which is the quote ADR-0266 §7's evidence
+    route was taken over.
+    """
+    request = a_priced_request()
+    quote = a_quote(request)
+
+    row = await _proposed(
+        request_kwargs={
+            "tool": PRICED_TOOL,
+            "parameters": {"site": "hotel-1"},
+            "intended_action": ACT,
+        },
+        coverage=PRICE_CEILING,
+        answers=an_answerer(quotes=FakeGoalQuotes([quote], goal=GOAL)),
+    )
+
+    assert row is not None
+    assert row.quoted == quote
+    assert row.quoted is not None
+    assert row.quoted.amount == Decimal("120")
+    assert row.quoted.currency == "EUR"
+    assert row.quoted.read_at == AT
+    assert row.quoted.arguments_digest == request.parameters_digest
+    assert row.coverage == PRICE_CEILING
+
+
+async def test_the_last_quote_of_that_action_is_the_one_recorded() -> None:
+    """ADR-0267 §2's order is the total order: *"the last naming an action"* governs."""
+    request = a_priced_request()
+    earlier = a_quote(request, amount="100")
+    later = a_quote(request, amount="130")
+
+    row = await _proposed(
+        request_kwargs={
+            "tool": PRICED_TOOL,
+            "parameters": {"site": "hotel-1"},
+            "intended_action": ACT,
+        },
+        coverage=PRICE_CEILING,
+        answers=an_answerer(quotes=FakeGoalQuotes([earlier, later], goal=GOAL)),
+    )
+
+    assert row is not None
+    assert row.quoted == later
+
+
+@pytest.mark.parametrize(
+    ("act", "held", "why"),
+    [
+        (None, True, "no intended_action, so the evidence route decides nothing"),
+        (ACT, False, "no quote of the goal names that act"),
+    ],
+    ids=["no-act", "no-quote-for-the-act"],
+)
+async def test_a_money_member_the_evidence_route_cannot_meet_proposes_nothing(
+    *, act: str | None, held: bool, why: str
+) -> None:
+    """ADR-0267 §11 arm 7's second and third cases, taken at their real strength.
+
+    The arm names them as rows *"carrying ``quoted`` absent"*, and on this corpus
+    that reading is unavailable: ADR-0270 §2 makes a quote **present exactly**
+    where a met answer's coverage carries a ``MONEY`` member, so a ``MONEY``
+    member the evidence route cannot meet leaves condition 6 unmet and **no row
+    is written at all** (ADR-0254 §1, §11). That is strictly stronger than an
+    absent field — the authority is not granted — and it is what this tree does.
+    The absent-field half is the case below, over a coverage carrying no ``MONEY``
+    member.
+    """
+    request = a_priced_request(intended_action=act)
+    quotes = FakeGoalQuotes([a_quote(request)] if held else [], goal=GOAL)
+
+    row = await _proposed(
+        request_kwargs={
+            "tool": PRICED_TOOL,
+            "parameters": {"site": "hotel-1"},
+            "intended_action": act,
+        },
+        coverage=PRICE_CEILING,
+        answers=an_answerer(quotes=quotes),
+    )
+
+    assert row is None, why
+
+
+async def test_a_row_carrying_no_money_member_records_no_quote_though_one_governs() -> None:
+    """ADR-0270 §2's presence rule, and ADR-0267 §11 arm 7's third case.
+
+    *"Absent in every other case"*: the goal **does** hold a governing quote for
+    this request's act, and the row still carries none, the evidence route having
+    decided nothing about a coverage that carries no ``MONEY`` member. This is the
+    half of the rule ``CoverageAnswer``'s own validator cannot enforce — it carries
+    no coverage to test itself against — so it is asserted at the row.
+    """
+    request = a_priced_request(parameters={"nights": "2026-09-13T09:00:00+00:00"})
+    period = (
+        coverage_member(
+            BoundKind.PERIOD,
+            bound=period_bound(starts_at=AT, ends_at=AT + timedelta(days=30)),
+        ),
+    )
+
+    row = await _proposed(
+        request_kwargs={
+            "tool": PRICED_TOOL,
+            "parameters": {"nights": "2026-09-13T09:00:00+00:00"},
+            "intended_action": ACT,
+        },
+        coverage=period,
+        answers=an_answerer(quotes=FakeGoalQuotes([a_quote(request)], goal=GOAL)),
+    )
+
+    assert row is not None
+    assert row.quoted is None
+
+
+async def test_the_subject_digest_is_unchanged_across_two_rows_differing_only_in_quoted() -> None:
+    """ADR-0267 §11 arm 7: what keeps ADR-0254 §7's recompute parity.
+
+    ``subject_digest`` is taken over §7's five fields and ``quoted`` is none of
+    them, so a row that records a figure and one that does not fingerprint the
+    same — which is what lets the trail recompute a digest over a row written
+    before this lane and one written after it.
+    """
+    request = a_priced_request()
+
+    priced = await _proposed(
+        request_kwargs={
+            "tool": PRICED_TOOL,
+            "parameters": {"site": "hotel-1"},
+            "intended_action": ACT,
+        },
+        coverage=PRICE_CEILING,
+        answers=an_answerer(quotes=FakeGoalQuotes([a_quote(request)], goal=GOAL)),
+    )
+
+    assert priced is not None
+    assert priced.quoted is not None
+    unpriced = priced.model_copy(update={"quoted": None})
+
+    assert unpriced.quoted is None
+    assert priced.subject_digest == unpriced.subject_digest
+
+
+@final
+class _RefreshingQuotes:
+    """A ``GoalQuotes`` that lands a re-quote the instant the read returns.
+
+    The window ADR-0267 §7's snapshot rule is about is between the read the proof
+    was taken over and the write of the row, and it is **inside**
+    :func:`proposed_authorization` — after ``coverage_met`` answers and before the
+    ``Authorization`` is constructed. Nothing else can put a quote there, so the
+    seam does it itself: what it answers is the goal as it stood, and what the
+    goal holds immediately afterwards is one reading newer.
+    """
+
+    def __init__(self, held: tuple[ActionQuote, ...], refresh: ActionQuote) -> None:
+        """Hold ``held``, and append ``refresh`` as soon as anyone reads."""
+        self._held = held
+        self._refresh = refresh
+        self.calls = 0
+
+    async def for_action(self, goal: str, intended_action: str) -> tuple[ActionQuote, ...]:
+        """That action's quotes as the goal stands, then advance the goal."""
+        del goal
+        self.calls += 1
+        answered = tuple(one for one in self._held if one.intended_action == intended_action)
+        self._held = (*self._held, self._refresh)
+        return answered
+
+
+async def test_the_recorded_quote_is_the_reads_own_snapshot() -> None:
+    """ADR-0267 §7, and §11 arm 7's snapshot limb.
+
+    One goal read per row built, and a quote appended **between** that read and the
+    write leaves the row carrying the quote the read returned. There is no version
+    check and no coordination in the builder: the row records the figure the proof
+    was actually taken over, and a later reading is a different fact about a later
+    moment — one ADR-0254 §13's recheck reads at dispatch and this row does not
+    (ADR-0270 §3).
+
+    **The refresh is chosen to be one a comparison would notice**: at 170 it is
+    outside the 150 ceiling, so a builder that re-read, compared versions or
+    coordinated at all would answer unmet and write no row at all.
+    """
+    request = a_priced_request()
+    quotes = _RefreshingQuotes((a_quote(request),), a_quote(request, amount="170"))
+
+    row = await _proposed(
+        request_kwargs={
+            "tool": PRICED_TOOL,
+            "parameters": {"site": "hotel-1"},
+            "intended_action": ACT,
+        },
+        coverage=PRICE_CEILING,
+        answers=an_answerer(quotes=quotes),
+    )
+
+    assert row is not None
+    assert row.quoted is not None
+    assert row.quoted.amount == Decimal("120")
+    assert quotes.calls == 1, "one goal read per row built"
+
+
+async def test_the_answer_is_asked_exactly_once_per_proposal() -> None:
+    """ADR-0270 §3: nothing is memoised and nothing is carried to a dispatch.
+
+    Two proposals ask twice, and each proposal asks once — a writer that cached
+    the answer across the pair, or took it twice to be sure, would fail one half
+    or the other.
+    """
+    answers = FakeCoverageAnswers()
+
+    first = await _proposed(answers=answers)
+    assert answers.call_count == 1
+
+    second = await _proposed(answers=answers)
+
+    assert first is not None
+    assert second is not None
+    assert answers.call_count == 2
+
+
+async def test_the_seam_is_asked_about_the_request_and_the_coverage_and_never_the_row() -> None:
+    """ADR-0270 §1: *"It takes the coverage tuple and never the row"*.
+
+    What the writer is obliged to put through this seam is the whole question, so
+    the arm reads back what was actually asked rather than only what came out.
+    """
+    answers = FakeCoverageAnswers()
+    request = a_request()
+
+    await _proposed(coverage=(), answers=answers)
+
+    ((asked, coverage),) = answers.calls
+    assert asked.tool.id == request.tool.id
+    assert asked.parameters == request.parameters
+    assert coverage == ()
+
+
+async def test_a_condition_the_writer_takes_first_asks_the_seam_nothing() -> None:
+    """A `CONFIRM` an earlier condition refused takes no durable read (ADR-0270 §3).
+
+    Not an optimisation: the seam reads a goal's quotes, and a read taken for a
+    row that was never going to be written is work done on the answer's behalf
+    about a proposal that does not exist.
+    """
+    answers = FakeCoverageAnswers()
+
+    assert await _proposed(request_kwargs={"goal": None}, answers=answers) is None
+    assert await _proposed(request_kwargs={"binding": None}, answers=answers) is None
+
+    assert answers.call_count == 0
+
+
+async def test_a_seam_fault_propagates_and_proposes_nothing() -> None:
+    """ADR-0270 §4: *"a fault is never an absence"*, and arm 3's propagation limb.
+
+    The writer converts it into neither a met answer nor an unmet one — an unmet
+    one would be indistinguishable from a coverage that genuinely is not met, and
+    the caller could not tell an authority withheld from one refused. ``_propose``
+    catches it one frame up, writes no row, and the one call is confirmed under
+    ADR-0148 §3's route (a).
+    """
+    answers = FakeCoverageAnswers()
+    answers.fail_coverage_met()
+
+    with pytest.raises(AuthorizationError):
+        await _proposed(answers=answers)
+
+
+async def test_a_met_coverage_over_a_user_facing_argument_proposes_a_row_now() -> None:
+    """ADR-0254 §20 arm 59's third case, as it now reads (ADR-0270 §1).
+
+    Arm 59 states it as *"a `CONFIRM` on an egress request one of whose arguments
+    **no resolution minted a member for**"* — the condition is about the coverage
+    and never about the argument. Before this lane the writer asked the weaker
+    question, refusing every request carrying a user-facing argument whatever the
+    coverage; now condition 6 is the member's answer, and a coverage that meets
+    the argument **does** found an authority. Nothing on this tree mints such a
+    coverage (#2373), which is why the row here is proposed over one the test
+    supplies.
+    """
+    covered = (coverage_member(BoundKind.TERMS, bound=terms_bound("hotel-1")),)
+
+    row = await _proposed(
+        request_kwargs={"tool": SITED_TOOL, "parameters": {"site": "hotel-1"}},
+        coverage=covered,
+        answers=an_answerer(),
+    )
+
+    assert row is not None
+    assert row.coverage == covered
+    assert row.quoted is None, "no MONEY member, so the evidence route decided nothing"
+
+
+async def test_an_argument_no_member_covers_still_proposes_nothing() -> None:
+    """Arm 59's third case at its other limb: the completeness condition still bites.
+
+    A coverage naming one argument leaves the *other* one uncovered, so condition 6
+    fails and no row is written — which is what makes the case above a real
+    condition rather than the writer having stopped asking.
+    """
+    row = await _proposed(
+        request_kwargs={
+            "tool": SITED_TOOL,
+            "parameters": {"site": "hotel-1", "nights": "2"},
+        },
+        coverage=(coverage_member(BoundKind.TERMS, bound=terms_bound("hotel-1")),),
+        answers=an_answerer(),
+    )
+
+    assert row is None
+
+
+# --- the projection is a transcription (ADR-0267 §7, §11 arm 7) ----------
+
+
+async def test_the_projection_transcribes_the_rows_own_quote() -> None:
+    """ADR-0267 §11 arm 7's projection limb, over a row this writer proposed.
+
+    The figure and the bound are rendered **beside** each other: ADR-0267 §7 is
+    explicit that *"a surface that renders a ceiling without the figure the act was
+    quoted at is not a disclosure of the same thing"*.
+    """
+    request = a_priced_request()
+    quote = a_quote(request)
+    ceiling = (
+        coverage_member(
+            BoundKind.MONEY,
+            bound=money_bound("150", currency="EUR"),
+            basis=authorization_basis(span="under a hundred and fifty euros"),
+        ),
+    )
+
+    row = await _proposed(
+        request_kwargs={
+            "tool": PRICED_TOOL,
+            "parameters": {"site": "hotel-1"},
+            "intended_action": ACT,
+        },
+        coverage=ceiling,
+        answers=an_answerer(quotes=FakeGoalQuotes([quote], goal=GOAL)),
+    )
+
+    assert row is not None
+    projection = projection_of(row)
+
+    assert projection.quote == QuoteView(
+        amount=Decimal("120"), currency="EUR", read_at=quote.read_at
+    )
+    (view,) = projection.coverage
+    assert view.bound is not None
+    assert view.bound.maximum == Decimal("150")
+    assert view.bound.currency == "EUR"
+    assert view.span == "under a hundred and fifty euros"
+
+
+async def test_the_projection_carries_no_quote_where_the_row_carries_none() -> None:
+    """ADR-0267 §7: the projection's figure is absent **exactly** where ``quoted`` is."""
+    row = await _proposed()
+
+    assert row is not None
+    assert row.quoted is None
+    assert projection_of(row).quote is None
+
+
+async def test_a_refresh_landing_after_the_question_moves_no_rendering() -> None:
+    """ADR-0267 §11 arm 7: *"the row being the source and nothing re-selecting"*.
+
+    A re-quote arriving between the question and the answer changes the **ruling**
+    — ADR-0254 §13's recheck reads the current governing quote at every dispatch —
+    and the **rendering** in no way. That is what makes a restart between the two
+    recover the same question (ADR-0254 §11), and it is why the row carries the
+    figure at all rather than the surface selecting one.
+    """
+    request = a_priced_request()
+    quotes = FakeGoalQuotes([a_quote(request)], goal=GOAL)
+
+    row = await _proposed(
+        request_kwargs={
+            "tool": PRICED_TOOL,
+            "parameters": {"site": "hotel-1"},
+            "intended_action": ACT,
+        },
+        coverage=PRICE_CEILING,
+        answers=an_answerer(quotes=quotes),
+    )
+
+    assert row is not None
+    before = projection_of(row)
+    quotes.hold_for(GOAL, a_quote(request, amount="170"))
+
+    assert projection_of(row) == before
