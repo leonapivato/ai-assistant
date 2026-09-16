@@ -278,6 +278,58 @@ def test_no_quote_prints_no_line_about_one(output: StringIO) -> None:
     assert "the amount: up to 60 GBP" in rendered
 
 
+def test_the_instant_is_rendered_at_this_surfaces_own_grain_for_a_context_instant(
+    output: StringIO,
+) -> None:
+    """``_when``, deliberately, and not ``_decided_at`` — asserted with an instant that
+    can tell the two apart.
+
+    **ADR-0267 imposes no precision on** ``read_at`` **and attaches nothing to it.** §6
+    is explicit that *"nothing in this decision expires a quote, and no comparison of
+    ADR-0266 §7 reads its age"*, that *"no lane refuses a quote for being old, computes
+    a validity window from ``read_at``, compares ``read_at`` to the instant of dispatch,
+    or adds an expiry field"*, and §1 that *"``read_at`` [is] read by no clause of
+    ADR-0266, by no route of this decision and by no test of either"*. What the
+    rendering owes is *"how old it is"* to the person answering, and this surface
+    already has a grain for that.
+
+    **The fine grain is reserved and the reservation is stated where it lives.**
+    :func:`~ai_assistant.interfaces.cli._decided_at` carries six fractional digits
+    because ADR-0186 §7 *"forbids a surface omitting, truncating or summarising 'any
+    part of what it renders'"* **on a recorded ruling's row**, and its own docstring
+    scopes the split: *"Every other instant on this surface is context for a value the
+    user is reading now … and a minute is the right grain for those."* A confirmation is
+    that second kind, and issue #1392 records the project's reading of which rendering
+    is the good one — *"The command line does not have this problem — ``_when`` renders
+    an instant in the user's own terms"*.
+
+    **The grain is the same as the line below it, and that is the point.** ``read_at``
+    and ``expires_at`` sit two lines apart in one block; two grains there would make one
+    surface speak two, which is ADR-0150's own objection, and it would buy a reader
+    nothing on a window §6 says is **open**. Adversarial review, round 1, ``blocker``:
+    waived on these clauses, with the convention pinned here rather than argued.
+    """
+    cli._render_confirmation_authorization(
+        AuthorizationProjection(
+            coverage=(),
+            expires_at=AUTHORIZATION_EXPIRES_AT,
+            quote=QuoteView(
+                amount=Decimal("45.50"),
+                currency="EUR",
+                # Almost a whole minute of sub-minute detail, so a rendering at either
+                # grain is distinguishable from the other.
+                read_at=AUTHORIZATION_NOW.replace(second=59, microsecond=999_999),
+            ),
+        )
+    )
+
+    rendered = _flat(output.getvalue())
+    assert "read 2026-09-13 10:00 UTC" in rendered
+    assert "59" not in rendered
+    # The same grain as the horizon two lines below it.
+    assert "It lapses at 2026-09-13 21:00 UTC" in rendered
+
+
 # --- §11's listing ------------------------------------------------------------
 
 
