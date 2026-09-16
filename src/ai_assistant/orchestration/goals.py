@@ -34,6 +34,7 @@ from typing import TYPE_CHECKING, Final
 from ai_assistant.core.types import (
     MAX_ASSOCIATION_CANDIDATES,
     AssociationVerdict,
+    AttemptOutcome,
     CandidateGoal,
     EngagementDisposition,
     Goal,
@@ -204,10 +205,24 @@ class GoalFacts:
             disposition is ``OPENED``"* — and **not** on a ``CONTINUED``, a ``RESUMED``
             or a ``REOPENED``, where *"a goal was found, and reciting what was not
             looked at would be noise on the turns the mechanism worked"*.
+        outcome: The member ADR-0262 §4's limbs yielded for the attempt this turn
+            compared, or ``None`` on a turn that ran no comparison. §6 **gives** the
+            stage this value, on ADR-0170 §5's construction, so that the instruction
+            can require the answer *"not to narrate as verified an outcome that was
+            not"*. It is the **comparison's** member and asserts nothing about the two
+            commits, which have not been taken when the stage is called (§1).
+        continues: Whether the goal's work is unfinished and the user may take it
+            further (§6). Where it is set the instruction **requires the answer to end
+            with an offer to continue** — the offer riding the reply rather than the
+            surface, because the next turn's bare *"Yes"* binds to the goal by reply
+            reference (ADR-0250 §3) and a surface's own line reaches neither the
+            browser's transcript nor the spoken channel as part of what was said.
     """
 
     clarification: str | None = None
     elided: bool = False
+    outcome: AttemptOutcome | None = None
+    continues: bool = False
 
 
 @dataclass(frozen=True, slots=True)
@@ -454,6 +469,34 @@ CLARIFICATION_PROMPT: Final[str] = (
     "question to them, in your own register and without changing what it asks. Do not "
     "answer it yourself, do not guess at the answer, and do not say that anything has "
     "been started or booked."
+)
+
+
+#: What ADR-0262 §6 tells the composing stage about the comparison this turn ran.
+#:
+#: **Two clauses, because §6 states two obligations and they are independent**: the
+#: instruction *"requires the answer to end with an offer to continue"* where
+#: ``continues`` is set, and *"requires it not to narrate as verified an outcome that
+#: was not"* wherever a comparison ran at all. A turn may owe the second and not the
+#: first — a ``CONDITION_PREVENTED`` attempt offers nothing to continue and must still
+#: not be narrated as done.
+#:
+#: **Neither is a guarantee about model output** (§6). *"Where a reply asserts
+#: otherwise, §6's fixed statement beside it is the record and the reply is wrong"* —
+#: which is ADR-0170 §5's own closing clause read here, and why the six fixed
+#: statements are rendered by the surface (L5) rather than asked of the model.
+CONTINUES_PROMPT: Final[str] = (
+    "The work on this objective is not finished and they can take it further. End "
+    "your answer by offering to continue with it — one short sentence, in your own "
+    "register. Do not say what remains to be done beyond what you were told above, "
+    "and do not promise a result."
+)
+
+#: The second of §6's two clauses; see :data:`CONTINUES_PROMPT`.
+UNVERIFIED_PROMPT: Final[str] = (
+    "Nothing about this objective has been established as done on this turn. Do not "
+    "say or imply that it was achieved, confirmed, verified or completed, and do not "
+    "restate an action's result as if it had been checked."
 )
 
 
@@ -823,9 +866,11 @@ def taken_question(
 __all__ = [
     "CANDIDATE_LABEL_PREFIX",
     "CLARIFICATION_PROMPT",
+    "CONTINUES_PROMPT",
     "ELISION_PROMPT",
     "MAX_ASSOCIATION_CANDIDATES",
     "OPEN_GOAL_STATUSES",
+    "UNVERIFIED_PROMPT",
     "GoalFacts",
     "RaisedSubject",
     "Resolution",
