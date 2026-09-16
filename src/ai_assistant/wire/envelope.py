@@ -2359,11 +2359,12 @@ from ai_assistant.wire.errors import (
 #:
 #: **No stored-record version moves with this lane and no migration is owed here**
 #: (ADR-0271 §8). Both widened shapes **are** stored shapes — a ``PermissionDecision``
-#: carrying either is written into ``SqliteAuditTrail``'s JSON record — but that store's
-#: ``_SCHEMA_VERSION`` moved in **P0**, the ``permissions`` lane before this one, so that
-#: it is a stored shape is answered there and not by this bump; *"P1 carries no part of
-#: it."* ``PlanExport.schema_version`` and the plan store's ``_SCHEMA_VERSION`` **do not
-#: move**: neither the export nor any shape that store persists carries a
+#: carrying either is written into the audit trail's JSON record, ``SqliteAuditTrail``'s
+#: — but that store's ``_SCHEMA_VERSION`` moved in **P0**, the ``permissions`` lane
+#: before this one, so that it is a stored shape is answered there and not by this bump;
+#: *"P1 carries no part of it."* ``PlanExport.schema_version`` and the plan store's
+#: ``_SCHEMA_VERSION`` **do not move**: neither the export nor any shape that store
+#: persists carries a
 #: ``ToolDefinition``, a ``PermissionRuling`` or a ``PermissionDecision`` at any depth —
 #: ``Goal`` is not touched by this lane at all. The parked-read store's marker stays at
 #: **3**, the goal-authorization store's at **1** and ``ConversationExport.

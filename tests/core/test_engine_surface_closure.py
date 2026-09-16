@@ -1308,6 +1308,20 @@ def test_the_promoted_surface_and_the_protocol_version_are_both_pinned() -> None
     **sixth** consecutive entry. §8 fixes no numeral either — it records **44** as a dated
     observation — and this lane was written **51** at a base holding 50.
 
+    **52 is ADR-0271 §8's P1, and it is under the second limb alone, on two grounds.**
+    ``PermissionRuling`` gains ``proved_quote`` — the ``ActionQuote`` the coverage
+    comparison was proved against, by value — and ``ToolDefinition`` gains
+    ``charged_output``; both ride a ``PermissionDecision``, which three promoted methods
+    return, and both models set ``extra="forbid"``, so a client at 51 fails every
+    decision with ``extra_forbidden``. ``ChargedOutput`` is minted and reaches a frame
+    only inside the declaration's new member, so it adds no third ground;
+    ``ActionQuote`` reaches one for the **first** time and rides the first ground rather
+    than adding to it. ``PermissionDecision`` itself gains no field and no enumeration
+    gains a member. **The method set does not move and stays at 63**: P1 adds no
+    ``AssistantEngine`` member and no gateway route, so the two numbers part company for
+    a **seventh** consecutive entry. §8 fixes no numeral either — *"The integer is chosen
+    at P1's own base"* — and this lane was written **52** at a base holding 51.
+
     **ADR-0124 §9 decides no mechanical check and creates none**, saying one is
     owed and leaving its shape open. This is not that check — it is a *pin*, and
     a deliberately crude one: it fails when either number moves, which is the
@@ -1316,7 +1330,7 @@ def test_the_promoted_surface_and_the_protocol_version_are_both_pinned() -> None
     """
     from ai_assistant.wire.envelope import PROTOCOL_VERSION  # noqa: PLC0415 — asserted about
 
-    assert (len(_method_names()), PROTOCOL_VERSION) == (63, 51), (
+    assert (len(_method_names()), PROTOCOL_VERSION) == (63, 52), (
         "the promoted method set and the protocol version are pinned together "
         "(ADR-0124 §9); move either and this pin makes you name the limb you are "
         "under — the method set, or a wire-carried core type"
