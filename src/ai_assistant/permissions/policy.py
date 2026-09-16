@@ -1419,8 +1419,16 @@ class ThresholdActionPolicy:
         tuple is this seam's word for *the goal holds no quote for this act* — so an
         unmet answer would be returned to a caller that had already asked for the
         work to stop, and a proposal would be declined for a reason that never
-        happened. The cancellation count is read before the await and compared after
-        it, and an increase re-raises. Adversarial review, round 5, ``blocker``.
+        happened. The cancellation count is read before the await and compared on
+        **both** exits from it — the normal one and the exceptional one — and an
+        increase re-raises. A seam that absorbed the cancellation and then raised an
+        ``AuthorizationError`` would otherwise leave that error standing in for it,
+        which is the same substitution one step over: the request would be reported
+        unreadable when what happened is that the caller asked for it to stop. **The
+        cancellation takes precedence over the fault**, the fault riding out as its
+        ``__cause__``; a ``CancelledError`` already leaving is passed through
+        unchanged, there being nothing to convert. Adversarial review, rounds 5 and
+        6, two ``blocker``s.
 
         **A policy holding no ``GoalQuotes`` answers unmet** for any ``coverage``
         carrying a ``MONEY`` member (§4), the empty tuple leaving the evidence route
@@ -1449,7 +1457,20 @@ class ThresholdActionPolicy:
             and any(member.kind is BoundKind.MONEY for member in members)
         ):
             entered = _pending_cancellations()
-            quotes = await self._quotes.for_action(subject.goal, subject.intended_action)
+            try:
+                quotes = await self._quotes.for_action(subject.goal, subject.intended_action)
+            except asyncio.CancelledError:
+                # Already being delivered onward, and its own instance is the one to
+                # deliver — there is nothing here to convert.
+                raise
+            except BaseException as exc:
+                # **A fault the seam raised after swallowing the cancellation does not
+                # stand in for it.** ``BaseException`` and not ``Exception``, because a
+                # seam is free to raise anything and the rule is about what reaches the
+                # caller rather than about the class that displaced it.
+                if _pending_cancellations() > entered:
+                    raise asyncio.CancelledError from exc
+                raise
             if _pending_cancellations() > entered:
                 raise asyncio.CancelledError
         return coverage_answer(members, subject, quotes)
