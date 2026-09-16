@@ -23,6 +23,7 @@ from typing import TYPE_CHECKING, Final
 import pytest
 from authorization_builders import AT, EXPIRES, GOAL, NOW, SHARED_CLOCK, TOOL, MovableClock
 from goal_authorization_contract import (
+    _MAX_INT64,
     OTHER_TOOL,
     GoalAuthorizationStoreContract,
     established,
@@ -30,7 +31,11 @@ from goal_authorization_contract import (
 
 from ai_assistant.core.errors import AuthorizationError
 from ai_assistant.core.types import AuthorizationDisposition, BoundKind
-from ai_assistant.permissions.goal_authorizations import SqliteGoalAuthorizationStore
+from ai_assistant.permissions.goal_authorizations import (
+    SqliteGoalAuthorizationStore,
+    _canonical_version,
+    _decoded_version,
+)
 from ai_assistant.testing.cancellation import (
     ResourceLog,
     SuspendedMidWrite,
@@ -655,3 +660,150 @@ class TestWhatOnlyAFileCanSay:
             assert held.disposition is AuthorizationDisposition.EXPIRED
         finally:
             reopened.close()
+
+
+#: Every magnitude band the four review rounds turned on, and the signs with them.
+#:
+#: ``0``-``9`` is in the table because it is the band where decimal and untagged
+#: hexadecimal **agree**, which is precisely what made an earlier revision's "a
+#: planted integer round-trips" note look true while it was false from ``10`` up.
+#: ``2**63`` straddles SQLite's integer-parameter width; ``16**4400`` straddles
+#: CPython's decimal-conversion cap, which no base-10 encoding reaches at all.
+_WATERMARKS: Final = [
+    *range(17),
+    99,
+    255,
+    _MAX_INT64 - 1,
+    _MAX_INT64,
+    _MAX_INT64 + 1,
+    2**64,
+    2**70,
+    10**4299,
+    16**4400,
+]
+
+#: Spellings the storage can present that are **not** what the encoder writes. Each
+#: decodes under some reading of the text, and each must be refused rather than read
+#: as a version.
+_NON_CANONICAL: Final = [
+    "x007",
+    "x0a0",
+    "-x0",
+    "x",
+    "-x",
+    "xa ",
+    " xa",
+    "xA",
+    "0xa",
+    "x0xa",
+    "x-a",
+    "10",
+    "9",
+    "abc",
+    "x_a",
+]
+
+
+@pytest.fixture
+def encoding_path(tmp_path: Path) -> Path:
+    """Where the encoding probe's database lives."""
+    return tmp_path / "authorizations.sqlite3"
+
+
+class TestTheWatermarkEncoding:
+    """`_canonical_version` / `_decoded_version` as one question, answered mechanically.
+
+    **Why this exists rather than a fifth review round** (ADR-0243 §§1-6, recorded on
+    PR #2449). The watermark's encoding was found wrong four rounds running — a
+    signed-64-bit guard that narrowed ADR-0268 §1's unrestricted ``int`` and stranded
+    a goal; a decimal encoding that hit CPython's 4300-digit conversion cap; untagged
+    hexadecimal that collides with SQLite's own ``TEXT``-affinity rendering of an
+    integer. Every one of those findings was correct, and each fix introduced the
+    next, because each round asked *"is this particular hazard real"* when the
+    question is **"does the encoding round-trip every value the domain admits, and is
+    every non-canonical spelling the storage admits refused?"**
+
+    That is one question with a mechanical answer, so it is answered once here
+    instead of one hazard at a time.
+    """
+
+    @pytest.mark.parametrize("magnitude", _WATERMARKS, ids=lambda one: format(one, "x")[:10])
+    @pytest.mark.parametrize("sign", [1, -1], ids=["positive", "negative"])
+    def test_every_value_the_domain_admits_round_trips_exactly(
+        self, magnitude: int, sign: int
+    ) -> None:
+        """ADR-0268 §1's watermark is *"never lowered"*, so it is held exactly or not held.
+
+        **Exactly** is the whole of it: a value that decodes to anything but itself is
+        one a later call can silently lower or raise, which is the invariant the
+        record exists for. Asserted over the encoding's own pair rather than through
+        the store, because what is under test is the representation and not the
+        transaction around it.
+        """
+        value = sign * magnitude
+        rendered = _canonical_version(value)
+        assert _decoded_version(rendered, GOAL, "p") == value
+        # And the rendering is itself canonical: encoding the decoded value again
+        # reproduces it byte for byte, which is what `_decoded_version` tests.
+        assert _canonical_version(_decoded_version(rendered, GOAL, "p")) == rendered
+
+    @pytest.mark.parametrize("magnitude", _WATERMARKS, ids=lambda one: format(one, "x")[:10])
+    async def test_the_rendering_is_accepted_by_the_column_the_store_writes_it_to(
+        self, encoding_path: Path, magnitude: int
+    ) -> None:
+        """The ``CHECK`` and the encoder agree — every value the encoder renders is one
+        the column takes.
+
+        **The two are written apart and could disagree**: the constraint is SQL and
+        the encoder is Python, and a ``GLOB`` that refused a form the encoder produces
+        would turn a legitimate version into a store fault at the write. Driven
+        through the real store, so it is the shipped statement that is asserted.
+        """
+        store = SqliteGoalAuthorizationStore(path=encoding_path, now=SHARED_CLOCK.reset())
+        try:
+            assert await store.end_for_goal(GOAL, at=NOW, goal_version=magnitude) == 0
+            assert await store.clear_closure(GOAL, goal_version=magnitude) is True
+            # Read back exactly: one below is stale against what was written.
+            assert await store.end_for_goal(GOAL, at=NOW, goal_version=magnitude - 1) == 0
+        finally:
+            store.close()
+
+    @pytest.mark.parametrize("spelling", _NON_CANONICAL, ids=str)
+    def test_every_other_spelling_is_refused_rather_than_read(self, spelling: str) -> None:
+        """A second spelling of one number is the misread the exact rule forbids.
+
+        ``int(…, 16)`` accepts an ``0x`` prefix, underscores, surrounding whitespace
+        and uppercase, and SQLite renders a planted integer in **decimal** — so
+        ``'10'`` is good untagged hexadecimal for sixteen. Every one of those decodes
+        under *some* reading, and none of them is what this store wrote, so each is
+        refused as an :class:`~ai_assistant.core.errors.AuthorizationError` rather
+        than read as a version.
+
+        **Stated as a closed table over the forms the storage can present**, which is
+        what makes this a probe rather than another hazard caught one at a time.
+        """
+        with pytest.raises(AuthorizationError, match="canonical"):
+            _decoded_version(spelling, GOAL, "p")
+
+    @pytest.mark.parametrize("value", [4.5, None, b"xa", True], ids=str)
+    def test_a_stored_value_that_is_not_text_is_refused(self, value: object) -> None:
+        """A declared column type is an affinity and not a constraint.
+
+        SQLite stores what it is given, so a file this store did not write can present
+        a ``REAL``, a ``NULL`` or a ``BLOB`` where the text belongs. Each is refused,
+        and none is coerced — a coerced ``4.5`` reads as version **4**, which a later
+        call would rewrite the watermark down to.
+        """
+        with pytest.raises(AuthorizationError, match="canonical"):
+            _decoded_version(value, GOAL, "p")
+
+    def test_a_value_that_is_not_an_integer_is_pythons_own_type_error(self) -> None:
+        """``operator.index`` rather than ``int``, so nothing is truncated into a version.
+
+        ``True`` is normalised to ``1`` — what Python itself says it means, so not a
+        refusal — and a ``float`` raises, rather than being truncated into a watermark
+        the caller never named.
+        """
+        assert _canonical_version(True) == _canonical_version(1)
+        with pytest.raises(TypeError):
+            _canonical_version(4.5)  # type: ignore[arg-type]  # the caller a type cannot reach
