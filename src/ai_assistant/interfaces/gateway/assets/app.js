@@ -2049,14 +2049,6 @@ function renderAttemptReport(body, member) {
   line(body, attemptOutcomeWords(member), "notice");
 }
 
-// ADR-0261 §7's one sentence for the two members it writes together, held once so the
-// pair cannot drift apart: "for `ATTEMPT_CANCELLED` and `ATTEMPT_ENDED`, that the attempt
-// this plan belonged to is over and that **the goal is not thereby closed**, asking again
-// starting a new one".
-const ATTEMPT_IS_OVER =
-  "The attempt that plan belonged to is over. The goal is not closed by that, and " +
-  "asking again starts a new attempt.";
-
 // --- the withheld drive (ADR-0261 §7) ---------------------------------------
 //
 // **One fixed statement per member, written out as a literal**, which is
@@ -2107,8 +2099,12 @@ const DRIVE_WITHHELD_WORDS = {
   goal_blocked:
     "That goal cannot currently be reached, and it is still open. " +
     "'assistant goals' is where you read how it stands.",
-  attempt_cancelled: ATTEMPT_IS_OVER,
-  attempt_ended: ATTEMPT_IS_OVER,
+  attempt_cancelled:
+    "The attempt that plan belonged to is over. The goal is not closed by that, and " +
+    "asking again starts a new attempt.",
+  attempt_ended:
+    "The attempt that plan belonged to is over. The goal is not closed by that, and " +
+    "asking again starts a new attempt.",
   attempt_paused:
     "That goal is waiting on you. 'assistant goals' is where you read what it is waiting for.",
   understanding_changed:

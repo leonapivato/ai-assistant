@@ -59,15 +59,33 @@ async def harness() -> AsyncIterator[Harness]:
         yield one
 
 
-def _summary() -> GoalSummary:
+def _summary(*, effect_in_flight: bool = True) -> GoalSummary:
     return GoalSummary(
         id=GOAL_ID,
         outcome=OUTCOME,
         status=GoalStatus.ACTIVE,
         paused=True,
+        effect_in_flight=effect_in_flight,
         last_engaged_at=ENGAGED,
         clarification=Clarification(question_id=QUESTION_ID, text=QUESTION, expires_at=DEADLINE),
     )
+
+
+async def test_a_goal_with_nothing_outstanding_crosses_as_false(harness: Harness) -> None:
+    """ADR-0261 §6's field in its ordinary state, so the arm above cannot pass on a
+    constant.
+
+    The field is "a ``bool`` defaulting to ``False``, computed and never stored", and §6
+    makes the cleared value "deliberately indistinguishable from a goal that claimed
+    nothing" — what the effect *did* being held by the step's own status. So the adapter
+    carries both values and derives neither.
+    """
+    harness.engine.goal_summaries = [_summary(effect_in_flight=False)]
+    status, body = await harness.whole("POST", "/goals", {})
+
+    assert status == 200
+    (row,) = body["goals"]
+    assert row["effect_in_flight"] is False
 
 
 def test_the_three_operations_are_in_the_enumeration_the_router_classifies_from() -> None:
@@ -99,6 +117,10 @@ async def test_the_listing_carries_every_field_the_summary_holds(harness: Harnes
 
     **``paused`` is carried and never derived**: §15 makes it the engine's, "so that two
     surfaces cannot render it differently … and no adapter derives it".
+
+    **``effect_in_flight`` joins it on exactly that ground** (ADR-0261 §6), which names
+    ``paused`` as its own precedent — "ADR-0250 §15's own clause for ``paused``, one fact
+    over". The engine computes it, per read and never stored, and no adapter derives it.
     """
     harness.engine.goal_summaries = [_summary()]
     status, body = await harness.whole("POST", "/goals", {})
@@ -110,6 +132,7 @@ async def test_the_listing_carries_every_field_the_summary_holds(harness: Harnes
         "outcome",
         "status",
         "paused",
+        "effect_in_flight",
         "last_engaged_at",
         "clarification",
     }
@@ -117,6 +140,7 @@ async def test_the_listing_carries_every_field_the_summary_holds(harness: Harnes
     assert row["outcome"] == OUTCOME
     assert row["status"] == "active"
     assert row["paused"] is True
+    assert row["effect_in_flight"] is True
     assert row["last_engaged_at"] == ENGAGED.isoformat()
     assert row["clarification"] == {
         "question_id": QUESTION_ID,

@@ -30,6 +30,7 @@ from ai_assistant.core.types import (
     ClarificationWithdrawal,
     ConversationDigest,
     DiscloserProvenance,
+    DriveWithheld,
     EngagementDisposition,
     ForecastNotRead,
     ForecastRefusal,
@@ -8553,6 +8554,204 @@ def test_only_the_two_statements_that_cannot_speak_for_the_status_name_a_command
         assert ("assistant " in sentence) is (member in names_goals), member
         for barred in ("assistant resume", "assistant decisions", "assistant cancel-read"):
             assert barred not in sentence, f"{member}: {barred}"
+
+
+# --- ADR-0261 §7: the withheld drive, as the shipped bundle declares it -------
+
+
+def test_one_fixed_statement_per_withheld_member_and_no_member_without_one() -> None:
+    """ADR-0261 §7, read off ``core``'s own vocabulary.
+
+    §7 closes ``DriveWithheld`` at **exactly seven** members and requires "one fixed
+    statement per member ... rendered beside the reply", under ADR-0242 §9's
+    all-or-nothing rule. So the map is total over the seven and closed at their count,
+    which is ``ATTEMPT_OUTCOME_WORDS``' own arrangement: an **eighth** member arriving with
+    the ADR that decides it fails here rather than reaching a person as a bare identifier —
+    the #1113 rule, at this vocabulary.
+
+    **And the lookup is by ownership rather than by truthiness**, which is the arm a plain
+    ``WORDS[member]`` leaves open: a member naming an inherited property — ``toString``,
+    ``constructor`` — comes back as a function and ``line`` would put its source text on
+    the screen. The ``typeof`` in front of it is the same round's: a property key is a
+    coerced one, so ``String(["goal_blocked"])`` spells a member.
+    """
+    script = _code("app.js")
+    words = _map(script, "DRIVE_WITHHELD_WORDS")
+    functions = _functions(script)
+
+    assert _keys(words) == {member.value for member in DriveWithheld}
+    assert (
+        'return typeof member === "string" && Object.hasOwn(DRIVE_WITHHELD_WORDS, member);'
+        in functions["isDriveWithheld"]
+    )
+    assert "isDriveWithheld(member)" in functions["driveWithheldWords"]
+    assert "DRIVE_WITHHELD_UNREADABLE" in functions["driveWithheldWords"]
+    assert "driveWithheldWords(member)" in functions["renderDriveWithheld"]
+
+
+def test_the_page_renders_the_withheld_statement_beside_the_reply_and_not_in_place_of_it() -> None:
+    """ADR-0261 §7's placement, and §7's meaning for an absent member.
+
+    The renderer is reached from ``renderOutcome`` **after** ``renderReply``, which is
+    ``renderRouted``'s own placement and this page's reading of "beside the reply and never
+    in place of it". And ``null`` is silence rather than a refusal: the member is
+    non-``None`` "exactly on a turn that *returned* after a ``ClaimRefused`` whose
+    post-refusal read established one of the seven states", so every turn that dispatched,
+    every turn that stopped on one of ADR-0255 §2's five, every turn that drove nothing and
+    ADR-0198 §1's restatement say nothing about a withheld drive at all.
+    """
+    script = _code("app.js")
+    functions = _functions(script)
+    outcome = functions["renderOutcome"]
+    render = functions["renderDriveWithheld"]
+
+    assert "renderDriveWithheld(body, outcome.drive_withheld);" in outcome
+    assert outcome.index("renderReply(body, outcome)") < outcome.index("renderDriveWithheld(")
+    assert "if (member === null || member === undefined) {" in render
+    assert render.index("member === undefined") < render.index("line(body,")
+
+
+def test_the_no_action_notice_is_guarded_on_the_withheld_member_being_absent() -> None:
+    """The contradiction on one screen, at this vocabulary, pinned where the condition is.
+
+    "No action was needed." above "That goal was cancelled, and this turn did nothing
+    further for it." says both that nothing was owed and that a step this turn was driving
+    was not claimed.
+
+    **On the member's presence and on all seven**, which is ``forecast_not_read``'s term
+    rather than ``attempt_report``'s: ``OutboundReach`` and ``AttemptOutcome`` each have a
+    member for having attempted nothing and ``DriveWithheld`` has none — every one of the
+    seven is a turn that was driving a step and did not claim it.
+
+    Asserted over the condition's own text, beside the executed arms in
+    ``test_browser_cancellation.py``.
+    """
+    outcome = _functions(_code("app.js"))["renderOutcome"]
+
+    guard = outcome[outcome.index("outcome.steps.length === 0") :]
+    guard = guard[: guard.index('line(body, "No action was needed."')]
+    assert "outcome.drive_withheld === null" in guard
+
+
+def test_no_withheld_statement_asserts_what_the_read_did_not_establish() -> None:
+    """ADR-0261 §7's bar, over the declared sentences as absences.
+
+    "**No statement says that the step would have succeeded, that the effect did not
+    happen, that no step of this plan was ever started, or why a store refused** — what
+    each asserts is what this turn did, which is the only thing the read establishes."
+
+    **And none says why**, which is the limb this vocabulary makes easiest to breach: one
+    ``ClaimRefused`` covers both liveness raisers and "the read cannot establish it
+    either", so a sentence naming a conjunct, a store, a transition or a version would name
+    something nothing established. ADR-0242 §9's own bar carries the rest.
+
+    **And two of them must not say the goal is closed** (§7): ADR-0250 §1 rules ``BLOCKED``
+    **open** and ADR-0249 §4 that an attempt reaching a terminal state does not move its
+    goal's status, so ``GOAL_BLOCKED``'s and ``ATTEMPT_ENDED``'s sentences are asserted
+    against the ``GoalStatus`` words read from ``core``'s own enumeration rather than
+    spelled out here.
+    """
+    said = _statements(_map(_code("app.js"), "DRIVE_WITHHELD_WORDS"))
+
+    assert set(said) == {member.value for member in DriveWithheld}
+    for member, sentence in said.items():
+        assert not any(character.isdigit() for character in sentence), member
+        for barred in (
+            "because",
+            "http",
+            "://",
+            "@",
+            "$",
+            "£",
+            "threshold",
+            "settings",
+            "shall i",
+            "would you like",
+            "try again",
+            "would have",
+            "did not happen",
+            "nothing was sent",
+            "never started",
+            "refused",
+            "conjunct",
+            "version",
+            "transition",
+        ):
+            assert barred not in sentence.lower(), f"{member}: {barred}"
+
+    for member in (DriveWithheld.GOAL_BLOCKED, DriveWithheld.ATTEMPT_ENDED):
+        for status in (GoalStatus.ABANDONED, GoalStatus.ACHIEVED):
+            assert status.value not in said[member.value].lower(), member
+
+
+def test_only_the_two_withheld_statements_the_adr_fixes_name_a_command() -> None:
+    """ADR-0261 §7's fixed half, on the surface that has a goals listing of its own.
+
+    §7 names ``assistant goals`` in exactly two of the seven — ``GOAL_BLOCKED``'s, because
+    the goal "cannot currently be reached and is still open" and the user's question is
+    then what it is waiting on, and ``ATTEMPT_PAUSED``'s, because the goal is waiting on
+    them. The other five name nothing: there is no act that helps, and naming one that
+    cannot help is worse than naming none.
+
+    Naming the terminal's command from this page is this surface's own ratified practice
+    (``UNREADABLE_RULINGS``, ``FORECAST_NOT_READ_WORDS``, ``ATTEMPT_OUTCOME_WORDS``), and
+    this lane writes both surfaces' prose byte for byte identically so the parity arm in
+    ``test_cli_cancellation.py`` asserts an equality rather than the fixed half alone.
+    """
+    said = _statements(_map(_code("app.js"), "DRIVE_WITHHELD_WORDS"))
+
+    names_goals = {DriveWithheld.GOAL_BLOCKED.value, DriveWithheld.ATTEMPT_PAUSED.value}
+    for member, sentence in said.items():
+        assert ("'assistant goals'" in sentence) is (member in names_goals), member
+        assert ("assistant " in sentence) is (member in names_goals), member
+        for barred in ("assistant resume", "assistant decisions", "assistant abandon-goal"):
+            assert barred not in sentence, f"{member}: {barred}"
+
+
+def test_the_two_pairs_the_adr_forbids_collapsing_read_differently_on_the_page() -> None:
+    """ADR-0261 §7: "**No lane collapses any two of the seven** — not ``GOAL_CANCELLED``
+    with ``ATTEMPT_CANCELLED``, and not ``GOAL_BLOCKED`` with ``ATTEMPT_PAUSED``."
+
+    The one pair that *does* read alike is ``ATTEMPT_CANCELLED`` with ``ATTEMPT_ENDED``,
+    which is §7's own arrangement — that section writes the two one sentence — and is
+    asserted as such so the equality cannot quietly be extended to a third member.
+    """
+    said = _statements(_map(_code("app.js"), "DRIVE_WITHHELD_WORDS"))
+
+    assert said[DriveWithheld.GOAL_CANCELLED.value] != said[DriveWithheld.ATTEMPT_CANCELLED.value]
+    assert said[DriveWithheld.GOAL_BLOCKED.value] != said[DriveWithheld.ATTEMPT_PAUSED.value]
+    assert said[DriveWithheld.ATTEMPT_CANCELLED.value] == said[DriveWithheld.ATTEMPT_ENDED.value]
+
+
+def test_the_listing_row_says_an_action_is_outstanding_and_asserts_no_outcome() -> None:
+    """ADR-0261 §6's statement for a row whose ``effect_in_flight`` is true.
+
+    §6 fixes which fact it names — that an action of this goal "is outstanding — claimed,
+    possibly sent, outcome unknown" — and bars the three an adapter would be tempted into:
+    "**No statement says that the action did not happen, that it did, or that anything the
+    user does will withdraw it.**"
+
+    ***In flight* means the claim landed, never that the call left**, so "may have been
+    sent" is the strongest thing the sentence is allowed to say — and it names no tool, no
+    destination and no effect key, §6 making *outstanding* "the step's status and never the
+    presence of an effect key" with a **read** included deliberately.
+
+    **And it is rendered on the field and on nothing else**: a page that compared a status
+    against an attempt state would be deriving a fact the engine already computed, which is
+    ``paused``'s own clause one fact over.
+    """
+    script = _code("app.js")
+    said = _constant(script, "EFFECT_IN_FLIGHT")
+    render = _functions(script)["renderGoal"]
+
+    assert "outstanding" in said
+    assert "claimed" in said
+    assert "may have been sent" in said
+    for barred in ("did not", "was sent", "withdraw", "undo", "cancel", "key", "tool", "http"):
+        assert barred not in said.lower(), barred
+    assert "if (goal.effect_in_flight) {" in render
+    assert "EFFECT_IN_FLIGHT" in render
+    assert "status" not in render.split("effect_in_flight")[1].split("}")[0]
 
 
 def test_both_accounts_a_park_owes_are_written_where_no_refresh_reaches_them() -> None:

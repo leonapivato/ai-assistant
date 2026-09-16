@@ -8368,22 +8368,6 @@ def _render_forecast_not_read(
             _print("[dim]Note: that forecast read produced nothing this turn could use.[/]")
 
 
-#: The one fixed statement ADR-0261 §7 gives each of ``DriveWithheld``'s **seven**
-#: members, and the rule that keeps two of them from collapsing into one.
-#:
-#: **``ATTEMPT_CANCELLED`` and ``ATTEMPT_ENDED`` read alike because §7 writes them one
-#: sentence**, not because this surface folded them: "for ``ATTEMPT_CANCELLED`` and
-#: ``ATTEMPT_ENDED``, that the attempt this plan belonged to is over and that **the goal
-#: is not thereby closed**, asking again starting a new one". The collapse §7 forbids is
-#: a different pair each time — "not :attr:`GOAL_CANCELLED` with :attr:`ATTEMPT_CANCELLED`,
-#: and not :attr:`GOAL_BLOCKED` with :attr:`ATTEMPT_PAUSED`" — and those four read
-#: differently here, which :mod:`tests.interfaces.test_cli_cancellation` pins.
-_ATTEMPT_IS_OVER: Final = (
-    "The attempt that plan belonged to is over. The goal is not closed by that, and "
-    "asking again starts a new attempt."
-)
-
-
 def _render_drive_withheld(member: DriveWithheld | None) -> None:
     """ADR-0261 §7's statement for this turn, **beside the reply and never in place of it**.
 
@@ -8440,30 +8424,37 @@ def _render_drive_withheld(member: DriveWithheld | None) -> None:
         case None:
             return
         case DriveWithheld.GOAL_CANCELLED:
-            _print(
-                "[dim]Note: that goal was cancelled, and this turn did nothing further for it.[/]"
-            )
+            _print("[dim]That goal was cancelled, and this turn did nothing further for it.[/]")
         case DriveWithheld.GOAL_ACHIEVED:
             _print(
-                "[dim]Note: that goal is already reached, and this turn did nothing "
-                "further for it.[/]"
+                "[dim]That goal is already reached, and this turn did nothing further for it.[/]"
             )
         case DriveWithheld.GOAL_BLOCKED:
             _print(
-                "[dim]Note: that goal cannot currently be reached, and it is still open. "
+                "[dim]That goal cannot currently be reached, and it is still open. "
                 "'assistant goals' is where you read how it stands.[/]"
             )
         case DriveWithheld.ATTEMPT_CANCELLED | DriveWithheld.ATTEMPT_ENDED:
-            _print(f"[dim]Note: {_ATTEMPT_IS_OVER}[/]")
+            # **One arm because §7 writes the two members one sentence**, not because
+            # this surface folded them: "for ``ATTEMPT_CANCELLED`` and ``ATTEMPT_ENDED``,
+            # that the attempt this plan belonged to is over and that **the goal is not
+            # thereby closed**, asking again starting a new one". The collapse §7 forbids
+            # is a different pair each time — "not ``GOAL_CANCELLED`` with
+            # ``ATTEMPT_CANCELLED``, and not ``GOAL_BLOCKED`` with ``ATTEMPT_PAUSED``" —
+            # and those four read differently above and below.
+            _print(
+                "[dim]The attempt that plan belonged to is over. The goal is not closed "
+                "by that, and asking again starts a new attempt.[/]"
+            )
         case DriveWithheld.ATTEMPT_PAUSED:
             _print(
-                "[dim]Note: that goal is waiting on you. 'assistant goals' is where you "
-                "read what it is waiting for.[/]"
+                "[dim]That goal is waiting on you. 'assistant goals' is where you read "
+                "what it is waiting for.[/]"
             )
         case DriveWithheld.UNDERSTANDING_CHANGED:
             _print(
-                "[dim]Note: the plan I had no longer matches what that goal now asks. "
-                "Asking again plans it afresh.[/]"
+                "[dim]The plan I had no longer matches what that goal now asks. Asking "
+                "again plans it afresh.[/]"
             )
 
 
