@@ -26,9 +26,9 @@ from ai_assistant.core.types import (
     AuthorizationOrigin,
     BoundAccount,
     BoundKind,
-    CanonicalDestination,
     CostBasis,
     CoverageMember,
+    EgressBinding,
     ExecutionState,
     Goal,
     GoalAttempt,
@@ -45,6 +45,7 @@ from ai_assistant.core.types import (
     ResolutionRule,
     Reversibility,
     RiskLevel,
+    SpanCoverage,
     StepExecution,
     StepFailure,
     StepStatus,
@@ -60,7 +61,14 @@ from ai_assistant.core.types import (
 if TYPE_CHECKING:
     from collections.abc import Mapping, Sequence
 
-    from ai_assistant.core.types import EgressBinding, FrozenJson, SkipReason
+    from ai_assistant.core.types import FrozenJson, SkipReason
+
+
+class _Derive:
+    """The sentinel meaning *"derive this from the ruling"* (:func:`a_decision`)."""
+
+
+_DERIVE: Final = _Derive()
 
 AT: Final = datetime(2026, 9, 16, 9, 0, tzinfo=UTC)
 """The one instant every record here is stamped at."""
@@ -76,8 +84,26 @@ ACT: Final = "t-1"
 
 ACCOUNT: Final = BoundAccount(identity="bookings@example.com", reference="conn-1")
 
-DESTINATION: Final = CanonicalDestination(account=ACCOUNT)
-"""The one canonical destination a recorded act names (ADR-0193 §1, ADR-0148 §2)."""
+BINDING: Final = EgressBinding(
+    spans=(),
+    account=ACCOUNT,
+    transport_endpoint="https://bookings.example.com",
+    coverage=SpanCoverage.NOT_COVERED,
+    closed_loop=False,
+    planned_with_external_content=False,
+)
+"""The binding a route-(d) decision carries.
+
+**A route-(d) ``ALLOW`` is an egress decision**: ADR-0254 §7's partition is over a
+decision that *"rests on a standing authorisation"*, which the trail's own shape test
+requires to carry an ``egress_binding``, so a ruling with ``authorised_goal`` set beside
+no binding is outside the four routes and ``AuditTrail.record`` refuses it. Carrying one
+here — over the **same** account the row names — is what makes these fixtures records the
+trail could have stored. Adversarial review, round 6, ``blocker``.
+"""
+
+DESTINATION: Final = BINDING.canonical_destination_set
+"""The row's destination set, taken from the binding rather than written twice."""
 
 _SUBJECT: Final = "a" * 64
 """A well-formed ``Sha256Hex``; the recomputed subject digest is ``record``'s check."""
@@ -215,7 +241,7 @@ def a_row(  # noqa: PLR0913 — one keyword per field of the stored row an arm v
         goal=goal,
         tool=tool if tool is not None else a_tool(tool_id=tool_id),
         account=ACCOUNT,
-        destinations=(DESTINATION,),
+        destinations=DESTINATION,
         origin=origin,
         coverage=members,
         proposed_at=AT - timedelta(hours=1),
@@ -258,16 +284,47 @@ def a_decision(
     definition: ToolDefinition | None = None,
     digest: str = DIGEST,
     ruling: PermissionRuling | None = None,
-    egress_binding: EgressBinding | None = None,
+    egress_binding: EgressBinding | None | _Derive = _DERIVE,
 ) -> PermissionDecision:
-    """The ruling a step was claimed under, with the declaration pinned **by value**."""
+    """The ruling a step was claimed under, with the declaration pinned **by value**.
+
+    ``egress_binding`` is **derived from the ruling** unless an arm names one: a ruling
+    that names an authorisation is a standing-route decision and carries
+    :data:`BINDING`, because the trail's own shape test refuses one that does not; a
+    ruling that names none is the policy's own rules and carries nothing. That coupling
+    is §7's, and deriving it here is what keeps an arm from having to remember it.
+
+    **It is also why a route-(d) act is rung 2 wherever its tool is side-effecting**
+    (§3's third limb reads the decision's binding). A rung-1 act that still establishes a
+    criterion is therefore a **read** authorised against a row — ``side_effecting``
+    ``False`` — and the arms that want one say so.
+    """
+    decided = ruling if ruling is not None else a_ruling()
     return PermissionDecision(
         id=decision_id,
-        ruling=ruling if ruling is not None else a_ruling(),
+        ruling=decided,
         tool=definition if definition is not None else a_tool(),
         parameters_digest=digest,
         decided_at=AT,
-        egress_binding=egress_binding,
+        egress_binding=(
+            (BINDING if decided.authorised_by is not None else None)
+            if isinstance(egress_binding, _Derive)
+            else egress_binding
+        ),
+    )
+
+
+def an_unbound_ruling() -> PermissionRuling:
+    """An ``ALLOW`` that names **no** authorisation — the policy's own rules.
+
+    ADR-0193 §11's third state, and §2's *"a step whose decision … carries no
+    ``authorised_by`` at all contributes no row"*. It is what an **unrelated** step's
+    ruling looks like: a step about something else did not run under the row this
+    criterion rests on, and giving it that row's pointer beside a different declaration
+    would be a pair ADR-0254 §7 refuses.
+    """
+    return PermissionRuling(
+        outcome=PermissionOutcome.ALLOW, reason="the deployment's own rules allow this call"
     )
 
 
@@ -362,11 +419,25 @@ def paired(
     Returns:
         The rows and the decisions, made consistent with each other.
     """
-    named = {
-        decision.ruling.authorised_by: decision
-        for decision in decisions
-        if decision.ruling.authorised_by is not None
-    }
+    named: dict[str, PermissionDecision] = {}
+    for decision in decisions:
+        pointer = decision.ruling.authorised_by
+        if pointer is None:
+            continue
+        held = named.setdefault(pointer, decision)
+        if held.tool != decision.tool:
+            # ADR-0254 §7 compares the row's declaration with the request's by value, so
+            # **one row cannot have admitted two different declarations**. A fixture
+            # pairing them is not a record the trail could hold, and silently keeping
+            # one of the two would leave the other mismatched — which is the shape this
+            # helper exists to remove. An unrelated step takes `an_unbound_ruling`, or
+            # its own row.
+            msg = (
+                f"decisions {held.id!r} and {decision.id!r} both name authorization "
+                f"{pointer!r} under different declarations: ADR-0254 §7 compares the "
+                f"row's tool with the request's by value, so no trail could hold both"
+            )
+            raise AssertionError(msg)
     rebuilt = tuple(
         row if row.id not in named else row.model_copy(update={"tool": named[row.id].tool})
         for row in rows
