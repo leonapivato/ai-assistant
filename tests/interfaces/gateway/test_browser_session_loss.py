@@ -45,6 +45,7 @@ import pytest
 from browser_drive import DESKTOP, PHONE, driving
 from playwright.async_api import Error as PlaywrightError
 from playwright.async_api import expect
+from test_browser_confirmations import _email, _read
 
 from ai_assistant.core.types import GoalStatus, GoalSummary
 
@@ -138,6 +139,21 @@ async def _ends_the_session(one: Route) -> None:
         content_type="application/json",
         body=json.dumps({"fault": "no-live-session"}),
     )
+
+
+async def _refused_at_the_door(one: Route) -> None:
+    """Answer one request the way a gateway answers the *other* session condition.
+
+    ``cookie-half-mismatch`` is what a request sent under the old header half with the
+    new session's cookie really meets, and it is a refusal the gateway decides at the
+    door: the hub never saw the request, so the act is known **not** to have landed.
+    """
+    with contextlib.suppress(PlaywrightError):
+        await one.fulfill(
+            status=409,
+            content_type="application/json",
+            body=json.dumps({"fault": "cookie-half-mismatch"}),
+        )
 
 
 def _held(
@@ -360,3 +376,138 @@ async def test_a_preference_write_is_not_sent_under_a_session_that_has_ended(
 
         await expect(drive.page.locator("#tuning")).to_be_hidden()
         assert not [one for one in written if one.endswith("/notification/preferences/set")]
+
+
+@pytest.mark.parametrize("viewport", [DESKTOP, PHONE], ids=["desktop", "phone"])
+async def test_a_listing_whose_request_fails_after_its_session_ended_opens_no_panel(
+    gateway_browser: Browser, tmp_path: Path, viewport: ViewportSize
+) -> None:
+    """The failing path reveals a panel too, and adversarial review round 1 found it.
+
+    Every other case here supplies a completed response. This one supplies none: the held
+    request is aborted after the session ends, ``relay``'s ``fetch`` rejects, and the
+    caller's ``catch`` calls ``fault(GATEWAY_GONE, panel)`` — which *shows* the panel it
+    writes into. So a control panel opens beside the bootstrap form moments after
+    ``showBootstrap`` hid every panel and cleared every fault slot, carrying a condition
+    about a session that no longer exists and that the owner could do nothing with.
+
+    Driven at the beliefs listing; the census in ``test_bundle.py`` is what says every
+    other ``catch`` compares the same way.
+    """
+    loop = asyncio.get_running_loop()
+    release: asyncio.Future[None] = loop.create_future()
+
+    async def fails(one: Route) -> None:
+        await release
+        with contextlib.suppress(PlaywrightError):
+            await one.abort("connectionreset")
+
+    async with driving(gateway_browser, tmp_path, viewport=viewport) as drive:
+        await drive.page.route("**/beliefs", fails)
+        async with drive.page.expect_request("**/beliefs"):
+            await drive.page.click("#beliefs-button")
+
+        await drive.page.route("**/sources", _ends_the_session)
+        await drive.page.click("#sources-button")
+        await drive.page.wait_for_selector("#bootstrap:not([hidden])")
+
+        async with drive.page.expect_event(
+            "requestfailed", predicate=lambda one: one.url.endswith("/beliefs")
+        ):
+            release.set_result(None)
+        await drive.admit()
+
+        await expect(drive.page.locator("#beliefs")).to_be_hidden()
+        assert await _empty(drive, "belief-list") == 0
+
+
+@pytest.mark.parametrize("viewport", [DESKTOP, PHONE], ids=["desktop", "phone"])
+async def test_an_answer_refused_at_the_door_after_re_entry_strands_no_token(
+    gateway_browser: Browser, tmp_path: Path, viewport: ViewportSize
+) -> None:
+    """The guard withholds the reveal and must not withhold the classification.
+
+    ``relay`` hands one caller the refusal it read, because the difference between two
+    refusals is what decides whether a consent token comes back (ADR-0177 §7's third
+    clause). Dropping that for a request whose session has ended reads as "a refusal this
+    page cannot classify at all", which takes the not-known branch: the token is stranded,
+    the listing is re-read, and the owner is told an action *may* have been carried
+    out — of a request the gateway refused at its own door, which the hub never saw.
+
+    Adversarial review, round 1, ``major``. What is asserted is the **account**: a
+    sentence there is this page claiming not to know something it does know. The panel
+    itself is not asserted on, and deliberately — re-entry's ``showConsole`` takes a
+    quiet read of the pending listing, so under the new session the panel opens again
+    with the park still waiting, which is that session's own answer and not this one's.
+    """
+    loop = asyncio.get_running_loop()
+    release: asyncio.Future[None] = loop.create_future()
+
+    async def door(one: Route) -> None:
+        await release
+        await _refused_at_the_door(one)
+
+    async with driving(gateway_browser, tmp_path, viewport=viewport) as drive:
+        drive.engine.parked["h-1"] = _email()
+        await drive.page.click("#confirmations-button")
+        await drive.page.wait_for_selector("#confirmation-list .confirmation-row")
+
+        await drive.page.route("**/confirmation/resume", door)
+        row = drive.page.locator("#confirmation-list .confirmation-row").first
+        async with drive.page.expect_request("**/confirmation/resume"):
+            await row.locator("button", has_text="Yes, do it").click()
+
+        await drive.page.route("**/sources", _ends_the_session)
+        await drive.page.click("#sources-button")
+        await drive.page.wait_for_selector("#bootstrap:not([hidden])")
+
+        async with drive.page.expect_response("**/confirmation/resume") as stale:
+            release.set_result(None)
+        await (await stale.value).finished()
+        await drive.admit()
+
+        await expect(drive.page.locator("#answer-said")).to_be_hidden()
+        assert "the action may have been carried out" not in await drive.page.inner_text("body")
+
+
+@pytest.mark.parametrize("viewport", [DESKTOP, PHONE], ids=["desktop", "phone"])
+async def test_a_cancellation_refused_at_the_door_after_re_entry_settles_nothing(
+    gateway_browser: Browser, tmp_path: Path, viewport: ViewportSize
+) -> None:
+    """The same, for the other caller that asks to be told which refusal it met.
+
+    ``cancelRead`` reads the condition to choose between ``CANCELLATION_UNRESOLVED`` and
+    a refusal known not to have landed (ADR-0244 §11). Withholding it settles the act as
+    unresolved and writes an account saying the connection failed before a reply was
+    read, of a reply this browser read in full. The panel is not asserted on, for the
+    reason the case above gives.
+    """
+    loop = asyncio.get_running_loop()
+    release: asyncio.Future[None] = loop.create_future()
+
+    async def door(one: Route) -> None:
+        await release
+        await _refused_at_the_door(one)
+
+    async with driving(gateway_browser, tmp_path, viewport=viewport) as drive:
+        drive.engine.read_parked["r-1"] = _read()
+        drive.engine._read_handles.add("r-1")
+        await drive.page.click("#confirmations-button")
+        await drive.page.wait_for_selector("#confirmation-list .confirmation-row")
+
+        await drive.page.route("**/confirmation/cancel-read", door)
+        row = drive.page.locator("#confirmation-list .confirmation-row").first
+        async with drive.page.expect_request("**/confirmation/cancel-read"):
+            await row.locator("button", has_text="Cancel this lookup").click()
+
+        await drive.page.route("**/sources", _ends_the_session)
+        await drive.page.click("#sources-button")
+        await drive.page.wait_for_selector("#bootstrap:not([hidden])")
+
+        async with drive.page.expect_response("**/confirmation/cancel-read") as stale:
+            release.set_result(None)
+        await (await stale.value).finished()
+        await drive.admit()
+
+        await expect(drive.page.locator("#cancellation-said")).to_be_hidden()
+        assert "before this browser read a reply" not in await drive.page.inner_text("body")

@@ -1043,13 +1043,14 @@ def test_a_refresh_that_is_no_longer_the_newest_listing_writes_no_outcome() -> N
 
     assert listing.index("listed += 1;") < listing.index("await relay(")
     assert "const mine = listed;" in listing
-    # Returned from all four paths, the refusals included: a forget whose refresh
+    # Returned from all five paths, the refusals included: a forget whose refresh
     # failed still destroyed something and still owes the owner the sentence saying
-    # so, so a read that ended in a fault must not swallow the outcome as well. The
-    # fourth is #2404's session guard, and it returns the number for the same reason:
-    # a listing dropped because the session under it ended is still a listing that
-    # began, and the caller comparing against it is asking which read was last.
-    assert listing.count("return mine;") == 4
+    # so, so a read that ended in a fault must not swallow the outcome as well. Two of
+    # the five are #2404's session guard, on the resuming and the failing path, and
+    # they return the number for the same reason: a listing dropped because the session
+    # under it ended is still a listing that began, and the caller comparing against it
+    # is asking which read was last.
+    assert listing.count("return mine;") == 5
     assert "if (read === listed) {" in functions["forgetConversation"]
 
 
@@ -1197,12 +1198,48 @@ def test_every_listing_that_resumes_asks_whether_its_session_still_stands() -> N
         assert body.index("const era = sessionEra;") < body.index("await relay("), name
         assert "if (!sameSession(half, era)) {" in resumed, name
         assert resumed.index("sameSession(half, era)") < resumed.index('show("'), name
+        # And the failing path, which reveals the panel too: `fault` shows the panel it
+        # writes into, so a listing whose request fails after its session ended would
+        # otherwise re-open a control panel beside the bootstrap form -- moments after
+        # `showBootstrap` hid every panel and cleared every fault slot. Adversarial
+        # review, round 1, `major`.
+        failing = body[body.rindex("} catch (_) {") :]
+        assert "if (!sameSession(half, era)) {" in failing, name
+        assert failing.index("sameSession(half, era)") < failing.index("fault("), name
 
     assert {"readGoals", "readBeliefs", "listConnections", "listAuthorizations"} <= set(checked)
     # The one listing that reveals its panel *before* it sends: nothing it does after
     # the await is a reveal, so what the guard has to precede there is the render.
     standing = functions["listStanding"]
     assert standing.index("sameSession(half, era)") < standing.index('el("standing-list")')
+
+
+def test_a_refusal_the_session_outlived_is_classified_but_not_displayed() -> None:
+    """The one place the guard cannot sit at the caller, and what it must not withhold.
+
+    ``relay`` renders a refusal *before* it returns, so a comparison after the ``await``
+    is too late for it: a listing released after the owner re-enters carries the old
+    header half and the new cookie, the gateway answers ``cookie-half-mismatch``, and
+    ``refused`` → ``report`` → ``sessionLost`` forgets the half of the session the owner
+    has just started.
+
+    **``noticed`` stays outside the guard**, which adversarial review's round 1 found the
+    version of this that did not. It is a fact about the *act* rather than about the
+    panel: ``answerConfirmation`` and ``cancelRead`` read the condition to sort ADR-0177
+    §7's third clause, and a ``refusal`` left null reads as a refusal the page cannot
+    classify at all — stranding a consent token and telling the owner an action the
+    gateway refused at the door may have been carried out.
+    """
+    relaying = _functions(_code("app.js"))["relay"]
+
+    assert relaying.index("const era = sessionEra;") < relaying.index("await fetch(")
+    assert relaying.index("noticed(body);") < relaying.index("if (!sameSession(half, era)) {")
+    assert relaying.index("if (!sameSession(half, era)) {") < relaying.index("refused(panelId")
+    # `conversationLost` is outside it as well, and above it: a conversation belongs to
+    # the hub and outlives every session, which is what the re-entry sentence says.
+    assert relaying.index("conversationLost(body") < relaying.index(
+        "if (!sameSession(half, era)) {"
+    )
 
 
 def test_the_session_era_moves_exactly_where_the_stored_half_does() -> None:
@@ -6983,7 +7020,16 @@ def test_a_refusal_the_gateway_answered_is_not_always_one_it_did_not_land() -> N
     # response returns above this.
     assert "if (noticed !== undefined) {" in relay
     assert "noticed(body);" in relay
-    assert relay.index("refused(panelId, body, response.status);") < relay.index("noticed(")
+    assert relay.index("const body = await readBody(response);") < relay.index("noticed(body);")
+    # **And before #2404's session guard, which `refused` sits after.** A refusal
+    # answered to a request whose session has since ended is still *classified* for the
+    # caller that asked to be told — it is a fact about the act — and is no longer
+    # *displayed*, because displaying it reveals the panel beside the bootstrap form and,
+    # for the two session conditions, ends the session the owner has just re-entered.
+    # Withholding it instead reads as "a refusal this page cannot classify at all", which
+    # takes the not-known branch below and strands a consent token over a request the
+    # gateway refused at the door. Adversarial review of #2404, round 1, `major`.
+    assert relay.index("noticed(body);") < relay.index("refused(panelId, body, response.status);")
     # And exactly one caller asks. Every other entry point reaching `relay` is unchanged
     # by this, which is the whole reason it is a callback.
     # And exactly one call site passes it, asserted over the *shape* rather than over
