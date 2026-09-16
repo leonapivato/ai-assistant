@@ -70,6 +70,7 @@ import contextlib
 import sqlite3
 import threading
 from datetime import UTC, datetime
+from operator import index
 from pathlib import Path
 from typing import TYPE_CHECKING, Any, Final
 
@@ -102,12 +103,11 @@ _OWNER_ONLY = 0o600
 #: because the family shares this method by copy today — #506).
 _SIDECARS = ("-journal", "-wal", "-shm")
 
-#: The largest value SQLite will bind as an integer parameter.
+#: The largest value SQLite will bind as an integer parameter. Binding a wider one
+#: raises ``OverflowError``, which is neither ``ValueError`` nor
+#: ``AuthorizationError`` — which is why ``recent`` clamps its ``limit`` and why
+#: ADR-0268 §1's watermark is stored as text rather than bound as an integer at all.
 _MAX_SQLITE_INT = 2**63 - 1
-
-#: And the smallest. Binding either side of the pair raises ``OverflowError``,
-#: which is neither ``ValueError`` nor ``AuthorizationError``.
-_MIN_SQLITE_INT = -(2**63)
 
 #: ADR-0254 §1's transition graph, whole and as data: the **seven** edges, keyed
 #: by the disposition each one leaves. **Stated once**, so ``settle``'s refusal and
@@ -154,48 +154,93 @@ _ANSWERS: Final[frozenset[AuthorizationDisposition]] = frozenset(
 )
 
 
-def _checked_version(goal_version: int) -> None:
-    """Hold ``goal_version`` to a value this store can hold, before any I/O.
+def _canonical_version(goal_version: int) -> str:
+    """``goal_version`` as the canonical decimal text this store holds it in.
 
-    **Refused locally and before any I/O**, which is :func:`_checked_target`'s own
-    posture one member over and is what keeps the guard from being sequenced behind
-    a store's own failure — so a caller's fail-closed branch cannot be handed the
-    wrong class for the same call.
+    **Text and not an ``INTEGER`` column, because ADR-0268 §1's watermark is an
+    unrestricted Python ``int`` and SQLite's is not.** ``Goal.version`` is
+    ``int`` with ``ge=0`` and **no ceiling** (ADR-0249 §1), and ``PlanStore``
+    persists a goal as JSON, which has none either — so a goal really can stand
+    above ``2**63 - 1``. Bound as an integer parameter such a version raises
+    ``OverflowError`` out of the driver: neither a refusal nor an
+    :class:`~ai_assistant.core.errors.AuthorizationError`, and so a hole in this
+    layer's boundary.
 
-    **Two things are refused and the reasons differ.** A value outside SQLite's
-    signed 64-bit parameter range raises ``OverflowError`` on binding — neither
-    ``ValueError`` nor
-    :class:`~ai_assistant.core.errors.AuthorizationError`, so it would leave this
-    layer's error boundary **through a hole**, which is the reason ``recent``'s own
-    ``limit`` is clamped. **Clamping is wrong here**: a bound above any possible row
-    count still means *"all of them"*, while a clamped watermark is a **different**
-    watermark, and ADR-0268 §1 keys the fence on the version the caller's own status
-    write names. And ``True`` is an ``int`` in Python, so an unchecked ``bool`` would
-    be taken silently as version **one** — the allowlist of the exact ``int`` is what
-    ``recent`` already uses for the same hazard.
+    **Refusing it instead was tried and is wrong.** A ceiling on ``goal_version``
+    is a narrowing of a contract ADR-0268 states *"in full"* over an unrestricted
+    ``int``, and it strands a goal rather than merely reporting: a goal at
+    ``2**63 - 1`` abandons and fences successfully, its version advances, and the
+    reopen's ``ACTIVE`` write then lands **before** the ending is refused —
+    leaving a live goal fenced against every authorization for good. Adversarial
+    and architecture review, round 2, ``blocker`` each. **So the storage widens
+    and the contract does not move.**
 
-    **What is not refused is a negative or a zero version.** ADR-0268 states no
-    floor on the value, only that the record is a watermark neither member lowers,
-    and a store refusing one would be deciding a rule the decision leaves to
-    ``PlanStore``.
+    **``operator.index`` rather than ``int``**, so what Python itself calls an
+    integer round-trips and nothing else does: ``True`` normalises to ``1``, which
+    is what it *means* in Python and is therefore not a refusal; a ``float``
+    raises ``TypeError`` as it would anywhere, rather than being truncated into a
+    watermark the caller did not name.
 
-    **Stated identically in the canonical fake**, so the two implementations answer
-    the same call the same way; a guard only the durable store had would be the
-    substitutability divergence ADR-0084 §4 names, with the conformance suite unable
-    to state the arm at all.
+    Args:
+        goal_version: The version to render.
+
+    Returns:
+        Its canonical decimal text — no leading zeros, no ``+``, no padding.
 
     Raises:
-        ValueError: If ``goal_version`` is not an exact ``int``, or is outside the
-            range SQLite can bind.
+        TypeError: If ``goal_version`` is not an integer by Python's own test.
     """
-    if type(goal_version) is not int or not _MIN_SQLITE_INT <= goal_version <= _MAX_SQLITE_INT:
-        msg = (
-            f"goal_version must be an int SQLite can hold "
-            f"({_MIN_SQLITE_INT} to {_MAX_SQLITE_INT}), got "
-            f"{describe_untrusted(goal_version)}; the type is checked because a bool "
-            f"is an int and would be taken as version one (ADR-0268 §1)"
-        )
-        raise ValueError(msg)
+    return str(index(goal_version))
+
+
+def _decoded_version(raw: object, goal: str, path: str) -> int:
+    """One stored watermark, or refuse the record as corrupt (ADR-0268 §1).
+
+    **Validated exactly rather than coerced**, and the reason is the invariant:
+    the watermark is one *"neither member lowers"*, so a value read back as
+    anything but what was written can lower it silently. A column read with
+    ``int(…)`` would take a planted ``4.5`` as version **4** — SQLite stores what
+    it is given whatever a column is declared as — and an ``end_for_goal`` at 4
+    would then proceed and rewrite the record down to 4; a planted ``'abc'``
+    would leak a raw ``ValueError`` past this layer's boundary. Adversarial
+    review, round 2, ``major``.
+
+    The table's own ``CHECK`` refuses both at the write, so this is the second
+    line and covers a file this store did not write.
+
+    Args:
+        raw: The column's value, as SQLite returned it.
+        goal: Whose record it is, for the message.
+        path: The database's path, for the message.
+
+    Returns:
+        The watermark.
+
+    Raises:
+        AuthorizationError: If the stored value is not canonical decimal text.
+            **Nothing is mutated on the way out**, the read happening inside the
+            caller's transaction and before any write.
+    """
+    if isinstance(raw, str) and _is_decimal(raw) and raw == str(int(raw)):
+        return int(raw)
+    msg = (
+        f"the authorization store at {path!r} holds a closure record for goal "
+        f"{goal!r} whose version is {describe_untrusted(raw)} rather than canonical "
+        f"decimal text; the watermark is never lowered, so a record that cannot be "
+        f"read exactly is not read at all (ADR-0268 §1)"
+    )
+    raise AuthorizationError(msg)
+
+
+def _is_decimal(raw: str) -> bool:
+    """Whether ``raw`` is a run of digits, optionally signed — and nothing else.
+
+    ``str.isdigit`` is not this test: it answers ``True`` for superscripts and
+    other Unicode digit forms, which ``int`` then accepts, so two spellings of one
+    number would both decode and only one would compare equal to what was written.
+    """
+    body = raw[1:] if raw.startswith("-") else raw
+    return bool(body) and all("0" <= character <= "9" for character in body)
 
 
 async def _run_to_completion[T](fn: Callable[..., T], /, *args: object) -> T:
@@ -351,9 +396,26 @@ _CREATE_TABLE = (
 #: from the blob because a stored copy of a value a uniqueness check reads could
 #: disagree with the record it describes (below); there is no blob here and nothing
 #: to disagree with, the record being exactly these three values.
+#:
+#: **``version`` is canonical decimal TEXT and not an ``INTEGER``**, and the reason
+#: is ADR-0268 §1's own domain: ``Goal.version`` is an ``int`` with ``ge=0`` and no
+#: ceiling, and a goal above ``2**63 - 1`` is one this store must be able to fence.
+#: See :func:`_canonical_version` for why the alternative — refusing such a version —
+#: strands the goal rather than reporting anything.
+#:
+#: **The ``CHECK`` pins the stored form, because SQLite stores what it is given.** A
+#: declared type is an *affinity* rather than a constraint: an ``INTEGER`` column
+#: accepts ``4.5`` and ``'abc'`` alike, and a watermark read back as ``4`` from a
+#: planted ``4.5`` is one a later call can silently **lower** — the one thing the
+#: record is for. ``typeof`` pins the storage class and the ``GLOB`` pins the
+#: characters; :func:`_decoded_version` then pins the exact value on the way out, so
+#: a file this store did not write is refused rather than misread.
 _CREATE_CLOSURES = (
     "CREATE TABLE IF NOT EXISTS goal_authorization_closures("
-    "goal TEXT PRIMARY KEY NOT NULL, version INTEGER NOT NULL, "
+    "goal TEXT PRIMARY KEY NOT NULL, "
+    "version TEXT NOT NULL CHECK ("
+    "typeof(version) = 'text' AND version NOT GLOB '*[^0-9-]*' "
+    "AND version NOT GLOB '?*-*' AND version NOT GLOB '-' AND length(version) > 0), "
     "fenced INTEGER NOT NULL CHECK (fenced IN (0, 1)))"
 )
 
@@ -1255,9 +1317,10 @@ class SqliteGoalAuthorizationStore:
         found = conn.execute(_CLOSURE_OF_GOAL, (row.goal,)).fetchone()
         if found is None or not int(found[1]):
             return
+        standing = _decoded_version(found[0], row.goal, self._path)
         msg = (
             f"authorization {row.id!r} names goal {row.goal!r}, which this store holds "
-            f"fenced at version {int(found[0])} by the ending its closure took; no row "
+            f"fenced at version {standing} by the ending its closure took; no row "
             f"of it comes into being while that fence stands (ADR-0268 §1)"
         )
         raise InvalidAuthorizationError(msg)
@@ -1283,22 +1346,30 @@ class SqliteGoalAuthorizationStore:
             How many rows this step moved.
 
         Raises:
-            ValueError: If ``goal_version`` is not an exact ``int`` this store can
-                hold (:func:`_checked_version`), refused **locally and before any
-                I/O**.
-            AuthorizationError: If the store cannot be read or written. The step is
+            TypeError: If ``goal_version`` is not an integer by Python's own test
+                (:func:`_canonical_version`). **No ceiling is imposed**: the
+                watermark is stored as canonical decimal text, so the whole
+                ``Goal.version`` domain round-trips.
+            AuthorizationError: If the store cannot be read or written, **or holds a
+                closure record whose version is not canonical decimal text**, which
+                is refused rather than misread (:func:`_decoded_version`). The step
+                is
                 all-or-nothing: the transaction rolls back, so nothing is settled
                 and no record is raised.
         """
-        _checked_version(goal_version)
+        # **Normalised before any I/O**, so a value that is not an integer is
+        # Python's own ``TypeError`` at the call rather than a fault from somewhere
+        # inside a transaction — and so the answer does not depend on whether a
+        # record happens to exist, which an early return would otherwise decide.
+        normalised = index(goal_version)
         async with self._lock:
-            return await _run_to_completion(self._end_for_goal_sync, goal, at, goal_version)
+            return await _run_to_completion(self._end_for_goal_sync, goal, at, normalised)
 
     def _end_for_goal_sync(self, goal: str, at: datetime, goal_version: int) -> int:
         """Settle the goal's standing rows and raise its record, as one transaction."""
         with self._transaction(f"end the authorizations of goal {goal!r}") as conn:
             found = conn.execute(_CLOSURE_OF_GOAL, (goal,)).fetchone()
-            if found is not None and int(found[0]) > goal_version:
+            if found is not None and _decoded_version(found[0], goal, self._path) > goal_version:
                 # **The stale-call rule** (§1). A record standing above this version
                 # means some act read the goal above it, so this attempt's own
                 # closing write is refused stale anyway — and the rows it would have
@@ -1321,7 +1392,7 @@ class SqliteGoalAuthorizationStore:
                     to=AuthorizationDisposition.GOAL_CLOSED,
                     settled_at=at,
                 )
-            conn.execute(_WRITE_CLOSURE, (goal, goal_version, 1))
+            conn.execute(_WRITE_CLOSURE, (goal, _canonical_version(goal_version), 1))
             return len(rows)
 
     async def clear_closure(self, goal: str, /, *, goal_version: int) -> bool:
@@ -1337,26 +1408,27 @@ class SqliteGoalAuthorizationStore:
             holds no record of that goal.
 
         Raises:
-            ValueError: If ``goal_version`` is not an exact ``int`` this store can
-                hold (:func:`_checked_version`), refused **locally and before any
-                I/O**.
-            AuthorizationError: If the store cannot be read or written.
+            TypeError: If ``goal_version`` is not an integer by Python's own test
+                (:func:`_canonical_version`). **No ceiling is imposed.**
+            AuthorizationError: If the store cannot be read or written, **or holds a
+                closure record whose version is not canonical decimal text**
+                (:func:`_decoded_version`).
         """
-        _checked_version(goal_version)
+        normalised = index(goal_version)
         async with self._lock:
-            return await _run_to_completion(self._clear_closure_sync, goal, goal_version)
+            return await _run_to_completion(self._clear_closure_sync, goal, normalised)
 
     def _clear_closure_sync(self, goal: str, goal_version: int) -> bool:
         """Raise the record with the fence down, or leave it be, as one transaction."""
         with self._transaction(f"clear the closure fence of goal {goal!r}") as conn:
             found = conn.execute(_CLOSURE_OF_GOAL, (goal,)).fetchone()
-            if found is None or int(found[0]) > goal_version:
+            if found is None or _decoded_version(found[0], goal, self._path) > goal_version:
                 # **A goal the store holds no record of is answered ``False``, has
                 # none written and raises nothing**, and a record standing at a
                 # higher version is left exactly as it was — which is what keeps a
                 # stale caller from unfencing a later closure (§1).
                 return False
-            conn.execute(_WRITE_CLOSURE, (goal, goal_version, 0))
+            conn.execute(_WRITE_CLOSURE, (goal, _canonical_version(goal_version), 0))
             # **The record is raised whichever way this answers**: the watermark
             # moves on a record already lifted at a lower version too, which is what
             # makes a delayed ``end_for_goal`` at that lower version answer ``0``.

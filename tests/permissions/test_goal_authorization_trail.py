@@ -42,6 +42,7 @@ from ai_assistant.core.types import (
     SpanCoverage,
 )
 from ai_assistant.permissions.audit import SqliteAuditTrail
+from ai_assistant.permissions.goal_authorizations import SqliteGoalAuthorizationStore
 from ai_assistant.testing import (
     FakeAuthorizationResolution,
     FakeRecipientGrantResolution,
@@ -385,6 +386,67 @@ class TestTheTenChecks:
             )
         finally:
             held.close()
+
+    async def test_a_row_ended_goal_closed_between_the_ruling_and_the_write(
+        self, path: Path, tmp_path: Path
+    ) -> None:
+        """ADR-0268 §9 arm 6's first limb, and §6's *"no conjunct added"*.
+
+        A route-(d) ``ALLOW`` whose row is ended ``GOAL_CLOSED`` between ``live_for``
+        and ``AuditTrail.record`` is **refused on ADR-0254 §7's first check**, which
+        reads the resolved row's ``disposition`` and requires ``ESTABLISHED``. That
+        section's own ground — *"every other disposition is retired and none of them
+        is live"* — is true of the new member as it is of the other four, so the
+        check is unchanged and ADR-0268 adds nothing to it.
+
+        **Driven through the real store and the real ending**, not by settling the
+        row to the member by hand: what arm 6 is about is the *interleaving* — the
+        policy resolved a live row, the goal closed underneath it, and the write that
+        follows must be refused — and a hand-settled row proves only that the trail
+        reads a disposition. The durable authorization store satisfies
+        ``AuthorizationResolution`` structurally, which is ADR-0254 §16's
+        three-faces construction and what lets the trail hold it directly.
+
+        **Stated at all because the four cases above enumerate the dispositions that
+        existed when §7 was written**: an implementation testing membership against
+        that list rather than against ``ESTABLISHED`` would pass every one of them
+        and admit the write this arm refuses. Adversarial review, round 2,
+        ``blocker``.
+
+        **And it is the closing act's own race**, exactly as arm 4's revocation
+        landing in the same window is (ADR-0254 §20): the ending is prospective, so
+        what it stops is a write still to be taken and not one already recorded.
+        """
+        authorizations = SqliteGoalAuthorizationStore(
+            path=tmp_path / "authorizations.sqlite3", now=lambda: NOW
+        )
+        trail = SqliteAuditTrail(
+            path=path,
+            recipient_grants=FakeRecipientGrantResolution(),
+            authorizations=authorizations,
+        )
+        try:
+            await authorizations.record(established())
+            assert (
+                await authorizations.settle(
+                    "a1", to=AuthorizationDisposition.ESTABLISHED, settled_at=AT
+                )
+                is AuthorizationSettlement.SETTLED
+            )
+            # The policy's read: a live row, which route (d) ruled ALLOW over.
+            resolved = await authorizations.live_for(GOAL, TOOL.id)
+            assert resolved is not None
+            submitted = route_d_decision(resolved, binding(SITE))
+
+            # The goal closes underneath it, before the trail is written.
+            assert await authorizations.end_for_goal(GOAL, at=NOW, goal_version=4) == 1
+
+            with pytest.raises(InvalidAuthorisationError, match="rather than ESTABLISHED"):
+                await trail.record(submitted)
+            assert await trail.recent() == []
+        finally:
+            trail.close()
+            authorizations.close()
 
     async def test_a_settled_at_after_the_decisions_decided_at(self, held: _Trail) -> None:
         """§7: the **backdated** case — *"the policy could not have read a record

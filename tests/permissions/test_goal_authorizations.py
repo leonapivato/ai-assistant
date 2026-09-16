@@ -414,6 +414,61 @@ class TestWhatOnlyAFileCanSay:
         with pytest.raises(AuthorizationError, match="schema_version=99"):
             SqliteGoalAuthorizationStore(path=path, now=SHARED_CLOCK.reset())
 
+    @pytest.mark.parametrize("planted", [4.5, "abc", "007", " 4", "+4"], ids=str)
+    async def test_a_closure_record_that_cannot_be_read_exactly_is_refused(
+        self, path: Path, planted: object
+    ) -> None:
+        """ADR-0268 §1's watermark is *"never lowered"*, so it is read exactly or not read.
+
+        **A declared column type is an affinity and not a constraint**: SQLite stores
+        what it is given, so an `INTEGER` column takes ``4.5`` and ``'abc'`` alike. A
+        store reading that back with ``int(…)`` would take a planted ``4.5`` as
+        version **4** — and an ``end_for_goal`` at 4 would then proceed and rewrite
+        the record **down** to 4, lowering the watermark the record exists to hold;
+        ``'abc'`` would instead leak a raw ``ValueError`` past this layer's boundary.
+        Adversarial review, round 2, ``major``.
+
+        **Both lines are asserted here.** The table's own ``CHECK`` refuses the write
+        — which is what the planting itself shows — and where a file this store did
+        not write gets past it, the decode refuses the record as an
+        ``AuthorizationError`` **without mutating anything**.
+
+        ``'007'``, ``' 4'`` and ``'+4'`` are in the table because ``int`` accepts all
+        three while none is what was written: two spellings of one number would both
+        decode and only one would compare equal to the record. **A planted *integer*
+        is deliberately absent**: the column's ``TEXT`` affinity converts one into
+        exactly the canonical form this store writes, so it reads back exactly and is
+        not corruption at all.
+        """
+        store = SqliteGoalAuthorizationStore(path=path, now=SHARED_CLOCK.reset())
+        try:
+            await store.record(established(id="a1"))
+            assert await store.end_for_goal(GOAL, at=NOW, goal_version=9) == 1
+        finally:
+            store.close()
+
+        connection = sqlite3.connect(path)
+        try:
+            try:
+                connection.execute("UPDATE goal_authorization_closures SET version = ?", (planted,))
+                connection.commit()
+            except sqlite3.IntegrityError:
+                # The first line held: the stored form is pinned by the table itself.
+                return
+        finally:
+            connection.close()
+
+        second = SqliteGoalAuthorizationStore(path=path, now=SHARED_CLOCK.reset())
+        try:
+            before = await second.export()
+            with pytest.raises(AuthorizationError, match="canonical decimal text"):
+                await second.end_for_goal(GOAL, at=NOW, goal_version=4)
+            with pytest.raises(AuthorizationError, match="canonical decimal text"):
+                await second.clear_closure(GOAL, goal_version=4)
+            assert await second.export() == before, "and nothing is mutated on the way out"
+        finally:
+            second.close()
+
     def test_a_file_holding_an_object_of_that_name_that_is_not_this_stores_is_refused(
         self, path: Path
     ) -> None:
