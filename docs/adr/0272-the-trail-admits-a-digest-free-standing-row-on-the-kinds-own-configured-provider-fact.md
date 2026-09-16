@@ -27,10 +27,15 @@
   conjuncts, §7's *"bind, then rule, then record, then send"*, §11's `forecast_reach` with
   its restrictive default and its **`closed_loop` is untouched** clause, §12's three lanes
   and §13's arms.
-- **This ADR moves no `core` surface, no stored shape and no version.** `CarriedProvenance`
-  and `EgressBinding` already carry both booleans (ADR-0260 §11, landed by that ADR's L1),
-  `PROTOCOL_VERSION` does not move, no `Settings` value reaches the trail, and no stored row
-  is revalidated, rewritten or re-derived. It decides one conjunct of one write-path check.
+- **This *is* a contract change, and this document is the ADR golden rule 5 requires for
+  one** — ratified and merged as its own PR before the lane that implements it (ADR-0015).
+  What it changes is **what `AuditTrail.record` accepts**, in one conjunct of one write-path
+  check. What it moves is **no `core` type, no member, no signature and no
+  `PROTOCOL_VERSION`**: `CarriedProvenance` and `EgressBinding` already carry both booleans
+  (ADR-0260 §11, landed by that ADR's L1), no `Settings` value reaches the trail, and no
+  stored row is revalidated, rewritten or re-derived. **And it moves no line of
+  `core/protocols.py`**, which §3 states as a fact about that file read at `origin/main`
+  `46403478` rather than as a posture, and conditions on a lane that finds otherwise.
 
 ## Context
 
@@ -61,11 +66,10 @@ recorded*. So on the corpus as it stands **every** forecast read at the configur
 would be ruled `ALLOW` and then dropped, and ADR-0260's L3 cannot land.
 
 **No lane could close it, and that is why this document exists.** ADR-0260 §12's L2
-paragraph enumerates what that lane owes and the trail is not among it, §12 adds *"[n]o
-lane files or defers anything this ADR has not named"*, and ADR-0260's header states that
-*"§2's route (c) and its trail check"* bind entire. Widening the conjunct in a lane would
-contradict a ratified sentence, which is a decision and not an implementation choice
-(ADR-0070 §1).
+paragraph enumerates what that lane owes and the trail is not among it, §12 adds *"[n]o lane
+files or defers anything this ADR has not named"*, and ADR-0260's header states that *"§2's
+route (c) and its trail check"* bind entire — so widening the conjunct in a lane would
+contradict a ratified sentence, which is a decision (ADR-0070 §1).
 
 **The same widening was proposed independently by the reviewer.** PR #2458's round-3
 adversarial `blocker` reached the defect from the code rather than from the issue, and gave
@@ -100,11 +104,23 @@ the row alone. ADR-0193 §6's pairing refusal, narrowed to route (b) by ADR-0247
 > kind's own configured-provider fact"*.** A non-resolving `ALLOW` carrying an
 > `egress_binding` and an `authorised_by` with **no** `authorised_subject` is accepted
 > **only** where **exactly one** of `binding.closed_loop` and `binding.forecast_reach` is
-> `True` **and** its `authorised_by` equals that binding's `account.reference`. Failing
-> either, it is refused exactly as it is refused at `origin/main`, with the same error type
-> and for the same reason. **Both facts are read from the decision** — no store read, no
-> `Settings` read and no clock — and the population is the closed two-member set ADR-0260
-> §6 gives route (c), so nothing is admitted that route (c) does not cover.
+> `True` **and** its `authorised_by` equals that binding's `account.reference`. **Both facts
+> are read from the decision** — no store read, no `Settings` read and no clock — and the
+> population is the closed two-member set ADR-0260 §6 gives route (c), so nothing is
+> admitted that route (c) does not cover. The refusal is `InvalidAuthorisationError` in
+> every failing case.
+
+> **Normative.** **Three of the four failing cases are refused exactly as `origin/main`
+> refuses them, and the fourth is a refusal this decision adds.** A row carrying **neither**
+> fact, and a row whose `authorised_by` is not its binding's `account.reference`, are
+> refused today and are refused after this decision, with the same error type and the same
+> reason. A row carrying **both** facts with a matching pointer is **admitted** today — the
+> check reads `closed_loop` alone and `closed_loop` is `True` — and is **refused** after it.
+> **That is the one behaviour this decision removes, and it is stated rather than glossed.**
+> It is unreachable from a correct system, which is why it is safe to remove and not why it
+> is permitted to go unsaid: ADR-0260 §11 writes each fact for exactly one kind, and §6 puts
+> a binding asserting both at no configured provider, so no policy obeying either mints such
+> a row. The lane §3 cuts pins it as a refusal for that reason.
 
 > **Normative.** **A binding carrying *neither* fact is refused, and so is one carrying
 > *both*.** Neither is the row ADR-0148 §3's third route covers: a binding asserting both
@@ -164,17 +180,35 @@ the row alone. ADR-0193 §6's pairing refusal, narrowed to route (b) by ADR-0247
 > `src/ai_assistant/permissions/audit.py` and the same check in `FakeAuditTrail` in
 > `src/ai_assistant/testing/permissions.py` to §1's conjunct, in one change and with the two
 > messages staying identical, and corrects in that same change every docstring citing the
-> rule it moved. **It touches no `core` surface, no `wire` version, no store schema, no
-> `Settings` field and no byte of `orchestration/`.**
+> rule it moved. **It touches no `wire` version, no store schema, no `Settings` field and no
+> byte of `orchestration/`.**
+
+> **Normative.** **It moves no line of `core/protocols.py`, because no line of that file
+> states the rule §1 moves — and where one is found, the lane corrects it in the same
+> change.** `AuditTrail.record`'s docstring states the **route-(b)** eight-check invariant
+> and names neither `closed_loop`, nor route (c), nor the digest-free admission at all; it
+> likewise names neither ADR-0247 §2's own narrowing of that invariant's scope nor ADR-0254
+> §7's route-(d) checks, so its staleness **predates this decision and is not created by
+> it**. That drift is filed as #2464 and is **not** absorbed by this lane, which is the
+> triage rule for a pre-existing defect. The conditional half is ADR-0260 §12's
+> correct-every-docstring clause binding here: a `core` docstring citing the moved rule is
+> documentation of this decision, which golden rule 5's own sequence permits the lane to
+> write because this ADR is merged ahead of it.
 
 > **Normative.** **The arms ride in `tests/permissions/audit_trail_contract.py`, so that the
-> store and the fake are held to one contract.** Four arms, each over a digest-free standing
-> row whose pointer equals its binding's `account.reference`: a binding carrying
+> store and the fake are held to one contract.** Four arms over a digest-free standing row
+> whose pointer equals its binding's `account.reference`: a binding carrying
 > `forecast_reach` alone is **recorded**; one carrying `closed_loop` alone is **recorded**,
 > and that arm is the search regression, unchanged in what it asserts; one carrying
-> **neither** fact is **refused**; one carrying **both** is **refused**. A fifth arm keeps
-> the pointer half: a binding carrying its kind's fact whose `authorised_by` is not that
-> binding's `account.reference` is refused. **The refusals assert the type and not the
+> **neither** fact is **refused**; one carrying **both** is **refused**.
+
+> **Normative.** **The pointer half is pinned over *each* admitted fact, not over one of
+> them.** A mismatched-pointer arm written on the search binding alone leaves an
+> implementation that takes the pointer comparison inside the `closed_loop` branch passing
+> every other arm while recording a forecast row on an `authorised_by` the policy invented —
+> which is `_check_authorisation`'s own hazard reaching the route this decision widens. So
+> the mismatch arm is **parameterised over both one-hot states**, or is written twice, and
+> either shape discharges this clause. **Every refusal arm asserts the type and not the
 > message text**, which is `InvalidAuthorisationError`.
 
 > **Normative.** **ADR-0260's L3 is briefed after this lane merges, and not before.** L3 is
@@ -252,9 +286,9 @@ arms pin the **both** case and the **neither** case as refusals rather than leav
 the policy, and why the two implementations move in one change.
 
 **What would trigger revisiting this.** A third kind reaching route (c), which would make
-the exactly-one rule an exactly-one-of-N rule and is the point at which a carried *kind*
-would be worth more than a set of sibling booleans — ADR-0260 §6's own argument for a
-sibling boolean was stated over two members and is not stated over ten. And any decision
-giving the trail a configuration read, which this ADR forbids and ADR-0247 §2 forbade first.
+the exactly-one rule an exactly-one-of-N rule and is where a carried *kind* starts to be
+worth more than a set of sibling booleans — ADR-0260 §6's argument for a sibling boolean was
+stated over two members, not ten. And any decision giving the trail a configuration read,
+which this ADR forbids and ADR-0247 §2 forbade first.
 
 Refs #2459, #2255.
