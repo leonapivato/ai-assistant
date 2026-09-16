@@ -1028,6 +1028,57 @@ async def test_a_delivery_stream_whose_drain_is_blocked_is_abandoned_without_a_v
     await asyncio.wait_for(body, timeout=5)
 
 
+async def test_a_drain_that_has_returned_is_never_read_as_a_write_still_outstanding() -> None:
+    """The guard above must not fire on a browser that is keeping up.
+
+    ``_Ending.outstanding`` is what ADR-0175 §4's abandonment clause is decided on, and a
+    session's death reads it from a timer callback — so the question is not only whether
+    it is cleared but *when*, relative to a loop turn that is not this code's. Reported
+    from the parent of the drain, there is a window between the drain's future completing
+    and the parent being rescheduled, and a timer firing inside it would find a completed
+    write recorded as outstanding and withhold the ending from a healthy stream.
+    :func:`~ai_assistant.interfaces.gateway.delivery._drained` closes it by construction:
+    the drain returning and the record of it are one task step.
+
+    This is that window, aimed at. The drain is released and the session is ended on the
+    *very next turn* — the earliest moment any callback of the loop's could run after the
+    drain resolved — and the ending is written, which it would not be if the report were
+    a turn further out. Adversarial review, round 4, ``blocker``.
+    """
+    delivery = DeliveryStream()
+    ending = _Ending()
+    stream, recording = _held(ending=ending, delivery=delivery)
+    body = asyncio.create_task(
+        write_stream(
+            cast("asyncio.StreamWriter", recording),
+            delivery,
+            frame=ending.framing,
+            wrote=ending.wrote,
+        )
+    )
+    assert delivery.offer(streams.alive())
+    await asyncio.sleep(0)
+    await asyncio.sleep(0)
+    # Compared whole rather than read member by member, so that the two readings of the
+    # record below are two facts about it and not one ``mypy`` has narrowed to a
+    # constant between them.
+    assert ending == _Ending(named=False, outstanding=True)
+
+    recording.drained.set()
+    await asyncio.sleep(0)
+    assert ending == _Ending(named=False, outstanding=False), "the drain returned; this did not"
+
+    stream.end()
+
+    assert _lines(recording.written) == [
+        {"kind": "alive"},
+        {"kind": "fault", "fault": "no-live-session"},
+    ]
+    assert recording.written.endswith(b"0\r\n\r\n")
+    assert delivery.abandoned.is_set()
+    await asyncio.wait_for(body, timeout=5)
+
+
 async def test_a_delivery_stream_whose_writes_have_all_left_is_named(
     harness: Harness,
 ) -> None:
