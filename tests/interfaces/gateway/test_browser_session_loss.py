@@ -139,19 +139,33 @@ _HEADER_HALF: Final = "assistant.session.header-half"
 #: its own door: ``refused`` before a single value is read, ``report`` after the loop, and
 #: ``fault(DELIVERY_STREAM_CUT, …)`` beside it.
 #:
-#: **Only the two head refusals can end a session**, which is what ``sessionLost`` is
-#: conditioned on — and ``cookie-half-mismatch`` is the two-tab case's own shape: a
-#: request sent under the old header half carrying the new session's cookie is what the
-#: gateway really meets, and it is a refusal it decides at the door. The other two carry
-#: no session condition at all and are here because the guard sits in front of the whole
-#: ending, so what they say about a superseded stream is part of the claim.
+#: **Three of them can end a session**, which is what ``sessionLost`` is conditioned on.
+#: Two are head refusals — and ``cookie-half-mismatch`` is the two-tab case's own shape:
+#: a request sent under the old header half carrying the new session's cookie is what the
+#: gateway really meets, and it is a refusal it decides at the door. The third is
+#: ``expired``, the terminal value on the *body*. The rest carry no session condition at
+#: all and are here because the guard sits in front of the whole ending, so what they say
+#: about a superseded stream is part of the claim.
 #:
-#: **``hub-unreachable`` rather than ``no-live-session`` on the body**, because that is
-#: what this gateway writes there: a session that ends under an open stream ends the
-#: stream without a terminal value (``test_gateway_streams.py``'s
-#: ``test_an_open_stream_is_not_use_of_the_session_and_dies_with_it``), which is the
-#: ``cut`` row. A terminal value naming a session condition would be a value no gateway
-#: in this tree emits, and a case driving one would be about nothing.
+#: **``expired`` is the row this table used not to have, and its absence was the defect**
+#: (#2498). What stood here said, in terms, that "a terminal value naming a session
+#: condition would be a value no gateway in this tree emits, and a case driving one would
+#: be about nothing" — true of the build it was written on, where a session ending under
+#: an open stream ended it with a close and no terminal value at all. ADR-0175 §2 makes
+#: that ending "a transport failure and the front end reports it as one", so the one
+#: condition ``app.js`` has words for arrived as ``net::ERR_INCOMPLETE_CHUNKED_ENCODING``
+#: and the owner was told to start a gateway that was listening. ``_OpenStream.end`` now
+#: names it, and this row is that value as the gateway really writes it —
+#: ``test_gateway_streams.py``'s
+#: ``test_an_open_stream_is_not_use_of_the_session_and_dies_with_it`` is the same bytes
+#: asserted at the harness, and
+#: :func:`test_a_watching_page_whose_session_idles_out_is_told_watching_did_not_keep_it`
+#: is them written by a real gateway rather than by a route.
+#:
+#: **``hub-unreachable`` stays as ``terminal``** rather than being replaced by it: it is
+#: one of the terminal faults a delivery stream really carries (``delivery.py``), it is
+#: emphatically *not* a session condition, and it is what says the page tells the two
+#: apart rather than treating every terminal fault as an expiry.
 _DELIVERY_ENDINGS: Final = {
     "refused": (401, "application/json", '{"fault": "no-live-session"}'),
     "mismatch": (409, "application/json", '{"fault": "cookie-half-mismatch"}'),
@@ -160,6 +174,7 @@ _DELIVERY_ENDINGS: Final = {
         "application/x-ndjson",
         '{"kind": "fault", "fault": "hub-unreachable", "detail": "no hub there"}\n',
     ),
+    "expired": (200, "application/x-ndjson", '{"kind": "fault", "fault": "no-live-session"}\n'),
     "cut": (200, "application/x-ndjson", ""),
     "misframed": (200, "application/x-ndjson", "[]\n"),
     "failed": None,
@@ -175,12 +190,12 @@ _DELIVERY_ENDINGS: Final = {
 #: front of them, through the two endings a case can order.
 _THROUGH_THE_CATCH: Final = ("misframed", "failed")
 
-#: The endings above that mean *this browser's session is gone* — the only two
-#: ``sessionLost`` acts on, and therefore the only two that could ever have evicted a
+#: The endings above that mean *this browser's session is gone* — the only ones
+#: ``sessionLost`` acts on, and therefore the only ones that could ever have evicted a
 #: half. Every other ending is a condition about a stream and about nothing else.
-_ENDS_THE_SESSION: Final = ("refused", "mismatch")
+_ENDS_THE_SESSION: Final = ("refused", "mismatch", "expired")
 
-#: What the page says about each of those two conditions, quoted from ``FAULTS`` in
+#: What the page says about each of those conditions, quoted from ``FAULTS`` in
 #: ``app.js``. Read back so that "the condition was restated rather than flattened into
 #: the re-entry sentence" is a claim about what the owner sees (ADR-0168 §6: the
 #: cookie-half fault is "never flattened into an expiry, a ceiling refusal or an ordinary
@@ -188,7 +203,23 @@ _ENDS_THE_SESSION: Final = ("refused", "mismatch")
 _CONDITION_SAID: Final = {
     "refused": "This browser has no live session.",
     "mismatch": "The two halves of this browser's session no longer match.",
+    "expired": "This browser has no live session.",
 }
+
+#: ``IDLE_WHILE_WATCHING``'s opening words, quoted from ``app.js``.
+#:
+#: It is the sentence ``describeDeliveryEnd`` adds to a ``no-live-session`` **on the
+#: body** and to nothing else, and the asymmetry is the point: an answer stream and a
+#: head refusal each carried a request that refreshed the idle timeout on the way in, so
+#: "the hour passed while you watched" would be a *wrong* explanation there rather than a
+#: missing one. ``expired`` is therefore the one ending of the three that gets it, which
+#: is asserted both ways round.
+_WATCHING_DID_NOT_KEEP_IT: Final = "Watching does not keep a session alive."
+
+#: The sentence a page must **not** say about a gateway that is listening — ``GATEWAY_GONE``
+#: in ``app.js``, which is where every one of these endings landed before #2498 because the
+#: stream was cut rather than ended.
+_START_THE_GATEWAY: Final = "Start the gateway"
 
 _KILLER: Final = ("#sources-button", "**/sources")
 _OTHER_KILLER: Final = ("#beliefs-button", "**/beliefs")
@@ -958,6 +989,12 @@ async def test_a_delivery_stream_whose_own_session_ended_still_asks_for_a_new_on
     above would still pass — the delivery stream would simply have stopped being a way of
     finding out that a session is gone, which is exactly what ``IDLE_WHILE_WATCHING``
     exists to explain to an owner who did nothing at all.
+
+    **``expired`` is the ending that arm was always about and could not reach** (#2498):
+    the terminal value on the body, which no gateway wrote until ``_OpenStream.end`` named
+    it. It is here as a route so that the *page's* reading of the value is pinned beside
+    the other two conditions; the gateway really writing it is
+    :func:`test_a_watching_page_whose_session_idles_out_is_told_watching_did_not_keep_it`.
     """
     loop = asyncio.get_running_loop()
     release, stream = _delivery(loop, ending)
@@ -977,6 +1014,11 @@ async def test_a_delivery_stream_whose_own_session_ended_still_asks_for_a_new_on
         said = await drive.page.inner_text("#reentry")
         assert "That session has ended" in said
         assert _CONDITION_SAID[ending] in said, said
+        # The watching sentence on the body's own value and on neither head refusal,
+        # which is `describeDeliveryEnd`'s whole asymmetry (#2498).
+        assert (_WATCHING_DID_NOT_KEEP_IT in said) == (ending == "expired"), said
+        # And never the sentence about a gateway that has stopped: it is listening.
+        assert _START_THE_GATEWAY not in said, said
         # The half really is gone, which is what re-entry means.
         assert (
             await drive.page.evaluate("(key) => window.localStorage.getItem(key)", _HEADER_HALF)
@@ -1030,3 +1072,97 @@ async def test_a_delivery_stream_under_a_standing_session_renders_and_reports_as
         assert (
             await drive.page.evaluate("(key) => window.localStorage.getItem(key)", _HEADER_HALF)
         ) is not None
+
+
+async def _holds_the_poll(**_: object) -> None:
+    """A hub with nothing to say, holding the delivery poll open as a real one does.
+
+    ``FakeAssistantEngine.next_notification`` answers ``None`` at once and says why in
+    terms — "a fake that waited out a five-minute budget would make every client's
+    delivery test slow or flaky" — and directs a test that wants the waiting to drive the
+    outbox itself. A gateway polling it therefore has its *second* value due before the
+    first has left the socket, which ADR-0175 §4 makes an abandonment: "a write that has
+    not completed when the next value is due on that stream is abandoned and the stream
+    is ended". So an un-routed delivery stream on the shipped fake carries one ``alive``
+    and stops, which is not a stream a session can expire *underneath*.
+
+    This is the other half of the same fake's own instruction: a poll that waits, so that
+    the stream stays open and the session's ending is the thing that ends it. It answers
+    nothing because what this case is about is the ending, and ADR-0131 §1's poll is a
+    long poll — a hub with nothing to say holds it for the budget rather than returning
+    emptily, so this is the *more* faithful of the two.
+    """
+    await asyncio.Event().wait()
+
+
+@pytest.mark.parametrize("viewport", [DESKTOP, PHONE], ids=["desktop", "phone"])
+async def test_a_watching_page_whose_session_idles_out_is_told_watching_did_not_keep_it(
+    gateway_browser: Browser,
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+    viewport: ViewportSize,
+) -> None:
+    """#2498, end to end: the real gateway, the bytes it really writes, the real page.
+
+    Every other arm in this class fulfils ``/deliveries`` from a route, which pins what
+    the page makes of a value but says nothing about whether any gateway writes it. This
+    one routes nothing. A page is admitted, ``showConsole`` opens its delivery stream, and
+    the gateway's own session table then reaches ADR-0175 §7's fourth clause — "the
+    gateway ends every stream a session held at the moment that session ends" — with that
+    stream open and a browser reading it.
+
+    **What the owner was told before this fix, in a real Chromium, was wrong.**
+    ``_session_ended`` closed the connection and wrote nothing, so §2's partition put this
+    ending on its second side: ``net::ERR_INCOMPLETE_CHUNKED_ENCODING``,
+    ``readDeliveries``' ``catch``, and "The gateway did not answer, so it may have
+    stopped… Start the gateway" — about the process the last two lines here get a second
+    session out of. The ending is now named, so the page takes ADR-0182 §6's re-entry and
+    says the one thing written for this condition and never before reachable.
+
+    **The clock is moved rather than waited out** (ADR-0216 §7). ADR-0168 §4 makes a
+    session's death a *scheduled* act — "destroyed continuously rather than at a
+    checkpoint or on the next request that happens to arrive" — so the drive's gateway is
+    built on the harness clock and timer table every gateway case uses, and
+    ``expire_sessions`` is the two lines ``test_gateway_streams.py`` writes for the same
+    ending. The hour is the settings' own; nothing here shortens it.
+
+    Ordered on the response rather than on the request: the head is written *after* the
+    stream is registered against its session (``_write_stream``), so a head that has
+    arrived is a stream the session's ending is certain to reach.
+    """
+    async with driving(gateway_browser, tmp_path, viewport=viewport, admitted=False) as drive:
+        monkeypatch.setattr(drive.engine, "next_notification", _holds_the_poll)
+        async with drive.page.expect_response("**/deliveries") as opened:
+            await drive.admit()
+        assert (await opened.value).status == 200
+        held = await drive.page.evaluate("(key) => window.localStorage.getItem(key)", _HEADER_HALF)
+        assert isinstance(held, str)
+        assert held
+        await expect(drive.page.locator("#delivery-state")).to_contain_text("Watching")
+
+        drive.expire_sessions()
+
+        # Re-entry, which is what a page does about a session that is gone (ADR-0182 §6).
+        await drive.page.wait_for_selector("#bootstrap:not([hidden])")
+        await expect(drive.page.locator("#console")).to_be_hidden()
+        said = await drive.page.inner_text("#reentry")
+        assert "That session has ended" in said, said
+        # The condition the gateway named, restated rather than flattened.
+        assert _CONDITION_SAID["expired"] in said, said
+        # And the sentence written for exactly this ending, on screen for the first time.
+        assert _WATCHING_DID_NOT_KEEP_IT in said, said
+        # Never the sentence about a gateway that stopped: this one is listening, and the
+        # re-entry below is the request that proves it.
+        assert _START_THE_GATEWAY not in said, said
+        # Nothing went wrong, so nothing is written where things that went wrong go.
+        await expect(drive.page.locator("#notifications > .fault")).to_be_hidden()
+        # The half is forgotten, which is what re-entry means.
+        assert (
+            await drive.page.evaluate("(key) => window.localStorage.getItem(key)", _HEADER_HALF)
+        ) is None
+
+        # The gateway mints another and the page carries on, which is the whole of what
+        # the old message got wrong: it asked the owner to start a process that was
+        # answering it the entire time.
+        await drive.admit()
+        await expect(drive.page.locator("#console")).to_be_visible()

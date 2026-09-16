@@ -34,7 +34,8 @@ from __future__ import annotations
 import contextlib
 from base64 import b64encode
 from dataclasses import dataclass
-from typing import TYPE_CHECKING, Any
+from datetime import timedelta
+from typing import TYPE_CHECKING, Any, Final
 
 import gateway_ports
 import numpy as np
@@ -50,7 +51,6 @@ from ai_assistant.testing import FakeAssistantEngine
 if TYPE_CHECKING:
     import asyncio
     from collections.abc import AsyncIterator
-    from datetime import timedelta
     from pathlib import Path
 
     from playwright.async_api import Browser, BrowserContext, Page, ViewportSize
@@ -97,6 +97,15 @@ _DEFAULT: ViewportSize = {"width": 1280, "height": 720}
 #: there are about the same screen.
 DESKTOP: ViewportSize = {"width": 1100, "height": 900}
 PHONE: ViewportSize = {"width": 390, "height": 844}
+
+#: How far :meth:`Drive.expire_sessions` moves the clock: past ``Settings``' default
+#: ``gateway_session_idle_timeout`` of an hour and well short of its
+#: ``gateway_session_ttl`` of twelve, so the bound that ends the session is the *idle*
+#: one — which is the bound ADR-0175 §7's fifth clause is about and the only one the
+#: page has a sentence for. Stated as a margin rather than read back from the settings
+#: so that a drive fails rather than quietly stops expiring anything if either default
+#: moves, which is the direction a harness should fail in.
+SESSION_IDLE_MARGIN: Final = timedelta(hours=2)
 
 #: The one probe the pages carry, installed before any of the bundle runs.
 #:
@@ -265,12 +274,35 @@ class Drive:
         gateway: The gateway serving the shipped bundle.
         engine: The engine behind it.
         origin: The one origin this page may load anything from (ADR-0168 §10).
+        clock: The gateway's clock, which a case moves rather than waits out.
+        timers: Everything the gateway deferred, which a case fires.
     """
 
     page: Page
     gateway: Gateway
     engine: SpeakingEngine
     origin: str
+    clock: Clock
+    timers: Timers
+
+    def expire_sessions(self) -> None:
+        """Move past every session's idle bound and fire what that armed.
+
+        The gateway is built with a clock and a timer table a test drives by hand
+        (``gateway_timing``), for ADR-0168 §4's reason: expired sessions are
+        "destroyed continuously rather than at a checkpoint or on the next request
+        that happens to arrive", so the death is a *scheduled* act and a case that
+        waited it out would wait an hour. Moving the clock and firing is the same
+        act the harness cases make (``test_gateway_streams.py``), reached from a
+        drive — and it is ADR-0216 §7's own requirement, a state the page reaches
+        rather than a duration it is raced against.
+
+        It is every session rather than one because the table announces each ending
+        through the same callback and a drive holds one session anyway; naming which
+        would be a discrimination neither this harness nor the gateway makes.
+        """
+        self.clock.advance(SESSION_IDLE_MARGIN)
+        self.timers.fire_all()
 
     async def probe(self) -> dict[str, Any]:
         """What the page's Web Audio probe has recorded so far."""
@@ -370,11 +402,12 @@ async def driving(
     """
     settings = Settings(gateway_port=gateway_ports.free_port(), data_dir=tmp_path)
     engine = SpeakingEngine(renderings or (rendering_of(8.0),))
+    clock, timers = Clock(), Timers()
     gateway = Gateway(
         settings=settings,
         engine=engine,
-        now=Clock(),
-        defer=Timers(),
+        now=clock,
+        defer=timers,
         bundle=packaged_bundle(),
     )
     server: asyncio.Server = await gateway.start()
@@ -395,7 +428,14 @@ async def driving(
         )
         await context.add_init_script(PROBE)
         page = await context.new_page()
-        drive = Drive(page=page, gateway=gateway, engine=engine, origin=origin)
+        drive = Drive(
+            page=page,
+            gateway=gateway,
+            engine=engine,
+            origin=origin,
+            clock=clock,
+            timers=timers,
+        )
         await page.goto(f"{origin}/")
         await page.wait_for_selector("#bootstrap-form")
         if admitted:
