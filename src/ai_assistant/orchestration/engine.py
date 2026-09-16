@@ -1756,8 +1756,16 @@ def _withheld_member(
 
     **The plan's test is last and is the only one that needs two records**: a plan whose
     ``targets_revision`` is not the goal's current ``revision`` is a plan a **correction**
-    has overtaken (ADR-0249 §8). A goal the read could not find decides nothing, here as
-    above — the member would be about a record nothing established.
+    has overtaken (ADR-0249 §8).
+
+    **A goal the read could not find decides nothing at all, the attempt's three
+    included.** Each of those three asserts something about the goal and not only about
+    the attempt — ``ATTEMPT_CANCELLED`` that the goal is **open**, reached where ADR-0250
+    §13 has reopened it; ``ATTEMPT_ENDED`` that *"the goal is **not** thereby closed"*
+    (ADR-0249 §4); ``ATTEMPT_PAUSED`` that the goal is waiting on the user — so a goal a
+    concurrent deletion removed between the reads leaves all three unestablished, and §7's
+    rule is that such a refusal **propagates** rather than being given a name it could not
+    support.
 
     **It names the state the goal is in and never the reason the store refused.** One
     class covers both liveness raisers and says which of the two fired, so a claim
@@ -1774,16 +1782,22 @@ def _withheld_member(
     Returns:
         The member the read established, or ``None`` where it established none.
     """
-    if goal is not None:
-        if (named := _GOAL_WITHHELD.get(goal.status)) is not None:
-            return named
-        if not is_open(goal):
-            # ADR-0250 §1's other closed member, reached by the division rather than by
-            # name (see :data:`_GOAL_WITHHELD`): the goal is already reached.
-            return DriveWithheld.GOAL_ACHIEVED
+    if goal is None:
+        # **A goal the read could not find decides nothing, including the attempt's
+        # three** (above). Every one of them asserts something about the goal — that it
+        # is open and taken up again, that it is not thereby closed, that it is waiting
+        # on the user — so a member chosen here would say of a goal nothing established,
+        # and §7's rule for that is that the refusal propagates.
+        return None
+    if (named := _GOAL_WITHHELD.get(goal.status)) is not None:
+        return named
+    if not is_open(goal):
+        # ADR-0250 §1's other closed member, reached by the division rather than by
+        # name (see :data:`_GOAL_WITHHELD`): the goal is already reached.
+        return DriveWithheld.GOAL_ACHIEVED
     if attempt is not None and (member := _ATTEMPT_WITHHELD.get(attempt.state)) is not None:
         return member
-    if goal is not None and plan is not None and plan.targets_revision != goal.revision:
+    if plan is not None and plan.targets_revision != goal.revision:
         return DriveWithheld.UNDERSTANDING_CHANGED
     return None
 
