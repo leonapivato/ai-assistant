@@ -18,7 +18,7 @@ booked to ADR-0261 L2 by that decision's §13 and recorded on #2435. ADR-0268 §
 anticipates exactly this — *"the lane above wires ``end_for_goal`` on the
 ``ABANDONED`` close alone, that being the one closing write that exists"* — so what
 is asserted here is the act as it is, the per-attempt structure the retry will wrap
-is pinned, and the two limbs are filed against that lane (#2451).
+is pinned, and the two limbs are filed against that lane (#2452).
 """
 
 from __future__ import annotations
