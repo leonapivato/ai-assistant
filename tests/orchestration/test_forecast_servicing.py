@@ -36,12 +36,15 @@ from test_loop_search import _CostedSearcher, _footing, _servicer
 
 from ai_assistant.core.errors import MemoryStoreError, ToolBindingError
 from ai_assistant.core.types import (
+    EvidenceBasis,
+    EvidenceStanding,
     ForecastNotRead,
     ForecastRefusal,
     OutboundDestination,
     OutboundReach,
     ReadAsk,
     ReadKind,
+    ReadOutcomeKind,
     ReadRequest,
     StructuredAsk,
     TimeWindow,
@@ -49,6 +52,7 @@ from ai_assistant.core.types import (
 from ai_assistant.orchestration import reads
 from ai_assistant.orchestration.evidence import (
     as_of_of,
+    composed_row,
     records_of,
     requested_of,
     supported_of,
@@ -370,16 +374,35 @@ async def test_the_row_is_composed_with_no_requested_no_record_and_one_region_pe
     none is derived from the configured place, "a fact about where we asked and not
     about what the answer established".
 
-    **Asserted over the composition rather than over an assembled ``GoalEvidence``**,
-    and the reason is a gap in the tree rather than a choice: ``GoalEvidence``'s own
-    by-kind validator still reads ADR-0252 §1's **unamended** ephemeral list — ADR-0260
-    §15 records the amendment to that list, §12 assigns it to no lane by name, and L1
-    did not land it — so the row §9 requires is unconstructable today. The assembly is
-    this arm's remaining half and lands with that byte.
+    **Asserted over the assembled row and over every value it is composed from**, which
+    are two different failures: a composer that filled ``requested`` and a validator
+    that refused the assembly are both caught, and neither catches the other.
     """
     carried, _ = await _service()
     [yielded] = [one for one in carried.yields if one.ask.kind is ReadKind.FORECAST_READ]
 
+    row = composed_row(
+        row_id="row-1",
+        goal_id=GOAL.goal_id,
+        attempt_id="attempt-1",
+        ask=yielded.ask,
+        outcome=yielded.outcome,
+        records=yielded.records,
+        admitted=yielded.admitted,
+        read_at=NOW,
+        source=yielded.source,
+    )
+
+    assert row.basis is EvidenceBasis.READ_OUTCOME
+    assert row.read_kind is ReadKind.FORECAST_READ
+    assert row.requested is None
+    assert row.records == (), "ADR-0252 §1's ephemeral side, as ADR-0260 §15 amends it"
+    assert row.returned == len(DEFAULT_FORECAST_DAYS)
+    assert row.admitted == len(DEFAULT_FORECAST_DAYS)
+    assert row.source == "fake forecast"
+    assert row.as_of == NOW
+    assert row.verdict == ReadOutcomeKind.RETURNED_RECORDS.value
+    assert row.standing is EvidenceStanding.STANDING
     assert requested_of(yielded.ask) is None, "the ask has no typed part, so §3 composes none"
     assert records_of(yielded.ask.kind, yielded.records) == (), (
         "ADR-0252 §1's ephemeral side: the count stands alone"
@@ -390,6 +413,8 @@ async def test_the_row_is_composed_with_no_requested_no_record_and_one_region_pe
     assert yielded.source == "fake forecast", "§9's source is the forecaster's own name"
     regions, elided = supported_of(yielded.records)
     assert elided == 0
+    assert row.supported == regions, "the row carries exactly what §3 composes"
+    assert row.supported_elided == 0
     assert len(regions) == len(DEFAULT_FORECAST_DAYS)
     for region, record in zip(regions, yielded.records, strict=True):
         attestation = record.provenance.attestation

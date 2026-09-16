@@ -13475,17 +13475,32 @@ class GoalEvidence(BaseModel):
         On a ``READ_OUTCOME`` row whose ``read_kind`` is ``SIGHTED_QUERY``,
         ``STRUCTURED_READ`` or ``CITATION_HOP``, ``len(records)`` **equals**
         ``returned``, or equals :data:`MAX_EVIDENCE_RECORDS` where ``returned``
-        exceeds it. On one whose ``read_kind`` is ``WEB_SEARCH`` or ``LOCAL_FILE``,
-        ``records`` is **empty** and the count stands alone — their records are minted
-        for one turn and resolve in no store (ADR-0231 §16, ADR-0230 §10), so **the
-        split is by where the record lives and not by which ADR minted it**.
+        exceeds it. On one whose ``read_kind`` is ``WEB_SEARCH``, ``LOCAL_FILE`` or
+        ``FORECAST_READ``, ``records`` is **empty** and the count stands alone — their
+        records are minted for one turn and resolve in no store (ADR-0231 §16,
+        ADR-0230 §10, ADR-0260 §5), so **the split is by where the record lives and
+        not by which ADR minted it**.
+
+        **``FORECAST_READ`` is the third member of that side, and ADR-0260 §15 records
+        the amendment**: §9 of that decision rules that *"a forecast row names no
+        record and its count stands alone"*, placing this kind on the ephemeral side
+        *"for that side's stated reason"*, and §15 states the consequence of not doing
+        so — *"a reader holding only ADR-0252 would validate a ``FORECAST_READ`` row
+        under the durable arm and require ``len(records)`` to equal ``returned``, which
+        §9 makes wrong."* ADR-0252 §1's clause is otherwise untouched: no member moves
+        sides, the durable arm's bound is unchanged, and this decision adds no fourth
+        axis.
 
         Raises:
             ValueError: If the kind and the identifiers beside it disagree.
         """
         if self.read_kind is None:
             return
-        if self.read_kind in (ReadKind.WEB_SEARCH, ReadKind.LOCAL_FILE):
+        if self.read_kind in (
+            ReadKind.WEB_SEARCH,
+            ReadKind.LOCAL_FILE,
+            ReadKind.FORECAST_READ,
+        ):
             if self.records:
                 msg = (
                     f"a {self.read_kind.value} evidence row names no record: its records "
