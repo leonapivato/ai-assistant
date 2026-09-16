@@ -1191,12 +1191,18 @@ _ACTS_THAT_ACCOUNT_FOR_THEMSELVES: Final = frozenset(
 )
 
 
-#: The one *segment* left outside the rule below, as a (function, which ``await relay``)
-#: pair — read the constant above first, because this is the same carve-out at a finer
-#: grain. ``forgetBelief``'s second request is the destruction itself, and what follows it
-#: is the account of what that destruction did: "There was no such belief" for a record
-#: the hub no longer held. That is an act reporting itself, and #2451 is the ruling that
-#: decides whether such an account may open its panel.
+#: The one *success path* left outside the rule below, as a (function, which
+#: ``await relay``) pair — read the constant above first, because this is the same
+#: carve-out at a finer grain. ``forgetBelief``'s second request is the destruction
+#: itself, and what follows it is the account of what that destruction did: "There was
+#: no such belief" for a record the hub no longer held. That is an act reporting itself,
+#: and #2451 is the ruling that decides whether such an account may open its panel.
+#:
+#: **It exempts that path and not the request**, which adversarial review round 6 found
+#: the version of this that did not: skipping the whole segment took its
+#: transport-failure ``catch`` with it, and the guard could have been deleted from there
+#: with every case green while an aborted destruction re-opened the beliefs panel beside
+#: the bootstrap form. A failing path is asked its question whatever the segment.
 #:
 #: Its three siblings need no entry, and not by luck: ``forgetConversation`` says what it
 #: destroyed through ``sayForgotten``, which writes into a node *inside* the panel and
@@ -1242,14 +1248,21 @@ def test_every_resumed_relay_that_displays_anything_compares_its_session() -> No
         for which, opened in enumerate(sending, start=1):
             closed = sending[which] if which < len(sending) else len(body)
             segment = body[opened:closed]
-            displays = [
-                segment.index(one)
-                for one in ('show("', "window.confirm(", "fault(")
-                if one in segment
-            ]
-            if not displays or (name, which) in _SEGMENTS_THAT_ACCOUNT_FOR_AN_ACT:
-                continue
-            asked.append((name, which, segment, min(displays)))
+            # The failing path is split out and asked its own question, because the
+            # exemption above is about an act's *account of itself* and a `catch` is not
+            # one: what it writes is a condition, and `fault` opens the panel it writes
+            # into whatever the request was.
+            resumed, _, failing = segment.partition("} catch (_) {")
+            for path, part in (("resumed", resumed), ("failing", failing)):
+                if path == "resumed" and (name, which) in _SEGMENTS_THAT_ACCOUNT_FOR_AN_ACT:
+                    continue
+                shown = [
+                    part.index(one)
+                    for one in ('show("', "window.confirm(", "fault(")
+                    if one in part
+                ]
+                if shown:
+                    asked.append(((name, which, path), part, min(shown)))
         if not asked:
             # Nothing it does after a request is display, so it has nothing to guard --
             # `answerConfirmation` and `cancelRead`, whose endings are records rather
@@ -1258,12 +1271,18 @@ def test_every_resumed_relay_that_displays_anything_compares_its_session() -> No
         # Captured before the first request goes out -- an era read on resumption is the
         # value it is being compared against and would never differ from it.
         assert body.index("const era = sessionEra;") < body.index("await relay("), name
-        for one, which, segment, displayed in asked:
-            checked.append((one, which))
-            assert "if (!sameSession(half, era)) {" in segment, (one, which)
-            assert segment.index("if (!sameSession(half, era)) {") < displayed, (one, which)
+        for where, part, displayed in asked:
+            checked.append(where)
+            assert "if (!sameSession(half, era)) {" in part, where
+            assert part.index("if (!sameSession(half, era)) {") < displayed, where
 
-    assert {("readGoals", 1), ("forgetBelief", 1), ("writePreferences", 2)} <= set(checked)
+    assert {
+        ("readGoals", 1, "resumed"),
+        ("readGoals", 1, "failing"),
+        ("forgetBelief", 1, "resumed"),
+        ("forgetBelief", 2, "failing"),
+        ("writePreferences", 2, "resumed"),
+    } <= set(checked)
     # And the exclusions are real functions of this script rather than names that have
     # gone stale: a set holding a function that no longer exists silently excuses nothing,
     # which is exactly how a list like this rots into a permission.
