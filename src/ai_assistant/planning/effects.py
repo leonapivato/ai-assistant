@@ -20,8 +20,10 @@ from __future__ import annotations
 from dataclasses import dataclass
 from typing import TYPE_CHECKING
 
+from pydantic import ValidationError
+
 from ai_assistant.core.errors import PlanningError
-from ai_assistant.core.types import EffectClaim, EffectOutcome, StepStatus
+from ai_assistant.core.types import EffectClaim, EffectOutcome, EffectRecord, StepStatus
 
 if TYPE_CHECKING:
     from datetime import datetime
@@ -296,3 +298,35 @@ def claiming_revision(plan: ActionPlan) -> int:
         msg = f"plan {plan.id} targets no revision, so an effect claim has none to record"
         raise PlanningError(msg)
     return plan.targets_revision
+
+
+def detached(record: EffectRecord) -> EffectRecord:
+    """Rebuild ``record`` as a validated, **detached** :class:`EffectRecord`.
+
+    ADR-0014 §5 has a ``PlanStore`` copy every record in and out, and pydantic passes an
+    already-valid model instance through without copying — so a row built from a
+    caller's :class:`~ai_assistant.core.types.EffectKey` holds **that object**, and
+    ``object.__setattr__`` on it (or on a key reached through an exported row) would
+    rewrite the identity ADR-0259 §2's at-most-once claim is decided over. ``frozen=True``
+    refuses the assignment and does nothing about ``key.__dict__``, which ADR-0018 §3
+    puts inside the threat model.
+
+    A dump-and-revalidate rather than ``model_copy(deep=True)``, for
+    :func:`~ai_assistant.planning.goals.revalidated_goal`'s reason: it is the snapshot
+    *and* the guard against persisting a record whose validators a mutation has already
+    been walked past.
+
+    Args:
+        record: The row to store or to hand out.
+
+    Returns:
+        A detached copy, nested key included.
+
+    Raises:
+        PlanningError: If the record does not survive its own validators.
+    """
+    try:
+        return EffectRecord.model_validate(record.model_dump())
+    except ValidationError as exc:
+        msg = f"effect row for goal {record.goal_id} is not a valid record: {exc}"
+        raise PlanningError(msg) from exc

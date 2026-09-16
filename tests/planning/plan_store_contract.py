@@ -7657,3 +7657,62 @@ class PlanStoreContract:
 
             step = await self._step(store, committed)
             assert step.finished_at == clock.at
+
+    async def test_an_effect_row_is_detached_from_the_key_it_was_claimed_under(
+        self, store: PlanStore
+    ) -> None:
+        """ADR-0014 §5's copy-in rule, over the one value ADR-0259 §2 decides by.
+
+        A store that kept the caller's :class:`EffectKey` would let
+        ``object.__setattr__`` on it rewrite the identity at-most-once is decided over:
+        a completed act claimed under key A becomes, after the mutation, a row naming
+        key B, so a later step genuinely asking for B is answered ``COMPLETED`` and
+        satisfied from an act that was never performed under it. ``frozen=True`` refuses
+        the assignment and does nothing about ``key.__dict__``, which ADR-0018 §3 puts
+        inside the threat model — so the copy is what holds, not the flag.
+        """
+        held = await self._acting(store)
+        mutable = _KEY.model_copy(deep=True)
+        assert (
+            await store.claim_effect(execution_id=held.id, step_id="s1", effect_key=mutable)
+        ).claim is EffectClaim.CLAIMED
+        held = await self._to_status(store, held, StepStatus.SUCCEEDED)
+
+        mutable.__dict__["parameters_digest"] = _OTHER_KEY.parameters_digest
+
+        assert (await self._rows(store))[0].key == _KEY, "the stored row did not move"
+        later = await self._acting(store, plan_id="p2", attempt_id="a2")
+        assert (
+            await store.claim_effect(execution_id=later.id, step_id="s1", effect_key=_KEY)
+        ).claim is EffectClaim.COMPLETED, "the act is still recognised under the key it took"
+        assert (
+            await store.claim_effect(execution_id=later.id, step_id="s1", effect_key=_OTHER_KEY)
+        ).claim is EffectClaim.COMPLETED_OTHERWISE, (
+            "and the mutated key is a different act, not the completed one"
+        )
+
+    async def test_an_exported_effect_row_is_detached_from_the_store(
+        self, store: PlanStore
+    ) -> None:
+        """ADR-0014 §5's copy-**out** rule, reaching the row's nested key.
+
+        The export is the artifact a user takes elsewhere, and a shallow copy of it
+        hands back the store's own :class:`EffectKey`. Mutating it through the document
+        would move a claim nobody re-claimed — the same hole as the arm above, entered
+        from the other side, which is why both are asserted rather than one standing in
+        for the other.
+        """
+        held = await self._acting(store)
+        await store.claim_effect(execution_id=held.id, step_id="s1", effect_key=_KEY)
+        held = await self._to_status(store, held, StepStatus.SUCCEEDED)
+
+        exported = (await store.export()).effects[0]
+        exported.key.__dict__["parameters_digest"] = _OTHER_KEY.parameters_digest
+        exported.__dict__["step_id"] = "s9"
+
+        assert (await self._rows(store))[0].key == _KEY
+        assert (await self._rows(store))[0].step_id == "s1"
+        later = await self._acting(store, plan_id="p2", attempt_id="a2")
+        assert (
+            await store.claim_effect(execution_id=later.id, step_id="s1", effect_key=_KEY)
+        ).claim is EffectClaim.COMPLETED

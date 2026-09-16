@@ -43,6 +43,7 @@ from ai_assistant.planning.effects import (
     EffectHolder,
     claiming_revision,
     decide_claim,
+    detached,
     refuse_an_unsatisfiable_borrowing,
     refuse_an_unscopable_claim,
 )
@@ -1193,14 +1194,19 @@ class InMemoryPlanStore:
             effect_key=effect_key,
         )
         if decision.writes:
-            self._effects[plan.goal_id, action] = EffectRecord(
-                goal_id=plan.goal_id,
-                intended_action_id=action,
-                key=effect_key,
-                execution_id=execution_id,
-                step_id=step_id,
-                targets_revision=claiming_revision(plan),
-                claimed_at=self._now(),
+            # Detached on the way in, for ADR-0014 §5's copy-in rule: the caller still
+            # holds the `EffectKey` this row was built from, and a mutation of it would
+            # otherwise rewrite the identity at-most-once is decided over.
+            self._effects[plan.goal_id, action] = detached(
+                EffectRecord(
+                    goal_id=plan.goal_id,
+                    intended_action_id=action,
+                    key=effect_key,
+                    execution_id=execution_id,
+                    step_id=step_id,
+                    targets_revision=claiming_revision(plan),
+                    claimed_at=self._now(),
+                )
             )
         return decision.outcome
 
@@ -1474,7 +1480,9 @@ class InMemoryPlanStore:
             # document. ADR-0014 §5's closure rule is stated over **one holder** —
             # `PlanExport` refuses a row whose execution, step and goal do not line up
             # — so a row cannot ride here naming a step of some other execution.
-            effects=tuple(self._effects[key] for key in sorted(self._effects)),
+            effects=tuple(
+                self._effects[key].model_copy(deep=True) for key in sorted(self._effects)
+            ),
         )
 
     async def delete_goal(self, goal_id: str) -> GoalDeletion:

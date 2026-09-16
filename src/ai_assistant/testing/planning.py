@@ -477,6 +477,32 @@ _PHASE_ORDER: Final[dict[AttemptPhase, int]] = {
 }
 
 
+def _revalidated_effect(record: EffectRecord) -> EffectRecord:
+    """Rebuild ``record`` as a validated, detached :class:`EffectRecord` (ADR-0014 §5).
+
+    Mirror of :func:`ai_assistant.planning.effects.detached`; re-implemented here rather
+    than imported from ``ai_assistant.planning``, for the reason the module docstring
+    gives. Pydantic passes an already-valid model instance through without copying, so a
+    row built from a caller's :class:`EffectKey` holds **that object**, and
+    ``object.__setattr__`` on it would rewrite the identity ADR-0259 §2's at-most-once
+    claim is decided over.
+
+    Args:
+        record: The row to store.
+
+    Returns:
+        A detached copy, nested key included.
+
+    Raises:
+        PlanningError: If the record does not survive its own validators.
+    """
+    try:
+        return EffectRecord.model_validate(record.model_dump())
+    except ValidationError as exc:
+        msg = f"effect row for goal {record.goal_id} is not a valid record: {exc}"
+        raise PlanningError(msg) from exc
+
+
 def _appended_id(held: tuple[str, ...], addition: str | None) -> tuple[str, ...]:
     """Append ``addition`` unless the tuple already holds it (ADR-0249 §12).
 
@@ -2594,14 +2620,20 @@ class FakePlanStore:
         if plan.targets_revision is None:  # pragma: no cover — save_plan refuses such a plan
             msg = f"plan {plan.id} targets no revision, so an effect claim has none to record"
             raise PlanningError(msg)
-        self._effects[plan.goal_id, action] = EffectRecord(
-            goal_id=plan.goal_id,
-            intended_action_id=action,
-            key=effect_key,
-            execution_id=execution_id,
-            step_id=step_id,
-            targets_revision=plan.targets_revision,
-            claimed_at=self._now(),
+        # Detached on the way in, for ADR-0014 §5's copy-in rule: the caller still holds
+        # the `EffectKey` this row was built from, and a mutation of it would otherwise
+        # rewrite the identity at-most-once is decided over. Re-implemented rather than
+        # imported from ``ai_assistant.planning``, for the module docstring's reason.
+        self._effects[plan.goal_id, action] = _revalidated_effect(
+            EffectRecord(
+                goal_id=plan.goal_id,
+                intended_action_id=action,
+                key=effect_key,
+                execution_id=execution_id,
+                step_id=step_id,
+                targets_revision=plan.targets_revision,
+                claimed_at=self._now(),
+            )
         )
         return EffectOutcome(claim=EffectClaim.CLAIMED)
 
@@ -2985,7 +3017,9 @@ class FakePlanStore:
                 evidence=tuple(self._history_locked(goal_id) for goal_id in self._goals),
                 # ADR-0259 §9: the goal's effect rows travel with it, in a
                 # deterministic order so two exports of one store are one document.
-                effects=tuple(self._effects[key] for key in sorted(self._effects)),
+                effects=tuple(
+                    self._effects[key].model_copy(deep=True) for key in sorted(self._effects)
+                ),
             )
 
     async def delete_goal(self, goal_id: str) -> GoalDeletion:
