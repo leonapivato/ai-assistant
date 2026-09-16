@@ -59,6 +59,7 @@ from ai_assistant.core.types import (
     ActionPlan,
     AnswerKind,
     AnswerOutcome,
+    AttemptReport,
     Attestation,
     Authorization,
     AuthorizationDisposition,
@@ -383,6 +384,10 @@ class FakeAssistantEngine:
             *composes* carries, or ``None`` — the default — for a fresh
             ``NOT_REACHED`` minted per outcome. Script it to drive a rendering
             surface over ``REACHED`` and ``INDETERMINATE``.
+        attempt_report: ADR-0262 §6's report every outcome this engine *composes a
+            reply for* carries, or ``None`` — the default — because a fake ends no
+            attempt. Script it to drive a rendering surface over each of the six
+            ``AttemptOutcome`` members a fixed statement is owed for.
         observation: What :meth:`observe` returns.
         answered: What :meth:`answer` returns, or ``None`` to synthesise one from
             the question's own state.
@@ -627,6 +632,29 @@ class FakeAssistantEngine:
         #: makes the member empty "on every turn that opened none", so the default is
         #: the honest value and not a stand-in.
         self.authorizations: tuple[AuthorizationView, ...] = ()
+        #: What :attr:`~ai_assistant.core.types.TurnOutcome.attempt_report` carries on
+        #: a pass this engine **composed a reply for** — ADR-0262 §6's report — or
+        #: ``None``, the default.
+        #:
+        #: **A lever, because no sequence of surface calls reaches a single member of
+        #: it**: this double runs no verification phase and ends no attempt, so §6's
+        #: "non-``None`` exactly on a turn that ended an attempt under §4" is a state
+        #: nothing here can arrive at, and every one of the six
+        #: :class:`~ai_assistant.core.types.AttemptOutcome` members a surface owes a
+        #: fixed statement for would be unreachable in a consumer's test without one.
+        #: That obligation is **not** optional and falls on **both** surfaces at once
+        #: (ADR-0262 §11's L5), which is why the lever lands with the field rather than
+        #: with its first renderer.
+        #:
+        #: **``None`` by default, because a fake ends no attempt**: §6 leaves the member
+        #: absent on every turn that did not, so the default is the honest value and not
+        #: a stand-in — :attr:`authorizations`'s ground one member over.
+        #:
+        #: **It is the value for a pass this engine composed and never a rewrite of a
+        #: scripted one**: an outcome handed to :attr:`turn_outcome` already carrying a
+        #: report keeps what it carries, exactly as a scripted
+        #: :attr:`authorizations` does.
+        self.attempt_report: AttemptReport | None = None
         #: What decides whether a listed row reads **live** or **lapsed** (ADR-0254 §16,
         #: ADR-0193 §9: one reading for a whole listing), and what stamps a withdrawal's
         #: ``settled_at``. Its own lever rather than :attr:`recipient_grant_clock`, and
@@ -893,10 +921,21 @@ class FakeAssistantEngine:
         """
         stated = outcome.outbound_statement
         announced = outcome.authorizations or self.authorizations
-        if stated is None and outcome.reply is None and announced == outcome.authorizations:
+        # ADR-0262 §6's report rides a pass that **composed a reply**, because §4's
+        # first ending condition is a completed one — so a reply-less outcome is left
+        # alone here as it is for §7's statement, and a scripted report is kept at its
+        # value for :attr:`authorizations`'s reason.
+        reported = outcome.attempt_report or (self.attempt_report if outcome.reply else None)
+        if (
+            stated is None
+            and outcome.reply is None
+            and announced == outcome.authorizations
+            and reported == outcome.attempt_report
+        ):
             return outcome
         carried = {name: getattr(outcome, name) for name in TurnOutcome.model_fields}
         carried["authorizations"] = announced
+        carried["attempt_report"] = reported
         if stated is None and outcome.reply is None:
             return TurnOutcome(**carried)
         statement = self._outbound() if stated is None else self._detached(stated)
