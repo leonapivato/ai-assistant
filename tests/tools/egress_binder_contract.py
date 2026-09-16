@@ -57,7 +57,14 @@ if TYPE_CHECKING:
     from ai_assistant.core.types import FrozenJson
     from ai_assistant.testing.cancellation import SuspendedCall
 
-__all__ = ["EgressBinderContract", "either", "https_tool", "recipients", "tool_declaring"]
+__all__ = [
+    "EgressBinderContract",
+    "either",
+    "forecast_tool",
+    "https_tool",
+    "recipients",
+    "tool_declaring",
+]
 
 #: The connection reference and identity every case arranges unless it says
 #: otherwise. The identity is a Tier 1 value and is asserted to appear in **no**
@@ -332,6 +339,44 @@ def https_tool() -> ToolDefinition:
 #: deployment's configured search provider takes as it reaches this seam, which is a
 #: destination-bearing **argument** and not a value the seam holds (ADR-0231 §5, §8).
 SEARCH_ORIGIN: Final = "https://search.example.com"
+
+#: The canonical form of :data:`SEARCH_ORIGIN`, spelled so a case can assert the
+#: *pair* a binding carries rather than only the fact — ADR-0260 §6 makes route (c)
+#: the conjunction of the two, and this seam's whole contribution to the second half
+#: is putting the account and the origin on the binding the policy then reads.
+SEARCH_ORIGIN_CANONICAL: Final = "https://search.example.com:443"
+
+
+def forecast_tool() -> ToolDefinition:
+    """A forecast integration declaring an HTTPS origin, in :func:`https_tool`'s shape.
+
+    ADR-0260 §1 gives the forecast read "a seam of its own, in ``Fetcher``'s and
+    ``WebSearcher``'s form", so what reaches *this* seam is a registered tool naming
+    an origin — the same shape the search integration takes, one provider along.
+    It declares that origin and nothing else, because §3 makes the ask carry nothing
+    at all; the seam is indifferent to that, and the case is stated over a tool whose
+    only argument is the destination-bearing one so that nothing but the origin can
+    be mistaken for a source of the fact.
+    """
+    return tool_declaring(
+        {
+            "origin": {
+                "type": "string",
+                "x-egress-destination": "https",
+                "x-egress-tier": "operational",
+            }
+        },
+        tool_id="forecast@provider",
+    )
+
+
+#: The forecast provider's half of ADR-0260 §6's pair, kept **distinct** from the
+#: search pair in both members: a case that varied only one of them would pass a seam
+#: that read the other off the wrong call.
+FORECAST_ORIGIN: Final = "https://forecast.example.com"
+FORECAST_ORIGIN_CANONICAL: Final = "https://forecast.example.com:443"
+FORECAST_REFERENCE: Final = "conn-0002"
+FORECAST_IDENTITY: Final = "forecast-key@example.com"
 
 
 def _no_provenance() -> CarriedProvenance:
@@ -2312,6 +2357,278 @@ class EgressBinderContract(ABC):
         assert again is not None
         assert again.binding.planned_with_external_content is False
         assert again.binding == first.binding
+
+    # --- ADR-0260 §6, §11: the forecast read's own configured-provider fact ---
+
+    async def test_bind_writes_the_forecast_reach_fact_from_the_carrier_unchanged(
+        self, binder: EgressBinder
+    ) -> None:
+        """ADR-0260 §11, one field along from ``closed_loop`` and for its reasons.
+
+        The seam "writes :attr:`EgressBinding.forecast_reach` from this value
+        unchanged"; §11 puts every condition the fact is stated over in
+        ``orchestration`` — the request's kind is a forecast read and this deployment
+        holds a forecast registration, "which ``orchestration`` knows because
+        ``Forecaster.request`` answered a proposal rather than ``None``" — and says
+        it is **written by ``orchestration`` alone**. So this seam can neither derive
+        the fact nor check it, exactly as ADR-0238 §5 says of ``closed_loop``.
+
+        Both states are driven, so a seam that hard-coded either passes neither — and
+        ``False`` is the state a seam that simply **dropped** the field would pass, so
+        the ``True`` arm is the one that fails an implementation not carrying it at
+        all. That was the live defect this case closes (#2473): the canonical fake
+        passed only ``closed_loop`` to its derivation, so every forecast bound through
+        it came back ``False``, took no route (c) under ADR-0260 §6, and turned every
+        forecast arm built on the fake into an assertion about a ``RULING_CONFIRM``.
+
+        This is the **shared** suite, so the real seam and the fake owe it equally —
+        which is the whole reason a divergence of this kind is caught rather than
+        discovered downstream.
+        """
+        self.register_egress(binder, SEND_EMAIL)
+        parameters: dict[str, FrozenJson] = {
+            "to": ["a@example.com"],
+            "subject": "s",
+            "body": "b",
+        }
+        for carried in (True, False):
+            bound = await binder.bind(
+                SEND_EMAIL,
+                parameters=parameters,
+                provenance=CarriedProvenance(
+                    spans={},
+                    planned_with_external_content=False,
+                    coverage=SpanCoverage.NOT_COVERED,
+                    forecast_reach=carried,
+                ),
+            )
+            assert bound is not None
+            assert bound.binding.forecast_reach is carried
+
+    async def test_a_forecast_at_the_configured_forecast_pair_carries_that_fact_alone(
+        self, binder: EgressBinder
+    ) -> None:
+        """ADR-0260 §6's route (c), assembled: the fact **and** the pair, on one binding.
+
+        §6 grants route (c) only where three conjuncts hold — "the request carries
+        §11's ``forecast_reach`` fact; the binding's" account and origin are the
+        configured forecast pair. The first is the carrier's and this seam transcribes
+        it; the second and third are **this seam's own product**, since the account
+        comes off the connection record it read and the origin off the
+        destination-bearing argument it canonicalised. So what a policy reading the
+        binding needs is all three on one object, and that is what is asserted here.
+
+        ``closed_loop`` is asserted ``False`` in the same breath because §11 leaves
+        that field "untouched in its field, its type, its default, its carriage and its
+        comparison" and keeps it meaning *this deployment's own search* and nothing
+        else: a forecast read never sets it. A seam writing one fact from the other —
+        the widening §11 refuses — passes the fact assertion and fails this one.
+        """
+        forecaster = forecast_tool()
+        self.register_egress(
+            binder, forecaster, reference=FORECAST_REFERENCE, identity=FORECAST_IDENTITY
+        )
+
+        bound = await binder.bind(
+            forecaster,
+            parameters={"origin": FORECAST_ORIGIN},
+            provenance=CarriedProvenance(
+                spans={},
+                planned_with_external_content=False,
+                coverage=SpanCoverage.NOT_COVERED,
+                forecast_reach=True,
+            ),
+        )
+
+        assert bound is not None
+        assert bound.binding.forecast_reach is True
+        assert bound.binding.closed_loop is False, "§11: a forecast read never sets it"
+        assert bound.binding.account.reference == FORECAST_REFERENCE
+        assert [member.canonical for member in bound.binding.canonical_destination_set] == [
+            FORECAST_ORIGIN_CANONICAL
+        ]
+
+    async def test_a_search_at_the_configured_search_pair_carries_that_fact_alone(
+        self, binder: EgressBinder
+    ) -> None:
+        """The case above at the other provider, and it is not redundant with it.
+
+        ADR-0260 §11 makes the two facts independent — "the two pairs are independent:
+        a deployment configured for search alone reaches route (c) on a search and on
+        no forecast read, and the reverse" (``permissions.policy``, ADR-0247 §2). A
+        seam that wrote ``forecast_reach`` from ``closed_loop``, or that set both from
+        whichever the carrier stated, passes the forecast case and fails this one; a
+        seam that derived either from the account or the origin — the inference §11
+        forbids in terms — fails whichever of the two it guessed wrong.
+
+        The pair is asserted here too, for the reason it is asserted there: a binding
+        carrying the right fact at the wrong pair is refused route (c) by §6's second
+        and third conjuncts, and this seam is what puts the pair on it.
+        """
+        searcher = https_tool()
+        self.register_egress(binder, searcher)
+
+        bound = await binder.bind(
+            searcher,
+            parameters={"origin": SEARCH_ORIGIN, "query": "weather"},
+            provenance=CarriedProvenance(
+                spans={},
+                planned_with_external_content=False,
+                coverage=SpanCoverage.NOT_COVERED,
+                closed_loop=True,
+            ),
+        )
+
+        assert bound is not None
+        assert bound.binding.closed_loop is True
+        assert bound.binding.forecast_reach is False, "the fact is the forecast kind's alone"
+        assert bound.binding.account.reference == REFERENCE
+        assert [member.canonical for member in bound.binding.canonical_destination_set] == [
+            SEARCH_ORIGIN_CANONICAL
+        ]
+
+    @pytest.mark.parametrize(
+        "at",
+        ["the forecast pair", "the search pair", "neither pair"],
+    )
+    async def test_neither_fact_is_recovered_from_the_account_the_origin_or_the_tool(
+        self, binder: EgressBinder, at: str
+    ) -> None:
+        """ADR-0260 §11: **written by ``orchestration`` alone**, so a carrier that states
+        neither fact yields a binding carrying neither, wherever it is bound.
+
+        This is §13's arm (d) reaching the seam the binding comes from. Its third shape
+        is "a forecast request whose kind, account and origin all match and whose
+        ``forecast_reach`` is ``False``", which "takes **no** route (c)" — and §13 says
+        that shape is asserted in its own right because ``forecast_reach`` is §6's
+        **first** conjunct, so "a policy reading only the kind and the pair passes the
+        other two shapes while granting route (c) where §6 refuses it". A seam that
+        recovered the fact from the pair in front of it would put ``True`` on that very
+        binding and make the policy's refusal unreachable, so the seam owes the arm's
+        premise: it is also "the value a composition site that never computed the fact
+        leaves behind", which is what §11 makes ``False`` the restrictive default for.
+
+        The three shapes are the cross pairs and the unconfigured one: a forecast tool
+        at the forecast pair, a search tool at the search pair, and a call at an
+        account that is neither provider. In every one the carrier is silent, so every
+        answer is ``False`` — the seam reads no origin, no account reference, no tool
+        id and no argument for either fact. ``closed_loop`` is asserted beside
+        ``forecast_reach`` so the case bites on both fields rather than on the new one
+        alone (ADR-0238 §5's identical clause).
+        """
+        tool: ToolDefinition
+        parameters: dict[str, FrozenJson]
+        if at == "the forecast pair":
+            tool = forecast_tool()
+            parameters = {"origin": FORECAST_ORIGIN}
+            self.register_egress(
+                binder, tool, reference=FORECAST_REFERENCE, identity=FORECAST_IDENTITY
+            )
+        elif at == "the search pair":
+            tool = https_tool()
+            parameters = {"origin": SEARCH_ORIGIN, "query": "weather"}
+            self.register_egress(binder, tool)
+        else:
+            tool = SEND_EMAIL
+            parameters = {"to": ["a@example.com"], "subject": "s", "body": "b"}
+            self.register_egress(binder, tool)
+
+        bound = await binder.bind(tool, parameters=parameters, provenance=_no_provenance())
+
+        assert bound is not None
+        assert bound.binding.forecast_reach is False
+        assert bound.binding.closed_loop is False
+
+    async def test_a_carrier_stating_both_facts_is_transcribed_rather_than_refused(
+        self, binder: EgressBinder
+    ) -> None:
+        """Where "a binding never carries both" is enforced, and why it is not here.
+
+        ADR-0260 §11 makes the exclusivity ``orchestration``'s: each fact is its own
+        kind's, ``closed_loop`` keeps meaning *this deployment's own search* and
+        "a forecast read never sets it", and both are "written by ``orchestration``
+        alone". The seam's clause is the other half of that — it writes each field
+        "from the carrier's value unchanged" and holds none of the inputs either fact
+        is stated over — so a check *here* would be the seam computing the fact, which
+        §11 and ADR-0238 §5 forbid in terms.
+
+        So the excluded state is caught where it is **read**, not where it is carried:
+        ``permissions.policy``'s configured-provider match answers ``None`` for a
+        binding carrying both, granting route (c) at neither provider, and ADR-0272 §1
+        makes the trail admit a standing row only on a binding carrying **exactly one**
+        of them. This case pins the seam's half of that arrangement, so a later lane
+        that "fixes" the state by normalising or refusing it here — silently changing
+        what the policy and the trail are handed, and hiding an ``orchestration`` defect
+        from both — fails a case instead of passing every one.
+
+        It is stated over the shared suite because a fake that refused where the real
+        seam transcribes would make every such defect invisible in tests and visible
+        only in production, which is the divergence this suite exists to prevent.
+        """
+        self.register_egress(binder, SEND_EMAIL)
+
+        bound = await binder.bind(
+            SEND_EMAIL,
+            parameters={"to": ["a@example.com"], "subject": "s", "body": "b"},
+            provenance=CarriedProvenance(
+                spans={},
+                planned_with_external_content=False,
+                coverage=SpanCoverage.NOT_COVERED,
+                closed_loop=True,
+                forecast_reach=True,
+            ),
+        )
+
+        assert bound is not None
+        assert bound.binding.closed_loop is True
+        assert bound.binding.forecast_reach is True
+
+    async def test_rebind_leaves_forecast_reach_at_its_restrictive_default(
+        self, binder: EgressBinder
+    ) -> None:
+        """ADR-0260 §11: ``rebind`` "transcribes nothing new, because no forecast binding
+        is ever rebound".
+
+        §11 mints **no park** for a forecast read — "ADR-0244's park is a ``CONFIRM``
+        on a **search**, and nothing here widens it" — so "a forecast read ruled
+        ``CONFIRM`` is recorded, is not made, is not parked". What ``rebind`` rebuilds
+        is therefore always "a ``CarriedProvenance`` for a **search** binding, where
+        ``forecast_reach``'s restrictive default is the correct value", and ADR-0152
+        §7's and ADR-0247 §7's closed transcription count stays at **four**.
+
+        The input is the park ADR-0247 §12's Arm E names, so the case says the
+        transcription count did not quietly become five: the re-derived binding carries
+        ``closed_loop`` transcribed from ``approved`` and ``forecast_reach`` defaulted,
+        and equals the approved binding — which is what keeps the answer from being
+        ``OPERATION_CHANGED`` (#2232). What fails it is a ``rebind`` that **invents**
+        the fact: any value but ``False`` on this path derives a binding unequal to the
+        recorded one and refuses every park a deployment can actually hold. On the
+        parks §11 admits, transcribing and defaulting are indistinguishable by
+        construction, so the case pins the equality rather than claiming to tell them
+        apart — and §14 defers the resumable forecast park, naming the ADR that would
+        owe the fifth transcription if one were ever minted.
+        """
+        searcher = https_tool()
+        self.register_egress(binder, searcher)
+        parameters: dict[str, FrozenJson] = {"origin": SEARCH_ORIGIN, "query": "weather"}
+        parked = await binder.bind(
+            searcher,
+            parameters=parameters,
+            provenance=CarriedProvenance(
+                spans={},
+                planned_with_external_content=False,
+                coverage=SpanCoverage.NOT_COVERED,
+                closed_loop=True,
+            ),
+        )
+        assert parked is not None
+        assert parked.binding.forecast_reach is False
+
+        again = await binder.rebind(searcher, parameters=parameters, approved=parked.binding)
+
+        assert again is not None
+        assert again.binding.forecast_reach is False
+        assert again.binding == parked.binding, "ADR-0152 §7's equality holds on this field too"
 
     # --- ADR-0233 §4, §6: the call's coverage, carried, transcribed and refused ---
 
