@@ -24,6 +24,7 @@ import pytest
 from ai_assistant.core.errors import AssistantError
 from ai_assistant.core.types import (
     DEFAULT_NOTIFICATION_REACH,
+    AttemptOutcome,
     BeliefBand,
     BeliefSummary,
     ClarificationWithdrawal,
@@ -8369,6 +8370,180 @@ def test_only_the_awaited_forecast_statement_names_a_command_and_it_names_decisi
     for member in ForecastNotRead:
         if member is not ForecastNotRead.AUTHORISATION_AWAITED:
             assert "assistant " not in said[member.value], member.value
+
+
+def test_one_fixed_statement_per_attempt_report_member_and_no_member_without_one() -> None:
+    """ADR-0262 §6, read off ``core``'s own vocabulary.
+
+    "**One fixed statement per member**, rendered beside the reply and never in place of
+    it", under the rule that "a surface that renders no statement for a member has not
+    implemented this section and is not a permitted degradation". So the map is total over
+    the six §6's report admits and closed at their count, which is
+    ``FORECAST_NOT_READ_WORDS``' own arrangement: an eighth ``AttemptOutcome`` arriving
+    with the ADR that decides it fails here rather than reaching a person as a bare
+    identifier — the #1113 rule, at this vocabulary.
+
+    **``CANCELLED`` is excluded on purpose and its exclusion is asserted.** §4 is explicit
+    that it "is reached by no limb" of the comparison, so §6 fixes no statement for it;
+    minting one here would be this surface deciding a vocabulary, and a cancelled attempt
+    is ADR-0261 §2's act with statements of its own. What it reaches instead is
+    ``ATTEMPT_REPORT_UNREADABLE``.
+
+    **And the lookup is by ownership rather than by truthiness**, which is the arm a plain
+    ``WORDS[member]`` leaves open: a member naming an inherited property — ``toString``,
+    ``constructor`` — comes back as a function and ``line`` would put its source text on
+    the screen. The ``typeof`` in front of it is the same round's: a property key is a
+    coerced one, so ``String(["failed"])`` spells a member.
+    """
+    script = _code("app.js")
+    words = _map(script, "ATTEMPT_OUTCOME_WORDS")
+    functions = _functions(script)
+
+    assert _keys(words) == {member.value for member in AttemptOutcome} - {
+        AttemptOutcome.CANCELLED.value
+    }
+    assert AttemptOutcome.CANCELLED.value not in _keys(words)
+    assert (
+        'return typeof member === "string" && Object.hasOwn(ATTEMPT_OUTCOME_WORDS, member);'
+        in functions["isAttemptOutcome"]
+    )
+    assert "isAttemptOutcome(member)" in functions["attemptOutcomeWords"]
+    assert "ATTEMPT_REPORT_UNREADABLE" in functions["attemptOutcomeWords"]
+    assert "attemptOutcomeWords(member)" in functions["renderAttemptReport"]
+
+
+def test_the_page_renders_the_attempt_statement_beside_the_reply_and_not_in_place_of_it() -> None:
+    """ADR-0262 §6's placement, and §6's meaning for an absent member.
+
+    The renderer is reached from ``renderOutcome`` **after** ``renderReply``, which is
+    ``renderRouted``'s own placement and this page's reading of "beside the reply and never
+    in place of it". And ``null`` is silence rather than a refusal: the member is non-``None``
+    "exactly on a turn that ended an attempt under §4", so every turn that ended none — a
+    routed operation, ADR-0198 §1's restatement, an attempt still live, **and a turn whose
+    ``commit_attempt`` was refused** — says nothing about an attempt at all. §6 fixes that
+    last one as "a silence rather than a false claim".
+    """
+    script = _code("app.js")
+    functions = _functions(script)
+    outcome = functions["renderOutcome"]
+    render = functions["renderAttemptReport"]
+
+    assert "renderAttemptReport(body, outcome.attempt_report);" in outcome
+    assert outcome.index("renderReply(body, outcome)") < outcome.index("renderAttemptReport(")
+    assert "if (member === null || member === undefined) {" in render
+    assert render.index("member === undefined") < render.index("line(body,")
+
+
+def test_the_no_action_notice_is_guarded_on_the_four_outcomes_that_assert_work() -> None:
+    """The contradiction on one screen, at this vocabulary, pinned where the condition is.
+
+    "No action was needed." above "The work failed, and no criterion of this goal was
+    established." says both that nothing was owed and that work was attempted and did not
+    complete. The comparison runs after the plan, so a turn that planned nothing still ends
+    an attempt — limb 1's first arm is an established contradiction read off the goal's own
+    earlier records — and this lane is what would have created the pairing.
+
+    **Four of the seven and not the member's presence**, which is where this term differs
+    from ``forecast_not_read``'s beside it. ``ForecastNotRead`` "has no member for having
+    attempted nothing"; ``AttemptOutcome`` has two, and ADR-0262 §12's first arm is a turn
+    of the second kind — "what is two plus two?", no step claimed, the attempt ending
+    ``ANSWERED`` — of which the notice is true.
+
+    Asserted over the condition's own text, beside the executed arms in
+    ``test_browser_attempt_report.py``: a driven case says the notice is absent on the
+    outcomes it was driven over, and this says the guard is a term of the condition rather
+    than an accident of the shapes those cases happened to use.
+    """
+    script = _code("app.js")
+    outcome = _functions(script)["renderOutcome"]
+
+    guard = outcome[outcome.index("outcome.steps.length === 0") :]
+    guard = guard[: guard.index('line(body, "No action was needed."')]
+    assert "!ATTEMPT_OUTCOMES_THAT_ASSERT_WORK.has(outcome.attempt_report)" in guard
+
+    opened = script.index("\nconst ATTEMPT_OUTCOMES_THAT_ASSERT_WORK = new Set([")
+    asserting = set(re.findall(r'"([a-z_]+)"', script[opened : script.index("]);", opened)]))
+    assert asserting == {
+        AttemptOutcome.PARTIAL.value,
+        AttemptOutcome.FAILED.value,
+        AttemptOutcome.UNCERTAIN.value,
+        AttemptOutcome.CONDITION_PREVENTED.value,
+    }
+
+
+def test_no_attempt_statement_asserts_what_the_comparison_did_not_establish() -> None:
+    """ADR-0262 §6's bar, over the declared sentences as absences.
+
+    "**No statement asserts anything the record does not carry.** None says that the goal
+    is complete unless the member is ``VERIFIED``; none says an effect did not happen; none
+    names a criterion, a tool, a destination, a figure, a ``Settings`` field or a cause; and
+    ``UNCERTAIN``'s says nothing about whether the call left."
+
+    **And none asserts a commit that has not happened** (§6): the comparison runs before the
+    composing stage and both commits after it, so "no statement of this section asserts that
+    an attempt was ended, that a status was written, or that a goal is now closed". The
+    ``GoalStatus`` words are read from ``core``'s own enumeration rather than spelled out, so
+    a member renamed there fails here instead of leaving a stale literal behind.
+
+    **The offer is barred too.** §6 puts it in the reply — "the **reply** carries the offer
+    and the **surface** the outcome word" — so a sentence here ending with one would be the
+    page composing a reply, which golden rule 3 refuses.
+    """
+    said = _statements(_map(_code("app.js"), "ATTEMPT_OUTCOME_WORDS"))
+
+    assert set(said) == {member.value for member in AttemptOutcome} - {
+        AttemptOutcome.CANCELLED.value
+    }
+    for member, sentence in said.items():
+        assert not any(character.isdigit() for character in sentence), member
+        for barred in (
+            "because",
+            "http",
+            "://",
+            "@",
+            "$",
+            "£",
+            "threshold",
+            "floor",
+            "settings",
+            "shall i",
+            "would you like",
+            "try again",
+            "never left",
+            "did not leave",
+            "nothing was sent",
+            "nothing was done",
+            "did not happen",
+            "the attempt was ended",
+            "goal is closed",
+            "goal is complete",
+        ):
+            assert barred not in sentence.lower(), f"{member}: {barred}"
+        for status in GoalStatus:
+            assert status.value not in sentence.lower(), f"{member}: {status.value}"
+
+
+def test_only_the_two_statements_that_cannot_speak_for_the_status_name_a_command() -> None:
+    """ADR-0262 §6's fixed half, on the surface that has no goals listing of its own.
+
+    §6 names ``assistant goals`` in exactly two of the six — ``VERIFIED``'s, which "speaks
+    of the criteria **this attempt compared**" and must not claim the goal is closed, and
+    ``UNCERTAIN``'s — because each is a statement the goal's own status could stand beside
+    differently, so it says where the status is read instead of asserting one. The other
+    four name nothing.
+
+    Naming the terminal's command from this page is this surface's own ratified practice
+    (``UNREADABLE_RULINGS``, ``FORECAST_NOT_READ_WORDS``): inventing a control here would be
+    minting a route no ratified decision gives this surface.
+    """
+    said = _statements(_map(_code("app.js"), "ATTEMPT_OUTCOME_WORDS"))
+
+    names_goals = {AttemptOutcome.VERIFIED.value, AttemptOutcome.UNCERTAIN.value}
+    for member, sentence in said.items():
+        assert ("'assistant goals'" in sentence) is (member in names_goals), member
+        assert ("assistant " in sentence) is (member in names_goals), member
+        for barred in ("assistant resume", "assistant decisions", "assistant cancel-read"):
+            assert barred not in sentence, f"{member}: {barred}"
 
 
 def test_both_accounts_a_park_owes_are_written_where_no_refresh_reaches_them() -> None:
