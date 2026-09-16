@@ -67,7 +67,15 @@ from ai_assistant.orchestration.verification import (
 )
 
 if TYPE_CHECKING:
-    from ai_assistant.core.types import Goal, GoalElement, PermissionDecision, StepExecution
+    from collections.abc import Mapping
+
+    from ai_assistant.core.types import (
+        FrozenJson,
+        Goal,
+        GoalElement,
+        PermissionDecision,
+        StepExecution,
+    )
     from ai_assistant.orchestration.verification import Comparison
 
 # The declaration the booking steps are pinned to in most arms: two postconditions,
@@ -401,11 +409,17 @@ async def test_a_declared_literal_is_compared_byte_exactly() -> None:
     """ADR-0253 §4: ``FIELD_EQUALS`` compares **byte-exactly**, folding nothing.
 
     *"No lane folds case, coerces a number to a string, compares a float by tolerance,
-    or treats ``1`` as ``true``."* Each of the three outputs below is what a coercion
-    would accept and what this comparison refuses.
+    or treats ``1`` as ``true``."* Python's own ``==`` performs two of those unaided —
+    ``1 == 1.0`` and ``True == 1`` are both true — so the **equal-valued** float is the
+    boundary that matters and it is walked here beside the unequal one.
+
+    **The comparison is the tree's one statement of §4** and this module restates none
+    of it: :func:`~ai_assistant.orchestration.effects.verification_holds` is that
+    statement, and these arms assert that §2's comparison reads it rather than a second
+    spelling free to disagree with it. Adversarial review, round 1, ``blocker``.
     """
     declaration = a_tool(postconditions=(field_equals("nights", 2),))
-    for output in ({"nights": "2"}, {"nights": 2.5}, {"nights": True}):
+    for output in ({"nights": "2"}, {"nights": 2.0}, {"nights": 2.5}, {"nights": True}):
         comparison = await _compared(
             a_goal(a_criterion(RIVERSIDE)),
             a_step("s-1", output=output),
@@ -417,6 +431,35 @@ async def test_a_declared_literal_is_compared_byte_exactly() -> None:
         a_goal(a_criterion(RIVERSIDE)),
         a_step("s-1", output={"nights": 2}),
         decisions=(a_decision("d-1", definition=declaration),),
+    )
+    assert _one(exact) is CriterionResult.MET
+
+
+async def test_the_byte_exact_comparison_is_walked_into_containers() -> None:
+    """ADR-0253 §4, one level down: ``equals`` is a ``FrozenJsonValue``, and so is an object.
+
+    ``{"count": true}`` equals ``{"count": 1}`` under a top-level ``==`` and ``[1]``
+    equals ``[1.0]`` — the same coercions §4 names, reached through a container. Each
+    reads **unmet**, and the identical shape reads **met**.
+    """
+    nested = a_tool(postconditions=(field_equals("room", {"beds": 1, "tags": [2]}),))
+    coerced: tuple[Mapping[str, FrozenJson], ...] = (
+        {"room": {"beds": True, "tags": [2]}},
+        {"room": {"beds": 1, "tags": [2.0]}},
+        {"room": {"beds": 1}},
+    )
+    for output in coerced:
+        comparison = await _compared(
+            a_goal(a_criterion(RIVERSIDE)),
+            a_step("s-1", output=output),
+            decisions=(a_decision("d-1", definition=nested),),
+        )
+        assert _one(comparison) is CriterionResult.UNMET, output
+
+    exact = await _compared(
+        a_goal(a_criterion(RIVERSIDE)),
+        a_step("s-1", output={"room": {"beds": 1, "tags": [2]}}),
+        decisions=(a_decision("d-1", definition=nested),),
     )
     assert _one(exact) is CriterionResult.MET
 

@@ -1526,13 +1526,26 @@ class _Verified:
     a second read between the comparison and the write would be free to answer
     differently, which is the interleaving §5's no-retry rule is about.
 
+    **And the attempt travels with it for the same reason one step down** (§4). The
+    ending transition's ``expected_version`` and its ``execution_versions`` are both
+    *"the caller read"* figures, and §4 is explicit that the snapshot is *"the versions
+    the comparison was computed against"*: a row re-read after the composing stage would
+    take the compare-and-swap over ground that moved during exactly the interval the two
+    conjuncts exist to cover. **The order between them is what keeps the two refusals
+    apart** — the attempt's own compare-and-swap is decided first, so an execution
+    appended after this read is reported as the race it is and never as a malformed set.
+
     Attributes:
-        comparison: §3's rung, §2's three results, §4's member and §6's two values.
+        comparison: §3's rung, §2's three results, §4's member, §6's two values and the
+            version snapshot the comparison read.
+        attempt: The attempt **as the comparison read it**, which is the row the ending
+            transition is computed against.
         goal_id: The goal compared.
         goal_version: Its ``version`` at the instant the comparison read it.
     """
 
     comparison: Comparison
+    attempt: OpenedAttempt
     goal_id: str
     goal_version: int
 
@@ -10578,7 +10591,6 @@ class Engine:
         if ends:
             return (
                 await self._ended(
-                    held,
                     verified,
                     working=self._worked(held, since),
                     add_authorization_id=allowed_by,
@@ -10673,6 +10685,7 @@ class Engine:
         working: timedelta | None = None,
         add_execution_id: str | None = None,
         add_authorization_id: str | None = None,
+        versions: tuple[tuple[str, int], ...] = (),
     ) -> OpenedAttempt | None:
         """Commit one attempt transition and carry the moved attempt forward (§12).
 
@@ -10700,6 +10713,13 @@ class Engine:
                 :attr:`~ai_assistant.core.types.GoalAttempt.authorization_ids`. An id the
                 tuple already holds is ignored rather than duplicated (§12), which is what
                 makes a resumption's re-append free.
+            versions: ADR-0262 §4's snapshot, **supplied by the caller and never read
+                here**: the field is *"the versions the comparison was computed
+                against"*, and this method runs after the composing stage. It rides the
+                ``→ ENDED`` transition and **only** that one — *"it is the ``→ ENDED``
+                limb alone that reads the field: every other transition ignores it,
+                ``→ CANCELLED`` included"* — so every other caller leaves it empty and
+                writes exactly as it does today.
 
         Returns:
             The attempt as the store now holds it, beside the phases stamped so far, or
@@ -10722,14 +10742,6 @@ class Engine:
             # nothing else — a write whose only effect is to invalidate a version
             # another writer is holding.
             return opened
-        # ADR-0262 §4: the snapshot rides on the `→ ENDED` transition and on no
-        # other, because "it is the ``→ ENDED`` limb **alone** that reads the
-        # field: every other transition ignores it, ``→ CANCELLED`` included".
-        # Reading the executions on a phase stamp or an append would buy nothing and
-        # would put a store read on every transition this engine makes.
-        versions = (
-            await self._execution_versions(opened.attempt) if to_state is AttemptState.ENDED else ()
-        )
         moved = await self._plans.commit_attempt(
             AttemptTransition(
                 attempt_id=opened.attempt.id,
@@ -10774,12 +10786,12 @@ class Engine:
         retries or repairs**, and a goal the user never returns to keeps a live attempt,
         which is what ``abandon_goal`` is for.
 
-        **Read separately from** :meth:`_execution_versions` **on purpose.** The two
-        answer different questions at different moments: this one decides whether to
-        propose the transition at all, and the snapshot is read at the commit, because
-        "the read is the last one before the write and nothing re-reads after it". A
-        single walk would either decide from a figure read too late or move the decision
-        into the commit helper, and §4 puts the decision at the three sites that make it.
+        **Read separately from the comparison's own walk on purpose.** The two answer
+        different questions at different moments: this one decides whether to *propose*
+        the transition at all, and §4's version snapshot is the figure the **comparison**
+        read, carried forward on :class:`_Verified` and compared at the commit. A single
+        walk would either decide the proposal from a figure read too late or take the
+        snapshot before the comparison it is supposed to be of.
 
         Args:
             opened: The attempt as this pass holds it, or ``None`` where the pass opened
@@ -10807,64 +10819,6 @@ class Engine:
             if any(step.status not in _SETTLED_STEP_STATUSES for step in state.steps):
                 return False
         return True
-
-    async def _execution_versions(self, attempt: GoalAttempt) -> tuple[tuple[str, int], ...]:
-        """Every execution this attempt names, at the version this read returns (ADR-0262 §4).
-
-        **The complete set, and completeness is the load-bearing half**: ADR-0262 §4
-        rules the field "a **snapshot of the set the comparison read** rather than a
-        list of the ones the caller chose to protect", because "a subset would leave the
-        omitted execution free to move between the comparison and the commit, which is
-        the whole of the race". So this walks
-        :attr:`~ai_assistant.core.types.GoalAttempt.execution_ids` entire and never the
-        one execution the turn happened to drive.
-
-        **Read off the same row the transition is computed against** — the one
-        :meth:`_move_attempt` takes ``expected_version`` from — which is §11's *"read
-        where they read the attempt"*. That is also what makes the id set exactly the
-        attempt's, which is the store's own ``ValueError`` limb: an id set built from any
-        other row could be a superset or a subset of the one the write is checked
-        against.
-
-        **The versions are read here rather than carried from the walk.** An execution's
-        version advances as its steps are claimed and committed, so a figure read before
-        the driving would be stale at the commit on every turn that drove anything —
-        which is the race the field exists to report, raised against the caller's own
-        turn. This engine takes no second bite at a refused commit (§4), so the read is
-        the last one before the write and nothing re-reads after it.
-
-        **This computes no verdict and decides nothing.** ADR-0262 §11's L2 is
-        compatibility alone: the value is assembled and passed, and which
-        :class:`~ai_assistant.core.types.AttemptOutcome` an attempt earns, whether it may
-        end at all, and what the store does with these pairs are L3's and L4's.
-
-        Args:
-            attempt: The attempt as this commit is computed against.
-
-        Returns:
-            One pair per execution the attempt names, in ``execution_ids``' own order —
-            empty for an attempt naming none, which is what §4 says such an attempt
-            carries.
-
-        Raises:
-            PlanningError: As ``get_execution`` raises it.
-        """
-        pairs: list[tuple[str, int]] = []
-        for execution_id in attempt.execution_ids:
-            state = await self._plans.get_execution(execution_id)
-            if state is None:  # pragma: no cover — the store's own write-time closure
-                # Unreachable against a store that kept its closure: both attempt-writing
-                # members refuse a reference the store does not resolve under the
-                # attempt's goal, and ``delete_goal`` cascades a goal's executions and
-                # attempts together. Where a store lost one anyway there is **no version
-                # to report**, and nothing here invents one — a figure this engine made
-                # up would be compared against a stored row as though a caller had read
-                # it. The pair is omitted, which leaves the snapshot short, and §4 makes a
-                # short snapshot a malformed command the store refuses outright (L3)
-                # rather than a write that silently protects less than it claims.
-                continue
-            pairs.append((execution_id, state.version))
-        return tuple(pairs)
 
     async def _compared(self, opened: OpenedAttempt | None) -> _Verified | None:
         """ADR-0262's comparison, run **before this turn composes anything** (§1).
@@ -10914,7 +10868,12 @@ class Engine:
             decisions=self._trail,
             rows=self._authorizations,
         )
-        return _Verified(comparison=comparison, goal_id=goal.id, goal_version=goal.version)
+        return _Verified(
+            comparison=comparison,
+            attempt=opened,
+            goal_id=goal.id,
+            goal_version=goal.version,
+        )
 
     def _pass_to_composing(self, verified: _Verified | None, facts: GoalFacts) -> GoalFacts:
         """Fold §6's two values into what the composing stage is told.
@@ -10941,7 +10900,6 @@ class Engine:
 
     async def _ended(
         self,
-        opened: OpenedAttempt | None,
         verified: _Verified | None,
         *,
         working: timedelta | None,
@@ -10967,10 +10925,16 @@ class Engine:
         read as written — one transition, no second write — and the alternative is the
         thing §4 refuses, a phase that writes again after a refusal.
 
+        **The transition is computed against the row the comparison read, and carries
+        that comparison's own version snapshot** (§4). Both are *"the caller read"*
+        figures: an ``expected_version`` or a snapshot taken after the composing stage
+        would report the ground as unmoved over the one interval the two conjuncts
+        exist to cover, which is the whole of the race — a retry that landed while a
+        model call was out leaves every step terminal at both instants.
+
         Args:
-            opened: The attempt as this pass holds it.
-            verified: This pass's comparison. ``None`` compares nothing and ends
-                nothing.
+            verified: This pass's comparison, with the attempt and the snapshot it was
+                computed against. ``None`` compares nothing and ends nothing.
             working: The ledger's new value.
             add_authorization_id: A decision this pass recorded, appended on the same
                 transition (ADR-0249 §12).
@@ -10984,24 +10948,25 @@ class Engine:
                 the ending but a failure of the store.
         """
         if verified is None:  # pragma: no cover — the callers test the same fact first
-            return opened, None
+            return None, None
         try:
             moved = await self._move_attempt(
-                opened,
+                verified.attempt,
                 to_phase=AttemptPhase.VERIFY,
                 to_state=AttemptState.ENDED,
                 outcome=verified.comparison.outcome,
                 ended_at=self._clock(),
                 working=working,
                 add_authorization_id=add_authorization_id,
+                versions=verified.comparison.versions,
             )
         except StaleExecutionError:
             _log.info(
                 "attempt_ending_refused",
-                attempt_id=None if opened is None else opened.attempt.id,
+                attempt_id=verified.attempt.attempt.id,
                 outcome=verified.comparison.outcome.value,
             )
-            return opened, None
+            return verified.attempt, None
         if verified.comparison.outcome is AttemptOutcome.VERIFIED:
             await self._achieved(verified)
         return moved, verified.comparison.report
@@ -11553,7 +11518,7 @@ class Engine:
             report: AttemptReport | None = None
             if ends:
                 attempt, report = await self._ended(
-                    attempt, verified, working=self._worked(attempt, drove_from)
+                    verified, working=self._worked(attempt, drove_from)
                 )
             elif raised is None:
                 attempt = await self._move_attempt(
@@ -11828,9 +11793,7 @@ class Engine:
         )
         report = None
         if ends:
-            attempt, report = await self._ended(
-                attempt, verified, working=self._worked(attempt, drove_from)
-            )
+            attempt, report = await self._ended(verified, working=self._worked(attempt, drove_from))
         elif parked is None:
             attempt = await self._move_attempt(
                 attempt,
