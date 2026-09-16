@@ -10461,6 +10461,14 @@ class Engine:
             # nothing else — a write whose only effect is to invalidate a version
             # another writer is holding.
             return opened
+        # ADR-0262 §4: the snapshot rides on the `→ ENDED` transition and on no
+        # other, because "it is the ``→ ENDED`` limb **alone** that reads the
+        # field: every other transition ignores it, ``→ CANCELLED`` included".
+        # Reading the executions on a phase stamp or an append would buy nothing and
+        # would put a store read on every transition this engine makes.
+        versions = (
+            await self._execution_versions(opened.attempt) if to_state is AttemptState.ENDED else ()
+        )
         moved = await self._plans.commit_attempt(
             AttemptTransition(
                 attempt_id=opened.attempt.id,
@@ -10472,10 +10480,69 @@ class Engine:
                 working=working,
                 add_execution_id=add_execution_id,
                 add_authorization_id=add_authorization_id,
+                execution_versions=versions,
             )
         )
         stamped = opened.phases + (() if to_phase is None else (to_phase,))
         return replace(opened, attempt=moved, phases=stamped)
+
+    async def _execution_versions(self, attempt: GoalAttempt) -> tuple[tuple[str, int], ...]:
+        """Every execution this attempt names, at the version this read returns (ADR-0262 §4).
+
+        **The complete set, and completeness is the load-bearing half**: ADR-0262 §4
+        rules the field "a **snapshot of the set the comparison read** rather than a
+        list of the ones the caller chose to protect", because "a subset would leave the
+        omitted execution free to move between the comparison and the commit, which is
+        the whole of the race". So this walks
+        :attr:`~ai_assistant.core.types.GoalAttempt.execution_ids` entire and never the
+        one execution the turn happened to drive.
+
+        **Read off the same row the transition is computed against** — the one
+        :meth:`_move_attempt` takes ``expected_version`` from — which is §11's *"read
+        where they read the attempt"*. That is also what makes the id set exactly the
+        attempt's, which is the store's own ``ValueError`` limb: an id set built from any
+        other row could be a superset or a subset of the one the write is checked
+        against.
+
+        **The versions are read here rather than carried from the walk.** An execution's
+        version advances as its steps are claimed and committed, so a figure read before
+        the driving would be stale at the commit on every turn that drove anything —
+        which is the race the field exists to report, raised against the caller's own
+        turn. This engine takes no second bite at a refused commit (§4), so the read is
+        the last one before the write and nothing re-reads after it.
+
+        **This computes no verdict and decides nothing.** ADR-0262 §11's L2 is
+        compatibility alone: the value is assembled and passed, and which
+        :class:`~ai_assistant.core.types.AttemptOutcome` an attempt earns, whether it may
+        end at all, and what the store does with these pairs are L3's and L4's.
+
+        Args:
+            attempt: The attempt as this commit is computed against.
+
+        Returns:
+            One pair per execution the attempt names, in ``execution_ids``' own order —
+            empty for an attempt naming none, which is what §4 says such an attempt
+            carries.
+
+        Raises:
+            PlanningError: As ``get_execution`` raises it.
+        """
+        pairs: list[tuple[str, int]] = []
+        for execution_id in attempt.execution_ids:
+            state = await self._plans.get_execution(execution_id)
+            if state is None:  # pragma: no cover — the store's own write-time closure
+                # Unreachable against a store that kept its closure: both attempt-writing
+                # members refuse a reference the store does not resolve under the
+                # attempt's goal, and ``delete_goal`` cascades a goal's executions and
+                # attempts together. Where a store lost one anyway there is **no version
+                # to report**, and nothing here invents one — a figure this engine made
+                # up would be compared against a stored row as though a caller had read
+                # it. The pair is omitted, which leaves the snapshot short, and §4 makes a
+                # short snapshot a malformed command the store refuses outright (L3)
+                # rather than a write that silently protects less than it claims.
+                continue
+            pairs.append((execution_id, state.version))
+        return tuple(pairs)
 
     async def _run_turn(  # noqa: C901, PLR0913, PLR0915 — C901: ADR-0250 §3 and §10 add two branches to one sequence — a turn that could not decide which goal it was about returns before the loop, and a turn that raised a question takes the undriven path whatever its plan proposed — and each is a fact about *this* pass that a helper could only take back by threading this pass's whole local state through a parameter list. PLR0913: the utterance, the budget, the conversation, the two composers, the supply filter and the spoken capture; every one is a distinct fact about the pass, and collapsing any pair would put a flag where a value belongs. PLR0915: one pass is one sequence — admit, persist, authorise, drive, compose, capture — and the four statements ADR-0249 §12's authorization boundary adds are a closure over this pass's own attempt carrier, which a helper could only take back by putting that carrier in a mutable cell
         self,
