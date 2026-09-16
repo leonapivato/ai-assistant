@@ -15258,18 +15258,6 @@ def _bounded_arguments(value: tuple[BoundedArgument, ...]) -> tuple[BoundedArgum
     return value
 
 
-#: The addressing forms ADR-0267 §3 refuses in a :class:`QuotedOutput` key, which are
-#: ``StepOutputRef.field``'s own four spelled out: *"a dotted expression, an index, a
-#: wildcard or a selector"*.
-#:
-#: **A closed set of characters rather than a grammar of valid keys**, because the
-#: rule is about what a key may **not** look like: a provider's output key is whatever
-#: the provider called it, and a whitelist would refuse legitimate keys nobody
-#: anticipated. Both bracket characters are here rather than only the opening one, so
-#: a key is refused whichever half of an index it carries.
-_ADDRESSING: Final = (".", "[", "]", "*")
-
-
 class QuotedOutput(BaseModel):
     """Where a declaration says a price may be read from its output (ADR-0267 §3).
 
@@ -15298,6 +15286,20 @@ class QuotedOutput(BaseModel):
     §4's *"No reading consults a schema to decide what an argument means, and there is
     no exception"*, and by order is arbitrary.
 
+    **Depth is one, and nothing here interprets a key to keep it that way** (§3).
+    *"Depth is one and no lane adds an addressing syntax to either — ``StepOutputRef.
+    field``'s rule, stated once more where it governs"*, and that record enforces it by
+    carrying **no validator at all**: the guarantee is that nothing splits the string,
+    so a key is looked up whole and a nested value is unreachable however the key is
+    spelled. **A provider's flat ``"price.total"`` is therefore an ordinary key and is
+    admitted**, and §3 names exactly one model validator on this record — the unequal
+    fields below. A blacklist of ``.``, ``[``, ``]`` and ``*`` would narrow what a
+    boundary-crossing ``core`` type admits, which golden rule 5 makes a contract
+    decision of its own and which would leave this record refusing what
+    :class:`StepOutputRef` admits under the rule §3 says the two share. §11 arm 3's
+    *"or where either names a key below depth one"* is booked as an adjudication
+    rather than implemented here (issue #2439).
+
     Attributes:
         amount: The key of the step's ``output`` whose value is the **whole charge**
             the act will make (§1). **No code checks that it is**, and ADR-0267 §10
@@ -15313,55 +15315,6 @@ class QuotedOutput(BaseModel):
     currency: EncodableText = Field(
         description="The output key carrying that amount's ISO-4217 code (ADR-0267 §3)."
     )
-
-    @field_validator("amount", "currency")
-    @classmethod
-    def _a_key_is_at_depth_one(cls, value: str) -> str:
-        """Refuse a key that is not a key at depth one (ADR-0267 §3).
-
-        §3 declares each field as *"naming a key of the step's ``output`` at depth
-        **one**"* and closes the question in terms: **"Depth is one and no lane adds an
-        addressing syntax to either"** — ``StepOutputRef.field``'s own rule, which
-        spells the refused forms out as *"a dotted expression, an index, a wildcard or
-        a selector"*.
-
-        **The refusal is at construction because that is where the author is**, and
-        because the alternative is silent. A declaration naming ``price.total`` would
-        be read as a literal key — nothing here splits a string, which is the whole of
-        how depth stays one — so against ``{"price": {"total": "200"}}`` it would find
-        no key, mint no quote, and leave **every** act under that declaration asking,
-        for a reason the integration author would see nowhere. ADR-0086 §4's posture:
-        a silent nothing is worse than a loud refusal.
-
-        **A blank key is refused with them.** :data:`EncodableText` admits ``""``, and
-        a declaration naming the empty string names a key no provider's output carries
-        while looking like a field somebody filled in.
-
-        Args:
-            value: The key as the declaration writes it.
-
-        Returns:
-            The key unchanged.
-
-        Raises:
-            ValueError: If it is blank or carries an addressing form.
-        """
-        if not value.strip():
-            msg = (
-                "a quoted output names a key of the step's output, and a blank string "
-                "names none (ADR-0267 §3)"
-            )
-            raise ValueError(msg)
-        found = sorted({one for one in _ADDRESSING if one in value})
-        if found:
-            msg = (
-                f"a quoted output names a key at depth one and never an addressing "
-                f"expression, and {value!r} carries {', '.join(repr(one) for one in found)}: "
-                f"no lane adds an addressing syntax to either field, so nothing would "
-                f"split this and the key would be looked up whole (ADR-0267 §3)"
-            )
-            raise ValueError(msg)
-        return value
 
     @model_validator(mode="after")
     def _the_two_keys_are_different(self) -> QuotedOutput:

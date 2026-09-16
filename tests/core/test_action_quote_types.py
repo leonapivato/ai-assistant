@@ -287,35 +287,24 @@ def test_a_quoted_output_names_two_different_keys() -> None:
 
 
 @pytest.mark.parametrize(
-    "key", ["price.total", "prices[0]", "prices[", "*", "price.*", "a]b", "", "   "]
+    "key", ["price", "total_price", "amount-due", "price/total", "price.total", "価格"]
 )
-def test_a_quoted_output_is_not_constructible_at_a_key_below_depth_one(key: str) -> None:
-    """§3: "Depth is one and no lane adds an addressing syntax to either".
+def test_any_key_a_provider_actually_uses_is_a_key_this_declaration_can_name(
+    key: str,
+) -> None:
+    """§3: each field is an ``EncodableText``, and one model validator guards the record.
 
-    ``StepOutputRef.field``'s own four forms — *"a dotted expression, an index, a
-    wildcard or a selector"* — refused at construction, where the integration author
-    is. **The alternative is silent**: nothing splits a key, so ``price.total`` would
-    be looked up whole against ``{"price": {"total": "200"}}``, find nothing, mint no
-    quote, and leave every act under that declaration asking for a reason nobody sees.
+    **Depth is one because nothing interprets the key**, not because the key's
+    characters are policed — *"``StepOutputRef.field``'s rule, stated once more where
+    it governs"*, and that record carries no validator at all. So a provider's flat
+    ``"price.total"`` is an ordinary key: the mint looks it up whole, and a nested
+    value stays unreachable however it is spelled.
 
-    **Both fields take it**, and a blank key with them: :data:`EncodableText` admits
-    ``""``, which names a key no output carries while looking like a field somebody
-    filled in.
-    """
-    with pytest.raises(ValidationError):
-        QuotedOutput(amount=key, currency="currency")
-    with pytest.raises(ValidationError):
-        QuotedOutput(amount="price", currency=key)
-
-
-@pytest.mark.parametrize("key", ["price", "total_price", "amount-due", "price/total", "価格"])
-def test_an_ordinary_output_key_is_a_perfectly_good_one(key: str) -> None:
-    """§3's rule is the four addressing forms and nothing wider.
-
-    A provider's output key is whatever the provider called it, so the refusal above
-    is a closed set of characters rather than a grammar of valid keys: a whitelist
-    would refuse legitimate keys nobody anticipated, which is a declaration an
-    integration author could not write for a tool that exists.
+    **The alternative was tried and removed.** A blacklist of ``.``, ``[``, ``]`` and
+    ``*`` narrows what a boundary-crossing ``core`` type admits — golden rule 5 makes
+    that a contract decision of its own — and would leave this record refusing what
+    :class:`~ai_assistant.core.types.StepOutputRef` admits under the rule §3 says the
+    two share. §11 arm 3's second limb is booked as an adjudication (#2439).
     """
     assert QuotedOutput(amount=key, currency="currency").amount == key
 
