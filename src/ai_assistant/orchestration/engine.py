@@ -5277,7 +5277,7 @@ class Engine:
         **Why this is a method and not two lines at the call site.** ADR-0268 §1
         takes the ending *"once per closing-write attempt"*, ADR-0261 §2's
         re-read-and-retry included, *"each carrying that attempt's own instant"*. The
-        retry is ADR-0261 L2's and is not in this tree (#2435, #2451), so the act
+        retry is ADR-0261 L2's and is not in this tree (#2435, #2452), so the act
         makes exactly one attempt today — and the pair is stated here so that the
         lane adding the retry wraps an attempt that already carries its ending,
         rather than having to remember to add a second call.
