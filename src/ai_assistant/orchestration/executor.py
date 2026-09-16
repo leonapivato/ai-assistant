@@ -713,6 +713,16 @@ class StepExecutor:
         )
         if borrowed is None or plan is None or step is None:
             return None
+        # **The pure conjunct first, so the evidential one is the last thing read before
+        # the write.** ``verifies`` is a predicate over the holder's output, which is
+        # already in hand; the goal's evidence is a value another turn can move, and §2
+        # asks for it *"at that instant"*. Taking it last makes the gap between the read
+        # and the commit one ``await`` rather than three. It does not close the gap, and
+        # nothing in this package can: §9 fixes ``commit_transition``'s satisfaction
+        # claim condition at **five** limbs and none of them is ``when``, exactly as no
+        # claim conjunct on an ordinary dispatch is (#2482).
+        if not verification_holds(step.verifies, borrowed.output):
+            return None
         if step.when:
             goal = await self._plans.get_goal(plan.goal_id)
             if goal is None:
@@ -725,8 +735,6 @@ class StepExecutor:
                 at=self._reading(),
             ):
                 return None
-        if not verification_holds(step.verifies, borrowed.output):
-            return None
         committed, cancelled = await self._commit_shielded(
             StepTransition(
                 execution_id=state.id,
