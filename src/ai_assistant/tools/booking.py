@@ -69,11 +69,12 @@ import contextlib
 import json
 import sqlite3
 import stat
+import threading
 from dataclasses import dataclass
 from datetime import date
 from decimal import Decimal, DecimalException
 from pathlib import Path
-from typing import TYPE_CHECKING, Final, final
+from typing import TYPE_CHECKING, Any, Final, final
 
 from ai_assistant.core.errors import AssistantError, ClassifiedToolError, ConnectionStoreError
 from ai_assistant.core.types import (
@@ -97,7 +98,7 @@ from ai_assistant.core.types import (
 from ai_assistant.tools.egress_declaration import DESTINATION_KEYWORD, TIER_KEYWORD
 
 if TYPE_CHECKING:
-    from collections.abc import Mapping
+    from collections.abc import Callable, Mapping
 
     from ai_assistant.core.protocols import Secrets
     from ai_assistant.core.types import EgressBinding, FrozenJson, SecretName
@@ -163,6 +164,15 @@ _CURRENCY_CODE_LENGTH: Final = 3
 #: The weakest record bound ADR-0273 §5 admits: *"a store that retains at least the
 #: booking just made"*. ``0`` would prune the record its own booking had just inserted.
 _MINIMUM_RETAINED_RECORDS: Final = 1
+
+#: The **range the reader accepts**, which §5 leaves to the lane and requires to be
+#: *"enforced **at the read** and never at the first prune"*. It is SQLite's own signed
+#: 64-bit integer domain, because the bound reaches the store as a ``LIMIT`` parameter:
+#: a larger value raises ``OverflowError`` out of the driver **at the first prune**,
+#: which is exactly where §5 forbids the refusal to happen. ``Settings`` states the same
+#: ceiling as its field's ``lt``; this states it at the one place a provider can be built
+#: without going through ``Settings``.
+_MAXIMUM_RETAINED_RECORDS: Final = 2**63
 
 
 def _origin_subschema() -> dict[str, FrozenJson]:
@@ -464,7 +474,8 @@ def _checked_retained(value: int) -> int:
         The bound.
 
     Raises:
-        BookingConfigurationError: If it is not a strictly positive exact integer.
+        BookingConfigurationError: If it is not an exact integer inside
+            ``[1, 2**63)``.
     """
     if isinstance(value, bool) or type(value) is not int:
         msg = (
@@ -478,6 +489,14 @@ def _checked_retained(value: int) -> int:
             f"(ADR-0273 §5): a store that retains at least the booking just made is the "
             f"weakest bound the decision admits, and 0 would prune the record its own "
             f"booking had just inserted"
+        )
+        raise BookingConfigurationError(msg)
+    if value >= _MAXIMUM_RETAINED_RECORDS:
+        msg = (
+            f"booking_retained_records must be below {_MAXIMUM_RETAINED_RECORDS} "
+            f"(ADR-0273 §5): the bound reaches the store as a LIMIT parameter, so a larger "
+            f"value raises out of the driver at the first prune — which is where §5 "
+            f"forbids the refusal to fall"
         )
         raise BookingConfigurationError(msg)
     return value
@@ -630,6 +649,80 @@ _PRUNE_BOOKINGS: Final = (
 )
 _SCHEMA_VERSION_KEY: Final = "schema_version"
 _COMMIT_COUNT_KEY: Final = "commit_count"
+
+
+async def _run_to_completion[T](fn: Callable[..., T], /, *args: object) -> T:
+    """Run ``fn`` on a worker thread and wait for it to **physically** finish.
+
+    **The seventh copy of this helper rather than an import from a sibling**, which is
+    the tree's established position rather than a fresh choice: ``memory``,
+    ``planning``, ``permissions``, ``evaluation``, ``archive`` and
+    ``tools/connection_store.py`` each carry their own, golden rule 1 forbids importing
+    another subsystem's, and #506 and #563 already track consolidating the family. The
+    one inside this subsystem is
+    :func:`~ai_assistant.tools.connection_store._run_to_completion`, module-private
+    there; this is that function, unchanged in substance.
+
+    **Why the store may not simply call SQLite on the loop thread.** ``BEGIN
+    IMMEDIATE`` takes the write lock, and under cross-process contention it blocks for
+    the driver's default — with no busy timeout set anywhere in this family (#564). The
+    system composes on **one** event loop, so a blocking call there stalls every
+    unrelated task and the invocation seam's own deadline (ADR-0029 §4) along with
+    them. Every other SQLite store in this tree hands off for exactly that reason.
+
+    **The worker records its own outcome and sets a** :class:`threading.Event` **when
+    it physically returns**, and this coroutine waits on *that* signal rather than on
+    the cancellable state of any task — so the store's lock is held for the whole life
+    of the worker even if the awaiting task, or a blanket cancellation, is cancelled.
+    An absorbed cancellation takes precedence and is re-raised once the thread has
+    finished: the caller's task still cancels, which is ADR-0060's delivery half, and
+    what is prevented is connection reuse rather than the cancellation itself.
+
+    **The completion wait is submitted at most once** (#697): a copy that submitted a
+    fresh one per cancellation would leave every earlier one running, because nothing
+    can interrupt a thread parked in ``Event.wait`` before the worker sets it.
+
+    Args:
+        fn: The synchronous call to run.
+        *args: Its positional arguments.
+
+    Returns:
+        Whatever ``fn`` returned.
+
+    Raises:
+        BaseException: Whatever ``fn`` raised, relayed once the thread has finished.
+        CancelledError: If the awaiting task was cancelled, re-raised after the worker
+            has physically returned.
+    """
+    done = threading.Event()
+    outcome: list[T] = []
+    failure: list[BaseException] = []
+
+    def worker() -> None:
+        try:
+            outcome.append(fn(*args))
+        except BaseException as exc:  # relayed once the thread has finished
+            failure.append(exc)
+        finally:
+            done.set()
+
+    loop = asyncio.get_running_loop()
+    pending: asyncio.Future[Any] = loop.run_in_executor(None, worker)
+    waiting: asyncio.Future[Any] | None = None
+    cancellation: asyncio.CancelledError | None = None
+    while not done.is_set():
+        try:
+            await asyncio.shield(pending)
+        except asyncio.CancelledError as exc:
+            cancellation = exc
+            if waiting is None:
+                waiting = loop.run_in_executor(None, done.wait)
+            pending = waiting
+    if cancellation is not None:
+        raise cancellation
+    if failure:
+        raise failure[0]
+    return outcome[0]
 
 
 class BookingStoreError(AssistantError):
@@ -869,7 +962,20 @@ class SqliteBookingStore:
         """
         serialised = json.dumps(dict(record), sort_keys=True, separators=(",", ":"))
         async with self._lock:
-            self._commit_sync(serialised, confirmed=confirmed)
+            await _run_to_completion(self._commit_sync_confirmed, serialised, confirmed)
+
+    def _commit_sync_confirmed(self, record: str, confirmed: bool) -> None:
+        """:meth:`_commit_sync` with both arguments positional, for the worker.
+
+        :func:`_run_to_completion` forwards ``*args`` and takes no keywords, so the
+        keyword-only form below is reached through this one rather than by widening the
+        helper every store shares.
+
+        Args:
+            record: The serialised booking record.
+            confirmed: Whether the outcome of the commit may be learned (§4).
+        """
+        self._commit_sync(record, confirmed=confirmed)
 
     def _commit_sync(self, record: str, *, confirmed: bool = True) -> None:
         """Run the one transaction, classified against ADR-0273 §2's commit boundary.
@@ -989,12 +1095,8 @@ class SqliteBookingStore:
             BookingStoreError: If the store could not be read.
         """
         async with self._lock:
-            try:
-                rows = self._conn.execute(_READ_BOOKINGS).fetchall()
-            except sqlite3.Error as exc:
-                msg = f"failed to read the booking store: {exc}"
-                raise BookingStoreError(msg, may_have_committed=False) from exc
-        return tuple(json.loads(str(row[0])) for row in rows)
+            rows = await _run_to_completion(self._read_records_sync)
+        return tuple(json.loads(str(row)) for row in rows)
 
     async def commit_count(self) -> int:
         """How many bookings this store has ever committed (§2).
@@ -1009,12 +1111,33 @@ class SqliteBookingStore:
             BookingStoreError: If the store could not be read.
         """
         async with self._lock:
-            try:
-                stored = self._meta(self._conn, _COMMIT_COUNT_KEY)
-            except sqlite3.Error as exc:
-                msg = f"failed to read the booking commit count: {exc}"
-                raise BookingStoreError(msg, may_have_committed=False) from exc
+            stored = await _run_to_completion(self._read_count_sync)
         return 0 if stored is None else int(stored)
+
+    def _read_records_sync(self) -> tuple[str, ...]:
+        """Every retained record's stored JSON, oldest first.
+
+        Raises:
+            BookingStoreError: If the store could not be read.
+        """
+        try:
+            rows = self._conn.execute(_READ_BOOKINGS).fetchall()
+        except sqlite3.Error as exc:
+            msg = f"failed to read the booking store: {exc}"
+            raise BookingStoreError(msg, may_have_committed=False) from exc
+        return tuple(str(row[0]) for row in rows)
+
+    def _read_count_sync(self) -> str | None:
+        """The stored commit count, as text.
+
+        Raises:
+            BookingStoreError: If the store could not be read.
+        """
+        try:
+            return self._meta(self._conn, _COMMIT_COUNT_KEY)
+        except sqlite3.Error as exc:
+            msg = f"failed to read the booking commit count: {exc}"
+            raise BookingStoreError(msg, may_have_committed=False) from exc
 
     def close(self) -> None:
         """Release the connection (ADR-0042 §2). Safe to call more than once."""
@@ -1499,11 +1622,16 @@ class SimulatedBookingAct:
             raise _refuse(ToolFailureKind.REFUSED, msg)
         amount = str(self._catalogue.charge_amount)
         currency = self._catalogue.charge_currency
-        # **Persisting only what the declaration's schema names, plus what was charged**
-        # (ADR-0273 §2): the day is the one argument worth keeping — the origin is the
-        # registration's own endpoint on every call — and the charge is the other half
-        # of "what it was asked and what it charged".
+        # **What it was asked and what it charged, and nothing else** (ADR-0273 §2).
+        # *Asked* is both declared arguments — the origin as well as the day. The origin
+        # equals this registration's configured endpoint on every call that gets this
+        # far, because the four conditions refuse any other; but the record outlives the
+        # configuration, and a deployment re-pointed between two runs would otherwise
+        # leave retained records that cannot say which endpoint each booking named.
+        # **And nothing else**: only keys the declaration's own ``parameters_schema``
+        # names are persisted, so nothing a caller supplied off-schema is ever stored.
         record: Mapping[str, FrozenJson] = {
+            ORIGIN_ARGUMENT: origin,
             DATE_ARGUMENT: day.isoformat(),
             CHARGED_AMOUNT_KEY: amount,
             CHARGED_CURRENCY_KEY: currency,
