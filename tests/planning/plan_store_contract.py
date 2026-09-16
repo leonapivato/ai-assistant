@@ -7747,6 +7747,48 @@ class PlanStoreContract:
             "and the mutated key is a different act, not the completed one"
         )
 
+    async def test_a_key_that_shadows_its_own_dump_does_not_substitute_another(
+        self, store: PlanStore
+    ) -> None:
+        """The detachment is taken through the class, not through the caller's instance.
+
+        The copy-in above rebuilds the key by dumping and revalidating it — and
+        ``model_dump`` is an ordinary method, so an entry of that name in the instance's
+        ``__dict__`` shadows it. ADR-0018 §3 puts that dictionary inside the threat
+        model, and it reaches the serializer exactly as it reaches the fields: a store
+        that dumped through the instance would validate and persist **key B** while the
+        caller's object still reads as **key A** and the
+        :class:`~ai_assistant.core.types.ToolCall` the stage dispatches still carries A.
+
+        That is the identity failure ADR-0259 §§1-2 decide at-most-once by, entered
+        through the one door the revalidation opened: the goal's row would name an act
+        nobody performed, the act that *was* performed would answer
+        ``COMPLETED_OTHERWISE`` for ever, and a later step genuinely asking for B would
+        be satisfied from it. Asserted over the **answer** and over the **stored row**,
+        because a store that recorded A while answering about B would pass either alone.
+        """
+        held = await self._acting(store)
+        shadowed = _KEY.model_copy(deep=True)
+        shadowed.__dict__["model_dump"] = lambda *_args, **_kwargs: _OTHER_KEY.model_dump()
+
+        assert (
+            await store.claim_effect(execution_id=held.id, step_id="s1", effect_key=shadowed)
+        ).claim is EffectClaim.CLAIMED
+        assert (await self._rows(store))[0].key == _KEY, (
+            "the row records the key the call was made with, not the one its dump named"
+        )
+
+        held = await self._to_status(store, held, StepStatus.SUCCEEDED)
+        later = await self._acting(store, plan_id="p2", attempt_id="a2")
+        assert (
+            await store.claim_effect(execution_id=later.id, step_id="s1", effect_key=_KEY)
+        ).claim is EffectClaim.COMPLETED, "the act is recognised under the key it was taken with"
+        assert (
+            await store.claim_effect(execution_id=later.id, step_id="s1", effect_key=_OTHER_KEY)
+        ).claim is EffectClaim.COMPLETED_OTHERWISE, (
+            "and the key its dump named is a different act, never the completed one"
+        )
+
     async def test_an_exported_effect_row_is_detached_from_the_store(
         self, store: PlanStore
     ) -> None:

@@ -484,6 +484,9 @@ def _revalidated_key(key: EffectKey) -> EffectKey:
     for the module docstring's reason. Taken at the entry of ``claim_effect`` so the one
     value the answer is decided by and the one stored are the same snapshot, and a key
     mutated before the call is refused rather than compared and kept as it stands.
+    **The dump is taken through the class**: ``model_dump`` is a plain method, so an
+    instance ``__dict__`` entry of that name shadows it and would hand this function a
+    different key entirely.
 
     Args:
         key: The key the caller handed in.
@@ -496,7 +499,7 @@ def _revalidated_key(key: EffectKey) -> EffectKey:
             written.
     """
     try:
-        return EffectKey.model_validate(key.model_dump())
+        return EffectKey.model_validate(EffectKey.model_dump(key))
     except ValidationError as exc:
         msg = f"the effect key this claim was taken under is not a valid key: {exc}"
         raise PlanningError(msg) from exc
@@ -510,7 +513,8 @@ def _revalidated_effect(record: EffectRecord) -> EffectRecord:
     gives. Pydantic passes an already-valid model instance through without copying, so a
     row built from a caller's :class:`EffectKey` holds **that object**, and
     ``object.__setattr__`` on it would rewrite the identity ADR-0259 §2's at-most-once
-    claim is decided over.
+    claim is decided over. **Taken through the class rather than the instance**, for
+    :func:`_revalidated_key`'s reason.
 
     Args:
         record: The row to store.
@@ -522,7 +526,7 @@ def _revalidated_effect(record: EffectRecord) -> EffectRecord:
         PlanningError: If the record does not survive its own validators.
     """
     try:
-        return EffectRecord.model_validate(record.model_dump())
+        return EffectRecord.model_validate(EffectRecord.model_dump(record))
     except ValidationError as exc:
         msg = f"effect row for goal {record.goal_id} is not a valid record: {exc}"
         raise PlanningError(msg) from exc
