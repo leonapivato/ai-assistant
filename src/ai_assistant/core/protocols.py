@@ -7216,8 +7216,9 @@ class AuditTrail(Protocol):
         component cannot write** (ADR-0193 §6). Implementations are constructed
         with a :class:`RecipientGrantResolution` — one member wide, so the trail
         can validate a grant and can never author one — and ``record`` refuses a
-        **non-resolving ``ALLOW``** whose ``egress_binding`` is not ``None`` and
-        whose ``authorised_by`` is set unless **all eight** hold:
+        **non-resolving ``ALLOW``** whose ``egress_binding`` is not ``None``,
+        whose ``authorised_by`` is set **and whose ``authorised_subject`` is set**
+        unless **all eight** hold:
         ``outstanding(authorised_by)`` returns a record (which is the existence,
         the kind and the unrevoked check at once); that record's ``decided_at`` is
         **at or before** the decision's; its ``expires_at`` is **strictly after**
@@ -7262,7 +7263,31 @@ class AuditTrail(Protocol):
         making a contract change to how a row in this scope is read rather than
         inheriting an "add your own arm" permission.
 
-        **``record`` checks existence, kind, unrevokedness, liveness as of the
+        **Validates a route-(c) standing row against the binding on the row, and
+        reads nothing else for it** (ADR-0247 §2, ADR-0272 §1). A non-resolving
+        ``ALLOW`` carrying an ``egress_binding`` and an ``authorised_by`` with
+        **no** ``authorised_subject`` is accepted **only** where **exactly one** of
+        its binding's ``closed_loop`` and ``forecast_reach`` is ``True`` **and** its
+        ``authorised_by`` equals that binding's ``account.reference``; failing
+        either, it is refused with the ``InvalidAuthorisationError`` the ``Raises:``
+        section below names. Both facts are read **from the decision** — no store
+        read, no ``Settings`` read and no clock — which is what keeps a revoked or
+        cleared grant from changing a recorded decision's meaning (ADR-0193 §9), and
+        the trail holds no configuration and is given none: the comparison of the
+        binding's account and origin against what the owner configured is the
+        policy's, taken where the configured values live.
+
+        **Exactly one, because the eligibility fact is the kind's own** (ADR-0272
+        §1). Each kind route (c) covers carries its own — ``closed_loop`` for a
+        ``WEB_SEARCH``, ``forecast_reach`` for a forecast read (ADR-0260 §11) — so a
+        binding carrying **neither** is of no kind this route covers, and one
+        carrying **both** asserts a kind route (c)'s closed two-member set does not
+        contain; admitting either would let one kind's authority be read off the
+        other's. The digest remains the *discriminator* and neither fact does its
+        work: **which** rows are route (c) is unchanged, and what this states is
+        what makes a route-(c) row **eligible**.
+
+                **``record`` checks existence, kind, unrevokedness, liveness as of the
         ruling, and subject match, and nothing else.** It does not re-rule, does
         not consult a clock, does not call ``covering``, does not rank grants, and
         returns no outcome. ADR-0021 §3's division is unchanged: the policy rules,
@@ -7277,12 +7302,14 @@ class AuditTrail(Protocol):
             InvalidResolutionError: If ``resolves`` is set and the invariant
                 above does not hold.
             InvalidAuthorisationError: If a route-(b) egress decision fails any of
-                the eight checks above, if a resolving ``ALLOW`` carries an
-                ``authorised_subject``, or if the resolution seam could not be
-                read — the last chained from the ``RecipientGrantError`` it came
-                from, so a caller keeps one handler while an operator keeps "the
-                pointer named no outstanding grant" and "the seam could not be
-                read" apart.
+                the eight checks above, if a route-(c) one carries a binding that
+                does not carry exactly one of ``closed_loop`` and ``forecast_reach``
+                or a pointer that is not that binding's ``account.reference``, if a
+                resolving ``ALLOW`` carries an ``authorised_subject``, or if the
+                resolution seam could not be read — the last chained from the
+                ``RecipientGrantError`` it came from, so a caller keeps one handler
+                while an operator keeps "the pointer named no outstanding grant"
+                and "the seam could not be read" apart.
         """
         ...
 
