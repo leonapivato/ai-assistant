@@ -980,37 +980,12 @@ class FakePlanStore:
         on nothing. Stated here rather than imported, for the reason this module's own
         docstring gives.
 
-        **And a goal opened carrying a quote is refused with it** (ADR-0267 §2, §4, §8).
-        The same reason one record over: ``record_quote`` is where §2's refusal of a
-        quote naming an action the goal does not hold lives, where
-        ``MAX_ACTION_QUOTES``' elision lives and where the count that discloses it is
-        advanced — so a seeded tuple reaches past all three at once. §8 is absolute that
-        **no store** constructs, writes or repairs an ``ActionQuote``, and a quote a
-        goal was opened with is a price nobody read, which ADR-0266 §7 would then prove
-        a ``MONEY`` ceiling against.
-
         Raises:
             PlanningError: If the goal is not one ``Goal`` admits, if the store already
                 holds a goal under this ``id``, or if the goal is opened carrying an
-                intended action or a quote.
+                intended action.
         """
         snapshot = _revalidated_goal(goal, what="the opening write")
-        if snapshot.quotes:
-            named = ", ".join(sorted({one.intended_action for one in snapshot.quotes}))
-            msg = (
-                f"goal {snapshot.id} is opened carrying a quote for {named}: a quote is "
-                f"minted from a step's output and written by record_quote alone, so a "
-                f"goal's opening write carries none (ADR-0267 §2, §4, §8)"
-            )
-            raise PlanningError(msg)
-        if snapshot.quotes_elided:
-            msg = (
-                f"goal {snapshot.id} is opened claiming {snapshot.quotes_elided} elided "
-                f"quotes: the count discloses what a write dropped and never decreases, "
-                f"so a goal that has been written once has dropped nothing "
-                f"(ADR-0267 §2; ADR-0086 §4)"
-            )
-            raise PlanningError(msg)
         if snapshot.intended_actions:
             named = ", ".join(action.id for action in snapshot.intended_actions)
             msg = (

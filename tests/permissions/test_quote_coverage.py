@@ -177,6 +177,27 @@ class TestTheGoverningQuoteIsComparedAgainstTheMember:
         call = priced()
         assert covered(ceiling("150"), call, [quote_for(call, amount="120")])
 
+    def test_zero_is_a_price_and_covers_under_any_ceiling_of_its_currency(self) -> None:
+        """§11 arm 1: *"``Decimal("0")`` constructs, covers under any ceiling of its
+        currency, and is no absence"*.
+
+        The arm most likely to regress silently, and the reason it is stated: a
+        reading written as ``if amount:`` or ``if not quote.amount:`` treats a free act
+        as *no quote at all*, which is the fail-**closed** direction and so would never
+        show up as a call that was wrongly authorised — only as one that asks forever
+        for a reason nobody can find. Driven at two ceilings, because *"any ceiling of
+        its currency"* includes the degenerate one.
+        """
+        call = priced()
+        free = quote_for(call, amount="0")
+        assert free.amount == Decimal("0")
+        assert covered(ceiling("150"), call, [free])
+        assert covered(ceiling("0"), call, [free]), "a zero ceiling admits a zero charge"
+        assert not covered(ceiling("150", currency="USD"), call, [free]), (
+            "and zero is still denominated: a free act in one currency proves nothing "
+            "about a ceiling in another"
+        )
+
     def test_a_quote_above_the_ceiling_does_not(self) -> None:
         """§7 and ADR-0254 §4: *at most* the maximum, and ``170`` is not."""
         call = priced()
@@ -369,6 +390,22 @@ class TestTheSeamAndTheFaultClause:
         assert ruling.authorised_goal == GOAL
         assert quotes is not None
         assert quotes.call_count == 1, "at most one durable read per seam per ruling"
+
+    async def test_a_zero_quote_reaches_a_standing_allow(self) -> None:
+        """Arm 1's covering limb, through the policy rather than the comparison.
+
+        *"Zero is a price … and is no absence"*: a free act proved against a stated
+        ceiling reaches route (d) exactly as a priced one does, and an implementation
+        reading ``Decimal("0")`` as *no quote* would ask here instead — a defect that
+        fails safe and therefore hides.
+        """
+        call = priced()
+        held = FakeGoalQuotes([quote_for(call, amount="0")], goal=GOAL)
+        gate, _ = policy_with(ceiling("150"), held)
+
+        ruling = await gate.decide(call)
+
+        assert ruling.outcome is PermissionOutcome.ALLOW
 
     async def test_a_quote_above_the_ceiling_asks(self) -> None:
         """The control beside it: the same wiring, a price the act did not bound."""
