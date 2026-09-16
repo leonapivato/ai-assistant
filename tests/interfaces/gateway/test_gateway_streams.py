@@ -44,7 +44,7 @@ from ai_assistant.core.types import (
     TurnResult,
 )
 from ai_assistant.interfaces.gateway import streams
-from ai_assistant.interfaces.gateway.delivery import GATEWAY_PLAYS, DeliveryStream
+from ai_assistant.interfaces.gateway.delivery import GATEWAY_PLAYS, DeliveryStream, write_stream
 from ai_assistant.interfaces.gateway.http import Request, Response
 from ai_assistant.interfaces.gateway.server import (
     _ASSISTANT_PATHS,
@@ -877,13 +877,27 @@ class _Recording:
     """
 
     def __init__(self) -> None:
-        """Start with nothing written and nothing closed."""
+        """Start with nothing written, nothing closed, and a drain that never ends."""
         self.written = b""
         self.closed = False
+        #: Cleared while a write has not completed, and set by a case that wants one
+        #: to. An ``Event`` rather than a future because these arms build the stub
+        #: outside a running loop as often as inside one.
+        self.drained = asyncio.Event()
 
     def write(self, data: bytes) -> None:
         """Take bytes, as a writer does."""
         self.written += data
+
+    async def drain(self) -> None:
+        """Wait exactly as long as the case says, which may be for ever.
+
+        A browser that has stopped reading fills the socket's window and a real
+        ``drain`` on it never returns. :attr:`draining` is that state, held open so a
+        case can ask what the gateway does *while* a write has not completed rather
+        than around it.
+        """
+        await self.drained.wait()
 
     def close(self) -> None:
         """Record that the stream was closed."""
@@ -932,39 +946,56 @@ def test_a_stream_that_already_carries_a_terminal_value_is_not_given_a_second() 
     assert already  # the body's own value, framed and therefore recorded
 
 
-def test_a_delivery_stream_with_a_write_outstanding_is_still_given_its_ending() -> None:
-    """The half of round 1's ``blocker`` this rebuts rather than fixes.
+async def test_a_delivery_stream_whose_drain_is_blocked_is_still_given_its_ending() -> None:
+    """The half of round 1's ``blocker`` this rebuts rather than acts on, driven.
 
-    The finding read ADR-0175 §4 as forbidding the terminal value on a stream whose
-    previous write has not completed: "queues nothing behind one", and a stalled write
-    "is abandoned and the stream is ended". Both clauses are about
-    :class:`.DeliveryStream`'s **pending slot** — the one :meth:`.DeliveryStream.offer`
-    refuses on — and :meth:`_OpenStream.end` does not touch it: the value goes to the
-    socket, and the stream is abandoned in the same breath, which is asserted here.
+    The finding, restated in round 2, reads ADR-0175 §4 as forbidding the terminal value
+    on a stream whose previous write has not completed: "queues nothing behind one", and
+    a stalled write "is abandoned and the stream is ended". This is that exact state —
+    :func:`~ai_assistant.interfaces.gateway.delivery.write_stream` running for real, one
+    value written, and a ``drain`` that never returns because the browser has stopped
+    reading — so what the two readings disagree about is asserted rather than argued.
 
-    §4 states the abandonment clause's own purpose in the clause — a stalled write is
-    abandoned "so a browser that stops reading cannot delay another browser's delivery"
-    — and nothing in this path waits on a drain. Two synchronous writes and a close
-    delay nobody, bound the stream's cost at one value and five bytes, and leave a
-    browser that resumes reading with a *better* ending than the cut §4 would otherwise
-    leave it. Withholding the value here would apply the clause's letter against its
-    stated reason.
+    **What §4 forbids is not done here, and each clause is checked.** "The gateway holds
+    at most one value pending per stream and queues nothing behind one" is about
+    :class:`.DeliveryStream`'s pending slot, and that slot still holds the one value:
+    :meth:`_OpenStream.end` never offers into it. The abandonment clause states its own
+    purpose in the same sentence — a stalled write is abandoned "so a browser that stops
+    reading cannot delay another browser's delivery" — and nothing here waits on the
+    drain: ``end`` returns with the drain still blocked, the stream is abandoned, and the
+    body returns without it ever completing. The whole cost of the ending is one value
+    and five bytes, once.
+
+    **And what the abandoned browser gets is better than the clause's fallback.** §4
+    leaves it a body that stopped, which §2 makes a transport failure; this leaves it the
+    named ending in good order behind the value it had not taken, if it ever reads again.
+    Withholding it would be the clause's letter applied against its stated reason.
     """
     delivery = DeliveryStream()
+    ending = _Ending()
+    stream, recording = _held(ending=ending, delivery=delivery)
+    body = asyncio.create_task(
+        write_stream(cast("asyncio.StreamWriter", recording), delivery, frame=ending.framing)
+    )
     assert delivery.offer(streams.alive())
-    stream, recording = _held(ending=_Ending(), delivery=delivery)
+    await asyncio.sleep(0)
+    await asyncio.sleep(0)
+    assert recording.written  # the value is on the wire and its drain has not returned
 
     stream.end()
 
-    assert json.loads(recording.written.split(b"\r\n")[1]) == {
-        "kind": "fault",
-        "fault": "no-live-session",
-    }
+    # Nothing waited: the drain is still blocked and the ending is already written.
+    assert not recording.drained.is_set()
+    values = [
+        json.loads(line) for line in recording.written.split(b"\r\n") if line.startswith(b"{")
+    ]
+    assert values == [{"kind": "alive"}, {"kind": "fault", "fault": "no-live-session"}]
     assert recording.written.endswith(b"0\r\n\r\n")
     assert recording.closed
-    # §4's disposition for a stalled stream is taken in full: it is abandoned, so the
-    # body stops waiting on a browser rather than on a socket that is about to go.
+    # §4's disposition for a stalled stream is taken in full, which is what releases the
+    # body: it stops waiting on a browser rather than on a socket that is about to go.
     assert delivery.abandoned.is_set()
+    await asyncio.wait_for(body, timeout=5)
 
 
 async def test_a_session_reaching_its_absolute_lifetime_names_the_ending_too() -> None:
