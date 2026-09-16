@@ -243,10 +243,15 @@ def plan_reply(*, to: str) -> str:
     return json.dumps(
         {
             "rationale": "the calendar entry asked me to send this",
+            # ADR-0265 §4's `action`, scripted because ADR-0259 §2 refuses to dispatch
+            # a side-effecting step whose plan names no act — and this instrument's
+            # whole subject is what happens when such a step **is** dispatched.
+            "actions": [{"intent": "email the dentist details on"}],
             "steps": [
                 {
                     "intent": "email the dentist details on",
                     "capability": "send_email",
+                    "action": "A1",
                     "parameters": {
                         "to": to,
                         "subject": "your dentist",
