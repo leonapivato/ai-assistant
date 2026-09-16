@@ -545,6 +545,14 @@ class ParkedReadOperations:
         bound = await search.rebound(confirmed, parameters)
         if bound is None:
             return AnsweredRead(ReadAnswerOutcome.OPERATION_CHANGED, park)
+        # **`intended_action` is `None` on this resume path**, and it is `goal`'s own
+        # disposition one field over. ADR-0266 §11's L2 sets it *"from the
+        # `intended_action` of the plan step the request serves, on every
+        # construction and resume path"*; the request rebuilt here serves no plan
+        # step — `step_id` and `execution_id` are refused below, not merely absent —
+        # so there is no act to name and naming one would be this stage's word. A
+        # request carrying `None` is met by ADR-0266 §7's evidence route in no case,
+        # so no `MONEY` member is met and the act asks: the fail-closed direction.
         request = ActionRequest(
             tool=bound.tool, parameters=bound.parameters, egress_binding=bound.binding
         )

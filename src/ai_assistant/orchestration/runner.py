@@ -94,6 +94,7 @@ from ai_assistant.orchestration.selection import (
     model_supplied_keys,
     select,
 )
+from ai_assistant.orchestration.stated_bounds import stated_bound_coverage
 from ai_assistant.orchestration.validating import PhaseFour, evaluate
 
 if TYPE_CHECKING:
@@ -321,9 +322,23 @@ def _requested(
     caller's word. A request whose ``goal`` is wrong is worse than one carrying
     ``None``, which reaches ADR-0148 §3's route (d) in no case.
 
+    **``intended_action`` is set here too, from the plan step the request serves,
+    and it is ``goal``'s own clause one field over** (ADR-0266 §11's L2, ADR-0254
+    §6): *"`orchestration` sets it from the plan step the request serves, on every
+    construction and resume path; no policy, no seam, no interface adapter and no
+    model output writes it."* This function is **both** of the runner's paths —
+    :meth:`StepRunner.run` builds a request through it and :meth:`StepRunner.resume`
+    rebuilds one through it after the answer — so the two take the value from one
+    expression rather than from two that could drift apart. It is taken from the
+    **stored** step (:meth:`StepRunner._planned`) for ``goal``'s own reason, and a
+    step naming no act yields a request carrying ``None``: ADR-0266 §7's evidence
+    route meets such a request in no case, so no ``MONEY`` member is met and the act
+    asks, which is the fail-closed direction.
+
     Args:
         tool: The selected or confirmed definition, used only on the ``None`` path.
-        step: The plan step, for its id and its parameters on the ``None`` path.
+        step: The plan step, for its id, its ``intended_action`` and its parameters
+            on the ``None`` path.
         state: The execution, for its id.
         bound: What the seam returned, or ``None``.
         goal: The goal the plan this execution runs was written against
@@ -337,6 +352,7 @@ def _requested(
             tool=tool,
             parameters=step.parameters,
             goal=goal,
+            intended_action=step.intended_action,
             step_id=step.id,
             execution_id=state.id,
         )
@@ -344,6 +360,7 @@ def _requested(
         tool=bound.tool,
         parameters=bound.parameters,
         goal=goal,
+        intended_action=step.intended_action,
         step_id=step.id,
         execution_id=state.id,
         egress_binding=bound.binding,
@@ -1772,14 +1789,20 @@ class StepRunner:
         completeness condition, so a stage that cannot ask is a stage that cannot
         satisfy it.
 
-        **The coverage is this package's to supply and it mints none yet.** ADR-0254
-        §1 requires a row's `coverage` to be minted from the user's own recorded
-        words; #2373 is ruled into ADR-0266 and the mint is that decision's **L2**,
-        which has not landed — so the empty tuple below is the coverage a row would
-        carry — condition 6's fourth operand, put to
-        ``coverage_met`` and written onto the row unchanged. It is **passed** rather
-        than assumed by the writer, so a minter landing here changes one expression
-        and no condition.
+        **The coverage is this package's to supply and it is minted from the goal
+        alone.** ADR-0254 §1 requires a row's `coverage` to be minted from the user's
+        own recorded words, and ADR-0266 §11's **L2** lands that mint in this package
+        (:func:`~ai_assistant.orchestration.stated_bounds.stated_bound_coverage`) —
+        so what it returns is the coverage a row would carry: condition 6's fourth
+        operand, put to ``coverage_met`` and written onto the row unchanged. This
+        method evaluates none of it and re-implements no conjunct of condition 6.
+
+        **The goal is read once and used twice**, for :meth:`_planned`'s own reason:
+        the mint and ADR-0256 §1's rung 2 take one stored value, so a goal that moved
+        between two reads cannot leave a row whose members are about one objective
+        and whose horizon is about another. **A stage that could not read one mints
+        nothing** — ``None`` is the same empty coverage as a goal stating no bound,
+        and ADR-0254 §1's completeness condition then holds only vacuously.
 
         **A refusal or a fault withholds the row and nothing else.** ADR-0254 §1
         already rules the outcome of proposing none: *"`Confirmation.authorization`
@@ -1820,10 +1843,12 @@ class StepRunner:
                 request,
                 decision,
                 answers=self._coverage_answers,
-                # No member is minted anywhere on this tree until ADR-0266 §11's
-                # L2 lands the mint, so the row's coverage is empty and condition 6
-                # holds only vacuously.
-                coverage=(),
+                # **The mint, and its whole input is the goal read above** (ADR-0266
+                # §5): one read of one stored goal supplies both the ladder's rung 2
+                # and the coverage, so the members the row carries and the deadline
+                # it is shown with describe the same objective. Nothing about the
+                # request, the plan, the step or the declaration reaches it.
+                coverage=stated_bound_coverage(goal),
                 goal=goal,
                 retention=self._episode_retention,
                 standing=standing,

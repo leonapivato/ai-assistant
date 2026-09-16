@@ -2677,6 +2677,15 @@ class SearchServicer:
         # runner's own rule at a second call site. `step_id` and `execution_id` are
         # `None` (§6): no plan step is synthesised, no `ExecutionState` and no
         # execution, and no clause written about steps is given a subject here.
+        #
+        # **`intended_action` is `None` here for exactly that reason**, and it is
+        # `goal`'s own disposition one field over. ADR-0266 §11's L2 sets it *"from
+        # the `intended_action` of the plan step the request serves"*; this request
+        # serves no plan step, so there is no act to name and naming one would be
+        # this stage's word rather than the plan's. A request carrying `None` is met
+        # by ADR-0266 §7's evidence route in no case, so no `MONEY` member is met —
+        # the fail-closed direction, and the same one this site already takes for
+        # `goal`.
         request = ActionRequest(
             tool=bound.tool, parameters=bound.parameters, egress_binding=bound.binding
         )
