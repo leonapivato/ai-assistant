@@ -2110,11 +2110,22 @@ class SqlitePlanStore:
     async def has_outstanding_effect(self, goal_id: str, /) -> bool:
         """Whether any step of any execution of any attempt of ``goal_id`` is claimed.
 
-        ADR-0261 §6's existential, **goal-wide and never per-attempt**. The scan runs
-        to completion on this store's one connection with the lock held, so it answers
-        from **a single consistent read**: a concurrent claim or resolution cannot
-        commit while it is in flight, and so cannot be seen half-applied. That is
-        ADR-0261 §14 arm 9's *one snapshot* witness rather than ADR-0069 §3's
+        ADR-0261 §6's existential, **goal-wide and never per-attempt**, answered from
+        **a single consistent read**. The predicate is not one ``SELECT``: it reads the
+        goal's attempts and then each attempt's executions, so the several statements
+        run inside one **deferred** transaction — :meth:`_transaction`'s own read form,
+        "a deferred transaction for several ``SELECT``s that must see one snapshot".
+
+        **The lock alone is not enough, and that is why the transaction is here.** This
+        store's ``asyncio.Lock`` serialises callers of *this* object; it excludes no
+        **second connection** to the same file, so without the snapshot another
+        process could claim a step this scan had already passed and resolve one it had
+        not yet reached, and the scan would answer ``False`` though something was
+        outstanding throughout — the exact sequence ADR-0261 §6 says no interleaving
+        may produce. A deferred begin rather than ``IMMEDIATE`` because this takes no
+        write lock and decides no write: it is a read that must not tear.
+
+        That is ADR-0261 §14 arm 9's *one snapshot* witness rather than ADR-0069 §3's
         no-``await`` escape, which an async wrapper around a worker cannot claim.
 
         **An unknown goal answers ``False``**, never a raise.
@@ -2126,7 +2137,10 @@ class SqlitePlanStore:
             return await _run_to_completion(self._has_outstanding_effect_sync, goal_id)
 
     def _has_outstanding_effect_sync(self, goal_id: str) -> bool:
-        return self._outstanding(self._conn, goal_id)
+        with self._transaction(
+            f"read whether goal {goal_id!r} has an outstanding effect", immediate=False
+        ) as conn:
+            return self._outstanding(conn, goal_id)
 
     async def candidates_for(self, conversation_id: str, /, *, limit: int) -> GoalCandidates:
         """Return this conversation's candidate goals, capped (ADR-0250 §2, §9).
