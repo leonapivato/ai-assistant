@@ -1,6 +1,6 @@
 # 260. A forecast read is its own seam, at a provider the deployment configured, and what it mints carries the extent that makes it evidence
 
-- Status: Accepted
+- Status: Partially superseded by ADR-0272 (one scope. **The header's *Everything else of ADR-0247 binds entire* sentence, in the words *"and its trail check"* alone.** ADR-0247 §2's trail check admits a digest-free standing row only on a binding whose `closed_loop` is `True`, and §11 below keeps `closed_loop` the search kind's alone — so that sentence makes §6's own forecast `ALLOW` unrecordable, and `AuditTrail.record` refuses it. ADR-0272 §1 widens that one conjunct to *the binding carries its kind's own configured-provider fact*, exactly one of `closed_loop` and `forecast_reach` carried. **Everything else of that sentence binds entire** — §1's remaining clauses, §2's route (c) itself, §3's retirements as §6 restates their reach, §4's `closed_loop`, §5, §7, §8's (a′) to (d′), §9's unchanged list and §10's surface — and so does every other clause of this ADR: §6's widened route (c) and its three conjuncts, §7's bind-then-rule-then-record-then-send order, §11's `forecast_reach` with its restrictive default and its `closed_loop` is untouched clause, §12's three lanes and their order, and §13's arms)
 - Date: 2026-09-15
 - **Partially supersedes**
   [ADR-0247](0247-the-configured-web-search-provider-is-the-destination-the-owner-chose-and-the-recipient-they-granted-and-the-call-budget-is-removed.md)
@@ -79,6 +79,36 @@
 - **This ADR authorises no byte and configures no deployment.** It decides a contract.
   Nothing transmits on its merge: no provider is configured, no integration is
   registered, and a deployment that configures none is unchanged in every respect.
+- **Partially superseded: 2026-09-16 by ADR-0272 — the header sentence above, in the words
+  *"and its trail check"* alone. Nothing else in this ADR.** This ADR's `Partially
+  supersedes` record against ADR-0247 states that *"**Everything else of ADR-0247 binds
+  entire** — §1's remaining clauses, §2's route (c) and its trail check"*. §6 mints, for a
+  forecast read at the configured forecast provider, a route-(c) `ALLOW` whose
+  `authorised_subject` is unset and whose binding carries `forecast_reach` and not
+  `closed_loop`; ADR-0247 §2's trail check admits such a row *"only where its binding's
+  `closed_loop` is `True`"*; and §11 above keeps `closed_loop` meaning *"this deployment's
+  own search"* and nothing else. So `AuditTrail.record` refuses every row §6 rules, and §7's
+  *"bind, then rule, then record, then send"* never reaches the send. **A reader holding
+  only this ADR would read the trail check as binding entire over the very kind this ADR
+  created**, which is ADR-0070 §1's test coming out on the supersession side; ADR-0070 §3's
+  partial form is the sanctioned tool, and the scope is three words.
+
+  **[ADR-0272](0272-the-trail-admits-a-digest-free-standing-row-on-the-kinds-own-configured-provider-fact.md) §1** takes
+  ADR-0247 §2's eligibility conjunct to **the binding's own kind's configured-provider
+  fact** — exactly one of `closed_loop` and `forecast_reach` carried, a binding carrying
+  neither or both refused — and leaves the pointer half and the digest discriminator
+  exactly as they are. The defect is #2459, found by this ADR's L2 lane (PR #2458) while
+  writing §13's arms, and independently by that PR's round-3 reviewer.
+
+  **Nothing else of this ADR moves.** §6's widened route (c), its three conjuncts and its
+  per-kind comparison; §7's order and its two audit fields; §11's `forecast_reach`, its
+  restrictive `False`, its written-by-`orchestration`-alone clause and its **`closed_loop`
+  is untouched** clause; §12's three lanes **in this order** — ADR-0272 §3 cuts its own
+  single lane and adds no fourth to that section, and L3 is briefed after that lane merges;
+  and §13's arms — all bind entire, as do §§1-5, §8, §9, §10 and §§14-16.
+
+  Appended dated note per ADR-0070 §1; no ratified text is rewritten and no mark is added
+  (ADR-0089 §5). Refs #2459.
 - Refs [#2255](https://github.com/leonapivato/ai-assistant/issues/2255).
 
 ## Context
