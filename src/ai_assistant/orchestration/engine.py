@@ -5492,11 +5492,11 @@ class Engine:
         takes the ending *"once per closing-write attempt"*, ADR-0261 §2's
         re-read-and-retry included, *"each carrying that attempt's own instant"*.
         :meth:`_abandon_goal`'s retry therefore calls this method a **second** time
-        rather than re-issuing the closing write alone, which is how arm 4's *"once per
-        attempt it makes"* is satisfied by construction instead of by memory: an
-        attempt cannot be made here without its own ending, its own instant and its own
-        version. A fresh row a reopen admitted between the two attempts is ended by the
-        second call with the rest.
+        rather than re-issuing the closing write alone, which is how ADR-0268 §9 arm 4's
+        *"once per attempt it makes"* is satisfied by construction instead of by memory:
+        an attempt cannot be made here without its own ending, its own instant and its
+        own version. A fresh row a reopen admitted between the two attempts is ended by
+        the second call with the rest (#2452).
 
         **What each failure leaves** (§1). Where ``end_for_goal`` faults the act ends
         here having written nothing on this attempt — its step is all-or-nothing —
