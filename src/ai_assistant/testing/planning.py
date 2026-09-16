@@ -22,6 +22,7 @@ each is its own place the resource could be handed over early (#397).
 
 from __future__ import annotations
 
+from dataclasses import dataclass
 from datetime import UTC, datetime
 from typing import TYPE_CHECKING, Final
 from uuid import uuid4
@@ -46,6 +47,9 @@ from ai_assistant.core.types import (
     AssociationVerdict,
     AttemptPhase,
     AttemptState,
+    EffectClaim,
+    EffectOutcome,
+    EffectRecord,
     EvidenceHistory,
     EvidenceStanding,
     ExecutionState,
@@ -77,7 +81,9 @@ if TYPE_CHECKING:
     from ai_assistant.core.types import (
         AttemptTransition,
         CurrentContext,
+        EffectKey,
         EvidenceDigest,
+        FrozenJsonValue,
         GoalBrief,
         GoalCandidacy,
         GoalStatus,
@@ -313,17 +319,50 @@ def _marked_evidence(row: GoalEvidence, mark: dict[str, object], *, what: str) -
 
 _LEGAL_TRANSITIONS: dict[StepStatus, frozenset[StepStatus]] = {
     StepStatus.PENDING: frozenset(
-        {StepStatus.RUNNING, StepStatus.AWAITING_APPROVAL, StepStatus.SKIPPED}
+        {
+            StepStatus.RUNNING,
+            StepStatus.AWAITING_APPROVAL,
+            StepStatus.SKIPPED,
+            StepStatus.SUCCEEDED,
+        }
     ),
-    StepStatus.AWAITING_APPROVAL: frozenset({StepStatus.RUNNING, StepStatus.SKIPPED}),
+    StepStatus.AWAITING_APPROVAL: frozenset(
+        {StepStatus.RUNNING, StepStatus.SKIPPED, StepStatus.SUCCEEDED}
+    ),
     StepStatus.RUNNING: frozenset(
         {StepStatus.SUCCEEDED, StepStatus.FAILED, StepStatus.INDETERMINATE}
     ),
     StepStatus.FAILED: frozenset({StepStatus.RUNNING}),
     StepStatus.SUCCEEDED: frozenset(),
     StepStatus.SKIPPED: frozenset(),
-    StepStatus.INDETERMINATE: frozenset(),
+    StepStatus.INDETERMINATE: frozenset({StepStatus.SUCCEEDED}),
 }
+
+#: ADR-0259 §9's two entry statuses: the only two a satisfaction may move a step from,
+#: and the only two whose ``→ SUCCEEDED`` row is a satisfaction rather than an outcome.
+#: Re-implemented here rather than imported from ``ai_assistant.planning``, for the
+#: reason the module docstring gives.
+_SATISFIABLE_STATUSES = frozenset({StepStatus.PENDING, StepStatus.AWAITING_APPROVAL})
+
+#: The two statuses that mean the goal's row names a holder whose act may or may not
+#: have happened (ADR-0259 §2). Re-implemented here for the same reason.
+_UNCERTAIN_STATUSES = frozenset({StepStatus.RUNNING, StepStatus.INDETERMINATE})
+
+
+@dataclass(frozen=True, slots=True)
+class BorrowedAct:
+    """What this store writes onto a step it is satisfying (ADR-0259 §9).
+
+    Mirror of :class:`ai_assistant.planning.effects.BorrowedAct`; re-implemented here
+    rather than imported from ``ai_assistant.planning``, for the reason the module
+    docstring gives. Both values are the **store's** and never the caller's: ``output``
+    is copied from the holder row this store has just verified, and ``finished_at`` is
+    read from this store's own injected clock rather than any tracker's.
+    """
+
+    output: FrozenJsonValue
+    finished_at: datetime
+
 
 #: The three :class:`~ai_assistant.core.types.AttemptState` members ADR-0249 §5 derives
 #: *paused* from, which ADR-0255 §3 makes as disqualifying of a claim as the two
@@ -883,6 +922,11 @@ class FakePlanStore:
         self._evidence_elided: dict[str, int] = {}
         self._plans: dict[str, ActionPlan] = {}
         self._executions: dict[str, ExecutionState] = {}
+        # ADR-0259 §2: at most one row per (goal_id, intended_action_id), which is what
+        # makes the lookup §2's second clause requires possible — a triple-keyed one
+        # could not ask about a completed effect under **this** action whose key is not
+        # this call's.
+        self._effects: dict[tuple[str, str], EffectRecord] = {}
         self._clock = checked_clock(now, owner="FakePlanStore")
         self._sequence = 0
         # A per-instance random nonce, matching ``InMemoryPlanStore``: the
@@ -2031,6 +2075,101 @@ class FakePlanStore:
             self._executions[state.id] = state
         return state.model_copy(deep=True)
 
+    async def claim_effect(
+        self, *, execution_id: str, step_id: str, effect_key: EffectKey
+    ) -> EffectOutcome:
+        """Claim this goal's effect for one intended action (ADR-0259 §2).
+
+        Re-implemented rather than imported from ``ai_assistant.planning``, for the
+        reason the module docstring gives: the shared conformance suite is what stops
+        the two drifting, and a fake that imported the subsystem it stands in for
+        would prove nothing.
+
+        Raises:
+            PlanningError: If the execution is unknown, the step is not a step of it,
+                or that step names no intended action. **Nothing is written** in any.
+        """
+        async with self._resource.held():
+            return self._claim_effect_locked(execution_id, step_id, effect_key)
+
+    def _claim_effect_locked(  # noqa: C901, PLR0911 — one return per row of ADR-0259 §2's second limb, so the totality that clause claims is visible; collapsing them would hide it
+        self, execution_id: str, step_id: str, effect_key: EffectKey
+    ) -> EffectOutcome:
+        """Answer one claim; the caller holds the resource."""
+        stored = self._executions.get(execution_id)
+        if stored is None:
+            msg = f"unknown execution {execution_id}"
+            raise PlanningError(msg)
+        if stored.step(step_id) is None:
+            msg = f"execution {execution_id} has no step {step_id}"
+            raise PlanningError(msg)
+        plan = self._plans[stored.plan_id]
+        planned = next((one for one in plan.steps if one.id == step_id), None)
+        action = None if planned is None else planned.intended_action
+        if action is None:
+            msg = (
+                f"step {step_id} of execution {execution_id} names no intended action, so "
+                "an effect claim has nothing to scope a row to (ADR-0259 §2, ADR-0265 §4)"
+            )
+            raise PlanningError(msg)
+
+        row = self._effects.get((plan.goal_id, action))
+        if row is None:
+            return self._claimed(plan, action, execution_id, step_id, effect_key)
+
+        held = self._executions[row.execution_id]
+        holder = held.step(row.step_id)
+        assert holder is not None  # noqa: S101 — a row is only written for a step it names
+        same_key = row.key == effect_key
+        same_step = (row.execution_id, row.step_id) == (execution_id, step_id)
+
+        if holder.status is StepStatus.SUCCEEDED:
+            if same_key:
+                return EffectOutcome(
+                    claim=EffectClaim.COMPLETED,
+                    execution_id=row.execution_id,
+                    step_id=row.step_id,
+                )
+            return EffectOutcome(claim=EffectClaim.COMPLETED_OTHERWISE)
+        if holder.status in _UNCERTAIN_STATUSES:
+            return EffectOutcome(claim=EffectClaim.UNCERTAIN)
+        if holder.status is StepStatus.SKIPPED:
+            return self._claimed(plan, action, execution_id, step_id, effect_key)
+        superseded = any(one.supersedes == held.plan_id for one in self._plans.values())
+        if holder.status is StepStatus.FAILED and superseded:
+            return self._claimed(plan, action, execution_id, step_id, effect_key)
+        if same_step and same_key:
+            return EffectOutcome(claim=EffectClaim.CLAIMED)
+        return EffectOutcome(claim=EffectClaim.HELD)
+
+    def _claimed(
+        self,
+        plan: ActionPlan,
+        action: str,
+        execution_id: str,
+        step_id: str,
+        effect_key: EffectKey,
+    ) -> EffectOutcome:
+        """Write the row — a first claim or a re-point that re-keys it — and answer.
+
+        ``claimed_at`` and ``targets_revision`` are both stamped **here**, on every
+        write that lands and on no other path, so a re-point restamps the pair at the
+        new holder's instant and every no-write outcome leaves them as they stand.
+        """
+        if plan.targets_revision is None:  # pragma: no cover — save_plan refuses such a plan
+            msg = f"plan {plan.id} targets no revision, so an effect claim has none to record"
+            raise PlanningError(msg)
+        self._effects[plan.goal_id, action] = EffectRecord(
+            goal_id=plan.goal_id,
+            intended_action_id=action,
+            key=effect_key,
+            execution_id=execution_id,
+            step_id=step_id,
+            targets_revision=plan.targets_revision,
+            claimed_at=self._now(),
+        )
+        return EffectOutcome(claim=EffectClaim.CLAIMED)
+
     async def commit_transition(self, transition: StepTransition) -> ExecutionState:
         """Apply one transition against the stored snapshot and persist it."""
         async with self._resource.held():
@@ -2080,7 +2219,13 @@ class FakePlanStore:
                 self._refuse_an_unclaimable_attempt(stored, transition, goal_id=plan.goal_id)
                 self._refuse_a_superseded_plan(stored.plan_id)
 
-        updated = self._advance(current, transition)
+        # ADR-0259 §9's five limbs run **after** the version compare and the step
+        # lookup above, so a stale write stays a `StaleExecutionError` and an unknown
+        # step a plain `PlanningError` — the ordering `PlanStore.commit_transition`'s
+        # exception contract needs, and the one the real stores get by having the
+        # tracker call the store's verification.
+        borrowed = self._borrowed(stored, current, transition)
+        updated = self._advance(current, transition, borrowed)
         state = ExecutionState.model_validate(
             stored.model_copy(
                 update={
@@ -2089,7 +2234,11 @@ class FakePlanStore:
                         for step in stored.steps
                     ),
                     "version": stored.version + 1,
-                    "updated_at": self._now(),
+                    # Read once, so the instant on the step and the instant on the state
+                    # are the same value: a state written earlier than the step it
+                    # carries says it finished would be a record that finished before it
+                    # was written, which the real tracker's own stamping refuses.
+                    "updated_at": self._now() if borrowed is None else borrowed.finished_at,
                 }
             ).model_dump()
         )
@@ -2183,7 +2332,12 @@ class FakePlanStore:
             )
             raise PlanningError(msg)
 
-    def _advance(self, step: StepExecution, transition: StepTransition) -> StepExecution:
+    def _advance(
+        self,
+        step: StepExecution,
+        transition: StepTransition,
+        borrowed: BorrowedAct | None = None,
+    ) -> StepExecution:
         """Build the step's next value, re-validating so invariants still bite."""
         if transition.to_status is StepStatus.RUNNING:
             updated = self._to_running(step, transition)
@@ -2192,15 +2346,95 @@ class FakePlanStore:
         elif transition.to_status is StepStatus.SKIPPED:
             updated = self._to_skipped(step, transition)
         else:
+            undispatched = step.status in _SATISFIABLE_STATUSES
+            if transition.to_status is StepStatus.SUCCEEDED and undispatched and borrowed is None:
+                msg = (
+                    f"step {step.step_id} cannot go from {step.status} to SUCCEEDED without "
+                    "naming the completed effect that satisfies it"
+                )
+                raise IllegalTransitionError(msg)
             updated = step.model_copy(
                 update={
                     "status": transition.to_status,
-                    "output": transition.output,
+                    "output": transition.output if borrowed is None else borrowed.output,
                     "failure": transition.failure,
-                    "finished_at": self._now(),
+                    "finished_at": self._now() if borrowed is None else borrowed.finished_at,
+                    "satisfied_by_execution": transition.satisfied_by_execution,
+                    "satisfied_by_step": transition.satisfied_by_step,
                 }
             )
         return StepExecution.model_validate(updated.model_dump())
+
+    def _borrowed(
+        self, stored: ExecutionState, source: StepExecution, transition: StepTransition
+    ) -> BorrowedAct | None:
+        """Verify ADR-0259 §9's satisfaction claim condition; return what is written.
+
+        Five limbs, decided inside the same step as the write and refused on a
+        ``PlanningError`` that is **not** a ``StaleExecutionError``: no re-read makes
+        one goal's execution another's, one key another, or a run that happened one
+        that did not. Re-implemented rather than imported, for the module docstring's
+        reason.
+
+        Both values it returns are the store's: the ``output`` is the holder's own and
+        the instant is this store's clock's, which §9 names in terms.
+
+        Returns:
+            What to write onto the satisfied step, or ``None`` where this is not a
+            satisfaction at all.
+
+        Raises:
+            PlanningError: On any limb of the condition.
+        """
+        named, borrowed_step = transition.satisfied_by_execution, transition.satisfied_by_step
+        if named is None or borrowed_step is None:
+            return None
+        plan = self._plans[stored.plan_id]
+        held = self._executions.get(named)
+        held_plan = None if held is None else self._plans.get(held.plan_id)
+        if held is None or held_plan is None or held_plan.goal_id != plan.goal_id:
+            msg = (
+                f"step {transition.step_id} names a borrowed execution this store does not "
+                "hold, or one that belongs to another goal"
+            )
+            raise PlanningError(msg)
+        borrowed = held.step(borrowed_step)
+        if borrowed is None:
+            msg = (
+                f"step {transition.step_id} names a borrowed step that is not a step of "
+                "that execution"
+            )
+            raise PlanningError(msg)
+        if borrowed.status is not StepStatus.SUCCEEDED:
+            msg = (
+                f"step {transition.step_id} cannot be satisfied from a step standing "
+                f"{borrowed.status}: only a SUCCEEDED act has been performed"
+            )
+            raise PlanningError(msg)
+        planned = next((one for one in plan.steps if one.id == transition.step_id), None)
+        action = None if planned is None else planned.intended_action
+        row = None if action is None else self._effects.get((plan.goal_id, action))
+        if row is None or (row.execution_id, row.step_id) != (named, borrowed_step):
+            msg = (
+                f"step {transition.step_id} names a borrowed act this goal's effect row "
+                "does not hold: a satisfaction is verified against the row, never "
+                "asserted by its caller"
+            )
+            raise PlanningError(msg)
+        if row.key != transition.satisfied_by_key:
+            msg = (
+                f"step {transition.step_id} names a satisfied_by_key that is not the "
+                "effect row's key: the act was performed with different arguments "
+                "(ADR-0259 §2)"
+            )
+            raise PlanningError(msg)
+        if source.status not in _SATISFIABLE_STATUSES:
+            msg = (
+                f"step {transition.step_id} stands {source.status}, so it has already run "
+                "and cannot be satisfied by an effect its goal completed earlier"
+            )
+            raise PlanningError(msg)
+        return BorrowedAct(output=borrowed.output, finished_at=self._now())
 
     def _to_awaiting_approval(
         self, step: StepExecution, transition: StepTransition
@@ -2307,6 +2541,9 @@ class FakePlanStore:
                 # ADR-0252 §13: exactly one history per goal the export carries, each
                 # with its rows and its elision count.
                 evidence=tuple(self._history_locked(goal_id) for goal_id in self._goals),
+                # ADR-0259 §9: the goal's effect rows travel with it, in a
+                # deterministic order so two exports of one store are one document.
+                effects=tuple(self._effects[key] for key in sorted(self._effects)),
             )
 
     async def delete_goal(self, goal_id: str) -> GoalDeletion:
@@ -2357,6 +2594,10 @@ class FakePlanStore:
         for evidence_id in evidence_ids:
             del self._evidence[evidence_id]
         self._evidence_elided.pop(goal_id, None)
+        # ADR-0259 §9: and it reaches that goal's effect rows, which are the goal's
+        # durable data. No row blocks a deletion and `GoalDeletion` gains no member.
+        for key in [one for one in self._effects if one[0] == goal_id]:
+            del self._effects[key]
         del self._goals[goal_id]
 
         return GoalDeletion(
@@ -2382,6 +2623,7 @@ class FakePlanStore:
                 + len(self._evidence)
                 + len(self._plans)
                 + len(self._executions)
+                + len(self._effects)
             )
             self._goals.clear()
             self._attempts.clear()
@@ -2390,6 +2632,7 @@ class FakePlanStore:
             self._evidence_elided.clear()
             self._plans.clear()
             self._executions.clear()
+            self._effects.clear()
         return removed
 
 

@@ -1415,7 +1415,7 @@ def conversation_summary(conversation: Conversation) -> ConversationSummary:
     )
 
 
-def _outcome_of(step: StepOutcome | None) -> ExchangeDisposition:  # noqa: PLR0911 — one return per Disposition member plus the no-step case; collapsing them would hide the totality the docstring relies on
+def _outcome_of(step: StepOutcome | None) -> ExchangeDisposition:  # noqa: C901, PLR0911 — one return per Disposition member plus the no-step case; collapsing them would hide the totality the docstring relies on
     """What became of the exchange, as the captured episode's ``disposition`` (ADR-0221 §2).
 
     Total over :class:`~ai_assistant.orchestration.runner.Disposition` and
@@ -1453,6 +1453,10 @@ def _outcome_of(step: StepOutcome | None) -> ExchangeDisposition:  # noqa: PLR09
             return ExchangeDisposition.STEP_INVALID_PARAMETERS
         case Disposition.EGRESS_UNBINDABLE:
             return ExchangeDisposition.STEP_EGRESS_UNBINDABLE
+        case Disposition.EFFECT_ALREADY_CLAIMED:
+            return ExchangeDisposition.STEP_EFFECT_ALREADY_CLAIMED
+        case Disposition.EFFECT_UNSCOPED:
+            return ExchangeDisposition.STEP_EFFECT_UNSCOPED
         case _:  # pragma: no cover - exhaustive
             assert_never(step.disposition)
 

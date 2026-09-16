@@ -931,7 +931,7 @@ async def test_an_outcome_cannot_forge_the_blocks_own_syntax() -> None:
 
 #: ADR-0221 §2's phrase table, written out here.
 #:
-#: **Deliberately a fourth copy** of the sixteen strings the three render sites each
+#: **Deliberately a fourth copy** of the strings the three render sites each
 #: hold (§3). A test importing ``planner._disposition_phrase`` would assert that a
 #: function equals itself and would pass on a table with every phrase wrong; written
 #: out, this module pins the values §2 fixes as well as the byte-identity §11's test
@@ -951,6 +951,12 @@ _PHRASES: Final[dict[ExchangeDisposition, str]] = {
     ),
     ExchangeDisposition.STEP_EGRESS_UNBINDABLE: (
         "the outbound call could not be described, so nothing was asked or sent"
+    ),
+    ExchangeDisposition.STEP_EFFECT_ALREADY_CLAIMED: (
+        "this goal had already claimed the act, so nothing was dispatched"
+    ),
+    ExchangeDisposition.STEP_EFFECT_UNSCOPED: (
+        "the plan did not say which act the step was, so nothing was dispatched"
     ),
     ExchangeDisposition.ROUTED_PERFORMED: (
         "the assistant performed the operation the user asked for"

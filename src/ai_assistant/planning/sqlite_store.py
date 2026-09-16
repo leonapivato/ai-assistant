@@ -42,6 +42,7 @@ from ai_assistant.core.errors import ActiveExecutionError, PlanningError, StaleE
 from ai_assistant.core.types import (
     MAX_GOAL_EVIDENCE,
     ActionPlan,
+    EffectRecord,
     EvidenceHistory,
     EvidenceStanding,
     ExecutionState,
@@ -58,6 +59,14 @@ from ai_assistant.core.types import (
     ground_of,
 )
 from ai_assistant.planning._transactions import transaction
+from ai_assistant.planning.effects import (
+    BorrowedAct,
+    EffectHolder,
+    claiming_revision,
+    decide_claim,
+    refuse_an_unsatisfiable_borrowing,
+    refuse_an_unscopable_claim,
+)
 from ai_assistant.planning.execution import PlanExecution
 from ai_assistant.planning.goals import (
     advanced,
@@ -89,10 +98,13 @@ if TYPE_CHECKING:
     from ai_assistant.core.clock import Clock
     from ai_assistant.core.types import (
         AttemptTransition,
+        EffectKey,
+        EffectOutcome,
         GoalCandidates,
         GoalRevision,
         GoalStatus,
         IntendedActionMinting,
+        StepExecution,
         StepTransition,
         UtcInstant,
     )
@@ -152,9 +164,17 @@ _SIDECARS = ("-journal", "-wal", "-shm")
 #: **No lane invents an intended action for a stored goal** (§5): "an act nothing
 #: declared is an act no claim was ever scoped to, and minting one would state a
 #: history the row does not hold".
-_SCHEMA_VERSION = 5
+#: **6 since ADR-0259 §9**: the store gains ``goal_effects``, and that decision's
+#: migration "creates the table empty" — no lane reconstructs a row for an execution
+#: that predates it, because doing so would need the tool, digest and binding of a
+#: decision the **audit trail** holds, and ``planning`` reaching into ``permissions``
+#: to build its own rows is what golden rule 1 forbids. So the version moves for the
+#: same reason every earlier move did: ADR-0049 §1's "a store labelled with a version
+#: this code does not read is refused loudly rather than read blindly" is the whole of
+#: the mechanism, and a version that did not move would leave it nothing to refuse on.
+_SCHEMA_VERSION = 6
 
-#: The versions a database this code can upgrade carries. Four members since ADR-0265:
+#: The versions a database this code can upgrade carries. Five members since ADR-0259:
 #: version 1 is ADR-0049 §1's original shape, version 2 is ADR-0249 §12's, version 3 is
 #: ADR-0250 §9's and version 4 is ADR-0252 §13's. Only the first needs its ``goals``
 #: blobs rewritten (:meth:`SqlitePlanStore._upgrade_goal_rows`); **all four** gain
@@ -162,8 +182,12 @@ _SCHEMA_VERSION = 5
 #: not hold, which ``CREATE TABLE IF NOT EXISTS`` supplies **empty** because no earlier
 #: store holds a question or an evidence row. **Version 4 needs nothing else at all**:
 #: ADR-0265 adds no column and no table, and every row it holds decodes unchanged with
-#: an empty ``intended_actions``.
-_UPGRADABLE_FROM: Final[frozenset[int]] = frozenset({1, 2, 3, 4})
+#: an empty ``intended_actions``. **Version 5 needs only the new table**, which
+#: ``CREATE TABLE IF NOT EXISTS`` supplies empty: a store written before ADR-0259 holds
+#: no effect row, exports and deletes cleanly the moment the table exists, and answers
+#: ``CLAIMED`` for the key of a legacy ``SUCCEEDED`` side-effecting step — the
+#: delimited guarantee §9 states rather than a gap in the migration.
+_UPGRADABLE_FROM: Final[frozenset[int]] = frozenset({1, 2, 3, 4, 5})
 
 # The ``meta`` table is created first and on its own, so the schema version can be
 # read and a newer store refused *before* any record table is created (ADR-0049
@@ -263,6 +287,26 @@ _EVIDENCE_INDEX_RULE: Final[str] = (
     "selected under a goal its columns do not name"
 )
 
+#: The five columns every effect read selects, so that each one can be checked against
+#: the blob beside it (:func:`_checked_effect`). Stated once because the reads have to
+#: agree about which columns they are reconciling.
+_EFFECT_COLUMNS: Final[str] = (
+    "SELECT goal_id, intended_action_id, execution_id, step_id, data FROM goal_effects"
+)
+
+#: **The effect index rule**, :data:`_EVIDENCE_INDEX_RULE`'s shape one record kind over
+#: (ADR-0259 §2, §9). ``goal_id`` and ``intended_action_id`` are the row's identity and
+#: the pair every lookup selects on; ``execution_id`` and ``step_id`` are the holder the
+#: claim reads a status through. Promoting them is what makes the pair a **schema**
+#: constraint rather than a code one — which is what refuses a second concurrent first
+#: claim — and reconciling them is what stops a tampered blob answering for a row it is
+#: not.
+_EFFECT_INDEX_RULE: Final[str] = (
+    "the promoted columns are the index: a row is selected by its columns and, wherever "
+    "it is decoded, refused if its record disagrees with them, and a row is never "
+    "selected under a goal and action its columns do not name"
+)
+
 _RECORD_SCHEMA = (
     "CREATE TABLE IF NOT EXISTS goals("
     "id TEXT PRIMARY KEY, conversation_id TEXT, last_engaged_in TEXT, "
@@ -306,6 +350,21 @@ _RECORD_SCHEMA = (
     "CREATE TABLE IF NOT EXISTS goal_evidence("
     "id TEXT PRIMARY KEY, goal_id TEXT NOT NULL REFERENCES goals(id), "
     "read_at TEXT NOT NULL, standing TEXT NOT NULL, data TEXT NOT NULL)",
+    # ADR-0259 §9's effects table, with the foreign key onto `goals` ADR-0049 §1's
+    # schema discipline requires. **Its primary key is the pair and not an `id`**,
+    # because the row has no id to be: §2 keeps "at most one row per `(goal_id,
+    # intended_action_id)`" as an invariant of its write rules, and declaring that
+    # pair as the key is what makes the invariant the *schema's* rather than the
+    # code's — a second writer racing the first on an empty pair is refused by SQLite
+    # rather than by whichever `SELECT` happened to run first. `execution_id` and
+    # `step_id` are columns because the claim reads the holder's status through them;
+    # the key and `targets_revision` and `claimed_at` live in the blob, which is the
+    # record, exactly as it is for the tables above. On any earlier database this
+    # table is **created empty** (§9's delimited guarantee).
+    "CREATE TABLE IF NOT EXISTS goal_effects("
+    "goal_id TEXT NOT NULL REFERENCES goals(id), intended_action_id TEXT NOT NULL, "
+    "execution_id TEXT NOT NULL, step_id TEXT NOT NULL, data TEXT NOT NULL, "
+    "PRIMARY KEY (goal_id, intended_action_id))",
 )
 
 #: ``created_seq`` is unique by construction — every allocation takes it from the
@@ -391,13 +450,32 @@ _RECORD_COLUMNS: dict[str, dict[str, tuple[str, bool, str | None]]] = {
         "standing": ("TEXT", True, None),
         "data": ("TEXT", True, None),
     },
+    "goal_effects": {
+        "goal_id": ("TEXT", True, None),
+        "intended_action_id": ("TEXT", True, None),
+        "execution_id": ("TEXT", True, None),
+        "step_id": ("TEXT", True, None),
+        "data": ("TEXT", True, None),
+    },
 }
 
 #: The single column every record table's ``PRIMARY KEY`` is, checked against
 #: ``PRAGMA table_info``'s ``pk`` flag. A pre-existing table without it opens a
 #: store whose ``save_goal`` ``ON CONFLICT(id)`` upsert and per-id uniqueness are
 #: silently absent, so the key is required, not assumed (#373).
-_RECORD_PRIMARY_KEY = "id"
+#: **Per table since ADR-0259 §9**, because ``goal_effects`` is keyed on the pair its
+#: row's identity actually is rather than on an ``id`` the record does not carry. Every
+#: other table keeps the single ``id`` key its upsert and per-id uniqueness rest on;
+#: the mapping is what lets the one exception be declared rather than exempted.
+_RECORD_PRIMARY_KEY: dict[str, tuple[str, ...]] = {
+    "goals": ("id",),
+    "plans": ("id",),
+    "executions": ("id",),
+    "attempts": ("id",),
+    "goal_questions": ("id",),
+    "goal_evidence": ("id",),
+    "goal_effects": ("goal_id", "intended_action_id"),
+}
 
 #: The foreign keys ADR-0049 §1's referential-integrity backstop rests on, absent
 #: on a pre-existing table this code did not create. ``table -> (child column,
@@ -411,6 +489,7 @@ _RECORD_FOREIGN_KEYS: dict[str, tuple[str, str, str]] = {
     "attempts": ("goal_id", "goals", "id"),
     "goal_questions": ("goal_id", "goals", "id"),
     "goal_evidence": ("goal_id", "goals", "id"),
+    "goal_effects": ("goal_id", "goals", "id"),
 }
 
 
@@ -1111,12 +1190,16 @@ class SqlitePlanStore:
             raise PlanningError(msg)
 
     def _verify_primary_key(self, conn: sqlite3.Connection, table: str) -> None:
-        """Require ``table``'s primary key to be exactly ``id``, BINARY-collated.
+        """Require ``table``'s primary key to be exactly its declared columns, BINARY.
 
         ``save_goal``'s ``ON CONFLICT(id) DO UPDATE`` upsert and the per-id
         uniqueness every record read assumes need ``id`` to be the primary key; a
         pre-existing table without it, or keyed on something else, opens a store
-        whose guarantee is silently absent (#373). The **collation** is load-bearing
+        whose guarantee is silently absent (#373). **``goal_effects`` is keyed on
+        ``(goal_id, intended_action_id)``** instead, which is the identity ADR-0259 §2
+        keeps at most one row per, and the same sentence holds of it: its
+        ``ON CONFLICT`` re-point and its refusal of a second concurrent first claim
+        both rest on that key being the schema's. The **collation** is load-bearing
         too: a ``COLLATE NOCASE`` key folds ``"A"`` and ``"a"`` into one row, so an
         upsert of a case-variant id overwrites a different record's blob and
         ``get_goal`` hands back an id the caller never stored — ``Identifier`` is
@@ -1151,17 +1234,19 @@ class SqlitePlanStore:
             if len(pk_indexes) == 1
             else []
         )
-        if key_columns == [(_RECORD_PRIMARY_KEY, "BINARY")]:
+        expected = _RECORD_PRIMARY_KEY[table]
+        if key_columns == [(column, "BINARY") for column in expected]:
             return
         if not key_columns:
             detail = "no PRIMARY KEY"
-        elif [column for column, _coll in key_columns] != [_RECORD_PRIMARY_KEY]:
+        elif [column for column, _coll in key_columns] != list(expected):
             detail = f"a PRIMARY KEY over {', '.join(column for column, _coll in key_columns)}"
         else:
-            detail = f"a {key_columns[0][1]}-collated {_RECORD_PRIMARY_KEY} PRIMARY KEY"
+            collations = ", ".join(sorted({collation for _column, collation in key_columns}))
+            detail = f"a {collations}-collated {', '.join(expected)} PRIMARY KEY"
         msg = (
             f"the plan store at {self._path!r} has a {table} table with {detail}, not the "
-            f"exact BINARY {_RECORD_PRIMARY_KEY} PRIMARY KEY (ADR-0049 §1) its upsert and "
+            f"exact BINARY {', '.join(expected)} PRIMARY KEY (ADR-0049 §1) its upsert and "
             f"per-id uniqueness rest on; refusing to open a table it did not shape"
         )
         raise PlanningError(msg)
@@ -2742,6 +2827,163 @@ class SqlitePlanStore:
         conn.execute(_UPDATE_HIGH_WATER, (str(nxt),))
         return nxt
 
+    async def claim_effect(
+        self, *, execution_id: str, step_id: str, effect_key: EffectKey
+    ) -> EffectOutcome:
+        """Claim this goal's effect for one intended action (ADR-0259 §2).
+
+        The lookup, the comparison and the write run inside one ``BEGIN IMMEDIATE``
+        transaction, so a second writer that found the pair unheld cannot also write
+        it: it waits on the write lock, then reads the row the first committed. The
+        ``INSERT`` is an upsert on the pair — the table's own primary key — so even a
+        writer that got past the read is refused by the schema rather than by
+        whichever ``SELECT`` happened to run first.
+
+        Raises:
+            PlanningError: If the execution is unknown, the step is not a step of it,
+                or that step names no intended action. **Nothing is written** in any.
+        """
+        async with self._lock:
+            return await _run_to_completion(
+                self._claim_effect_sync, execution_id, step_id, effect_key
+            )
+
+    def _claim_effect_sync(
+        self, execution_id: str, step_id: str, effect_key: EffectKey
+    ) -> EffectOutcome:
+        with self._transaction(f"claim an effect for execution {execution_id!r}") as conn:
+            row = conn.execute(
+                "SELECT e.data, p.data FROM executions e JOIN plans p ON e.plan_id = p.id "
+                "WHERE e.id = ?",
+                (execution_id,),
+            ).fetchone()
+            stored = None if row is None else _decode_execution(row[0])
+            plan = None if row is None else _decode_plan(row[1])
+            planned = (
+                None
+                if plan is None
+                else next((one for one in plan.steps if one.id == step_id), None)
+            )
+            action = refuse_an_unscopable_claim(
+                execution_id=execution_id,
+                step_id=step_id,
+                known=stored is not None,
+                is_a_step=stored is not None and stored.step(step_id) is not None,
+                intended_action=None if planned is None else planned.intended_action,
+            )
+            assert plan is not None  # noqa: S101 — the refusal's first limb
+            decision = decide_claim(
+                holder=self._holder(conn, plan.goal_id, action),
+                execution_id=execution_id,
+                step_id=step_id,
+                effect_key=effect_key,
+            )
+            if decision.writes:
+                record = EffectRecord(
+                    goal_id=plan.goal_id,
+                    intended_action_id=action,
+                    key=effect_key,
+                    execution_id=execution_id,
+                    step_id=step_id,
+                    targets_revision=claiming_revision(plan),
+                    claimed_at=self._now(),
+                )
+                conn.execute(
+                    "INSERT INTO goal_effects(goal_id, intended_action_id, execution_id, "
+                    "step_id, data) VALUES (?, ?, ?, ?, ?) "
+                    "ON CONFLICT(goal_id, intended_action_id) DO UPDATE SET "
+                    "execution_id = excluded.execution_id, step_id = excluded.step_id, "
+                    "data = excluded.data",
+                    (
+                        record.goal_id,
+                        record.intended_action_id,
+                        record.execution_id,
+                        record.step_id,
+                        record.model_dump_json(),
+                    ),
+                )
+        return decision.outcome
+
+    def _effect_row(
+        self, conn: sqlite3.Connection, goal_id: str, action: str
+    ) -> EffectRecord | None:
+        """The row indexed at ``(goal_id, action)``, reconciled against its own columns.
+
+        :data:`_EFFECT_INDEX_RULE`: the promoted columns are the index, so a row whose
+        blob disagrees with the columns it was selected by is **refused** rather than
+        read. Without it a row indexed at ``(g1, ia1)`` whose record names ``ia2`` would
+        answer ``COMPLETED`` for ``ia1`` from ``ia2``'s holder, and a completed ``ia1``
+        indexed under ``ia2`` would be invisible and let another ``ia1`` dispatch — the
+        same corruption ``goal_evidence`` is already guarded for (#2328), at the one
+        lookup ADR-0259 §2's at-most-once rests on.
+
+        Args:
+            conn: The connection the transaction is running on.
+            goal_id: The goal the row is scoped to.
+            action: The intended action it is scoped to.
+
+        Returns:
+            The record, or ``None`` where the goal holds no row for that action.
+
+        Raises:
+            PlanningError: If the stored blob disagrees with its own columns.
+        """
+        row = conn.execute(
+            _EFFECT_COLUMNS + " WHERE goal_id = ? AND intended_action_id = ?",
+            (goal_id, action),
+        ).fetchone()
+        return None if row is None else _checked_effect(str(self._path), row)
+
+    def _holder(self, conn: sqlite3.Connection, goal_id: str, action: str) -> EffectHolder | None:
+        """The row this goal holds for ``action``, read with its holder's status.
+
+        Read on the commit's own connection and inside its transaction, so the status
+        the decision is taken over is the one the write lands against. The
+        supersession is derived here rather than asked of a caller, and the scan is
+        confined to the holder's own goal's plans for :meth:`_refuse_a_superseded_plan`'s
+        reason: ``save_plan`` refuses a ``supersedes`` naming a plan under a different
+        ``goal_id``.
+
+        Args:
+            conn: The connection the claim transaction is running on.
+            goal_id: The goal the row is scoped to.
+            action: The intended action it is scoped to.
+
+        Returns:
+            The holder, or ``None`` where the goal holds no row for that action.
+        """
+        record = self._effect_row(conn, goal_id, action)
+        if record is None:
+            return None
+        held = conn.execute(
+            "SELECT data, plan_id FROM executions WHERE id = ?", (record.execution_id,)
+        ).fetchone()
+        if held is None:  # pragma: no cover — the claim refuses a row it could not write
+            msg = (
+                f"the plan store at {str(self._path)!r} holds an effect row naming "
+                f"execution {record.execution_id}, which it does not hold; the store is corrupt"
+            )
+            raise PlanningError(msg)
+        step = _decode_execution(held[0]).step(record.step_id)
+        if step is None:  # pragma: no cover — likewise
+            msg = (
+                f"the plan store at {str(self._path)!r} holds an effect row naming step "
+                f"{record.step_id} of execution {record.execution_id}, which has no such "
+                f"step; the store is corrupt"
+            )
+            raise PlanningError(msg)
+        successors = conn.execute(
+            "SELECT 1 FROM plans WHERE goal_id = ? AND json_extract(data, '$.supersedes') = ?",
+            (goal_id, str(held[1])),
+        ).fetchone()
+        return EffectHolder(
+            execution_id=record.execution_id,
+            step_id=record.step_id,
+            key=record.key,
+            status=step.status,
+            superseded=successors is not None,
+        )
+
     async def commit_transition(self, transition: StepTransition) -> ExecutionState:
         """Apply one transition against the stored snapshot and persist it.
 
@@ -2789,7 +3031,15 @@ class SqlitePlanStore:
             self._refuse_a_stale_target(conn, stored, transition)
             self._refuse_an_unclaimable_attempt(conn, stored, transition)
             self._refuse_a_superseded_plan(conn, stored, transition)
-            updated = self._tracker.apply(stored, transition)
+            updated = self._tracker.apply(
+                stored,
+                transition,
+                satisfaction=(
+                    None
+                    if transition.satisfied_by_execution is None
+                    else lambda source: self._borrowed(conn, stored, transition, source)
+                ),
+            )
             conn.execute(
                 "UPDATE executions SET version = ?, active = ?, data = ? WHERE id = ?",
                 (
@@ -2800,6 +3050,63 @@ class SqlitePlanStore:
                 ),
             )
         return updated.model_copy(deep=True)
+
+    def _borrowed(
+        self,
+        conn: sqlite3.Connection,
+        stored: ExecutionState,
+        transition: StepTransition,
+        source: StepExecution,
+    ) -> BorrowedAct:
+        """Verify ADR-0259 §9's satisfaction claim condition and return what is written.
+
+        Five limbs, decided on the commit's own connection and inside its transaction,
+        and refused on a ``PlanningError`` that is not a ``StaleExecutionError``. It is
+        called **by the tracker**, once that has compared the version and resolved the
+        step, so a stale write is still a ``StaleExecutionError``.
+
+        Both values it returns are the store's: the ``output`` is the holder's own, off
+        the row it has just verified, and the instant is this store's clock's rather
+        than the tracker's, which may be injected independently (§9).
+
+        Args:
+            conn: The connection the commit transaction is running on.
+            stored: The execution the transition targets.
+            transition: The move being applied.
+            source: The **stored** step being satisfied, as the tracker resolved it.
+
+        Returns:
+            What the store writes onto the satisfied step.
+
+        Raises:
+            PlanningError: On any limb of the condition.
+        """
+        named, borrowed_step = transition.satisfied_by_execution, transition.satisfied_by_step
+        assert named is not None  # noqa: S101 — the tracker calls this for a satisfaction alone
+        assert borrowed_step is not None  # noqa: S101 — StepTransition keeps the trio whole
+        mine = conn.execute("SELECT data FROM plans WHERE id = ?", (stored.plan_id,)).fetchone()
+        plan = _decode_plan(mine[0])
+        theirs = conn.execute(
+            "SELECT e.data, p.goal_id FROM executions e JOIN plans p ON e.plan_id = p.id "
+            "WHERE e.id = ?",
+            (named,),
+        ).fetchone()
+        same_goal = theirs is not None and str(theirs[1]) == plan.goal_id
+        borrowed = _decode_execution(theirs[0]).step(borrowed_step) if theirs is not None else None
+        planned = next((one for one in plan.steps if one.id == transition.step_id), None)
+        action = None if planned is None else planned.intended_action
+        record = None if action is None else self._effect_row(conn, plan.goal_id, action)
+        refuse_an_unsatisfiable_borrowing(
+            step_id=transition.step_id,
+            same_goal=same_goal,
+            borrowed_status=None if borrowed is None else borrowed.status,
+            holder_names_it=record is not None
+            and (record.execution_id, record.step_id) == (named, borrowed_step),
+            key_matches=record is not None and record.key == transition.satisfied_by_key,
+            source_status=source.status,
+        )
+        assert borrowed is not None  # noqa: S101 — the refusal's second limb
+        return BorrowedAct(output=borrowed.output, finished_at=self._now())
 
     def _refuse_a_stale_target(
         self, conn: sqlite3.Connection, stored: ExecutionState, transition: StepTransition
@@ -2977,7 +3284,7 @@ class SqlitePlanStore:
         exported_at = self._now()
         async with self._lock:
             snapshot = await _run_to_completion(self._export_sync)
-        goals, plans, executions, attempts, questions, evidence = snapshot
+        goals, plans, executions, attempts, questions, evidence, effects = snapshot
         return PlanExport(
             exported_at=exported_at,
             goals=tuple(_decode_goal(data) for data in goals),
@@ -2993,6 +3300,11 @@ class SqlitePlanStore:
                 EvidenceHistory(goal_id=goal_id, rows=tuple(rows), elided=elided)
                 for goal_id, rows, elided in evidence
             ),
+            # ADR-0259 §9: the goal's effect rows travel with it, in a deterministic
+            # order so two exports of one store are one document. `PlanExport` states
+            # §5's closure over **one holder** and refuses a row whose execution, step
+            # and goal do not line up, so nothing here needs a second check.
+            effects=tuple(effects),
         )
 
     def _export_sync(
@@ -3004,6 +3316,7 @@ class SqlitePlanStore:
         list[str],
         list[str],
         list[tuple[str, list[GoalEvidence], int]],
+        list[EffectRecord],
     ]:
         # All three reads inside one transaction, so the export is a single
         # database snapshot: a concurrent connection cannot commit a goal+plan
@@ -3063,7 +3376,16 @@ class SqlitePlanStore:
                 for r in conn.execute("SELECT id, evidence_elided FROM goals").fetchall()
             }
             evidence = [(goal_id, rows, elided[goal_id]) for goal_id, rows in by_goal.items()]
-        return goals, plans, executions, attempts, questions, evidence
+            # Read in the same transaction as the rest, for the reason the evidence
+            # read states: the document cannot carry a row a concurrent writer added
+            # between two reads and whose holder it does not hold.
+            effects = [
+                _checked_effect(str(self._path), row)
+                for row in conn.execute(
+                    _EFFECT_COLUMNS + " ORDER BY goal_id ASC, intended_action_id ASC"
+                ).fetchall()
+            ]
+        return goals, plans, executions, attempts, questions, evidence, effects
 
     async def delete_goal(self, goal_id: str) -> GoalDeletion:
         """Delete a goal, its plan history, its attempts and its questions.
@@ -3136,6 +3458,12 @@ class SqlitePlanStore:
             # the count is a column of the goal's own row. Before the goal, so the
             # foreign key holds at each step.
             evidence_removed = self._delete_goal_evidence(conn, goal_id)
+            # ADR-0259 §9: and it reaches that goal's effect rows. They are the goal's
+            # durable data, no row blocks a deletion — the live-step refusal above is
+            # unchanged — and `GoalDeletion` gains no member for them, exactly as
+            # ADR-0249 §12 has it report attempts. Before the goal, so the foreign key
+            # holds at each step.
+            conn.execute("DELETE FROM goal_effects WHERE goal_id = ?", (goal_id,))
             conn.execute("DELETE FROM goals WHERE id = ?", (goal_id,))
         return GoalDeletion(
             deleted=True,
@@ -3176,6 +3504,9 @@ class SqlitePlanStore:
             # No column is read at all — the whole table goes — so there is nothing
             # here for a record and a projection to disagree about.
             removed += conn.execute("DELETE FROM goal_evidence").rowcount
+            # Likewise whole-table, so no row survives in storage or in the export
+            # (ADR-0259 §9).
+            removed += conn.execute("DELETE FROM goal_effects").rowcount
             removed += conn.execute("DELETE FROM goals").rowcount
         return removed
 
@@ -3468,6 +3799,45 @@ def _decode_attempt(data: str) -> GoalAttempt:
         return GoalAttempt.model_validate_json(data)
     except ValidationError as exc:
         msg = f"the plan store holds an attempt that no longer validates: {exc}"
+        raise PlanningError(msg) from exc
+
+
+def _checked_effect(path: str, row: Sequence[Any]) -> EffectRecord:
+    """Decode one effect row and refuse a blob that disagrees with its columns.
+
+    :data:`_EFFECT_INDEX_RULE`. Four values are promoted and all four are reconciled,
+    because each one a reader trusts is one a tampered file could answer with: the pair
+    decides which row a claim finds at all, and the holder decides the status §2's
+    second limb is taken over.
+
+    Args:
+        path: The store's path, for the message.
+        row: ``(goal_id, intended_action_id, execution_id, step_id, data)``.
+
+    Returns:
+        The reconciled record.
+
+    Raises:
+        PlanningError: If the blob does not validate, or disagrees with its columns.
+    """
+    record = _decode_effect(str(row[4]))
+    promoted = (str(row[0]), str(row[1]), str(row[2]), str(row[3]))
+    held = (record.goal_id, record.intended_action_id, record.execution_id, record.step_id)
+    if promoted != held:
+        msg = (
+            f"the plan store at {path!r} holds an effect row indexed at {promoted} whose "
+            f"record names {held}; the store is corrupt"
+        )
+        raise PlanningError(msg)
+    return record
+
+
+def _decode_effect(data: str) -> EffectRecord:
+    """Rebuild a stored effect row from its JSON, surfacing corruption as ``PlanningError``."""
+    try:
+        return EffectRecord.model_validate_json(data)
+    except ValidationError as exc:
+        msg = f"the plan store holds an effect row that no longer validates: {exc}"
         raise PlanningError(msg) from exc
 
 

@@ -19,7 +19,7 @@ from __future__ import annotations
 import asyncio
 from collections.abc import Mapping
 from datetime import UTC, datetime, timedelta, timezone
-from typing import TYPE_CHECKING, Any, Protocol
+from typing import TYPE_CHECKING, Any, Final, Protocol
 
 import pytest
 from pydantic import ValidationError
@@ -44,6 +44,8 @@ from ai_assistant.core.types import (
     AttemptPhase,
     AttemptState,
     AttemptTransition,
+    EffectClaim,
+    EffectKey,
     EvidenceApplicability,
     EvidenceBasis,
     EvidenceHistory,
@@ -85,10 +87,10 @@ from ai_assistant.testing.cancellation import settle
 
 if TYPE_CHECKING:
     from collections.abc import Callable, Coroutine
-    from contextlib import AbstractAsyncContextManager
+    from contextlib import AbstractAsyncContextManager, AbstractContextManager
 
     from ai_assistant.core.protocols import PlanStore
-    from ai_assistant.core.types import ExecutionState, StepExecution
+    from ai_assistant.core.types import EffectRecord, ExecutionState, StepExecution
     from ai_assistant.testing.cancellation import SuspendedMidWrite
 
 _WHEN = datetime(2026, 1, 1, tzinfo=UTC)
@@ -323,6 +325,69 @@ def _acting_plan(
         ),
         created_at=_WHEN,
         targets_revision=1,
+    )
+
+
+#: The output the holder's own step carries, so a satisfaction that invented one rather
+#: than copying the row it verified is visible as a different value.
+_BOOKED: Final[Mapping[str, Any]] = {"reference": "BK-1"}
+
+#: The effect key an arm claims under, and the one it claims under when a case needs an
+#: **unequal** key — the Sunday booking, one intended action and two keys. Neither
+#: carries an egress binding: ADR-0259 §1's binding limb is `core`'s to arm, and what a
+#: store is held to is that two equal keys are one row and two unequal keys are not.
+_KEY: Final[EffectKey] = EffectKey(tool_id="book_room", parameters_digest="a" * 64)
+_OTHER_KEY: Final[EffectKey] = EffectKey(tool_id="book_room", parameters_digest="b" * 64)
+
+
+class _MovingClock:
+    """An injected clock an arm advances, for the instants a fixed one cannot tell apart.
+
+    ADR-0026's discipline says the store reads *its* clock rather than the wall, and
+    every subject's own fixture pins a constant — which is right for every arm but the
+    one asserting that a re-point **restamps** ``claimed_at``, where a constant makes a
+    restamp and a value left alone the same bytes.
+    """
+
+    def __init__(self) -> None:
+        self.at = _WHEN
+
+    def advance(self, by: timedelta = timedelta(hours=1)) -> None:
+        """Move the reading forward, so the next write that lands stamps a new instant."""
+        self.at += by
+
+    def __call__(self) -> datetime:
+        return self.at
+
+
+def _effect_plan(
+    plan_id: str = "p1",
+    *,
+    goal_id: str = "g1",
+    actions: tuple[str | None, ...] = ("ia1",),
+    supersedes: str | None = None,
+    targets_revision: int = 1,
+) -> ActionPlan:
+    """A plan whose steps name intended actions, for ADR-0259 §2's row scoping.
+
+    One step per entry of ``actions``, each naming that entry — ``None`` included, which
+    is the shape ADR-0265 §4 leaves and §2 refuses an effect claim of.
+    """
+    return ActionPlan(
+        id=plan_id,
+        goal_id=goal_id,
+        steps=tuple(
+            PlanStep(
+                id=f"s{index}",
+                intent="book a room",
+                capability="book_room",
+                intended_action=action,
+            )
+            for index, action in enumerate(actions, start=1)
+        ),
+        created_at=_WHEN,
+        supersedes=supersedes,
+        targets_revision=targets_revision,
     )
 
 
@@ -857,6 +922,57 @@ class _EvidenceOfOp(_EvidenceReadOp):
         return store.evidence_of("gB")
 
 
+class _ClaimEffectOp:
+    """The ``claim_effect`` compare-and-swap (ADR-0259 §2).
+
+    Two goals, so both claims have their own ``(goal_id, intended_action_id)`` row and
+    neither races the other — the shape every other write op here takes. It is a
+    distinct lock site with its own indivisible read-compare-write, so a regression that
+    released the resource before its own work finished would let a second caller decide
+    against a row this one was about to write.
+    """
+
+    name = "claim_effect"
+
+    def __init__(self) -> None:
+        """Hold the two started executions the claims are taken on."""
+        self._state_a: ExecutionState
+        self._state_b: ExecutionState
+
+    async def prepare(self, store: PlanStore) -> None:
+        """Two independent goals, each with one acting plan and one started execution."""
+        for goal_id, plan_id, attempt_id in (("gA", "pA", "aA"), ("gB", "pB", "aB")):
+            await store.save_goal(_goal(goal_id))
+            await store.record_intended_actions(_minting(_intended("ia1"), goal_id=goal_id))
+            await store.save_plan(_effect_plan(plan_id, goal_id=goal_id))
+            state = await store.start_execution(plan_id)
+            await store.open_attempt(
+                GoalAttempt(
+                    id=attempt_id,
+                    goal_id=goal_id,
+                    opened_at=_WHEN,
+                    execution_ids=(state.id,),
+                )
+            )
+            if goal_id == "gA":
+                self._state_a = state
+            else:
+                self._state_b = state
+
+    def first(self, store: PlanStore) -> Coroutine[Any, Any, object]:
+        """Claim goal A's effect — the write that is cancelled."""
+        return store.claim_effect(execution_id=self._state_a.id, step_id="s1", effect_key=_KEY)
+
+    def second(self, store: PlanStore) -> Coroutine[Any, Any, object]:
+        """Claim goal B's effect concurrently."""
+        return store.claim_effect(execution_id=self._state_b.id, step_id="s1", effect_key=_KEY)
+
+    async def verify(self, store: PlanStore) -> None:
+        """Goal B's row landed whole; the store still serves reads."""
+        rows = [row for row in (await store.export()).effects if row.goal_id == "gB"]
+        assert [row.execution_id for row in rows] == [self._state_b.id]
+
+
 #: Every locked ``PlanStore`` operation ADR-0060's case is run against: each is a
 #: distinct lock site with its own ``_run_to_completion`` call. The writes came
 #: first (#370); the reads are the same invariant on the other half of the surface
@@ -883,6 +999,9 @@ _CANCELLATION_OPS: tuple[Callable[[], _CancellationOp], ...] = (
     # regression that released the resource before its own work finished would let a
     # second caller decide against a version this one was about to advance.
     _RecordIntendedActionsOp,
+    # ADR-0259 §2's member is one more lock site, and a compare-and-swap one for the
+    # same reason: its read, its comparison and its write are one indivisible step.
+    _ClaimEffectOp,
 )
 
 
@@ -921,6 +1040,22 @@ class PlanStoreContract:
         Args:
             store: The subject under test.
             attempt: The row to write as it stands, with no refusal applied.
+        """
+        raise NotImplementedError
+
+    def store_on(self, now: Callable[[], datetime]) -> AbstractContextManager[PlanStore]:
+        """Return a fresh subject reading ``now``, for the arms that need time to move.
+
+        The ``store`` fixture pins a constant instant, which every other arm wants; the
+        two ADR-0259 §9 arms that assert a **restamp** cannot use it, because a constant
+        makes a restamp and a value left alone the same bytes. A context manager rather
+        than a bare store, so a subject holding an open file closes it.
+
+        Args:
+            now: The clock the subject reads.
+
+        Returns:
+            The subject, for the length of the ``with``.
         """
         raise NotImplementedError
 
@@ -3676,7 +3811,7 @@ class PlanStoreContract:
 
         export = await store.export()
 
-        assert export.schema_version == 13
+        assert export.schema_version == 14
         assert [one.id for one in export.attempts] == ["a1"]
         assert export.attempts[0].plan_ids == ("p1",)
 
@@ -5035,7 +5170,7 @@ class PlanStoreContract:
         await store.save_plan(_plan(read_request=_READ_REQUEST))
         export = await store.export()
 
-        assert export.schema_version == 13
+        assert export.schema_version == 14
         assert export.plans[0].read_request == _READ_REQUEST
 
     async def test_export_round_trips_a_plans_read_request(self, store: PlanStore) -> None:
@@ -5321,3 +5456,652 @@ class PlanStoreContract:
             )
 
             await op.verify(store)
+
+    # --- ADR-0259's effect claim (§2, §9; arm 4) --------------------------
+
+    async def _acting(  # noqa: PLR0913 — one keyword per thing an arm varies about the plan it drives; a bundle would mint a type whose only reader is this helper
+        self,
+        store: PlanStore,
+        *,
+        plan_id: str = "p1",
+        attempt_id: str = "a1",
+        supersedes: str | None = None,
+        actions: tuple[str | None, ...] = ("ia1",),
+        revision: int = 1,
+    ) -> ExecutionState:
+        """Save a plan whose steps name intended actions, start it, and own it.
+
+        The goal and its ``ia1`` are seeded on the first call only, so an arm that
+        wants two plans of one goal calls this twice.
+        """
+        if await store.get_goal("g1") is None:
+            await store.save_goal(_goal())
+            await store.record_intended_actions(_minting(_intended("ia1"), _intended("ia2")))
+        await store.save_plan(
+            _effect_plan(plan_id, actions=actions, supersedes=supersedes, targets_revision=revision)
+        )
+        state = await store.start_execution(plan_id)
+        await store.open_attempt(
+            GoalAttempt(id=attempt_id, goal_id="g1", opened_at=_WHEN, execution_ids=(state.id,))
+        )
+        return state
+
+    async def _to_status(
+        self,
+        store: PlanStore,
+        state: ExecutionState,
+        target: StepStatus,
+        *,
+        step_id: str = "s1",
+        attempt_id: str = "a1",
+    ) -> ExecutionState:
+        """Walk one step of ``state`` to ``target`` through the legal moves alone."""
+        if target is StepStatus.PENDING:
+            return state
+        if target is StepStatus.SKIPPED:
+            return await store.commit_transition(
+                StepTransition(
+                    execution_id=state.id,
+                    step_id=step_id,
+                    to_status=StepStatus.SKIPPED,
+                    expected_version=state.version,
+                    skip_reason=SkipReason.SUPERSEDED,
+                )
+            )
+        state = await store.commit_transition(
+            StepTransition(
+                execution_id=state.id,
+                step_id=step_id,
+                to_status=StepStatus.AWAITING_APPROVAL,
+                expected_version=state.version,
+                bound_tool="booker",
+            )
+        )
+        if target is StepStatus.AWAITING_APPROVAL:
+            return state
+        state = await store.commit_transition(
+            StepTransition(
+                execution_id=state.id,
+                step_id=step_id,
+                to_status=StepStatus.RUNNING,
+                expected_version=state.version,
+                approval_ref="d1",
+                attempt_id=attempt_id,
+            )
+        )
+        if target is StepStatus.RUNNING:
+            return state
+        if target is StepStatus.SUCCEEDED:
+            return await store.commit_transition(
+                StepTransition(
+                    execution_id=state.id,
+                    step_id=step_id,
+                    to_status=StepStatus.SUCCEEDED,
+                    expected_version=state.version,
+                    output=_BOOKED,
+                )
+            )
+        return await store.commit_transition(
+            StepTransition(
+                execution_id=state.id,
+                step_id=step_id,
+                to_status=target,
+                expected_version=state.version,
+                failure=StepFailure(message="no answer"),
+            )
+        )
+
+    async def _rows(self, store: PlanStore) -> tuple[EffectRecord, ...]:
+        """The store's effect rows, which the export is the only way to read."""
+        return (await store.export()).effects
+
+    @pytest.mark.parametrize(
+        ("status", "same_step", "same_key", "expected", "moves"),
+        [
+            # SUCCEEDED: the Sunday case at the store. Equal keys answer COMPLETED and
+            # unequal ones COMPLETED_OTHERWISE, and neither writes.
+            (StepStatus.SUCCEEDED, True, True, EffectClaim.COMPLETED, False),
+            (StepStatus.SUCCEEDED, True, False, EffectClaim.COMPLETED_OTHERWISE, False),
+            (StepStatus.SUCCEEDED, False, True, EffectClaim.COMPLETED, False),
+            (StepStatus.SUCCEEDED, False, False, EffectClaim.COMPLETED_OTHERWISE, False),
+            # RUNNING and INDETERMINATE: UNCERTAIN whether or not the keys are equal,
+            # because what is uncertain is whether the action was performed at all.
+            (StepStatus.RUNNING, True, True, EffectClaim.UNCERTAIN, False),
+            (StepStatus.RUNNING, True, False, EffectClaim.UNCERTAIN, False),
+            (StepStatus.RUNNING, False, True, EffectClaim.UNCERTAIN, False),
+            (StepStatus.RUNNING, False, False, EffectClaim.UNCERTAIN, False),
+            (StepStatus.INDETERMINATE, True, True, EffectClaim.UNCERTAIN, False),
+            (StepStatus.INDETERMINATE, True, False, EffectClaim.UNCERTAIN, False),
+            (StepStatus.INDETERMINATE, False, True, EffectClaim.UNCERTAIN, False),
+            (StepStatus.INDETERMINATE, False, False, EffectClaim.UNCERTAIN, False),
+            # SKIPPED: the sweep put it there, so the row re-points and re-keys to
+            # whichever step asks.
+            (StepStatus.SKIPPED, True, True, EffectClaim.CLAIMED, True),
+            (StepStatus.SKIPPED, True, False, EffectClaim.CLAIMED, True),
+            (StepStatus.SKIPPED, False, True, EffectClaim.CLAIMED, True),
+            (StepStatus.SKIPPED, False, False, EffectClaim.CLAIMED, True),
+            # The three that may still dispatch: this same step with this same key
+            # re-claims, and nothing else does. The FAILED pair is what stops
+            # `StepExecutor.execute`'s retry racing a later plan.
+            (StepStatus.PENDING, True, True, EffectClaim.CLAIMED, False),
+            (StepStatus.PENDING, True, False, EffectClaim.HELD, False),
+            (StepStatus.PENDING, False, True, EffectClaim.HELD, False),
+            (StepStatus.PENDING, False, False, EffectClaim.HELD, False),
+            (StepStatus.AWAITING_APPROVAL, True, True, EffectClaim.CLAIMED, False),
+            (StepStatus.AWAITING_APPROVAL, True, False, EffectClaim.HELD, False),
+            (StepStatus.AWAITING_APPROVAL, False, True, EffectClaim.HELD, False),
+            (StepStatus.AWAITING_APPROVAL, False, False, EffectClaim.HELD, False),
+            (StepStatus.FAILED, True, True, EffectClaim.CLAIMED, False),
+            (StepStatus.FAILED, True, False, EffectClaim.HELD, False),
+            (StepStatus.FAILED, False, True, EffectClaim.HELD, False),
+            (StepStatus.FAILED, False, False, EffectClaim.HELD, False),
+        ],
+    )
+    async def test_claim_effect_is_total_over_status_step_and_key(  # noqa: PLR0913 — one parameter per axis of ADR-0259 §2's second limb, plus the two facts each row asserts
+        self,
+        store: PlanStore,
+        status: StepStatus,
+        same_step: bool,
+        same_key: bool,
+        expected: EffectClaim,
+        moves: bool,
+    ) -> None:
+        """ADR-0259 §2's second limb, asserted as the total function it claims to be.
+
+        Each of :class:`StepStatus`'s seven members, crossed with the row naming **this**
+        step and a **different** one, and crossed again with the row's key being this
+        call's key and not being it — twenty-eight rows, each asserting both the
+        returned member **and** whether the row moved **and**, where it moved, that its
+        key moved with it. An implementation that answered `HELD` for a `SKIPPED`
+        holder, or re-pointed without re-keying, passes no row it should.
+        """
+        held = await self._acting(store)
+        first = await store.claim_effect(execution_id=held.id, step_id="s1", effect_key=_KEY)
+        assert first.claim is EffectClaim.CLAIMED
+        held = await self._to_status(store, held, status)
+
+        if same_step:
+            claimant, step_id = held.id, "s1"
+        else:
+            later = await self._acting(store, plan_id="p2", attempt_id="a2")
+            claimant, step_id = later.id, "s1"
+        key = _KEY if same_key else _OTHER_KEY
+
+        before = (await self._rows(store))[0]
+        answer = await store.claim_effect(execution_id=claimant, step_id=step_id, effect_key=key)
+        after = (await self._rows(store))[0]
+
+        assert answer.claim is expected
+        if expected is EffectClaim.COMPLETED:
+            assert (answer.execution_id, answer.step_id) == (before.execution_id, before.step_id)
+        else:
+            assert (answer.execution_id, answer.step_id) == (None, None)
+        if moves:
+            assert (after.execution_id, after.step_id) == (claimant, step_id)
+            assert after.key == key, "a re-point re-keys the row rather than leaving the old key"
+        else:
+            assert after == before, "every other answer writes nothing at all"
+
+    async def test_a_superseded_failed_holder_is_re_pointed_and_an_unsuperseded_one_holds(
+        self, store: PlanStore
+    ) -> None:
+        """ADR-0259 §2's ``FAILED``-on-a-superseded-plan branch, with its negative beside it.
+
+        A ``FAILED`` holder takes ``PENDING``'s shape — its own retry re-claims and
+        nothing else does — *while its plan stands*. Once a stored plan supersedes that
+        plan the holder can never retry (ADR-0255 §7), so the row is freed to whichever
+        step asks, and the goal is never stuck behind a dead claim. **The store decides
+        the supersession itself**, from the holder's execution's plan and the plans it
+        holds: no caller computes it and no member is added for it.
+        """
+        held = await self._acting(store)
+        await store.claim_effect(execution_id=held.id, step_id="s1", effect_key=_KEY)
+        held = await self._to_status(store, held, StepStatus.FAILED)
+
+        standing = await self._acting(store, plan_id="p2", attempt_id="a2")
+        assert (
+            await store.claim_effect(execution_id=standing.id, step_id="s1", effect_key=_KEY)
+        ).claim is EffectClaim.HELD, "the live-plan hold survives, because the retry may come"
+        assert (
+            await store.claim_effect(execution_id=held.id, step_id="s1", effect_key=_KEY)
+        ).claim is EffectClaim.CLAIMED, "and the holder's own retry still re-claims its key"
+
+        successor = await self._acting(store, plan_id="p3", attempt_id="a3", supersedes="p1")
+        answer = await store.claim_effect(
+            execution_id=successor.id, step_id="s1", effect_key=_OTHER_KEY
+        )
+
+        assert answer.claim is EffectClaim.CLAIMED
+        row = (await self._rows(store))[0]
+        assert (row.execution_id, row.step_id, row.key) == (successor.id, "s1", _OTHER_KEY)
+
+    async def test_a_moved_key_is_held_to_its_own_holder_and_freed_by_supersession(
+        self, store: PlanStore
+    ) -> None:
+        """ADR-0259 §2's moved-key row, pinned in the ``FAILED`` pair.
+
+        "Every retry of an authorised call reuses the same ``ToolCall``, hence the same
+        decision, hence the same key" (ADR-0029 §5), so an **honest** retry reconstructs
+        the equal key and the same-step exemption answers it. An unequal key on the
+        holder's own retry therefore means the key **moved** — ADR-0018's threat model,
+        not a fresh intent — and re-keying to it would hand the mutated call the claim
+        the authorised one holds. The stall is bounded by the holding plan's life.
+        """
+        held = await self._acting(store)
+        await store.claim_effect(execution_id=held.id, step_id="s1", effect_key=_KEY)
+        held = await self._to_status(store, held, StepStatus.FAILED)
+
+        answer = await store.claim_effect(execution_id=held.id, step_id="s1", effect_key=_OTHER_KEY)
+
+        assert answer.claim is EffectClaim.HELD, "a mutated key does not take the row"
+        assert (await self._rows(store))[0].key == _KEY, "and the row is unmoved"
+
+        successor = await self._acting(store, plan_id="p2", attempt_id="a2", supersedes="p1")
+        freed = await store.claim_effect(
+            execution_id=successor.id, step_id="s1", effect_key=_OTHER_KEY
+        )
+        assert freed.claim is EffectClaim.CLAIMED
+        assert (await self._rows(store))[0].key == _OTHER_KEY
+
+    async def test_a_claim_stamps_its_instant_and_revision_and_a_re_point_restamps_both(
+        self,
+    ) -> None:
+        """ADR-0259 §9: the pair is written on every write that lands and on no other path.
+
+        A stale revision surviving a re-point would hand the modify-before-replace
+        decision a false account of which understanding the act that stands was taken
+        under, so the two are asserted **together on every path** — on the initial
+        claim, restamped on a re-point, and preserved by every no-write outcome. Run on
+        an **advancing** injected clock, because a fixed one cannot tell a restamp from
+        a value left alone.
+        """
+        clock = _MovingClock()
+        with self.store_on(clock) as store:
+            held = await self._acting(store)
+            await store.claim_effect(execution_id=held.id, step_id="s1", effect_key=_KEY)
+            first = (await self._rows(store))[0]
+            assert (first.claimed_at, first.targets_revision) == (clock.at, 1)
+
+            held = await self._to_status(store, held, StepStatus.AWAITING_APPROVAL)
+            clock.advance()
+            assert (
+                await store.claim_effect(execution_id=held.id, step_id="s1", effect_key=_KEY)
+            ).claim is EffectClaim.CLAIMED, "the same step re-claims its own key"
+            kept = (await self._rows(store))[0]
+            assert (kept.claimed_at, kept.targets_revision) == (
+                first.claimed_at,
+                first.targets_revision,
+            ), "a no-write outcome leaves the pair exactly as it stands"
+
+            held = await self._to_status(store, held, StepStatus.SKIPPED)
+            await store.record_interpretation(
+                GoalRevision(
+                    goal_id="g1",
+                    expected_version=1,
+                    interpretation=GoalInterpretation(
+                        revision=2,
+                        outcome="relocate to Porto",
+                        outcome_ground=Ground.USER_STATED,
+                        recorded_at=_WHEN,
+                    ),
+                )
+            )
+            clock.advance()
+            later = await self._acting(store, plan_id="p2", attempt_id="a2", revision=2)
+            assert (
+                await store.claim_effect(execution_id=later.id, step_id="s1", effect_key=_KEY)
+            ).claim is EffectClaim.CLAIMED
+            moved = (await self._rows(store))[0]
+            assert moved.claimed_at == clock.at, "a re-point restamps the instant"
+            assert moved.targets_revision == 2, "and the revision the new holder's plan targets"
+
+    async def test_claim_effect_refuses_what_it_cannot_scope_and_writes_nothing(
+        self, store: PlanStore
+    ) -> None:
+        """ADR-0259 §2's three refusals, each leaving the store exactly as it was.
+
+        The third is ADR-0265 §4's window closed **at the store** rather than trusted to
+        close itself: a plan written before that decision carries ``None`` on every step,
+        so a side-effecting step of such a plan stalls rather than dispatching, and no
+        lane invents an intended action for a stored plan to lift the stall.
+        """
+        state = await self._acting(store, actions=("ia1", None))
+
+        with pytest.raises(PlanningError, match="unknown execution"):
+            await store.claim_effect(execution_id="nope", step_id="s1", effect_key=_KEY)
+        with pytest.raises(PlanningError, match="no step"):
+            await store.claim_effect(execution_id=state.id, step_id="s9", effect_key=_KEY)
+        with pytest.raises(PlanningError, match="names no intended action"):
+            await store.claim_effect(execution_id=state.id, step_id="s2", effect_key=_KEY)
+
+        assert await self._rows(store) == (), "no refusal writes a row"
+
+    @pytest.mark.parametrize("source", [StepStatus.PENDING, StepStatus.AWAITING_APPROVAL])
+    async def test_a_satisfaction_lands_the_marks_and_the_store_writes_the_output(
+        self, store: PlanStore, source: StepStatus
+    ) -> None:
+        """ADR-0259 §9's persistence and the store's own writes, from both entry statuses.
+
+        The two identifiers are persisted **exactly as given**; ``attempts`` stays at 0
+        and ``started_at`` and ``approval_ref`` stay ``None``, because nothing ran under
+        this step; ``bound_tool`` is left as the source had it — absent from a
+        ``PENDING`` one and **kept** from an ``AWAITING_APPROVAL`` one, ADR-0014 §3's
+        selection record rather than a claim mark. And the ``output`` is the holder's
+        own, copied by the store from the row it has just verified, because a value the
+        caller never supplies cannot be mis-stated.
+        """
+        holder = await self._acting(store)
+        await store.claim_effect(execution_id=holder.id, step_id="s1", effect_key=_KEY)
+        holder = await self._to_status(store, holder, StepStatus.SUCCEEDED)
+
+        later = await self._acting(store, plan_id="p2", attempt_id="a2")
+        later = await self._to_status(store, later, source)
+        assert (
+            await store.claim_effect(execution_id=later.id, step_id="s1", effect_key=_KEY)
+        ).claim is EffectClaim.COMPLETED
+
+        committed = await store.commit_transition(
+            StepTransition(
+                execution_id=later.id,
+                step_id="s1",
+                to_status=StepStatus.SUCCEEDED,
+                expected_version=later.version,
+                satisfied_by_execution=holder.id,
+                satisfied_by_step="s1",
+                satisfied_by_key=_KEY,
+            )
+        )
+
+        step = await self._step(store, committed)
+        assert step.status is StepStatus.SUCCEEDED
+        assert (step.satisfied_by_execution, step.satisfied_by_step) == (holder.id, "s1")
+        assert step.output == _BOOKED, "the output is the holder's own, written by the store"
+        assert step.finished_at is not None, "and the instant is the store's own clock's"
+        assert (step.attempts, step.started_at, step.approval_ref) == (0, None, None)
+        assert step.bound_tool == (None if source is StepStatus.PENDING else "booker")
+
+    async def test_the_satisfaction_claim_condition_refuses_its_six_shapes(
+        self, store: PlanStore
+    ) -> None:
+        """ADR-0259 §9's five limbs, each refused on a **non-stale** ``PlanningError``.
+
+        Six refusals over the five limbs, because the second limb refuses both a step
+        that is not of the named execution and one that is but does not stand
+        ``SUCCEEDED``. The class is decided by what it means: a
+        ``StaleExecutionError`` directs a caller to re-read and retry, and none of these
+        grounds moves under a re-read — which the arm asserts by refusing the same
+        transition twice.
+        """
+        holder = await self._acting(store)
+        await store.claim_effect(execution_id=holder.id, step_id="s1", effect_key=_KEY)
+        holder = await self._to_status(store, holder, StepStatus.SUCCEEDED)
+        foreign = await self._foreign_success(store)
+        later = await self._acting(store, plan_id="p2", attempt_id="a2")
+        await store.claim_effect(execution_id=later.id, step_id="s1", effect_key=_KEY)
+
+        # A SUCCEEDED step of this **same** goal that the ia1 row does not name, so the
+        # fourth limb is reached rather than the first.
+        unheld = await self._acting(store, plan_id="p4", attempt_id="a4", actions=("ia2",))
+        unheld = await self._to_status(store, unheld, StepStatus.SUCCEEDED, attempt_id="a4")
+        running = await self._acting(store, plan_id="p3", attempt_id="a3")
+        running = await self._to_status(store, running, StepStatus.RUNNING, attempt_id="a3")
+
+        shapes = {
+            "another goal's execution": (later, foreign.id, "s1", _KEY),
+            "not a step of that execution": (later, holder.id, "s9", _KEY),
+            "not standing SUCCEEDED": (later, later.id, "s1", _KEY),
+            "the row does not name it": (later, unheld.id, "s1", _KEY),
+            "not the row's key": (later, holder.id, "s1", _OTHER_KEY),
+            "a source that has already run": (running, holder.id, "s1", _KEY),
+        }
+        for label, (state, named, step_id, key) in shapes.items():
+            move = StepTransition(
+                execution_id=state.id,
+                step_id="s1",
+                to_status=StepStatus.SUCCEEDED,
+                expected_version=state.version,
+                satisfied_by_execution=named,
+                satisfied_by_step=step_id,
+                satisfied_by_key=key,
+            )
+            for _attempt in range(2):  # and it stays refused across a re-read
+                with pytest.raises(PlanningError) as raised:
+                    await store.commit_transition(move)
+                assert not isinstance(raised.value, StaleExecutionError), label
+            step = await self._step(store, state)
+            assert step.status is not StepStatus.SUCCEEDED, label
+            assert step.satisfied_by_execution is None, label
+
+    async def _foreign_success(self, store: PlanStore) -> ExecutionState:
+        """A second goal with one ``SUCCEEDED`` step, for the another-goal limb."""
+        await store.save_goal(_goal("g2"))
+        await store.record_intended_actions(_minting(_intended("ia1"), goal_id="g2"))
+        await store.save_plan(_effect_plan("pf", goal_id="g2"))
+        state = await store.start_execution("pf")
+        await store.open_attempt(
+            GoalAttempt(id="af", goal_id="g2", opened_at=_WHEN, execution_ids=(state.id,))
+        )
+        return await self._to_status(store, state, StepStatus.SUCCEEDED, attempt_id="af")
+
+    async def test_two_writers_claiming_one_pair_leave_exactly_one_holder(
+        self, store: PlanStore
+    ) -> None:
+        """ADR-0259's atomicity under contention, over the **no-row** write path.
+
+        Two steps of one goal claim the same ``(goal_id, intended_action_id)``
+        concurrently. Exactly one receives ``CLAIMED`` and the other ``HELD``, and
+        exactly one durable row names a holder — an implementation whose read and write
+        are two steps lets both write and leaves the goal claiming one act twice. The
+        two calls are dispatched together rather than awaited in turn, so a store cannot
+        pass by being serialised in this arm's own control flow.
+        """
+        first = await self._acting(store)
+        second = await self._acting(store, plan_id="p2", attempt_id="a2")
+
+        settled = await asyncio.gather(
+            store.claim_effect(execution_id=first.id, step_id="s1", effect_key=_KEY),
+            store.claim_effect(execution_id=second.id, step_id="s1", effect_key=_KEY),
+        )
+
+        assert sorted(one.claim for one in settled) == [EffectClaim.CLAIMED, EffectClaim.HELD]
+        rows = await self._rows(store)
+        assert len(rows) == 1, "exactly one durable row names a holder"
+        assert rows[0].execution_id in {first.id, second.id}
+
+    async def test_two_writers_re_pointing_one_skipped_holder_leave_exactly_one(
+        self, store: PlanStore
+    ) -> None:
+        """The same, over the **re-point** path, which a uniqueness constraint cannot catch.
+
+        An insertion constraint passes the first writer and leaves the second racing on
+        an ``UPDATE``, so a store that gets the empty case right can still let two steps
+        take a ``SKIPPED`` holder's key and both dispatch.
+        """
+        holder = await self._acting(store)
+        await store.claim_effect(execution_id=holder.id, step_id="s1", effect_key=_KEY)
+        await self._to_status(store, holder, StepStatus.SKIPPED)
+        first = await self._acting(store, plan_id="p2", attempt_id="a2")
+        second = await self._acting(store, plan_id="p3", attempt_id="a3")
+
+        settled = await asyncio.gather(
+            store.claim_effect(execution_id=first.id, step_id="s1", effect_key=_OTHER_KEY),
+            store.claim_effect(execution_id=second.id, step_id="s1", effect_key=_OTHER_KEY),
+        )
+
+        assert sorted(one.claim for one in settled) == [EffectClaim.CLAIMED, EffectClaim.HELD]
+        rows = await self._rows(store)
+        assert len(rows) == 1
+        assert rows[0].execution_id in {first.id, second.id}
+
+    async def test_delete_goal_erases_the_effect_rows(self, store: PlanStore) -> None:
+        """ADR-0259 §9: the rows are the goal's durable data and go with it."""
+        state = await self._acting(store)
+        await store.claim_effect(execution_id=state.id, step_id="s1", effect_key=_KEY)
+        assert len(await self._rows(store)) == 1
+
+        assert (await store.delete_goal("g1")).deleted
+
+        assert await self._rows(store) == (), "no row survives in storage or in the export"
+
+    async def test_clear_erases_the_effect_rows(self, store: PlanStore) -> None:
+        """The second erase path, exercised separately from ``delete_goal``."""
+        state = await self._acting(store)
+        await store.claim_effect(execution_id=state.id, step_id="s1", effect_key=_KEY)
+
+        await store.clear()
+
+        assert await self._rows(store) == ()
+        assert (await store.export()).goals == ()
+
+    async def test_a_reconciled_indeterminate_step_is_committed_succeeded(
+        self, store: PlanStore
+    ) -> None:
+        """ADR-0259 §7's first new row, driven rather than merely declared legal.
+
+        "``INDETERMINATE → SUCCEEDED``, trigger *reconciliation established the
+        effect*". It "also sets ``output`` and ``finished_at``" and does **not**
+        increment ``attempts``; the step ran, so its execution marks stand and its
+        ``failure`` — the diagnostic ``abandon_running`` wrote — is cleared by the move
+        that resolves it. **A shared arm rather than a tracker one**, because the
+        canonical fake re-implements the graph independently, so either side can drift
+        while every other case added here passes.
+        """
+        state = await self._acting(store)
+        state = await self._to_status(store, state, StepStatus.INDETERMINATE)
+        before = await self._step(store, state)
+        assert before.failure is not None
+
+        committed = await store.commit_transition(
+            StepTransition(
+                execution_id=state.id,
+                step_id="s1",
+                to_status=StepStatus.SUCCEEDED,
+                expected_version=state.version,
+                output=_BOOKED,
+            )
+        )
+
+        step = await self._step(store, committed)
+        assert step.status is StepStatus.SUCCEEDED
+        assert step.output == _BOOKED
+        assert step.finished_at is not None
+        assert step.failure is None, "the resolution clears the diagnostic it resolves"
+        assert (step.attempts, step.approval_ref, step.bound_tool) == (
+            before.attempts,
+            before.approval_ref,
+            before.bound_tool,
+        ), "the step ran, so its marks stand and no row of §7's three increments attempts"
+        assert step.satisfied_by_execution is None, "a reconciliation is not a satisfaction"
+
+    @pytest.mark.parametrize("illegal", [StepStatus.FAILED, StepStatus.RUNNING, StepStatus.SKIPPED])
+    async def test_every_other_move_out_of_indeterminate_stays_illegal(
+        self, store: PlanStore, illegal: StepStatus
+    ) -> None:
+        """ADR-0259 §7: exactly one row is added out of ``INDETERMINATE`` and no other.
+
+        One rather than two "is a consequence of §3's mechanism, not a gap in it": the
+        one reconciliation route it admits is a **read**, which has no effect to have
+        failed to happen, so the transition that would record a proven non-effect has no
+        producer and adding a row nothing writes would be the vocabulary-with-no-producer
+        problem ADR-0249 §5 names.
+        """
+        state = await self._acting(store)
+        state = await self._to_status(store, state, StepStatus.INDETERMINATE)
+        extra: dict[str, Any] = {}
+        if illegal is StepStatus.RUNNING:
+            extra |= {"attempt_id": "a1", "bound_tool": "booker", "approval_ref": "d1"}
+        if illegal is StepStatus.SKIPPED:
+            extra |= {"skip_reason": SkipReason.SUPERSEDED}
+        if illegal is StepStatus.FAILED:
+            extra |= {"failure": StepFailure(message="no answer")}
+
+        with pytest.raises(IllegalTransitionError):
+            await store.commit_transition(
+                StepTransition(
+                    execution_id=state.id,
+                    step_id="s1",
+                    to_status=illegal,
+                    expected_version=state.version,
+                    **extra,
+                )
+            )
+
+    async def test_a_satisfaction_is_checked_after_the_version_and_the_step(
+        self, store: PlanStore
+    ) -> None:
+        """``commit_transition``'s exception contract survives ADR-0259 §9's condition.
+
+        The five limbs are the **store's** and are decided atomically with the write —
+        but they are decided *after* the compare-and-swap and the step lookup, because
+        the class a caller is handed is what tells it what to do next. A stale write
+        directs a caller to re-read and retry, so it stays a ``StaleExecutionError``
+        even where the satisfaction would also have failed; and a transition naming a
+        step the execution does not carry is the plain ``PlanningError`` it has always
+        been, rather than whichever satisfaction limb the check happened to reach.
+        """
+        holder = await self._acting(store)
+        await store.claim_effect(execution_id=holder.id, step_id="s1", effect_key=_KEY)
+        holder = await self._to_status(store, holder, StepStatus.SUCCEEDED)
+        later = await self._acting(store, plan_id="p2", attempt_id="a2")
+        await store.claim_effect(execution_id=later.id, step_id="s1", effect_key=_KEY)
+
+        with pytest.raises(PlanningError) as unknown:
+            await store.commit_transition(
+                StepTransition(
+                    execution_id=later.id,
+                    step_id="s9",
+                    to_status=StepStatus.SUCCEEDED,
+                    expected_version=later.version,
+                    satisfied_by_execution=holder.id,
+                    satisfied_by_step="s1",
+                    satisfied_by_key=_KEY,
+                )
+            )
+        assert not isinstance(unknown.value, StaleExecutionError)
+        assert "s9" in str(unknown.value), "the step lookup answers, not a satisfaction limb"
+
+        with pytest.raises(StaleExecutionError):
+            await store.commit_transition(
+                StepTransition(
+                    execution_id=later.id,
+                    step_id="s1",
+                    to_status=StepStatus.SUCCEEDED,
+                    expected_version=later.version + 7,
+                    satisfied_by_execution=holder.id,
+                    satisfied_by_step="s1",
+                    satisfied_by_key=_KEY,
+                )
+            )
+
+    async def test_a_satisfaction_stamps_the_stores_own_clock(self) -> None:
+        """ADR-0259 §9: the store "stamps ``finished_at`` from its own clock".
+
+        Asserted against an **advancing** injected clock, so the instant the write lands
+        is a value this arm chose rather than whatever a constant would make every
+        candidate equal to. What it cannot see from here is a store handed a tracker on
+        a *different* clock — that wiring is each subject's own affordance, and the
+        subject that offers it pins it beside its own fixture.
+        """
+        clock = _MovingClock()
+        with self.store_on(clock) as store:
+            holder = await self._acting(store)
+            await store.claim_effect(execution_id=holder.id, step_id="s1", effect_key=_KEY)
+            holder = await self._to_status(store, holder, StepStatus.SUCCEEDED)
+            later = await self._acting(store, plan_id="p2", attempt_id="a2")
+            await store.claim_effect(execution_id=later.id, step_id="s1", effect_key=_KEY)
+
+            clock.advance()
+            committed = await store.commit_transition(
+                StepTransition(
+                    execution_id=later.id,
+                    step_id="s1",
+                    to_status=StepStatus.SUCCEEDED,
+                    expected_version=later.version,
+                    satisfied_by_execution=holder.id,
+                    satisfied_by_step="s1",
+                    satisfied_by_key=_KEY,
+                )
+            )
+
+            step = await self._step(store, committed)
+            assert step.finished_at == clock.at

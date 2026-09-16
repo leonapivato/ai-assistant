@@ -21,10 +21,14 @@ from typing import TYPE_CHECKING, Final
 
 import pytest
 from plan_store_contract import (
+    _KEY,
     PlanStoreContract,
     _attempt,
     _claim,
+    _effect_plan,
     _goal,
+    _intended,
+    _minting,
     _plan,
     _revision,
 )
@@ -36,6 +40,7 @@ from ai_assistant.core.types import (
     MAX_GOAL_EVIDENCE,
     ActionPlan,
     AttemptTransition,
+    EffectClaim,
     EvidenceApplicability,
     EvidenceBasis,
     EvidenceHistory,
@@ -69,6 +74,7 @@ from ai_assistant.testing.cancellation import (
 
 if TYPE_CHECKING:
     from collections.abc import AsyncIterator, Awaitable, Callable, Iterator, Sequence
+    from contextlib import AbstractContextManager
     from pathlib import Path
 
     from ai_assistant.core.protocols import PlanStore
@@ -154,6 +160,9 @@ _SYNC_METHODS = {
     # its write are one `BEGIN IMMEDIATE`, so it is its own lock site rather than a
     # caller of one above.
     "record_intended_actions": "_record_intended_actions_sync",
+    # ADR-0259 §2's member, likewise a compare-and-swap: its read, its comparison and
+    # its write are one `BEGIN IMMEDIATE`, so it is its own lock site.
+    "claim_effect": "_claim_effect_sync",
 }
 
 
@@ -187,6 +196,19 @@ class TestSqlitePlanStoreContract(PlanStoreContract):
             yield realised
         finally:
             realised.close()
+
+    def store_on(self, now: Callable[[], datetime]) -> AbstractContextManager[PlanStore]:
+        """A fresh in-memory database on ``now``, closed when the ``with`` ends."""
+
+        @contextlib.contextmanager
+        def opened() -> Iterator[PlanStore]:
+            realised = SqlitePlanStore(path=":memory:", now=now)
+            try:
+                yield realised
+            finally:
+                realised.close()
+
+        return opened()
 
     @contextlib.asynccontextmanager
     async def store_suspended_mid_write(
@@ -3371,6 +3393,65 @@ def _version_4_database(path: Path) -> None:
         conn.execute("UPDATE meta SET value = '4' WHERE key = 'schema_version'")
 
 
+def _version_5_database(path: Path) -> None:
+    """Build the database this store shipped **after** ADR-0265 and before ADR-0259.
+
+    The **previous** version, which is the one ADR-0259 §9's migration is stated over.
+    ADR-0265 added no table and no column, so the version 5 file is the version 4 file
+    with the marker moved — which is exactly the claim the version 4 arm above makes,
+    and building it this way is what keeps the two statements one.
+
+    Args:
+        path: Where to build it.
+    """
+    _version_4_database(path)
+    with sqlite3.connect(path) as conn:
+        conn.execute("UPDATE meta SET value = '5' WHERE key = 'schema_version'")
+
+
+async def test_a_version_5_plan_store_opens_with_an_empty_effects_table(tmp_path: Path) -> None:
+    """ADR-0259 §9's migration, and the guarantee it delimits rather than closes.
+
+    "The migration creates the table empty" — **no lane reconstructs a row for an
+    execution that predates it**, because doing so would need the tool, digest and
+    binding of a decision the *audit trail* holds, and ``planning`` reaching into
+    ``permissions`` to build its own rows is what golden rule 1 forbids. So an effect
+    performed before the migration "is not claimed, is not recognised, and a later plan
+    repeating it answers ``CLAIMED`` and dispatches" — which is asserted here rather
+    than left as prose, because it is the one window the migration opens. What bounds
+    it is ADR-0255 §13's Q4 rule: no consequential capability has been wired, so there
+    is no legacy real effect for the gap to expose.
+    """
+    path = tmp_path / "plans.db"
+    _version_5_database(path)
+
+    store = SqlitePlanStore(path=path, now=_fixed_now)
+    try:
+        export = await store.export()
+        assert export.schema_version == 14
+        assert export.effects == (), "the table is created empty rather than reconstructed"
+
+        # A plan written **after** the upgrade, naming an action minted after it: the
+        # only shape a claim can be scoped to at all (ADR-0265 §5).
+        await store.record_intended_actions(_minting(_intended("ia1")))
+        await store.save_plan(_effect_plan("p1"))
+        state = await store.start_execution("p1")
+        answer = await store.claim_effect(execution_id=state.id, step_id="s1", effect_key=_KEY)
+
+        assert answer.claim is EffectClaim.CLAIMED, (
+            "a legacy act is not recognised, so the repeat is claimed and dispatches"
+        )
+        assert (await store.delete_goal("g1")).deleted, "and the upgraded store still erases"
+        assert (await store.export()).effects == ()
+    finally:
+        store.close()
+
+    with sqlite3.connect(path) as conn:
+        assert conn.execute("SELECT value FROM meta WHERE key = 'schema_version'").fetchone() == (
+            "6",
+        )
+
+
 async def test_a_version_4_plan_store_reads_its_goals_with_no_intended_actions(
     tmp_path: Path,
 ) -> None:
@@ -3402,14 +3483,14 @@ async def test_a_version_4_plan_store_reads_its_goals_with_no_intended_actions(
         assert goal.intended_actions == (), "and nothing is invented for it"
 
         export = await store.export()
-        assert export.schema_version == 13
+        assert export.schema_version == 14
         assert export.goals[0].intended_actions == ()
     finally:
         store.close()
 
     with sqlite3.connect(path) as conn:
         assert conn.execute("SELECT value FROM meta WHERE key = 'schema_version'").fetchone() == (
-            "5",
+            "6",
         )
         assert conn.execute("SELECT data FROM goals WHERE id = 'g1'").fetchone()[0] == before, (
             "the migration converts nothing: the blob is the one the previous release wrote"
@@ -3447,14 +3528,14 @@ async def test_a_version_3_plan_store_gains_the_evidence_table_and_its_counter(
         assert await store.evidence_of("g1") == EvidenceHistory(goal_id="g1")
 
         export = await store.export()
-        assert export.schema_version == 13
+        assert export.schema_version == 14
         assert export.evidence == (EvidenceHistory(goal_id="g1"),)
     finally:
         store.close()
 
     with sqlite3.connect(path) as conn:
         assert conn.execute("SELECT value FROM meta WHERE key = 'schema_version'").fetchone() == (
-            "5",
+            "6",
         )
         assert conn.execute("SELECT COUNT(*) FROM goal_evidence").fetchone() == (0,)
         assert conn.execute("SELECT evidence_elided FROM goals").fetchall() == [(0,)]
@@ -3498,14 +3579,14 @@ async def test_a_version_2_plan_store_is_taken_the_whole_way_to_the_current_shap
         assert page.elided == 0
 
         export = await store.export()
-        assert export.schema_version == 13
+        assert export.schema_version == 14
         assert export.questions == ()
     finally:
         store.close()
 
     with sqlite3.connect(path) as conn:
         assert conn.execute("SELECT value FROM meta WHERE key = 'schema_version'").fetchone() == (
-            "5",
+            "6",
         )
         columns = {str(row[1]) for row in conn.execute("PRAGMA table_info(goals)").fetchall()}
         assert {"conversation_id", "last_engaged_in", "evidence_elided"} <= columns
@@ -3616,7 +3697,7 @@ async def test_a_pre_decision_plan_store_upgrades_and_stays_exportable(
         assert plan.targets_revision is None, "each plans row's targets_revision is absent"
 
         export = await store.export()
-        assert export.schema_version == 13
+        assert export.schema_version == 14
         assert [one.id for one in export.goals] == ["g1"]
         assert export.attempts == ()
 
@@ -3630,7 +3711,7 @@ async def test_a_pre_decision_plan_store_upgrades_and_stays_exportable(
         # 3, because every pass runs inside the one setup transaction and the marker is
         # stamped last.
         assert conn.execute("SELECT value FROM meta WHERE key = 'schema_version'").fetchone() == (
-            "5",
+            "6",
         )
 
 
@@ -3714,3 +3795,95 @@ async def test_a_row_that_fails_a_model_invariant_is_this_layers_error(
         assert conn.execute("SELECT value FROM meta WHERE key = 'schema_version'").fetchone() == (
             "1",
         ), "unupgraded rather than half-migrated"
+
+
+@pytest.mark.parametrize(
+    "tamper",
+    [
+        pytest.param("execution_id = 'ghost'", id="the-holders-execution"),
+        pytest.param("step_id = 's9'", id="the-holders-step"),
+    ],
+)
+async def test_an_effect_row_whose_holder_columns_disagree_with_its_blob_is_refused(
+    tmp_path: Path, tamper: str
+) -> None:
+    """The effect index rule, at the lookup ADR-0259 §2's at-most-once rests on.
+
+    ``goal_effects`` promotes four values and every one of them is something a reader
+    trusts: the pair decides which row a claim finds at all, and ``execution_id`` and
+    ``step_id`` decide the **status** §2's second limb is taken over. A row whose blob
+    names a holder its columns do not would have that status read off the wrong step —
+    this decision's at-most-once guarantee decided over a row nothing verified.
+
+    It refuses rather than repairs, which is the posture ``goal_evidence`` already takes
+    (#2328): a sound file reads exactly right, a tampered one reads refusing.
+    """
+    path = tmp_path / "plans.db"
+    state_id = await _claimed_effect(path)
+
+    # The record is untouched; the columns it was selected by are moved off it.
+    with sqlite3.connect(path) as conn:
+        conn.execute(f"UPDATE goal_effects SET {tamper}")  # noqa: S608 — a literal from the table above
+
+    store = SqlitePlanStore(path=path, now=_fixed_now)
+    try:
+        with pytest.raises(PlanningError, match="the store is corrupt"):
+            await store.export()
+        with pytest.raises(PlanningError, match="the store is corrupt"):
+            await store.claim_effect(execution_id=state_id, step_id="s1", effect_key=_KEY)
+    finally:
+        store.close()
+
+
+async def test_an_effect_row_indexed_under_another_action_is_that_actions_and_refuses_there(
+    tmp_path: Path,
+) -> None:
+    """The effect index rule, in both of its consequences at once.
+
+    A row indexed at ``(g1, ia2)`` whose record names ``ia1`` is therefore **not
+    ``ia1``'s row** — not filtered out of the lookup, not lost from it, simply never
+    selected there, so a fresh ``ia1`` claim answers ``CLAIMED`` — and it **does not
+    hide**, because reading the pair its columns *do* name decodes it and refuses. Those
+    are the two answers a store is allowed to give, and the evidence rule's own arm
+    takes exactly this shape.
+
+    Both halves are asserted together because either alone is consistent with the bug: a
+    store that silently dropped the row would pass the first, and one that scanned every
+    row on every lookup would pass the second.
+    """
+    path = tmp_path / "plans.db"
+    await _claimed_effect(path)
+
+    with sqlite3.connect(path) as conn:
+        conn.execute("UPDATE goal_effects SET intended_action_id = 'ia2'")
+
+    store = SqlitePlanStore(path=path, now=_fixed_now)
+    try:
+        with pytest.raises(PlanningError, match="the store is corrupt"):
+            await store.export()
+
+        await store.save_plan(_effect_plan("p2", actions=("ia1",)))
+        under_ia1 = await store.start_execution("p2")
+        answer = await store.claim_effect(execution_id=under_ia1.id, step_id="s1", effect_key=_KEY)
+        assert answer.claim is EffectClaim.CLAIMED, "the row is not ia1's under the rule"
+
+        await store.save_plan(_effect_plan("p3", actions=("ia2",)))
+        under_ia2 = await store.start_execution("p3")
+        with pytest.raises(PlanningError, match="the store is corrupt"):
+            await store.claim_effect(execution_id=under_ia2.id, step_id="s1", effect_key=_KEY)
+    finally:
+        store.close()
+
+
+async def _claimed_effect(path: Path) -> str:
+    """Build a store holding one sound effect row, and return its holder's execution id."""
+    store = SqlitePlanStore(path=path, now=_fixed_now)
+    try:
+        await store.save_goal(_goal("g1"))
+        await store.record_intended_actions(_minting(_intended("ia1"), _intended("ia2")))
+        await store.save_plan(_effect_plan("p1"))
+        state = await store.start_execution("p1")
+        await store.claim_effect(execution_id=state.id, step_id="s1", effect_key=_KEY)
+    finally:
+        store.close()
+    return state.id

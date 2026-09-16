@@ -21,6 +21,7 @@ from ai_assistant.core.clock import ClockReadingError, checked_clock
 from ai_assistant.core.errors import ActiveExecutionError, PlanningError, StaleExecutionError
 from ai_assistant.core.types import (
     MAX_GOAL_EVIDENCE,
+    EffectRecord,
     EvidenceHistory,
     EvidenceStanding,
     GoalDeletion,
@@ -28,6 +29,14 @@ from ai_assistant.core.types import (
     PlanExport,
     StepStatus,
     evidence_order,
+)
+from ai_assistant.planning.effects import (
+    BorrowedAct,
+    EffectHolder,
+    claiming_revision,
+    decide_claim,
+    refuse_an_unsatisfiable_borrowing,
+    refuse_an_unscopable_claim,
 )
 from ai_assistant.planning.execution import PlanExecution
 from ai_assistant.planning.goals import (
@@ -62,6 +71,8 @@ if TYPE_CHECKING:
     from ai_assistant.core.types import (
         ActionPlan,
         AttemptTransition,
+        EffectKey,
+        EffectOutcome,
         ExecutionState,
         Goal,
         GoalAttempt,
@@ -71,6 +82,7 @@ if TYPE_CHECKING:
         GoalRevision,
         GoalStatus,
         IntendedActionMinting,
+        StepExecution,
         StepTransition,
         UtcInstant,
     )
@@ -118,6 +130,15 @@ class InMemoryPlanStore:
         self._evidence_elided: dict[str, int] = {}
         self._plans: dict[str, ActionPlan] = {}
         self._executions: dict[str, ExecutionState] = {}
+        # ADR-0259 §2: **at most one row per (goal_id, intended_action_id)**, which is
+        # an invariant of that section's write rules rather than a competing
+        # constraint — the only writes are the first claim and a re-point onto a dead
+        # holder, and a re-point re-keys the row rather than leaving the dead key's
+        # row beside it. Keying the dict on the pair is what makes the lookup §2's
+        # second clause requires possible at all: "a completed effect claimed under
+        # **this** intended action whose key is **not** this call's key" is a state a
+        # triple-keyed lookup could not ask about, finding no row.
+        self._effects: dict[tuple[str, str], EffectRecord] = {}
         self._clock = checked_clock(now, owner="InMemoryPlanStore")
         self._tracker = tracker or PlanExecution(now=now)
         self._sequence = 0
@@ -917,6 +938,81 @@ class InMemoryPlanStore:
         self._executions[state.id] = state
         return state.model_copy(deep=True)
 
+    async def claim_effect(
+        self, *, execution_id: str, step_id: str, effect_key: EffectKey
+    ) -> EffectOutcome:
+        """Claim this goal's effect for one intended action (ADR-0259 §2).
+
+        The read, the comparison and the write are one step: there is no ``await``
+        between them, so nothing can interleave and no decision is taken on a separate
+        read. The answer itself is :func:`~ai_assistant.planning.effects.decide_claim`'s,
+        stated once for every store in this package.
+
+        Raises:
+            PlanningError: If the execution is unknown, the step is not a step of it,
+                or that step names no intended action. **Nothing is written** in any.
+        """
+        stored = self._executions.get(execution_id)
+        plan = None if stored is None else self._plans.get(stored.plan_id)
+        planned = (
+            None if plan is None else next((one for one in plan.steps if one.id == step_id), None)
+        )
+        action = refuse_an_unscopable_claim(
+            execution_id=execution_id,
+            step_id=step_id,
+            known=stored is not None,
+            is_a_step=stored is not None and stored.step(step_id) is not None,
+            intended_action=None if planned is None else planned.intended_action,
+        )
+        assert stored is not None  # noqa: S101 — the refusal's first limb
+        assert plan is not None  # noqa: S101 — save_plan refuses an orphan execution
+        decision = decide_claim(
+            holder=self._holder(plan.goal_id, action),
+            execution_id=execution_id,
+            step_id=step_id,
+            effect_key=effect_key,
+        )
+        if decision.writes:
+            self._effects[plan.goal_id, action] = EffectRecord(
+                goal_id=plan.goal_id,
+                intended_action_id=action,
+                key=effect_key,
+                execution_id=execution_id,
+                step_id=step_id,
+                targets_revision=claiming_revision(plan),
+                claimed_at=self._now(),
+            )
+        return decision.outcome
+
+    def _holder(self, goal_id: str, action: str) -> EffectHolder | None:
+        """The row this goal holds for ``action``, read with its holder's status.
+
+        The holder's **stored** status is what §2's second limb is decided over, and
+        the supersession is derived here rather than asked of a caller — "the store
+        decides the supersession itself, from the holder's execution's plan and the
+        plans it holds".
+
+        Args:
+            goal_id: The goal the row is scoped to.
+            action: The intended action it is scoped to.
+
+        Returns:
+            The holder, or ``None`` where the goal holds no row for that action.
+        """
+        row = self._effects.get((goal_id, action))
+        if row is None:
+            return None
+        held = self._executions[row.execution_id]
+        step = held.step(row.step_id)
+        assert step is not None  # noqa: S101 — claim_effect refuses a row it could not write
+        return EffectHolder(
+            execution_id=row.execution_id,
+            step_id=row.step_id,
+            key=row.key,
+            status=step.status,
+            superseded=any(one.supersedes == held.plan_id for one in self._plans.values()),
+        )
+
     async def commit_transition(self, transition: StepTransition) -> ExecutionState:
         """Apply one transition against the stored snapshot and persist it.
 
@@ -953,9 +1049,67 @@ class InMemoryPlanStore:
         self._refuse_a_stale_target(stored, transition)
         self._refuse_an_unclaimable_attempt(stored, transition)
         self._refuse_a_superseded_plan(stored, transition)
-        updated = self._tracker.apply(stored, transition)
+        updated = self._tracker.apply(
+            stored,
+            transition,
+            satisfaction=(
+                None
+                if transition.satisfied_by_execution is None
+                else lambda source: self._borrowed(stored, transition, source)
+            ),
+        )
         self._executions[updated.id] = updated
         return updated.model_copy(deep=True)
+
+    def _borrowed(
+        self, stored: ExecutionState, transition: StepTransition, source: StepExecution
+    ) -> BorrowedAct:
+        """Verify ADR-0259 §9's satisfaction claim condition and return what is written.
+
+        Five limbs, decided in the same step as the write and refused on a
+        ``PlanningError`` that is **not** a ``StaleExecutionError``: no re-read makes
+        one goal's execution another's, one key another, or a run that happened one
+        that did not. It is called **by the tracker**, once that has compared the
+        version and resolved the step, so a stale write is still a
+        ``StaleExecutionError`` and an unknown step still a plain ``PlanningError``.
+
+        Both values it returns are the store's: the ``output`` is the holder's own, off
+        the row it has just verified, and the instant is this store's clock's rather
+        than the tracker's, which may be injected independently (§9).
+
+        Args:
+            stored: The execution the transition targets.
+            transition: The move being applied.
+            source: The **stored** step being satisfied, as the tracker resolved it.
+
+        Returns:
+            What the store writes onto the satisfied step.
+
+        Raises:
+            PlanningError: On any limb of the condition.
+        """
+        named, borrowed_step = transition.satisfied_by_execution, transition.satisfied_by_step
+        assert named is not None  # noqa: S101 — the tracker calls this for a satisfaction alone
+        assert borrowed_step is not None  # noqa: S101 — StepTransition keeps the trio whole
+        plan = self._plans.get(stored.plan_id)
+        assert plan is not None  # noqa: S101 — save_plan refuses an orphan execution
+        held = self._executions.get(named)
+        held_plan = None if held is None else self._plans.get(held.plan_id)
+        borrowed = None if held is None else held.step(borrowed_step)
+        planned = next((one for one in plan.steps if one.id == transition.step_id), None)
+        action = None if planned is None else planned.intended_action
+        row = None if action is None else self._effects.get((plan.goal_id, action))
+        refuse_an_unsatisfiable_borrowing(
+            step_id=transition.step_id,
+            same_goal=held_plan is not None and held_plan.goal_id == plan.goal_id,
+            borrowed_status=None if borrowed is None else borrowed.status,
+            holder_names_it=row is not None
+            and (row.execution_id, row.step_id) == (named, borrowed_step),
+            key_matches=row is not None and row.key == transition.satisfied_by_key,
+            source_status=source.status,
+        )
+        assert borrowed is not None  # noqa: S101 — the refusal's second limb
+        return BorrowedAct(output=borrowed.output, finished_at=self._now())
 
     def _refuse_a_stale_target(self, stored: ExecutionState, transition: StepTransition) -> None:
         """Refuse a ``→ RUNNING`` claim on a plan targeting a stale revision (§8).
@@ -1092,6 +1246,12 @@ class InMemoryPlanStore:
             # count would say *this is the evidence*, where the truth is *this is the
             # evidence that was kept*".
             evidence=tuple(self._history(goal_id) for goal_id in self._goals),
+            # ADR-0259 §9: the goal's effect rows are its durable data and travel with
+            # it, in a deterministic order so two exports of one store are one
+            # document. ADR-0014 §5's closure rule is stated over **one holder** —
+            # `PlanExport` refuses a row whose execution, step and goal do not line up
+            # — so a row cannot ride here naming a step of some other execution.
+            effects=tuple(self._effects[key] for key in sorted(self._effects)),
         )
 
     async def delete_goal(self, goal_id: str) -> GoalDeletion:
@@ -1148,6 +1308,11 @@ class InMemoryPlanStore:
         for evidence_id in evidence_ids:
             del self._evidence[evidence_id]
         self._evidence_elided.pop(goal_id, None)
+        # ADR-0259 §9: and it reaches that goal's effect rows. They are the goal's
+        # durable data, no row blocks a deletion, and `GoalDeletion` gains no member
+        # for them — ADR-0249 §12's treatment of attempts, one record kind over.
+        for key in [one for one in self._effects if one[0] == goal_id]:
+            del self._effects[key]
         del self._goals[goal_id]
 
         return GoalDeletion(
@@ -1172,6 +1337,7 @@ class InMemoryPlanStore:
             + len(self._evidence)
             + len(self._plans)
             + len(self._executions)
+            + len(self._effects)
         )
         self._goals.clear()
         self._attempts.clear()
@@ -1180,4 +1346,5 @@ class InMemoryPlanStore:
         self._evidence_elided.clear()
         self._plans.clear()
         self._executions.clear()
+        self._effects.clear()
         return removed

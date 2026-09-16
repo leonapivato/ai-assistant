@@ -65,6 +65,9 @@ _DISPOSITION_VALUES: dict[str, str] = {
     "STEP_AMBIGUOUS_CAPABILITY": "step_ambiguous_capability",
     "STEP_INVALID_PARAMETERS": "step_invalid_parameters",
     "STEP_EGRESS_UNBINDABLE": "step_egress_unbindable",
+    # ADR-0259 §9's two, "ADR-0221 §2's own form, the member name lower-cased".
+    "STEP_EFFECT_ALREADY_CLAIMED": "step_effect_already_claimed",
+    "STEP_EFFECT_UNSCOPED": "step_effect_unscoped",
     "ROUTED_PERFORMED": "routed_performed",
     "ROUTED_AWAITING_CONFIRMATION": "routed_awaiting_confirmation",
     "ROUTED_REFUSED": "routed_refused",
@@ -98,17 +101,23 @@ def _episode(**overrides: Any) -> EpisodicMemory:
 # --- §11.8: every enum value is pinned, over the whole membership -------------
 
 
-def test_exchange_disposition_has_exactly_sixteen_members() -> None:
-    """§2's count, asserted as a count so a member cannot be added unnoticed.
+def test_exchange_disposition_is_one_member_per_source_member_and_one_more() -> None:
+    """§2's shape, asserted as an arithmetic identity rather than as a literal.
 
-    Sixteen is not an arbitrary number: it is one per :class:`Disposition` member,
+    The count is not an arbitrary number: it is one per :class:`Disposition` member,
     one for the no-step case, and one per :class:`RouteOutcome` member. Asserting it
-    against the *source* enums' lengths as well as against the literal is what makes
-    this fail on the day a member is added to one of them — the cost §2 accepts and
+    against the *source* enums' lengths is what makes this fail on the day a member
+    is added to one of them without a member here — the cost §2 accepts and
     ``assert_never`` at the render sites collects.
+
+    **The literal it used to carry beside them is gone rather than refreshed**
+    (ADR-0259 §9 takes both enums to eighteen). A number written twice is a number
+    that can be updated in one place, and the arithmetic below is the property §2
+    actually states; :data:`_DISPOSITION_VALUES` is what pins the membership itself,
+    name by name and value by value, which is the pin a count was standing in for.
     """
-    assert len(ExchangeDisposition) == 16
     assert len(ExchangeDisposition) == len(Disposition) + 1 + len(RouteOutcome)
+    assert len(ExchangeDisposition) == len(_DISPOSITION_VALUES)
 
 
 def test_every_exchange_disposition_value_is_the_one_the_adr_fixes() -> None:

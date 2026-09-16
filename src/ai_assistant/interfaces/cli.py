@@ -9485,6 +9485,19 @@ def _render_disposition(disposition: Disposition, tool_id: str | None) -> None:
     ``Disposition.INVALID_PARAMETERS``'s own: *not established as acceptable*, which
     is true of both.
 
+    **ADR-0259 §9's two members each take a fixed line, and neither is A9's report.**
+    §2 assigns the wording of *what the turn tells the user about a satisfaction* to the
+    reply surface, and these are not that: they are the bare verdict's own line, in
+    ``EGRESS_UNBINDABLE``'s shape, saying that nothing was run and why in the
+    disposition's own words. ``EFFECT_ALREADY_CLAIMED`` says the goal has already
+    claimed the act and no more — **which of the four claims produced it is not carried
+    on the disposition** (§2), so a line naming one would be a claim this adapter cannot
+    check. ``EFFECT_UNSCOPED`` is the separate line the two members exist for: it is a
+    defect in the plan rather than a fact about what the goal has done, and a user told
+    the two apart is a user who can tell "I already asked for this" from "the assistant
+    could not say which act this was". Neither names a tool: nothing was selected for
+    the second and the first commits nothing about the first's holder.
+
     Two further constraints shape it. ADR-0145 §8 forbids any rendering from
     carrying an argument value *or key*, so nothing about the parameters is echoed;
     and the violations that would say which constraint was missed stop at
@@ -9510,6 +9523,12 @@ def _render_disposition(disposition: Disposition, tool_id: str | None) -> None:
         Disposition.EGRESS_UNBINDABLE: (
             "[dim]This step's outbound call could not be described, so nobody was asked "
             "and nothing was sent.[/]"
+        ),
+        Disposition.EFFECT_ALREADY_CLAIMED: (
+            "[dim]This goal has already claimed this action, so nothing was run.[/]"
+        ),
+        Disposition.EFFECT_UNSCOPED: (
+            "[dim]This plan does not say which action this step is, so nothing was run.[/]"
         ),
     }
     message = messages.get(disposition)

@@ -2,15 +2,21 @@
 
 from __future__ import annotations
 
+import contextlib
 from datetime import UTC, datetime
 from typing import TYPE_CHECKING
 
 import pytest
 from plan_store_contract import PlanStoreContract
 
+from ai_assistant.core.types import StepStatus, StepTransition
 from ai_assistant.planning import InMemoryPlanStore
+from ai_assistant.planning.execution import PlanExecution
 
 if TYPE_CHECKING:
+    from collections.abc import Callable
+    from contextlib import AbstractContextManager
+
     from ai_assistant.core.protocols import PlanStore
     from ai_assistant.core.types import GoalAttempt
 
@@ -43,6 +49,10 @@ class TestInMemoryPlanStoreContract(PlanStoreContract):
         # A pre-decision row, by construction: the public members refuse it now.
         store._attempts[attempt.id] = attempt
 
+    def store_on(self, now: Callable[[], datetime]) -> AbstractContextManager[PlanStore]:
+        """A fresh subject on ``now``; nothing to dispose of, so a null context."""
+        return contextlib.nullcontext(InMemoryPlanStore(now=now))
+
 
 async def _seed_and_start(store: InMemoryPlanStore) -> str:
     """Save a goal+plan and start one execution, returning its id."""
@@ -67,3 +77,67 @@ async def test_a_fresh_store_does_not_reuse_a_prior_instances_execution_id() -> 
     first_id = await _seed_and_start(InMemoryPlanStore(now=_fixed_now))
     second_id = await _seed_and_start(InMemoryPlanStore(now=_fixed_now))
     assert first_id != second_id
+
+
+@pytest.mark.parametrize(
+    ("store_at", "tracker_at"),
+    [
+        pytest.param(
+            datetime(2026, 6, 1, tzinfo=UTC),
+            datetime(2030, 1, 1, tzinfo=UTC),
+            id="a-tracker-running-ahead",
+        ),
+        pytest.param(
+            datetime(2030, 1, 1, tzinfo=UTC),
+            datetime(2026, 6, 1, tzinfo=UTC),
+            id="a-tracker-running-behind",
+        ),
+    ],
+)
+async def test_a_satisfaction_stamps_the_stores_clock_and_not_the_trackers(
+    store_at: datetime, tracker_at: datetime
+) -> None:
+    """ADR-0259 §9: the **store** stamps ``finished_at``, whatever the tracker reads.
+
+    This store takes its transition tracker by injection, so the two clocks are
+    independently settable — which is the wiring that makes §9's "from its own injected
+    clock" a claim with a way to be false. Decided here rather than in the shared suite:
+    the ``tracker`` keyword is this class's own affordance, and a contract arm could only
+    assert the two agree where the default wiring already makes them one value.
+
+    **Both orderings**, because one of them is the coherence case and the other is not.
+    A state stamped at the tracker's clock while the step it carries is stamped at the
+    store's would, with the tracker behind, be a record that **finished before it was
+    written** — and an arm that only ran the tracker ahead would pass on exactly the
+    implementation that produces it. So both instants are asserted to be the store's.
+    """
+    from plan_store_contract import _KEY, PlanStoreContract  # noqa: PLC0415 — the suite's helpers
+
+    store = InMemoryPlanStore(now=lambda: store_at, tracker=PlanExecution(now=lambda: tracker_at))
+    suite = PlanStoreContract()
+
+    holder = await suite._acting(store)
+    await store.claim_effect(execution_id=holder.id, step_id="s1", effect_key=_KEY)
+    holder = await suite._to_status(store, holder, StepStatus.SUCCEEDED)
+    later = await suite._acting(store, plan_id="p2", attempt_id="a2")
+    await store.claim_effect(execution_id=later.id, step_id="s1", effect_key=_KEY)
+
+    committed = await store.commit_transition(
+        StepTransition(
+            execution_id=later.id,
+            step_id="s1",
+            to_status=StepStatus.SUCCEEDED,
+            expected_version=later.version,
+            satisfied_by_execution=holder.id,
+            satisfied_by_step="s1",
+            satisfied_by_key=_KEY,
+        )
+    )
+
+    step = committed.step("s1")
+    assert step is not None
+    assert step.finished_at == store_at, "the satisfaction's instant is the store's"
+    assert step.finished_at != tracker_at
+    assert committed.updated_at == store_at, (
+        "and the state's is the same one, so it is never written before its step finished"
+    )

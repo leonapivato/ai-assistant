@@ -32,23 +32,59 @@ from ai_assistant.core.types import (
 )
 
 if TYPE_CHECKING:
+    from collections.abc import Callable
+
     from ai_assistant.core.clock import Clock
     from ai_assistant.core.types import ActionPlan
+    from ai_assistant.planning.effects import BorrowedAct
 
 #: The transition graph from ADR-0014 §4. Anything not listed here is rejected.
+#:
+#: **ADR-0259 §7 adds exactly three rows and no other.** ``INDETERMINATE →
+#: SUCCEEDED``, triggered by a reconciliation that established the effect; and
+#: ``PENDING → SUCCEEDED`` and ``AWAITING_APPROVAL → SUCCEEDED``, triggered by a step
+#: being satisfied by an effect its goal already completed (§2). Each also sets
+#: ``output`` and ``finished_at``, and **none increments** ``attempts``.
+#:
+#: **Two rows rather than one for the satisfaction**, because §2 takes the claim on
+#: both entries — ``StepRunner.run``'s and ``StepRunner.resume``'s — and a resumed step
+#: is ``AWAITING_APPROVAL`` in the store, so a single ``PENDING`` row would leave the
+#: resumed case with no legal move and the walk stalled at exactly the step that route
+#: exists to unstall. **No row is added for a parked step** beyond that: ADR-0259
+#: replays nothing, and the ordinary ``AWAITING_APPROVAL → RUNNING`` a user's own
+#: answer drives is untouched.
+#:
+#: **One row out of ``INDETERMINATE`` rather than two** is a consequence of ADR-0259
+#: §3's mechanism and not a gap in it: the one reconciliation route it admits is a
+#: **read**, which has no effect to have failed to happen, so the transition that
+#: would record a proven non-effect has no producer and adding a row nothing writes
+#: would be the vocabulary-with-no-producer problem ADR-0249 §5 names.
+#: ``INDETERMINATE → FAILED``, ``INDETERMINATE → RUNNING``, ``INDETERMINATE →
+#: SKIPPED`` and every other move stay **illegal**.
 _LEGAL_TRANSITIONS: dict[StepStatus, frozenset[StepStatus]] = {
     StepStatus.PENDING: frozenset(
-        {StepStatus.RUNNING, StepStatus.AWAITING_APPROVAL, StepStatus.SKIPPED}
+        {
+            StepStatus.RUNNING,
+            StepStatus.AWAITING_APPROVAL,
+            StepStatus.SKIPPED,
+            StepStatus.SUCCEEDED,
+        }
     ),
-    StepStatus.AWAITING_APPROVAL: frozenset({StepStatus.RUNNING, StepStatus.SKIPPED}),
+    StepStatus.AWAITING_APPROVAL: frozenset(
+        {StepStatus.RUNNING, StepStatus.SKIPPED, StepStatus.SUCCEEDED}
+    ),
     StepStatus.RUNNING: frozenset(
         {StepStatus.SUCCEEDED, StepStatus.FAILED, StepStatus.INDETERMINATE}
     ),
     StepStatus.FAILED: frozenset({StepStatus.RUNNING}),
     StepStatus.SUCCEEDED: frozenset(),
     StepStatus.SKIPPED: frozenset(),
-    StepStatus.INDETERMINATE: frozenset(),
+    StepStatus.INDETERMINATE: frozenset({StepStatus.SUCCEEDED}),
 }
+
+#: The two statuses a step is **entered at** when ADR-0259 §2 takes its effect claim,
+#: and therefore the only two a satisfaction may move it from (§9's fifth limb).
+_SATISFIABLE_STATUSES = frozenset({StepStatus.PENDING, StepStatus.AWAITING_APPROVAL})
 
 #: Which skip reasons are truthful from which status (ADR-0014 §4, ADR-0041).
 #:
@@ -172,12 +208,27 @@ class PlanExecution:
             updated_at=self._now(),
         )
 
-    def apply(self, state: ExecutionState, transition: StepTransition) -> ExecutionState:
+    def apply(
+        self,
+        state: ExecutionState,
+        transition: StepTransition,
+        *,
+        satisfaction: Callable[[StepExecution], BorrowedAct] | None = None,
+    ) -> ExecutionState:
         """Return ``state`` advanced by ``transition``.
 
         Args:
             state: The execution as currently stored.
             transition: The move to apply.
+            satisfaction: The store's verification of a satisfaction (ADR-0259 §9),
+                called with the **stored** source step once this method's own
+                preconditions have passed, and returning what the store writes onto
+                it. Passing it is how the store's five-limbed claim condition runs
+                *after* the version compare and the step lookup, so a stale write is
+                a ``StaleExecutionError`` and an unknown step a ``PlanningError``
+                rather than whichever the satisfaction check happened to reach first.
+                A transition carrying the trio without one is refused: this tracker
+                cannot verify a borrowing, and it does not guess.
 
         Returns:
             A new state with the step updated and ``version`` incremented.
@@ -186,9 +237,12 @@ class PlanExecution:
             StaleExecutionError: If ``transition.expected_version`` no longer
                 matches — someone else has written since the caller read.
             IllegalTransitionError: If the move is not legal from the step's
-                current status.
+                current status, or a ``→ SUCCEEDED`` move from an undispatched step
+                carries no satisfaction.
             RetriesExhaustedError: If a retry would exceed the ceiling.
-            PlanningError: If the execution or step ids do not match.
+            PlanningError: If the execution or step ids do not match, if a
+                satisfaction arrives with no ``satisfaction`` to verify it, or on any
+                limb of the store's own claim condition.
         """
         if transition.execution_id != state.id:
             msg = f"transition targets execution {transition.execution_id}, not {state.id}"
@@ -212,7 +266,23 @@ class PlanExecution:
             )
             raise IllegalTransitionError(msg)
 
-        updated = _revalidated(self._advance(current, transition))
+        # ADR-0259 §9's five limbs, resolved **here** — after the version compare, the
+        # step lookup and the legality check above, which is the ordering
+        # `PlanStore.commit_transition`'s exception contract needs — and resolved
+        # **once**, so the instant the store stamps on the step is the instant the
+        # state carries too. A state written at the tracker's clock while its step
+        # says the store's would be a record that finished before it was written.
+        borrowed: BorrowedAct | None = None
+        if transition.satisfied_by_execution is not None:
+            if satisfaction is None:
+                msg = (
+                    f"step {transition.step_id} names a completed effect, and a satisfaction "
+                    "is committed only through a store that can verify it against its rows"
+                )
+                raise PlanningError(msg)
+            borrowed = satisfaction(current)
+
+        updated = _revalidated(self._advance(current, transition, borrowed))
         return _revalidated_state(
             state.model_copy(
                 update={
@@ -220,7 +290,7 @@ class PlanExecution:
                         updated if step.step_id == updated.step_id else step for step in state.steps
                     ),
                     "version": state.version + 1,
-                    "updated_at": self._now(),
+                    "updated_at": self._now() if borrowed is None else borrowed.finished_at,
                 }
             )
         )
@@ -294,7 +364,12 @@ class PlanExecution:
             )
         )
 
-    def _advance(self, step: StepExecution, transition: StepTransition) -> StepExecution:
+    def _advance(
+        self,
+        step: StepExecution,
+        transition: StepTransition,
+        borrowed: BorrowedAct | None = None,
+    ) -> StepExecution:
         """Build the step's next value for a move already known to be legal."""
         if transition.to_status is StepStatus.RUNNING:
             return self._to_running(step, transition)
@@ -302,7 +377,7 @@ class PlanExecution:
             return self._to_awaiting_approval(step, transition)
         if transition.to_status is StepStatus.SKIPPED:
             return self._to_skipped(step, transition)
-        return self._to_finished(step, transition)
+        return self._to_finished(step, transition, borrowed)
 
     def _to_awaiting_approval(
         self, step: StepExecution, transition: StepTransition
@@ -407,13 +482,43 @@ class PlanExecution:
             }
         )
 
-    def _to_finished(self, step: StepExecution, transition: StepTransition) -> StepExecution:
-        """Close the step out as SUCCEEDED, FAILED, or INDETERMINATE."""
+    def _to_finished(
+        self,
+        step: StepExecution,
+        transition: StepTransition,
+        borrowed: BorrowedAct | None = None,
+    ) -> StepExecution:
+        """Close the step out as SUCCEEDED, FAILED, or INDETERMINATE.
+
+        **A ``→ SUCCEEDED`` move from an undispatched step is a satisfaction and
+        nothing else** (ADR-0259 §2). ADR-0014 §4's two new rows are triggered by a
+        step being satisfied by an effect its goal already completed, so a transition
+        that takes one of them without naming the act it borrows from is refused here
+        rather than left to :class:`StepExecution`'s own validator — which would
+        refuse it too, for the marks a ``SUCCEEDED`` step needs, but with a message
+        about ``approval_ref`` rather than about the move.
+
+        **What the store verified is what lands**: the ``output`` is the holder's own
+        and the ``finished_at`` is the **store's** clock's, not this tracker's, which
+        ADR-0259 §9 names in terms and which matters because a store may be given an
+        independently clocked tracker. ``attempts`` is untouched on every path here, so
+        no row of §7's three increments it.
+        """
+        undispatched = step.status in _SATISFIABLE_STATUSES
+        if transition.to_status is StepStatus.SUCCEEDED and undispatched and borrowed is None:
+            msg = (
+                f"step {step.step_id} cannot go from {step.status} to SUCCEEDED without "
+                "naming the completed effect that satisfies it"
+            )
+            raise IllegalTransitionError(msg)
+
         return step.model_copy(
             update={
                 "status": transition.to_status,
-                "output": transition.output,
+                "output": transition.output if borrowed is None else borrowed.output,
                 "failure": transition.failure,
-                "finished_at": self._now(),
+                "finished_at": self._now() if borrowed is None else borrowed.finished_at,
+                "satisfied_by_execution": transition.satisfied_by_execution,
+                "satisfied_by_step": transition.satisfied_by_step,
             }
         )
