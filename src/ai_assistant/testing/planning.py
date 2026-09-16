@@ -22,6 +22,7 @@ each is its own place the resource could be handed over early (#397).
 
 from __future__ import annotations
 
+from dataclasses import dataclass
 from datetime import UTC, datetime
 from typing import TYPE_CHECKING, Final
 from uuid import uuid4
@@ -402,6 +403,22 @@ _SATISFIABLE_STATUSES = frozenset({StepStatus.PENDING, StepStatus.AWAITING_APPRO
 #: The two statuses that mean the goal's row names a holder whose act may or may not
 #: have happened (ADR-0259 §2). Re-implemented here for the same reason.
 _UNCERTAIN_STATUSES = frozenset({StepStatus.RUNNING, StepStatus.INDETERMINATE})
+
+
+@dataclass(frozen=True, slots=True)
+class BorrowedAct:
+    """What this store writes onto a step it is satisfying (ADR-0259 §9).
+
+    Mirror of :class:`ai_assistant.planning.effects.BorrowedAct`; re-implemented here
+    rather than imported from ``ai_assistant.planning``, for the reason the module
+    docstring gives. Both values are the **store's** and never the caller's: ``output``
+    is copied from the holder row this store has just verified, and ``finished_at`` is
+    read from this store's own injected clock rather than any tracker's.
+    """
+
+    output: FrozenJsonValue
+    finished_at: datetime
+
 
 #: The three :class:`~ai_assistant.core.types.AttemptState` members ADR-0249 §5 derives
 #: *paused* from, which ADR-0255 §3 makes as disqualifying of a claim as the two
@@ -2637,7 +2654,12 @@ class FakePlanStore:
                 self._refuse_an_unclaimable_attempt(stored, transition, goal_id=plan.goal_id)
                 self._refuse_a_superseded_plan(stored.plan_id)
 
-        borrowed = self._borrowed_output(stored, current, transition)
+        # ADR-0259 §9's five limbs run **after** the version compare and the step
+        # lookup above, so a stale write stays a `StaleExecutionError` and an unknown
+        # step a plain `PlanningError` — the ordering `PlanStore.commit_transition`'s
+        # exception contract needs, and the one the real stores get by having the
+        # tracker call the store's verification.
+        borrowed = self._borrowed(stored, current, transition)
         updated = self._advance(current, transition, borrowed)
         state = ExecutionState.model_validate(
             stored.model_copy(
@@ -2752,7 +2774,7 @@ class FakePlanStore:
         self,
         step: StepExecution,
         transition: StepTransition,
-        borrowed_output: FrozenJsonValue = None,
+        borrowed: BorrowedAct | None = None,
     ) -> StepExecution:
         """Build the step's next value, re-validating so invariants still bite."""
         if transition.to_status is StepStatus.RUNNING:
@@ -2762,42 +2784,42 @@ class FakePlanStore:
         elif transition.to_status is StepStatus.SKIPPED:
             updated = self._to_skipped(step, transition)
         else:
-            satisfied = transition.satisfied_by_execution is not None
             undispatched = step.status in _SATISFIABLE_STATUSES
-            if transition.to_status is StepStatus.SUCCEEDED and undispatched and not satisfied:
+            if transition.to_status is StepStatus.SUCCEEDED and undispatched and borrowed is None:
                 msg = (
                     f"step {step.step_id} cannot go from {step.status} to SUCCEEDED without "
                     "naming the completed effect that satisfies it"
                 )
                 raise IllegalTransitionError(msg)
-            if satisfied and not undispatched:
-                msg = (
-                    f"step {step.step_id} has already run, so it cannot be satisfied by an "
-                    f"earlier effect from {step.status}"
-                )
-                raise IllegalTransitionError(msg)
             updated = step.model_copy(
                 update={
                     "status": transition.to_status,
-                    "output": borrowed_output if satisfied else transition.output,
+                    "output": transition.output if borrowed is None else borrowed.output,
                     "failure": transition.failure,
-                    "finished_at": self._now(),
+                    "finished_at": self._now() if borrowed is None else borrowed.finished_at,
                     "satisfied_by_execution": transition.satisfied_by_execution,
                     "satisfied_by_step": transition.satisfied_by_step,
                 }
             )
         return StepExecution.model_validate(updated.model_dump())
 
-    def _borrowed_output(
+    def _borrowed(
         self, stored: ExecutionState, source: StepExecution, transition: StepTransition
-    ) -> FrozenJsonValue:
-        """Verify ADR-0259 §9's satisfaction claim condition; return what is borrowed.
+    ) -> BorrowedAct | None:
+        """Verify ADR-0259 §9's satisfaction claim condition; return what is written.
 
         Five limbs, decided inside the same step as the write and refused on a
         ``PlanningError`` that is **not** a ``StaleExecutionError``: no re-read makes
         one goal's execution another's, one key another, or a run that happened one
         that did not. Re-implemented rather than imported, for the module docstring's
         reason.
+
+        Both values it returns are the store's: the ``output`` is the holder's own and
+        the instant is this store's clock's, which §9 names in terms.
+
+        Returns:
+            What to write onto the satisfied step, or ``None`` where this is not a
+            satisfaction at all.
 
         Raises:
             PlanningError: On any limb of the condition.
@@ -2850,7 +2872,7 @@ class FakePlanStore:
                 "and cannot be satisfied by an effect its goal completed earlier"
             )
             raise PlanningError(msg)
-        return borrowed.output
+        return BorrowedAct(output=borrowed.output, finished_at=self._now())
 
     def _to_awaiting_approval(
         self, step: StepExecution, transition: StepTransition

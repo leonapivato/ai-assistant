@@ -4349,3 +4349,95 @@ async def test_a_row_that_fails_a_model_invariant_is_this_layers_error(
         assert conn.execute("SELECT value FROM meta WHERE key = 'schema_version'").fetchone() == (
             "1",
         ), "unupgraded rather than half-migrated"
+
+
+@pytest.mark.parametrize(
+    "tamper",
+    [
+        pytest.param("execution_id = 'ghost'", id="the-holders-execution"),
+        pytest.param("step_id = 's9'", id="the-holders-step"),
+    ],
+)
+async def test_an_effect_row_whose_holder_columns_disagree_with_its_blob_is_refused(
+    tmp_path: Path, tamper: str
+) -> None:
+    """The effect index rule, at the lookup ADR-0259 §2's at-most-once rests on.
+
+    ``goal_effects`` promotes four values and every one of them is something a reader
+    trusts: the pair decides which row a claim finds at all, and ``execution_id`` and
+    ``step_id`` decide the **status** §2's second limb is taken over. A row whose blob
+    names a holder its columns do not would have that status read off the wrong step —
+    this decision's at-most-once guarantee decided over a row nothing verified.
+
+    It refuses rather than repairs, which is the posture ``goal_evidence`` already takes
+    (#2328): a sound file reads exactly right, a tampered one reads refusing.
+    """
+    path = tmp_path / "plans.db"
+    state_id = await _claimed_effect(path)
+
+    # The record is untouched; the columns it was selected by are moved off it.
+    with sqlite3.connect(path) as conn:
+        conn.execute(f"UPDATE goal_effects SET {tamper}")  # noqa: S608 — a literal from the table above
+
+    store = SqlitePlanStore(path=path, now=_fixed_now)
+    try:
+        with pytest.raises(PlanningError, match="the store is corrupt"):
+            await store.export()
+        with pytest.raises(PlanningError, match="the store is corrupt"):
+            await store.claim_effect(execution_id=state_id, step_id="s1", effect_key=_KEY)
+    finally:
+        store.close()
+
+
+async def test_an_effect_row_indexed_under_another_action_is_that_actions_and_refuses_there(
+    tmp_path: Path,
+) -> None:
+    """The effect index rule, in both of its consequences at once.
+
+    A row indexed at ``(g1, ia2)`` whose record names ``ia1`` is therefore **not
+    ``ia1``'s row** — not filtered out of the lookup, not lost from it, simply never
+    selected there, so a fresh ``ia1`` claim answers ``CLAIMED`` — and it **does not
+    hide**, because reading the pair its columns *do* name decodes it and refuses. Those
+    are the two answers a store is allowed to give, and the evidence rule's own arm
+    takes exactly this shape.
+
+    Both halves are asserted together because either alone is consistent with the bug: a
+    store that silently dropped the row would pass the first, and one that scanned every
+    row on every lookup would pass the second.
+    """
+    path = tmp_path / "plans.db"
+    await _claimed_effect(path)
+
+    with sqlite3.connect(path) as conn:
+        conn.execute("UPDATE goal_effects SET intended_action_id = 'ia2'")
+
+    store = SqlitePlanStore(path=path, now=_fixed_now)
+    try:
+        with pytest.raises(PlanningError, match="the store is corrupt"):
+            await store.export()
+
+        await store.save_plan(_effect_plan("p2", actions=("ia1",)))
+        under_ia1 = await store.start_execution("p2")
+        answer = await store.claim_effect(execution_id=under_ia1.id, step_id="s1", effect_key=_KEY)
+        assert answer.claim is EffectClaim.CLAIMED, "the row is not ia1's under the rule"
+
+        await store.save_plan(_effect_plan("p3", actions=("ia2",)))
+        under_ia2 = await store.start_execution("p3")
+        with pytest.raises(PlanningError, match="the store is corrupt"):
+            await store.claim_effect(execution_id=under_ia2.id, step_id="s1", effect_key=_KEY)
+    finally:
+        store.close()
+
+
+async def _claimed_effect(path: Path) -> str:
+    """Build a store holding one sound effect row, and return its holder's execution id."""
+    store = SqlitePlanStore(path=path, now=_fixed_now)
+    try:
+        await store.save_goal(_goal("g1"))
+        await store.record_intended_actions(_minting(_intended("ia1"), _intended("ia2")))
+        await store.save_plan(_effect_plan("p1"))
+        state = await store.start_execution("p1")
+        await store.claim_effect(execution_id=state.id, step_id="s1", effect_key=_KEY)
+    finally:
+        store.close()
+    return state.id

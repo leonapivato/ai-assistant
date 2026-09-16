@@ -9,7 +9,9 @@ from typing import TYPE_CHECKING
 import pytest
 from plan_store_contract import InjectedFaultError, PlanStoreContract
 
+from ai_assistant.core.types import StepStatus, StepTransition
 from ai_assistant.planning import InMemoryPlanStore
+from ai_assistant.planning.execution import PlanExecution
 
 if TYPE_CHECKING:
     from collections.abc import AsyncIterator
@@ -99,3 +101,43 @@ async def test_a_fresh_store_does_not_reuse_a_prior_instances_execution_id() -> 
     first_id = await _seed_and_start(InMemoryPlanStore(now=_fixed_now))
     second_id = await _seed_and_start(InMemoryPlanStore(now=_fixed_now))
     assert first_id != second_id
+
+
+async def test_a_satisfaction_stamps_the_stores_clock_and_not_the_trackers() -> None:
+    """ADR-0259 §9: the **store** stamps ``finished_at``, whatever the tracker reads.
+
+    This store takes its transition tracker by injection, so the two clocks are
+    independently settable — which is the wiring that makes §9's "from its own injected
+    clock" a claim with a way to be false. Decided here rather than in the shared suite:
+    the ``tracker`` keyword is this class's own affordance, and a contract arm could only
+    assert the two agree where the default wiring already makes them one value.
+    """
+    from plan_store_contract import _KEY, PlanStoreContract  # noqa: PLC0415 — the suite's helpers
+
+    store_at = datetime(2026, 6, 1, tzinfo=UTC)
+    tracker_at = datetime(2030, 1, 1, tzinfo=UTC)
+    store = InMemoryPlanStore(now=lambda: store_at, tracker=PlanExecution(now=lambda: tracker_at))
+    suite = PlanStoreContract()
+
+    holder = await suite._acting(store)
+    await store.claim_effect(execution_id=holder.id, step_id="s1", effect_key=_KEY)
+    holder = await suite._to_status(store, holder, StepStatus.SUCCEEDED)
+    later = await suite._acting(store, plan_id="p2", attempt_id="a2")
+    await store.claim_effect(execution_id=later.id, step_id="s1", effect_key=_KEY)
+
+    committed = await store.commit_transition(
+        StepTransition(
+            execution_id=later.id,
+            step_id="s1",
+            to_status=StepStatus.SUCCEEDED,
+            expected_version=later.version,
+            satisfied_by_execution=holder.id,
+            satisfied_by_step="s1",
+            satisfied_by_key=_KEY,
+        )
+    )
+
+    step = committed.step("s1")
+    assert step is not None
+    assert step.finished_at == store_at, "the satisfaction's instant is the store's"
+    assert step.finished_at != tracker_at

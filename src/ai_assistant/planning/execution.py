@@ -32,8 +32,11 @@ from ai_assistant.core.types import (
 )
 
 if TYPE_CHECKING:
+    from collections.abc import Callable
+
     from ai_assistant.core.clock import Clock
-    from ai_assistant.core.types import ActionPlan, FrozenJsonValue
+    from ai_assistant.core.types import ActionPlan
+    from ai_assistant.planning.effects import BorrowedAct
 
 #: The transition graph from ADR-0014 §4. Anything not listed here is rejected.
 #:
@@ -210,19 +213,22 @@ class PlanExecution:
         state: ExecutionState,
         transition: StepTransition,
         *,
-        borrowed_output: FrozenJsonValue = None,
+        satisfaction: Callable[[StepExecution], BorrowedAct] | None = None,
     ) -> ExecutionState:
         """Return ``state`` advanced by ``transition``.
 
         Args:
             state: The execution as currently stored.
             transition: The move to apply.
-            borrowed_output: On a satisfaction (ADR-0259 §2), the **holder's own**
-                ``output``, which the store has read off the row it just verified.
-                The transition is forbidden to carry one — "a value the caller never
-                supplies cannot be mis-stated" — so the store reads it and passes it
-                here, and this is the only path by which a ``SUCCEEDED`` step's
-                ``output`` is not the transition's.
+            satisfaction: The store's verification of a satisfaction (ADR-0259 §9),
+                called with the **stored** source step once this method's own
+                preconditions have passed, and returning what the store writes onto
+                it. Passing it is how the store's five-limbed claim condition runs
+                *after* the version compare and the step lookup, so a stale write is
+                a ``StaleExecutionError`` and an unknown step a ``PlanningError``
+                rather than whichever the satisfaction check happened to reach first.
+                A transition carrying the trio without one is refused: this tracker
+                cannot verify a borrowing, and it does not guess.
 
         Returns:
             A new state with the step updated and ``version`` incremented.
@@ -231,11 +237,12 @@ class PlanExecution:
             StaleExecutionError: If ``transition.expected_version`` no longer
                 matches — someone else has written since the caller read.
             IllegalTransitionError: If the move is not legal from the step's
-                current status, if a ``→ SUCCEEDED`` move from an undispatched step
-                carries no satisfaction, or if a satisfaction is applied to a step
-                that has already run.
+                current status, or a ``→ SUCCEEDED`` move from an undispatched step
+                carries no satisfaction.
             RetriesExhaustedError: If a retry would exceed the ceiling.
-            PlanningError: If the execution or step ids do not match.
+            PlanningError: If the execution or step ids do not match, if a
+                satisfaction arrives with no ``satisfaction`` to verify it, or on any
+                limb of the store's own claim condition.
         """
         if transition.execution_id != state.id:
             msg = f"transition targets execution {transition.execution_id}, not {state.id}"
@@ -259,7 +266,7 @@ class PlanExecution:
             )
             raise IllegalTransitionError(msg)
 
-        updated = _revalidated(self._advance(current, transition, borrowed_output))
+        updated = _revalidated(self._advance(current, transition, satisfaction))
         return _revalidated_state(
             state.model_copy(
                 update={
@@ -345,7 +352,7 @@ class PlanExecution:
         self,
         step: StepExecution,
         transition: StepTransition,
-        borrowed_output: FrozenJsonValue = None,
+        satisfaction: Callable[[StepExecution], BorrowedAct] | None = None,
     ) -> StepExecution:
         """Build the step's next value for a move already known to be legal."""
         if transition.to_status is StepStatus.RUNNING:
@@ -354,7 +361,7 @@ class PlanExecution:
             return self._to_awaiting_approval(step, transition)
         if transition.to_status is StepStatus.SKIPPED:
             return self._to_skipped(step, transition)
-        return self._to_finished(step, transition, borrowed_output)
+        return self._to_finished(step, transition, satisfaction)
 
     def _to_awaiting_approval(
         self, step: StepExecution, transition: StepTransition
@@ -463,7 +470,7 @@ class PlanExecution:
         self,
         step: StepExecution,
         transition: StepTransition,
-        borrowed_output: FrozenJsonValue = None,
+        satisfaction: Callable[[StepExecution], BorrowedAct] | None = None,
     ) -> StepExecution:
         """Close the step out as SUCCEEDED, FAILED, or INDETERMINATE.
 
@@ -475,15 +482,21 @@ class PlanExecution:
         refuse it too, for the marks a ``SUCCEEDED`` step needs, but with a message
         about ``approval_ref`` rather than about the move.
 
-        **And a satisfaction is refused on a step that has already run**, which is
-        ADR-0259 §9's fifth limb seen from the tracker: a ``RUNNING`` or
-        ``INDETERMINATE`` source would leave a record carrying a spent authorisation
-        and a started run beside satisfaction marks.
+        **And a satisfaction is committed only through a store that can verify it.**
+        Whether the borrowed act is this goal's, stands ``SUCCEEDED``, is the one the
+        effect row names, was taken under the key the transition names, and is being
+        applied to a step that has not already run are ADR-0259 §9's five limbs, and
+        every one of them is a question about **stored rows** this tracker does not
+        hold. So the store's verification is called here — after the version compare,
+        the step lookup and the legality check, which is the ordering
+        ``PlanStore.commit_transition``'s exception contract needs — and a
+        satisfaction arriving without one is refused rather than guessed at.
 
-        The satisfaction's ``output`` is ``borrowed_output`` — the holder's own, read
-        by the store — and never the transition's, which its validator forbids;
-        ``attempts`` is untouched on every path here, so no row of the three
-        increments it.
+        **What it returns is what lands**: the ``output`` is the holder's own and the
+        ``finished_at`` is the **store's** clock's, not this tracker's, which §9 names
+        in terms and which matters because a store may be given an independently
+        clocked tracker. ``attempts`` is untouched on every path here, so no row of
+        ADR-0259 §7's three increments it.
         """
         satisfied = transition.satisfied_by_execution is not None
         undispatched = step.status in _SATISFIABLE_STATUSES
@@ -493,19 +506,23 @@ class PlanExecution:
                 "naming the completed effect that satisfies it"
             )
             raise IllegalTransitionError(msg)
-        if satisfied and not undispatched:
-            msg = (
-                f"step {step.step_id} has already run, so it cannot be satisfied by an "
-                f"earlier effect from {step.status}"
-            )
-            raise IllegalTransitionError(msg)
+
+        borrowed: BorrowedAct | None = None
+        if satisfied:
+            if satisfaction is None:
+                msg = (
+                    f"step {step.step_id} names a completed effect, and a satisfaction is "
+                    "committed only through a store that can verify it against its rows"
+                )
+                raise PlanningError(msg)
+            borrowed = satisfaction(step)
 
         return step.model_copy(
             update={
                 "status": transition.to_status,
-                "output": borrowed_output if satisfied else transition.output,
+                "output": transition.output if borrowed is None else borrowed.output,
                 "failure": transition.failure,
-                "finished_at": self._now(),
+                "finished_at": self._now() if borrowed is None else borrowed.finished_at,
                 "satisfied_by_execution": transition.satisfied_by_execution,
                 "satisfied_by_step": transition.satisfied_by_step,
             }

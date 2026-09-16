@@ -24,7 +24,9 @@ from ai_assistant.core.errors import PlanningError
 from ai_assistant.core.types import EffectClaim, EffectOutcome, StepStatus
 
 if TYPE_CHECKING:
-    from ai_assistant.core.types import ActionPlan, EffectKey
+    from datetime import datetime
+
+    from ai_assistant.core.types import ActionPlan, EffectKey, FrozenJsonValue
 
 #: The two statuses ADR-0014 §4 calls indistinguishable — "a crash between a tool's
 #: side effect and the commit of ``RUNNING → SUCCEEDED`` … cannot, from planning's
@@ -37,6 +39,26 @@ _UNCERTAIN_STATUSES = frozenset({StepStatus.RUNNING, StepStatus.INDETERMINATE})
 #: The two entry statuses §2 takes the claim at, and therefore the only two §9's fifth
 #: limb admits as the source of a satisfaction.
 _SATISFIABLE_STATUSES = frozenset({StepStatus.PENDING, StepStatus.AWAITING_APPROVAL})
+
+
+@dataclass(frozen=True, slots=True)
+class BorrowedAct:
+    """What a store writes onto a step it is satisfying (ADR-0259 §9).
+
+    Both values are the **store's** and never the caller's: ``output`` is copied from
+    the holder row the store has just verified, and ``finished_at`` is read from the
+    store's own injected clock — "a value the caller never supplies cannot be
+    mis-stated", which is what makes §2's reuse identity mechanical rather than
+    advisory. The tracker receives this rather than reading its own clock, because the
+    tracker's clock is injectable independently of the store's and §9 names the store's.
+
+    Attributes:
+        output: The holder's own ``output``.
+        finished_at: The instant the satisfaction landed, from the store's clock.
+    """
+
+    output: FrozenJsonValue
+    finished_at: datetime
 
 
 @dataclass(frozen=True, slots=True)
