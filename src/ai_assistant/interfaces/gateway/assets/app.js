@@ -731,6 +731,29 @@ function fault(message, panelId) {
 // Every slot at once, for the two moments the page changes what it is — a session
 // starting and a session ending. Nothing else clears a panel it is not acting in: a
 // fault about the connection surface is still true while the owner reads beliefs.
+// **The condition, written where it belongs and revealing nothing** (#2404, adversarial
+// review round 3).
+//
+// `fault` shows the panel it writes into, which is right for an act the owner is waiting
+// on and wrong for one whose session has ended: it opens a control panel beside the
+// bootstrap form. Withholding the condition altogether is the other mistake, and the
+// case that shows it is two tabs — a ceremony open in one, a session started in the
+// other, the consent then sent under a half the gateway no longer admits. That page is
+// *looking at* the panel it pressed the control in, and it was told nothing at all.
+//
+// Written without the reveal, both are answered by the same three lines: the owner
+// watching that panel reads the condition, and a page that has closed it — every page
+// showing the bootstrap form, because `showBootstrap` closes all of them — opens nothing.
+//
+// **It writes no dismiss control and needs none**: `faultSlot` builds the slot with one,
+// and `clearFaults` sweeps every slot when a session starts or ends, so nothing written
+// here outlives the session it belonged to.
+function writeCondition(message, panelId) {
+  const node = faultSlot(panelId);
+  node.firstElementChild.textContent = message;
+  node.hidden = false;
+}
+
 function clearFaults() {
   fault(null);
   faultSlots.forEach((_, panelId) => fault(null, panelId));
@@ -7846,6 +7869,7 @@ async function relay(half, path, payload, panelId, stopping, noticed) {
     noticed(body);
   }
   if (!sameSession(half, era)) {
+    writeCondition(describe(body, response.status), panelId);
     return null;
   }
   refused(panelId, body, response.status);
