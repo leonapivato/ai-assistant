@@ -176,7 +176,8 @@ act it stands in for; that they come out differently is the whole content of §2
 
 > **Normative.** The **availability read** declares `side_effecting: False`,
 > `idempotency: Idempotency.NATURAL`, `reversibility: Reversibility.REVERSIBLE`
-> (which `_effects_are_consistent` requires of anything not side-effecting), and a
+> (which `_effects_are_consistent` requires of anything not side-effecting),
+> **`risk_level: RiskLevel.LOW`**, **`cost: ToolCost(basis=CostBasis.FREE)`**, and a
 > **`quoted_output`** naming, at depth one, the key carrying **the whole charge the
 > booking will make** and the key carrying its ISO-4217 code (ADR-0267 §3). It
 > declares **`charged_output: None`**: a read charges nothing, and ADR-0271 §2's
@@ -185,9 +186,10 @@ act it stands in for; that they come out differently is the whole content of §2
 
 > **Normative.** The **booking act** declares `side_effecting: True`,
 > `idempotency: Idempotency.NONE`, `reversibility: Reversibility.IRREVERSIBLE`,
-> `risk_level: RiskLevel.HIGH`, and a **`charged_output`** naming, at depth one,
-> the key carrying **the whole amount that invocation charged** and the key
-> carrying its ISO-4217 code (ADR-0271 §2). It declares **`quoted_output: None`**.
+> `risk_level: RiskLevel.HIGH`, **`cost: ToolCost(basis=CostBasis.FREE)`**, and a
+> **`charged_output`** naming, at depth one, the key carrying **the whole amount
+> that invocation charged** and the key carrying its ISO-4217 code (ADR-0271 §2).
+> It declares **`quoted_output: None`**.
 
 > **Normative — the booking has a state change and it is durable.** A booking
 > **appends a record** to durable state the provider holds **under the deployment's
@@ -206,6 +208,24 @@ act it stands in for; that they come out differently is the whole content of §2
 > can be truncated or interleaved is not an implementation of the clause above**,
 > because a store that cannot be read back proves nothing about at-most-once.
 
+> **Normative — a failure at or after the commit boundary is reported as one that
+> may have committed, and never as a certain failure.** Where the append has
+> reached the point at which it may have landed — the commit or flush itself
+> included — the provider raises
+> **`ClassifiedToolError(effect_may_have_committed=True)`**, so the seam completes
+> the step `INDETERMINATE` and ADR-0255 §6's authoritative record of the
+> uncertainty is what stands. **A booking that may have happened is never recorded
+> as certainly failed**: that is the one state from which a later plan re-books
+> with the corpus's own machinery agreeing it may, and it is the failure §4 exists
+> to keep reachable rather than to create by accident.
+
+> **Normative — and nothing fallible runs after the commit.** The provider does no
+> work between the commit and its return that can raise: the output is composed
+> from values it already holds, and **an escaping exception after a committed
+> append is a defect of the implementation and not a state this clause admits**.
+> The two clauses are one rule — narrow the window, and classify honestly whatever
+> is left in it.
+
 > **Normative — the store carries exactly the data rights every other store in
 > this tree carries, and this decision claims no exemption from ADR-0004 §6 and
 > creates none.** It sits **in the data directory**, so `ai-assistant-purge`
@@ -219,10 +239,23 @@ act it stands in for; that they come out differently is the whole content of §2
 > **Normative — and `IRREVERSIBLE` does not rest on the record being
 > unpurgeable.** ADR-0016 §2's scale asks whether **the change the tool made can be
 > undone**, and the answer here is that **no operation of this provider, and none
-> in this system, undoes a booking**. Destroying the deployment's data directory is
-> not an undo of the act; it is the deployment ceasing to hold anything at all, and
-> every store is equally destroyed by it. **No lane reads a purge, a retention rule
-> or a deletion right as making this tool `RECOVERABLE`.**
+> in this system, undoes a booking**. **No lane reads a wholesale purge, a
+> retention rule or a deletion right as making a tool `RECOVERABLE`**, and the rule
+> is stated over every tool rather than over this one.
+
+**The reading is stated because a reviewer can reach the other one, and it is
+worth the paragraph.** ADR-0016 §2's `RECOVERABLE` examples are *"a file in the
+trash; a correction email"* — each a recovery **of the thing the tool affected**,
+leaving the rest of the world standing. `ai-assistant-purge` is not that: it
+destroys the **whole data directory** (ADR-0126, ADR-0153) — memory, the trail,
+the plans, the connections and this store alike. **Counting it as a recovery would
+make every tool in this system `RECOVERABLE`**, `send_email` included, since every
+tool's record lives in that directory; and §2 names that collapse as the failure
+the scale exists to avoid — *"The scale would then have one useful value, a policy
+keyed on it could not tell booking a flight apart from adding a calendar entry,
+and the user would be prompted identically for both."* **The reading here is the
+one that keeps §2's scale doing what §2 says it is for**, and it narrows no clause
+of ADR-0016: it says what *"undone"* has always meant there, over every tool.
 
 > **Normative — `IRREVERSIBLE` then states what is true of this provider.**
 > ADR-0016 §2 fixes `IRREVERSIBLE` as *"it cannot be taken back"* and
@@ -271,11 +304,21 @@ act it stands in for; that they come out differently is the whole content of §2
 > `discloses: ()` here is that the walkthrough exercises no disclosure gating; §8
 > books it.
 
-> **Normative — `cost` declares what invoking costs and is never the charge.**
-> ADR-0271 §2 rules that *"No lane substitutes `ToolDefinition.cost`,
-> `ToolInvocation.incurred_cost`, a quote, a ceiling or a zero"* for a charge.
-> **Neither declaration's `cost` is derived from, defaulted from or kept in step
-> with the configured prices.**
+> **Normative — both `cost` values are `CostBasis.FREE`, and `cost` is never the
+> charge.** Invoking either tool spends nothing: the provider is in-process,
+> reaches no metered service and holds no account that could be billed, so `FREE`
+> is the true claim and `UNKNOWN` would be a declaration that something might be
+> spent when nothing can be. ADR-0271 §2 rules that *"No lane substitutes
+> `ToolDefinition.cost`, `ToolInvocation.incurred_cost`, a quote, a ceiling or a
+> zero"* for a charge, and **neither declaration's `cost` is derived from,
+> defaulted from or kept in step with the configured prices** — the price the
+> booking charges is a fact about the act, not about calling it.
+
+> **Normative — `risk_level` is `LOW` on the read and `HIGH` on the act, and the
+> gap between them is the whole point of the field.** The read performs nothing,
+> discloses nothing and spends nothing; the act is irreversible and charges. **A
+> deployment that finds the read prompting, or the act not prompting, has a policy
+> threshold to examine and not a declaration to edit.**
 
 > **Normative — neither declaration carries a `bounded_arguments` member**, so no
 > `BoundKind.MONEY` argument is declared and the owner's `max_price` route is not
@@ -598,6 +641,9 @@ clauses more widely than it now holds?*
 - **ADR-0014 §3, ADR-0029 §3, ADR-0039 §2** — no. §6's statement rides in the
   carriers those decisions already provide and adds no field to `ToolResult`,
   `ToolFailure` or `StepExecution`.
+- **ADR-0032 §1** — no. §2's commit-boundary clause uses `ClassifiedToolError`
+  for what that decision already mints it for — a tool classifying its own
+  failure — and adds no field, no branch and no seam behaviour.
 - **ADR-0004 §6, ADR-0101 §7, ADR-0126, ADR-0153** — no. §2 adds a store on the
   same footing as every other, purged by the same act, and owed to the same
   deferred surface; it claims no exemption, so no sentence of any of them becomes
@@ -670,14 +716,20 @@ clauses more widely than it now holds?*
 > 11. **Two concurrent bookings** — two calls entering the provider at once leave
 >     **two whole records** and a store readable afterwards, which is §2's
 >     serialised, failure-atomic append with a subject.
-> 12. **The four conditions** — a binding whose connectability, endpoint,
+> 12. **The commit boundary, both sides** — a fault injected **before** the commit
+>     leaves **no** record and is reported as a certain failure; a fault injected
+>     **at or after** it raises
+>     `ClassifiedToolError(effect_may_have_committed=True)` and the step completes
+>     **`INDETERMINATE`**; and after an interruption at the commit boundary the
+>     store **reads back whole**, carrying every record that preceded it (§2).
+> 13. **The four conditions** — a binding whose connectability, endpoint,
 >     connection reference or recorded identity does not match refuses the call,
 >     **one arm per condition** (ADR-0148 §6).
-> 13. **No network** — the transport-confinement contract covers the new module and
+> 14. **No network** — the transport-confinement contract covers the new module and
 >     fails if the entry is removed.
-> 14. **The uncertain booking** — a configuration producing an `INDETERMINATE`
+> 15. **The uncertain booking** — a configuration producing an `INDETERMINATE`
 >     step, which stays `INDETERMINATE` and is not reconciled (§4).
-> 15. **The honesty statement** — the field on every successful output, and the
+> 16. **The honesty statement** — the field on every successful output, and the
 >     statement in the `message` of a `ToolFailure` **this provider returns** (§6).
 
 > **Normative — arm 7 asserts the *reading* and not ADR-0271 §3's finding, because
