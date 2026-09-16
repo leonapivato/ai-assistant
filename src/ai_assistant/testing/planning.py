@@ -2881,6 +2881,14 @@ class FakePlanStore:
         that did not. Re-implemented rather than imported, for the module docstring's
         reason.
 
+        **The pair is read through a refusal rather than returned as no satisfaction.**
+        The transition stays the caller's object while the call is queued, so a caller
+        that nulls ``satisfied_by_step`` reaches here with half a pair — a shape the
+        five limbs cannot be decided in — and §9's answer is the same non-stale
+        ``PlanningError``. A transition naming no execution at all is not a
+        satisfaction, which is the guard the real stores take before the tracker is
+        handed one.
+
         Both values it returns are the store's: the ``output`` is the holder's own and
         the instant is this store's clock's, which §9 names in terms.
 
@@ -2892,8 +2900,16 @@ class FakePlanStore:
             PlanningError: On any limb of the condition.
         """
         named, borrowed_step = transition.satisfied_by_execution, transition.satisfied_by_step
-        if named is None or borrowed_step is None:
+        if named is None:
             return None
+        if borrowed_step is None:
+            msg = (
+                f"step {transition.step_id} names a satisfaction whose marks are not "
+                "whole: satisfied_by_execution and satisfied_by_step are verified "
+                "together, and a transition that lost one after the call was queued is "
+                "refused rather than committed against half a pair"
+            )
+            raise PlanningError(msg)
         plan = self._plans[stored.plan_id]
         held = self._executions.get(named)
         held_plan = None if held is None else self._plans.get(held.plan_id)
