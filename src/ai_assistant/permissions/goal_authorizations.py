@@ -922,15 +922,28 @@ class SqliteGoalAuthorizationStore:
                 for statement in _INDEXES.values():
                     conn.execute(statement)
                 conn.execute(_SETTLE_ONLY)
-                # **ADR-0268 §9's migration, and the whole of it.** On a version-1
-                # file this is the create that upgrades it; on a version-2 file it
-                # is a no-op. Nothing else happens either way: no row is rewritten,
-                # re-dispositioned or back-filled, and no goal is recorded closed —
-                # *"a lane that moved the marker without creating the storage has
-                # shipped a store no existing database opens"*, and one that
-                # rewrote a row would have retrofitted a decision that governs
-                # closing acts taken after it ships.
-                conn.execute(_CREATE_CLOSURES)
+                # **ADR-0268 §9's migration, and the whole of it** — taken only on a
+                # file that is *not already at this version*: an unlabelled database
+                # this open is creating, or a version-1 one being upgraded. Nothing
+                # else happens either way: no row is rewritten, re-dispositioned or
+                # back-filled, and no goal is recorded closed — *"a lane that moved
+                # the marker without creating the storage has shipped a store no
+                # existing database opens"*, and one that rewrote a row would have
+                # retrofitted a decision that governs closing acts taken after it
+                # ships.
+                #
+                # **A version-2 file is checked and never created over**, which is
+                # the difference between a no-op and a silent repair.
+                # ``_CREATE_CLOSURES`` is an ``IF NOT EXISTS``, so running it on a
+                # file already labelled current would put an **empty** closure table
+                # back where a lost one had been and let ``_check_objects`` match it
+                # by construction — discarding every standing fence and admitting a
+                # ``record`` for a goal that has closed. This store refuses a file
+                # whose objects are not its own rather than trusting it (see
+                # :meth:`_check_objects`), and the fence is no exception.
+                # Adversarial review, round 17, ``blocker``.
+                if stored != _SCHEMA_VERSION:
+                    conn.execute(_CREATE_CLOSURES)
                 self._check_objects(conn, tuple(_OBJECTS))
                 if stored != _SCHEMA_VERSION:
                     # Stamped *after* the creates and inside the same transaction, so
