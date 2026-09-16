@@ -1,6 +1,6 @@
 # 272. The trail admits a digest-free standing row on the kind's own configured-provider fact
 
-- Status: Proposed
+- Status: Accepted
 - Date: 2026-09-16
 - **Partially supersedes**
   [ADR-0247](0247-the-configured-web-search-provider-is-the-destination-the-owner-chose-and-the-recipient-they-granted-and-the-call-budget-is-removed.md)
