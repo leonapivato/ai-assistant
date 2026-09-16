@@ -2,21 +2,43 @@
 
 from __future__ import annotations
 
+import contextlib
 from datetime import UTC, datetime
 from typing import TYPE_CHECKING
 
 import pytest
-from plan_store_contract import PlanStoreContract
+from plan_store_contract import InjectedFaultError, PlanStoreContract
 
 from ai_assistant.planning import InMemoryPlanStore
 
 if TYPE_CHECKING:
+    from collections.abc import AsyncIterator
+
     from ai_assistant.core.protocols import PlanStore
-    from ai_assistant.core.types import GoalAttempt
+    from ai_assistant.core.types import GoalAttempt, UtcInstant
 
 
 def _fixed_now() -> datetime:
     return datetime(2026, 6, 1, tzinfo=UTC)
+
+
+class _FailsMidAbandonment(InMemoryPlanStore):
+    """This store with ADR-0261 §14 arm 6's fault in its own per-attempt seam.
+
+    The second ending the act computes raises, which on a goal holding two live
+    attempts is part-way through the set. The seam is a method of the store, so the
+    dicts beneath it are untouched and the fault lands exactly where the act does its
+    fallible per-attempt work.
+    """
+
+    _endings = 0
+
+    def _cancelled_attempt(self, attempt: GoalAttempt, /, *, at: UtcInstant) -> GoalAttempt:
+        """Raise on the second ending, once, then behave (ADR-0261 §14 arm 6)."""
+        self._endings += 1
+        if self._endings == 2:
+            raise InjectedFaultError("the second attempt's ending")
+        return super()._cancelled_attempt(attempt, at=at)
 
 
 class TestInMemoryPlanStoreContract(PlanStoreContract):
@@ -42,6 +64,11 @@ class TestInMemoryPlanStoreContract(PlanStoreContract):
         assert isinstance(store, InMemoryPlanStore)
         # A pre-decision row, by construction: the public members refuse it now.
         store._attempts[attempt.id] = attempt
+
+    @contextlib.asynccontextmanager
+    async def store_failing_mid_abandonment(self) -> AsyncIterator[PlanStore]:
+        """A subclass carrying the fault; nothing to dispose of, hence the bare yield."""
+        yield _FailsMidAbandonment(now=_fixed_now)
 
 
 async def _seed_and_start(store: InMemoryPlanStore) -> str:

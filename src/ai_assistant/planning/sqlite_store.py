@@ -2124,11 +2124,7 @@ class SqlitePlanStore:
             refuse_a_closed_goal(goal_id=goal_id, status=stored.status, what="abandon")
             outstanding = self._outstanding(conn, goal_id)
             for one in self._live_attempts(conn, goal_id):
-                ended = cancelled(
-                    one,
-                    outcome=cancellation_outcome(self._step_statuses(conn, one)),
-                    at=at,
-                )
+                ended = self._cancelled_attempt(conn, one, at=at)
                 conn.execute(
                     "UPDATE attempts SET data = ? WHERE id = ?",
                     (ended.model_dump_json(), ended.id),
@@ -2139,6 +2135,28 @@ class SqlitePlanStore:
                 (updated.model_dump_json(), updated.id),
             )
         return outstanding
+
+    def _cancelled_attempt(
+        self, conn: sqlite3.Connection, attempt: GoalAttempt, /, *, at: UtcInstant
+    ) -> GoalAttempt:
+        """``attempt`` ended ``CANCELLED`` with the outcome its **own** steps yield (§3).
+
+        Every part of the act that can fail for this attempt happens here, and this
+        store writes the set row by row as it goes — so it is ADR-0261 §14 arm 6's
+        injection limb that the enclosing ``BEGIN IMMEDIATE`` answers: a failure
+        part-way through rolls the earlier rows back with it.
+
+        Args:
+            conn: The connection the enclosing transaction runs on.
+            attempt: The non-terminal attempt being ended.
+            at: The instant of the act, from the caller.
+
+        Returns:
+            The row as it stands after the closure.
+        """
+        return cancelled(
+            attempt, outcome=cancellation_outcome(self._step_statuses(conn, attempt)), at=at
+        )
 
     async def has_outstanding_effect(self, goal_id: str, /) -> bool:
         """Whether any step of any execution of any attempt of ``goal_id`` is claimed.

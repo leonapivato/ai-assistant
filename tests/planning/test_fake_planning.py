@@ -15,7 +15,7 @@ from datetime import UTC, datetime
 from typing import TYPE_CHECKING
 
 import pytest
-from plan_store_contract import PlanStoreContract
+from plan_store_contract import InjectedFaultError, PlanStoreContract
 from planner_contract import PlannerContract
 
 from ai_assistant.core.types import (
@@ -45,10 +45,30 @@ if TYPE_CHECKING:
     from collections.abc import AsyncIterator
 
     from ai_assistant.core.protocols import Planner, PlanStore
+    from ai_assistant.core.types import UtcInstant
 
 
 def _fixed_now() -> datetime:
     return datetime(2026, 6, 1, tzinfo=UTC)
+
+
+class _FailsMidAbandonment(FakePlanStore):
+    """The fake with ADR-0261 §14 arm 6's fault in its own per-attempt seam.
+
+    The second ending the act computes raises, which on a goal holding two live
+    attempts is part-way through the set. Overriding the seam rather than the modelled
+    resource keeps the fault where the act's fallible per-attempt work is, and leaves
+    the resource doing the one job ADR-0060 §3 gives it.
+    """
+
+    _endings = 0
+
+    def _cancelled_attempt(self, attempt: GoalAttempt, /, *, at: UtcInstant) -> GoalAttempt:
+        """Raise on the second ending, once, then behave (ADR-0261 §14 arm 6)."""
+        self._endings += 1
+        if self._endings == 2:
+            raise InjectedFaultError("the second attempt's ending")
+        return super()._cancelled_attempt(attempt, at=at)
 
 
 class TestFakePlanStoreContract(PlanStoreContract):
@@ -85,6 +105,11 @@ class TestFakePlanStoreContract(PlanStoreContract):
             log=store.resource_log,
             arm=lambda _operation: store.suspend_next_operation(),
         )
+
+    @contextlib.asynccontextmanager
+    async def store_failing_mid_abandonment(self) -> AsyncIterator[PlanStore]:
+        """A subclass carrying the fault; nothing to dispose of, hence the bare yield."""
+        yield _FailsMidAbandonment(now=_fixed_now)
 
 
 class TestFakePlannerContract(PlannerContract):
