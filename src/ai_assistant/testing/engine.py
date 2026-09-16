@@ -82,6 +82,7 @@ from ai_assistant.core.types import (
     Disposition,
     EgressBinding,
     ExecutionState,
+    ForecastNotRead,
     Goal,
     GoalAbandonment,
     GoalBrief,
@@ -402,6 +403,10 @@ class FakeAssistantEngine:
             reply for* carries, or ``None`` — the default — because a fake ends no
             attempt. Script it to drive a rendering surface over each of the six
             ``AttemptOutcome`` members a fixed statement is owed for.
+        forecast_not_read: ADR-0260 §10's member every outcome this engine *composes*
+            carries, or ``None`` — the default — because a fake services no forecast
+            read. Script it to drive a rendering surface over each of the six
+            ``ForecastNotRead`` members a fixed statement is owed for.
         observation: What :meth:`observe` returns.
         answered: What :meth:`answer` returns, or ``None`` to synthesise one from
             the question's own state.
@@ -620,6 +625,28 @@ class FakeAssistantEngine:
         #: caller built it, that member included, exactly as every other member of a
         #: scripted outcome is.
         self.outbound_statement: OutboundStatement | None = None
+        #: ADR-0260 §10's member, for every outcome this engine composes, or ``None`` —
+        #: the default.
+        #:
+        #: **A lever, because no sequence of surface calls reaches any of the six**:
+        #: this double wires no forecaster, services no read and records no
+        #: ``ForecastDisposition``, so every member would be unreachable in a consumer's
+        #: test without one — and they are exactly what a surface rendering §10's six
+        #: fixed statements has to be driven over, on the terminal and on the browser
+        #: alike (#2474).
+        #:
+        #: **``None`` is the honest default here and is not :attr:`outbound_statement`'s
+        #: case.** §10 fixes the meaning of the absence — "``None`` means the servicing
+        #: recorded no ``ForecastDisposition``, and means nothing else" — and a fake that
+        #: services no read has recorded none, so filling one in would assert something
+        #: no pass of this double established. What #2381 makes obligatory is a *true*
+        #: value for a member a conforming engine always carries, not a value for one it
+        #: leaves absent on every pass it takes.
+        #:
+        #: **A scripted outcome that already carries the member keeps what it carries**,
+        #: which is :attr:`authorizations`' own arrangement: the caller stated the member
+        #: and overwriting it would silently discard what they said.
+        self.forecast_not_read: ForecastNotRead | None = None
         self.observation: ObservationReport = ObservationReport()
         self.answered: AnswerOutcome | None = None
         # ADR-0250 §§12, 15's three operations, each defaulting to what the concrete
@@ -915,6 +942,14 @@ class FakeAssistantEngine:
         detached here is the member this decision makes load-bearing, and widening that
         to the whole outcome is a change to what scripting means rather than this lane's.
 
+        **ADR-0260 §10's member rides the same site, on ADR-0254 §11's terms rather
+        than §7's**: a scripted outcome carrying the member keeps it, and the attribute
+        fills in only where the outcome states none. §10 fixes the absence's meaning —
+        ``None`` "means the servicing recorded no ``ForecastDisposition``, and means
+        nothing else" — so there is nothing to synthesise for a pass that serviced no
+        read, and the member is a lever rather than a default for the reason
+        :attr:`forecast_not_read` records.
+
         **ADR-0254 §11's announcement rides the same site**, and its default is the
         opposite one for the opposite reason: §7's member states a fact about the pass
         and so must be filled in, while §11's states *which rows this turn opened* and a
@@ -936,16 +971,19 @@ class FakeAssistantEngine:
         stated = outcome.outbound_statement
         announced = outcome.authorizations or self.authorizations
         reported = self._reported(outcome)
+        forecast = outcome.forecast_not_read or self.forecast_not_read
         if (
             stated is None
             and outcome.reply is None
             and announced == outcome.authorizations
             and reported == outcome.attempt_report
+            and forecast == outcome.forecast_not_read
         ):
             return outcome
         carried = {name: getattr(outcome, name) for name in TurnOutcome.model_fields}
         carried["authorizations"] = announced
         carried["attempt_report"] = reported
+        carried["forecast_not_read"] = forecast
         if stated is None and outcome.reply is None:
             return TurnOutcome(**carried)
         statement = self._outbound() if stated is None else self._detached(stated)

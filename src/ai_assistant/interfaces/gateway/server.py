@@ -4552,6 +4552,23 @@ def _outcome_view(outcome: TurnOutcome) -> dict[str, Any]:
     given but not rendered a section not implemented rather than a degradation. That
     says nothing about ``search_not_serviced``, whose own deferral is untouched and
     whose lane is still #2237.
+
+    **``forecast_not_read`` crosses, and it is the entry above it that stays deferred
+    rather than this one joining it.** ADR-0260 §10 admits *a* surface with no deferral
+    of either — "A surface renders, beside the reply and never in place of it, one fixed
+    statement per member" — and ADR-0262 §11 places this one by name for the vocabulary's
+    own reason: "a member rendered on one and not the other is the parity failure M4
+    recorded". So the six reach the page and the nine above them do not, and that is two
+    rules each met as written rather than one rule applied twice: §9's all-or-nothing
+    clause is stated over *a vocabulary*, so a page rendering all six of this one and
+    none of that one has implemented §10 entire and left §9's browser deferral entire.
+
+    **The member is carried and nothing is derived from it here** (§10). It is the fold
+    of §8's twelve dispositions, non-injective by design, and "the fact is never derived
+    from ``ForecastNotRead`` … a site holding only the folded member cannot compute it
+    and does not try" — so this view carries the value the servicing computed and asks it
+    no question, which is `search_not_serviced`'s own posture at the layer that does
+    carry it.
     """
     turn = outcome.turn
     plan = None if turn is None else turn.plan
@@ -4581,6 +4598,14 @@ def _outcome_view(outcome: TurnOutcome) -> dict[str, Any]:
         "reference": None if outcome.reference is None else outcome.reference.value,
         "disambiguation": (
             None if outcome.disambiguation is None else _disambiguation_view(outcome.disambiguation)
+        ),
+        # ADR-0260 §10's member: the class of act that would have let a forecast read
+        # this turn asked for happen, by value and never a second computation. It is
+        # carried as its own value and is **not** read off `search_not_serviced` or off
+        # any outbound account — §10 makes the fold non-injective by design, so a site
+        # holding one of these cannot compute the other and does not try.
+        "forecast_not_read": (
+            None if outcome.forecast_not_read is None else outcome.forecast_not_read.value
         ),
         # ADR-0254 §11's announcement: one view per authority this turn opened
         # **without putting a question**, in the order the rows were written, and an

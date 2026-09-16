@@ -611,6 +611,14 @@ async def test_an_admitted_ask_round_trips_and_renders_what_the_hub_returned(
     surface by name — "the command line and the browser both implement this decision" —
     and its last clause makes a member given but not rendered a section not implemented
     rather than a permissible degradation.
+
+    **And ``forecast_not_read`` joins it while ``search_not_serviced`` above it does
+    not.** ADR-0260 §10 admits *a* surface with no deferral — "A surface renders, beside
+    the reply and never in place of it, one fixed statement per member" — and ADR-0262
+    §11 places this one by name: "a member rendered on one and not the other is the
+    parity failure M4 recorded". ADR-0242 §9's all-or-nothing clause is stated over *a
+    vocabulary*, so carrying all six of this one and none of that one's nine is both
+    rules met as written rather than one of them bent.
     """
     cookie_half, header_half = await _start_session(harness)
     head, body = _ask(harness, header_half=header_half, cookie_half=cookie_half)
@@ -636,6 +644,7 @@ async def test_an_admitted_ask_round_trips_and_renders_what_the_hub_returned(
         "clarification",
         "reference",
         "disambiguation",
+        "forecast_not_read",
         "authorizations",
     }
     assert [call[0] for call in harness.engine.calls] == ["converse"]
@@ -946,23 +955,30 @@ def test_a_new_member_of_a_turn_outcome_cannot_reach_the_page_unnoticed() -> Non
     member it was given" one that "has not implemented this section" — which is the
     obligation ADR-0244 §13's own last clause already put on the two members above.
 
-    **``forecast_not_read`` is ADR-0260 §10's member, and the decision taken here is
-    "not rendered" for ``search_not_serviced``'s identical reason.** §12 cuts three
-    lanes — the contract and its ``tools/`` implementation, the authority in
-    ``permissions/``, and the servicing in ``orchestration/`` plus the composition root
-    — and names ``interfaces/`` in none of them. So the member crosses the wire, because
-    it is on ``TurnOutcome`` and this page decodes the whole outcome, and no panel reads
-    it.
+    **``forecast_not_read`` is ADR-0260 §10's member, and the decision taken here is now
+    "rendered".** ADR-0260 §12 cut three lanes — the contract with its ``tools/``
+    implementation, the authority in ``permissions/``, and the servicing in
+    ``orchestration/`` plus the composition root — and named ``interfaces/`` in none of
+    them, which is why this entry read "not rendered" while those lanes ran. Issue #2474
+    is the lane that closes it: once L3 landed, the member was populated by the engine and
+    rendered by nothing at all. So ``_outcome_view`` carries it,
+    ``renderForecastNotRead`` puts one fixed statement per member on the screen beside the
+    reply, and ``FORECAST_NOT_READ_WORDS`` is total over the six.
 
-    **The cost in this lane is nil, and that is stated rather than hidden.** ADR-0260
-    §12's L1 wires the forecaster into no servicing site, so nothing computes a
-    ``ForecastDisposition`` and the member is ``None`` on every outcome this adapter can
-    see. What a surface owes when it does arrive is not optional — §10 requires "one
-    fixed statement per member" and ADR-0242 §9's all-or-nothing rule governs it, which
-    is the same obligation the entry above already carries — and the terminal's is
-    likewise a later lane's, ``interfaces/cli.py`` gaining a phrase here only for
-    ``OutboundDestination``'s new member, which is an ``assert_never`` this addition
-    forces rather than a rendering decision.
+    **It was never optional, and §10 is where that is said**: "A surface renders, beside
+    the reply and never in place of it, one fixed statement per member", under ADR-0242
+    §9's bar binding word for word — and ADR-0262 §11's parity point put **both** surfaces
+    in the one lane, since "a member rendered on one and not the other is the parity
+    failure M4 recorded".
+
+    **The entry above it is still the one that is "not rendered", and the two decisions do
+    not contradict each other.** ADR-0242 §9's deferral is of *that* vocabulary on this
+    surface — "the browser, until its own lane (§5), renders neither the statement nor the
+    reply's absence of one" — and #2237 still carries the lane that ends it. §9's
+    all-or-nothing clause is stated over a vocabulary rather than over a surface, so a
+    page rendering all six of ``ForecastNotRead`` and none of ``SearchNotServiced``'s nine
+    has implemented §10 entire and left §9's browser deferral entire. ADR-0260 §10 defers
+    no surface at all, which is the difference between them.
 
     **``drive_withheld`` is ADR-0261 §7's member, and the decision taken here is "not
     rendered" for ``forecast_not_read``'s identical reason.** §13 cuts three lanes — the
