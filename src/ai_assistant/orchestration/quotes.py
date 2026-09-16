@@ -153,7 +153,7 @@ def quote_read(
     output: Mapping[str, FrozenJson] = recorded.output
     if quoted.amount not in output or quoted.currency not in output:
         return None
-    amount = _amount_of(output[quoted.amount])
+    amount = amount_read(output[quoted.amount])
     currency = output[quoted.currency]
     # §4's own listed refusal — *"a currency that is not a JSON string"* — and the one
     # half of the currency reading that lives here. The **shape** of a string currency
@@ -187,7 +187,7 @@ def quote_read(
         return None
 
 
-def _amount_of(value: FrozenJson) -> Decimal | None:
+def amount_read(value: FrozenJson) -> Decimal | None:
     """The amount a JSON value states, or ``None`` where it states none (§4).
 
     A JSON **string** ``Decimal`` accepts or a JSON **integer**, and nothing else. The
@@ -198,6 +198,21 @@ def _amount_of(value: FrozenJson) -> Decimal | None:
     Finiteness and the sign are **not** checked here: ``ActionQuote`` checks them, and
     ``Decimal("sNaN") < 0`` raises rather than answering, so the one place that
     comparison is made is the one that already orders it correctly.
+
+    **It is public because ADR-0271 §2 states the charge reading *"by reference"* to
+    ADR-0267 §4 rather than re-specifying it**, and
+    :func:`~ai_assistant.orchestration.charges.charge_read` is that reference: an
+    amount the mint admits and one a charge reading admits cannot come apart while
+    both are this function. It is the **amount** half alone — the finiteness, the sign
+    and the currency's shape are the caller's, because the quote path reads them off
+    :class:`~ai_assistant.core.types.ActionQuote`'s validator and a charge mints no
+    record to read them off.
+
+    Args:
+        value: The JSON value at the declared amount key.
+
+    Returns:
+        The amount, or ``None`` where the value states none. **It raises nothing.**
     """
     if isinstance(value, bool):
         return None
