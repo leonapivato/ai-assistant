@@ -313,6 +313,7 @@ from ai_assistant.core.types import (
     EngagementDisposition,
     FeedbackEvent,
     FeedbackKind,
+    ForecastNotRead,
     GoalAbandonment,
     GoalDisambiguation,
     GoalEngagement,
@@ -7829,6 +7830,12 @@ def _render_turn(outcome: TurnOutcome, *, streamed: _StreamedReply | None = None
     # ADR-0242 §9: **beside the reply and never in place of it**. The model said what
     # was not done; this says what would enable it.
     _render_search_not_serviced(outcome.search_not_serviced)
+    # ADR-0260 §10's statement, in the same position and under the same rule: beside the
+    # reply and never in place of it. It is a **second vocabulary and not a case of the
+    # one above** — a turn that searched and read a forecast carries both members and
+    # renders both statements, each saying only what its own servicing established, and
+    # neither is suppressed on account of the other or derived from it.
+    _render_forecast_not_read(outcome.forecast_not_read)
     # ADR-0254 §11's announcement, in the same position and for the same reason as the
     # statement above: an authority this turn opened **without putting a question** is a
     # fact about what the turn did, composed by `orchestration` and not by a model, and
@@ -8109,6 +8116,87 @@ def _render_search_not_serviced(
             _print("[dim]Note: that lookup was begun and stopped.[/]")
         case SearchNotServiced.UNAVAILABLE:
             _print("[dim]Note: that lookup produced nothing this turn could use.[/]")
+
+
+def _render_forecast_not_read(
+    member: ForecastNotRead | None,
+) -> None:
+    """ADR-0260 §10's statement for this turn, **beside the reply and never in place of it**.
+
+    **One fixed statement per member, written out as a literal**, which is
+    :func:`_render_search_not_serviced`'s ratified shape one vocabulary over: nothing
+    here is assembled from a member's value, its name, a format string over the
+    enumeration, or a mapping a later member would silently join. A member added without
+    its statement is a member with no rendering, and §10's closure is what makes that a
+    review question rather than a runtime one.
+
+    **ADR-0242 §9's bar binds on these six word for word** (§10), so no statement says
+    that performing the act it names will make the next read happen and none says why a
+    ruling was not an ``ALLOW``. None of them names a floor, a threshold, a ``Settings``
+    field, a configuration value, a provider, an origin, a place or a coordinate — and
+    none carries a ``ForecastDisposition`` or a ``ForecastRefusal`` value, which are the
+    vocabularies §8 keeps for the operator's audit.
+
+    **What is fixed is which command each names, and the wording is this lane's** (§10).
+    ``AUTHORISATION_AWAITED`` names ``assistant decisions`` and it is the only one that
+    names anything: **no park is minted for a forecast read** (ADR-0260 §11), so the
+    question is a recorded decision and never a resumable one — which is why this member
+    does not name ``assistant resume`` as ``SearchNotServiced.ANSWER_AWAITED`` does, and
+    why it does not name ``assistant remember-recipients`` as that vocabulary's own
+    ``AUTHORISATION_AWAITED`` does. There is nothing to answer here and nothing to
+    withdraw; what the user can do is read the decision that was recorded.
+
+    **``NOT_CONFIGURED`` names no user act at all**, and that is §10 in terms: "there is
+    none, and naming one that cannot help is worse than naming none". ``SPEND_EXHAUSTED``
+    names none for the same reason, one stage on — a ceiling is an operator setting and
+    no act of the user's lifts it.
+
+    **``UNAVAILABLE`` names no cause and no act** (§10), and it does **not** say that no
+    request was made: seven dispositions fold onto it and two of them — a response this
+    system refused as oversized or unattested — reached the provider and yielded nothing
+    usable. ADR-0264 §8's both-statements rule is what tells the user about that contact,
+    rendered above by :func:`_render_outbound_statement`, and **this statement is never
+    read off that one nor that one off this** (§10: "the fact is never derived from
+    ``ForecastNotRead``, which is non-injective by design").
+
+    **``DECLINED`` is not cleared by a later read** (§10). A turn that was denied and
+    then answered still carries this member, because the user was told about a read this
+    turn did not make and a second read does not unmake it — so this statement stands
+    beside a reply that may well carry forecast records, and says only what it says.
+
+    **Silence where the member is absent** is a turn that serviced no forecast read or
+    one the provider answered, and the surface then says nothing about a forecast at all.
+    ``None`` means the servicing recorded no ``ForecastDisposition`` and means nothing
+    else (§10), which is why no statement is minted for it.
+
+    Args:
+        member: What ``TurnOutcome.forecast_not_read`` carried, or ``None``.
+    """
+    match member:
+        case None:
+            return
+        case ForecastNotRead.NOT_CONFIGURED:
+            _print(
+                "[dim]Note: no forecast source is configured in this deployment. "
+                "That is an operator setting.[/]"
+            )
+        case ForecastNotRead.AUTHORISATION_AWAITED:
+            _print(
+                "[dim]Note: that forecast read was put to you as a question instead of "
+                "being made, and a decision is recorded. 'assistant decisions' is where "
+                "you read it.[/]"
+            )
+        case ForecastNotRead.SPEND_EXHAUSTED:
+            _print(
+                "[dim]Note: a spending ceiling refused that forecast read. "
+                "That is an operator setting.[/]"
+            )
+        case ForecastNotRead.DECLINED:
+            _print("[dim]Note: that forecast read was declined when it was ruled on.[/]")
+        case ForecastNotRead.INTERRUPTED:
+            _print("[dim]Note: that forecast read was begun and stopped.[/]")
+        case ForecastNotRead.UNAVAILABLE:
+            _print("[dim]Note: that forecast read produced nothing this turn could use.[/]")
 
 
 def _outbound_destination(member: OutboundDestination) -> str:
