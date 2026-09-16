@@ -75,6 +75,7 @@ from ai_assistant.planning.goals import (
     quoted,
     refuse_a_second_owner,
     refuse_a_seeded_minting,
+    refuse_a_seeded_quote,
     refuse_a_superseded_plan,
     refuse_an_unclaimable_attempt,
     refuse_an_unsubstituted_action,
@@ -1496,11 +1497,12 @@ class SqlitePlanStore:
 
         Raises:
             PlanningError: If the store already holds a goal under this ``id``, if the
-                goal is opened carrying an intended action, or if it does not
-                revalidate.
+                goal is opened carrying an intended action or a quote, or if it does
+                not revalidate.
         """
         snapshot = _revalidated_goal(goal)
         refuse_a_seeded_minting(snapshot)
+        refuse_a_seeded_quote(snapshot)
         async with self._lock:
             await _run_to_completion(self._save_goal_sync, snapshot)
         return snapshot.id

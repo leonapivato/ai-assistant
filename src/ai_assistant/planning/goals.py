@@ -133,6 +133,55 @@ def refuse_a_seeded_minting(goal: Goal) -> None:
         raise PlanningError(msg)
 
 
+def refuse_a_seeded_quote(goal: Goal) -> None:
+    """Refuse an opening write carrying a quote (ADR-0267 §2, §4, §8).
+
+    :func:`refuse_a_seeded_minting`'s reason one record over, and it is the reason the
+    corpus gives every time it puts a guard at the door: a ``save_goal`` that accepted a
+    seeded tuple would "take at the door what the ceiling forbids and enforce it on
+    nothing". Three of this decision's own rules are enforced **only** at
+    :meth:`~ai_assistant.core.protocols.PlanStore.record_quote`, so a goal opened
+    carrying quotes reaches past all three at once: §2's refusal of a quote naming an
+    action the goal does not hold, :data:`~ai_assistant.core.types.MAX_ACTION_QUOTES`
+    and the elision that discloses what it drops, and §2's own append-only order.
+
+    **And the whole of the mechanism rests on the producer** (§4, §8). ``orchestration``
+    mints every ``ActionQuote`` after a step succeeds and writes it through
+    ``record_quote``; §8 is absolute that "no ``ActionPolicy``, no ``ToolRegistry``, **no
+    store**, no reader, no interface adapter, no tool and no model **constructs, writes
+    or repairs** one", and §11 that "**no lane invents a quote for a stored goal or
+    back-fills one onto a stored row**: a price nothing read is a price no record
+    holds". A quote a goal was opened with is a price nobody read, and ADR-0266 §7 would
+    prove a ``MONEY`` ceiling against it.
+
+    **``quotes_elided`` is refused with it**, because the count is a disclosure of what
+    a **write** dropped (ADR-0086 §4): a goal opened claiming to have elided seven
+    readings states a history no write performed, and §2 makes the count one that
+    "never decreases", so nothing afterwards can correct it downward.
+
+    Args:
+        goal: The goal as the caller handed it in.
+
+    Raises:
+        PlanningError: If the opening write carries a quote or a non-zero elision count.
+    """
+    if goal.quotes:
+        named = ", ".join(sorted({one.intended_action for one in goal.quotes}))
+        msg = (
+            f"goal {goal.id} is opened carrying a quote for {named}: a quote is minted "
+            f"from a step's output and written by record_quote alone, so a goal's "
+            f"opening write carries none (ADR-0267 §2, §4, §8)"
+        )
+        raise PlanningError(msg)
+    if goal.quotes_elided:
+        msg = (
+            f"goal {goal.id} is opened claiming {goal.quotes_elided} elided quotes: the "
+            f"count discloses what a write dropped and never decreases, so a goal that "
+            f"has been written once has dropped nothing (ADR-0267 §2; ADR-0086 §4)"
+        )
+        raise PlanningError(msg)
+
+
 def bounded(goal: Goal) -> Goal:
     """Hold ``goal``'s history to ADR-0249 §2's bound, disclosing what it drops.
 
