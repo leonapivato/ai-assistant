@@ -20,13 +20,19 @@ from typing import TYPE_CHECKING, Final
 
 from pydantic import TypeAdapter, ValidationError
 
-from ai_assistant.core.errors import IllegalTransitionError, PlanningError
+from ai_assistant.core.errors import (
+    ClaimRefused,
+    IllegalTransitionError,
+    PlanningError,
+    StaleExecutionError,
+)
 from ai_assistant.core.types import (
     MAX_ASSOCIATION_CANDIDATES,
     MAX_GOAL_INTERPRETATIONS,
     MAX_INTENDED_ACTIONS,
     TERMINAL_ATTEMPT_STATES,
     ActionPlan,
+    AttemptOutcome,
     AttemptPhase,
     AttemptState,
     EvidenceStanding,
@@ -37,8 +43,10 @@ from ai_assistant.core.types import (
     GoalQuestion,
     GoalQuestionDisposition,
     GoalRevision,
+    GoalStatus,
     Identifier,
     IntendedActionMinting,
+    StepStatus,
 )
 
 if TYPE_CHECKING:
@@ -47,7 +55,6 @@ if TYPE_CHECKING:
     from ai_assistant.core.types import (
         AttemptTransition,
         GoalInterpretation,
-        GoalStatus,
         IntendedAction,
         UtcInstant,
     )
@@ -1048,6 +1055,14 @@ def refuse_an_unclaimable_attempt(
     never lives again, a paused one lives again only by a **user act**, and a
     duplicated ownership is refused whichever attempt is supplied.
 
+    **The *state* limb raises ``ClaimRefused`` and the other three do not** (ADR-0261
+    §7, partially superseding ADR-0255 §3 in the class alone). It is still a
+    ``PlanningError`` and still not a ``StaleExecutionError``, so §3's own reason for
+    that choice is exercised rather than contradicted — what the subclass adds is the
+    one thing a driver cannot otherwise tell: that **a user act** ended, paused or
+    cancelled this attempt, rather than that this walk built a transition no correct
+    driver builds. The other three limbs are defects of the walk and propagate.
+
     Args:
         attempt_id: The attempt the claim names.
         execution_id: The execution the claim is against.
@@ -1060,7 +1075,9 @@ def refuse_an_unclaimable_attempt(
             attempt B run a step of an **ended** attempt A's execution.
 
     Raises:
-        PlanningError: On any of the four limbs. Never ``StaleExecutionError``.
+        ClaimRefused: On the **state** limb — the attempt is terminal or paused
+            (ADR-0261 §7).
+        PlanningError: On the other three limbs. Never ``StaleExecutionError``.
     """
     if named is None:
         msg = (
@@ -1082,7 +1099,7 @@ def refuse_an_unclaimable_attempt(
             f"it: a terminal attempt never lives again, and a paused one lives again "
             f"only by a user act answering what it is paused on (ADR-0255 §3)"
         )
-        raise PlanningError(msg)
+        raise ClaimRefused(msg)
     if len(owners) != 1:
         held = ", ".join(sorted(one.id for one in owners))
         msg = (
@@ -1165,3 +1182,216 @@ def refuse_a_superseded_plan(*, plan_id: str, successors: Sequence[str]) -> None
             f"superseded plan drives nothing further (ADR-0255 §3, ADR-0228 §5)"
         )
         raise PlanningError(msg)
+
+
+#: ADR-0261 §3's limb 1 and §6's predicate, one statement of *outstanding* so the two
+#: cannot disagree: "any step of any execution … stands ``INDETERMINATE`` or
+#: ``RUNNING``". The same two statuses ADR-0259 §4's acts 3 and 4 read.
+OUTSTANDING_STEP_STATUSES: Final[frozenset[StepStatus]] = frozenset(
+    {StepStatus.INDETERMINATE, StepStatus.RUNNING}
+)
+
+#: ADR-0250 §1's *closed* half of the goal division, which ADR-0261 §2's two
+#: closed-goal refusals are both stated over — written as the **complement of §1's
+#: open half**, "a goal is **open** where its ``GoalStatus`` is ``ACTIVE`` or
+#: ``BLOCKED``, and **closed** where it is ``ACHIEVED`` or ``ABANDONED``". Stating it
+#: that way round names no achieved status: ADR-0249 §4 gives that member no producer,
+#: and ``tests/core/test_goal_status_has_no_producer.py`` reads **any** member access
+#: under ``src/`` as one — deliberately over-approximating, since what §4 refuses is
+#: the producer however it is written. This is a read, so the guard stays exactly as
+#: strict and costs this module nothing.
+CLOSED_GOAL_STATUSES: Final[frozenset[GoalStatus]] = frozenset(GoalStatus) - {
+    GoalStatus.ACTIVE,
+    GoalStatus.BLOCKED,
+}
+
+
+def cancellation_outcome(statuses: Iterable[StepStatus]) -> AttemptOutcome:
+    """Which outcome a cancelled attempt earns, by ADR-0261 §3's four ordered limbs.
+
+    Stated once, because §3 evaluates the limbs in exactly two places — inside
+    ``close_goal_abandoned``'s own writes, and as ``commit_attempt``'s conjunct over
+    what a caller proposed — and two statements of an **ordered** rule are two places
+    to get the order wrong. The order is the whole of it: the single-limb cases are
+    all passed by an implementation that tests them in any order, and only the
+    precedence boundaries tell them apart.
+
+    Args:
+        statuses: The status of every step of every execution the attempt's
+            ``execution_ids`` names, read **inside the same indivisible step as the
+            write**. Order is irrelevant; the limbs are a precedence over the set.
+
+    Returns:
+        ``UNCERTAIN`` where any step is outstanding — ``INDETERMINATE`` or
+        ``RUNNING``; otherwise ``PARTIAL`` where any is ``SUCCEEDED``; otherwise
+        ``FAILED`` where any is ``FAILED``; otherwise ``CANCELLED``. The four are
+        **total** over ``StepStatus``'s seven members: ``PENDING``,
+        ``AWAITING_APPROVAL`` and ``SKIPPED`` reach the last, which is the state
+        ``CANCELLED`` describes — nothing succeeded, nothing failed, nothing is
+        outstanding. An attempt with no step at all reaches it too.
+    """
+    held = frozenset(statuses)
+    if held & OUTSTANDING_STEP_STATUSES:
+        return AttemptOutcome.UNCERTAIN
+    if StepStatus.SUCCEEDED in held:
+        return AttemptOutcome.PARTIAL
+    if StepStatus.FAILED in held:
+        return AttemptOutcome.FAILED
+    return AttemptOutcome.CANCELLED
+
+
+def cancelled(attempt: GoalAttempt, *, outcome: AttemptOutcome, at: UtcInstant) -> GoalAttempt:
+    """End ``attempt`` ``CANCELLED`` with ``outcome``, advancing its version (§2).
+
+    The row ADR-0261 §2's act writes over every non-terminal attempt of the goal it
+    closes, and the row §10's migration writes over the legacy states no later act can
+    reach. **The transition is stated whole, because a partial one is not a valid
+    ``GoalAttempt``**: ADR-0249 §5's validator requires both an ``outcome`` and an
+    ``ended_at`` on a terminal state.
+
+    **``version`` advances by one**, exactly as every other transition of that attempt
+    moves it, so an ``AttemptTransition`` built before the closure is **stale** and
+    refuses rather than appending a reference to a record that is now terminal.
+
+    Args:
+        attempt: The attempt as stored, which the caller has already established is
+            non-terminal.
+        outcome: The member :func:`cancellation_outcome` yields over this attempt's
+            **own** executions.
+        at: The instant of the act, from the caller's clock.
+
+    Returns:
+        The attempt as it stands after the closure.
+
+    **Revalidated rather than merely copied** (ADR-0023 §2). ``model_copy(update=...)``
+    **skips validators** — "a pydantic property no type can close" — so a rebuild that
+    trusted it would store a terminal attempt carrying, say, a naive ``ended_at``: the
+    in-memory store would hold a ``GoalAttempt`` its own type refuses, and the SQLite
+    store would serialise a row its next decode reports as corruption. The rule is that
+    "a write that reaches past it must re-validate", and this is such a write.
+
+    Raises:
+        PlanningError: If the result is not a shape ADR-0249 §5 admits.
+    """
+    rebuilt = attempt.model_copy(
+        update={
+            "state": AttemptState.CANCELLED,
+            "outcome": outcome,
+            "ended_at": at,
+            "version": attempt.version + 1,
+        }
+    )
+    try:
+        return GoalAttempt.model_validate(rebuilt.model_dump())
+    except ValidationError as exc:
+        msg = f"cancelling attempt {attempt.id} would leave a shape ADR-0249 §5 refuses: {exc}"
+        raise PlanningError(msg) from exc
+
+
+def refuse_a_wrong_cancellation_outcome(
+    *, attempt_id: str, proposed: AttemptOutcome | None, yielded: AttemptOutcome
+) -> None:
+    """Refuse a ``→ CANCELLED`` transition proposing the wrong outcome (§3).
+
+    The conjunct for **every caller other than** ``close_goal_abandoned``, which
+    computes the limbs itself and proposes nothing.
+
+    **It refuses with ``StaleExecutionError``**, which is exactly the
+    re-read-and-recompute that class means: a claim landing between the caller's read
+    of the attempt's steps and its commit is precisely the race this closes, and the
+    caller's correct response is to recompute and commit again. That is why this
+    refusal takes the *stale* class where ADR-0255 §3's permanent ones do not.
+
+    Args:
+        attempt_id: The attempt being ended, for the message.
+        proposed: The ``outcome`` the transition carries, or ``None`` where it carries
+            none — which ADR-0249 §5's validator refuses on a terminal state anyway,
+            and which is refused here too rather than silently admitted.
+        yielded: What :func:`cancellation_outcome` yields over this attempt's own
+            executions, read inside the same step.
+
+    Raises:
+        StaleExecutionError: If the two differ.
+    """
+    if proposed is yielded:
+        return
+    named = "no outcome" if proposed is None else proposed.value
+    msg = (
+        f"attempt {attempt_id} is being cancelled with {named}, but its own executions "
+        f"yield {yielded.value}: the four limbs are decided by the store inside the "
+        f"write, because a claim advances no GoalAttempt.version and a caller's read of "
+        f"them is not ordered against one — re-read and recompute (ADR-0261 §3)"
+    )
+    raise StaleExecutionError(msg)
+
+
+def refuse_a_live_attempt(*, goal_id: str, status: GoalStatus, live: Sequence[str]) -> None:
+    """Refuse a ``→ ABANDONED`` write over a goal holding a live attempt (§2).
+
+    ADR-0261 §2's first closure conjunct, **one limb**, stated over **every** caller of
+    ``set_goal_status``: that an ``ABANDONED`` goal never carries a live attempt is the
+    *store's* invariant and not one member's. ``close_goal_abandoned`` satisfies it by
+    construction and needs no refusal of its own.
+
+    **It binds on ``ABANDONED`` alone and decides no vocabulary.** ``ACHIEVED`` is
+    A10's and ``BLOCKED`` is A3's, and neither is constrained by it; ``ACTIVE`` on
+    ADR-0250 §13's reopen is untouched, which is what keeps the reopen sequence —
+    status first, then the new attempt — the one sequence that works. What is refused
+    is a **write that would leave two records inconsistent**, so ADR-0250 §9's "which
+    acts may write which member is the caller's rule" stays true word for word.
+
+    **It refuses with ``StaleExecutionError``** because the ground **moves** under a
+    re-read: the caller's correct response is to end that attempt and write again.
+
+    Args:
+        goal_id: The goal being moved, for the message.
+        status: The status the caller is writing.
+        live: The ids of that goal's attempts standing in a non-terminal state, read
+            inside the same indivisible step as the write.
+
+    Raises:
+        StaleExecutionError: If the write is ``→ ABANDONED`` and ``live`` is non-empty.
+    """
+    if status is not GoalStatus.ABANDONED or not live:
+        return
+    held = ", ".join(sorted(live))
+    msg = (
+        f"goal {goal_id} cannot be abandoned while it holds live attempts ({held}): an "
+        f"ABANDONED goal never carries a claimable attempt, so end them in the step that "
+        f"closes it — which is close_goal_abandoned — and write again (ADR-0261 §2)"
+    )
+    raise StaleExecutionError(msg)
+
+
+def refuse_a_closed_goal(*, goal_id: str, status: GoalStatus, what: str) -> None:
+    """Refuse an act this decision does not admit on a **closed** goal (§2).
+
+    Two callers, one rule and one class. ``open_attempt``'s closed-goal limb — the
+    second of ADR-0261 §2's closure conjuncts, and the half that makes the interleaving
+    exhaustive, since ``open_attempt`` advances no ``Goal.version`` and is therefore
+    invisible to any goal-level compare-and-swap — and ``close_goal_abandoned``'s own
+    refusal of a goal already ``ACHIEVED`` or ``ABANDONED``.
+
+    **The class is a ``PlanningError`` that is not a ``StaleExecutionError``**, and the
+    arms assert the class rather than merely the refusal: a closed goal opens again
+    only by ADR-0250 §13's user act, so no re-read makes the write valid, and a caller
+    reading it as stale would re-read and retry for ever. For the act, it is also what
+    stops a second caller replacing a concurrently reached ``ACHIEVED`` with
+    ``ABANDONED``.
+
+    Args:
+        goal_id: The goal, for the message.
+        status: Its stored status, read inside the same indivisible step as the write.
+        what: What the caller is doing, for the message.
+
+    Raises:
+        PlanningError: If the goal is ``ACHIEVED`` or ``ABANDONED``.
+    """
+    if status not in CLOSED_GOAL_STATUSES:
+        return
+    msg = (
+        f"cannot {what} goal {goal_id}: it stands {status.value}, and ADR-0250 §1 rules "
+        f"that closed — a closed goal opens again only by the user's own act, so no "
+        f"re-read makes this write valid (ADR-0261 §2)"
+    )
+    raise PlanningError(msg)

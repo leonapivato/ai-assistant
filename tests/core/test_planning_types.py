@@ -1354,7 +1354,7 @@ def test_the_kind_vocabulary_is_the_six_the_decisions_admit() -> None:
 
 def test_export_is_versioned_and_defaults_to_empty() -> None:
     export = PlanExport(exported_at=_WHEN)
-    assert export.schema_version == 13
+    assert export.schema_version == 14
     assert export.goals == ()
 
 
@@ -1377,13 +1377,13 @@ def test_export_pins_the_schema_version_to_exactly_thirteen() -> None:
     value, so the advertised version cannot be mislabelled. The positive default is
     what a producer gets for free; only the rejections pin it.
 
-    **The neighbour on each side is asserted and not only the far ones**: ``12`` is
-    the shape this contract had one decision ago and ``14`` is the shape nobody has
+    **The neighbour on each side is asserted and not only the far ones**: ``13`` is
+    the shape this contract had one decision ago and ``15`` is the shape nobody has
     decided, and a ``Literal`` that admitted either would be a document announcing a
     shape it does not have.
     """
-    assert PlanExport(exported_at=_WHEN, schema_version=13).schema_version == 13
-    for stale in (1, 2, 3, 4, 5, 6, 7, 8, 9, 10, 11, 12, 14):
+    assert PlanExport(exported_at=_WHEN, schema_version=14).schema_version == 14
+    for stale in (1, 2, 3, 4, 5, 6, 7, 8, 9, 10, 11, 12, 13, 15):
         with pytest.raises(ValidationError):
             PlanExport(exported_at=_WHEN, schema_version=stale)  # type: ignore[arg-type]
 
@@ -1430,7 +1430,7 @@ def test_export_carries_a_whole_supersession_chain() -> None:
         exported_at=_WHEN, goals=(_goal(),), plans=(first, revision), evidence=_histories("g1")
     )
 
-    assert export.schema_version == 13
+    assert export.schema_version == 14
     assert [plan.supersedes for plan in export.plans] == [None, "p1"]
 
 
@@ -1523,7 +1523,7 @@ def test_export_round_trips_through_json() -> None:
     )
     restored = TypeAdapter(PlanExport).validate_json(export.model_dump_json())
     assert restored == export
-    assert restored.schema_version == 13
+    assert restored.schema_version == 14
     request = restored.plans[0].read_request
     assert request is not None
     assert {ask.kind for ask in request.asks} == {ReadKind.SIGHTED_QUERY, ReadKind.CITATION_HOP}
@@ -2057,7 +2057,13 @@ def test_an_attempt_carries_its_result_exactly_on_a_terminal_state() -> None:
 
 
 def test_the_attempt_vocabularies_are_closed_at_what_the_decision_fixes() -> None:
-    """§5, §6: six phases in order, seven states with two terminal, six outcomes."""
+    """§5, §6: six phases in order, seven states with two terminal, seven outcomes.
+
+    **The seventh outcome is ADR-0261 §3's ``CANCELLED``**, admitted by ADR-0249 §5's
+    own *"the vocabulary is added to and never renamed"* and owed because that
+    section's validator makes an outcome compulsory on a terminal state: an attempt a
+    user ended before it produced anything is none of the six.
+    """
     assert [one.value for one in AttemptPhase] == [
         "understand",
         "investigate",
@@ -2068,7 +2074,8 @@ def test_the_attempt_vocabularies_are_closed_at_what_the_decision_fixes() -> Non
     ]
     assert len(AttemptState) == 7
     assert {AttemptState.CANCELLED, AttemptState.ENDED} == TERMINAL_ATTEMPT_STATES
-    assert len(AttemptOutcome) == 6
+    assert len(AttemptOutcome) == 7
+    assert AttemptOutcome.CANCELLED.value == "cancelled"
     assert len(Ground) == 3
     assert len(EvidenceStanding) == 3
 

@@ -217,6 +217,10 @@ def test_the_three_operations_are_on_the_protocol_and_reach_the_wire() -> None:
     } == set(ClarificationWithdrawal)
     assert {
         GoalAbandonment.ABANDONED,
+        # ADR-0261 §6's fourth member, which is a wire ground of its own: it crosses a
+        # frame from the promoted `abandon_goal`, so a peer one `PROTOCOL_VERSION` back
+        # validates the value against a three-member enumeration and fails it.
+        GoalAbandonment.ABANDONED_EFFECT_IN_FLIGHT,
         GoalAbandonment.ALREADY_CLOSED,
         GoalAbandonment.NO_SUCH_GOAL,
     } == set(GoalAbandonment)

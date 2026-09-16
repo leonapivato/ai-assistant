@@ -5135,11 +5135,36 @@ class Engine:
         this system that writes ``ABANDONED``**. No expiry, no silence, no timeout, no
         sweep, no reclaim, no model output and no inference writes it."*
 
-        *"Abandoning writes the goal's status through ``PlanStore.set_goal_status``
-        (§9) and settles its open question ``WITHDRAWN``, and does nothing else.** It
-        does **not** move the attempt's state, does not write an ``AttemptOutcome``,
-        does not end an execution and does not cancel anything in flight: **what becomes
-        of an attempt on an abandoned goal is A9's**."*
+        *"Abandoning … settles its open question ``WITHDRAWN``"* — and since ADR-0261
+        §2 it writes the status through **``PlanStore.close_goal_abandoned``** rather
+        than through ``set_goal_status``. That decision partially supersedes ADR-0250
+        §12's *"does **not** move the attempt's state, does not write an
+        ``AttemptOutcome``"*: the one call ends **every** attempt of the goal standing
+        in a non-terminal ``AttemptState`` — each carrying the outcome ADR-0261 §3's
+        four limbs yield over that attempt's own executions — writes ``ABANDONED`` and
+        answers what was outstanding, all in one indivisible step. A9 is discharged
+        there rather than still owed. What ADR-0250 §12 says about **executions** binds
+        verbatim and is untouched: the act *"does not end an execution and does not
+        cancel anything in flight"*.
+
+        **Why the member and not ``set_goal_status``.** ADR-0261 §2 puts a conjunct on
+        that member refusing an ``→ ABANDONED`` write over a goal holding a live
+        attempt, on **every** caller, so this path could not take it and be correct;
+        and the three writes are one step because "every two-step arrangement loses the
+        answer" — a predicate read before the status write is falsified between them,
+        and one computed after separate attempt commits misses a step that resolved in
+        between.
+
+        **What this lane does *not* do, and why it is a widening rather than L2's
+        work** (issue #2435). ADR-0261 §13 books this call on L2, but §2's conjunct
+        lands with the contract in L1 — so on the cut as written ``main`` cannot
+        abandon a goal holding a live attempt between the two merges. The call is
+        therefore taken here and **nothing else of L2 is**: the answer is mapped to
+        ``GoalAbandonment.ABANDONED`` unconditionally, the ``bool`` the member returns
+        is **discarded**, and §2's single ``StaleExecutionError`` re-read-and-retry is
+        not taken. Mapping the ``bool`` onto ADR-0261 §6's
+        ``ABANDONED_EFFECT_IN_FLIGHT``, that retry, ``GoalSummary.effect_in_flight``'s
+        computation and §7's refusal catch are all still L2's.
 
         **The question is settled first**, so a call that dies between the two writes
         leaves an open goal whose question is gone rather than a closed goal still
@@ -5160,10 +5185,12 @@ class Engine:
             goal_id: The goal to abandon.
 
         Returns:
-            Which of the three states this call reached.
+            Which of the three states this call reached. ``ABANDONED_EFFECT_IN_FLIGHT``
+            is L2's to produce and is never returned here (above).
 
         Raises:
-            StaleExecutionError: As ``set_goal_status`` raises it (ADR-0014 §5).
+            StaleExecutionError: As ``close_goal_abandoned`` raises it (ADR-0014 §5,
+                ADR-0261 §2), on a lost ``Goal.version`` and on nothing else.
         """
         goal = await self._plans.get_goal(goal_id)
         if goal is None:
@@ -5171,9 +5198,11 @@ class Engine:
         if not is_open(goal):
             return GoalAbandonment.ALREADY_CLOSED
         await self._withdraw_open_question(goal.id)
-        await self._plans.set_goal_status(
+        # The answer is deliberately discarded: what it reports is ADR-0261 §6's
+        # fourth `GoalAbandonment` member, which L2 owes together with the retry and
+        # the listing's field (issue #2435).
+        await self._plans.close_goal_abandoned(
             goal.id,
-            status=GoalStatus.ABANDONED,
             at=self._clock(),
             expected_version=goal.version,
         )

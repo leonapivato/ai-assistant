@@ -18,29 +18,43 @@ from typing import TYPE_CHECKING
 from uuid import uuid4
 
 from ai_assistant.core.clock import ClockReadingError, checked_clock
-from ai_assistant.core.errors import ActiveExecutionError, PlanningError, StaleExecutionError
+from ai_assistant.core.errors import (
+    ActiveExecutionError,
+    ClaimRefused,
+    PlanningError,
+    StaleExecutionError,
+)
 from ai_assistant.core.types import (
     MAX_GOAL_EVIDENCE,
+    TERMINAL_ATTEMPT_STATES,
+    AttemptState,
     EvidenceHistory,
     EvidenceStanding,
     GoalDeletion,
     GoalQuestionDisposition,
+    GoalStatus,
     PlanExport,
     StepStatus,
     evidence_order,
 )
 from ai_assistant.planning.execution import PlanExecution
 from ai_assistant.planning.goals import (
+    OUTSTANDING_STEP_STATUSES,
     advanced,
     appended,
     bounded,
+    cancellation_outcome,
+    cancelled,
     capped,
     engaged,
     invalidated,
     minted,
+    refuse_a_closed_goal,
+    refuse_a_live_attempt,
     refuse_a_second_owner,
     refuse_a_seeded_minting,
     refuse_a_superseded_plan,
+    refuse_a_wrong_cancellation_outcome,
     refuse_an_unclaimable_attempt,
     refuse_an_unsubstituted_action,
     refuse_an_unsubstituted_condition,
@@ -69,7 +83,6 @@ if TYPE_CHECKING:
         GoalEvidence,
         GoalQuestion,
         GoalRevision,
-        GoalStatus,
         IntendedActionMinting,
         StepTransition,
         UtcInstant,
@@ -336,19 +349,123 @@ class InMemoryPlanStore:
     ) -> Goal:
         """Move the goal's status, compare-and-swap (ADR-0250 §9).
 
-        The goal's **only** status-mutation route. It refuses no member of the
-        vocabulary, because A10 and A3 write ``ACHIEVED`` and ``BLOCKED`` through this
-        same route and a store that refused one would be a second place the vocabulary
-        is decided.
+        It refuses no member of the vocabulary, because A10 and A3 write ``ACHIEVED``
+        and ``BLOCKED`` through this same route and a store that refused one would be a
+        second place the vocabulary is decided. **It is no longer the only route to**
+        ``ABANDONED``: :meth:`close_goal_abandoned` writes that member too (ADR-0261
+        §2).
+
+        **A ``→ ABANDONED`` write over a goal holding a non-terminal attempt is
+        refused**, decided in this same step (ADR-0261 §2). What is refused is a write
+        that would leave two records inconsistent, not a status member.
 
         Raises:
-            StaleExecutionError: If the stored version has moved on.
+            StaleExecutionError: If the stored version has moved on, or the write is
+                ``→ ABANDONED`` over a goal holding a live attempt.
             PlanningError: If ``goal_id`` names no stored goal.
         """
         stored = self._goal_for_write(goal_id, expected_version, "set the status of")
+        refuse_a_live_attempt(goal_id=goal_id, status=status, live=self._live_attempts(goal_id))
         updated = _with_status(stored, status=status)
         self._goals[updated.id] = updated
         return updated.model_copy(deep=True)
+
+    def _live_attempts(self, goal_id: str) -> list[str]:
+        """The ids of ``goal_id``'s attempts standing in a non-terminal state.
+
+        Read with no ``await`` between it and the write it decides, which is
+        :meth:`_goal_for_write`'s discipline stated once more.
+
+        Args:
+            goal_id: The goal to look under.
+
+        Returns:
+            Every such attempt's id, in no particular order.
+        """
+        return [
+            one.id
+            for one in self._attempts.values()
+            if one.goal_id == goal_id and one.state not in TERMINAL_ATTEMPT_STATES
+        ]
+
+    def _step_statuses(self, attempt: GoalAttempt) -> list[StepStatus]:
+        """Every step status of every execution ``attempt`` names (ADR-0261 §3).
+
+        Args:
+            attempt: The attempt whose ``execution_ids`` are walked.
+
+        Returns:
+            One status per step, over the executions this store holds. An
+            ``execution_ids`` entry the store does not hold contributes nothing, which
+            :meth:`_refuse_a_dangling_execution` makes unreachable through the
+            contract.
+        """
+        return [
+            step.status
+            for execution_id in attempt.execution_ids
+            if (held := self._executions.get(execution_id)) is not None
+            for step in held.steps
+        ]
+
+    async def close_goal_abandoned(
+        self, goal_id: str, /, *, at: UtcInstant, expected_version: int
+    ) -> bool:
+        """End the goal's live attempts, close it, and say what was outstanding (§2).
+
+        **One step, because every two-step arrangement loses the answer.** The read,
+        every attempt write, the status write and the predicate happen with no
+        ``await`` between them, so nothing interleaves: this store's whole event loop
+        is the total order ADR-0014 §5 assigns to a store.
+
+        **Over the set and not the row**: *at most one live attempt per goal* is an
+        invariant no store enforces, so every non-terminal attempt is ended, each with
+        the outcome ADR-0261 §3's limbs yield over its **own** executions.
+
+        **The answer is goal-wide**, so an ``INDETERMINATE`` step on an older, already
+        terminal attempt makes it ``True`` though that attempt is not ended at all.
+
+        Raises:
+            StaleExecutionError: If the stored version has moved on.
+            PlanningError: If ``goal_id`` names no stored goal, or the goal is already
+                closed — ``ACHIEVED`` or ``ABANDONED`` — which no re-read makes valid.
+        """
+        stored = self._goal_for_write(goal_id, expected_version, "abandon")
+        refuse_a_closed_goal(goal_id=goal_id, status=stored.status, what="abandon")
+        outstanding = await self.has_outstanding_effect(goal_id)
+        ended = [
+            cancelled(one, outcome=cancellation_outcome(self._step_statuses(one)), at=at)
+            for one in self._attempts.values()
+            if one.goal_id == goal_id and one.state not in TERMINAL_ATTEMPT_STATES
+        ]
+        for one in ended:
+            self._attempts[one.id] = one
+        updated = _with_status(stored, status=GoalStatus.ABANDONED)
+        self._goals[updated.id] = updated
+        return outstanding
+
+    async def has_outstanding_effect(self, goal_id: str, /) -> bool:
+        """Whether any step of any execution of any attempt of ``goal_id`` is claimed.
+
+        ADR-0261 §6's existential, **goal-wide and never per-attempt**. It takes no
+        ``await`` at all, which is ADR-0069 §3's escape: a read with no suspension
+        point has no interleaving to be torn by, so the answer is necessarily one the
+        store held.
+
+        **An unknown goal answers ``False``**, never a raise — the shape
+        :meth:`get_goal` and :meth:`attempts_of` already take.
+
+        Args:
+            goal_id: The goal to ask about.
+
+        Returns:
+            Whether some such step stands ``INDETERMINATE`` or ``RUNNING``.
+        """
+        return any(
+            status in OUTSTANDING_STEP_STATUSES
+            for attempt in self._attempts.values()
+            if attempt.goal_id == goal_id
+            for status in self._step_statuses(attempt)
+        )
 
     async def candidates_for(self, conversation_id: str, /, *, limit: int) -> GoalCandidates:
         """Return this conversation's candidate goals, capped (ADR-0250 §2, §9).
@@ -645,14 +762,23 @@ class InMemoryPlanStore:
         execution and defeat the claim conjunct without ever calling
         :meth:`commit_attempt`. Decided in the same step as the write.
 
+        **An attempt on a *closed* goal is refused** (ADR-0261 §2), decided in this
+        same step, and it refuses nothing on account of another attempt: an attempt on
+        an open goal is opened whatever that goal already holds.
+
         Raises:
-            PlanningError: If ``goal_id`` names no stored goal, the store already
+            PlanningError: If ``goal_id`` names no stored goal, the goal it names is
+                closed (ADR-0261 §2), the store already
                 holds an attempt under this ``id``, or any ``execution_ids`` member
                 is already carried by another attempt of that goal (ADR-0255 §3).
         """
-        if attempt.goal_id not in self._goals:
+        goal = self._goals.get(attempt.goal_id)
+        if goal is None:
             msg = f"attempt {attempt.id} refers to unknown goal {attempt.goal_id}"
             raise PlanningError(msg)
+        refuse_a_closed_goal(
+            goal_id=goal.id, status=goal.status, what=f"open attempt {attempt.id} on"
+        )
         if attempt.id in self._attempts:
             msg = (
                 f"attempt {attempt.id} already exists; a change to an attempt is a "
@@ -703,8 +829,14 @@ class InMemoryPlanStore:
         untouched: a repeat of the same append **on the owning attempt** is still
         ignored rather than refused.
 
+        **A ``→ CANCELLED`` transition carries the outcome ADR-0261 §3's four limbs
+        yield over this attempt's own executions**, read in this same step, and every
+        other is refused. That is the rule for every caller *other* than
+        :meth:`close_goal_abandoned`, which computes the limbs itself.
+
         Raises:
-            StaleExecutionError: If the stored version has moved on.
+            StaleExecutionError: If the stored version has moved on, or a
+                ``→ CANCELLED`` transition proposes the wrong outcome (ADR-0261 §3).
             IllegalTransitionError: If the move is not legal from where it stands.
             PlanningError: If the attempt does not exist, the result is not a shape
                 ADR-0249 §5 admits, or the execution it names is already another
@@ -728,6 +860,12 @@ class InMemoryPlanStore:
                 attempt_id=stored.id,
                 execution_id=transition.add_execution_id,
                 owners=self._owners_of(stored.goal_id, transition.add_execution_id),
+            )
+        if transition.to_state is AttemptState.CANCELLED:
+            refuse_a_wrong_cancellation_outcome(
+                attempt_id=stored.id,
+                proposed=transition.outcome,
+                yielded=cancellation_outcome(self._step_statuses(stored)),
             )
         updated = advanced(stored, transition)
         self._attempts[updated.id] = updated
@@ -972,8 +1110,11 @@ class InMemoryPlanStore:
             transition: The move being applied.
 
         Raises:
-            StaleExecutionError: If the claim names a plan that does not target its
-                goal's current interpretation revision.
+            ClaimRefused: If the claim names a plan that does not target its goal's
+                current interpretation revision (ADR-0249 §8, re-classed by ADR-0261
+                §7): a **correction** replaced what the user asked for, which is one
+                of the two states a user act produces and the one thing a driver
+                cannot otherwise tell from an ordinary compare-and-swap loss.
         """
         if transition.to_status is not StepStatus.RUNNING:
             return
@@ -987,7 +1128,7 @@ class InMemoryPlanStore:
                 f"{goal.id} stands at {goal.revision}: a plan that does not target the "
                 f"goal's current understanding is not driven (ADR-0249 §8)"
             )
-            raise StaleExecutionError(msg)
+            raise ClaimRefused(msg)
 
     def _refuse_an_unclaimable_attempt(
         self, stored: ExecutionState, transition: StepTransition

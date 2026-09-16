@@ -270,6 +270,16 @@ _NAMESPACE: Final = {
 #: walk then reaches the model and the two vocabularies it carries. §4 and §5 are what
 #: promotes them — the value is what a rendering surface builds its statement from, so
 #: it is contract surface by the same route every other member of this roster is.
+#:
+#: **ADR-0261 §7's ``DriveWithheld`` is here, by that same route.** ``TurnOutcome``
+#: gains ``drive_withheld`` and the walk reaches the closed seven-member vocabulary it
+#: carries — a surface renders one fixed statement per member beside the reply
+#: (ADR-0242 §9's construction), so it is contract surface exactly as ``OutboundReach``
+#: is. **``GoalSummary.effect_in_flight`` and ``GoalAbandonment``'s fourth member add
+#: nothing to this roster**: a ``bool`` is a scalar ADR-0087 §2c spells, and the
+#: enumeration is already named above. And **``ClaimRefused`` is not here and is not an
+#: omission** — it is an error class, which crosses as ADR-0085 §10a's payload rather
+#: than as a field of any promoted type, so no walk of these signatures reaches it.
 PROMOTED: Final[frozenset[str]] = frozenset(
     {
         "Clarification",
@@ -340,6 +350,7 @@ PROMOTED: Final[frozenset[str]] = frozenset(
         "OutboundStatement",
         "OutboundReach",
         "OutboundDestination",
+        "DriveWithheld",
     }
 )
 
@@ -1243,6 +1254,23 @@ def test_the_promoted_surface_and_the_protocol_version_are_both_pinned() -> None
     to **47** when ADR-0265's L1 landed first — on that entry's own instruction, and
     the reason every entry above it gives.
 
+    **48 is ADR-0261 §10's L1, and it is under the second limb alone, four times
+    over.** ``GoalAbandonment`` gains ``ABANDONED_EFFECT_IN_FLIGHT`` and is returned by
+    the promoted ``abandon_goal``, so a client one version back validates a value
+    against a three-member enumeration; ``GoalSummary`` gains ``effect_in_flight`` and
+    ``TurnOutcome`` gains ``drive_withheld``, both ``extra="forbid"`` models a promoted
+    method returns, so an older peer refuses **every** listed goal and **every** turn;
+    and ``ClaimRefused`` is minted, which can cross as an error payload whose unknown
+    ``code`` ADR-0085 §10a makes a protocol violation rather than a widening — the
+    handshake being what keeps that safe, and this bump being what keeps the handshake
+    true. ``AttemptOutcome``'s new member is **not** among them: it rides a
+    ``GoalAttempt``, which no peer emits, so its version ground is
+    ``PlanExport.schema_version`` alone. **The method set does not move and stays at
+    63**: L1 adds no ``AssistantEngine`` member and no gateway route, so the two numbers
+    part company for a third consecutive entry. ADR-0261 §10 fixes no numeral —
+    *"the figure is the tree's"* — and two further lanes in flight also move it, so a
+    lane landing after this one re-bumps.
+
     **ADR-0124 §9 decides no mechanical check and creates none**, saying one is
     owed and leaving its shape open. This is not that check — it is a *pin*, and
     a deliberately crude one: it fails when either number moves, which is the
@@ -1251,7 +1279,7 @@ def test_the_promoted_surface_and_the_protocol_version_are_both_pinned() -> None
     """
     from ai_assistant.wire.envelope import PROTOCOL_VERSION  # noqa: PLC0415 — asserted about
 
-    assert (len(_method_names()), PROTOCOL_VERSION) == (63, 47), (
+    assert (len(_method_names()), PROTOCOL_VERSION) == (63, 48), (
         "the promoted method set and the protocol version are pinned together "
         "(ADR-0124 §9); move either and this pin makes you name the limb you are "
         "under — the method set, or a wire-carried core type"

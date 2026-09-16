@@ -1814,6 +1814,54 @@ class StaleExecutionError(PlanningError):
     """
 
 
+class ClaimRefused(PlanningError):  # noqa: N818 — ADR-0261 §7 names the class, and the name says what happened rather than that something is broken
+    """A ``→ RUNNING`` claim was refused because a **user act** changed something.
+
+    Raised by exactly two things, which are the two *liveness* conjuncts a claim
+    meets (ADR-0261 §7):
+
+    * **ADR-0255 §3's attempt conjunct, in its *state* limb alone** — the attempt the
+      claim names is in a state that is terminal (``CANCELLED`` or ``ENDED``) or
+      paused (``AWAITING_CLARIFICATION``, ``AWAITING_AUTHORIZATION`` or ``BLOCKED``).
+    * **ADR-0249 §8's revision conjunct** — the plan the execution runs does not
+      target its goal's current interpretation revision, because a correction
+      replaced what the user asked for.
+
+    **Every other limb of every conjunct keeps the class it has today, and no lane
+    raises this from any of them**: an attempt that does not exist, one that does not
+    carry this execution, one of two attempts naming it, and ADR-0255 §3's successor
+    conjunct each stay on the non-stale :class:`PlanningError` that section gives
+    them, being defects of the *walk* rather than states a user act produced. So do a
+    lost ``expected_version`` (:class:`StaleExecutionError`), an illegal move
+    (:class:`IllegalTransitionError`) and an unknown execution (bare
+    :class:`PlanningError`). **No other member of any Protocol and no other subsystem
+    raises it.**
+
+    **Catching this *is* catching "a user act changed something under this walk"**,
+    which is what makes composing safe. Until ADR-0261 the two liveness raisers raised
+    classes shared with refusals that are not claim guards at all —
+    :class:`StaleExecutionError` is also an ordinary compare-and-swap loss, a bare
+    :class:`PlanningError` also an unknown execution — so a driver could not tell
+    *the user changed something* from *this driver built a bad transition*.
+
+    **It says *that* a liveness conjunct refused and never *which*.** It defines no
+    ``__init__``, carries a message and **no structured state**, and sends no
+    ``details`` (ADR-0085 §10a): the read that follows the refusal names the state
+    the goal is in, and even that cannot establish which conjunct fired — a claim
+    refused on the attempt conjunct, on a goal a correction had meanwhile revised,
+    answers ``UNDERSTANDING_CHANGED``, true of the goal while naming the wrong
+    conjunct. **No lane gives it structured state naming one.**
+
+    **A subclass of** :class:`PlanningError` **so nothing that catches the planning
+    family stops seeing it**, and so a peer that cannot name the code never completes
+    a connect at all: ADR-0085 §10a fixes that an unknown error code is a
+    transport-level protocol failure and **not** a fall back to the nearest ancestor,
+    and ADR-0084 §3's exact-match handshake is what keeps the two halves shipping
+    together — which is why the class and ``PROTOCOL_VERSION``'s move land in one
+    change.
+    """
+
+
 class ActiveExecutionError(PlanningError):
     """A destructive store operation was refused because work is in flight.
 
