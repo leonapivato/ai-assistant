@@ -485,8 +485,13 @@ class TestWhatOnlyAFileCanSay:
                 # **Not corruption**: canonical base-16 text of a 4301-digit
                 # magnitude, which is exactly what the encoding exists to hold and
                 # what a decimal one could not have converted in either direction.
+                planted_version = int("1" * 4301, 16)
                 assert await second.end_for_goal(GOAL, at=NOW, goal_version=0) == 0
-                assert await second.clear_closure(GOAL, goal_version=int("1" * 4301, 16)) is True
+                # **Squeezed, not merely accepted**: a decode answering any value
+                # below the planted one would lift at ``planted_version`` all the
+                # same, so what pins it is the call one below answering ``False``.
+                assert await second.clear_closure(GOAL, goal_version=planted_version - 1) is False
+                assert await second.clear_closure(GOAL, goal_version=planted_version) is True
                 return
             with pytest.raises(AuthorizationError, match="canonical"):
                 await second.end_for_goal(GOAL, at=NOW, goal_version=4)
@@ -762,9 +767,17 @@ class TestTheWatermarkEncoding:
         store = SqliteGoalAuthorizationStore(path=encoding_path, now=SHARED_CLOCK.reset())
         try:
             assert await store.end_for_goal(GOAL, at=NOW, goal_version=magnitude) == 0
+            # **Read back exactly, and each member's own record before the other
+            # rewrites it**: one below what the ending wrote is stale against it, so
+            # it lifts nothing and writes nothing — and the version itself lifts it,
+            # which together leave no value but ``magnitude`` standing.
+            assert await store.clear_closure(GOAL, goal_version=magnitude - 1) is False
             assert await store.clear_closure(GOAL, goal_version=magnitude) is True
-            # Read back exactly: one below is stale against what was written.
+            # The clear's own record the same way, with a row to move so that ``0``
+            # is staleness rather than a goal holding nothing.
+            assert await store.record(established(id="afresh")) == "afresh"
             assert await store.end_for_goal(GOAL, at=NOW, goal_version=magnitude - 1) == 0
+            assert await store.end_for_goal(GOAL, at=NOW, goal_version=magnitude) == 1
         finally:
             store.close()
 
