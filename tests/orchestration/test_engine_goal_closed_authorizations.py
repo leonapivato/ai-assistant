@@ -88,6 +88,11 @@ class _Advancing:
         self.readings += 1
         return reading
 
+    @property
+    def step_would_move(self) -> bool:
+        """Whether this clock really advances, so a fixed one cannot pass as one."""
+        return self._step > timedelta(0)
+
 
 def _row(goal_id: str, tool_id: str, *, row_id: str) -> Authorization:
     """A path-(iii) opening act of ``goal_id`` through ``tool_id``, standing live."""
@@ -304,13 +309,37 @@ async def test_the_ending_and_the_closing_write_share_one_clock_reading() -> Non
     it and never a second reading taken between the two writes — so the rows, the
     ending's own argument and the closing write's own argument are one value.
 
-    **Asserted under an advancing clock and over both calls.** A fixed clock cannot
-    falsify this: an act reading the clock a second time for its closing write would
-    pass every arm stated against a constant, and would close the goal at an instant
-    its own rows say nothing happened at. And asserting only over the rows leaves the
-    *other* half free — which is why the closing write's own ``at`` is captured here
-    rather than inferred. Adversarial review, round 5, ``blocker``; the reopen path's
-    half of the same clause was closed in round 1 and this is its twin.
+    **Three things are asserted, and each is free without the others.**
+
+    The clock **advances**, so an act reading it twice cannot produce one value by
+    luck — a fixed clock falsifies nothing, which is what round 5 found.
+
+    Both writes were given the **same** value, the closing write's own ``at`` being
+    captured rather than inferred from the rows — asserting only over the rows leaves
+    the other half free, which is what round 5 found.
+
+    And the attempt takes **exactly one reading**, which is the clause's own word —
+    *"reads the clock **once**"* — and which an act taking a second reading and
+    discarding it breaches while satisfying both assertions above. Adversarial
+    review, round 6, ``blocker``.
+
+    **The one reading is measured against a baseline act rather than hard-coded.**
+    A bare count over the whole call is not the attempt's: the tracing seam stamps
+    every tracked operation from the same clock (``orchestration/traces.py``), so
+    the engine reads it once before ``abandon_goal`` has done anything. So the act
+    is run twice — once over a goal the store does not hold, which answers
+    ``NO_SUCH_GOAL`` from its first read and *"ends **nothing** and fences
+    **nothing**"* (§1), and once for real — and the difference between the two
+    deltas is the attempt's own reading and nothing else. That is self-calibrating:
+    it stays true if the tracing seam ever stamps differently, where a hard-coded
+    total would break for a reason this arm is not about.
+
+    **The goal is arranged with no open question** so that no third party reads
+    inside either act: ``_withdraw_open_question`` reads no clock where a goal holds
+    none, ``_open_question`` returning before its own reading.
+
+    The reopen path's half of this clause was closed in round 1, and rounds 5 and 6
+    are this path's twin arriving in two pieces.
     """
     journal = _Journal()
     clock = _Advancing(AT, step=timedelta(days=1))
@@ -326,11 +355,25 @@ async def test_the_ending_and_the_closing_write_share_one_clock_reading() -> Non
         now=clock,
     )
     goal = await _goal_with_two_rows(harness, store, conversation="conversation-1")
+    assert await harness.plans.open_question(goal.id) is None, (
+        "arranged with no open question, so the attempt's own reading is the only one"
+    )
     journal.reset()
 
+    # The baseline: a tracked act that makes no closing-write attempt at all.
+    baseline = clock.readings
+    assert await harness.engine.abandon_goal("no-such-goal") is GoalAbandonment.NO_SUCH_GOAL
+    overhead = clock.readings - baseline
+    assert journal.calls == [], "and it takes no ending, which is what makes it a baseline"
+
+    before = clock.readings
     assert await harness.engine.abandon_goal(goal.id) is GoalAbandonment.ABANDONED
 
-    assert clock.readings > 1, "the clock really is advancing, so a second read would show"
+    assert (clock.readings - before) - overhead == 1, (
+        "the attempt reads the clock once (ADR-0268 §1), so a discarded second "
+        "reading is a breach even where both writes get the same value"
+    )
+    assert clock.step_would_move, "the clock advances, so one value cannot happen by luck"
     (_, ending_at, _version) = journal.endings[0]
     assert journal.closings == [ending_at], (
         "the closing write takes the ending's own instant, not a later reading"
