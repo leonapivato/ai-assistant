@@ -79,6 +79,10 @@ if TYPE_CHECKING:
 STEP = "step-1"
 ATTEMPT = "a-1"
 CAPABILITY = "send_email"
+
+#: The act every step here is an attempt at, and the one the goal holds. It is the
+#: builder's default because ADR-0259 §2 refuses a side-effecting step that names none.
+ACT = "ia-1"
 CONNECTION = "conn-1"
 IDENTITY = "work@example.com"
 
@@ -163,7 +167,7 @@ class Harness:
         self,
         goal: Goal,
         *,
-        act: str | None = None,
+        act: str | None = ACT,
         plan_id: str = "p-1",
         rationale: str | None = None,
     ) -> ExecutionState:
@@ -171,9 +175,11 @@ class Harness:
 
         ``act`` is the :class:`~ai_assistant.core.types.IntendedAction` the step is
         an attempt at (ADR-0265 §1), minted onto the goal first because
-        ``save_plan`` refuses a step naming an action the goal does not hold. The
-        default is ``None``, which is a conforming plan rather than a degraded one
-        and is what every case here that is not about the request builder wants.
+        ``save_plan`` refuses a step naming an action the goal does not hold. It
+        **defaults to one**, because ADR-0259 §2 refuses to dispatch a side-effecting
+        step whose plan names none — ``EFFECT_UNSCOPED``, before any ruling is sought —
+        and every declaration here is side-effecting. A case about a plan that names
+        none passes ``act=None`` and says so.
 
         ``plan_id`` and ``rationale`` are plan-level values that say **nothing**
         about the goal, so a case asserting ADR-0266 §5's goal-only read can vary
@@ -219,7 +225,7 @@ def _appends_execution(execution_id: str) -> AttemptTransition:
 
 
 async def _parked(
-    harness: Harness, goal: Goal, *, act: str | None = None, **plan: str
+    harness: Harness, goal: Goal, *, act: str | None = ACT, **plan: str
 ) -> ExecutionState:
     """Drive the step to its `CONFIRM` park and return the execution."""
     state = await harness.an_execution(goal, act=act, **plan)
@@ -636,9 +642,6 @@ async def test_the_store_is_read_and_written_and_never_raises_into_the_turn(
 
 # --- ADR-0266 §11's L2: the mint at its call site, and the request builder ----
 
-#: The act the builder cases put on the step, and the one the goal holds.
-ACT = "ia-1"
-
 #: A goal whose one ``USER_STATED`` constraint states a ceiling ADR-0266 §4 reads.
 CEILING = (
     GoalElement(
@@ -807,7 +810,7 @@ async def test_a_step_naming_no_act_yields_a_request_carrying_none() -> None:
     answers = FakeCoverageAnswers(quote=QUOTED)
     harness = Harness(answers=answers)
 
-    await _parked(harness, a_goal(deadline=AT + timedelta(hours=12), constraints=CEILING))
+    await _parked(harness, a_goal(deadline=AT + timedelta(hours=12), constraints=CEILING), act=None)
 
     ((asked, _),) = answers.calls
     assert asked.intended_action is None
@@ -856,7 +859,11 @@ async def test_an_unbound_call_whose_step_names_no_act_carries_none() -> None:
     parameters rather than from what the seam returned.
     """
     harness = Harness(bound=False)
-    state = await harness.an_execution(a_goal(deadline=AT + timedelta(hours=12)))
+    # The one case here that wants a step naming **no** act, which is a conforming plan
+    # (ADR-0265 §4). Nothing is dispatched under it — ADR-0259 §2's `EFFECT_UNSCOPED`
+    # sees to that — and this arm is about the recorded request, which is written before
+    # the claim is reached.
+    state = await harness.an_execution(a_goal(deadline=AT + timedelta(hours=12)), act=None)
 
     await harness.runner.run(
         state, STEP, attempt_id=ATTEMPT, timeout=PATIENT, origin=NOTHING_EXTERNAL

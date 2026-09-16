@@ -683,6 +683,15 @@ class StepExecutor:
         indivisible step as the write (§9's five-limbed claim condition), so a holder
         that moved between the read and the commit is refused rather than copied.
 
+        **A plan, step or holder the store cannot resolve takes that same route**, and
+        the direction is §2's rather than an exception's: every way the reuse can fail
+        writes nothing and stops the walk, so a row naming an execution that has since
+        gone stalls the act instead of failing the turn over it. None of the three is
+        reachable through the door this method is entered by — the execution names its
+        plan, the runner has just read this step out of it, and the store checks the
+        holder's references before it ever writes a row (§2) — so the guards are the
+        narrowing those facts do not themselves perform.
+
         Returns:
             The committed state, or ``None`` where a condition failed — where nothing
             is written and the caller answers ``EFFECT_ALREADY_CLAIMED``.

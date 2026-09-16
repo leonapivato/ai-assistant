@@ -38,6 +38,8 @@ from ai_assistant.core.types import (
     GoalInterpretation,
     Ground,
     Idempotency,
+    IntendedAction,
+    IntendedActionMinting,
     MemorySource,
     OriginUnrecordedBinding,
     PermissionOutcome,
@@ -85,6 +87,9 @@ STEP = "step-1"
 #: (ADR-0255 §3).
 ATTEMPT = "a-1"
 CAPABILITY = "send_email"
+
+#: The act every step here is an attempt at (ADR-0265 §4). See `_step`.
+ACT = "act-1"
 REFERENCE = "conn-0001"
 IDENTITY = "work@example.com"
 ENDPOINT = "test://endpoint/one"
@@ -138,6 +143,11 @@ def _step() -> PlanStep:
         intent="send the note",
         capability=CAPABILITY,
         parameters={"to": ["Alice@Example.COM"], "body": "hello"},
+        # ADR-0265 §4's field, and ADR-0259 §2 is why every step here carries one: a
+        # side-effecting step whose plan cannot say which act it is an attempt at is
+        # refused `EFFECT_UNSCOPED` before any ruling is sought, and every declaration
+        # in this module discloses off-device and is therefore side-effecting.
+        intended_action=ACT,
     )
 
 
@@ -350,6 +360,13 @@ async def _an_execution(store: FakePlanStore, step: PlanStep) -> ExecutionState:
         created_at=AT,
     )
     await store.save_goal(goal)
+    await store.record_intended_actions(
+        IntendedActionMinting(
+            goal_id=goal.id,
+            actions=(IntendedAction(id=ACT, intent="send the note"),),
+            expected_version=0,
+        )
+    )
     plan = ActionPlan(id="p-1", goal_id=goal.id, steps=(step,), created_at=AT, targets_revision=1)
     await store.save_plan(plan)
     state = await store.start_execution(plan.id)
@@ -531,6 +548,9 @@ async def test_the_rebuilt_request_is_built_from_what_rebind_returned() -> None:
         step_id=STEP,
         execution_id=state.id,
         egress_binding=returned.binding,
+        # `authorises`' sixth conjunct (ADR-0266 §4): the step names an act, so a
+        # request rebuilt without it is not the request that was authorised.
+        intended_action=ACT,
     )
     assert resolved.authorises(rebuilt)
     assert returned.parameters["body"] == "hello"

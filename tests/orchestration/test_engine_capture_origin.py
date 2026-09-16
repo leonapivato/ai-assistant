@@ -625,26 +625,29 @@ class _FetchingOneStepPlanner(OneStepPlanner):
     ) -> PlannerOutput:
         """Answer the base plan, carrying a ``LOCAL_FILE`` ask the first time only."""
         first = self._calls == 0
-        plan = (
-            await super().plan(
-                goal,
-                utterance="a request",
-                context=context,
-                memories=memories,
-                capabilities=capabilities,
-                files=files,
-            )
-        ).plan
+        # **The base output whole, not its plan alone**: it carries the act its own step
+        # names (ADR-0265 §4), and dropping it would leave the label resolving to
+        # nothing and refuse the plan.
+        produced = await super().plan(
+            goal,
+            utterance="a request",
+            context=context,
+            memories=memories,
+            capabilities=capabilities,
+            files=files,
+        )
         if not first:
-            return PlannerOutput(plan=plan)
-        return PlannerOutput(
-            plan=plan.model_copy(
-                update={
-                    "read_request": ReadRequest(
-                        asks=(ReadAsk(kind=ReadKind.LOCAL_FILE, entry="F1"),)
-                    )
-                }
-            )
+            return produced
+        return produced.model_copy(
+            update={
+                "plan": produced.plan.model_copy(
+                    update={
+                        "read_request": ReadRequest(
+                            asks=(ReadAsk(kind=ReadKind.LOCAL_FILE, entry="F1"),)
+                        )
+                    }
+                )
+            }
         )
 
 

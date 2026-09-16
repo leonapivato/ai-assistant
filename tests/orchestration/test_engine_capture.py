@@ -311,7 +311,18 @@ async def test_a_no_reply_record_renders_its_phrase_and_nothing_else_at_all_thre
         json.dumps(
             {
                 "rationale": "one step",
-                "steps": [{"intent": "send it", "capability": CAPABILITY, "parameters": {}}],
+                # ADR-0265 §4's `action`, and ADR-0259 §2 is why it is scripted: a
+                # side-effecting step whose plan names no act is refused
+                # `EFFECT_UNSCOPED` before any ruling is sought.
+                "actions": [{"intent": "send the note"}],
+                "steps": [
+                    {
+                        "intent": "send it",
+                        "capability": CAPABILITY,
+                        "parameters": {},
+                        "action": "A1",
+                    }
+                ],
             }
         )
     )
@@ -903,7 +914,18 @@ async def test_a_captured_reply_reaches_the_tail_and_the_observation_batch() -> 
         json.dumps(
             {
                 "rationale": "one step",
-                "steps": [{"intent": "send it", "capability": CAPABILITY, "parameters": {}}],
+                # ADR-0265 §4's `action`, and ADR-0259 §2 is why it is scripted: a
+                # side-effecting step whose plan names no act is refused
+                # `EFFECT_UNSCOPED` before any ruling is sought.
+                "actions": [{"intent": "send the note"}],
+                "steps": [
+                    {
+                        "intent": "send it",
+                        "capability": CAPABILITY,
+                        "parameters": {},
+                        "action": "A1",
+                    }
+                ],
             }
         )
     )
@@ -998,7 +1020,18 @@ async def test_no_log_on_the_capture_or_observation_path_carries_the_reply() -> 
         json.dumps(
             {
                 "rationale": "one step",
-                "steps": [{"intent": "send it", "capability": CAPABILITY, "parameters": {}}],
+                # ADR-0265 §4's `action`, and ADR-0259 §2 is why it is scripted: a
+                # side-effecting step whose plan names no act is refused
+                # `EFFECT_UNSCOPED` before any ruling is sought.
+                "actions": [{"intent": "send the note"}],
+                "steps": [
+                    {
+                        "intent": "send it",
+                        "capability": CAPABILITY,
+                        "parameters": {},
+                        "action": "A1",
+                    }
+                ],
             }
         )
     )

@@ -35,6 +35,8 @@ from ai_assistant.core.types import (
     GoalInterpretation,
     Ground,
     Idempotency,
+    IntendedAction,
+    IntendedActionMinting,
     MemorySource,
     PermissionDecision,
     PermissionOutcome,
@@ -77,6 +79,13 @@ NEIGHBOUR = "step-2"
 #: does — immediately after ``start_execution`` and before anything is driven.
 ATTEMPT = "a-1"
 CAPABILITY = "send_email"
+
+#: The intended act each step here is an attempt at, and the second one a two-step plan
+#: needs (ADR-0265 §4). Every declaration below is ``side_effecting``, and ADR-0259 §2
+#: refuses to dispatch such a step whose plan names no act — so a scoped step is the
+#: default and the unscoped case is asked for by name.
+ACT = "act-1"
+OTHER_ACT = "act-2"
 
 #: The id ``Harness`` mints for the first decision of a test.
 FIRST_DECISION = "d-1"
@@ -121,13 +130,21 @@ def confirmable(tool_id: str = "smtp") -> ToolDefinition:
     return tool(tool_id, discloses=(DataTier.PERSONAL,))
 
 
-def plan_step(capability: str = CAPABILITY) -> PlanStep:
-    """The one step every test here disposes of."""
+def plan_step(capability: str = CAPABILITY, *, action: str | None = ACT) -> PlanStep:
+    """The one step every test here disposes of.
+
+    **It names an intended action by default** (ADR-0265 §4). Every declaration here is
+    ``side_effecting``, and ADR-0259 §2 refuses to dispatch such a step when its plan
+    cannot say which act it is an attempt at — ``EFFECT_UNSCOPED``, before any ruling is
+    sought. So a case about anything else gets a scoped step, and a case about *that*
+    refusal passes ``action=None`` and says so.
+    """
     return PlanStep(
         id=STEP,
         intent="send the note",
         capability=capability,
         parameters={"to": "someone@example.com"},
+        intended_action=action,
     )
 
 
@@ -169,6 +186,7 @@ async def an_execution(store: FakePlanStore, step: PlanStep) -> ExecutionState:
         created_at=AT,
     )
     await store.save_goal(goal)
+    await _minted(store, ACT)
     plan = ActionPlan(id="p-1", goal_id=goal.id, steps=(step,), created_at=AT, targets_revision=1)
     await store.save_plan(plan)
     return await _driven_under(store, plan)
@@ -192,12 +210,34 @@ async def a_two_step_execution(store: FakePlanStore) -> ExecutionState:
         created_at=AT,
     )
     await store.save_goal(goal)
-    neighbour = PlanStep(id=NEIGHBOUR, intent="send another", capability=CAPABILITY)
+    # Two acts and not one: ADR-0259 §2 keeps at most one effect row per (goal, intended
+    # action), so two steps sharing an act would be two attempts at **one** of them and
+    # the second would be held rather than driven (§12 arm 12).
+    await _minted(store, ACT, OTHER_ACT)
+    neighbour = PlanStep(
+        id=NEIGHBOUR, intent="send another", capability=CAPABILITY, intended_action=OTHER_ACT
+    )
     plan = ActionPlan(
         id="p-1", goal_id=goal.id, steps=(plan_step(), neighbour), created_at=AT, targets_revision=1
     )
     await store.save_plan(plan)
     return await _driven_under(store, plan)
+
+
+async def _minted(store: FakePlanStore, *actions: str) -> None:
+    """Mint ``actions`` on the stored goal, through the member ADR-0265 §5 adds.
+
+    A plan's ``intended_action`` must name a member of its goal's own
+    ``intended_actions`` or ``save_plan`` refuses it, so the goal is opened without them
+    and they are appended here — which is the order ``engine.py`` writes them in.
+    """
+    await store.record_intended_actions(
+        IntendedActionMinting(
+            goal_id="g-1",
+            actions=tuple(IntendedAction(id=one, intent=f"perform {one}") for one in actions),
+            expected_version=0,
+        )
+    )
 
 
 async def _driven_under(store: FakePlanStore, plan: ActionPlan) -> ExecutionState:
@@ -2471,6 +2511,7 @@ async def test_a_step_naming_a_system_supplied_argument_builds_no_request() -> N
         intent="send the note",
         capability=CAPABILITY,
         parameters={"to": "someone@example.com", "idempotency_key": "k-1"},
+        intended_action=ACT,
     )
     state = await an_execution(harness.plans, step)
 
@@ -2504,6 +2545,7 @@ async def test_a_confirmable_declaration_puts_no_question_about_a_supplied_key()
         intent="send the note",
         capability=CAPABILITY,
         parameters={"to": "someone@example.com", "idempotency_key": "k-1"},
+        intended_action=ACT,
     )
     state = await an_execution(harness.plans, step)
 
@@ -2528,6 +2570,7 @@ async def test_the_refusal_is_asked_of_the_selected_declaration_and_not_of_the_s
         intent="send the note",
         capability=CAPABILITY,
         parameters={"to": "someone@example.com", "idempotency_key": "k-1"},
+        intended_action=ACT,
     )
     state = await an_execution(harness.plans, step)
 
@@ -2623,7 +2666,11 @@ async def _a_dependent_plan(harness: Harness) -> ExecutionState:
     §2's dependency rule and ADR-0255's conditional deferral are both stated over.
     """
     dependent = PlanStep(
-        id=NEIGHBOUR, intent="send another", capability=CAPABILITY, depends_on=(STEP,)
+        id=NEIGHBOUR,
+        intent="send another",
+        capability=CAPABILITY,
+        depends_on=(STEP,),
+        intended_action=OTHER_ACT,
     )
     goal = Goal(
         id="g-1",
@@ -2641,6 +2688,7 @@ async def _a_dependent_plan(harness: Harness) -> ExecutionState:
         created_at=AT,
     )
     await harness.plans.save_goal(goal)
+    await _minted(harness.plans, ACT, OTHER_ACT)
     plan = ActionPlan(
         id="p-1", goal_id=goal.id, steps=(plan_step(), dependent), created_at=AT, targets_revision=1
     )
