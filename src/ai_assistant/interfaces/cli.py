@@ -5302,24 +5302,40 @@ def _render_clarification_withdrawal(outcome: ClarificationWithdrawal) -> None:
 def _render_goal_abandonment(outcome: GoalAbandonment) -> None:
     """ADR-0250 §12's statement for what ``abandon_goal`` did.
 
-    **One fixed statement per member of a closed three-member vocabulary**, on
+    **One fixed statement per member of a closed four-member vocabulary**, on
     :func:`_render_clarification_withdrawal`'s clause and for its reason.
 
     **The abandonment says what it did *not* touch, and that is the load-bearing
-    half** (§12). It "does not move the attempt's state, does not write an
-    ``AttemptOutcome``, does not end an execution and does not cancel anything in
-    flight: what becomes of an attempt on an abandoned goal is A9's". So the statement
-    says the goal leaves what I consider and says nothing about work already under
-    way — a sentence promising that everything stopped would be false on a reachable
-    state, and one promising that anything already done was undone would be false
-    always.
+    half** (§12). It "does not end an execution and does not cancel anything in
+    flight". So the statement says the goal leaves what I consider and says nothing
+    about work already under way — a sentence promising that everything stopped would
+    be false on a reachable state, and one promising that anything already done was
+    undone would be false always. **ADR-0261 §2 is why the *attempt* half of that
+    sentence is gone**: the act now ends every live attempt of the goal in the step
+    that closes it, so "nothing under way was cancelled" is said of **executions** and
+    of nothing else.
+
+    **``ABANDONED_EFFECT_IN_FLIGHT`` is ADR-0261 §6's fourth member, and this case is
+    the minimum ADR-0250 §15's non-degradation clause requires** — a surface that
+    renders no statement for a member it was given "has not implemented this section"
+    — landed here because the member itself lands in ADR-0261 §13's L1 while §13 books
+    this surface on L3 (issue #2435). §6 fixes **which fact** it names and leaves the
+    wording to the lane: the goal was given up **and an action of it had been claimed
+    and may have been sent**, naming ``assistant goals`` as where that goal's state,
+    and any outcome since established, is read. **No statement says the action did not
+    happen, that it did, or that anything the user does will withdraw it**, and *in
+    flight* means the claim landed rather than that the call left. **The exit code is
+    still L3's** and is untouched: ADR-0261 §14 arm 10 rules that the parameterised
+    assertion "a new member joins on the failing side while staying green", and it
+    does — both members are successful cancellations and only one of them answers zero
+    today.
 
     **``ALREADY_CLOSED`` names no reason**, because the member does not carry one: §12
     reaches it from ``ACHIEVED`` and from ``ABANDONED`` alike, and a statement guessing
     which would be the diagnosis a member is not.
 
     Args:
-        outcome: Which of §12's three states the engine reached.
+        outcome: Which of the four states the engine reached (§12, ADR-0261 §6).
     """
     match outcome:
         case GoalAbandonment.ABANDONED:
@@ -5328,6 +5344,14 @@ def _render_goal_abandonment(outcome: GoalAbandonment) -> None:
                 "and nothing more is planned for it, and any question it had open is "
                 "withdrawn. Nothing already done for it was undone, reversed or "
                 "replayed by this, and nothing under way was cancelled."
+            )
+        case GoalAbandonment.ABANDONED_EFFECT_IN_FLIGHT:
+            _print(
+                "[bold]That goal is given up,[/] and an action of it had already been "
+                "claimed and may have been sent. I cannot tell you yet whether it "
+                "happened. Nothing already done for it was undone, reversed or replayed "
+                "by this. 'assistant goals' is where that goal stands, and any outcome "
+                "since established."
             )
         case GoalAbandonment.ALREADY_CLOSED:
             _print(
