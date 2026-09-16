@@ -17,6 +17,7 @@ establishment partition each walked totally over their own domain — and arm (h
 
 from __future__ import annotations
 
+import asyncio
 from typing import TYPE_CHECKING, Any, Final, final
 
 import pytest
@@ -34,7 +35,14 @@ from forecast_servicing_harness import (
 )
 from test_loop_search import _CostedSearcher, _footing, _servicer
 
-from ai_assistant.core.errors import MemoryStoreError, ToolBindingError
+from ai_assistant.core.errors import (
+    AuditError,
+    EgressBindingError,
+    MemoryStoreError,
+    PermissionDeniedError,
+    SecretStoreError,
+    ToolBindingError,
+)
 from ai_assistant.core.types import (
     EvidenceBasis,
     EvidenceStanding,
@@ -46,6 +54,7 @@ from ai_assistant.core.types import (
     ReadKind,
     ReadOutcomeKind,
     ReadRequest,
+    RiskLevel,
     StructuredAsk,
     TimeWindow,
 )
@@ -69,7 +78,10 @@ from ai_assistant.orchestration.reads import (
 )
 from ai_assistant.testing import (
     DEFAULT_FORECAST_DAYS,
+    FakeActionPolicy,
+    FakeAuditTrail,
     FakeFetcher,
+    FakeForecaster,
     FakeMemoryStore,
     FakeWebSearcher,
 )
@@ -149,6 +161,7 @@ async def _service(  # noqa: PLR0913 — one keyword per seam or ask a case vari
     *,
     request: ReadRequest | None = None,
     forecast: ForecastServicer | None = None,
+    wired: bool = True,
     supply: tuple[MemoryRecord, ...] = (),
     store: Any = None,
     fetcher: Fetcher | None = None,
@@ -161,6 +174,9 @@ async def _service(  # noqa: PLR0913 — one keyword per seam or ask a case vari
     Args:
         request: The emission, defaulting to a forecast ask and nothing else.
         forecast: The wired servicer, defaulting to a configured deployment's.
+        wired: ``False`` hands the site **no** servicer at all, which is §8's first
+            route to ``NOT_CONFIGURED`` — a caller stating the fact rather than a
+            servicer computing it, exactly as ``fetcher`` and ``search`` are.
         supply: The three groups the planner was passed.
         store: The memory store, defaulting to the canonical fake.
         fetcher: The file seam, where a case asks for one.
@@ -182,7 +198,7 @@ async def _service(  # noqa: PLR0913 — one keyword per seam or ask a case vari
         fetcher=fetcher,
         listing=listing,
         search=search,
-        forecast=servicer() if forecast is None else forecast,
+        forecast=(servicer() if forecast is None else forecast) if wired else None,
         utterance=_UTTERANCE,
         audit=written,
         goal=GOAL,
@@ -1027,3 +1043,407 @@ class _RaisingFetcher:
         _ = args, kwargs
         msg = "the file went away"
         raise MemoryStoreError(msg)
+
+
+# --------------------------------------------------------------------------- #
+# §8's producer paths, and the mark a failing stage leaves behind              #
+# --------------------------------------------------------------------------- #
+#
+# §13's enumeration "is a floor and not a ceiling", and "a lane adds the arm a normative
+# clause needs whether or not that clause is listed here". §8 requires **each member to
+# name the stage that produced it**, so a servicing that reported one stage's outcome
+# under another stage's member would breach a clause with no lettered arm above it —
+# and the vocabulary's own tests cannot catch it, feeding already-constructed members
+# into the downstream tables rather than driving the branches that mint them.
+
+
+@final
+class _RaisingBinder:
+    """A binding seam that raises what ADR-0152 §1 contracts (``EgressBindingError``)."""
+
+    __slots__ = ()
+
+    async def bind(self, tool: Any, *, parameters: Any, provenance: Any) -> Any:
+        """Refuse by raising.
+
+        Args:
+            tool: The declaration, never read.
+            parameters: Its arguments, never read.
+            provenance: The carrier, never read.
+
+        Raises:
+            EgressBindingError: Always.
+        """
+        _ = tool, parameters, provenance
+        msg = "this deployment's forecast registration could not be derived"
+        raise EgressBindingError(msg)
+
+    async def rebind(self, tool: Any, *, parameters: Any, approved: Any) -> Any:
+        """Never reached: ADR-0260 §11 rebinds no forecast binding.
+
+        Args:
+            tool: The declaration.
+            parameters: Its arguments.
+            approved: The approved binding.
+
+        Raises:
+            EgressBindingError: Always.
+        """
+        _ = tool, parameters, approved
+        msg = "no forecast binding is ever rebound (ADR-0260 §11)"
+        raise EgressBindingError(msg)
+
+
+@final
+class _RaisingPolicy:
+    """An ``ActionPolicy`` whose ``decide`` raises — §8's ``RULING_UNAVAILABLE``, limb 1."""
+
+    __slots__ = ()
+
+    async def decide(self, request: Any) -> Any:
+        """Raise rather than rule.
+
+        Args:
+            request: The request, never read.
+
+        Raises:
+            PermissionDeniedError: Always.
+        """
+        _ = request
+        msg = "the policy could not be consulted"
+        raise PermissionDeniedError(msg)
+
+    async def resolve(self, decision: Any, *, approved: bool) -> Any:
+        """Never reached on this path.
+
+        Args:
+            decision: The decision.
+            approved: The answer.
+
+        Raises:
+            PermissionDeniedError: Always.
+        """
+        _ = decision, approved
+        msg = "no forecast decision is resolved (ADR-0260 §11)"
+        raise PermissionDeniedError(msg)
+
+
+@final
+class _RaisingTrail:
+    """A trail whose ``record`` raises — §8's ``RULING_UNAVAILABLE``, limb 2."""
+
+    __slots__ = ("_inner",)
+
+    def __init__(self) -> None:
+        """Delegate every member but the append."""
+        self._inner = FakeAuditTrail()
+
+    def __getattr__(self, name: str) -> Any:
+        """Delegate what this class does not name.
+
+        Args:
+            name: The member being reached for.
+
+        Returns:
+            The wrapped trail's member.
+        """
+        return getattr(self._inner, name)
+
+    async def record(self, decision: Any) -> str:
+        """Refuse the append.
+
+        Args:
+            decision: The decision to record.
+
+        Raises:
+            AuditError: Always.
+        """
+        _ = decision
+        msg = "the append was refused"
+        raise AuditError(msg)
+
+
+@final
+class _LosingTrail:
+    """A trail that accepts the append and hands nothing back (§8's second limb).
+
+    ADR-0192 §1 keys a seam's own claim on the decision the store holds under that id,
+    so a trail that accepted a write and lost it would have the servicing open a channel
+    under a decision nothing holds. §8 resolves it to ``RULING_UNAVAILABLE`` rather than
+    letting the send proceed.
+    """
+
+    __slots__ = ("_inner",)
+
+    def __init__(self) -> None:
+        """Delegate every member but the read-back."""
+        self._inner = FakeAuditTrail()
+
+    def __getattr__(self, name: str) -> Any:
+        """Delegate what this class does not name.
+
+        Args:
+            name: The member being reached for.
+
+        Returns:
+            The wrapped trail's member.
+        """
+        return getattr(self._inner, name)
+
+    async def get(self, decision_id: str) -> None:
+        """Answer that the trail holds nothing under this id.
+
+        Args:
+            decision_id: The id just written.
+        """
+        _ = decision_id
+
+
+#: The one row that wires **no** servicer at all — §8's first route to
+#: ``NOT_CONFIGURED``, which is a caller stating the fact rather than a servicer
+#: computing it, exactly as ``fetcher`` and ``search`` are.
+_UNWIRED: Final = "unwired"
+
+
+def _producers() -> list[tuple[str, dict[str, Any], ForecastDisposition, ForecastNotRead]]:
+    """Every branch of :meth:`ForecastServicer.service` that mints a disposition.
+
+    One row per **stage** §8 names, because §8's whole discipline is that "each member
+    names the stage that produced it": a servicing reporting one stage's outcome under
+    another's would satisfy every mapping test above and still be wrong.
+
+    Returns:
+        The label, the servicer's knobs, the member §8 gives that stage, and the member
+        §10 folds it to.
+    """
+    unregistered = FORECAST_DECLARATION.model_copy(update={"id": "forecast.unregistered"})
+    return [
+        (
+            # §8's first route: no forecaster is wired into the loop at all. Driven
+            # through the servicing site, which is where the `None` is answered.
+            _UNWIRED,
+            {},
+            ForecastDisposition.NOT_CONFIGURED,
+            ForecastNotRead.NOT_CONFIGURED,
+        ),
+        (
+            # §4's second route: a wired forecaster whose `request` answers `None`
+            # because the four-field registration is absent — "a configuration fact and
+            # never a failure". The fake carries **no cost pair** here, which is its own
+            # shape of ADR-0236 §2's registration-whole refusal rather than a knob this
+            # case chose: a per-call figure for a forecaster that proposes nothing is a
+            # value nothing reads.
+            "proposes_nothing",
+            {"seam": FakeForecaster(reported_at=NOW, origin=None)},
+            ForecastDisposition.NOT_CONFIGURED,
+            ForecastNotRead.NOT_CONFIGURED,
+        ),
+        (
+            # ADR-0152 §9's `None`: the seam holds no registration for this declaration,
+            # which for the one integration §6 registers is a mis-wiring and is
+            # fail-closed — "a forecast sent under no binding is a send to a destination
+            # no policy ruled on".
+            "binder_holds_no_registration",
+            {"binding": binder(unregistered)},
+            ForecastDisposition.BINDING_FAILED,
+            ForecastNotRead.UNAVAILABLE,
+        ),
+        (
+            "binder_raises",
+            {"binding": _RaisingBinder()},
+            ForecastDisposition.BINDING_FAILED,
+            ForecastNotRead.UNAVAILABLE,
+        ),
+        (
+            # §8's own member for a policy the operator set against this read.
+            "ruling_deny",
+            {"policy": FakeActionPolicy(deny_at=RiskLevel.LOW)},
+            ForecastDisposition.RULING_DENY,
+            ForecastNotRead.DECLINED,
+        ),
+        (
+            "policy_raises",
+            {"policy": _RaisingPolicy()},
+            ForecastDisposition.RULING_UNAVAILABLE,
+            ForecastNotRead.UNAVAILABLE,
+        ),
+        (
+            "trail_refuses_the_append",
+            {"trail": _RaisingTrail()},
+            ForecastDisposition.RULING_UNAVAILABLE,
+            ForecastNotRead.UNAVAILABLE,
+        ),
+        (
+            "trail_hands_nothing_back",
+            {"trail": _LosingTrail()},
+            ForecastDisposition.RULING_UNAVAILABLE,
+            ForecastNotRead.UNAVAILABLE,
+        ),
+    ]
+
+
+@pytest.mark.parametrize(
+    ("label", "knobs", "disposition", "member"),
+    [pytest.param(one[0], one[1], one[2], one[3], id=one[0]) for one in _producers()],
+)
+async def test_each_stage_records_its_own_member_and_opens_no_channel(
+    label: str,
+    knobs: dict[str, Any],
+    disposition: ForecastDisposition,
+    member: ForecastNotRead,
+) -> None:
+    """Every branch §8 names as a decline, driven over the production servicing.
+
+    **Each member names the stage that produced it** (§8), so this asserts the exact
+    member per stage rather than that *some* decline happened — a servicing collapsing
+    two stages onto one member passes every mapping test in
+    ``test_forecast_outcomes.py`` and fails here.
+
+    **And no channel is opened on any of them** (§7's "bind, then rule, then record,
+    then send": "no channel is opened before a recorded ``ALLOW`` exists"). Asserted
+    over the seam's own record of calls rather than over the absence of records,
+    because a read that was made and yielded nothing looks identical in the counts.
+
+    Args:
+        label: Which stage this row drives.
+        knobs: What this row replaces on the servicer.
+        disposition: The member §8 gives that stage.
+        member: The member §10 folds it to.
+    """
+    seam = knobs.get("seam", forecaster())
+
+    carried, audit = await _service(
+        forecast=None if label == _UNWIRED else servicer(**{**knobs, "seam": seam}),
+        wired=label != _UNWIRED,
+    )
+
+    serviced = audit.servicings[-1]
+    assert serviced.forecast is disposition
+    assert serviced.forecast_serviced is True, "the ask reached the forecast stage"
+    assert serviced.failed is False, "a decline is not a degradation (ADR-0226 §5)"
+    assert carried.forecast_not_read is member
+    assert carried.forecast_contact is OutboundReach.NOT_REACHED, (
+        "§10 places every stage before the send on the no-contact side"
+    )
+    assert carried.forecast_records == 0
+    assert seam.read_calls == [], "no channel was opened before a recorded ALLOW"
+
+
+@final
+class _FaultingForecaster:
+    """A forecaster whose ``read`` raises a fault §8 gives no member (ADR-0226 §5).
+
+    ADR-0260 §8 closes its vocabulary at twelve with **no member for a fault at the
+    send** — ``SearchDisposition.SEARCH_FAILED`` has no forecast twin and §12 forbids a
+    lane adding one — so the ratified answer is the all-or-nothing degradation, which
+    is what this case drives. §6's three pre-execution checks are **not** this: those
+    raise ``ToolBindingError`` and are recorded as ``BINDING_FAILED``, which
+    :class:`_RefusingBinding` above drives.
+    """
+
+    __slots__ = ("_inner",)
+
+    def __init__(self, inner: Forecaster) -> None:
+        """Wrap a forecaster whose ``request`` answers normally.
+
+        Args:
+            inner: The forecaster to propose through.
+        """
+        self._inner = inner
+
+    @property
+    def name(self) -> str:
+        """The wrapped source's own identity."""
+        return self._inner.name
+
+    async def request(self) -> Any:
+        """Propose exactly what the wrapped forecaster proposes.
+
+        Returns:
+            The proposal.
+        """
+        return await self._inner.request()
+
+    async def read(self, call: ToolCall, /, *, timeout: TimeDelta) -> ForecastOutcome:  # noqa: ASYNC109 — the seam owns the deadline (ADR-0241 §1); this stands in for the production forecaster and carries its signature
+        """Raise a fault no ``ForecastRefusal`` member names.
+
+        Args:
+            call: The authorised call.
+            timeout: The bound.
+
+        Raises:
+            SecretStoreError: Always — the credential slot could not be read, which is
+                a fault and not a source reason.
+        """
+        _ = call, timeout
+        msg = "the credential slot could not be read"
+        raise SecretStoreError(msg)
+
+
+async def test_a_fault_raised_by_the_forecast_stage_still_records_that_the_ask_was_put() -> None:
+    """ADR-0260 §7's first audit field, over the one servicing that makes it earn its keep.
+
+    §8 closes the vocabulary at twelve with no member for a fault at the send, so a
+    forecaster that raises one degrades the turn (ADR-0226 §5) and the record carries
+    **no disposition**. An absent disposition is §10's *answered* case, so without the
+    boolean beside it this turn would be indistinguishable in the audit from one whose
+    planner never asked for a forecast — which is the collapse §7's pair exists to
+    close, and it closes only if the mark is taken **before** the stage is awaited.
+
+    Everything else is ADR-0226 §5 unchanged: the supply is left as planning saw it,
+    every count is zero, ``failed`` is true, and nothing raises out of the turn.
+    """
+    seam = _FaultingForecaster(forecaster())
+
+    carried, audit = await _service(forecast=servicer(seam=seam))
+
+    serviced = audit.servicings[-1]
+    assert serviced.failed is True, "ADR-0226 §5's degradation, not a decline"
+    assert serviced.forecast is None, "§8 gives a fault at the send no member"
+    assert serviced.forecast_serviced is True, (
+        "and the boolean is what says the ask was put to the seam all the same"
+    )
+    assert serviced.records == ()
+    assert serviced.new == 0
+    assert carried.forecast_not_read is None
+    assert carried.forecast_contact is None, "no outcome was read, so nothing either way"
+    assert carried.forecast_records == 0
+
+
+async def test_a_cancellation_inside_the_forecast_stage_leaves_the_same_mark() -> None:
+    """The second half of the clause above: a cancellation carries the frame away.
+
+    ADR-0060 lets a ``CancelledError`` pass through untouched — it is a
+    ``BaseException`` and neither handler in ``service_read_request`` catches it — so
+    ADR-0226 §9's record is written from the ``finally`` on a path that returned nothing
+    at all. A mark taken from the returned value would be ``False`` there; taken before
+    the await it is ``True``, which is what the record needs to say of a turn whose
+    forecast was genuinely begun.
+
+    **The record is still written, and it is still honest** (ADR-0226 §9's "one record,
+    on every path out of this function — the completed servicing, the degraded one, and
+    the one a cancellation carried away").
+    """
+    seam = forecaster()
+    audit = TurnReadAudit()
+    suspension = seam.suspend_next()
+    servicing = asyncio.ensure_future(_service(forecast=servicer(seam=seam), audit=audit))
+    await suspension.reached()
+
+    servicing.cancel()
+    # The suspension **defers** a cancellation rather than absorbing it (ADR-0054's
+    # `_run_to_completion` in miniature), so the read is released to finish its own work
+    # and the cancellation is re-raised after it — which is the shape a real seam holding
+    # a resource has, and is why the record below is written from the `finally` rather
+    # than lost with the frame.
+    suspension.release()
+    with pytest.raises(asyncio.CancelledError):
+        await servicing
+
+    serviced = audit.servicings[-1]
+    assert serviced.failed is True, "the servicing did not complete"
+    assert serviced.forecast is None, "no outcome was read"
+    assert serviced.forecast_serviced is True, (
+        "the ask was put to the seam, which is what the mark taken before the await says"
+    )
+    assert serviced.records == ()

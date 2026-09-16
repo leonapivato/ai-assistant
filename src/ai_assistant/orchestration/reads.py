@@ -2182,9 +2182,11 @@ class ServicedRead:
         forecast_serviced: ADR-0260 §7's first added field: whether this servicing
             **put a ``FORECAST_READ`` ask to the forecast stage at all**. ``True`` on
             every outcome of an ask this servicing reached, ``NO_BUDGET`` and
-            ``NOT_CONFIGURED`` included; ``False`` where the request carried no such
-            ask and where the servicing raised before the forecast's position in §7's
-            order.
+            ``NOT_CONFIGURED`` included, **and on a servicing the forecast stage itself
+            then failed or a cancellation carried away** — the mark is taken before that
+            stage is awaited, which is what makes it true of a stage that then raised.
+            ``False`` where the request carried no such ask and where the servicing
+            raised **before** the forecast's position in §7's order.
 
             **Two fields and not one, because neither is derivable from the other**
             (§7). An absent :attr:`forecast` covers both a read the provider answered
@@ -4770,10 +4772,10 @@ async def service_read_request(  # noqa: PLR0913, PLR0915 — the store, the emi
     # too, for the reason the search's disposition does: a forecast that declined before
     # a later kind's read raised is neither of §8's two empty cases, and the contact its
     # call established is one "nothing that happens to the enclosing servicing
-    # afterwards unmakes" (§10). Assigned before the `try` so that a fault raised *by*
-    # the forecast leaves behind the honest empty value — an ask this servicing never
-    # reached, which `serviced=False` and `contact=None` say together and which neither
-    # says alone.
+    # afterwards unmakes" (§10). Assigned before the `try` so that a servicing which
+    # raised *before* the forecast's position in §7's order leaves behind the honest
+    # empty value — an ask this servicing never reached, which `serviced=False` and
+    # `contact=None` say together and which neither says alone.
     forecasted = _Forecast()
     # **ADR-0238 §11's three counts are *written* rather than returned**, for the reason
     # `_Reads` is: a fault the searcher raised after the ruling unwinds past the call
@@ -4842,6 +4844,21 @@ async def service_read_request(  # noqa: PLR0913, PLR0915 — the store, the emi
         # read off it: its presence *is* the whole of the ask, and the place and the
         # horizon are the deployment's own — which is why the ask is passed whole and
         # every absence this kind has is answered in :func:`_serviced_forecast`.
+        # **§7's first audit field is taken before the stage is awaited, and that is the
+        # whole of what makes it true of a stage that then raised.** A fault the
+        # forecaster itself raises unwinds past the assignment below, and a cancellation
+        # carries the frame away entirely — so a mark taken only from the returned value
+        # would report an ask this servicing **put to the seam** as one it never
+        # reached, which is exactly the collapse the field exists to close. It is not
+        # recoverable from the disposition afterwards either: §8 closes the vocabulary
+        # at twelve with no member for a fault at the send, so the degraded record
+        # carries none.
+        #
+        # `forecast_ask is not None` is the whole condition, because the next line *is*
+        # the stage: an emission carrying no such ask reaches it and is answered `False`
+        # by :func:`_serviced_forecast` itself, and one carrying an ask has by here
+        # reached the forecast's own position in §7's order.
+        forecasted = _Forecast(serviced=forecast_ask is not None)
         forecasted = await _serviced_forecast(
             forecast,
             forecast_ask,
