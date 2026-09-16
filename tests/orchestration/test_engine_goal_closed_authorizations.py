@@ -641,12 +641,21 @@ async def test_the_goals_user_stated_constraints_survive_the_closure_and_the_reo
 
 
 async def test_a_goal_whose_rows_are_all_ended_reaches_route_d_in_no_case() -> None:
-    """Arm 6's second limb: ``live_for`` answers ``None``, so route (d) is unreachable.
+    """Arm 6's second limb, at the **act**: the abandon leaves ``live_for`` at ``None``.
 
     ADR-0254 §7's route-(d) refusal reads the resolved row's ``disposition`` and
     requires ``ESTABLISHED`` — *"every other disposition is retired and none of them is
     live"* — and that reason is true of ``GOAL_CLOSED`` as it is of the other four, so
     **the check is unchanged and needs no conjunct** (ADR-0268 §6).
+
+    **What this half pins is the reason, over the real act**: that ``abandon_goal``
+    leaves every row of the goal in a disposition the seam refuses to answer with.
+    *"``decide`` reaches route (d) in no case"* is the claim itself, and a seam
+    answering ``None`` is not evidence for it — a policy reaching the route anyway
+    would pass here. That half is driven against the real ``ThresholdActionPolicy``
+    in ``tests/permissions/test_goal_authorization_policy.py``
+    (``TestAGoalWhoseRowsAreAllGoalClosedReachesRouteDInNoCase``), which is where the
+    policy's own seam-read arms live. Adversarial review, round 14, ``blocker``.
     """
     harness, store, _journal, conversation = _journalled()
     goal = await _goal_with_two_rows(harness, store, conversation=conversation)
