@@ -1445,3 +1445,68 @@ async def test_a_step_carrying_resolves_reconciles_on_this_tree() -> None:
     held = await world.plans.get_execution(state.id)
     assert held is not None
     assert rebuilt.request == _requested(decision.tool, consumer, held, None, goal=GOAL)
+
+
+async def _two_uncertain_steps(world: World, *, first: ToolDefinition) -> ExecutionState:
+    """Two ``INDETERMINATE`` steps of one execution, in ``steps`` order.
+
+    ``s-1`` carries ``first``'s declaration and ``s-2`` always carries a read, so an arm
+    varies only what the **earlier** candidate is and reads what became of the later
+    one.
+    """
+    await world.goal()
+    earlier, later = a_step("s-1"), a_step("s-2")
+    state = await world.execution(earlier, later)
+    state, _ = await world.uncertain(state, earlier, first)
+    state, _ = await world.uncertain(state, later, reading())
+    return state
+
+
+async def test_an_ended_check_leaves_the_next_candidate_untouched() -> None:
+    """§3: *"no second step of that turn is reconciled"* — over **two** candidates.
+
+    Adversarial review, round 2, ``major``. A one-candidate arm cannot tell a ``break``
+    from a ``continue``, and §3 distinguishes the two paths in terms: one of its **six
+    declared refusals** ends the check, and an **uncheckable** step does not, because §3
+    ends the check on a *refusal of this call* and no call is ever admitted for an
+    uncheckable one. This row is the first half; the row below it is the second, and
+    together they fail an implementation that folded the two.
+    """
+    world = World()
+    seam = _Scripted(ToolBindingError("the registry no longer holds it"), succeeded())
+    world.invoker = seam  # type: ignore[assignment]
+    state = await _two_uncertain_steps(world, first=reading())
+    await world.pass_().run(GOAL, remaining=whole())
+
+    found = await world.check().run(GOAL, remaining=whole())
+
+    assert len(seam.calls) == 1, "the refusal ended the check before the second candidate"
+    assert found.uncertain == ("s-1", "s-2")
+    assert found.established == ()
+    assert (await world.stored(state, "s-1")).status is StepStatus.INDETERMINATE
+    assert (await world.stored(state, "s-2")).status is StepStatus.INDETERMINATE
+
+
+async def test_an_uncheckable_candidate_does_not_stop_the_check() -> None:
+    """§3: an uncheckable step is passed over, and the next candidate is still checked.
+
+    Adversarial review, round 2, ``major``, the second half. §3 ends the check on the
+    seam's *"declared refusals **of this call**"* and on a call it could not build;
+    an uncheckable step is neither — *"every other ``INDETERMINATE`` step is
+    uncheckable"*, and §3's disposal of it is that it *"stays uncertain, is told once,
+    and is never repeated"*, not that it silences the turn's one remaining check.
+    """
+    world = World()
+    seam = _Scripted(succeeded())
+    world.invoker = seam  # type: ignore[assignment]
+    state = await _two_uncertain_steps(world, first=acting("book", Idempotency.NONE))
+    await world.pass_().run(GOAL, remaining=whole())
+
+    found = await world.check().run(GOAL, remaining=whole())
+
+    assert len(seam.calls) == 1, "no call for the uncheckable step, one for the read"
+    assert seam.calls[0][0].request.step_id == "s-2"
+    assert found.uncertain == ("s-1", "s-2")
+    assert found.established == ("s-2",)
+    assert (await world.stored(state, "s-1")).status is StepStatus.INDETERMINATE
+    assert (await world.stored(state, "s-2")).status is StepStatus.SUCCEEDED
