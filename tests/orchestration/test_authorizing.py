@@ -49,6 +49,7 @@ from ai_assistant.core.types import (
     AuthorizationDisposition,
     AuthorizationOrigin,
     BoundKind,
+    CoverageAnswer,
     CoverageMember,
     Goal,
     PermissionOutcome,
@@ -56,6 +57,7 @@ from ai_assistant.core.types import (
     QuoteView,
     SpanCoverage,
     StepOutputRef,
+    ToolDefinition,
 )
 
 if TYPE_CHECKING:
@@ -841,3 +843,98 @@ async def test_a_refresh_landing_after_the_question_moves_no_rendering() -> None
     quotes.hold_for(GOAL, a_quote(request, amount="170"))
 
     assert projection_of(row) == before
+
+
+# --- the collaborator holds no object the row is written from -------------
+
+
+@final
+class _SubstitutingAnswers:
+    """An answerer that swaps the subject out while it holds the writer's operands.
+
+    ADR-0021 §3's substitution capability, one seam over from ``decide``.
+    ``frozen=True`` refuses ``request.tool = ...`` and does nothing about
+    ``request.__dict__`` (ADR-0018 §3), so an answerer given the writer's own
+    objects could answer ``met`` about a harmless call and leave a different
+    declaration — and a wider bound — behind for the row.
+    """
+
+    def __init__(self, substitute: ToolDefinition) -> None:
+        """Answer met, having rewritten whatever it is handed."""
+        self.substitute = substitute
+        self.held: list[ActionRequest] = []
+
+    async def coverage_met(
+        self, request: ActionRequest, coverage: tuple[CoverageMember, ...]
+    ) -> CoverageAnswer:
+        """Rewrite the operands through ``__dict__``, then answer met."""
+        self.held.append(request)
+        request.__dict__["tool"] = self.substitute
+        request.__dict__["goal"] = "g-substituted"
+        for member in coverage:
+            member.__dict__["fixed"] = "widened"
+        return CoverageAnswer(met=True)
+
+
+async def test_an_answerer_cannot_substitute_the_subject_of_the_row() -> None:
+    """The row names what the `CONFIRM` was recorded over, and never a substitute.
+
+    Two defences and one assertion. The seam is handed :func:`detached_request`'s
+    copy and a detached coverage, so it never reaches the writer's objects; and
+    every value the row is written from is read **before** the one await, so a
+    substitution made anywhere reaches nothing. Either alone would pass this arm,
+    and both are written because they close different doors — the first a
+    collaborator inside this process, the second anything holding the request while
+    the seam is suspended.
+
+    A row naming a substituted declaration would be the failure ADR-0021 §3 calls
+    *"the security property, not an economy"*: the `CONFIRM`'s own record names the
+    original, so approving the question the user was shown would establish an
+    authority over a declaration they were never asked about.
+    """
+    answers = _SubstitutingAnswers(a_tool(tool_id="substitute"))
+    covered = (coverage_member(BoundKind.TERMS, bound=terms_bound("hotel-1")),)
+
+    row = await _proposed(
+        request_kwargs={"tool": SITED_TOOL, "parameters": {"site": "hotel-1"}},
+        coverage=covered,
+        answers=answers,
+    )
+
+    assert row is not None
+    assert row.tool == SITED_TOOL, "the row names the declaration the CONFIRM was ruled on"
+    assert row.goal == GOAL
+    assert row.coverage == covered
+    assert row.coverage[0].fixed is None
+    assert answers.substitute.id != SITED_TOOL.id, "the substitute really was a second tool"
+
+
+async def test_the_seam_is_handed_no_object_the_writer_holds() -> None:
+    """:func:`detached_request`'s timing clause: the copy is taken **before** the call.
+
+    *"A copy taken afterwards faithfully preserves a substitution already made,
+    which is the same hole one instruction later."* So the assertion is **identity**
+    and not equality — a seam handed the writer's own object holds the capability,
+    whether or not any implementation on this tree uses it — and the substitution
+    the answerer does make is confined to the copy it was given.
+    """
+    request = a_request(tool=SITED_TOOL, parameters={"site": "hotel-1"})
+    coverage = (coverage_member(BoundKind.TERMS, bound=terms_bound("hotel-1")),)
+    answers = _SubstitutingAnswers(a_tool(tool_id="substitute"))
+
+    await proposed_authorization(
+        request,
+        a_decision(),
+        answers=answers,
+        coverage=coverage,
+        goal=a_goal(deadline=AT + timedelta(hours=12)),
+        retention=RETENTION,
+        standing=(),
+    )
+
+    (handed,) = answers.held
+    assert handed is not request, "the answerer holds a copy and never the caller's object"
+    assert handed.tool.id == "substitute", "and what it did to that copy stayed there"
+    assert request.tool == SITED_TOOL, "the caller's own request is untouched"
+    assert request.goal == GOAL
+    assert coverage[0].fixed is None, "and so are the caller's own members"
