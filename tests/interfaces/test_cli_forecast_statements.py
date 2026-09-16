@@ -420,6 +420,51 @@ async def test_an_outbound_contact_and_an_unavailable_forecast_ride_together(
     assert "that forecast read produced nothing this turn could use" in rendered
 
 
+@pytest.mark.parametrize("member", list(ForecastNotRead))
+async def test_no_action_was_needed_is_not_printed_beside_a_forecast_statement(
+    member: ForecastNotRead, output: StringIO
+) -> None:
+    """Adversarial review, round 1, ``major``: the contradiction on one screen.
+
+    A forecast read is serviced in context assembly and not as a plan step, so a turn
+    whose planner then declined every capability reaches :func:`cli._render_turn` with an
+    empty plan while ``forecast_not_read`` says a read it asked for did not happen. "No
+    action was needed." beside "that forecast read was begun and stopped" says both that
+    nothing was owed and that something was attempted and stopped.
+
+    **Parametrised over all six, because this vocabulary has no member for having
+    attempted nothing.** ``_reached_outside``'s arm one vocabulary over guards ``REACHED``
+    alone — ``OutboundReach`` *has* such a member, and "a turn that reached nothing is
+    exactly a turn of which 'no action was needed' may well be true". ADR-0260 §10 fixes
+    the absence as the state where the servicing "recorded no ``ForecastDisposition``", so
+    ``None`` is where this guard stays off and every member is a turn that asked.
+    """
+    base = await _composed()
+    assert base.turn is not None
+    assert not base.turn.plan.steps, "the arm is about a turn that planned nothing"
+    cli._render_turn(base.model_copy(update={"forecast_not_read": member}))
+    rendered = _flat(output.getvalue())
+
+    assert "No action was needed." not in rendered, member
+    for fragment in _STATEMENTS[member]:
+        assert fragment in rendered, f"{member}: {fragment}"
+
+
+async def test_no_action_was_needed_still_prints_where_no_forecast_was_asked_for(
+    output: StringIO,
+) -> None:
+    """The control the arm above needs to mean anything.
+
+    A guard that suppressed the notice unconditionally would pass every case above and
+    would have removed a true statement from every ordinary turn. ADR-0260 §10's ``None``
+    is a turn that serviced no forecast read *or* one the provider answered, and "no
+    action was needed" may well be true of it.
+    """
+    cli._render_turn(await _composed())
+
+    assert "No action was needed." in _flat(output.getvalue())
+
+
 # --- end to end, over the canonical fake's own lever -------------------------
 
 
