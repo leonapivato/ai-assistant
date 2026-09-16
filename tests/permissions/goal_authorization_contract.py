@@ -2396,58 +2396,55 @@ class GoalAuthorizationStoreContract(GoalAuthorizationsContract, AuthorizationRe
         # Read back exactly: a version one below is stale against what was written.
         assert await store.end_for_goal(GOAL, at=NOW, goal_version=version - 1) == 0
 
-    async def test_end_for_goal_normalises_a_bool_version_to_one(
-        self, store: GoalAuthorizationStore
+    @pytest.mark.parametrize(
+        ("passed", "means"),
+        [(True, 1), (False, 0), (1, 1), (0, 0), (7, 7), (_MAX_INT64 + 1, _MAX_INT64 + 1)],
+        ids=repr,
+    )
+    @pytest.mark.parametrize("member_name", _ENDING_OPS)
+    async def test_the_version_a_member_stores_is_exactly_the_one_it_was_passed(
+        self, store: GoalAuthorizationStore, member_name: str, passed: int, means: int
     ) -> None:
-        """``True`` is an ``int`` in Python and means **one**, so it stores as one.
+        """The watermark a call writes is pinned **from both sides**, so it is the value.
 
-        **Normalised rather than refused**, because refusing it would narrow a
-        contract stated over ``int``, and Python's own answer for ``True`` as an
-        integer is ``1``.
+        **This is the general form of a question four review rounds asked one case
+        at a time**, and it is stated once here for the reason the encoding probe
+        exists: an arm that pins a *bound* leaves every value above it passing. A
+        case asserting only that ``clear_closure(True)`` lifted a fence standing at
+        1 admits an implementation mapping ``True`` to **2**; one asserting only that
+        a later call was stale admits everything below. Adversarial review, rounds
+        10 and 11, ``major`` each.
 
-        **The watermark is observed directly, before anything can overwrite it.** An
-        earlier revision asserted only that the call was *accepted* and then made
-        further calls, which an implementation mapping ``True`` to ``0`` passed —
-        each later call rewrote the record before it was ever read. Such a store
-        would then fail to clear a real fence standing at version ``1``, leaving a
-        reopened goal unable to record anything. Adversarial review, round 10,
-        ``major``.
+        So each call's record is squeezed: the version **one below** what was passed
+        is **stale** against it, and the version passed **acts**. Nothing between
+        them is left free, and ``True``/``False`` ride in the same table as the
+        integers they mean — ``operator.index`` normalising them rather than a guard
+        refusing them, because ADR-0268 §1 states the member over ``int`` and Python
+        says a ``bool`` is one.
 
-        So the record written by the bool call is pinned from **both** sides: a
-        ``clear_closure`` at ``0`` is stale against it and leaves the fence standing,
-        and one at ``1`` lifts it.
+        ``_MAX_INT64 + 1`` is in the table because the squeeze has to hold where the
+        storage stops being a machine integer, which is where the encoding lives.
         """
         await store.record(established(id="a1"))
-        assert await store.end_for_goal(GOAL, at=NOW, goal_version=True) == 1
+        if member_name == "clear_closure":
+            # A fence has to stand for a clear to do anything, and it must stand
+            # *above* the version under test so the call is not stale against it.
+            assert await store.end_for_goal(GOAL, at=NOW, goal_version=means) == 1
+            assert await store.clear_closure(GOAL, goal_version=passed) is True
+        else:
+            assert await store.end_for_goal(GOAL, at=NOW, goal_version=passed) == 1
+            assert await self._fenced(store)
+            assert await store.clear_closure(GOAL, goal_version=means) is True
 
-        assert await store.clear_closure(GOAL, goal_version=0) is False, (
-            "version 0 is below the record, so it is stale — which it would not be "
-            "had True been taken as 0"
-        )
-        assert await self._fenced(store), "and the fence it could not lift still stands"
-        assert await store.clear_closure(GOAL, goal_version=1) is True
-        assert not await self._fenced(store)
+        # **Below is stale**: a record standing at ``means`` discards this call.
+        assert await store.end_for_goal(GOAL, at=NOW, goal_version=means - 1) == 0
+        assert not await self._fenced(store), "a stale ending raises no fence"
 
-    async def test_clear_closure_normalises_a_bool_version_to_one(
-        self, store: GoalAuthorizationStore
-    ) -> None:
-        """The same normalisation on the other member, over a fence that really stands.
-
-        **A record has to exist for the call to do anything**, which is what makes
-        this an observation rather than an inert one: against a store holding none,
-        ``clear_closure`` answers ``False`` whatever version it is passed, so an
-        earlier revision's bool case asserted nothing at all about the value.
-        Adversarial review, round 10, ``major``.
-
-        A fence standing at **1**, lifted by ``clear_closure(goal_version=True)``: it
-        answers ``True`` only if the bool reached the store as one, ``0`` being below
-        the record and answered ``False``.
-        """
-        assert await store.end_for_goal(GOAL, at=NOW, goal_version=1) == 0
+        # **At the version, it acts** — which a record standing anywhere *above*
+        # ``means`` would refuse, so the two together pin it exactly.
+        await store.record(established(id="a2"))
+        assert await store.end_for_goal(GOAL, at=NOW, goal_version=means) == 1
         assert await self._fenced(store)
-
-        assert await store.clear_closure(GOAL, goal_version=True) is True
-        assert not await self._fenced(store), "the fence standing at 1 is lifted"
 
     @pytest.mark.parametrize("member_name", _ENDING_OPS)
     async def test_a_version_that_is_not_an_integer_is_pythons_own_type_error(
