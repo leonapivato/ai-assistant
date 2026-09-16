@@ -198,6 +198,80 @@ def search_binding(  # noqa: PLR0913 — one knob per field an ADR-0247 §12 arm
     )
 
 
+#: The account, origin and canonical form a **forecast read** at *the configured
+#: forecast provider* is arranged around (ADR-0260 §6). Deliberately a different
+#: account and a different origin from the search ones above, because §6 compares
+#: each kind against its own configured pair and the crosswise cases below have no
+#: subject unless the two pairs really differ.
+FORECAST_ACCOUNT = BoundAccount(identity="Example Forecast", reference="conn-forecast")
+FORECAST_ORIGIN = "https://forecast.example.com"
+FORECAST_CANONICAL = "https://forecast.example.com:443"
+
+#: The declaration a forecast read is ruled over, in :data:`SEARCH_TOOL`'s own shape
+#: and for its own reason: a **declared** per-call cost, because ADR-0260 §11 leaves
+#: the unknown-cost floor standing at the configured forecast provider too, so an
+#: undeclared figure would draw ``CONFIRM`` on a clause no arm here is about.
+FORECAST_TOOL: ToolDefinition = TOOL.model_copy(
+    update={
+        "id": "forecast_read",
+        "capability": "forecast_read",
+        "description": "Read the forecast through the connected forecast account.",
+        "cost": ToolCost(basis=CostBasis.PER_CALL, amount=Decimal("0.001"), currency="USD"),
+    }
+)
+
+
+def forecast_member(canonical: str = FORECAST_CANONICAL) -> CanonicalDestination:
+    """One selected-recipient member under HTTPS — a forecast read's whole set."""
+    return CanonicalDestination(protocol=DestinationProtocol.HTTPS, canonical=canonical)
+
+
+def forecast_binding(  # noqa: PLR0913 — one knob per field an ADR-0260 §13 arm varies
+    *,
+    account: BoundAccount = FORECAST_ACCOUNT,
+    origin: str = FORECAST_ORIGIN,
+    canonical: str = FORECAST_CANONICAL,
+    external: bool = False,
+    coverage: SpanCoverage = SpanCoverage.NOT_COVERED,
+    forecast_reach: bool = True,
+    closed_loop: bool = False,
+) -> EgressBinding:
+    """The binding a forecast servicing derives (ADR-0231 §5, ADR-0260 §6).
+
+    :func:`search_binding` one kind along: one HTTPS span over the ``origin``
+    argument, which ``tools/forecast.py`` declares ``x-egress-destination: "https"``
+    exactly as ``tools/web_search.py`` declares its own, so the canonical destination
+    set is the one member that origin canonicalises to.
+
+    ``forecast_reach`` defaults **``True``** and ``closed_loop`` **``False``**, which
+    is ADR-0260 §11's own asymmetry rather than a convenience: the forecast fact is
+    written ``True`` exactly where the kind is a forecast read and the deployment
+    holds a forecast registration, and ``closed_loop`` *"still means this
+    deployment's own search and nothing else, and a forecast read never sets it"*.
+    Both are knobs because the arms need a mismatched read that still carries its
+    fact, a read whose fact was never computed, and a binding asserting both kinds.
+    """
+    return EgressBinding(
+        spans=(
+            EgressSpan(
+                argument="origin",
+                index=0,
+                provenance=DiscloserProvenance.SYSTEM_SELECTED,
+                extent=len(origin),
+                destination=EgressDestination(
+                    protocol=DestinationProtocol.HTTPS, supplied=origin, canonical=canonical
+                ),
+            ),
+        ),
+        account=account,
+        transport_endpoint=origin,
+        planned_with_external_content=external,
+        coverage=coverage,
+        closed_loop=closed_loop,
+        forecast_reach=forecast_reach,
+    )
+
+
 def origin_unrecorded(*supplied: str, account: BoundAccount = ACCOUNT) -> OriginUnrecordedBinding:
     """The pre-ADR-0181 binding, over the members its twin above carries.
 

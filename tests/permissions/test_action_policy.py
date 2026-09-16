@@ -18,6 +18,10 @@ from recipient_builders import (
     ALICE,
     BOB,
     ENDPOINT,
+    FORECAST_ACCOUNT,
+    FORECAST_CANONICAL,
+    FORECAST_ORIGIN,
+    FORECAST_TOOL,
     NOW,
     SEARCH_ACCOUNT,
     SEARCH_CANONICAL,
@@ -25,6 +29,8 @@ from recipient_builders import (
     SEARCH_TOOL,
     TOOL,
     binding,
+    forecast_binding,
+    forecast_member,
     member,
     request,
     search_binding,
@@ -45,9 +51,14 @@ from ai_assistant.core.types import (
     ToolCost,
     ToolDefinition,
 )
-from ai_assistant.permissions import ConfiguredSearchDestination, ThresholdActionPolicy
+from ai_assistant.permissions import (
+    ConfiguredForecastDestination,
+    ConfiguredSearchDestination,
+    ThresholdActionPolicy,
+)
 from ai_assistant.testing import (
     FakeAuditTrail,
+    FakeGoalAuthorizations,
     FakeRecipientGrantResolution,
     FakeRecipientGrants,
     recipient_grant,
@@ -915,3 +926,407 @@ async def test_the_route_c_reason_names_the_basis_and_quotes_no_identifier() -> 
         assert quoted not in ruled.reason
     assert "web_search_connection" not in ruled.reason
     assert "web_search_origin" not in ruled.reason
+
+
+# --- ADR-0260 §6, §13: route (c) widened to the configured forecast provider ---
+#
+# §6 widens ADR-0247 §2's route (c) to a **closed two-member set** and adds no fourth
+# route, with each kind compared against **its own** configured pair. Every case below
+# turns on the seam's call count beside its outcome, for the search block's reasons
+# above and for one more of §6's own: a read at the configured forecast provider is
+# `ALLOW` "with no confirmation sought and no grant seam consulted".
+#
+# The **binding** is `forecast_binding`, the forecast-shaped one — one HTTPS span over
+# the `origin` argument, `forecast_reach` `True`, `closed_loop` `False` — because §6's
+# predicate is stated over a binding's own account and canonical destination set, and
+# the two configured pairs in this block deliberately differ in both, so a crosswise
+# case has a subject.
+
+
+def _configured_forecast(
+    *, reference: str = FORECAST_ACCOUNT.reference, canonical: str = FORECAST_CANONICAL
+) -> ConfiguredForecastDestination:
+    """The forecast pair a composition root hands the policy (ADR-0260 §6, §12's L2).
+
+    :func:`_configured`'s twin, defaulted to what :func:`forecast_binding` derives, so
+    a case that wants a **mismatch** states the one character it changes and nothing
+    else — the shape §13's Arm (d) is written over.
+    """
+    return ConfiguredForecastDestination(
+        reference=reference, destinations=frozenset({forecast_member(canonical)})
+    )
+
+
+def _at_both(
+    *records: RecipientGrant, **overrides: Any
+) -> tuple[ThresholdActionPolicy, FakeRecipientGrants]:
+    """A policy configured with **both** pairs, over a seam holding ``records``.
+
+    Both, because §6's crosswise clause has no subject on a policy that holds only
+    one: "a forecast request bound to the search provider's account or origin, or the
+    reverse, takes no route at all" is a statement about a deployment that configured
+    two providers, and a policy holding one pair would refuse the crosswise request on
+    the missing pair instead of on the mismatch.
+    """
+    grants = FakeRecipientGrants(records)
+    arguments: dict[str, Any] = {
+        "grants": grants,
+        "configured_search": _configured(),
+        "configured_forecast": _configured_forecast(),
+    }
+    arguments.update(overrides)
+    return ThresholdActionPolicy(**arguments), grants
+
+
+async def test_a_forecast_read_at_the_configured_provider_is_allowed_with_no_grant_record() -> None:
+    """§13's **Arm (d)** in the affirmative, over all three of §6's conjuncts at once.
+
+    A turn that has read a local file and then reads the forecast: the binding carries
+    ``planned_with_external_content``, carries ``forecast_reach``, matches the
+    configured forecast pair in both recorded comparisons, and the grant store is
+    **empty**. The ruling is an ``ALLOW`` on route (c) whose ``authorised_by`` is the
+    binding's own ``account.reference`` and whose ``authorised_subject`` is unset, and
+    **the grant seam is consulted zero times** — asserted over the seam rather than
+    over the ruling, because a policy that looked first and preferred the
+    configuration afterwards passes every outcome assertion here.
+
+    **Nothing is asserted here about the audit trail**, which is the one half of
+    ADR-0247 §2 this decision does not carry to this kind: that section's trail check
+    admits a digest-free standing row "only where its binding's ``closed_loop`` is
+    ``True``", and ADR-0260's own header lists "§2's route (c) and its trail check"
+    among what "binds entire". So a forecast route-(c) row is refused by
+    ``AuditTrail.record`` as the corpus stands — a gap filed as an issue and reported
+    to the dispatcher, and **not** something this lane may close: §12's L2 enumerates
+    what it owes and the trail is not in it, and widening the check would contradict a
+    sentence of a ratified ADR.
+    """
+    policy, grants = _at_both()
+    subject = request(forecast_binding(external=True), tool=FORECAST_TOOL)
+
+    ruled = await policy.decide(subject)
+
+    assert ruled.outcome is PermissionOutcome.ALLOW
+    assert ruled.authorised_by == FORECAST_ACCOUNT.reference
+    assert ruled.authorised_subject is None
+    assert grants.call_count == 0
+
+
+@pytest.mark.parametrize(
+    ("external", "coverage"),
+    [
+        pytest.param(True, SpanCoverage.MODEL_ON_EVERY_PATH, id="both limbs at once"),
+        pytest.param(False, SpanCoverage.MODEL_ON_EVERY_PATH, id="coverage alone"),
+        pytest.param(True, SpanCoverage.NOT_COVERED, id="lineage alone"),
+    ],
+)
+async def test_both_floors_retire_at_the_configured_forecast_provider_and_retire_together(
+    *, external: bool, coverage: SpanCoverage
+) -> None:
+    """§6's restatement of ``_only_the_disclosure_floor``'s two limbs, at this kind.
+
+    "Both limbs are satisfied by one fact and are not two decisions", and the reason
+    is ADR-0247 §3's rather than a new one: a deployment retiring the lineage floor
+    alone would still be stopped by the coverage limb on every turn that had read
+    anything, and one retiring the coverage exception alone by the lineage floor.
+    The middle row is the one a lane that restated only the lineage limb fails, and
+    the last is its converse.
+    """
+    policy, grants = _at_both()
+    bound = forecast_binding(external=external, coverage=coverage)
+
+    ruled = await policy.decide(request(bound, tool=FORECAST_TOOL))
+
+    assert ruled.outcome is PermissionOutcome.ALLOW
+    assert ruled.authorised_by == FORECAST_ACCOUNT.reference
+    assert ruled.authorised_subject is None
+    assert grants.call_count == 0
+
+
+@pytest.mark.parametrize(
+    "mismatch",
+    [
+        pytest.param(
+            {"account": FORECAST_ACCOUNT.model_copy(update={"reference": "conn-forecasT"})},
+            id="the connection reference",
+        ),
+        pytest.param({"canonical": "https://forecast.example.com:444"}, id="the canonical form"),
+        pytest.param({"forecast_reach": False}, id="the carried fact"),
+    ],
+)
+@pytest.mark.parametrize(
+    ("external", "coverage"),
+    [
+        pytest.param(True, SpanCoverage.NOT_COVERED, id="over external content"),
+        pytest.param(False, SpanCoverage.MODEL_ON_EVERY_PATH, id="over covered content"),
+    ],
+)
+async def test_a_forecast_read_failing_any_conjunct_keeps_every_floor(
+    mismatch: dict[str, Any], *, external: bool, coverage: SpanCoverage
+) -> None:
+    """§13's **Arm (d)**, over each of §6's three conjuncts on its own.
+
+    "A forecast request whose account or origin is not the configured pair … and a
+    forecast request whose kind, account and origin all match and whose
+    ``forecast_reach`` is ``False`` — each takes **no** route (c), both
+    ``_only_the_disclosure_floor`` limbs bind in full and the ruling is what it is
+    today." The two recorded comparisons differ **by one character** each, because §6
+    compares both and either alone would leave the other unchecked; and the third row
+    is owed in its own right because ``forecast_reach`` is §6's *first* conjunct — a
+    policy reading only the kind and the pair passes the other two shapes while
+    granting route (c) where §6 refuses it, and ``False`` "is also the value a
+    composition site that never computed the fact leaves behind".
+
+    **With a grant covering the request in the store**, so no row passes on the
+    absence of one: the ruling is ``CONFIRM``, the seam is consulted **zero** times,
+    and no ``ALLOW`` of any route is reached.
+    """
+    bound = forecast_binding(external=external, coverage=coverage, **mismatch)
+    covering = recipient_grant(
+        forecast_member(canonical=str(bound.spans[0].destination.canonical)),  # type: ignore[union-attr]  # the span this builder writes carries one
+        grant_id="g-f1",
+        tool=FORECAST_TOOL,
+        account=bound.account,
+    )
+    policy, grants = _at_both(covering)
+    subject = request(bound, tool=FORECAST_TOOL)
+
+    ruled = await policy.decide(subject)
+
+    assert ruled.outcome is PermissionOutcome.CONFIRM
+    assert ruled.authorised_by is None
+    assert ruled.authorised_subject is None
+    assert grants.call_count == 0
+    # The premise, over a second seam so the count above stays this ruling's.
+    assert await FakeRecipientGrants([covering]).covering(subject) is not None
+
+
+@pytest.mark.parametrize(
+    ("bound", "tool"),
+    [
+        pytest.param(
+            forecast_binding(
+                account=SEARCH_ACCOUNT,
+                origin=SEARCH_ORIGIN,
+                canonical=SEARCH_CANONICAL,
+                external=True,
+            ),
+            FORECAST_TOOL,
+            id="a forecast read at the search provider's pair",
+        ),
+        pytest.param(
+            search_binding(
+                account=FORECAST_ACCOUNT,
+                origin=FORECAST_ORIGIN,
+                canonical=FORECAST_CANONICAL,
+                external=True,
+            ),
+            SEARCH_TOOL,
+            id="a search at the forecast provider's pair",
+        ),
+    ],
+)
+async def test_neither_kind_is_authorised_by_the_other_kinds_configured_pair(
+    bound: Any, tool: ToolDefinition
+) -> None:
+    """§6's crosswise clause, in both directions and on a policy holding both pairs.
+
+    "**Each kind is compared against its own configured pair**; a forecast request
+    bound to the search provider's account or origin, or the reverse, takes no route
+    at all." Each binding here carries its own kind's fact and matches the **other**
+    kind's configured pair exactly — both recorded comparisons, not one — so an
+    implementation comparing against whichever pair happens to match, or against the
+    two as one set, passes every arm above and fails both rows here.
+    """
+    policy, grants = _at_both()
+
+    ruled = await policy.decide(request(bound, tool=tool))
+
+    assert ruled.outcome is PermissionOutcome.CONFIRM
+    assert ruled.authorised_by is None
+    assert grants.call_count == 0
+
+
+async def test_a_binding_asserting_both_kinds_is_at_no_configured_provider() -> None:
+    """§6's closed set, on the one shape neither member of it describes.
+
+    ADR-0260 §11 writes ``forecast_reach`` "exactly where the request's kind is a
+    forecast read" and leaves ``closed_loop`` meaning "this deployment's own search
+    and nothing else, and a forecast read never sets it", so a binding carrying both
+    asserts a kind route (c)'s two-member set does not contain. Selecting either pair
+    for it would let one kind's configuration authorise the other's, which §6 forbids
+    in terms — so the ambiguity fails closed.
+
+    Arranged at the **forecast** pair, which is the sharper half: an implementation
+    testing ``closed_loop`` first and falling through would rule this an ``ALLOW``
+    the moment the forecast pair matched.
+
+    §13's own preamble is the authority for the arm: the enumeration there "is a
+    floor and not a ceiling", and "every normative clause of this decision that an
+    implementation can fail is owed an arm".
+    """
+    policy, grants = _at_both()
+    bound = forecast_binding(external=True, closed_loop=True)
+
+    ruled = await policy.decide(request(bound, tool=FORECAST_TOOL))
+
+    assert ruled.outcome is PermissionOutcome.CONFIRM
+    assert ruled.authorised_by is None
+    assert grants.call_count == 0
+
+
+async def test_a_policy_with_no_configured_forecast_reaches_no_route_c_on_a_forecast_read() -> None:
+    """The fail-closed direction at this kind, and the two pairs' independence.
+
+    ADR-0260 §6 read through ADR-0247 §2: an otherwise perfect route-(c) forecast read
+    draws ``CONFIRM`` where the deployment configured no forecast provider — which is
+    also what ``forecast_reach``'s restrictive default gives a site that never computed
+    the fact. The **same policy still reaches route (c) on a search**, which is what
+    keeps the first half from passing on a policy that had simply stopped working.
+    """
+    policy, grants = _at_both(configured_forecast=None)
+
+    forecast = await policy.decide(request(forecast_binding(external=True), tool=FORECAST_TOOL))
+
+    assert forecast.outcome is PermissionOutcome.CONFIRM
+    assert forecast.authorised_by is None
+
+    searched = await policy.decide(request(search_binding(external=True), tool=SEARCH_TOOL))
+
+    assert searched.outcome is PermissionOutcome.ALLOW
+    assert searched.authorised_by == SEARCH_ACCOUNT.reference
+    assert grants.call_count == 0
+
+
+async def test_the_forecast_read_asks_nothing_and_the_turns_other_send_is_unaffected() -> None:
+    """§13's **Arm (e)**: no new question, and nothing rides it that is not this read.
+
+    "A turn on a goal whose supply already carries an external record asks for a
+    forecast at the configured provider and is ruled ``ALLOW`` with **no** ``CONFIRM``,
+    **no** grant seam read and ``authorised_subject`` unset — and the same turn's
+    search at an unconfigured destination is unaffected."
+
+    The goal is carried on the request, and the policy holds a ``GoalAuthorizations``
+    seam, so route (d) is reachable in principle: the ``ALLOW`` still names the
+    connection reference rather than a record id, which is route (c) answering first.
+    The second ruling is the same policy in the same turn on a search bound elsewhere —
+    ADR-0260 §6's last normative clause, "nothing rides this that is not a forecast
+    read at the configured forecast provider".
+    """
+    covering = recipient_grant(
+        search_member(canonical="https://elsewhere.example.com:443"),
+        grant_id="g-f2",
+        tool=SEARCH_TOOL,
+        account=SEARCH_ACCOUNT,
+    )
+    policy, grants = _at_both(covering, authorizations=FakeGoalAuthorizations([]))
+
+    forecast = await policy.decide(
+        request(
+            forecast_binding(external=True, coverage=SpanCoverage.MODEL_ON_EVERY_PATH),
+            tool=FORECAST_TOOL,
+            goal="goal-1",
+        )
+    )
+
+    assert forecast.outcome is PermissionOutcome.ALLOW
+    assert forecast.authorised_by == FORECAST_ACCOUNT.reference
+    assert forecast.authorised_subject is None
+    assert forecast.authorised_goal is None
+    assert grants.call_count == 0
+
+    elsewhere = await policy.decide(
+        request(
+            search_binding(external=True, canonical="https://elsewhere.example.com:443"),
+            tool=SEARCH_TOOL,
+            goal="goal-1",
+        )
+    )
+
+    assert elsewhere.outcome is PermissionOutcome.CONFIRM
+    assert elsewhere.authorised_by is None
+
+
+@pytest.mark.parametrize(
+    ("thresholds", "declared", "expected"),
+    [
+        pytest.param(
+            {},
+            {"cost": ToolCost(basis=CostBasis.UNKNOWN)},
+            PermissionOutcome.CONFIRM,
+            id="an undeclared cost",
+        ),
+        pytest.param(
+            {"deny_at_risk": RiskLevel.LOW},
+            {},
+            PermissionOutcome.DENY,
+            id="a threshold deny",
+        ),
+    ],
+)
+async def test_the_forecast_configuration_discharges_the_disclosure_floor_and_no_other_ground(
+    thresholds: dict[str, Any], declared: dict[str, Any], expected: PermissionOutcome
+) -> None:
+    """ADR-0260 §11 leaves the unknown-cost floor and the thresholds standing here too.
+
+    "Where the cost pair is unset the unknown-cost floor binds unchanged", and §6
+    retires the two disclosure limbs and nothing else. Each row reaches no route at
+    all, because ``fired == [_DISCLOSURE_FLOOR]`` is false for it — a policy returning
+    ``ALLOW`` the moment the forecast configuration matched suppresses both while
+    passing every case above.
+    """
+    declaration = FORECAST_TOOL.model_copy(update=declared)
+    policy, grants = _at_both(**thresholds)
+
+    ruled = await policy.decide(request(forecast_binding(external=True), tool=declaration))
+
+    assert ruled.outcome is expected
+    assert ruled.authorised_by is None
+    assert grants.call_count == 0
+
+
+async def test_the_forecast_route_c_reason_names_the_basis_and_quotes_no_identifier() -> None:
+    """The route-(c) ground at this kind, held to ADR-0247 §2's last clause.
+
+    The sentence says that this deployment's owner configured this **forecast**
+    provider — its own text rather than the search one, so a surface cannot report a
+    forecast read as a search — and it names no origin, no host, no connection
+    reference, no coordinate, no credential and no ``Settings`` field.
+    """
+    policy, _ = _at_both()
+
+    ruled = await policy.decide(request(forecast_binding(external=True), tool=FORECAST_TOOL))
+
+    assert "configured this forecast provider" in ruled.reason
+    assert "search" not in ruled.reason
+    for quoted in (
+        FORECAST_ACCOUNT.reference,
+        FORECAST_ORIGIN,
+        FORECAST_CANONICAL,
+        "forecast.example.com",
+    ):
+        assert quoted not in ruled.reason
+    assert "forecast_connection" not in ruled.reason
+    assert "forecast_origin" not in ruled.reason
+
+
+async def test_a_search_at_the_configured_provider_rules_exactly_as_it_did() -> None:
+    """The regression pin: widening route (c) moves **no** search ruling.
+
+    ADR-0260 §12 gives this lane "no live behaviour on its own", and a search is the
+    only behaviour it could have moved. The whole ruling is compared — outcome,
+    pointer, subject **and the reason text** — because the ground is what a surface
+    renders, and generalising one sentence over both kinds would have changed it on
+    every search this deployment already makes while passing every other arm here.
+    """
+    policy, grants = _at_both()
+
+    ruled = await policy.decide(request(search_binding(external=True), tool=SEARCH_TOOL))
+
+    assert ruled.outcome is PermissionOutcome.ALLOW
+    assert ruled.authorised_by == SEARCH_ACCOUNT.reference
+    assert ruled.authorised_subject is None
+    assert ruled.reason == (
+        "this deployment's owner configured this search provider, so searching it is "
+        "the destination they chose and the recipient they granted"
+    )
+    assert grants.call_count == 0

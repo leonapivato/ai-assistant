@@ -25,6 +25,7 @@ from ai_assistant.app import build_engine
 from ai_assistant.app import composition as composition_module
 from ai_assistant.core.config import EmbedderKind, Settings
 from ai_assistant.core.types import CostBasis
+from ai_assistant.permissions import ConfiguredForecastDestination, ThresholdActionPolicy
 from ai_assistant.tools import ForecastIntegration, build_forecast_integration
 from ai_assistant.tools.egress import HttpsEgressTransport, StreamOutboundTransport
 from ai_assistant.tools.egress_binder import EgressBindingSeam
@@ -349,3 +350,77 @@ async def test_a_cost_pair_with_no_forecast_provider_is_refused_at_settings_load
             forecast_cost_per_call=FIGURE,
             forecast_cost_currency=CODE,
         )
+
+
+async def test_the_policy_is_handed_the_configured_forecast_destination(tmp_path: Path) -> None:
+    """ADR-0260 §12's L2: the one new constructor argument, where a root could drop it.
+
+    "``app/composition.py`` supplying it — the one file outside ``permissions/`` this
+    lane touches and the composition root's own job." A lane that landed the policy,
+    the widened predicate and every arm while passing nothing would leave **every
+    configured deployment taking the forecast predicate as false**, with a green gate
+    and a forecast read that still asks — the same failure
+    ``test_the_policy_is_handed_the_configured_search_destination`` exists for, one
+    decision along.
+
+    **Asserted against the registration the seam holds rather than against the settings
+    text**, because what §6 compares is the binding's own ``account.reference`` and its
+    own canonical destination set: a root that passed the right strings to the wrong
+    policy, or the **search** pair into this argument, fails here.
+    """
+    engine = build_engine(_settings(configured=True), data_dir=tmp_path)
+    try:
+        binder = engine._runner._binder
+        assert isinstance(binder, EgressBindingSeam)
+        registration = binder._registrations.registration(FORECAST_READ_ID)
+        assert registration is not None, "a configured deployment registers the forecast read"
+        policy = engine._runner._policy
+        assert isinstance(policy, ThresholdActionPolicy), "the production policy"
+
+        assert policy._configured_forecast == ConfiguredForecastDestination(
+            reference=registration.reference,
+            destinations=frozenset(
+                composition_module._forecast_destinations(registration.transport_endpoint)
+            ),
+        )
+        # **The two pairs are not the same value**, which is what makes the crosswise
+        # clause of §6 have a subject in a real deployment: this one configured a
+        # forecast provider and no search account, so the search argument is `None`
+        # while the forecast argument is a pair.
+        assert policy._configured_search is None
+    finally:
+        await engine.aclose()
+
+
+async def test_a_deployment_that_configured_no_forecast_provider_hands_the_policy_nothing(
+    tmp_path: Path,
+) -> None:
+    """ADR-0260 §6's fail-closed default, and what ``forecast_reach`` already gives.
+
+    With none of the four settings there is no registration, no forecast request is
+    ever composed, and the authority §6 states has nothing to attach to — so the policy
+    is handed ``None`` and takes the predicate as false for every forecast read.
+    Without this row the case above would pass against a root that hard-coded a pair.
+    """
+    engine = build_engine(_settings(configured=False), data_dir=tmp_path)
+    try:
+        policy = engine._runner._policy
+        assert isinstance(policy, ThresholdActionPolicy), "the production policy"
+        assert policy._configured_forecast is None
+    finally:
+        await engine.aclose()
+
+
+async def test_an_origin_with_no_canonical_form_leaves_the_forecast_pair_unbuilt() -> None:
+    """The refusal is answered rather than raised, as ``_search_destinations`` answers it.
+
+    A composition root that raised here would take the whole process down for a read the
+    seam would refuse anyway. Answering the empty set instead leaves the pair ``None``,
+    which is the restrictive value: no forecast read is at the configured provider, and
+    a pair carrying an empty set could never equal a binding's own — which is never
+    empty — so it would read as a configuration while authorising nothing.
+    """
+    assert composition_module._forecast_destinations("not an origin at all") == ()
+    assert composition_module._forecast_destinations(None) == ()
+    assert composition_module._configured_forecast(CONNECTION, ()) is None
+    assert composition_module._configured_forecast(None, ()) is None
