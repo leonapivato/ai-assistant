@@ -331,8 +331,11 @@
   **Not replaced — §4 above all.** `closed_loop` is untouched in its field, its type, its
   default, its carriage and its comparison inside `PermissionDecision.authorises`, and
   stays the search kind's alone; this decision **reads** it and never widens it. §§1, 3 and
-  5-16 stand exactly as ratified, and no `core` surface, stored shape or
-  `PROTOCOL_VERSION` moves with it.
+  5-16 stand exactly as ratified. **No `core` type, member, signature, stored shape or
+  `PROTOCOL_VERSION` moves with it** — what does move is the contract *text* of
+  `AuditTrail.record` in `core/protocols.py`, where ADR-0272 §3 puts route (c)'s revised
+  invariant and, with it, the narrowing of the route-(b) sentence this ADR's §2 already
+  ratified and that file never received.
 
   Appended dated note per ADR-0070 §1; no ratified text is rewritten and no mark is added
   (ADR-0089 §5). Refs #2459.
