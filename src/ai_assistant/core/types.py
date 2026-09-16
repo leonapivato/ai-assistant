@@ -21480,25 +21480,31 @@ class AuthorizationOrigin(StrEnum):
 
 
 class AuthorizationDisposition(StrEnum):
-    """Where one :class:`Authorization` stands (ADR-0254 §1).
+    """Where one :class:`Authorization` stands (ADR-0254 §1, ADR-0268 §2).
 
-    A **closed** enumeration of exactly **six** members, each valued by its
-    lower-cased name, and the vocabulary is *added to and never renamed*.
+    A **closed** enumeration of exactly **seven** members, each valued by its
+    lower-cased name, and the vocabulary is *added to and never renamed* — which is
+    §1's own rule and the licence ADR-0268 §2 takes for :attr:`GOAL_CLOSED`.
 
-    **The transition graph has exactly five edges** (§1):
+    **The transition graph has exactly seven edges** (§1, ADR-0268 §2):
 
     * ``PROPOSED → ESTABLISHED`` — the user approved;
     * ``PROPOSED → DECLINED`` — the user refused;
     * ``PROPOSED → EXPIRED`` — the deadline passed before an answer;
+    * ``PROPOSED → GOAL_CLOSED`` — the ending a closure of its goal takes;
     * ``ESTABLISHED → REVOKED`` — the user withdrew the authority;
-    * ``ESTABLISHED → SUPERSEDED`` — a later row replaced it (§5).
+    * ``ESTABLISHED → SUPERSEDED`` — a later row replaced it (§5);
+    * ``ESTABLISHED → GOAL_CLOSED`` — the same ending, one disposition over.
 
-    :attr:`DECLINED`, :attr:`EXPIRED`, :attr:`REVOKED` and :attr:`SUPERSEDED` are
-    **retired**: no edge leaves them, and
+    ``PROPOSED`` and ``ESTABLISHED`` stay **the two members an edge leaves**, and no
+    other edge exists.
+
+    :attr:`DECLINED`, :attr:`EXPIRED`, :attr:`REVOKED`, :attr:`SUPERSEDED` and
+    :attr:`GOAL_CLOSED` are **retired**: no edge leaves them, and
     :meth:`~ai_assistant.core.protocols.GoalAuthorizationStore.settle` refuses a row
     already in one. There is no ``DECLINED → ESTABLISHED``, no ``EXPIRED →
-    ESTABLISHED``, no ``SUPERSEDED → ESTABLISHED`` and no ``REVOKED →
-    ESTABLISHED``.
+    ESTABLISHED``, no ``SUPERSEDED → ESTABLISHED``, no ``REVOKED → ESTABLISHED`` and
+    no ``GOAL_CLOSED → ESTABLISHED``.
 
     **The disposition is itself the compare-and-swap token** (§1), which is why no
     version field is on :class:`Authorization`: a settlement succeeds only where the
@@ -21556,6 +21562,36 @@ class AuthorizationDisposition(StrEnum):
     live, because no edge leaves this member and nothing un-supersedes one. That is
     the fail-closed direction, and the one that refuses to resurrect a broader
     authority the user has already moved on from."""
+
+    GOAL_CLOSED = "goal_closed"
+    """The ending a closure of its goal takes over the rows standing when it is
+    taken (ADR-0268 §1, §2).
+
+    Written by
+    :meth:`~ai_assistant.core.protocols.GoalAuthorizationStore.end_for_goal` and by
+    nothing else, at the three call sites ADR-0268 §6 names exhaustively: a
+    **closing act** of the goal — ADR-0250 §12's ``ABANDONED`` act and A10's
+    ``ACHIEVED`` write — and a **reopen** of a goal whose closure this store was
+    never told of, which takes the ending that closure never took.
+
+    **The meaning is stated over that ending and not over the goal's resulting
+    status**, and that is deliberate (§2): the ending and the ``GoalStatus`` write
+    are two writes in two stores, the ending is taken **first**, and a closing write
+    that then fails leaves rows this member describes truthfully. It is as
+    deliberate that it is not stated over the *act* taking the ending: a row written
+    in the reopen's unfenced window was ended by no closing act, and the member is
+    true of it too.
+
+    **What it never means** is that the row lapsed, that the user withdrew it or
+    that a later row replaced it — which is what keeps it apart from :attr:`EXPIRED`,
+    :attr:`REVOKED` and :attr:`SUPERSEDED`, each refused for ADR-0268 §2's stated
+    reason. A lapsed ``PROPOSED`` row ended by this ending is settled ``GOAL_CLOSED``
+    and **not** ``EXPIRED``: ``end_for_goal`` *evaluates no liveness*.
+
+    **Retired**, so no edge leaves it and **it is never live**, §1's liveness
+    predicate being stated over :attr:`ESTABLISHED` alone. A reopened goal restores,
+    re-opens, re-establishes and reads as an authority **no** row standing here
+    (ADR-0268 §2): the reopened goal's authority is established afresh."""
 
 
 class AuthorizationSettlement(StrEnum):

@@ -105,21 +105,32 @@ _SIDECARS = ("-journal", "-wal", "-shm")
 #: The largest value SQLite will bind as an integer parameter.
 _MAX_SQLITE_INT = 2**63 - 1
 
-#: ADR-0254 §1's transition graph, whole and as data: the five edges, keyed by the
-#: disposition each one leaves. **Stated once**, so ``settle``'s refusal and the
-#: conformance suite's enumeration cannot disagree about which moves exist. The
-#: four dispositions absent as keys are the **retired** ones — no edge leaves
+#: ADR-0254 §1's transition graph, whole and as data: the **seven** edges, keyed
+#: by the disposition each one leaves. **Stated once**, so ``settle``'s refusal and
+#: the conformance suite's enumeration cannot disagree about which moves exist. The
+#: **five** dispositions absent as keys are the **retired** ones — no edge leaves
 #: them, which is what ``settle`` refuses a move out of.
+#:
+#: **Seven since ADR-0268 §2**, which adds ``PROPOSED → GOAL_CLOSED`` and
+#: ``ESTABLISHED → GOAL_CLOSED``. Both are stated here because ``settle`` *"admits
+#: both like any other edge"* — the store refuses neither, and what keeps a
+#: single-row settlement to ``GOAL_CLOSED`` from happening is ADR-0268 §6's writer
+#: clause rather than a refusal with nowhere truthful to go.
 _EDGES: Final[dict[AuthorizationDisposition, frozenset[AuthorizationDisposition]]] = {
     AuthorizationDisposition.PROPOSED: frozenset(
         {
             AuthorizationDisposition.ESTABLISHED,
             AuthorizationDisposition.DECLINED,
             AuthorizationDisposition.EXPIRED,
+            AuthorizationDisposition.GOAL_CLOSED,
         }
     ),
     AuthorizationDisposition.ESTABLISHED: frozenset(
-        {AuthorizationDisposition.REVOKED, AuthorizationDisposition.SUPERSEDED}
+        {
+            AuthorizationDisposition.REVOKED,
+            AuthorizationDisposition.SUPERSEDED,
+            AuthorizationDisposition.GOAL_CLOSED,
+        }
     ),
 }
 
@@ -193,11 +204,34 @@ async def _run_to_completion[T](fn: Callable[..., T], /, *args: object) -> T:
     return outcome[0]
 
 
-#: One shape only, so far. There is no ``_migrate`` here and that is not an
-#: omission: version 1 is the first shape this store has ever had, so an unlabelled
-#: database is one this code is creating now, and it is stamped rather than
-#: migrated.
-_SCHEMA_VERSION = 1
+#: **Two shapes.** Version 1 held the rows alone; version 2 adds ADR-0268 §1's
+#: per-goal **closure record**.
+#:
+#: **The migration is structural and nothing more** (ADR-0268 §9): a version-1
+#: database opens under version 2 with *every row it held intact*, the upgrade
+#: **creates the closure-record storage and moves the marker**, and that is the
+#: whole of it. **No row is rewritten, re-dispositioned or back-filled and no goal
+#: is recorded closed by the upgrade** — so a database written before that decision
+#: may hold an ``ESTABLISHED`` row whose goal was already closed, and it stands
+#: until its own ``expires_at`` exactly as it did before. That is the prospectivity
+#: bound stated rather than implied, and it is *no worse than the pre-decision
+#: behaviour*; the one path by which such a row could outlive that bound is closed
+#: by §2's reopen, which ends it before clearing the fence.
+#:
+#: **Nothing reads ``PlanStore`` at the upgrade to find out which goals closed.**
+#: That cross-store read is the subsystem-boundary crossing ADR-0268 §1 declines at
+#: the *write*, and declining it at the write while taking it at the upgrade would
+#: put the same read in the same place by another door. **No back-fill, no
+#: reconciliation pass, no start-up scan, no compatibility shim, no lenient decode
+#: and no tolerated-unknown entry.**
+#:
+#: **Why the creates are unconditional rather than a version-keyed ``_migrate``.**
+#: Every object this store defines is created with ``IF NOT EXISTS`` and then held
+#: to its own definition (:data:`_OBJECTS`), so the upgrade *is* the ordinary setup
+#: path running against a file that lacks one table — and a version-keyed branch
+#: would be a second statement of which objects version 2 has, free to drift from
+#: the first.
+_SCHEMA_VERSION = 2
 
 #: Created first and on its own, so a database labelled with a schema this code
 #: cannot read is refused *before* the ``goal_authorizations`` table is created or
@@ -206,7 +240,19 @@ _META_SCHEMA = "CREATE TABLE IF NOT EXISTS meta(key TEXT PRIMARY KEY, value TEXT
 
 _READ_SCHEMA_VERSION = "SELECT value FROM meta WHERE key = 'schema_version'"
 
-_WRITE_SCHEMA_VERSION = "INSERT INTO meta(key, value) VALUES ('schema_version', ?)"
+#: **An upsert, because the marker now *moves*.** Version 1 only ever stamped an
+#: unlabelled file, so a plain ``INSERT`` sufficed; ADR-0268 §9 has a version-1
+#: database open under version 2, and its ``meta`` row already exists.
+_WRITE_SCHEMA_VERSION = (
+    "INSERT INTO meta(key, value) VALUES ('schema_version', ?) "
+    "ON CONFLICT(key) DO UPDATE SET value = excluded.value"
+)
+
+#: Every ``schema_version`` this code can open. **A file below the current version
+#: is upgraded; one above it is refused**, because a newer writer may have written
+#: rows this code would decode wrongly — ADR-0039 §10's mechanism, and the reason
+#: no lenient decode is added.
+_READABLE_SCHEMA_VERSIONS: Final[frozenset[int]] = frozenset({1, _SCHEMA_VERSION})
 
 #: The epoch the sort keys count from. Any fixed instant would do; this one is
 #: conventional.
@@ -238,6 +284,29 @@ _CREATE_TABLE = (
     "goal TEXT GENERATED ALWAYS AS (json_extract(data, '$.goal')) VIRTUAL, "
     "tool_id TEXT GENERATED ALWAYS AS (json_extract(data, '$.tool.id')) VIRTUAL, "
     "disposition TEXT GENERATED ALWAYS AS (json_extract(data, '$.disposition')) VIRTUAL)"
+)
+
+#: **ADR-0268 §1's closure record — one row per goal, a watermark and a fence.**
+#:
+#: ``goal`` is the primary key, which is what makes it *one per goal*. ``version``
+#: is the watermark **neither member lowers and neither removes**, and ``fenced``
+#: is whether this store admits a row of that goal — raised by ``end_for_goal``,
+#: **lifted rather than removed** by ``clear_closure``. Stored as an ``INTEGER``
+#: because SQLite has no boolean, and constrained to ``0``/``1`` so a hand-built
+#: file cannot make the fence read as a third thing.
+#:
+#: **It carries no basis, no instant, no expiry and no disposition**: it is neither
+#: an authority, nor coverage, nor a row, which is why ``export`` does not reach it
+#: and why ``clear`` — and only ``clear`` — erases it (§1).
+#:
+#: **Plain columns, not generated ones.** The rows' four projections are generated
+#: from the blob because a stored copy of a value a uniqueness check reads could
+#: disagree with the record it describes (below); there is no blob here and nothing
+#: to disagree with, the record being exactly these three values.
+_CREATE_CLOSURES = (
+    "CREATE TABLE IF NOT EXISTS goal_authorization_closures("
+    "goal TEXT PRIMARY KEY NOT NULL, version INTEGER NOT NULL, "
+    "fenced INTEGER NOT NULL CHECK (fenced IN (0, 1)))"
 )
 
 #: Keyed by name, because :data:`_OBJECTS` holds each one to its own definition and
@@ -314,6 +383,7 @@ _OBJECTS: Final = {
     "goal_authorizations": _CREATE_TABLE,
     **_INDEXES,
     "goal_authorizations_settle_only": _SETTLE_ONLY,
+    "goal_authorization_closures": _CREATE_CLOSURES,
 }
 
 _ORDERED = "SELECT data FROM goal_authorizations ORDER BY proposed_at_us DESC, id ASC"
@@ -340,6 +410,25 @@ _BY_ID = "SELECT data FROM goal_authorizations WHERE id = ?"
 #: Whether one id is already held, over the derived column so a hand-written ``id``
 #: cannot hide a row from the duplicate check.
 _ID_IS_HELD = "SELECT 1 FROM goal_authorizations WHERE id = ?"
+
+#: One goal's closure record, or nothing.
+_CLOSURE_OF_GOAL = "SELECT version, fenced FROM goal_authorization_closures WHERE goal = ?"
+
+#: Raise or lift one goal's record. **Upsert rather than delete-and-insert**,
+#: because a record is *lifted and never removed* and the two statements would be a
+#: window in which neither stood.
+_WRITE_CLOSURE = (
+    "INSERT INTO goal_authorization_closures(goal, version, fenced) VALUES (?, ?, ?) "
+    "ON CONFLICT(goal) DO UPDATE SET version = excluded.version, fenced = excluded.fenced"
+)
+
+#: Every row of one goal standing ``PROPOSED`` or ``ESTABLISHED`` — exactly the set
+#: ``end_for_goal`` ends. **No instant appears in it**: that member *evaluates no
+#: liveness*, so a lapsed proposal is in this set like any other.
+_STANDING_OF_GOAL = (
+    "SELECT data FROM goal_authorizations WHERE goal = ? AND disposition IN (?, ?) "
+    "ORDER BY proposed_at_us DESC, id ASC"
+)
 
 
 def _checked_target(to: AuthorizationDisposition) -> None:
@@ -657,7 +746,7 @@ class SqliteGoalAuthorizationStore:
             with conn:  # commits on success, rolls back on any exception
                 conn.execute("BEGIN IMMEDIATE")
                 conn.execute(_META_SCHEMA)
-                labelled = self._check_schema_version(conn)
+                stored = self._check_schema_version(conn)
                 conn.execute(_CREATE_TABLE)
                 # The table is held to its definition **before** the indexes and the
                 # trigger are created over it, so a file arriving with a
@@ -667,11 +756,23 @@ class SqliteGoalAuthorizationStore:
                 for statement in _INDEXES.values():
                     conn.execute(statement)
                 conn.execute(_SETTLE_ONLY)
+                # **ADR-0268 §9's migration, and the whole of it.** On a version-1
+                # file this is the create that upgrades it; on a version-2 file it
+                # is a no-op. Nothing else happens either way: no row is rewritten,
+                # re-dispositioned or back-filled, and no goal is recorded closed —
+                # *"a lane that moved the marker without creating the storage has
+                # shipped a store no existing database opens"*, and one that
+                # rewrote a row would have retrofitted a decision that governs
+                # closing acts taken after it ships.
+                conn.execute(_CREATE_CLOSURES)
                 self._check_objects(conn, tuple(_OBJECTS))
-                if not labelled:
+                if stored != _SCHEMA_VERSION:
                     # Stamped *after* the creates and inside the same transaction, so
                     # a failure rolls the marker — and the `meta` table itself — back
-                    # rather than leaving a database falsely labelled current.
+                    # rather than leaving a database falsely labelled current. The
+                    # same write serves both cases: an unlabelled file is stamped,
+                    # and a version-1 file has its marker **moved** once the storage
+                    # the new version means exists beside it.
                     conn.execute(_WRITE_SCHEMA_VERSION, (str(_SCHEMA_VERSION),))
         except AuthorizationError:
             conn.close()
@@ -736,16 +837,19 @@ class SqliteGoalAuthorizationStore:
             with contextlib.suppress(FileNotFoundError):
                 sidecar.chmod(_OWNER_ONLY)
 
-    def _check_schema_version(self, conn: sqlite3.Connection) -> bool:
-        """Refuse a labelled schema this code cannot read; say whether one is labelled.
+    def _check_schema_version(self, conn: sqlite3.Connection) -> int | None:
+        """Refuse a labelled schema this code cannot read; say which one is labelled.
 
         Runs inside the setup transaction, after ``meta`` exists and **before** the
-        ``goal_authorizations`` table is created or read. An unlabelled database is
-        **stamped rather than migrated**: version 1 is the only shape this store has
-        ever written.
+        ``goal_authorizations`` table is created or read. An **unlabelled** database
+        is one this code is creating now and is stamped rather than migrated; a
+        **version-1** one is upgraded, which ADR-0268 §9 makes *structural and
+        nothing more* — the setup's own creates add the closure-record storage and
+        the marker is then moved, with every row it held left byte for byte as it
+        was.
 
         Returns:
-            Whether the database already carries a ``schema_version``.
+            The version the database carries, or ``None`` where it carries none.
 
         Raises:
             AuthorizationError: If the stored version is not one this code
@@ -754,7 +858,7 @@ class SqliteGoalAuthorizationStore:
         """
         rows = conn.execute(_READ_SCHEMA_VERSION).fetchall()
         if not rows:
-            return False
+            return None
         if len(rows) > 1:
             # `meta`'s primary key makes this unreachable for a table *this* code
             # created — but `CREATE TABLE IF NOT EXISTS` accepts a pre-existing
@@ -783,14 +887,15 @@ class SqliteGoalAuthorizationStore:
             stored = int(raw)
         except ValueError as exc:
             raise AuthorizationError(msg) from exc
-        if stored != _SCHEMA_VERSION:
+        if stored not in _READABLE_SCHEMA_VERSIONS:
+            supported = ", ".join(str(one) for one in sorted(_READABLE_SCHEMA_VERSIONS))
             msg = (
                 f"the authorization store at {self._path!r} has schema_version={stored}, "
-                f"but this code supports only version {_SCHEMA_VERSION}; refusing to open "
+                f"but this code supports only version {supported}; refusing to open "
                 f"it rather than read it blindly"
             )
             raise AuthorizationError(msg)
-        return True
+        return stored
 
     def _transaction(
         self, what: str, *, immediate: bool = True
@@ -843,6 +948,7 @@ class SqliteGoalAuthorizationStore:
                     f"write-once, so history cannot be rewritten by replaying a write"
                 )
                 raise InvalidAuthorizationError(msg)
+            self._check_not_fenced(conn, snapshot)
             self._check_write_path(snapshot)
             superseded = self._check_supersedes(conn, snapshot)
             self._check_uniqueness(conn, snapshot, retiring=superseded)
@@ -1075,6 +1181,132 @@ class SqliteGoalAuthorizationStore:
                 f"stands per pair (ADR-0254 §1)"
             )
             raise InvalidAuthorizationError(msg)
+
+    def _check_not_fenced(self, conn: sqlite3.Connection, row: Authorization) -> None:
+        """Refuse a row whose goal this store holds fenced (ADR-0268 §1).
+
+        Read **inside** ``record``'s own ``BEGIN IMMEDIATE`` transaction, which is
+        what makes the refusal *"decided in the same indivisible step as the
+        write"*: the write lock is already held, so no ``end_for_goal`` can raise a
+        fence between this read and the insert, and none can be lifted between them
+        either.
+
+        **Taken before the path rules and the uniqueness checks**, so a row of a
+        fenced goal is reported as what it is rather than as whichever other rule it
+        happens to trip first.
+
+        Args:
+            conn: The connection ``record``'s transaction is running on.
+            row: The row being written.
+
+        Raises:
+            InvalidAuthorizationError: If the row's goal stands fenced. **The class
+                is reused and none is minted** — ADR-0254 §16 gives it *"a write
+                this store does not admit"*.
+        """
+        found = conn.execute(_CLOSURE_OF_GOAL, (row.goal,)).fetchone()
+        if found is None or not int(found[1]):
+            return
+        msg = (
+            f"authorization {row.id!r} names goal {row.goal!r}, which this store holds "
+            f"fenced at version {int(found[0])} by the ending its closure took; no row "
+            f"of it comes into being while that fence stands (ADR-0268 §1)"
+        )
+        raise InvalidAuthorizationError(msg)
+
+    # --- the ending -------------------------------------------------------
+
+    async def end_for_goal(self, goal: str, /, *, at: datetime, goal_version: int) -> int:
+        """End every standing authorization of ``goal`` and fence it (ADR-0268 §1).
+
+        **One indivisible step** — one ``BEGIN IMMEDIATE`` transaction — over the
+        staleness test, the settlements and the record, so no interleaving leaves a
+        partition of the rows it saw and none admits a row of that goal after it
+        returns.
+
+        **It reads no clock**: ``at`` is the caller's, and is the act's own instant
+        read once (ADR-0254 §16's discipline for ``record`` and ``settle`` alike).
+        **It evaluates no liveness**, so a lapsed ``PROPOSED`` row is settled
+        ``GOAL_CLOSED`` and not ``EXPIRED``. And it edits each row's ``disposition``
+        and ``settled_at`` and nothing else, so the settlement trigger governs this
+        write unchanged and no ``expires_at`` moves.
+
+        Returns:
+            How many rows this step moved.
+
+        Raises:
+            AuthorizationError: If the store cannot be read or written. The step is
+                all-or-nothing: the transaction rolls back, so nothing is settled
+                and no record is raised.
+        """
+        async with self._lock:
+            return await _run_to_completion(self._end_for_goal_sync, goal, at, goal_version)
+
+    def _end_for_goal_sync(self, goal: str, at: datetime, goal_version: int) -> int:
+        """Settle the goal's standing rows and raise its record, as one transaction."""
+        with self._transaction(f"end the authorizations of goal {goal!r}") as conn:
+            found = conn.execute(_CLOSURE_OF_GOAL, (goal,)).fetchone()
+            if found is not None and int(found[0]) > goal_version:
+                # **The stale-call rule** (§1). A record standing above this version
+                # means some act read the goal above it, so this attempt's own
+                # closing write is refused stale anyway — and the rows it would have
+                # ended are of a request established after its read, which it never
+                # had an authority over. **The version governs staleness, never
+                # emptiness**: nothing here is conditioned on the row set.
+                return 0
+            rows = conn.execute(
+                _STANDING_OF_GOAL,
+                (
+                    goal,
+                    AuthorizationDisposition.PROPOSED.value,
+                    AuthorizationDisposition.ESTABLISHED.value,
+                ),
+            ).fetchall()
+            for row in rows:
+                self._write_settlement(
+                    conn,
+                    _decode(str(row[0])),
+                    to=AuthorizationDisposition.GOAL_CLOSED,
+                    settled_at=at,
+                )
+            conn.execute(_WRITE_CLOSURE, (goal, goal_version, 1))
+            return len(rows)
+
+    async def clear_closure(self, goal: str, /, *, goal_version: int) -> bool:
+        """Lift ``goal``'s write fence, removing no record (ADR-0268 §1).
+
+        **Settles nothing, revives nothing and reads no clock.** A row already
+        ``GOAL_CLOSED`` is retired and no edge leaves it, so nothing here restores
+        one.
+
+        Returns:
+            Whether a **standing** fence was lifted — ``False`` where it was already
+            lifted, where the record stands at a higher version, and where the store
+            holds no record of that goal.
+
+        Raises:
+            AuthorizationError: If the store cannot be read or written.
+        """
+        async with self._lock:
+            return await _run_to_completion(self._clear_closure_sync, goal, goal_version)
+
+    def _clear_closure_sync(self, goal: str, goal_version: int) -> bool:
+        """Raise the record with the fence down, or leave it be, as one transaction."""
+        with self._transaction(f"clear the closure fence of goal {goal!r}") as conn:
+            found = conn.execute(_CLOSURE_OF_GOAL, (goal,)).fetchone()
+            if found is None or int(found[0]) > goal_version:
+                # **A goal the store holds no record of is answered ``False``, has
+                # none written and raises nothing**, and a record standing at a
+                # higher version is left exactly as it was — which is what keeps a
+                # stale caller from unfencing a later closure (§1).
+                return False
+            conn.execute(_WRITE_CLOSURE, (goal, goal_version, 0))
+            # **The record is raised whichever way this answers**: the watermark
+            # moves on a record already lifted at a lower version too, which is what
+            # makes a delayed ``end_for_goal`` at that lower version answer ``0``.
+            return bool(int(found[1]))
+
+    # --- the write path, continued ----------------------------------------
 
     @staticmethod
     def _established_ids(conn: sqlite3.Connection, row: Authorization) -> set[str]:
@@ -1496,14 +1728,32 @@ class SqliteGoalAuthorizationStore:
         the two and be erased without being counted — and each instance has its own
         ``asyncio.Lock``, which arbitrates nothing across them.
 
-        Only ``goal_authorizations`` is emptied: the ``meta`` schema marker
-        describes the file's shape rather than the user's history, so burning the
-        book leaves a database this code can still open. Nothing else is retained —
-        no id, no tombstone, no derived value — so an id held before this may be
-        recorded again afterwards.
+        **The closure records go with the rows** (ADR-0268 §1): a record is keyed by
+        a goal identifier, a goal identifier is Tier-1 user data, and one surviving
+        a wholesale erasure would be a retained identifier of a user who asked for
+        everything to be forgotten. **A record whose fence is lifted goes exactly as
+        a standing one does**, and this is the only thing that erases either — there
+        is no ``delete(goal)`` for one any more than there is a ``delete(id)`` for a
+        row. **The count answered is of rows and is unchanged**, a record being no
+        row.
+
+        So ADR-0268 §1's universal — no row of a closed goal stands and none can be
+        recorded — holds *absent a ``clear``*, and afterwards a turn that read the
+        goal open before the closure can record a row under it. That is the stated
+        cost, and the alternative is worse in the direction that matters: the only
+        fix is retaining the goal identifiers of a cleared store.
+
+        Only ``goal_authorizations`` and ``goal_authorization_closures`` are
+        emptied: the ``meta`` schema marker describes the file's shape rather than
+        the user's history, so burning the book leaves a database this code can
+        still open. Nothing else is retained — no id, no tombstone, no derived value
+        — so an id held before this may be recorded again afterwards.
         """
         with self._transaction("clear the authorization store") as conn:
             removed = conn.execute("DELETE FROM goal_authorizations").rowcount
+            # **Inside the same transaction as the rows**, so no reader sees a store
+            # emptied of rows while a fence of it still stands.
+            conn.execute("DELETE FROM goal_authorization_closures")
         return int(removed)
 
     def close(self) -> None:

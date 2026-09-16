@@ -9138,15 +9138,44 @@ class GoalAuthorizationStore(Protocol):
     §10's mechanism, which is the store settling a deadline it can see rather than a
     component deciding anything.
 
-    **A settlement is the store's single mutation, and there is no ``update``**
-    (§1). :meth:`settle` moves one field and its instant, exactly as
-    :meth:`ParkedReadStore.settle` does, and the record's coverage, basis, account,
-    destinations and expiry are never edited. **No row is deleted** — not by expiry,
-    not by a settlement, not by supersession, not by revocation, and by no operation
-    but :meth:`clear` — so a user can see what they once authorised, what they
-    declined and what lapsed. **There is no ``delete(id)``**, exactly as there is
-    none on the recipient-grant store and for its reason: a store from which a row
-    can be removed is one whose history can be rewritten.
+    **What mutates this store is three members and there is still no ``update``**
+    (§1, ADR-0268 §1). :meth:`settle` moves one field and its instant, exactly as
+    :meth:`ParkedReadStore.settle` does; :meth:`end_for_goal` settles rows the same
+    way and raises the goal's **closure record**; :meth:`clear_closure` lifts that
+    record's fence and writes no row at all. **What §1 rules binds all three
+    verbatim**: a settlement moves one field and its instant and nothing else, and
+    the record's coverage, basis, account, destinations and expiry are **never**
+    edited. **No row is deleted** — not by expiry, not by a settlement, not by
+    supersession, not by revocation, not by the ending, and by no operation but
+    :meth:`clear` — so a user can see what they once authorised, what they declined
+    and what lapsed. **There is no ``delete(id)``**, exactly as there is none on the
+    recipient-grant store and for its reason: a store from which a row can be
+    removed is one whose history can be rewritten.
+
+    **The closure record is a write fence and not a second kind of record**
+    (ADR-0268 §1). One per goal — a ``goal_version`` **watermark** and whether the
+    fence stands — it is raised by :meth:`end_for_goal`, lifted (**not** removed) by
+    :meth:`clear_closure`, and **neither member lowers it and neither removes it**.
+    It carries no basis, no instant, no expiry and no disposition, so it is neither
+    an authority, nor coverage, nor a row. **It binds :meth:`record` alone**:
+    :meth:`settle` gains no conjunct and needs none, a settlement naming a row the
+    ending settled answering ``NOT_AT_SOURCE`` truthfully. **It is carried by no
+    export and by no surface** — :meth:`export` returns the rows exactly as §16
+    fixes them — and **only :meth:`clear` erases it**, with the rows, because a goal
+    identifier is Tier 1 and one surviving a wholesale erasure would be a retained
+    identifier of a user who asked for everything to be forgotten. That absence is
+    ADR-0268's **one scope on ADR-0004 §6**, stated and bounded there (#2410); a
+    lane that adds a closure record to :meth:`export`, mints a type for one or
+    renders one on ADR-0254 §11's surfaces has breached it.
+
+    **So the ending's universal — no row of a closed goal stands and none can be
+    recorded — holds *absent a :meth:`clear`*** and absent a reuse of the goal's
+    identifier (ADR-0268 §8): after a ``clear`` a turn that read the goal open
+    before the closure can record a row under it, and that row is reached by no
+    ending and lapses on its own ``expires_at``. **No implementation retains a
+    record across ``clear``, reconstructs one afterwards, or reads ``PlanStore`` to
+    rebuild one**, and none adds a sweep, a timer, a reclaim, a repair pass or a
+    start-up scan for any of it.
 
     **A Tier 1 local store** (ADR-0004 §1, §7, ADR-0155 §1): a goal statement, an
     argument value and a span of the user's words are the user's personal data, so
@@ -9168,7 +9197,9 @@ class GoalAuthorizationStore(Protocol):
     :meth:`recent`, :meth:`export`, :meth:`record` and :meth:`settle` evaluate no
     liveness: ``settle`` takes its ``settled_at`` from the caller as ``record``
     takes its instants, because a store neither mints ids nor reads a clock
-    (ADR-0021 §3).
+    (ADR-0021 §3). **:meth:`end_for_goal` and :meth:`clear_closure` read no clock
+    and evaluate no liveness either** (ADR-0268 §1): the first takes the act's own
+    instant from the caller and the second takes no instant at all.
 
     Cancelling any method here is governed by this module's cancellation clause
     (ADR-0060). Its input-observation clause (ADR-0065) is **vacuous**: the one
@@ -9185,9 +9216,20 @@ class GoalAuthorizationStore(Protocol):
         overwriting, for :meth:`AuditTrail.record`'s reason — a store that upserts
         is one where history can be rewritten by replaying a write.
 
-        **Atomic**: the duplicate-id check, the uniqueness refusal, the path rules,
-        the transcription and non-widening checks, the path-(ii) supersession and
-        the append are **one** operation, not a read followed by a write.
+        **Atomic**: the duplicate-id check, the **closure-fence refusal**, the
+        uniqueness refusal, the path rules, the transcription and non-widening
+        checks, the path-(ii) supersession and the append are **one** operation, not
+        a read followed by a write.
+
+        **A row whose ``goal`` the store holds fenced is refused** (ADR-0268 §1),
+        decided in the **same indivisible step** as the write and with
+        :class:`~ai_assistant.core.errors.InvalidAuthorizationError` — the class
+        ADR-0254 §16 gives *"a write this store does not admit"*, one further entry
+        in that section's list and **no new class**. That is what makes the ending
+        total rather than best-effort: from the instant
+        :meth:`end_for_goal` returns, and for as long as the fence it raised stands,
+        no row of that goal stands ``PROPOSED`` or ``ESTABLISHED`` and none can come
+        into being, so a closing write cannot be raced by an establishment.
 
         **Stores a detached, validated snapshot**, recursively over reachable
         state, and never retains the caller's object. ``frozen=True`` refuses
@@ -9273,10 +9315,11 @@ class GoalAuthorizationStore(Protocol):
             The recorded id.
 
         Raises:
-            InvalidAuthorizationError: If the id is already recorded; if the write
-                would leave two ``ESTABLISHED`` rows of one goal and declaration
-                id; if a path-(ii) row fails the transcription, the non-widening or
-                the ``expires_at`` check; if a row carrying ``confirmation`` is
+            InvalidAuthorizationError: If the id is already recorded; if the row's
+                ``goal`` stands fenced by :meth:`end_for_goal` (ADR-0268 §1); if the
+                write would leave two ``ESTABLISHED`` rows of one goal and
+                declaration id; if a path-(ii) row fails the transcription, the
+                non-widening or the ``expires_at`` check; if a row carrying ``confirmation`` is
                 written in any disposition but ``PROPOSED``; if a row carrying
                 ``confirmation`` unset is written in any disposition but
                 ``ESTABLISHED`` or with ``settled_at`` unequal to ``proposed_at``;
@@ -9294,7 +9337,20 @@ class GoalAuthorizationStore(Protocol):
         to: AuthorizationDisposition,
         settled_at: UtcInstant,
     ) -> AuthorizationSettlement:
-        """Move one row along one of ADR-0254 §1's five edges, or say why not.
+        """Move one row along one of ADR-0254 §1's seven edges, or say why not.
+
+        **Seven since ADR-0268 §2**, which adds ``PROPOSED → GOAL_CLOSED`` and
+        ``ESTABLISHED → GOAL_CLOSED``. This member **admits both like any other
+        edge** and answers
+        :class:`~ai_assistant.core.types.AuthorizationSettlement` unchanged, still
+        closed at four members, with ``WOULD_DUPLICATE`` unreachable on either. That
+        a single-row settlement to ``GOAL_CLOSED`` is admissible here is deliberate:
+        what keeps it from happening is ADR-0268 §6's **writer** clause standing on
+        ADR-0254 §15, not a refusal by the store, because a refusal has nowhere
+        truthful to go — ``NOT_AT_SOURCE`` would be false of a row standing exactly
+        at the edge's source. ``GOAL_CLOSED`` is written through
+        :meth:`end_for_goal` alone, and a lane writing it from anywhere else has
+        breached that clause.
 
         **The read, the comparisons and the writes are one indivisible step**,
         which is :meth:`ParkedReadStore.settle`'s own construction and
@@ -9306,8 +9362,9 @@ class GoalAuthorizationStore(Protocol):
         version token is added to the type** and two racing settlements cannot both
         win: the second finds a disposition the edge does not leave and is answered
         :attr:`~ai_assistant.core.types.AuthorizationSettlement.NOT_AT_SOURCE`.
-        **Every move that is not one of the five edges is refused**, including any
-        move out of a retired disposition.
+        **Every move that is not one of the seven edges is refused**, including any
+        move out of a retired disposition — of which there are now **five**,
+        ``GOAL_CLOSED`` among them (ADR-0268 §2).
 
         **A settlement to ``ESTABLISHED`` takes §1's uniqueness check and the
         supersession inside that same step.** Where the row carries ``supersedes``
@@ -9383,6 +9440,118 @@ class GoalAuthorizationStore(Protocol):
             AuthorizationError: If the store cannot be read or written. A refusal
                 is **not** this: the four outcomes are total over what the step can
                 answer.
+        """
+        ...
+
+    async def end_for_goal(self, goal: Identifier, /, *, at: UtcInstant, goal_version: int) -> int:
+        """End every standing authorization of ``goal`` and fence it (ADR-0268 §1).
+
+        **In one indivisible step** it settles every row of that goal standing
+        ``PROPOSED`` or ``ESTABLISHED`` to
+        :attr:`~ai_assistant.core.types.AuthorizationDisposition.GOAL_CLOSED` with
+        ``settled_at`` at ``at``, **raises the goal's closure record to
+        ``goal_version`` with the fence standing**, and answers **how many rows it
+        moved**. No interleaving produces a partition of the rows its step saw, and
+        none leaves a row of that goal standing ``PROPOSED`` or ``ESTABLISHED``
+        after it returns.
+
+        **It reads no clock**, the instant being the caller's — ADR-0254 §16's
+        discipline for :meth:`record` and :meth:`settle` alike. **It evaluates no
+        liveness**, ending a lapsed row exactly as it ends a live one: a ``PROPOSED``
+        row already past its ``expires_at`` is settled ``GOAL_CLOSED`` and **not**
+        ``EXPIRED``, which retires the last limb of ADR-0254 §20's arm 37 (ADR-0268
+        §7). And it edits **nothing else** on any row — ``disposition`` and
+        ``settled_at`` alone — so §1's *"a row's coverage, basis, account,
+        destinations and expiry are never edited"* binds it unchanged, and **no
+        ``expires_at`` is moved, shortened or recomputed** (ADR-0268 §3).
+
+        **The instant is the act's own, read once.** An act calling this member
+        reads the clock **once** and passes that instant, and where its own status
+        write carries one it is the **same** instant — so a ``GOAL_CLOSED`` row's
+        ``settled_at`` is the instant of the **act** and never a second reading
+        taken between the two writes. A **retry attempt** (ADR-0261 §2) passes its
+        own attempt's instant and not the first attempt's.
+
+        **The version is the one the caller's own status write *expects*, never the
+        one that write returns.** ``PlanStore.set_goal_status`` advances
+        ``Goal.version`` and answers the goal as written (ADR-0250 §9), so an act
+        holds two versions and the record is keyed to the **earlier**. A caller
+        passing the returned version has breached ADR-0268 §1.
+
+        **The record is a watermark and not a latch.** Where it already stands at a
+        version **above** ``goal_version`` this moves no row, writes nothing and
+        answers ``0`` — the stale-call rule, and the store's whole defence against
+        an act that read the goal before an intervening closure or reopen and
+        arrived after it. **The version governs staleness, never emptiness**: a
+        repeated call at or above a standing record finds none left to move and
+        answers ``0`` because the fence stood throughout, while a call after a
+        reopen lifted it and a row was admitted since **ends that row and counts
+        it**, raising the record and standing the fence.
+
+        **A goal the store holds no row of answers ``0`` and is fenced all the
+        same**, which is the shape :meth:`standing` already takes for a goal it does
+        not hold.
+
+        **Its one writer is ``orchestration``** and it is called at exactly three
+        places and no fourth (ADR-0268 §6): before each ``ABANDONED`` closing-write
+        attempt, before A10's ``ACHIEVED`` write, and after a **successful**
+        ``ACTIVE`` write on ADR-0250 §13's reopen. No store, no ``ActionPolicy``, no
+        ``AuditTrail``, no interface adapter, no reader, no tool, no model output,
+        and no sweep, timer, scheduler, reconciliation pass or start-up scan calls
+        it. **A ``→ BLOCKED`` write ends nothing**: ADR-0250 §1 rules ``BLOCKED``
+        open, and a lane that ended an authorization on one has breached ADR-0268
+        §1.
+
+        Args:
+            goal: The goal whose authorizations end and whose fence is raised.
+            at: The instant the rows are settled at — the **act's own**, read once.
+            goal_version: The version the act's own status write names as its
+                ``expected_version``.
+
+        Returns:
+            How many rows this step moved; ``0`` where it moved none.
+
+        Raises:
+            AuthorizationError: If the store cannot be read or written. **The step
+                is all-or-nothing**: a fault leaves no row settled and no record
+                raised.
+        """
+        ...
+
+    async def clear_closure(self, goal: Identifier, /, *, goal_version: int) -> bool:
+        """Lift ``goal``'s write fence, removing no record (ADR-0268 §1).
+
+        Where the closure record stands at a version **at or below**
+        ``goal_version`` this raises the record to ``goal_version`` with the fence
+        **lifted**, and answers whether a standing fence was lifted — ``True`` where
+        one was standing, ``False`` where it was already lifted. **A record standing
+        at a higher version is left exactly as it was and ``False`` is answered**,
+        which is what keeps a stale caller from unfencing a later closure; and **a
+        goal the store holds no record of is answered ``False``, has none written
+        and raises nothing**.
+
+        **It settles nothing, revives nothing and reads no clock.** A row already
+        ``GOAL_CLOSED`` is retired and no edge leaves it (ADR-0268 §2), so nothing
+        here restores, re-opens or re-establishes one.
+
+        **It has exactly one caller and no second** (ADR-0268 §6): ADR-0250 §13's
+        reopen, immediately after that reopen's own :meth:`end_for_goal` and only on
+        a successful ``ACTIVE`` write, carrying that write's own
+        ``expected_version``. **No act compensates a failed closing write with it**
+        — ADR-0268 §1 refuses that compensation with its reasons, a fence a
+        concurrent act is relying on being indistinguishable from an orphaned one at
+        the same version.
+
+        Args:
+            goal: The goal whose fence is lifted.
+            goal_version: The version the reopen's ``ACTIVE`` write named as its
+                ``expected_version``.
+
+        Returns:
+            Whether a **standing** fence was lifted by this call.
+
+        Raises:
+            AuthorizationError: If the store cannot be read or written.
         """
         ...
 

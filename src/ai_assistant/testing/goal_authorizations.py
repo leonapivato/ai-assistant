@@ -46,6 +46,7 @@ things a conforming implementation is compared against.
 
 from __future__ import annotations
 
+from dataclasses import dataclass
 from datetime import UTC, datetime, timedelta
 from decimal import Decimal
 from typing import TYPE_CHECKING, Final, final
@@ -439,20 +440,25 @@ def _named(given: object) -> str:
     return "the given value"
 
 
-#: ADR-0254 §1's transition graph, whole and as data — the same five edges
-#: ``SqliteGoalAuthorizationStore`` states, written a second time because
-#: ``testing/`` may not import ``permissions/`` (golden rule 1). The conformance
-#: suite is what holds the two in step.
+#: ADR-0254 §1's transition graph, whole and as data — the same **seven** edges
+#: ``SqliteGoalAuthorizationStore`` states (ADR-0268 §2 added the last two),
+#: written a second time because ``testing/`` may not import ``permissions/``
+#: (golden rule 1). The conformance suite is what holds the two in step.
 _EDGES: Final[dict[AuthorizationDisposition, frozenset[AuthorizationDisposition]]] = {
     AuthorizationDisposition.PROPOSED: frozenset(
         {
             AuthorizationDisposition.ESTABLISHED,
             AuthorizationDisposition.DECLINED,
             AuthorizationDisposition.EXPIRED,
+            AuthorizationDisposition.GOAL_CLOSED,
         }
     ),
     AuthorizationDisposition.ESTABLISHED: frozenset(
-        {AuthorizationDisposition.REVOKED, AuthorizationDisposition.SUPERSEDED}
+        {
+            AuthorizationDisposition.REVOKED,
+            AuthorizationDisposition.SUPERSEDED,
+            AuthorizationDisposition.GOAL_CLOSED,
+        }
     ),
 }
 
@@ -579,6 +585,24 @@ def _member_defect(later: CoverageMember, earlier: CoverageMember | None) -> str
 
 
 @final
+@dataclass(frozen=True, slots=True)
+class _Closure:
+    """One goal's closure record — a watermark and whether the fence stands (ADR-0268 §1).
+
+    **Frozen**, because neither member edits one in place: both replace it wholesale
+    at the version they were passed, and a mutable record is a place a stale caller
+    could lower one.
+    """
+
+    version: int
+    """The ``goal_version`` this record stands at. **Never lowered**, by either member."""
+
+    fenced: bool
+    """Whether this store admits a row of that goal. Raised by ``end_for_goal``,
+    lifted — not removed — by ``clear_closure``."""
+
+
+@final
 class _AuthorizationLog:
     """The history all three fakes answer from (ADR-0254 §1, §16).
 
@@ -591,8 +615,13 @@ class _AuthorizationLog:
     """
 
     def __init__(self) -> None:
-        """Create an empty history."""
+        """Create an empty history, holding no row and no closure record."""
         self._records: list[Authorization] = []
+        #: ADR-0268 §1's closure records — one per goal the store was told closed,
+        #: each a ``goal_version`` **watermark** and whether the write fence stands.
+        #: **A watermark and not a latch**: neither member lowers it and neither
+        #: removes it, and only :meth:`clear` erases one.
+        self._closures: dict[str, _Closure] = {}
 
     # --- writes -----------------------------------------------------------
 
@@ -619,6 +648,7 @@ class _AuthorizationLog:
                 f"write-once, so history cannot be rewritten by replaying a write"
             )
             raise InvalidAuthorizationError(msg)
+        self._check_not_fenced(snapshot)
         self._check_write_path(snapshot)
         superseded = self._check_supersedes(snapshot)
         self._check_uniqueness(snapshot, retiring=superseded)
@@ -825,6 +855,75 @@ class _AuthorizationLog:
             and held.disposition is AuthorizationDisposition.ESTABLISHED
         }
 
+    def _check_not_fenced(self, row: Authorization) -> None:
+        """Refuse a row whose goal stands fenced (ADR-0268 §1).
+
+        Taken inside :meth:`append`'s one step, beside the duplicate-id check and
+        before every other, so no interleaving admits a row of a goal the ending
+        has fenced. **The class is reused and none is minted**: ``record``'s
+        refusals are all :class:`InvalidAuthorizationError`.
+
+        Raises:
+            InvalidAuthorizationError: If the row's goal stands fenced.
+        """
+        closure = self._closures.get(row.goal)
+        if closure is None or not closure.fenced:
+            return
+        msg = (
+            f"authorization {row.id!r} names goal {row.goal!r}, which this store holds "
+            f"fenced at version {closure.version} by the ending its closure took; no "
+            f"row of it comes into being while that fence stands (ADR-0268 §1)"
+        )
+        raise InvalidAuthorizationError(msg)
+
+    def end_for_goal(self, goal: str, at: datetime, goal_version: int) -> int:
+        """Settle every standing row of ``goal`` ``GOAL_CLOSED`` and fence it (ADR-0268 §1).
+
+        **One step**: the staleness test, the settlements and the record are taken
+        with no ``await`` between them, so no interleaving leaves a partition of the
+        rows it saw.
+
+        **The version governs staleness, never emptiness**: a record already
+        standing *above* ``goal_version`` moves no row, writes nothing and answers
+        ``0``, while a call at or above it ends whatever stands — which on a
+        repeated call is nothing, and after a reopen admitted a fresh row is that
+        row.
+
+        **It evaluates no liveness**, so a lapsed ``PROPOSED`` row is settled
+        ``GOAL_CLOSED`` and not ``EXPIRED``, and it edits nothing but each row's
+        disposition and its instant.
+        """
+        standing = self._closures.get(goal)
+        if standing is not None and standing.version > goal_version:
+            return 0
+        moved = [
+            one
+            for one in self._records
+            if one.goal == goal
+            and one.disposition
+            in {AuthorizationDisposition.PROPOSED, AuthorizationDisposition.ESTABLISHED}
+        ]
+        for one in moved:
+            self._write_settlement(one, to=AuthorizationDisposition.GOAL_CLOSED, settled_at=at)
+        self._closures[goal] = _Closure(version=goal_version, fenced=True)
+        return len(moved)
+
+    def clear_closure(self, goal: str, goal_version: int) -> bool:
+        """Lift ``goal``'s fence, removing no record (ADR-0268 §1).
+
+        Answers whether a **standing** fence was lifted. A record standing at a
+        higher version is left exactly as it was and ``False`` is answered — which
+        is what keeps a stale caller from unfencing a later closure — and a goal no
+        record is held of is answered ``False`` with none written.
+
+        **It settles nothing, revives nothing and reads no clock.**
+        """
+        standing = self._closures.get(goal)
+        if standing is None or standing.version > goal_version:
+            return False
+        self._closures[goal] = _Closure(version=goal_version, fenced=False)
+        return standing.fenced
+
     def settle(
         self, authorization_id: str, to: AuthorizationDisposition, settled_at: datetime
     ) -> AuthorizationSettlement:
@@ -961,9 +1060,17 @@ class _AuthorizationLog:
         return tuple(_detached(one) for one in (ranked if limit is None else ranked[:limit]))
 
     def clear(self) -> int:
-        """Delete every row, returning the number removed."""
+        """Delete every row **and every closure record**, returning the row count.
+
+        ADR-0268 §1: a record is keyed by a goal identifier, which is Tier 1, so one
+        surviving a wholesale erasure would be a retained identifier of a user who
+        asked for everything to be forgotten. **A lifted record goes exactly as a
+        standing one does**, and ``clear`` is the only thing that erases either.
+        **The count is of rows unchanged**, a record being no row.
+        """
         removed = len(self._records)
         self._records.clear()
+        self._closures.clear()
         return removed
 
 
@@ -1383,7 +1490,7 @@ class FakeGoalAuthorizationStore:
         to: AuthorizationDisposition,
         settled_at: datetime,
     ) -> AuthorizationSettlement:
-        """Move one row along one of ADR-0254 §1's five edges, or say why not.
+        """Move one row along one of ADR-0254 §1's seven edges, or say why not.
 
         **A refusal is a result and never an exception**, so the three non-``SETTLED``
         members are returned rather than raised; the only raise here is the scripted
@@ -1405,6 +1512,39 @@ class FakeGoalAuthorizationStore:
         self._refuse_write()
         async with self._resource.held():
             return self._log.settle(authorization_id, to, settled_at)
+
+    async def end_for_goal(self, goal: str, /, *, at: datetime, goal_version: int) -> int:
+        """End every standing row of ``goal``, fence it, and say how many moved.
+
+        The staleness test, the settlements and the record are taken **inside** the
+        modelled resource with no ``await`` between them, which is where ADR-0268
+        §1's indivisibility is obtained on a single event loop: nothing runs between
+        the rows this call saw and the fence it raises, so no interleaving leaves a
+        partition of them.
+
+        **It reads no clock** — ``at`` is the caller's — and **evaluates no
+        liveness**.
+
+        Raises:
+            AuthorizationError: If a store fault is scripted (:meth:`fail_writes`).
+                The step is all-or-nothing, so nothing is settled and no record is
+                raised.
+        """
+        self._refuse_write()
+        async with self._resource.held():
+            return self._log.end_for_goal(goal, at, goal_version)
+
+    async def clear_closure(self, goal: str, /, *, goal_version: int) -> bool:
+        """Lift ``goal``'s fence, removing no record, and say whether one was standing.
+
+        **Reads no clock, settles nothing and revives nothing.**
+
+        Raises:
+            AuthorizationError: If a store fault is scripted (:meth:`fail_writes`).
+        """
+        self._refuse_write()
+        async with self._resource.held():
+            return self._log.clear_closure(goal, goal_version)
 
     async def live_for(self, goal: str, tool_id: str) -> Authorization | None:
         """The live row of ``goal`` through ``tool_id``, or ``None``.
