@@ -365,6 +365,19 @@ class _CollectedAct:
 #: ADR-0197 §8 makes a routed pass that is not a park owe one.
 _ROUTED_REPLY: Final = "the assistant did what you asked."
 
+#: The step statuses ADR-0262 §4's **third** ending condition admits, stated as the
+#: three it names rather than as the four it excludes: *"every step of every execution
+#: it names stands ``SUCCEEDED``, ``FAILED`` or ``SKIPPED`` — so none stands
+#: ``PENDING``, ``AWAITING_APPROVAL``, ``RUNNING`` or ``INDETERMINATE``"*.
+#:
+#: **Not** :data:`~ai_assistant.core.types.TERMINAL_STEP_STATUSES`, which is a different
+#: set for a different question — ``FAILED`` sits outside it *"(it may still be
+#: retried)"*, and reading it here would refuse a failed step §4 admits, so the
+#: attempt an implementation could never end is exactly the one §4's limb 1 reports.
+_ENDING_ADMITS: Final[frozenset[StepStatus]] = frozenset(
+    {StepStatus.SUCCEEDED, StepStatus.FAILED, StepStatus.SKIPPED}
+)
+
 
 class FakeAssistantEngine:
     """An in-memory :class:`~ai_assistant.core.protocols.AssistantEngine`.
@@ -966,6 +979,23 @@ class FakeAssistantEngine:
           **second** ending condition names among the three paused states an attempt may
           not end from. ADR-0250 §10's *"A turn that raised a question drives no step of
           its plan and produces no effect"* is the same fact from the other side.
+        * a pass whose **visible execution holds a non-terminal step** carries none.
+          §4's **third** ending condition is that "every step of every execution it
+          names stands ``SUCCEEDED``, ``FAILED`` or ``SKIPPED``", and
+          :attr:`StepOutcome.state` puts one such execution on the outcome whole — so a
+          step standing ``PENDING``, ``AWAITING_APPROVAL``, ``RUNNING`` or
+          ``INDETERMINATE`` is decisive on its own. **It is a one-way test and not the
+          store's**: an attempt may name executions this outcome does not show, so a
+          clean visible execution proves nothing and the caller still decides. That
+          asymmetry is the right one — the fake refuses only what it can *see* is
+          unreachable.
+
+        **Taken as one pass over §4's three conditions rather than one predicate per
+        finding.** Each is written beside the clause it comes from and the admitted
+        statuses are named in :data:`_ENDING_ADMITS`, which
+        ``tests/testing/test_fake_engine_attempt_report.py`` pins against §4's own
+        enumeration — so a later decision moving that set fails a test here rather than
+        leaving this gate quietly short a status.
 
         **A fake that filled the member in anywhere else would hand back a shape no
         conforming engine produces**, which is the looseness ADR-0026 §7 forbids and
@@ -1003,11 +1033,24 @@ class FakeAssistantEngine:
             ValueError: If the report this pass would carry names ``CANCELLED``.
         """
         eligible = (
+            # The two structural preconditions: a pass that made a plan, and one that
+            # took no route.
             outcome.turn is not None
+            and outcome.routed is None
+            # §4's condition 1 — a reply that **completed**.
             and outcome.reply is not None
             and not outcome.reply_degraded
-            and outcome.routed is None
+            # §4's condition 2 — the attempt is not paused. ``clarification`` is the one
+            # of its three states the outcome names; the ``AWAITING_APPROVAL`` step it
+            # also excludes is a *status*, so condition 3's sweep is what catches it.
             and outcome.clarification is None
+            # §4's condition 3 — every step of every execution the attempt names stands
+            # terminal. The outcome shows one execution, which is the whole of what a
+            # double can see, and a non-terminal step there is decisive on its own.
+            and not (
+                outcome.step is not None
+                and any(step.status not in _ENDING_ADMITS for step in outcome.step.state.steps)
+            )
         )
         reported = outcome.attempt_report or (self.attempt_report if eligible else None)
         if reported is None:
@@ -1015,9 +1058,10 @@ class FakeAssistantEngine:
         if not eligible:
             msg = (
                 "this pass ended no attempt, so it carries no report: a report is "
-                "non-None exactly on a turn that ended one, and §4's conditions for "
-                "that are a reply that **completed**, on a pass that planned, took no "
-                "route and left the attempt unpaused (ADR-0262 §4, §6)"
+                "non-None exactly on a turn that ended one, and §4's three conditions "
+                "for that are a reply that completed, an attempt that is not paused, "
+                "and every step of it standing SUCCEEDED, FAILED or SKIPPED — on a "
+                "pass that planned and took no route (ADR-0262 §4, §6)"
             )
             raise ValueError(msg)
         if reported.outcome is AttemptOutcome.CANCELLED:

@@ -31,6 +31,7 @@ from typing import Final
 import pytest
 
 from ai_assistant.core.types import (
+    TERMINAL_STEP_STATUSES,
     ActionPlan,
     AttemptOutcome,
     AttemptReport,
@@ -38,7 +39,9 @@ from ai_assistant.core.types import (
     BeliefBand,
     Clarification,
     CurrentContext,
+    Disposition,
     EngagementDisposition,
+    ExecutionState,
     GoalBrief,
     GoalEngagement,
     GoalStatus,
@@ -48,13 +51,19 @@ from ai_assistant.core.types import (
     RoutableOperation,
     RoutedOperation,
     RouteOutcome,
+    SkipReason,
     SpokenAudio,
     SpokenAudioFormat,
+    StepExecution,
+    StepFailure,
+    StepOutcome,
+    StepStatus,
     TimeOfDay,
     TurnOutcome,
     TurnResult,
 )
 from ai_assistant.testing import FakeAssistantEngine
+from ai_assistant.testing.engine import _ENDING_ADMITS
 
 PATIENT: Final = timedelta(seconds=30)
 _AT: Final = datetime(2026, 9, 16, 12, 0, tzinfo=UTC)
@@ -82,6 +91,43 @@ def _belief() -> Belief:
         content="prefers riverside pitches",
         confidence=0.9,
         last_updated=_AT,
+    )
+
+
+#: The statuses :class:`StepExecution` requires a finishing instant on, and the subset
+#: of those it also requires a failure for (ADR-0039 §2).
+_FINISHED: Final = (StepStatus.SUCCEEDED, StepStatus.FAILED, StepStatus.INDETERMINATE)
+_FAILED: Final = (StepStatus.FAILED, StepStatus.INDETERMINATE)
+
+
+def _step(status: StepStatus) -> StepOutcome:
+    """One driven step whose visible execution holds a single step at ``status``.
+
+    The marks each status requires are supplied here rather than in the cases, so that
+    a case is about the status alone: a claim needs a bound tool, an approval and a
+    start; a finished step needs an instant; and a failed or indeterminate one needs a
+    failure (ADR-0039 §2).
+    """
+    marks: dict[str, object] = {"step_id": "s-1", "status": status}
+    if status is StepStatus.SKIPPED:
+        marks["skip_reason"] = SkipReason.UNMET_DEPENDENCY
+    elif status is not StepStatus.PENDING:
+        marks["bound_tool"] = "book_room"
+    if status not in {StepStatus.PENDING, StepStatus.AWAITING_APPROVAL, StepStatus.SKIPPED}:
+        marks |= {"approval_ref": "d-1", "started_at": _AT, "attempts": 1}
+    if status in _FINISHED:
+        marks["finished_at"] = _AT
+    if status in _FAILED:
+        marks["failure"] = StepFailure(message="the provider refused")
+    return StepOutcome(
+        disposition=Disposition.EXECUTED,
+        step_id="s-1",
+        state=ExecutionState(
+            id="exec-1",
+            plan_id="p-1",
+            steps=(StepExecution(**marks),),  # type: ignore[arg-type]  # per-status marks
+            updated_at=_AT,
+        ),
     )
 
 
@@ -358,6 +404,86 @@ async def test_a_turn_that_raised_a_question_is_given_none(scripted: bool) -> No
         outcome = await engine.converse("book it", timeout=PATIENT)
         assert outcome.clarification is not None
         assert outcome.attempt_report is None
+
+
+@pytest.mark.parametrize(
+    "status",
+    [
+        StepStatus.PENDING,
+        StepStatus.AWAITING_APPROVAL,
+        StepStatus.RUNNING,
+        StepStatus.INDETERMINATE,
+    ],
+)
+@pytest.mark.parametrize("scripted", [False, True])
+async def test_a_visible_execution_holding_a_non_terminal_step_is_given_none(
+    status: StepStatus, scripted: bool
+) -> None:
+    """§4's **third** ending condition, over each of the four statuses it excludes.
+
+    *"Every step of every execution it names stands ``SUCCEEDED``, ``FAILED`` or
+    ``SKIPPED``"* — which "covers the two statuses ADR-0259 §4 and ADR-0261 §3 read for
+    *outstanding*, and the two a claim can still be made from".
+    :attr:`StepOutcome.state` puts one such execution on the outcome whole, so a step
+    standing any of the four is decisive on its own.
+
+    All four rather than one, because an implementation testing a single status passes
+    the case it was written for and admits the other three — and each of the four is
+    reached by a different route: a walk that stopped, a park, a claim in flight, and a
+    possible effect.
+    """
+    engine = FakeAssistantEngine()
+    engine.attempt_report = VERIFIED
+    driven = _scripted(step=_step(status))
+    engine.turn_outcome = (
+        driven.model_copy(update={"attempt_report": VERIFIED}) if scripted else driven
+    )
+
+    if scripted:
+        with pytest.raises(ValueError, match="ended no attempt"):
+            await engine.converse("book it", timeout=PATIENT)
+    else:
+        outcome = await engine.converse("book it", timeout=PATIENT)
+        assert outcome.attempt_report is None
+
+
+@pytest.mark.parametrize("status", [StepStatus.SUCCEEDED, StepStatus.FAILED, StepStatus.SKIPPED])
+async def test_a_visible_execution_of_ended_steps_is_eligible(status: StepStatus) -> None:
+    """The other side of the third condition: the three statuses it **admits**.
+
+    ``FAILED`` among them, which is the one an implementation reaching for
+    :data:`~ai_assistant.core.types.TERMINAL_STEP_STATUSES` would get wrong — that set
+    excludes it *"(it may still be retried)"*, and reading it here would refuse exactly
+    the attempt §4's limb 1 exists to report.
+    """
+    engine = FakeAssistantEngine()
+    engine.attempt_report = VERIFIED
+    engine.turn_outcome = _scripted(step=_step(status))
+
+    outcome = await engine.converse("book it", timeout=PATIENT)
+
+    assert outcome.attempt_report == VERIFIED
+
+
+def test_the_admitted_statuses_are_the_three_the_ending_condition_names() -> None:
+    """The gate's set, pinned against §4's own enumeration rather than trusted.
+
+    Stated in both directions over the whole vocabulary, so that a later decision adding
+    a ``StepStatus`` fails here — and whoever adds it decides, in this file, which side
+    of §4's third condition it falls on. That is the tripwire the gate above was short
+    of for three rounds: each round found one more condition it did not encode, and a
+    set nobody pins is how a fourth would have arrived.
+    """
+    assert set(_ENDING_ADMITS) == {StepStatus.SUCCEEDED, StepStatus.FAILED, StepStatus.SKIPPED}
+    assert set(StepStatus) - _ENDING_ADMITS == {
+        StepStatus.PENDING,
+        StepStatus.AWAITING_APPROVAL,
+        StepStatus.RUNNING,
+        StepStatus.INDETERMINATE,
+    }
+    assert StepStatus.FAILED not in TERMINAL_STEP_STATUSES, (
+        "the set this gate must not reach for: §4 admits FAILED and that one does not"
+    )
 
 
 async def test_a_report_scripted_onto_an_ineligible_pass_is_refused() -> None:
