@@ -2018,3 +2018,89 @@ async def test_a_deeply_nested_corrupt_row_is_this_stores_error_too(tmp_path: Pa
             await reopened.records()
     finally:
         reopened.close()
+
+
+# --------------------------------------------------------------------------- #
+# what the fourth adversarial round found
+# --------------------------------------------------------------------------- #
+
+
+async def _an_established_store(path: Path) -> None:
+    """Create a store with two bookings past a bound of one, and close it.
+
+    Past the bound on purpose: the point of every case below is that the surviving
+    records **cannot** reconstruct the count, because pruning has already removed one.
+    """
+    store = SqliteBookingStore(path=path, retained=1)
+    await store.commit({DATE_ARGUMENT: "2026-10-01"})
+    await store.commit({DATE_ARGUMENT: "2026-10-02"})
+    assert await store.commit_count() == 2
+    assert len(await store.records()) == 1
+    store.close()
+
+
+def _edit(path: Path, statement: str) -> None:
+    """Run one statement against the store's file, as a tamper would.
+
+    Args:
+        path: The store's path.
+        statement: The SQL to run.
+    """
+    handle = sqlite3.connect(path)
+    try:
+        handle.execute(statement)
+        handle.commit()
+    finally:
+        handle.close()
+
+
+@pytest.mark.parametrize(
+    ("tamper", "why"),
+    [
+        ("DELETE FROM meta WHERE key = 'commit_count'", "the count alone is gone"),
+        ("DELETE FROM meta WHERE key = 'schema_version'", "the version alone is gone"),
+        ("DELETE FROM meta", "both rows are gone"),
+    ],
+)
+async def test_every_incomplete_metadata_pair_is_refused(
+    tmp_path: Path, tamper: str, why: str
+) -> None:
+    """Newness is decided from the whole state the open found (ADR-0273 §2).
+
+    **The version-alone case is why this is parametrised.** An earlier repair read the
+    version first and stamped it immediately, so the answer to *"is this store new?"*
+    depended on that very write: a store that had lost only its ``schema_version`` row
+    looked new, and its **surviving** commit count was overwritten with ``"0"`` — the
+    same reset the count-alone case was fixed to prevent, reached by the other route.
+    The fix reads **both** rows and the table's prior existence before writing anything,
+    and refuses every incomplete pair.
+
+    ``DELETE FROM meta`` is the third shape: both rows gone while the ``bookings`` table
+    stands. That is a store whose ``meta`` was emptied and not a new one — the rows and
+    the table are written in **one** transaction, so no interruption of this code can
+    produce it.
+    """
+    path = tmp_path / "bookings.db"
+    await _an_established_store(path)
+    _edit(path, tamper)
+
+    with pytest.raises(BookingStoreError, match="corrupt"):
+        SqliteBookingStore(path=path, retained=1)
+    assert why
+
+
+async def test_a_reopen_of_an_untouched_store_keeps_its_count(tmp_path: Path) -> None:
+    """And an untouched store reopens with its count intact.
+
+    The other half of every refusal above: a case that only ever asserted refusals would
+    pass just as well over a store that refused to open at all.
+    """
+    path = tmp_path / "bookings.db"
+    await _an_established_store(path)
+
+    reopened = SqliteBookingStore(path=path, retained=1)
+    try:
+        assert await reopened.commit_count() == 2
+        assert len(await reopened.records()) == 1
+    finally:
+        reopened.close()
