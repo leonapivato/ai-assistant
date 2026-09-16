@@ -34,11 +34,15 @@ from ai_assistant.core.types import (
     ActionPlan,
     AttemptOutcome,
     AttemptReport,
+    Belief,
+    BeliefBand,
     CurrentContext,
     GoalBrief,
     GoalStatus,
     Ground,
+    MemoryKind,
     ReadAnswerOutcome,
+    RoutableOperation,
     SpokenAudio,
     SpokenAudioFormat,
     TimeOfDay,
@@ -58,6 +62,22 @@ RECORDING: Final = SpokenAudio(
 
 #: One report, for the cases that only need *a* report rather than a particular member.
 VERIFIED: Final = AttemptReport(outcome=AttemptOutcome.VERIFIED, continues=False)
+
+#: The members ADR-0262 §4's limbs yield, which are the six §6 fixes a statement for.
+#: Derived rather than transcribed — see the case that pins the derivation.
+COMPARED: Final[frozenset[AttemptOutcome]] = frozenset(AttemptOutcome) - {AttemptOutcome.CANCELLED}
+
+
+def _belief() -> Belief:
+    """One live belief, as a routed ``forget`` resolves it."""
+    return Belief(
+        id="b-1",
+        band=BeliefBand.ASSERTED,
+        kind=MemoryKind.PREFERENCE,
+        content="prefers riverside pitches",
+        confidence=0.9,
+        last_updated=_AT,
+    )
 
 
 def _scripted(**overrides: object) -> TurnOutcome:
@@ -106,16 +126,18 @@ async def test_a_turn_carries_no_report_until_one_is_scripted() -> None:
     assert outcome.attempt_report is None
 
 
-@pytest.mark.parametrize("member", list(AttemptOutcome))
-async def test_the_lever_drives_a_composed_turn_over_every_member(
+@pytest.mark.parametrize("member", sorted(COMPARED))
+async def test_the_lever_drives_a_composed_turn_over_every_compared_member(
     member: AttemptOutcome,
 ) -> None:
     """§11's L5 owes a fixed statement per member; this is what makes each reachable.
 
-    Every member rather than the six §4's limbs yield: ``CANCELLED`` is reached by no
-    limb of the comparison, but it **is** a member of the vocabulary
-    :attr:`AttemptReport.outcome` is typed by, and a double that refused to be driven
-    over it would decide for a consumer which values it may test its handling of.
+    **The six §4's limbs yield, and not the seventh.** §6 fixes one statement per
+    member and enumerates six; ``CANCELLED`` is reached by no limb, because a cancelled
+    attempt is ADR-0261 §2's act and ADR-0249 §5's *"no transition leaves a terminal
+    member"* keeps it out of this phase's reach. Driving a double over all seven would
+    put a consumer under pressure to mint a seventh statement §6 does not authorise,
+    which is the widening the case below refuses outright.
     """
     engine = FakeAssistantEngine()
     engine.attempt_report = AttemptReport(outcome=member, continues=False)
@@ -123,6 +145,42 @@ async def test_the_lever_drives_a_composed_turn_over_every_member(
     outcome = await engine.converse("book it", timeout=PATIENT)
 
     assert outcome.attempt_report == AttemptReport(outcome=member, continues=False)
+
+
+def test_the_six_are_every_member_but_the_one_this_phase_never_writes() -> None:
+    """The roster above, derived from the enumeration rather than transcribed from it.
+
+    Spelling the six out as literals would leave this file silently short a case when a
+    later decision adds a member the comparison *does* yield — the failure ADR-0261 §3
+    made real by taking ``AttemptOutcome`` from six to seven. Deriving them means such
+    a member arrives parametrized, and a member this phase must not write has to be
+    named here to be excluded.
+    """
+    assert set(AttemptOutcome) - COMPARED == {AttemptOutcome.CANCELLED}
+    assert len(COMPARED) == 6, "ADR-0262 §6's six fixed statements, one per member"
+
+
+async def test_the_lever_refuses_the_member_no_limb_reaches() -> None:
+    """§4: *"**no lane writes ``AttemptOutcome.CANCELLED`` from this phase**"*.
+
+    A report naming it is a state no engine reaches, so a double that let a consumer
+    arrange one would certify that consumer against a shape no conforming engine
+    returns — *"the looseness ADR-0026 §7 forbids"*, in
+    :meth:`FakeAssistantEngine._stating`'s own words one member over. Refused rather
+    than passed silently, which is
+    :class:`~ai_assistant.testing.FakeToolRegistry`'s rule for the single arrangement
+    mistake a consumer could plausibly make.
+
+    **The refusal is on the arrangement and not on the type.** :class:`AttemptReport`
+    still admits the member — it is handed one rather than computing one, and narrowing
+    it would be this decision policing a value ADR-0261 §3 owns — which
+    ``tests/core/test_attempt_report_types.py`` pins from the other side.
+    """
+    engine = FakeAssistantEngine()
+    engine.attempt_report = AttemptReport(outcome=AttemptOutcome.CANCELLED, continues=False)
+
+    with pytest.raises(ValueError, match="CANCELLED"):
+        await engine.converse("book it", timeout=PATIENT)
 
 
 async def test_the_report_rides_beside_the_reply_and_never_in_place_of_it() -> None:
@@ -199,6 +257,45 @@ async def test_a_pass_that_composed_no_reply_is_given_none() -> None:
     assert settled.read_answer is ReadAnswerOutcome.ALREADY_SETTLED
     assert settled.reply is None
     assert settled.attempt_report is None
+
+
+async def test_a_routed_pass_is_given_none_although_it_composed_a_reply() -> None:
+    """§6: ``None`` on **a routed operation** (ADR-0197 §7), and prose does not change it.
+
+    ADR-0197 §10's routed answer owes a reply and has one, so a lever gated on prose
+    alone would attach a report to it. It must not: a routed pass "mints no goal,
+    assembles no context and makes no plan" (ADR-0197 §8), so there is no attempt for a
+    report to be about, and §6 names the shape in terms. The arm that fails against a
+    double filling the member in wherever it finds text.
+    """
+    engine = FakeAssistantEngine()
+    engine.attempt_report = VERIFIED
+    card = engine.park_routed("h-1", operation=RoutableOperation.FORGET, subject=(_belief(),))
+
+    outcome = await engine.resume(card.token, approved=True, timeout=PATIENT)
+
+    assert outcome.routed is not None
+    assert outcome.reply is not None
+    assert outcome.attempt_report is None
+
+
+async def test_a_pass_that_made_no_plan_is_given_none() -> None:
+    """§6: a report is about **an attempt an ending turn compared**, and this made none.
+
+    Every shape on which :attr:`TurnOutcome.turn` is ``None`` made no ``Planner.plan``
+    call — a recovered park, a routed pass and an undecided turn — and §4's first
+    ending condition is a reply such a pass never composed. Asserted through a scripted
+    outcome, because that is the shape a consumer builds and the one a lever reaching
+    too far would spoil.
+    """
+    engine = FakeAssistantEngine()
+    engine.attempt_report = VERIFIED
+    engine.turn_outcome = TurnOutcome(turn=None, step=None)
+
+    outcome = await engine.converse("hello", timeout=PATIENT)
+
+    assert outcome.turn is None
+    assert outcome.attempt_report is None
 
 
 async def test_a_scripted_outcome_keeps_the_report_it_carries() -> None:
