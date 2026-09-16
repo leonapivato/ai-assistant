@@ -73,6 +73,8 @@ from ai_assistant.planning.effects import (
     EffectHolder,
     claiming_revision,
     decide_claim,
+    detached,
+    detached_key,
     refuse_an_unsatisfiable_borrowing,
     refuse_an_unscopable_claim,
 )
@@ -3341,6 +3343,10 @@ class SqlitePlanStore:
     def _claim_effect_sync(
         self, execution_id: str, step_id: str, effect_key: EffectKey
     ) -> EffectOutcome:
+        # Detached first, so the value the answer is decided by is the value persisted
+        # and neither is the caller's mutable instance (ADR-0018 §3). Before the
+        # transaction, because a refused key writes nothing and needs no write lock.
+        effect_key = detached_key(effect_key)
         with self._transaction(f"claim an effect for execution {execution_id!r}") as conn:
             row = conn.execute(
                 "SELECT e.data, p.data FROM executions e JOIN plans p ON e.plan_id = p.id "
@@ -3369,14 +3375,16 @@ class SqlitePlanStore:
                 effect_key=effect_key,
             )
             if decision.writes:
-                record = EffectRecord(
-                    goal_id=plan.goal_id,
-                    intended_action_id=action,
-                    key=effect_key,
-                    execution_id=execution_id,
-                    step_id=step_id,
-                    targets_revision=claiming_revision(plan),
-                    claimed_at=self._now(),
+                record = detached(
+                    EffectRecord(
+                        goal_id=plan.goal_id,
+                        intended_action_id=action,
+                        key=effect_key,
+                        execution_id=execution_id,
+                        step_id=step_id,
+                        targets_revision=claiming_revision(plan),
+                        claimed_at=self._now(),
+                    )
                 )
                 conn.execute(
                     "INSERT INTO goal_effects(goal_id, intended_action_id, execution_id, "

@@ -7716,3 +7716,31 @@ class PlanStoreContract:
         assert (
             await store.claim_effect(execution_id=later.id, step_id="s1", effect_key=_KEY)
         ).claim is EffectClaim.COMPLETED
+
+    async def test_a_key_mutated_before_the_claim_is_refused_and_writes_nothing(
+        self, store: PlanStore
+    ) -> None:
+        """The other half of the detachment rule: the value is checked **on the way in**.
+
+        The arms above mutate after the claim has landed; this one mutates before it is
+        taken, which is the half a copy-on-export cannot reach. ``frozen=True`` refuses
+        the assignment and does nothing about ``key.__dict__`` (ADR-0018 §3), so without
+        a re-validation at the boundary a store both **decides** the answer over a value
+        its own validators would refuse and **persists** it — after which every later
+        read of that row fails, a durable store holding a record it cannot decode.
+
+        ADR-0021 §4's posture one seam over: construction catches the honest mistake, and
+        the boundary check is what holds against a deliberate one. **Nothing is written**,
+        which is what makes this a refused claim rather than a corrupted store.
+        """
+        state = await self._acting(store)
+        mutated = _KEY.model_copy(deep=True)
+        mutated.__dict__["parameters_digest"] = "not a sha-256 digest"
+
+        with pytest.raises(PlanningError, match="not a valid key"):
+            await store.claim_effect(execution_id=state.id, step_id="s1", effect_key=mutated)
+
+        assert await self._rows(store) == (), "a refused claim writes no row"
+        assert (
+            await store.claim_effect(execution_id=state.id, step_id="s1", effect_key=_KEY)
+        ).claim is EffectClaim.CLAIMED, "and leaves the pair free for a well-formed one"

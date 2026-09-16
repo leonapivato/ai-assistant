@@ -53,6 +53,7 @@ from ai_assistant.core.types import (
     AttemptPhase,
     AttemptState,
     EffectClaim,
+    EffectKey,
     EffectOutcome,
     EffectRecord,
     EvidenceHistory,
@@ -87,7 +88,6 @@ if TYPE_CHECKING:
     from ai_assistant.core.types import (
         AttemptTransition,
         CurrentContext,
-        EffectKey,
         EvidenceDigest,
         FrozenJsonValue,
         GoalBrief,
@@ -475,6 +475,31 @@ _MAX_ATTEMPTS = 3
 _PHASE_ORDER: Final[dict[AttemptPhase, int]] = {
     phase: index for index, phase in enumerate(AttemptPhase)
 }
+
+
+def _revalidated_key(key: EffectKey) -> EffectKey:
+    """Rebuild ``key`` as a validated, detached :class:`EffectKey` (ADR-0018 §3).
+
+    Mirror of :func:`ai_assistant.planning.effects.detached_key`; re-implemented here
+    for the module docstring's reason. Taken at the entry of ``claim_effect`` so the one
+    value the answer is decided by and the one stored are the same snapshot, and a key
+    mutated before the call is refused rather than compared and kept as it stands.
+
+    Args:
+        key: The key the caller handed in.
+
+    Returns:
+        A detached copy.
+
+    Raises:
+        PlanningError: If the key does not survive its own validators; nothing is
+            written.
+    """
+    try:
+        return EffectKey.model_validate(key.model_dump())
+    except ValidationError as exc:
+        msg = f"the effect key this claim was taken under is not a valid key: {exc}"
+        raise PlanningError(msg) from exc
 
 
 def _revalidated_effect(record: EffectRecord) -> EffectRecord:
@@ -2551,7 +2576,10 @@ class FakePlanStore:
                 or that step names no intended action. **Nothing is written** in any.
         """
         async with self._resource.held():
-            return self._claim_effect_locked(execution_id, step_id, effect_key)
+            # Detached first, so the value the answer is decided by is the value stored
+            # and neither is the caller's mutable instance (ADR-0018 §3). Re-implemented
+            # rather than imported, for the module docstring's reason.
+            return self._claim_effect_locked(execution_id, step_id, _revalidated_key(effect_key))
 
     def _claim_effect_locked(  # noqa: C901, PLR0911 — one return per row of ADR-0259 §2's second limb, so the totality that clause claims is visible; collapsing them would hide it
         self, execution_id: str, step_id: str, effect_key: EffectKey
