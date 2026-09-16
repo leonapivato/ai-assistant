@@ -690,8 +690,12 @@ def _thresholds(calls: list[dict[str, object]]) -> list[dict[str, object]]:
     destination is — the second dependency this list exists to keep out of a
     mapping test — :func:`_policy_authorization_seam` is ADR-0254 §6's, the
     third, and :func:`_policy_quote_seam` is ADR-0267 §5's, the fourth.
+    ``configured_forecast`` is the fifth (ADR-0260 §6, §12's L2), lifted for the
+    same reason and asserted in ``tests/app/test_composition_forecast.py``, where
+    the value can be compared against the registration the seam actually holds
+    rather than against a spy's record of what was passed.
     """
-    lifted = {"grants", "configured_search", "authorizations", "quotes"}
+    lifted = {"grants", "configured_search", "configured_forecast", "authorizations", "quotes"}
     return [{name: value for name, value in call.items() if name not in lifted} for call in calls]
 
 
