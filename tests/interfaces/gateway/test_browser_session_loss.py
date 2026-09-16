@@ -30,6 +30,13 @@ visible at the end was revealed by the stale response.
 (``test_every_listing_that_resumes_asks_whether_its_session_still_stands``), which is
 universally quantified over the script: a listing added later is covered by the rule
 rather than by anybody remembering to extend the table below.
+
+**The delivery stream is here too, and it is not a listing** (#2455). It issues its own
+``fetch`` rather than going through ``relay``, so neither the guard nor the census above
+ever reached it — and it is the one surface where outliving its own session is the
+*design*: ADR-0175 §7 has an idle session expire underneath an open stream and end it. Its
+arms are at the foot of this module, and what they are about is the ending rather than the
+rendering.
 """
 
 from __future__ import annotations
@@ -119,6 +126,21 @@ _AUDITED: Final = (
 #: panel, so that what invalidates the run in flight is a condition reported elsewhere —
 #: which is the whole of #2404's shape. The sources listing ends its own session with the
 #: beliefs read instead, for the obvious reason.
+#: Where the page keeps the header half (``STORAGE_KEY`` in ``app.js``). Read back so
+#: that "the session another tab started is still there" is a fact about storage rather
+#: than about a panel that happens to still be showing.
+_HEADER_HALF: Final = "assistant.session.header-half"
+
+#: The two endings of a delivery stream that reach ``sessionLost``, as the gateway writes
+#: them: the refusal on the head, and ADR-0175 §4's terminal value on the body. They are
+#: different code in ``readDeliveries`` — one is ``refused`` before a single value is
+#: read, the other ``report`` after the loop — and each is a door of its own, which is why
+#: every case below is driven through both rather than through whichever is easier.
+_DELIVERY_ENDINGS: Final = {
+    "refused": (401, "application/json", '{"fault": "no-live-session"}'),
+    "terminal": (200, "application/x-ndjson", '{"kind": "fault", "fault": "no-live-session"}\n'),
+}
+
 _KILLER: Final = ("#sources-button", "**/sources")
 _OTHER_KILLER: Final = ("#beliefs-button", "**/beliefs")
 
@@ -173,6 +195,38 @@ def _held(
             await one.fallback()
 
     return release, hang
+
+
+def _delivery(
+    loop: asyncio.AbstractEventLoop, ending: str
+) -> tuple[asyncio.Future[None], Callable[[Route], Awaitable[None]]]:
+    """A ``/deliveries`` route held open until the case ends it, and how it ends.
+
+    Held rather than answered at once because the stream opens on its own — ``showConsole``
+    calls ``watchDeliveries`` — so holding it is what gives a case the window between the
+    stream existing and the stream ending, which is the window the whole class lives in.
+
+    It is ``fulfill``ed rather than passed on, so the gateway never sees the request and
+    holds no connection against it while the case does its other work.
+
+    Args:
+        loop: The running loop, for the future the case resolves.
+        ending: Which of :data:`_DELIVERY_ENDINGS` the stream ends with.
+
+    Returns:
+        The future that ends the stream, and the route handler to install.
+    """
+    release: asyncio.Future[None] = loop.create_future()
+    status, media, body = _DELIVERY_ENDINGS[ending]
+
+    async def stream(one: Route) -> None:
+        await release
+        # The page may have been navigated away from under a held route by the time this
+        # resumes in a failing run; the case's own assertions are what report it.
+        with contextlib.suppress(PlaywrightError):
+            await one.fulfill(status=status, content_type=media, body=body)
+
+    return release, stream
 
 
 async def _empty(drive: Drive, node: str) -> int:
@@ -735,3 +789,183 @@ async def test_a_destruction_that_lands_after_its_session_ended_opens_nothing(
         # re-read renders nothing, which is the listing rule one case up -- so what is
         # asserted here is the opening, which is this case's claim.
         await expect(drive.page.locator("#conversations")).to_be_hidden()
+
+
+@pytest.mark.parametrize("viewport", [DESKTOP, PHONE], ids=["desktop", "phone"])
+@pytest.mark.parametrize("ending", list(_DELIVERY_ENDINGS), ids=list(_DELIVERY_ENDINGS))
+async def test_a_delivery_stream_that_outlived_its_session_ends_no_other(
+    gateway_browser: Browser, tmp_path: Path, viewport: ViewportSize, ending: str
+) -> None:
+    """#2455, and it is the one door #2404 could not reach.
+
+    ``readDeliveries`` issues its own ``fetch("/deliveries", …)`` rather than going
+    through ``relay``, so the comparison ``relay`` performs before ``refused`` never
+    covered it. Both of its endings called ``report`` — ``sessionLost`` →
+    ``forgetHeaderHalf`` → an unconditional ``removeItem`` on a header half every tab at
+    this origin shares.
+
+    **The reachable case is two tabs, and the stream's own design is what makes it
+    reachable.** ADR-0175 §7 has ``gateway_session_idle_timeout`` refreshed "by a request
+    the gateway admits and by nothing else — not by a stream's continued existence", so a
+    page left watching expires on time and its stream ends with the session. A second tab
+    that minted a session in the meantime has replaced the shared half; the first tab is
+    not told and is not evicted at the gateway. So the stream's ending arrives for a
+    session that is genuinely gone, and forgetting the stored half throws the tab the
+    owner is *actually using* back to the bootstrap form.
+
+    Here the expiry is the route's answer rather than an hour of waiting — which is the
+    same value on the same wire, and what ADR-0216 §7 asks for instead of a clock. The
+    ordering is the page's own state: the stream's ending is awaited to its last byte and
+    then the line beside the control is read, which only a continuation that has run can
+    have written.
+
+    What the first tab is owed is not silence: it stopped watching and gets its control
+    and a sentence back. What it must not do is write a fault — nothing went wrong — or
+    touch a session that is not its own.
+    """
+    loop = asyncio.get_running_loop()
+    release, stream = _delivery(loop, ending)
+
+    async with driving(gateway_browser, tmp_path, viewport=viewport, admitted=False) as drive:
+        await drive.page.route("**/deliveries", stream)
+        async with drive.page.expect_request("**/deliveries"):
+            await drive.admit()
+
+        # A whole second session, in a second tab, through the page's own form. The half
+        # is dropped and the page reloaded first because that tab is holding the *same*
+        # session and shows the console rather than the entry form -- the storage is
+        # shared, which is the whole premise.
+        elsewhere = await drive.page.context.new_page()
+        await elsewhere.goto(f"{drive.origin}/")
+        await elsewhere.evaluate("(key) => window.localStorage.removeItem(key)", _HEADER_HALF)
+        await elsewhere.reload()
+        await elsewhere.fill("#bootstrap-value", bootstrap_value(drive.gateway))
+        await elsewhere.click("#bootstrap-form button[type=submit]")
+        await elsewhere.wait_for_selector("#console:not([hidden])")
+        minted = await elsewhere.evaluate("(key) => window.localStorage.getItem(key)", _HEADER_HALF)
+        assert isinstance(minted, str), minted
+        assert minted
+
+        async with drive.page.expect_response("**/deliveries") as stale:
+            release.set_result(None)
+        await (await stale.value).finished()
+
+        # The first tab's own account of it, which is also what orders every assertion
+        # below: only a continuation that ran can have written this line.
+        await expect(drive.page.locator("#delivery-state")).to_contain_text("no longer holds")
+        await expect(drive.page.locator("#watch-button")).to_be_visible()
+        # Nothing went wrong, so nothing is written where things that went wrong go
+        # (ADR-0182 §6).
+        await expect(drive.page.locator("#notifications > .fault")).to_be_hidden()
+        # And this tab was not thrown back to the entry form by its own stream.
+        await expect(drive.page.locator("#bootstrap")).to_be_hidden()
+        await expect(drive.page.locator("#console")).to_be_visible()
+
+        # The defect itself: the half the second tab minted is still the stored one.
+        held = await elsewhere.evaluate("(key) => window.localStorage.getItem(key)", _HEADER_HALF)
+        assert held == minted
+        # Read as the page reads it -- a request of the second tab's, admitted. Asserted
+        # rather than inferred from storage, because what the owner loses is the ability
+        # to go on using the session, and only a round trip says they still can.
+        async with elsewhere.expect_response("**/conversations") as answered:
+            await elsewhere.click("#conversations-button")
+        assert (await answered.value).status == 200
+        await expect(elsewhere.locator("#bootstrap")).to_be_hidden()
+        await expect(elsewhere.locator("#console")).to_be_visible()
+
+
+@pytest.mark.parametrize("viewport", [DESKTOP, PHONE], ids=["desktop", "phone"])
+@pytest.mark.parametrize("ending", list(_DELIVERY_ENDINGS), ids=list(_DELIVERY_ENDINGS))
+async def test_a_delivery_stream_whose_own_session_ended_still_asks_for_a_new_one(
+    gateway_browser: Browser, tmp_path: Path, viewport: ViewportSize, ending: str
+) -> None:
+    """The other half of #2455's guard: what it must **not** suppress.
+
+    One tab, nothing else touching the shared half, and the stream ends the way ADR-0175
+    §7 says it ends when the session that held it expires. That session is still the one
+    this page holds, so the ending is this page's to act on: ADR-0182 §6's re-entry, the
+    half forgotten, every control panel hidden and the entry form back with the sentence
+    that explains it.
+
+    Without this arm the guard could be written to return on every ending and every case
+    above would still pass — the delivery stream would simply have stopped being a way of
+    finding out that a session is gone, which is exactly what ``IDLE_WHILE_WATCHING``
+    exists to explain to an owner who did nothing at all.
+    """
+    loop = asyncio.get_running_loop()
+    release, stream = _delivery(loop, ending)
+
+    async with driving(gateway_browser, tmp_path, viewport=viewport, admitted=False) as drive:
+        await drive.page.route("**/deliveries", stream)
+        async with drive.page.expect_request("**/deliveries"):
+            await drive.admit()
+        release.set_result(None)
+
+        await drive.page.wait_for_selector("#bootstrap:not([hidden])")
+        await expect(drive.page.locator("#console")).to_be_hidden()
+        await expect(drive.page.locator("#notifications")).to_be_hidden()
+        # The re-entry sentence, and -- on the ending that has earned it -- the one
+        # explanation nobody guesses right: watching does not keep a session alive
+        # (ADR-0175 §7). ``describeDeliveryEnd`` adds it to a terminal value and to
+        # nothing else, because a refusal on the *head* is a request the gateway looked
+        # at, which refreshed the idle timeout on its way in: the hour passing is not
+        # what happened there, and saying it was would be a wrong explanation rather
+        # than a missing one. The guard sits in front of both and must leave that
+        # distinction exactly where it is.
+        said = await drive.page.inner_text("#reentry")
+        assert "That session has ended" in said
+        idle = "Watching does not keep a session alive"
+        assert (idle in said) is (ending == "terminal"), said
+        # The half really is gone, which is what re-entry means.
+        assert (
+            await drive.page.evaluate("(key) => window.localStorage.getItem(key)", _HEADER_HALF)
+        ) is None
+        # And nothing of the stream's was rendered on the way past.
+        assert await _empty(drive, "notification-list") == 0
+
+
+@pytest.mark.parametrize("viewport", [DESKTOP, PHONE], ids=["desktop", "phone"])
+async def test_a_delivery_stream_under_a_standing_session_renders_and_reports_as_before(
+    gateway_browser: Browser, tmp_path: Path, viewport: ViewportSize
+) -> None:
+    """The happy path the guard must leave exactly where it was (#2455).
+
+    A notification arrives and is rendered, and the stream then ends in a way that is
+    nobody's session — a body that stopped, which is ``DELIVERY_STREAM_CUT``. Both are
+    under a session nothing has touched, so both are this page's, and the guard sits in
+    front of the second of them.
+
+    It is the arm that says the comparison is a comparison rather than a refusal: a guard
+    that always fired would render nothing, report nothing, and pass every case above.
+    """
+    delivered = (
+        '{"kind": "notification", "summary": "The dentist is at four",'
+        ' "detail": "Bring the letter", "notification_class": "reminder"}\n'
+    )
+
+    async def stream(one: Route) -> None:
+        with contextlib.suppress(PlaywrightError):
+            await one.fulfill(status=200, content_type="application/x-ndjson", body=delivered)
+
+    async with driving(gateway_browser, tmp_path, viewport=viewport, admitted=False) as drive:
+        await drive.page.route("**/deliveries", stream)
+        async with drive.page.expect_response("**/deliveries"):
+            await drive.admit()
+
+        # The delivery reached the owner.
+        await expect(drive.page.locator("#notification-list li")).to_have_count(1)
+        await expect(drive.page.locator("#notification-list")).to_contain_text(
+            "The dentist is at four"
+        )
+        # And the ending reached them too, in the panel, with the control back.
+        slot = drive.page.locator("#notifications > .fault")
+        await slot.wait_for(state="visible")
+        assert (
+            "ended before the gateway finished it" in await slot.locator(".fault-text").inner_text()
+        )
+        await expect(drive.page.locator("#watch-button")).to_be_visible()
+        # The session was not touched by any of it.
+        await expect(drive.page.locator("#console")).to_be_visible()
+        assert (
+            await drive.page.evaluate("(key) => window.localStorage.getItem(key)", _HEADER_HALF)
+        ) is not None
