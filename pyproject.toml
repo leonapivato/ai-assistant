@@ -327,8 +327,11 @@ ai-assistant-store-health = "ai_assistant.service.store_health:main"
 dev = [
     # The acceptance tests ADR-0024 §5 requires build a real wheel and a real
     # sdist in-process, with the network denied — so the build backend is a
-    # test dependency as well as a build one.
-    "hatchling>=1.27",
+    # test dependency as well as a build one. It carries the same `<1.32` cap as
+    # `[build-system] requires` below, and for the same reason: those tests load
+    # `hatch_build.py` through `hatchling.build`, so a lock refresh that resolved
+    # 1.32 would break them exactly as it breaks a real build.
+    "hatchling>=1.27,<1.32",
     # Hatchling defers to it when building an editable wheel, which one of those
     # acceptance tests does; a build frontend would install it, and these tests
     # deliberately do not use one.
