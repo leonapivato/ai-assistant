@@ -871,16 +871,35 @@ class ReconciliationStage:
         self._check = ReconciliationCheck(plans=plans, trail=trail, invoker=invoker)
         self._monotonic = monotonic
 
-    async def run(self, goal_id: str, *, budget: timedelta) -> Reconciled:
+    def opened(self, budget: timedelta) -> TurnRemainder:
+        """Open the turn's remainder **now**, against this stage's monotonic source.
+
+        **Called at the turn's entry and not at this stage's**, which is ADR-0255 §9's
+        *"the turn's remaining budget"* read literally: a turn that spent most of its
+        budget resolving its conversation and its goal before it reached the pass has
+        that much less left, and a remainder opened here would hand §3's call the whole
+        figure again. The two are separated so the caller states when the turn began and
+        this stage states what it is measured against.
+
+        Args:
+            budget: The turn's whole budget.
+
+        Returns:
+            The remainder, to be handed back to :meth:`run`.
+        """
+        return TurnRemainder.opened(budget, monotonic=self._monotonic)
+
+    async def run(self, goal_id: str, *, remaining: TurnRemainder) -> Reconciled:
         """Run the pass and then the check, over one goal, under one remainder.
 
         Args:
             goal_id: The goal the turn engaged.
-            budget: The turn's budget, from which the remainder is measured.
+            remaining: The turn's remainder, opened at the turn's entry
+                (:meth:`opened`) and read by each half immediately before its own unit
+                of work.
 
         Returns:
             What the check found and established, for the turn to say.
         """
-        remaining = TurnRemainder.opened(budget, monotonic=self._monotonic)
         await self._pass.run(goal_id, remaining=remaining)
         return await self._check.run(goal_id, remaining=remaining)

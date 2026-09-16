@@ -66,11 +66,13 @@ from ai_assistant.core.types import (
     PermissionRuling,
     PlanStep,
     Provenance,
+    ResultReference,
     Reversibility,
     RiskLevel,
     SkipReason,
     SpanCoverage,
     StepFailure,
+    StepOutputRef,
     StepStatus,
     StepTransition,
     ToolCost,
@@ -83,6 +85,7 @@ from ai_assistant.core.types import (
 from ai_assistant.orchestration.reconciling import (
     ReconciliationCheck,
     ReconciliationPass,
+    ReconciliationStage,
     TurnRemainder,
 )
 from ai_assistant.orchestration.runner import _requested
@@ -1373,3 +1376,72 @@ async def test_a_failed_holder_releases_its_row_only_once_its_plan_is_superseded
     rows = await harness.rows()
     assert len(rows) == 1
     assert rows[0].step_id == ("s-2" if supersedes else "s-1")
+
+
+def test_the_remainder_is_opened_where_the_turn_begins_and_not_where_it_is_read() -> None:
+    """The remainder measures the **turn**, not this stage (adversarial round 1).
+
+    ADR-0255 §9's gate is over *"the turn's remaining budget"*, so a turn that spent
+    most of its figure before reaching the pass must reach §3's call with that much
+    less. :meth:`ReconciliationStage.opened` is what the turn's entry calls; an
+    implementation that opened the remainder inside ``run`` would hand the call the
+    whole budget again, and this row would read the full thirty seconds.
+    """
+    ticking = _Ticking(0.0, 29.0)
+    stage = ReconciliationStage(
+        plans=FakePlanStore(now=lambda: AT),
+        trail=FakeAuditTrail(),
+        invoker=_Scripted(),
+        monotonic=ticking,
+    )
+
+    remaining = stage.opened(PATIENT)
+
+    assert remaining() == timedelta(seconds=1)
+
+
+async def test_a_step_carrying_resolves_reconciles_on_this_tree() -> None:
+    """A ``resolves``-bearing step is rebuilt exactly as its claim was (round 1).
+
+    Adversarial review, round 1, ``blocker``, **rebutted with this row as its record.**
+    The finding says the rebuild is incomplete because it never fills ``resolves`` from
+    the producing step's stored output, so ``authorises`` would reject it and the step
+    would stay uncertain for ever. It is false **against this tree**, and the reason is
+    the half the finding did not read: ADR-0253 §6's resolution has **no implementation
+    here**. ``StepRunner`` builds its request from ``step.parameters`` verbatim
+    (``runner._requested``'s ``bound is None`` path), so the ``PermissionDecision``
+    recorded for such a step carries a ``parameters_digest`` over the **unresolved**
+    mapping — which is exactly the mapping this rebuild uses, and the comparison holds.
+    ADR-0255's own L2 is the lane that lands the resolution at dispatch, and it is the
+    lane that owes this rebuild the same call; that is what #2478 is already open for,
+    and this row is what will fail when it lands rather than a step stranded in silence.
+    """
+    world = World()
+    seam = _Scripted(succeeded())
+    world.invoker = seam  # type: ignore[assignment]
+    await world.goal()
+    producer = a_step("s-0")
+    consumer = PlanStep(
+        id="s-1",
+        intent="look it up",
+        capability="look_up",
+        parameters={},
+        depends_on=("s-0",),
+        resolves=(
+            ResultReference(
+                parameter="reference", source=StepOutputRef(step="s-0", field="booking")
+            ),
+        ),
+    )
+    state = await world.execution(producer, consumer)
+    decision = await world.decide(state, consumer, reading())
+    state, _ = await world.uncertain(state, consumer, reading(), decision=decision)
+    await world.pass_().run(GOAL, remaining=whole())
+
+    found = await world.check().run(GOAL, remaining=whole())
+
+    assert found.established == ("s-1",)
+    rebuilt, _ = seam.calls[0]
+    held = await world.plans.get_execution(state.id)
+    assert held is not None
+    assert rebuilt.request == _requested(decision.tool, consumer, held, None, goal=GOAL)
