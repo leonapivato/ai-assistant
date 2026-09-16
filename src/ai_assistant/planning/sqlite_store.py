@@ -60,6 +60,7 @@ from ai_assistant.core.types import (
 )
 from ai_assistant.planning._transactions import transaction
 from ai_assistant.planning.effects import (
+    BorrowedAct,
     EffectHolder,
     claiming_revision,
     decide_claim,
@@ -99,11 +100,11 @@ if TYPE_CHECKING:
         AttemptTransition,
         EffectKey,
         EffectOutcome,
-        FrozenJsonValue,
         GoalCandidates,
         GoalRevision,
         GoalStatus,
         IntendedActionMinting,
+        StepExecution,
         StepTransition,
         UtcInstant,
     )
@@ -284,6 +285,26 @@ _EVIDENCE_INDEX_RULE: Final[str] = (
     "the promoted columns are the index: a row is selected by its columns and, wherever "
     "it is decoded, refused if its record disagrees with them, and a row is never "
     "selected under a goal its columns do not name"
+)
+
+#: The five columns every effect read selects, so that each one can be checked against
+#: the blob beside it (:func:`_checked_effect`). Stated once because the reads have to
+#: agree about which columns they are reconciling.
+_EFFECT_COLUMNS: Final[str] = (
+    "SELECT goal_id, intended_action_id, execution_id, step_id, data FROM goal_effects"
+)
+
+#: **The effect index rule**, :data:`_EVIDENCE_INDEX_RULE`'s shape one record kind over
+#: (ADR-0259 §2, §9). ``goal_id`` and ``intended_action_id`` are the row's identity and
+#: the pair every lookup selects on; ``execution_id`` and ``step_id`` are the holder the
+#: claim reads a status through. Promoting them is what makes the pair a **schema**
+#: constraint rather than a code one — which is what refuses a second concurrent first
+#: claim — and reconciling them is what stops a tampered blob answering for a row it is
+#: not.
+_EFFECT_INDEX_RULE: Final[str] = (
+    "the promoted columns are the index: a row is selected by its columns and, wherever "
+    "it is decoded, refused if its record disagrees with them, and a row is never "
+    "selected under a goal and action its columns do not name"
 )
 
 _RECORD_SCHEMA = (
@@ -2883,6 +2904,36 @@ class SqlitePlanStore:
                 )
         return decision.outcome
 
+    def _effect_row(
+        self, conn: sqlite3.Connection, goal_id: str, action: str
+    ) -> EffectRecord | None:
+        """The row indexed at ``(goal_id, action)``, reconciled against its own columns.
+
+        :data:`_EFFECT_INDEX_RULE`: the promoted columns are the index, so a row whose
+        blob disagrees with the columns it was selected by is **refused** rather than
+        read. Without it a row indexed at ``(g1, ia1)`` whose record names ``ia2`` would
+        answer ``COMPLETED`` for ``ia1`` from ``ia2``'s holder, and a completed ``ia1``
+        indexed under ``ia2`` would be invisible and let another ``ia1`` dispatch — the
+        same corruption ``goal_evidence`` is already guarded for (#2328), at the one
+        lookup ADR-0259 §2's at-most-once rests on.
+
+        Args:
+            conn: The connection the transaction is running on.
+            goal_id: The goal the row is scoped to.
+            action: The intended action it is scoped to.
+
+        Returns:
+            The record, or ``None`` where the goal holds no row for that action.
+
+        Raises:
+            PlanningError: If the stored blob disagrees with its own columns.
+        """
+        row = conn.execute(
+            _EFFECT_COLUMNS + " WHERE goal_id = ? AND intended_action_id = ?",
+            (goal_id, action),
+        ).fetchone()
+        return None if row is None else _checked_effect(str(self._path), row)
+
     def _holder(self, conn: sqlite3.Connection, goal_id: str, action: str) -> EffectHolder | None:
         """The row this goal holds for ``action``, read with its holder's status.
 
@@ -2901,13 +2952,9 @@ class SqlitePlanStore:
         Returns:
             The holder, or ``None`` where the goal holds no row for that action.
         """
-        row = conn.execute(
-            "SELECT data FROM goal_effects WHERE goal_id = ? AND intended_action_id = ?",
-            (goal_id, action),
-        ).fetchone()
-        if row is None:
+        record = self._effect_row(conn, goal_id, action)
+        if record is None:
             return None
-        record = _decode_effect(row[0])
         held = conn.execute(
             "SELECT data, plan_id FROM executions WHERE id = ?", (record.execution_id,)
         ).fetchone()
@@ -2984,8 +3031,15 @@ class SqlitePlanStore:
             self._refuse_a_stale_target(conn, stored, transition)
             self._refuse_an_unclaimable_attempt(conn, stored, transition)
             self._refuse_a_superseded_plan(conn, stored, transition)
-            borrowed = self._borrowed_output(conn, stored, transition)
-            updated = self._tracker.apply(stored, transition, borrowed_output=borrowed)
+            updated = self._tracker.apply(
+                stored,
+                transition,
+                satisfaction=(
+                    None
+                    if transition.satisfied_by_execution is None
+                    else lambda source: self._borrowed(conn, stored, transition, source)
+                ),
+            )
             conn.execute(
                 "UPDATE executions SET version = ?, active = ?, data = ? WHERE id = ?",
                 (
@@ -2997,35 +3051,39 @@ class SqlitePlanStore:
             )
         return updated.model_copy(deep=True)
 
-    def _borrowed_output(
-        self, conn: sqlite3.Connection, stored: ExecutionState, transition: StepTransition
-    ) -> FrozenJsonValue:
-        """Verify ADR-0259 §9's satisfaction claim condition and return what is borrowed.
+    def _borrowed(
+        self,
+        conn: sqlite3.Connection,
+        stored: ExecutionState,
+        transition: StepTransition,
+        source: StepExecution,
+    ) -> BorrowedAct:
+        """Verify ADR-0259 §9's satisfaction claim condition and return what is written.
 
         Five limbs, decided on the commit's own connection and inside its transaction,
-        and refused on a ``PlanningError`` that is not a ``StaleExecutionError``: no
-        re-read makes one goal's execution another's, one key another, or a run that
-        happened one that did not. The ``output`` it returns is the **holder's own**,
-        which is why the transition is forbidden to carry one.
+        and refused on a ``PlanningError`` that is not a ``StaleExecutionError``. It is
+        called **by the tracker**, once that has compared the version and resolved the
+        step, so a stale write is still a ``StaleExecutionError``.
+
+        Both values it returns are the store's: the ``output`` is the holder's own, off
+        the row it has just verified, and the instant is this store's clock's rather
+        than the tracker's, which may be injected independently (§9).
 
         Args:
             conn: The connection the commit transaction is running on.
             stored: The execution the transition targets.
             transition: The move being applied.
+            source: The **stored** step being satisfied, as the tracker resolved it.
 
         Returns:
-            The borrowed ``output``, or ``None`` where this is not a satisfaction.
+            What the store writes onto the satisfied step.
 
         Raises:
             PlanningError: On any limb of the condition.
         """
         named, borrowed_step = transition.satisfied_by_execution, transition.satisfied_by_step
-        if named is None or borrowed_step is None:
-            return None
-        source = stored.step(transition.step_id)
-        if source is None:
-            msg = f"execution {stored.id} has no step {transition.step_id}"
-            raise PlanningError(msg)
+        assert named is not None  # noqa: S101 — the tracker calls this for a satisfaction alone
+        assert borrowed_step is not None  # noqa: S101 — StepTransition keeps the trio whole
         mine = conn.execute("SELECT data FROM plans WHERE id = ?", (stored.plan_id,)).fetchone()
         plan = _decode_plan(mine[0])
         theirs = conn.execute(
@@ -3037,15 +3095,7 @@ class SqlitePlanStore:
         borrowed = _decode_execution(theirs[0]).step(borrowed_step) if theirs is not None else None
         planned = next((one for one in plan.steps if one.id == transition.step_id), None)
         action = None if planned is None else planned.intended_action
-        row = (
-            None
-            if action is None
-            else conn.execute(
-                "SELECT data FROM goal_effects WHERE goal_id = ? AND intended_action_id = ?",
-                (plan.goal_id, action),
-            ).fetchone()
-        )
-        record = None if row is None else _decode_effect(row[0])
+        record = None if action is None else self._effect_row(conn, plan.goal_id, action)
         refuse_an_unsatisfiable_borrowing(
             step_id=transition.step_id,
             same_goal=same_goal,
@@ -3056,7 +3106,7 @@ class SqlitePlanStore:
             source_status=source.status,
         )
         assert borrowed is not None  # noqa: S101 — the refusal's second limb
-        return borrowed.output
+        return BorrowedAct(output=borrowed.output, finished_at=self._now())
 
     def _refuse_a_stale_target(
         self, conn: sqlite3.Connection, stored: ExecutionState, transition: StepTransition
@@ -3254,7 +3304,7 @@ class SqlitePlanStore:
             # order so two exports of one store are one document. `PlanExport` states
             # §5's closure over **one holder** and refuses a row whose execution, step
             # and goal do not line up, so nothing here needs a second check.
-            effects=tuple(_decode_effect(data) for data in effects),
+            effects=tuple(effects),
         )
 
     def _export_sync(
@@ -3266,7 +3316,7 @@ class SqlitePlanStore:
         list[str],
         list[str],
         list[tuple[str, list[GoalEvidence], int]],
-        list[str],
+        list[EffectRecord],
     ]:
         # All three reads inside one transaction, so the export is a single
         # database snapshot: a concurrent connection cannot commit a goal+plan
@@ -3330,9 +3380,9 @@ class SqlitePlanStore:
             # read states: the document cannot carry a row a concurrent writer added
             # between two reads and whose holder it does not hold.
             effects = [
-                str(r[0])
-                for r in conn.execute(
-                    "SELECT data FROM goal_effects ORDER BY goal_id ASC, intended_action_id ASC"
+                _checked_effect(str(self._path), row)
+                for row in conn.execute(
+                    _EFFECT_COLUMNS + " ORDER BY goal_id ASC, intended_action_id ASC"
                 ).fetchall()
             ]
         return goals, plans, executions, attempts, questions, evidence, effects
@@ -3750,6 +3800,36 @@ def _decode_attempt(data: str) -> GoalAttempt:
     except ValidationError as exc:
         msg = f"the plan store holds an attempt that no longer validates: {exc}"
         raise PlanningError(msg) from exc
+
+
+def _checked_effect(path: str, row: Sequence[Any]) -> EffectRecord:
+    """Decode one effect row and refuse a blob that disagrees with its columns.
+
+    :data:`_EFFECT_INDEX_RULE`. Four values are promoted and all four are reconciled,
+    because each one a reader trusts is one a tampered file could answer with: the pair
+    decides which row a claim finds at all, and the holder decides the status §2's
+    second limb is taken over.
+
+    Args:
+        path: The store's path, for the message.
+        row: ``(goal_id, intended_action_id, execution_id, step_id, data)``.
+
+    Returns:
+        The reconciled record.
+
+    Raises:
+        PlanningError: If the blob does not validate, or disagrees with its columns.
+    """
+    record = _decode_effect(str(row[4]))
+    promoted = (str(row[0]), str(row[1]), str(row[2]), str(row[3]))
+    held = (record.goal_id, record.intended_action_id, record.execution_id, record.step_id)
+    if promoted != held:
+        msg = (
+            f"the plan store at {path!r} holds an effect row indexed at {promoted} whose "
+            f"record names {held}; the store is corrupt"
+        )
+        raise PlanningError(msg)
+    return record
 
 
 def _decode_effect(data: str) -> EffectRecord:
