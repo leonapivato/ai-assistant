@@ -29,12 +29,15 @@ from recipient_builders import (
     ACCOUNT,
     ALICE,
     BOB,
+    FORECAST_TOOL,
     NOW,
     OTHER_ACCOUNT,
     SEARCH_ACCOUNT,
+    SEARCH_TOOL,
     TOOL,
     account_member,
     binding,
+    forecast_binding,
     member,
     origin_unrecorded,
     route_b_decision,
@@ -1035,16 +1038,34 @@ class AuditTrailContract:
             InvalidAuthorisationError,
         )
 
-    async def test_a_digest_free_standing_row_is_admitted_from_its_own_binding(self) -> None:
-        """§12's **Arm D**, route (c)'s half: the pointer equality, and no store read.
+    @pytest.mark.parametrize(
+        ("bound", "declaration"),
+        [
+            pytest.param(search_binding(), SEARCH_TOOL, id="closed_loop alone"),
+            pytest.param(forecast_binding(), FORECAST_TOOL, id="forecast_reach alone"),
+        ],
+    )
+    async def test_a_digest_free_standing_row_is_admitted_from_its_own_binding(
+        self, bound: EgressBinding, declaration: ToolDefinition
+    ) -> None:
+        """§12's **Arm D**, route (c)'s half, over ADR-0272 §3's two admitted facts.
 
-        ADR-0247 §2: a non-resolving ``ALLOW`` carrying an ``egress_binding`` and an
-        ``authorised_by`` with **no** ``authorised_subject`` is accepted **only** where
-        its binding's ``closed_loop`` is ``True`` and its ``authorised_by`` equals that
-        binding's ``account.reference``. Both facts are read from the decision — no
-        store read, no ``Settings`` read and no clock — which is what ADR-0193 §9
-        requires of a recorded decision's meaning, and the call count is where that is
-        asserted rather than described.
+        ADR-0247 §2 as ADR-0272 §1 moves its eligibility conjunct: a non-resolving
+        ``ALLOW`` carrying an ``egress_binding`` and an ``authorised_by`` with **no**
+        ``authorised_subject`` is accepted **only** where **exactly one** of its
+        binding's ``closed_loop`` and ``forecast_reach`` is ``True`` and its
+        ``authorised_by`` equals that binding's ``account.reference``. Both facts are
+        read from the decision — no store read, no ``Settings`` read and no clock —
+        which is what ADR-0193 §9 requires of a recorded decision's meaning, and the
+        call count is where that is asserted rather than described.
+
+        **Parameterised over both one-hot states**, which is §3's own instruction for
+        the pointer half — *"the mismatch arm is parameterised over both one-hot
+        states, or is written twice"* — and what it buys is stated there too: an
+        implementation taking the pointer comparison **inside** the ``closed_loop``
+        branch would pass every other arm while recording a forecast row on an
+        ``authorised_by`` the policy invented. The ``closed_loop`` case is the search
+        regression, unchanged in what it asserts.
 
         The refusing row is the same shape with a pointer the binding contradicts:
         "without this the pointer is a string a policy could invent", one route over.
@@ -1052,7 +1073,7 @@ class AuditTrailContract:
         seam = self._held(recipient_grant(member(ALICE), grant_id="g-1"))
         trail = self.trail_over(seam)
 
-        recorded = route_c_decision()
+        recorded = route_c_decision(bound=bound, tool=declaration)
 
         assert await trail.record(recorded) == "d-route-c"
         assert await trail.get("d-route-c") == recorded
@@ -1060,10 +1081,56 @@ class AuditTrailContract:
 
         await _refuses(
             trail,
-            route_c_decision(authorised_by="conn-somewhere-else", decision_id="d-invented"),
+            route_c_decision(
+                bound=bound,
+                tool=declaration,
+                authorised_by="conn-somewhere-else",
+                decision_id="d-invented",
+            ),
             InvalidAuthorisationError,
         )
         assert seam.call_count == 0
+
+    @pytest.mark.parametrize(
+        ("bound", "declaration"),
+        [
+            pytest.param(forecast_binding(forecast_reach=False), FORECAST_TOOL, id="neither fact"),
+            pytest.param(forecast_binding(closed_loop=True), FORECAST_TOOL, id="both facts"),
+        ],
+    )
+    async def test_a_digest_free_standing_row_carrying_neither_fact_or_both_is_refused(
+        self, bound: EgressBinding, declaration: ToolDefinition
+    ) -> None:
+        """ADR-0272 §3's other two arms: the exactly-one rule, from both sides.
+
+        §1 admits a digest-free standing row **only** where exactly one of its
+        binding's ``closed_loop`` and ``forecast_reach`` is ``True``. A binding
+        carrying **neither** is of no kind route (c) covers and is refused exactly as
+        it is refused today; a binding carrying **both** asserts a kind route (c)'s
+        closed two-member set does not contain, and admitting it would let one kind's
+        authority be read off the other's.
+
+        **The both-fact row is the one behaviour ADR-0272 removes**, which is why it is
+        pinned here rather than left to the policy: before that decision the check read
+        ``closed_loop`` alone and admitted it. It is unreachable from a correct policy —
+        ADR-0260 §6 puts a binding asserting both facts at no configured provider at
+        all — and ADR-0247 §2's *"[n]either component is offered the other's job"* is
+        why the trail does not rest on that.
+
+        Both rows carry a pointer their binding **agrees** with, so what refuses them is
+        the eligibility conjunct and not the pointer half. The **type** is asserted and
+        the message text is not (§3), and the seam count is asserted beside it because
+        an ineligible row must not buy a store read on its way to being refused.
+        """
+        seam = self._held()
+        trail = self.trail_over(seam)
+
+        await _refuses(
+            trail,
+            route_c_decision(bound=bound, tool=declaration),
+            InvalidAuthorisationError,
+        )
+        assert seam.call_count == 0, "an ineligible route-(c) row reads no grant store"
 
     async def test_a_digest_free_standing_row_whose_origin_was_never_recorded_is_refused(
         self,
@@ -1072,9 +1139,10 @@ class AuditTrailContract:
 
         ADR-0238 §15's Arm 5b is replaced in its premise and this limb is kept: "such a
         decision is refused by name in **both** cases". A binding that records no origin
-        carries no ``closed_loop`` either, so no lane reads an unrecorded origin as a
-        configured provider — and the refusal is the one ADR-0184 §7 already makes,
-        rather than a second rule about the same row.
+        carries **neither** configured-provider fact, so no lane reads an unrecorded
+        origin as a configured provider — and the refusal is the one ADR-0184 §7
+        already makes, rather than a second rule about the same row (ADR-0272 §2 keeps
+        this limb where ADR-0247 §2 left it).
         """
         trail = self.trail_over(self._held())
 
@@ -1102,7 +1170,10 @@ class AuditTrailContract:
 
         Asserted for three kinds so that **no kind is admitted by the shape alone** —
         the declaration is what varies, and the binding carries the fact ``closed_loop``
-        is written from (§4), which is ``False`` for every one of them.
+        is written from (§4), which is ``False`` for every one of them. Since ADR-0272
+        §1 these bindings carry **neither** configured-provider fact — ``forecast_reach``
+        is written only where the kind is a forecast read (ADR-0260 §11) — so each is
+        refused by the exactly-one conjunct, for the reason it was refused before.
         """
         seam = self._held()
         trail = self.trail_over(seam)
@@ -1194,7 +1265,10 @@ class AuditTrailContract:
         **The eligibility conjunct is what makes that exclusion exact rather than
         hopeful**: ``closed_loop`` was added to ``EgressBinding`` by ADR-0238, which
         lands after ADR-0193's implementation, so no row predating that implementation
-        can carry it ``True``.
+        can carry it ``True``. ADR-0272 §2 carries that argument onto the second fact
+        unchanged — ``forecast_reach`` was added later still, by ADR-0260 §11 — so the
+        reserved pointer carries neither fact and the widened conjunct admits it no
+        more than the old one did.
 
         Asserted over the **stored** row rather than over ``record``, which refuses the
         shape going forward — the case above is where that refusal is pinned — and
