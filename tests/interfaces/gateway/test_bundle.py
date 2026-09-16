@@ -1459,9 +1459,16 @@ def test_the_delivery_stream_carries_the_session_it_was_opened_under() -> None:
     # session says so in the line that hands the control back rather than in a fault
     # slot: nothing went wrong, and nothing here was ended.
     read = functions["readDeliveries"]
-    assert read.count("if (!sameSession(half, era)) {") == 2
-    assert read.count("stopWatching(OUTLIVED_ITS_SESSION);") == 2
+    assert read.count("if (!sameSession(half, era)) {") == 3
+    assert read.count("stopWatching(OUTLIVED_ITS_SESSION);") == 3
     assert "forgetHeaderHalf" not in read
+    # The third is the `catch`, and it sits below the release and above the
+    # classification (adversarial review, round 1). Nothing there can evict a half, but
+    # each of the four branches writes a `fault`, and a rule that let a superseded stream
+    # report a black hole while refusing it a cut would be two rules for one ending.
+    failing = read[read.index("} catch (error) {") :]
+    assert failing.index("if (open.released) {") < failing.index("if (!sameSession(half, era)) {")
+    assert failing.index("if (!sameSession(half, era)) {") < failing.index("if (stalled) {")
 
 
 def test_the_session_era_moves_exactly_where_the_stored_half_does() -> None:
