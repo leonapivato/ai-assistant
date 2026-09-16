@@ -287,9 +287,16 @@ def _objects(left: Mapping[str, FrozenJson], right: Mapping[str, FrozenJson]) ->
     handful of keys"* — so every other test here costs a scan per key, and an object of
     a different size than the literal it is compared against is refused before any of
     them is made. Within one size the walk takes **one** lookup on each side per key and
-    no key-set comparison beside them, which is the cheapest shape the mapping protocol
-    admits; a linear one would need a view `FrozenDict` does not offer, and `core` owns
-    that trade. Adversarial review, round 2, ``major``.
+    no key-set comparison beside them, which is the fewest questions the mapping
+    protocol admits.
+
+    **It is the count that is closable here and not the cost** (#2481). Each of those
+    lookups scans that tuple, so two objects of one large width stay quadratic in the
+    width — exactly as ``FrozenDict.__eq__`` is, and therefore exactly as the bare
+    ``==`` this comparison replaced was. Closing that needs a linear view on
+    ``FrozenDict`` or a breadth bound on ``FrozenJsonValue``, both of which are
+    ``core``'s and neither of which this package can reach.
+    Adversarial review, rounds 2 and 3, ``major``.
     """
     if len(left) != len(right):
         return False

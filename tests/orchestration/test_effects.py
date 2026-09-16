@@ -564,14 +564,19 @@ def test_field_equals_walks_a_container_rather_than_comparing_its_top_level(
 
 
 class _CountingMapping(Mapping[str, "FrozenJson"]):
-    """A mapping that counts key lookups, as ``FrozenDict`` makes them cost.
+    """A mapping that counts key lookups.
 
-    ``FrozenDict`` holds its pairs as a tuple and *"lookup is therefore a linear
-    scan"*, so what decides whether a wide object is affordable is **how many lookups
-    the comparison makes**, not how fast one is. Counting them is deterministic where
-    a wall-clock assertion would be flaky, and it is the same shape ``ItemsView``
-    gives a mapping that overrides no view: iterating ``items()`` is one lookup per
-    key.
+    **What it measures is how many lookups the comparison makes, and nothing about
+    what one costs.** The number is this module's to decide; the cost of one is the
+    mapping's, and for ``FrozenDict`` it is a scan of the whole tuple of pairs
+    (``core/types.py``: *"Lookup is therefore a linear scan"*), which stays quadratic
+    in the object's width however few lookups are made. That residue is `FrozenDict`'s
+    own documented trade, is paid by ``FrozenDict.__eq__`` exactly as here, and is
+    filed as **#2481**; it is not closable from this package.
+
+    Counting is deterministic where a wall-clock assertion would be flaky, and the
+    shape is the one ``ItemsView`` gives a mapping that overrides no view: iterating
+    ``items()`` is one lookup per key.
     """
 
     def __init__(self, pairs: Mapping[str, FrozenJson]) -> None:
@@ -615,11 +620,17 @@ def test_two_objects_of_different_sizes_are_refused_without_a_single_lookup() ->
 
 
 def test_two_objects_of_one_size_are_walked_with_one_lookup_per_key_per_side() -> None:
-    """And within one size the walk is linear in lookups, not quadratic.
+    """And within one size the walk asks **2n** questions rather than 3n.
 
-    ``2n`` and not ``n²``: one lookup on the left through ``items()``, one on the right
-    to find the member it is compared against, and **no key-set comparison beside
-    them** — which is where the quadratic the review found actually lived.
+    One lookup on the left through ``items()``, one on the right to find the member it
+    is compared against, and **no key-set comparison beside them** — a comparison of
+    key sets probes one side once more per key, and re-reading ``left[key]`` after it
+    probes again. Those are the two this row forbids.
+
+    **It does not claim the walk is linear in *work*** (#2481): each of those lookups
+    scans a ``FrozenDict``'s pairs, so two objects of one large width stay quadratic —
+    exactly as ``FrozenDict.__eq__`` is, on the comparison this code replaced as much
+    as on this one. What is closable here is the **count**, and this is it.
     """
     size = 500
     left = _CountingMapping({f"k{n}": n for n in range(size)})
@@ -627,3 +638,26 @@ def test_two_objects_of_one_size_are_walked_with_one_lookup_per_key_per_side() -
 
     assert _identical(left, right)
     assert (left.lookups, right.lookups) == (size, size)
+
+
+def test_the_walk_holds_over_the_frozen_types_a_stored_output_is_actually_held_in() -> None:
+    """The production shapes, not only the stand-ins the rows above use.
+
+    A validated ``FrozenJsonValue`` freezes an object into a ``FrozenDict`` and an array
+    into a ``tuple``, and a step's stored ``output`` is one. So the walk is exercised
+    over those types at a width no case above reaches, with both of §4's coercions
+    planted inside — an implementation comparing the two with ``==`` returns ``True``
+    for the second pair.
+    """
+    width = 200
+    body = {f"k{n}": n for n in range(width)}
+    stored = StepVerification(
+        kind=VerificationKind.FIELD_EQUALS, field="f", equals={"rows": body, "flags": [1, 2]}
+    )
+    assert isinstance(stored.equals, Mapping)
+    assert isinstance(stored.equals["rows"], Mapping), "an object freezes to a FrozenDict"
+    assert isinstance(stored.equals["flags"], tuple), "and an array to a tuple"
+
+    assert verification_holds(stored, {"f": {"rows": body, "flags": [1, 2]}})
+    assert not verification_holds(stored, {"f": {"rows": {**body, "k0": True}, "flags": [1, 2]}})
+    assert not verification_holds(stored, {"f": {"rows": body, "flags": [1.0, 2]}})
