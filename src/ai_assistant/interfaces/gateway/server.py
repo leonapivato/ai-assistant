@@ -940,8 +940,12 @@ class _OpenStream:
     death only from a request that never comes.
 
     Ending it is closing the connection the response body is being written on, which
-    *is* the stream (§1). A delivery stream is abandoned first, so its writer stops
-    waiting on a browser rather than on a socket that is about to go.
+    *is* the stream (§1) — but not *only* that, because ADR-0175 §2 makes the two
+    endings a reader can meet a partition, and a close on its own puts this one on
+    the wrong side of it. The ending is **named** first and closed second (#2498).
+
+    A delivery stream is abandoned before either, so its writer stops waiting on a
+    browser rather than on a socket that is about to go.
 
     Compared by identity, because two streams in the same state are not one stream.
     """
@@ -970,12 +974,46 @@ class _OpenStream:
         is being served on a connection that has no stream open, so the guard is
         belt-and-braces rather than load-bearing, and it is cheaper than reasoning
         about it again later.
+
+        **And the bytes are a terminal value before they are a closed socket**
+        (#2498). ADR-0175 §2 gives a reader exactly two endings to tell apart —
+        "the gateway wrote a **terminal** value, or the body ended without one" —
+        and rules that the second "has a transport failure and the front end reports
+        it as one". A session ending is not a transport failure: the gateway is
+        listening, holds its hub connection, and answers the very next request. Ended
+        by a close alone, §7's fourth clause reached a real browser as
+        ``net::ERR_INCOMPLETE_CHUNKED_ENCODING`` and the owner was told the gateway
+        "may have stopped" and to start it — an instruction to do something to a
+        healthy process, and the one condition ``app.js`` has written words for and
+        could never say, because no gateway in this tree wrote the value its
+        ``IDLE_WHILE_WATCHING`` branch is conditioned on. Naming it is what puts this
+        ending on §2's first side, and ``no-live-session`` is the condition itself:
+        the same name :class:`.RefusalCondition` gives the request-side refusal, so
+        the page describes a stream's ending with the words it already has for a
+        response's, which is ADR-0168 §9's distinction surviving to what is read.
+
+        **The name is true on all three routes into here**, which is why it is not
+        conditioned on which one was taken: both of a session's bounds and
+        :meth:`Gateway.close` on the way down each leave no live session. A process on
+        its way down may not flush before it goes, and a browser that misses the flush
+        sees exactly what it sees today — a body without a terminal value, which is
+        §2's other ending and legible as one — so the shutdown route can lose this
+        value but cannot be misled by it.
+
+        Written after the cancellation rather than before it, so no value the driver
+        was mid-body can follow the terminal one: a cancelled task resumes at its next
+        suspension point, and by then this has written the zero-length chunk and closed
+        the writer. ``close()`` flushes what is buffered, so the ordering costs no
+        drain — which this cannot await, being the synchronous callback
+        :class:`.SessionTable` announces an ending through.
         """
         if self.delivery is not None:
             self.delivery.abandon()
         if self.driver is not None and self.driver is not asyncio.current_task():
             self.driver.cancel()
         with contextlib.suppress(ConnectionError, OSError):
+            self.writer.write(_frame(streams.fault(RefusalCondition.NO_LIVE_SESSION.value)))
+            self.writer.write(render_stream_end())
             self.writer.close()
 
 
