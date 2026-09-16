@@ -44,6 +44,7 @@ from ai_assistant.planning.effects import (
     claiming_revision,
     decide_claim,
     detached,
+    detached_key,
     refuse_an_unsatisfiable_borrowing,
     refuse_an_unscopable_claim,
 )
@@ -1173,6 +1174,9 @@ class InMemoryPlanStore:
             PlanningError: If the execution is unknown, the step is not a step of it,
                 or that step names no intended action. **Nothing is written** in any.
         """
+        # Detached first, so the value the answer is decided by is the value persisted
+        # and neither is the caller's mutable instance (ADR-0018 §3).
+        effect_key = detached_key(effect_key)
         stored = self._executions.get(execution_id)
         plan = None if stored is None else self._plans.get(stored.plan_id)
         planned = (

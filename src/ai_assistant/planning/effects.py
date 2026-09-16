@@ -23,12 +23,18 @@ from typing import TYPE_CHECKING
 from pydantic import ValidationError
 
 from ai_assistant.core.errors import PlanningError
-from ai_assistant.core.types import EffectClaim, EffectOutcome, EffectRecord, StepStatus
+from ai_assistant.core.types import (
+    EffectClaim,
+    EffectKey,
+    EffectOutcome,
+    EffectRecord,
+    StepStatus,
+)
 
 if TYPE_CHECKING:
     from datetime import datetime
 
-    from ai_assistant.core.types import ActionPlan, EffectKey, FrozenJsonValue
+    from ai_assistant.core.types import ActionPlan, FrozenJsonValue
 
 #: The two statuses ADR-0014 §4 calls indistinguishable — "a crash between a tool's
 #: side effect and the commit of ``RUNNING → SUCCEEDED`` … cannot, from planning's
@@ -329,4 +335,36 @@ def detached(record: EffectRecord) -> EffectRecord:
         return EffectRecord.model_validate(record.model_dump())
     except ValidationError as exc:
         msg = f"effect row for goal {record.goal_id} is not a valid record: {exc}"
+        raise PlanningError(msg) from exc
+
+
+def detached_key(key: EffectKey) -> EffectKey:
+    """Rebuild ``key`` as a validated, detached :class:`EffectKey`.
+
+    **Taken at the entry of every** ``claim_effect``, before the row is looked up, so
+    the **one** value the answer is decided by and the one persisted are the same
+    snapshot. Pydantic passes an already-valid model instance through without copying,
+    and ``frozen=True`` does nothing about ``key.__dict__`` — ADR-0018 §3's own bypass —
+    so without this a key mutated *before* the call is both compared as the mutated
+    value and written into the durable row, which is how a store comes to hold an
+    ``EffectKey`` its own validators would refuse and to fail every later read of it.
+
+    ADR-0021 §4's posture, one seam over: the construction-time check catches the honest
+    mistake, and re-validating at the boundary is what holds against a deliberate one.
+
+    Args:
+        key: The key the caller handed in.
+
+    Returns:
+        A detached copy, compared and stored in place of the caller's.
+
+    Raises:
+        PlanningError: If the key does not survive its own validators, in which case
+            **nothing is written** — a claim is refused rather than a malformed row
+            persisted.
+    """
+    try:
+        return EffectKey.model_validate(key.model_dump())
+    except ValidationError as exc:
+        msg = f"the effect key this claim was taken under is not a valid key: {exc}"
         raise PlanningError(msg) from exc
