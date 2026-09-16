@@ -37,6 +37,7 @@ from ai_assistant.core.errors import (
 from ai_assistant.core.protocols import (
     ActionPolicy,
     AuditTrail,
+    AuthorizationResolution,
     CoverageAnswers,
     InvocationLedger,
     RecipientGrantStore,
@@ -677,6 +678,16 @@ class Harness:
         # which is exactly what is true of a deployment holding no rows. A case that
         # wires one therefore changes no other case's behaviour.
         authorizations: FakeGoalAuthorizationStore | None = None,
+        # ADR-0262 §3's one new collaborator, which the composition root gives the engine
+        # as the **third face** of the store above (ADR-0254 §16) — so the default here
+        # is that same object, and an engine wired with no store resolves no row and
+        # leaves every criterion `unestablished`, which is that deployment's own truth.
+        #
+        # **The override exists because the comparison's operands and the path that
+        # writes them are two different lanes' subjects.** ADR-0254 §20 drives the
+        # establishment end to end; a case about §4's limbs needs the row the comparison
+        # reads to be a fact it chose, not one it had to establish first.
+        resolution: AuthorizationResolution | None = None,
         coverage_answers: CoverageAnswers | None = None,
         # ADR-0256 §1's third rung, which `StepRunner` reads when an act names no
         # instant and the goal carries no deadline. Only a case wiring `authorizations`
@@ -1056,6 +1067,10 @@ class Harness:
                     authorizations=authorizations, plans=self.plans, now=self.clock
                 )
             ),
+            # ADR-0262 §3's read seam, narrowed at the engine's own annotation to
+            # `resolve(id)` and nothing else — the same object the runner writes
+            # through unless a case named another.
+            authorizations=authorizations if resolution is None else resolution,
             loop=loop,
             runner=runner,
             reconciliation=reconciliation,

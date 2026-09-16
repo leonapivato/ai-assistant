@@ -59,7 +59,12 @@ from ai_assistant.core.types import (
     SkipReason,
     StepStatus,
 )
-from ai_assistant.orchestration.verification import CriterionResult, Rung, compare
+from ai_assistant.orchestration.verification import (
+    CriterionResult,
+    Rung,
+    compare,
+    continues_on,
+)
 
 if TYPE_CHECKING:
     from ai_assistant.core.types import Goal, GoalElement, PermissionDecision, StepExecution
@@ -1282,3 +1287,21 @@ async def test_only_a_route_d_allow_contributes_a_row() -> None:
         a_ruling(outcome=PermissionOutcome.CONFIRM)
     with pytest.raises(ValueError, match="cites no authorisation"):
         a_ruling(outcome=PermissionOutcome.DENY)
+
+
+async def test_continues_is_true_on_exactly_three_members_over_an_open_goal() -> None:
+    """Arm 10's L4 half: §6's ``continues``, over every member and both goal states.
+
+    *"``True`` **exactly** where the outcome is ``PARTIAL``, ``FAILED`` or ``UNCERTAIN``
+    **and** the goal is open (ADR-0250 §1: ``ACTIVE`` or ``BLOCKED``)"*, and ``False`` on
+    ``VERIFIED``, on ``ANSWERED`` and on ``CONDITION_PREVENTED`` — unconditionally, with
+    no second fact consulted. **``CANCELLED`` is reached by no limb** (§4) and so is not
+    a value this function is ever handed; it is walked here anyway, because what the
+    rule says of it is the same thing it says of every member outside the three.
+    """
+    unfinished = {AttemptOutcome.PARTIAL, AttemptOutcome.FAILED, AttemptOutcome.UNCERTAIN}
+    for outcome in AttemptOutcome:
+        for status in (GoalStatus.ACTIVE, GoalStatus.BLOCKED):
+            assert continues_on(outcome, status) is (outcome in unfinished), (outcome, status)
+        for closed in (GoalStatus.ACHIEVED, GoalStatus.ABANDONED):
+            assert continues_on(outcome, closed) is False, (outcome, closed)
