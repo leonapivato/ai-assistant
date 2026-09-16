@@ -1174,6 +1174,27 @@ async def test_a_binding_asserting_both_kinds_is_at_no_configured_provider() -> 
     assert grants.call_count == 0
 
 
+async def test_a_forecast_only_policy_reaches_route_c_with_no_seam_and_no_search_pair() -> None:
+    """ADR-0247 §2's sourceless clause carried to this kind by ADR-0260 §6.
+
+    "A policy constructed with no ``RecipientGrants`` reaches route (c)" — the one way
+    route (c)'s reachability differs from route (b)'s — and §6 carries the supersession
+    of ADR-0021 §3 "to a forecast read at the configured forecast provider and to no
+    further kind". Asserted on a policy holding **nothing else**: no grant seam, no
+    goal-authorization seam, and no search pair either, because a deployment that
+    configured a forecast provider and connected no search account is an ordinary one
+    and an implementation requiring either before honouring the forecast pair would
+    make every such deployment ask.
+    """
+    policy = ThresholdActionPolicy(configured_forecast=_configured_forecast())
+
+    ruled = await policy.decide(request(forecast_binding(external=True), tool=FORECAST_TOOL))
+
+    assert ruled.outcome is PermissionOutcome.ALLOW
+    assert ruled.authorised_by == FORECAST_ACCOUNT.reference
+    assert ruled.authorised_subject is None
+
+
 async def test_a_policy_with_no_configured_forecast_reaches_no_route_c_on_a_forecast_read() -> None:
     """The fail-closed direction at this kind, and the two pairs' independence.
 
