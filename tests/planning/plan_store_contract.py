@@ -5952,3 +5952,156 @@ class PlanStoreContract:
 
         assert await self._rows(store) == ()
         assert (await store.export()).goals == ()
+
+    async def test_a_reconciled_indeterminate_step_is_committed_succeeded(
+        self, store: PlanStore
+    ) -> None:
+        """ADR-0259 §7's first new row, driven rather than merely declared legal.
+
+        "``INDETERMINATE → SUCCEEDED``, trigger *reconciliation established the
+        effect*". It "also sets ``output`` and ``finished_at``" and does **not**
+        increment ``attempts``; the step ran, so its execution marks stand and its
+        ``failure`` — the diagnostic ``abandon_running`` wrote — is cleared by the move
+        that resolves it. **A shared arm rather than a tracker one**, because the
+        canonical fake re-implements the graph independently, so either side can drift
+        while every other case added here passes.
+        """
+        state = await self._acting(store)
+        state = await self._to_status(store, state, StepStatus.INDETERMINATE)
+        before = await self._step(store, state)
+        assert before.failure is not None
+
+        committed = await store.commit_transition(
+            StepTransition(
+                execution_id=state.id,
+                step_id="s1",
+                to_status=StepStatus.SUCCEEDED,
+                expected_version=state.version,
+                output=_BOOKED,
+            )
+        )
+
+        step = await self._step(store, committed)
+        assert step.status is StepStatus.SUCCEEDED
+        assert step.output == _BOOKED
+        assert step.finished_at is not None
+        assert step.failure is None, "the resolution clears the diagnostic it resolves"
+        assert (step.attempts, step.approval_ref, step.bound_tool) == (
+            before.attempts,
+            before.approval_ref,
+            before.bound_tool,
+        ), "the step ran, so its marks stand and no row of §7's three increments attempts"
+        assert step.satisfied_by_execution is None, "a reconciliation is not a satisfaction"
+
+    @pytest.mark.parametrize("illegal", [StepStatus.FAILED, StepStatus.RUNNING, StepStatus.SKIPPED])
+    async def test_every_other_move_out_of_indeterminate_stays_illegal(
+        self, store: PlanStore, illegal: StepStatus
+    ) -> None:
+        """ADR-0259 §7: exactly one row is added out of ``INDETERMINATE`` and no other.
+
+        One rather than two "is a consequence of §3's mechanism, not a gap in it": the
+        one reconciliation route it admits is a **read**, which has no effect to have
+        failed to happen, so the transition that would record a proven non-effect has no
+        producer and adding a row nothing writes would be the vocabulary-with-no-producer
+        problem ADR-0249 §5 names.
+        """
+        state = await self._acting(store)
+        state = await self._to_status(store, state, StepStatus.INDETERMINATE)
+        extra: dict[str, Any] = {}
+        if illegal is StepStatus.RUNNING:
+            extra |= {"attempt_id": "a1", "bound_tool": "booker", "approval_ref": "d1"}
+        if illegal is StepStatus.SKIPPED:
+            extra |= {"skip_reason": SkipReason.SUPERSEDED}
+        if illegal is StepStatus.FAILED:
+            extra |= {"failure": StepFailure(message="no answer")}
+
+        with pytest.raises(IllegalTransitionError):
+            await store.commit_transition(
+                StepTransition(
+                    execution_id=state.id,
+                    step_id="s1",
+                    to_status=illegal,
+                    expected_version=state.version,
+                    **extra,
+                )
+            )
+
+    async def test_a_satisfaction_is_checked_after_the_version_and_the_step(
+        self, store: PlanStore
+    ) -> None:
+        """``commit_transition``'s exception contract survives ADR-0259 §9's condition.
+
+        The five limbs are the **store's** and are decided atomically with the write —
+        but they are decided *after* the compare-and-swap and the step lookup, because
+        the class a caller is handed is what tells it what to do next. A stale write
+        directs a caller to re-read and retry, so it stays a ``StaleExecutionError``
+        even where the satisfaction would also have failed; and a transition naming a
+        step the execution does not carry is the plain ``PlanningError`` it has always
+        been, rather than whichever satisfaction limb the check happened to reach.
+        """
+        holder = await self._acting(store)
+        await store.claim_effect(execution_id=holder.id, step_id="s1", effect_key=_KEY)
+        holder = await self._to_status(store, holder, StepStatus.SUCCEEDED)
+        later = await self._acting(store, plan_id="p2", attempt_id="a2")
+        await store.claim_effect(execution_id=later.id, step_id="s1", effect_key=_KEY)
+
+        with pytest.raises(PlanningError) as unknown:
+            await store.commit_transition(
+                StepTransition(
+                    execution_id=later.id,
+                    step_id="s9",
+                    to_status=StepStatus.SUCCEEDED,
+                    expected_version=later.version,
+                    satisfied_by_execution=holder.id,
+                    satisfied_by_step="s1",
+                    satisfied_by_key=_KEY,
+                )
+            )
+        assert not isinstance(unknown.value, StaleExecutionError)
+        assert "s9" in str(unknown.value), "the step lookup answers, not a satisfaction limb"
+
+        with pytest.raises(StaleExecutionError):
+            await store.commit_transition(
+                StepTransition(
+                    execution_id=later.id,
+                    step_id="s1",
+                    to_status=StepStatus.SUCCEEDED,
+                    expected_version=later.version + 7,
+                    satisfied_by_execution=holder.id,
+                    satisfied_by_step="s1",
+                    satisfied_by_key=_KEY,
+                )
+            )
+
+    async def test_a_satisfaction_stamps_the_stores_own_clock(self) -> None:
+        """ADR-0259 §9: the store "stamps ``finished_at`` from its own clock".
+
+        Asserted against an **advancing** injected clock, so the instant the write lands
+        is a value this arm chose rather than whatever a constant would make every
+        candidate equal to. What it cannot see from here is a store handed a tracker on
+        a *different* clock — that wiring is each subject's own affordance, and the
+        subject that offers it pins it beside its own fixture.
+        """
+        clock = _MovingClock()
+        with self.store_on(clock) as store:
+            holder = await self._acting(store)
+            await store.claim_effect(execution_id=holder.id, step_id="s1", effect_key=_KEY)
+            holder = await self._to_status(store, holder, StepStatus.SUCCEEDED)
+            later = await self._acting(store, plan_id="p2", attempt_id="a2")
+            await store.claim_effect(execution_id=later.id, step_id="s1", effect_key=_KEY)
+
+            clock.advance()
+            committed = await store.commit_transition(
+                StepTransition(
+                    execution_id=later.id,
+                    step_id="s1",
+                    to_status=StepStatus.SUCCEEDED,
+                    expected_version=later.version,
+                    satisfied_by_execution=holder.id,
+                    satisfied_by_step="s1",
+                    satisfied_by_key=_KEY,
+                )
+            )
+
+            step = await self._step(store, committed)
+            assert step.finished_at == clock.at
