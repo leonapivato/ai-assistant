@@ -293,6 +293,8 @@ from ai_assistant.core.types import (
     DEFAULT_PAGE_SIZE,
     SECRET_VALUE_MAX_BYTES,
     AnswerKind,
+    AttemptOutcome,
+    AttemptReport,
     AuthorizationProjection,
     AuthorizationSettlement,
     AuthorizationView,
@@ -7859,6 +7861,13 @@ def _render_turn(outcome: TurnOutcome, *, streamed: _StreamedReply | None = None
     # engagement, and a `disambiguation` only on a turn that engaged nothing at all.
     _render_reference_outcome(outcome.reference)
     _render_goal_engagement(outcome.goal_engagement)
+    # ADR-0262 §6's statement, beside the reply and never in place of it, and **after**
+    # ADR-0250 §5's announcement for the reader's sake alone: that one says which goal
+    # this turn is about and this says what the attempt produced. "A turn may owe both,
+    # one or neither ... and no lane derives either from the other or collapses them" —
+    # so neither is guarded on the other, and the order between them carries no meaning
+    # beyond putting the goal in front of the reader before what became of it.
+    _render_attempt_report(outcome.attempt_report)
     _render_disambiguation(outcome.disambiguation)
     _render_clarification(outcome.clarification)
     routed = outcome.routed
@@ -7918,6 +7927,25 @@ def _render_turn(outcome: TurnOutcome, *, streamed: _StreamedReply | None = None
         # `ForecastDisposition`", so **every** member means a read this turn asked for
         # produced nothing, and `None` is already exactly where this guard stays off.
         #
+        # **And not a turn whose attempt ended having attempted work** (ADR-0262 §6).
+        # A comparison runs after the plan, so a turn that planned nothing still ends
+        # an attempt and still carries a report — an established contradiction read off
+        # the goal's own earlier records is limb 1's first arm and needs no step of this
+        # turn at all. "No action was needed." one line from "the work failed, and no
+        # criterion of this goal was established" is the same contradiction on one
+        # screen, and it is one **this lane would otherwise have created**: before §6's
+        # statement the ended attempt reached this surface through no route.
+        #
+        # **The guard is on four of the seven and not on the member's presence**, which
+        # is where this differs from `forecast_not_read`'s term above and follows
+        # `_reached_outside`'s instead. `ForecastNotRead` "has no member for having
+        # attempted nothing"; `AttemptOutcome` has two — `VERIFIED` says criteria were
+        # checked and hold, `ANSWERED` says an answer was produced and nothing was
+        # verified — and ADR-0262 §12's first arm is exactly a turn of the second kind,
+        # "what is two plus two?" with no step claimed, of which "No action was needed."
+        # is true. Suppressing it there would take a true line off every ordinary
+        # attempt-ending turn. `_asserts_work` is where the four are named.
+        #
         # **The two members #2329 records are deliberately still unguarded**, and that
         # is the triage rule rather than an oversight: `read_confirmation` and
         # `read_answer` are pre-existing, neither is rendered by this lane, and PR
@@ -7929,6 +7957,7 @@ def _render_turn(outcome: TurnOutcome, *, streamed: _StreamedReply | None = None
             and outcome.clarification is None
             and outcome.disambiguation is None
             and outcome.forecast_not_read is None
+            and not _asserts_work(outcome.attempt_report)
             and not _reached_outside(outcome)
         ):
             _print("[dim]No action was needed.[/]")
@@ -8220,6 +8249,165 @@ def _render_forecast_not_read(
             _print("[dim]Note: that forecast read produced nothing this turn could use.[/]")
 
 
+#: The four :class:`~ai_assistant.core.types.AttemptOutcome` members whose §6 statement
+#: **asserts that work was attempted**, and which therefore suppress
+#: :func:`_render_turn`'s "No action was needed." notice.
+#:
+#: **The split is `_reached_outside`'s arm one vocabulary over, and it is stated rather
+#: than derived.** That guard is on ``OutboundReach.REACHED`` alone "because a turn that
+#: reached nothing is exactly a turn of which 'no action was needed' may well be true",
+#: and ``ForecastNotRead``'s is on all six because that vocabulary "has no member for
+#: having attempted nothing". ``AttemptOutcome`` has **two**: ADR-0262 §6 fixes
+#: ``VERIFIED``'s statement as one about criteria that were checked and hold, and
+#: ``ANSWERED``'s as one that "an answer was produced and **nothing was verified**" —
+#: neither of which says any step was owed, and ADR-0262 §12's first arm is exactly a
+#: turn of the second kind ("what is two plus two?", one composing call, no step
+#: claimed) where "No action was needed." is **true**. The other four each say work was
+#: attempted and did not complete — part established and part not, work that failed, an
+#: action whose outcome is not established, an action prevented before it ran — and
+#: "No action was needed." one line from any of them is the contradiction on one screen
+#: this guard exists to prevent.
+#:
+#: **Nothing here reads a criterion, a step or a store.** It is a fact about which two
+#: *sentences* can sit together, which is presentation and not the comparison's work
+#: (golden rule 3): the member itself is the one L4 computed and this file computes none.
+_ATTEMPT_OUTCOMES_THAT_ASSERT_WORK: Final[frozenset[AttemptOutcome]] = frozenset(
+    {
+        AttemptOutcome.PARTIAL,
+        AttemptOutcome.FAILED,
+        AttemptOutcome.UNCERTAIN,
+        AttemptOutcome.CONDITION_PREVENTED,
+    }
+)
+
+#: What the terminal says for an ``AttemptOutcome`` that is **not** one of §6's six.
+#:
+#: ``AttemptOutcome`` is closed at **seven** and ADR-0262 §6's report admits **six** of
+#: them: ``CANCELLED`` "is reached by no limb" of the comparison (§4), so no conforming
+#: engine puts it on an ``AttemptReport``. **But the type admits it** — ``AttemptReport``
+#: constrains ``continues`` and not ``outcome``, and the canonical fake refuses the
+#: *arrangement* rather than the value, "which is why the refusal is on the arrangement
+#: and not on :class:`AttemptReport`" — so a hub at another version can put one on this
+#: screen and this surface decides what a user then reads.
+#:
+#: **Not a bare identifier and not silence**, which is ``FORECAST_NOT_READ_UNREADABLE``'s
+#: position one vocabulary over: an enum value printed as itself is this surface
+#: reporting an internal vocabulary to a person, and silence is a turn that ended an
+#: attempt reading exactly like one that ended none.
+#:
+#: **And not a seventh fixed statement.** §6 fixes six and leaves the wording of each to
+#: the lane; minting one for a member that section excludes would be this surface
+#: deciding a vocabulary, and a cancelled attempt is ADR-0261 §2's act with its own
+#: statements. So this says what is known and no more, and asserts nothing about what
+#: the attempt produced.
+_ATTEMPT_REPORT_UNREADABLE: Final = (
+    "What this turn's comparison produced arrived as something this surface has no "
+    "words for, so it is not reported here rather than reported as something it may "
+    "not be."
+)
+
+
+def _render_attempt_report(report: AttemptReport | None) -> None:
+    """ADR-0262 §6's statement for this turn, **beside the reply and never in place of it**.
+
+    **One fixed statement per member, written out as a literal**, which is
+    :func:`_render_search_not_serviced`'s ratified shape two vocabularies over: nothing
+    here is assembled from a member's value, its name, a format string over the
+    enumeration, or a mapping a later member would silently join. A member added without
+    its statement is a member with no rendering, and §6's closure is what makes that a
+    review question rather than a runtime one — "a surface that renders no statement for
+    a member has not implemented this section and is not a permitted degradation".
+
+    **What each statement names is fixed and the wording is this lane's** (§6). It
+    renders the member ``orchestration`` computed and derives nothing from it: no
+    criterion is read, no goal is looked up, no status is consulted (golden rule 3).
+
+    **No statement says the goal is closed, and ``VERIFIED``'s least of all.** §6 puts
+    the comparison **before** the composing stage and the two commits **after** it, so
+    "no statement of this section asserts that an attempt was ended, that a status was
+    written, or that a goal is now closed" — "a statement that could be falsified by a
+    commit taken after it was composed is one this decision does not write". That is why
+    ``VERIFIED``'s speaks of *the criteria this attempt compared* and names
+    ``assistant goals`` as where the goal's own state is read.
+
+    **``ANSWERED`` is not a weaker ``VERIFIED``** and its statement does not read as one:
+    it says an answer was produced and that nothing was verified, and it says nothing
+    about whether the answer is correct.
+
+    **``FAILED``'s speaks of the criteria and never of the acts** (§6). Limb 1's "no
+    criterion is met" conjunct is true of both of its arms, so the statement is true of
+    an established contradiction and of a failed step alike — and it is true where one
+    call satisfied a criterion and another contradicted it, which is why it does not say
+    that nothing was done. §6: "a statement saying *nothing was done* would be false of
+    the record and this one is not".
+
+    **``UNCERTAIN``'s says nothing about whether the call left** — ADR-0261 §6's "no
+    caller assumes the query did not leave" binding on one more statement — and it names
+    ``assistant goals`` for ``VERIFIED``'s reason.
+
+    **``CONDITION_PREVENTED``'s is true of both of ``blocked``'s sources without
+    asserting either** (§6): ``UNMET_DEPENDENCY`` is a stated condition that did not hold
+    and ``APPROVAL_DENIED`` is the user's own refusal, and a read may well have succeeded
+    first — so it says the action was prevented before it ran and names no cause.
+
+    **None of the six names a criterion, a criterion's text, a tool, a step, a
+    destination, a count, a figure, a ``Settings`` field or a cause** (§6), and none says
+    that an effect did not happen. ADR-0242 §9's bar binds on these word for word.
+
+    **``continues`` is deliberately not rendered here, and that is §6's own split rather
+    than an omission.** "The offer is in the reply rather than on the surface": the reply
+    ends with an offer to continue where ``continues`` is set, so that the next turn's
+    bare "Yes" binds to the goal by reply reference (ADR-0250 §3), and "an offer a surface
+    printed would reach neither the browser's transcript nor the spoken channel as part of
+    what was said". So "the **reply** carries the offer and the **surface** the outcome
+    word", and a second offer printed here would be this file composing a reply, which
+    golden rule 3 refuses.
+
+    **Silence where the report is absent** is every turn that ended no attempt under §4 —
+    a turn that engaged no goal, a routed operation, ADR-0198 §1's restatement, every turn
+    whose attempt stayed live, **and a turn whose ``commit_attempt`` was refused**. §6
+    fixes that last one as "a silence rather than a false claim", so no statement is
+    rendered and the composed reply stands as composed.
+
+    **And it is rendered on the one turn the member is non-``None``.** "No lane repeats it
+    on a later turn, re-renders it from the stored ``AttemptOutcome``, or makes the value
+    durable on any other record": where a user asks later how a goal stands,
+    ``assistant goals`` reads the goal's status and the attempt's stored outcome.
+
+    Args:
+        report: What ``TurnOutcome.attempt_report`` carried, or ``None``.
+    """
+    if report is None:
+        return
+    match report.outcome:
+        case AttemptOutcome.VERIFIED:
+            _print(
+                "[dim]The criteria this attempt compared were checked, and they hold. "
+                "'assistant goals' is where you read how the goal stands.[/]"
+            )
+        case AttemptOutcome.ANSWERED:
+            _print(
+                "[dim]An answer was produced, and nothing was verified. Nothing here "
+                "says whether it is correct.[/]"
+            )
+        case AttemptOutcome.PARTIAL:
+            _print(
+                "[dim]Part of what you asked for was established, and part of it was "
+                "not established.[/]"
+            )
+        case AttemptOutcome.FAILED:
+            _print("[dim]The work failed, and no criterion of this goal was established.[/]")
+        case AttemptOutcome.UNCERTAIN:
+            _print(
+                "[dim]An action was taken, and its outcome is not established. "
+                "'assistant goals' is where you read how the goal stands.[/]"
+            )
+        case AttemptOutcome.CONDITION_PREVENTED:
+            _print("[dim]The action was prevented before it ran.[/]")
+        case AttemptOutcome.CANCELLED:
+            _print(f"[dim]{_ATTEMPT_REPORT_UNREADABLE}[/]")
+
+
 def _outbound_destination(member: OutboundDestination) -> str:
     """The words for one class of destination this turn contacted (ADR-0264 §5, §7).
 
@@ -8274,6 +8462,31 @@ def _reached_outside(outcome: TurnOutcome) -> bool:
     """
     statement = outcome.outbound_statement
     return statement is not None and statement.reach is OutboundReach.REACHED
+
+
+def _asserts_work(report: AttemptReport | None) -> bool:
+    """Whether this turn's statement says work was attempted and did not complete.
+
+    Read off ``attempt_report.outcome`` and off nothing else: no plan, no step, no
+    criterion, no goal and no store read (golden rule 3). It exists for
+    :func:`_reached_outside`'s reason exactly — so that :func:`_render_turn`'s "No action
+    was needed." notice is not printed one line from a statement saying the work failed,
+    or that an action was taken whose outcome is not established.
+
+    **Four of the seven and not all of them**, which is
+    :data:`_ATTEMPT_OUTCOMES_THAT_ASSERT_WORK`'s own entry: ``VERIFIED`` and ``ANSWERED``
+    each say something a turn that needed no step may truthfully say, and ADR-0262 §12's
+    first arm is a turn of the second kind. ``CANCELLED`` reaches only
+    :data:`_ATTEMPT_REPORT_UNREADABLE`, which asserts nothing about what was attempted
+    and so contradicts nothing.
+
+    Args:
+        report: What ``TurnOutcome.attempt_report`` carried, or ``None``.
+
+    Returns:
+        Whether the statement rendered for this report asserts attempted work.
+    """
+    return report is not None and report.outcome in _ATTEMPT_OUTCOMES_THAT_ASSERT_WORK
 
 
 def _counted(records: int) -> str:
