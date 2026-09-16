@@ -796,6 +796,54 @@ def test_an_effect_row_whose_holder_does_not_line_up_is_refused(
         _export(goals=(_goal(), _goal("g2")), effects=(_record(**overrides),))
 
 
+@pytest.mark.parametrize(
+    "key",
+    [
+        pytest.param(EffectKey(tool_id="smtp", parameters_digest=_DIGEST), id="the-same-key"),
+        pytest.param(
+            EffectKey(tool_id="smtp", parameters_digest=_OTHER_DIGEST), id="a-different-key"
+        ),
+    ],
+)
+def test_two_effect_rows_for_one_act_are_refused(key: EffectKey) -> None:
+    """ADR-0259 §2's at-most-one-row invariant, stated over the document.
+
+    "The store additionally keeps at most one row per ``(goal_id, intended_action_id)``",
+    and a document carrying two current rows for one act leaves a reader unable to say
+    which claim stands — the same defect as a duplicate id, and refused the same way.
+    **Both key cases**, because they fail differently: two rows under one key are a
+    store that wrote twice where it should have compared, and two under different keys
+    are a re-point that left the dead key's row beside the live one, which is exactly
+    what §2 says a re-point must not do.
+    """
+    with pytest.raises(ValidationError, match="two effect rows"):
+        _export(
+            effects=(
+                _record(execution_id="x1", step_id="s1"),
+                _record(execution_id="x2", step_id="s1", key=key),
+            )
+        )
+
+
+def test_two_effect_rows_for_two_acts_of_one_goal_export() -> None:
+    """The control: the refusal above is about the **pair** and not about the goal.
+
+    A goal whose user asked for two rooms has two rows and neither holds the other,
+    which is the whole of what ADR-0265's scoping bought §2.
+    """
+    assert (
+        len(
+            _export(
+                effects=(
+                    _record(execution_id="x1", step_id="s1"),
+                    _record(execution_id="x2", step_id="s1", intended_action_id="ia2"),
+                )
+            ).effects
+        )
+        == 2
+    )
+
+
 def _satisfied(execution_id: str, step_id: str) -> StepExecution:
     """A ``SUCCEEDED`` step satisfied from ``execution_id``/``step_id``."""
     return StepExecution(

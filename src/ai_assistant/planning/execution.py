@@ -266,7 +266,23 @@ class PlanExecution:
             )
             raise IllegalTransitionError(msg)
 
-        updated = _revalidated(self._advance(current, transition, satisfaction))
+        # ADR-0259 §9's five limbs, resolved **here** — after the version compare, the
+        # step lookup and the legality check above, which is the ordering
+        # `PlanStore.commit_transition`'s exception contract needs — and resolved
+        # **once**, so the instant the store stamps on the step is the instant the
+        # state carries too. A state written at the tracker's clock while its step
+        # says the store's would be a record that finished before it was written.
+        borrowed: BorrowedAct | None = None
+        if transition.satisfied_by_execution is not None:
+            if satisfaction is None:
+                msg = (
+                    f"step {transition.step_id} names a completed effect, and a satisfaction "
+                    "is committed only through a store that can verify it against its rows"
+                )
+                raise PlanningError(msg)
+            borrowed = satisfaction(current)
+
+        updated = _revalidated(self._advance(current, transition, borrowed))
         return _revalidated_state(
             state.model_copy(
                 update={
@@ -274,7 +290,7 @@ class PlanExecution:
                         updated if step.step_id == updated.step_id else step for step in state.steps
                     ),
                     "version": state.version + 1,
-                    "updated_at": self._now(),
+                    "updated_at": self._now() if borrowed is None else borrowed.finished_at,
                 }
             )
         )
@@ -352,7 +368,7 @@ class PlanExecution:
         self,
         step: StepExecution,
         transition: StepTransition,
-        satisfaction: Callable[[StepExecution], BorrowedAct] | None = None,
+        borrowed: BorrowedAct | None = None,
     ) -> StepExecution:
         """Build the step's next value for a move already known to be legal."""
         if transition.to_status is StepStatus.RUNNING:
@@ -361,7 +377,7 @@ class PlanExecution:
             return self._to_awaiting_approval(step, transition)
         if transition.to_status is StepStatus.SKIPPED:
             return self._to_skipped(step, transition)
-        return self._to_finished(step, transition, satisfaction)
+        return self._to_finished(step, transition, borrowed)
 
     def _to_awaiting_approval(
         self, step: StepExecution, transition: StepTransition
@@ -470,7 +486,7 @@ class PlanExecution:
         self,
         step: StepExecution,
         transition: StepTransition,
-        satisfaction: Callable[[StepExecution], BorrowedAct] | None = None,
+        borrowed: BorrowedAct | None = None,
     ) -> StepExecution:
         """Close the step out as SUCCEEDED, FAILED, or INDETERMINATE.
 
@@ -482,40 +498,19 @@ class PlanExecution:
         refuse it too, for the marks a ``SUCCEEDED`` step needs, but with a message
         about ``approval_ref`` rather than about the move.
 
-        **And a satisfaction is committed only through a store that can verify it.**
-        Whether the borrowed act is this goal's, stands ``SUCCEEDED``, is the one the
-        effect row names, was taken under the key the transition names, and is being
-        applied to a step that has not already run are ADR-0259 §9's five limbs, and
-        every one of them is a question about **stored rows** this tracker does not
-        hold. So the store's verification is called here — after the version compare,
-        the step lookup and the legality check, which is the ordering
-        ``PlanStore.commit_transition``'s exception contract needs — and a
-        satisfaction arriving without one is refused rather than guessed at.
-
-        **What it returns is what lands**: the ``output`` is the holder's own and the
-        ``finished_at`` is the **store's** clock's, not this tracker's, which §9 names
-        in terms and which matters because a store may be given an independently
-        clocked tracker. ``attempts`` is untouched on every path here, so no row of
-        ADR-0259 §7's three increments it.
+        **What the store verified is what lands**: the ``output`` is the holder's own
+        and the ``finished_at`` is the **store's** clock's, not this tracker's, which
+        ADR-0259 §9 names in terms and which matters because a store may be given an
+        independently clocked tracker. ``attempts`` is untouched on every path here, so
+        no row of §7's three increments it.
         """
-        satisfied = transition.satisfied_by_execution is not None
         undispatched = step.status in _SATISFIABLE_STATUSES
-        if transition.to_status is StepStatus.SUCCEEDED and undispatched and not satisfied:
+        if transition.to_status is StepStatus.SUCCEEDED and undispatched and borrowed is None:
             msg = (
                 f"step {step.step_id} cannot go from {step.status} to SUCCEEDED without "
                 "naming the completed effect that satisfies it"
             )
             raise IllegalTransitionError(msg)
-
-        borrowed: BorrowedAct | None = None
-        if satisfied:
-            if satisfaction is None:
-                msg = (
-                    f"step {step.step_id} names a completed effect, and a satisfaction is "
-                    "committed only through a store that can verify it against its rows"
-                )
-                raise PlanningError(msg)
-            borrowed = satisfaction(step)
 
         return step.model_copy(
             update={
