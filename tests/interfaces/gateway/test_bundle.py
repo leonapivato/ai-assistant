@@ -1213,6 +1213,26 @@ _ACTS_THAT_ACCOUNT_FOR_THEMSELVES: Final = frozenset(
 _SEGMENTS_THAT_ACCOUNT_FOR_AN_ACT: Final = frozenset({("forgetBelief", 2)})
 
 
+#: The functions that still reach ``sessionLost`` without asking whose session it is,
+#: and the issue that empties this set (#2446).
+#:
+#: ``report`` is ``sessionLost`` at one remove, and ``sessionLost`` calls
+#: ``forgetHeaderHalf``, which removes the stored half whatever session that half belongs
+#: to. The half is shared by every tab at this origin, so **any** ``report`` or
+#: ``refused`` reached after an ``await`` is a door through which a request belonging to a
+#: session that has already ended can end the session the owner is actually using. #2404
+#: closed every one that goes through ``relay``; #2455 closed the delivery stream's two,
+#: which are the ones the census above cannot see because ``readDeliveries`` issues its
+#: own ``fetch``.
+#:
+#: What is left is the **ask** paths, named here rather than left invisible. They are
+#: #2446's, and not by deferral for its own sake: each carries its own outcome reasoning
+#: — ADR-0139 §4's three outcomes, ADR-0177 §7's not-known branch — that a guard has to be
+#: fitted to rather than dropped into, and that issue owes an arm per path. It empties
+#: this set when it lands, exactly as :data:`_OUTSIDE_THE_HIDE_SWEEP` is emptied.
+_REPORTS_WITHOUT_A_SESSION_GUARD: Final = frozenset({"askWhole", "askStreaming", "sendRecording"})
+
+
 def test_every_resumed_relay_that_displays_anything_compares_its_session() -> None:
     """The rule over the whole script, and the exclusions named (#2404).
 
@@ -1364,6 +1384,84 @@ def test_a_refusal_the_session_outlived_is_classified_but_not_displayed() -> Non
     assert relaying.index("conversationLost(body") < relaying.index(
         "if (!sameSession(half, era)) {"
     )
+
+
+def test_every_ending_that_can_end_a_session_asks_whose_session_it_is() -> None:
+    """The rule over the doors ``relay`` does not own, and the one gap named (#2455).
+
+    ``test_every_resumed_relay_that_displays_anything_compares_its_session`` is scoped to
+    "every function that awaits ``relay``", which is honest and leaves this class
+    unclaimed: a caller that issues its own ``fetch`` and then calls ``report`` reaches
+    ``sessionLost`` — and therefore ``forgetHeaderHalf`` — with nothing comparing the
+    session its request was sent under against the one this browser now holds. The
+    delivery stream was the whole of that class in ADR-0175 §4's surface, and it is the
+    reachable one: §7 has an idle session expire *under* an open stream, so a stream
+    answering ``no-live-session`` for a session that ended an hour ago is the design
+    working, and evicting another tab's freshly minted half with it was #2455.
+
+    **Per call site rather than per function.** A single guard before the first
+    ``report`` would otherwise satisfy a function with two endings, which is exactly the
+    shape ``readDeliveries`` has — a refusal at the head and a terminal value on the body
+    — so each call is asked whether a comparison stands between it and the one before it.
+
+    **The exclusions are three and they are named**: ``refused`` and ``relay``, where the
+    comparison already sits inside — ``test_a_refusal_the_session_outlived_is_classified``
+    ``_but_not_displayed`` is where that is pinned — and
+    :data:`_REPORTS_WITHOUT_A_SESSION_GUARD`, which is #2446's open work.
+    """
+    script = _code("app.js")
+    functions = _functions(script)
+    checked = []
+    for name, body in functions.items():
+        if name in {"refused", "relay"} or name in _REPORTS_WITHOUT_A_SESSION_GUARD:
+            continue
+        calls = [one.start() for one in re.finditer(r'(?<![\w.])(?:report|refused)\("', body)]
+        if not calls:
+            continue
+        checked.append(name)
+        previous = 0
+        for call in calls:
+            assert "if (!sameSession(half, era)) {" in body[previous:call], (name, call)
+            previous = call
+
+    # The scan found the surface it is about: a regex that matched nothing would satisfy
+    # every assertion in the loop above.
+    assert "readDeliveries" in checked
+    # And the carve-out names real functions rather than names that have gone stale,
+    # which is how a list like this rots into a permission.
+    assert set(functions) >= _REPORTS_WITHOUT_A_SESSION_GUARD
+
+
+def test_the_delivery_stream_carries_the_session_it_was_opened_under() -> None:
+    """Why the guard above is reachable at all on this surface (#2455).
+
+    Every other caller reads the half and the era in the same breath and compares them
+    after its own ``await``. A delivery stream cannot: the pair has to survive a request
+    that is *expected* to outlive its own session, and ``readDeliveries`` is called from
+    ``watchDeliveries`` rather than opened where the half was read. So the era is captured
+    beside the half in the caller and handed down, which is the second of #2455's two
+    directions — the first, comparing inside ``forgetHeaderHalf`` itself, would have to be
+    told which half the provoking request carried, and the only way to tell it is through
+    ``report``, whose callers are most of this file.
+
+    **Captured before ``watching`` is set**, so that nothing between reading the half and
+    committing to the stream can move either part of the pair.
+    """
+    functions = _functions(_code("app.js"))
+    watch = functions["watchDeliveries"]
+
+    assert "const era = sessionEra;" in watch
+    assert watch.index("const half = headerHalf();") < watch.index("const era = sessionEra;")
+    assert watch.index("const era = sessionEra;") < watch.index("watching = true;")
+    assert "await readDeliveries(half, era);" in watch
+    assert "async function readDeliveries(half, era) {" in _code("app.js")
+    # Neither ending reports before it has compared, and the stream that outlived its
+    # session says so in the line that hands the control back rather than in a fault
+    # slot: nothing went wrong, and nothing here was ended.
+    read = functions["readDeliveries"]
+    assert read.count("if (!sameSession(half, era)) {") == 2
+    assert read.count("stopWatching(OUTLIVED_ITS_SESSION);") == 2
+    assert "forgetHeaderHalf" not in read
 
 
 def test_the_session_era_moves_exactly_where_the_stored_half_does() -> None:
@@ -3528,7 +3626,16 @@ def test_a_stream_that_never_opened_is_not_reported_as_one_that_went_quiet() -> 
     # its own sentence for the reason the three above are three, and carrying the same
     # way back because the condition is the same: the hub is polled only while a browser
     # is watching, so nothing it holds was taken while nothing here was listening.
-    assert script.count("Start watching again.") == 4
+    #
+    # **Five since #2455**, and the fifth is the one ending that is not a fault at all:
+    # a stream opened under a session this browser no longer holds, whose ending belongs
+    # to that session and not to this one. It carries the same way back because the
+    # control is the way back from every ending — what it does not carry is the outbox
+    # sentence, because nothing here stopped watching on the hub's account.
+    assert script.count("Start watching again.") == 5
+    # And it is stated where a legitimate ending is stated (ADR-0182 §6): the line beside
+    # the control, never the fault slot the four above write into.
+    assert "fault(OUTLIVED_ITS_SESSION" not in script
 
 
 def test_the_page_holds_a_stream_from_the_request_and_not_from_its_first_value() -> None:
@@ -3556,7 +3663,7 @@ def test_the_page_holds_a_stream_from_the_request_and_not_from_its_first_value()
     rearm = _functions(script)["rearm"]
 
     # Held from before the request, not from its first value.
-    assert watch.index("watching = true;") < watch.index("await readDeliveries(half);")
+    assert watch.index("watching = true;") < watch.index("await readDeliveries(half, era);")
     # And the two gates that spend it are the same fact, so nothing opens a second.
     assert "if (half === null || watching) {" in watch
     assert "if (watching) {" in rearm
