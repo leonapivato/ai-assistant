@@ -21,8 +21,8 @@ from typing import TYPE_CHECKING, Final
 
 import pytest
 from plan_store_contract import (
-    InjectedFaultError,
     _KEY,
+    InjectedFaultError,
     PlanStoreContract,
     _attempt,
     _claim,
@@ -3729,14 +3729,14 @@ async def test_a_version_5_plan_store_reads_its_goals_with_no_quotes(
         assert await store.for_action("g1", "ia1") == (), "an absence and never a fault"
 
         export = await store.export()
-        assert export.schema_version == 15
+        assert export.schema_version == 16
         assert export.goals[0].quotes == ()
     finally:
         store.close()
 
     with sqlite3.connect(path) as conn:
         assert conn.execute("SELECT value FROM meta WHERE key = 'schema_version'").fetchone() == (
-            "7",
+            "8",
         )
         assert conn.execute("SELECT data FROM goals WHERE id = 'g1'").fetchone()[0] == before, (
             "the migration converts nothing: the blob is the one the previous release wrote"
@@ -3868,13 +3868,13 @@ async def test_the_upgrade_repairs_every_live_attempt_of_an_abandoned_goal(
         assert held is not None
         assert held.quotes == ()
         assert held.quotes_elided == 0
-        assert (await store.export()).schema_version == 15
+        assert (await store.export()).schema_version == 16
     finally:
         store.close()
 
     with sqlite3.connect(path) as conn:
         assert conn.execute("SELECT value FROM meta WHERE key = 'schema_version'").fetchone() == (
-            "7",
+            "8",
         )
 
 
@@ -3981,7 +3981,7 @@ async def test_an_earlier_plan_store_opens_with_an_empty_effects_table(
     store = SqlitePlanStore(path=path, now=_fixed_now)
     try:
         export = await store.export()
-        assert export.schema_version == 15
+        assert export.schema_version == 16
         assert export.effects == (), "the table is created empty rather than reconstructed"
         assert export.goals[0].quotes == (), "and every earlier pass ran, not just the last"
 
@@ -4002,7 +4002,7 @@ async def test_an_earlier_plan_store_opens_with_an_empty_effects_table(
 
     with sqlite3.connect(path) as conn:
         assert conn.execute("SELECT value FROM meta WHERE key = 'schema_version'").fetchone() == (
-            "7",
+            "8",
         )
 
 
@@ -4037,14 +4037,14 @@ async def test_a_version_4_plan_store_reads_its_goals_with_no_intended_actions(
         assert goal.intended_actions == (), "and nothing is invented for it"
 
         export = await store.export()
-        assert export.schema_version == 15
+        assert export.schema_version == 16
         assert export.goals[0].intended_actions == ()
     finally:
         store.close()
 
     with sqlite3.connect(path) as conn:
         assert conn.execute("SELECT value FROM meta WHERE key = 'schema_version'").fetchone() == (
-            "7",
+            "8",
         )
         assert conn.execute("SELECT data FROM goals WHERE id = 'g1'").fetchone()[0] == before, (
             "the migration converts nothing: the blob is the one the previous release wrote"
@@ -4082,14 +4082,14 @@ async def test_a_version_3_plan_store_gains_the_evidence_table_and_its_counter(
         assert await store.evidence_of("g1") == EvidenceHistory(goal_id="g1")
 
         export = await store.export()
-        assert export.schema_version == 15
+        assert export.schema_version == 16
         assert export.evidence == (EvidenceHistory(goal_id="g1"),)
     finally:
         store.close()
 
     with sqlite3.connect(path) as conn:
         assert conn.execute("SELECT value FROM meta WHERE key = 'schema_version'").fetchone() == (
-            "7",
+            "8",
         )
         assert conn.execute("SELECT COUNT(*) FROM goal_evidence").fetchone() == (0,)
         assert conn.execute("SELECT evidence_elided FROM goals").fetchall() == [(0,)]
@@ -4133,14 +4133,14 @@ async def test_a_version_2_plan_store_is_taken_the_whole_way_to_the_current_shap
         assert page.elided == 0
 
         export = await store.export()
-        assert export.schema_version == 15
+        assert export.schema_version == 16
         assert export.questions == ()
     finally:
         store.close()
 
     with sqlite3.connect(path) as conn:
         assert conn.execute("SELECT value FROM meta WHERE key = 'schema_version'").fetchone() == (
-            "7",
+            "8",
         )
         columns = {str(row[1]) for row in conn.execute("PRAGMA table_info(goals)").fetchall()}
         assert {"conversation_id", "last_engaged_in", "evidence_elided"} <= columns
@@ -4251,7 +4251,7 @@ async def test_a_pre_decision_plan_store_upgrades_and_stays_exportable(
         assert plan.targets_revision is None, "each plans row's targets_revision is absent"
 
         export = await store.export()
-        assert export.schema_version == 15
+        assert export.schema_version == 16
         assert [one.id for one in export.goals] == ["g1"]
         assert export.attempts == ()
 
@@ -4265,7 +4265,7 @@ async def test_a_pre_decision_plan_store_upgrades_and_stays_exportable(
         # 3, because every pass runs inside the one setup transaction and the marker is
         # stamped last.
         assert conn.execute("SELECT value FROM meta WHERE key = 'schema_version'").fetchone() == (
-            "7",
+            "8",
         )
 
 
