@@ -1244,12 +1244,18 @@ async def test_a_refused_boundary_write_is_recovered_on_a_declining_answer() -> 
 
     **What this arm is about is unchanged, and it is the state rather than the member**:
     wherever the boundary's write was refused the stored row still says
-    ``AWAITING_AUTHORIZATION``, and the finishing commit is what repairs it. §4's second
-    ending condition asks whether the attempt is *paused*, and this resumption **is** the
-    user's answer — the token is settled and nothing is waiting on it — so the commit
-    reads that condition off the pass rather than off a row it is itself repairing. An
-    implementation that declined here on the strength of the stale row would leave §5's
-    paused state at ``VERIFY`` over a question nobody can answer again.
+    ``AWAITING_AUTHORIZATION``, and the finishing commit is what repairs it. An
+    implementation that wrote the state only alongside a terminal outcome would leave
+    §5's paused state at ``VERIFY`` over a question nobody can answer again.
+
+    **And the attempt does not end on this turn**, which is the same clause read the
+    other way. ADR-0262 §4 admits an ending *"exactly where"* the attempt's state is
+    none of its three paused members, and this row is one of them at the instant the
+    commit is computed — §12's arm 7 requires an ``AWAITING_AUTHORIZATION`` attempt to
+    stay non-terminal with no outcome, and it does not except the turn that is answering
+    it. So this turn takes the recovery transition and nothing else, and the next turn
+    that engages the goal runs its own comparison against the then-current criteria.
+    That is §4's own stated cost, and it is bounded by an act that already runs.
 
     **The two approving answers this arm used to carry — the tool failing and the
     composition producing nothing — are unreachable behind a refused boundary write
@@ -1281,6 +1287,9 @@ async def test_a_refused_boundary_write_is_recovered_on_a_declining_answer() -> 
     attempt = await harness.plans.get_attempt(stored.id)
     assert attempt is not None
     assert attempt.phase is AttemptPhase.VERIFY, "the phase says where it stands"
-    assert attempt.state is AttemptState.ENDED, "and it is no longer waiting on the user"
-    assert attempt.outcome is AttemptOutcome.CONDITION_PREVENTED
-    assert attempt.ended_at is not None
+    assert attempt.state is AttemptState.RUNNING, "and it is no longer waiting on the user"
+    assert attempt.outcome is None, "§4 ends no attempt whose stored state is paused"
+    assert attempt.ended_at is None
+    goal = await harness.plans.get_goal(stored.goal_id)
+    assert goal is not None
+    assert goal.status is GoalStatus.ACTIVE, "and no GoalStatus moved"

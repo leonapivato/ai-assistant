@@ -10572,20 +10572,25 @@ class Engine:
         held = await self._attempt_of(step.state)
         if held is None:
             return None
-        # ADR-0262 §4's three ending conditions. The first is the reply — read as the
-        # one `bool` §1 admits — and the third is every step of every execution the
-        # attempt names having settled (#2477); an attempt whose walk left one unsettled
-        # does not end on this turn.
+        # ADR-0262 §4's three ending conditions, **all three read here**: the reply, as
+        # the one `bool` §1 admits; the attempt's own state; and every step of every
+        # execution the attempt names having settled (#2477).
         #
-        # **The second is not read off the stored row here, and that is deliberate.**
-        # §4 asks whether the attempt is *paused*, and this resumption **is** the user's
-        # answer: the boundary already committed it out of `AWAITING_AUTHORIZATION` at
-        # the instant the answer was recorded, and where that write did not land the row
-        # still says so while nothing is waiting on it. Reading the row would decline to
-        # end an attempt on the strength of a write this very commit repairs.
+        # **The second is read off the stored row, and the boundary's own write is what
+        # moves it.** Where that write landed, the row says `RUNNING` and this
+        # resumption ends the attempt on the member the comparison earned. Where it did
+        # **not** land, the row still says `AWAITING_AUTHORIZATION`, and §4 admits an
+        # ending "exactly where" the state is none of its three paused members — so this
+        # turn ends nothing, takes the recovery transition below instead, and the next
+        # turn that engages the goal runs its own comparison against the then-current
+        # criteria. That is §4's own stated cost rather than a gap: arm 7 requires an
+        # `AWAITING_AUTHORIZATION` attempt to stay non-terminal with no outcome, and it
+        # does not except the turn that is answering it. Adversarial review, round 2,
+        # `blocker`.
         ends = (
             verified is not None
             and self._composed_a_reply(composed)
+            and not self._paused(verified.attempt)
             and await self._every_step_settled(held)
         )
         if ends:
