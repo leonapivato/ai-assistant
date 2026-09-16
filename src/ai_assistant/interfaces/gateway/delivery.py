@@ -624,6 +624,7 @@ async def write_stream(
     stream: DeliveryStream,
     *,
     frame: Callable[[Mapping[str, Any]], bytes],
+    wrote: Callable[[], None],
 ) -> None:
     """Write one delivery stream's values until it ends or is abandoned (§4).
 
@@ -633,10 +634,21 @@ async def write_stream(
     reclaims the connection; without the race the abandonment clause would be a
     decision the gateway made and could not act on.
 
+    **The completion of each write is reported, and that is §4's own condition read
+    rather than guessed at.** "A write that has not completed when the next value is
+    due on that stream is abandoned and the stream is ended", and the gateway ends a
+    stream for a second reason as well — the session under it ended (ADR-0175 §7).
+    That ending has no value of the fan-out's to offer, so :meth:`DeliveryStream.offer`
+    cannot tell it what ``offer`` tells this loop; ``frame`` marks a write begun and
+    this marks it complete, so the caller can ask.
+
     Args:
         writer: The connection's writer, already carrying the stream's head.
         stream: The stream to drain.
-        frame: How one value becomes bytes on the wire.
+        frame: How one value becomes bytes on the wire, and where a write begins.
+        wrote: Called once each write has completed, which is once its drain has
+            returned. Not called for a write abandoned mid-drain, because that write
+            is exactly the one that has not completed.
     """
     async for value in stream.values():
         writer.write(frame(value))
@@ -647,6 +659,7 @@ async def write_stream(
             if not drained.done():
                 return
             await drained
+            wrote()
         finally:
             for pending in (drained, abandoned):
                 pending.cancel()

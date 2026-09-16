@@ -353,6 +353,24 @@ async def _read_all(reader: asyncio.StreamReader) -> list[dict[str, Any]]:
     return [value async for value in _values(reader)]
 
 
+async def _settled() -> None:
+    """Let the gateway finish the write a case has just read off the socket.
+
+    Bytes reaching a reader is not the gateway's write *completing*: the value is
+    offered to the stream, the connection handler resumes, the drain returns, and only
+    then is the write recorded as done (ADR-0175 §4, ``_Ending.outstanding``). Those are
+    a fixed, small number of event-loop turns, and a case that fires a timer in the same
+    turn as its last read observes the gateway mid-step.
+
+    An ordering rather than a duration, which is what ADR-0216 §7 asks of this corpus:
+    ``asyncio.sleep(0)`` yields one turn and waits on no clock. ``_Delivering``'s own
+    ``answer_one_poll`` spends four for the same reason; this spends more than any of
+    these paths needs.
+    """
+    for _ in range(16):
+        await asyncio.sleep(0)
+
+
 @contextlib.asynccontextmanager
 async def _harness(
     engine: FakeAssistantEngine | None = None, **overrides: Any
@@ -855,6 +873,7 @@ async def test_an_open_stream_is_not_use_of_the_session_and_dies_with_it() -> No
         reader, _, _ = await one.send("GET", "/deliveries")
         await engine.answer_one_poll()
         assert (await anext(_values(reader)))["kind"] == "alive"
+        await _settled()
 
         one.clock.advance(timedelta(minutes=6))
         one.timers.fire_all()
@@ -904,6 +923,15 @@ class _Recording:
         self.closed = True
 
 
+def _lines(written: bytes) -> list[dict[str, Any]]:
+    """Every NDJSON value in a chunked body, read off the bytes a stub recorded."""
+    return [
+        json.loads(line)
+        for line in written.split(b"\r\n")
+        if line.startswith(b"{") and line.endswith(b"}\n")
+    ]
+
+
 def _held(
     *, ending: _Ending, delivery: DeliveryStream | None = None
 ) -> tuple[_OpenStream, _Recording]:
@@ -946,56 +974,88 @@ def test_a_stream_that_already_carries_a_terminal_value_is_not_given_a_second() 
     assert already  # the body's own value, framed and therefore recorded
 
 
-async def test_a_delivery_stream_whose_drain_is_blocked_is_still_given_its_ending() -> None:
-    """The half of round 1's ``blocker`` this rebuts rather than acts on, driven.
+async def test_a_delivery_stream_whose_drain_is_blocked_is_abandoned_without_a_value() -> None:
+    """ADR-0175 §4's abandonment clause, reached by a session's ending (#2505).
 
-    The finding, restated in round 2, reads ADR-0175 §4 as forbidding the terminal value
-    on a stream whose previous write has not completed: "queues nothing behind one", and
-    a stalled write "is abandoned and the stream is ended". This is that exact state —
+    "On a **delivery** stream a write that has not completed when the next value is due
+    on that stream is abandoned and the stream is ended", and "the gateway holds at most
+    one value pending per stream and queues nothing behind one". A session's ending is
+    the next value due, so it takes the same disposition
+    ``DeliveryFanOut._end_all`` takes for a poll that could not complete.
+
+    This is that state driven rather than described:
     :func:`~ai_assistant.interfaces.gateway.delivery.write_stream` running for real, one
     value written, and a ``drain`` that never returns because the browser has stopped
-    reading — so what the two readings disagree about is asserted rather than argued.
+    reading. What the browser is left with is a body that ended without a terminal value,
+    which §2 makes a transport failure and §4 prices at "a reconnect — which is free,
+    because a session outlives its connections".
 
-    **What §4 forbids is not done here, and each clause is checked.** "The gateway holds
-    at most one value pending per stream and queues nothing behind one" is about
-    :class:`.DeliveryStream`'s pending slot, and that slot still holds the one value:
-    :meth:`_OpenStream.end` never offers into it. The abandonment clause states its own
-    purpose in the same sentence — a stalled write is abandoned "so a browser that stops
-    reading cannot delay another browser's delivery" — and nothing here waits on the
-    drain: ``end`` returns with the drain still blocked, the stream is abandoned, and the
-    body returns without it ever completing. The whole cost of the ending is one value
-    and five bytes, once.
-
-    **And what the abandoned browser gets is better than the clause's fallback.** §4
-    leaves it a body that stopped, which §2 makes a transport failure; this leaves it the
-    named ending in good order behind the value it had not taken, if it ever reads again.
-    Withholding it would be the clause's letter applied against its stated reason.
+    **The clause admits a narrow reading that would have written the value here**, on
+    which "pending" is :class:`.DeliveryStream`'s own slot — untouched by this path — and
+    the abandonment clause is satisfied by anything that does not wait on a drain, which
+    two synchronous writes and a close do not. Adversarial review raised the broad
+    reading at rounds 1, 2 and 3; it is the conservative one and it costs #2498's own case
+    nothing, because a page watching an idle stream drained its last keep-alive a poll
+    budget ago. #2505 holds the question.
     """
     delivery = DeliveryStream()
     ending = _Ending()
     stream, recording = _held(ending=ending, delivery=delivery)
     body = asyncio.create_task(
-        write_stream(cast("asyncio.StreamWriter", recording), delivery, frame=ending.framing)
+        write_stream(
+            cast("asyncio.StreamWriter", recording),
+            delivery,
+            frame=ending.framing,
+            wrote=ending.wrote,
+        )
     )
     assert delivery.offer(streams.alive())
     await asyncio.sleep(0)
     await asyncio.sleep(0)
     assert recording.written  # the value is on the wire and its drain has not returned
+    assert ending.outstanding
 
     stream.end()
 
-    # Nothing waited: the drain is still blocked and the ending is already written.
+    # The ending waited on nothing — the drain is still blocked — and wrote nothing.
     assert not recording.drained.is_set()
-    values = [
-        json.loads(line) for line in recording.written.split(b"\r\n") if line.startswith(b"{")
-    ]
-    assert values == [{"kind": "alive"}, {"kind": "fault", "fault": "no-live-session"}]
-    assert recording.written.endswith(b"0\r\n\r\n")
+    assert _lines(recording.written) == [{"kind": "alive"}]
+    assert not recording.written.endswith(b"0\r\n\r\n")
     assert recording.closed
-    # §4's disposition for a stalled stream is taken in full, which is what releases the
-    # body: it stops waiting on a browser rather than on a socket that is about to go.
+    # §4's disposition in full, which is also what releases the body: it stops waiting on
+    # a browser rather than on a socket that is about to go.
     assert delivery.abandoned.is_set()
     await asyncio.wait_for(body, timeout=5)
+
+
+async def test_a_delivery_stream_whose_writes_have_all_left_is_named(
+    harness: Harness,
+) -> None:
+    """The other side of the arm above, so that the guard is a guard and not a refusal.
+
+    A stream the browser is keeping up with has no write outstanding, and takes §2's
+    terminal value — which is #2498 and the whole point of the change. Without this,
+    :meth:`_OpenStream._name_the_ending` could return early on every delivery stream and
+    the arm above would still pass.
+
+    Driven through the harness rather than the stub because "every write has left" is a
+    fact about a real socket and a real drain, and the arm that matters is the one where
+    the two are not arranged by the case.
+    """
+    engine = _Delivering([None, None])
+    async with _harness(engine, gateway_session_idle_timeout=timedelta(minutes=5)) as one:
+        reader, _, _ = await one.send("GET", "/deliveries")
+        await engine.answer_one_poll()
+        assert (await anext(_values(reader)))["kind"] == "alive"
+        # The gateway's own write completing is what this arm is about, and it is a few
+        # turns past the bytes arriving — so it is waited for rather than assumed.
+        await _settled()
+
+        one.clock.advance(timedelta(minutes=6))
+        one.timers.fire_all()
+        await asyncio.sleep(0)
+
+        assert await _read_all(reader) == [{"kind": "fault", "fault": "no-live-session"}]
 
 
 async def test_a_session_reaching_its_absolute_lifetime_names_the_ending_too() -> None:
@@ -1021,6 +1081,7 @@ async def test_a_session_reaching_its_absolute_lifetime_names_the_ending_too() -
         reader, _, _ = await one.send("GET", "/deliveries")
         await engine.answer_one_poll()
         assert (await anext(_values(reader)))["kind"] == "alive"
+        await _settled()
 
         one.clock.advance(timedelta(minutes=9))
         status, _ = await one.whole("POST", "/conversations", {})
@@ -1049,6 +1110,7 @@ async def test_a_gateway_on_the_way_down_names_the_ending_of_every_stream_it_hel
         reader, _, _ = await one.send("GET", "/deliveries")
         await engine.answer_one_poll()
         assert (await anext(_values(reader)))["kind"] == "alive"
+        await _settled()
 
         one.gateway.close()
         await asyncio.sleep(0)

@@ -954,9 +954,14 @@ class _Ending:
     """
 
     named: bool = False
+    outstanding: bool = False
 
     def framing(self, value: Mapping[str, Any]) -> bytes:
-        """Frame one value for this stream, recording a terminal one as it goes.
+        """Frame one value for this stream, recording what it is as it goes.
+
+        Framing is the synchronous step immediately before the write, and the drain
+        after that write is the suspension point — so both facts recorded here are
+        true from before a session's ending can observe them.
 
         Args:
             value: The value, already carrying its ``kind``.
@@ -966,7 +971,12 @@ class _Ending:
         """
         if value.get("kind") in streams.TERMINAL_KINDS:
             self.named = True
+        self.outstanding = True
         return _frame(value)
+
+    def wrote(self) -> None:
+        """Record that the write begun by the last framing has completed."""
+        self.outstanding = False
 
 
 @dataclass(eq=False)
@@ -1047,9 +1057,10 @@ class _OpenStream:
         drain — which this cannot await, being the synchronous callback
         :class:`.SessionTable` announces an ending through.
 
-        **And a stream that already carries a terminal value is ended without a second**
-        — adversarial review, round 1, ``blocker``. :meth:`_name_the_ending` has it, and
-        has why the other half of that finding is not acted on.
+        **And two streams are ended without a value at all, because writing one would
+        breach a clause it was meant to serve** — adversarial review, rounds 1-3,
+        ``blocker``. :meth:`_name_the_ending` has both and the reading behind the
+        second.
         """
         self._name_the_ending()
         if self.delivery is not None:
@@ -1071,28 +1082,36 @@ class _OpenStream:
         one. :class:`_Ending` is set at framing time, before the write that precedes
         that drain, so this reads the state as it is rather than as it was.
 
-        **A delivery stream with a write outstanding still gets it**, which is the half
-        of that finding this rebuts rather than fixes. ADR-0175 §4 says "the gateway
-        holds at most one value pending per stream and queues nothing behind one", and
-        that pending slot is :class:`.DeliveryStream`'s — which this does not touch at
-        all: the value goes to the socket, not through :meth:`.DeliveryStream.offer`,
-        and the stream is abandoned in the same breath by :meth:`end`. §4's other clause
-        states its own purpose — a stalled write is abandoned "so a browser that stops
-        reading cannot delay another browser's delivery" — and nothing here waits on a
-        drain, because there is nothing to wait on: two synchronous writes and a close.
-        So no browser is delayed, nothing accumulates beyond one value and five bytes,
-        and the abandoned browser gets a *better* ending than §4's fallback if it ever
-        reads again. Suppressing the value there would be the clause's letter applied
-        against its stated reason.
+        **A delivery stream with a write outstanding is abandoned and gets no value**
+        (§4): "the gateway holds at most one value pending per stream and queues nothing
+        behind one", and "a write that has not completed when the next value is due on
+        that stream is abandoned and the stream is ended". A session's ending is the
+        next value due, so it takes the same disposition
+        :meth:`.DeliveryFanOut._end_all` takes for a poll that could not complete, and
+        the browser is not left guessing: §2 makes a body that ended without a terminal
+        value a transport failure, and §4 prices the remedy in the same breath — "a
+        reconnect, which is free, because a session outlives its connections".
 
-        **A complete chunk can only follow a complete chunk**, which is what makes the
-        preceding paragraph true of the bytes as well as of the state.
-        :func:`~ai_assistant.interfaces.gateway.http.render_chunk` frames a whole value
-        and every writer hands it to ``write`` in one call, so a stream is never
-        suspended mid-chunk: the drain that follows is the only suspension point, and by
-        then the chunk before it is whole.
+        **The reading is disclosed because there was one to make** (adversarial review,
+        rounds 1-3). The clause can be read narrowly, as the *pending slot*
+        :meth:`.DeliveryStream.offer` refuses on — which this path never touches, since
+        the value goes to the socket rather than through the fan-out — and on that
+        reading writing here breaches nothing: two synchronous writes and a close delay
+        no other browser, which is the purpose the abandonment clause states in its own
+        sentence. The broad reading, that a value put on the wire behind one the browser
+        has not taken is queued behind it whatever holds it, is the one taken here: it
+        is the conservative of the two, it is never worse for anyone than the ending this
+        build already gives that browser, and the case it governs is not #2498's — a page
+        watching an idle stream drained its last keep-alive a poll budget ago. #2505 has
+        the question if it is ever worth settling.
+
+        **An answer stream is not guarded on this**, which is §4 in terms: "an answer
+        stream has one reader and nothing to protect from it, and this clause does not
+        reach one".
         """
         if self.ending.named:
+            return
+        if self.delivery is not None and self.ending.outstanding:
             return
         with contextlib.suppress(ConnectionError, OSError):
             self.writer.write(
@@ -1135,10 +1154,11 @@ class _Streamed:
         release: Gives back what deciding to stream took — the hub slot, or the
             fan-out's registration and the poll that goes with the last reader.
             Called exactly once, on every exit.
-        ending: Whether a terminal value has been written on this stream. The body
-            frames every value through it and :meth:`_OpenStream._name_the_ending`
-            reads it, so "has this stream already been ended by a value" is one fact
-            held in one place rather than two the pair could disagree about.
+        ending: What has been written on this stream and whether it has left. The body
+            frames every value through it and reports each write's completion to it,
+            and :meth:`_OpenStream._name_the_ending` reads it — so the two facts a
+            session's ending turns on are held in one place rather than in two the
+            body and the ending could disagree about.
     """
 
     handle: SessionHandle
@@ -2611,12 +2631,17 @@ class Gateway:
                 async for produced in pieces:
                     if isinstance(produced, TurnOutcome):
                         await _write_value(
-                            writer, streams.outcome(_outcome_view(produced)), frame=ending.framing
+                            writer,
+                            streams.outcome(_outcome_view(produced)),
+                            frame=ending.framing,
+                            wrote=ending.wrote,
                         )
                         return
-                    await _write_value(writer, streams.chunk(produced), frame=ending.framing)
+                    await _write_value(
+                        writer, streams.chunk(produced), frame=ending.framing, wrote=ending.wrote
+                    )
         except (TransportError, AssistantError, ValueError) as exc:
-            await _write_value(writer, _stream_fault(exc), frame=ending.framing)
+            await _write_value(writer, _stream_fault(exc), frame=ending.framing, wrote=ending.wrote)
 
     def _delivery_stream(self, handle: SessionHandle) -> Response | _Streamed:
         """Open one delivery stream, and the poll with the first (ADR-0175 §4).
@@ -2655,7 +2680,7 @@ class Gateway:
                 content_type=streams.MEDIA_TYPE,
                 headers=(streams.keep_alive_header(self._settings.gateway_notification_budget),),
             ),
-            body=partial(write_stream, stream=opened, frame=ending.framing),
+            body=partial(write_stream, stream=opened, frame=ending.framing, wrote=ending.wrote),
             release=partial(self._deliveries.close, opened),
             ending=ending,
             delivery=opened,
@@ -4369,6 +4394,7 @@ async def _write_value(
     value: Mapping[str, Any],
     *,
     frame: Callable[[Mapping[str, Any]], bytes],
+    wrote: Callable[[], None],
 ) -> None:
     """Write one value on a stream and wait for it to leave.
 
@@ -4385,9 +4411,15 @@ async def _write_value(
         frame: How one value becomes bytes on *this* stream — the stream's own
             :class:`_Ending`, so that a terminal value is recorded as one in the same
             step it is framed and before the drain below can suspend.
+        wrote: Called once the drain has returned. An answer stream is not guarded on
+            it (ADR-0175 §4 reaches a delivery stream alone), so what this keeps true
+            is the record rather than a decision: an ``_Ending`` that said a write was
+            outstanding for the life of every answer stream would be a field meaning
+            one thing on one stream shape and nothing on the other.
     """
     writer.write(frame(value))
     await writer.drain()
+    wrote()
 
 
 def _rendered(payload: Mapping[str, Any]) -> Response:
