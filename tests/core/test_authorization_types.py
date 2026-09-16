@@ -75,6 +75,11 @@ def test_the_four_vocabularies_are_closed_at_the_membership_the_adr_fixes() -> N
         "expired",
         "revoked",
         "superseded",
+        # **Seven and not six** (ADR-0268 §2): the ending a closure of the row's goal
+        # takes over the rows standing when it is taken. Appended, so the six
+        # ratified members keep the values a stored row decodes from, which is §1's
+        # own *"added to and never renamed"* rule and the licence for it.
+        "goal_closed",
     ]
     assert [member.value for member in AuthorizationOrigin] == ["confirmed", "opening_act"]
     assert [member.value for member in AuthorizationSettlement] == [
