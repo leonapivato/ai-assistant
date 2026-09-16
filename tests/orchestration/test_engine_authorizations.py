@@ -5,10 +5,11 @@ the clause under test is about what a user is shown *at the question* and again 
 restart* — which no unit over the projection alone can exhibit.
 
 **The row is seeded rather than proposed, and that is Lane 2's fence rather than a
-shortcut.** ADR-0254 §20 assigns proposing the row to Lane 2, and issue #2373 leaves it
-unable to mint a ``CoverageMember`` for a named argument at all — so on this tree a
-``CONFIRM`` over a request carrying a user-facing argument proposes nothing, which the
-absence arm below asserts rather than works around. What is seeded is exactly the row
+shortcut.** ADR-0254 §20 assigns proposing the row to Lane 2, and the goals these
+harnesses drive state no bound ADR-0266 §4 reads — so nothing is minted, condition 6
+refuses an empty coverage over a request carrying a user-facing argument, and such a
+``CONFIRM`` proposes nothing, which the absence arm below asserts rather than works
+around. What is seeded is exactly the row
 :func:`~ai_assistant.orchestration.authorizing.proposed_authorization` would have
 written, under exactly the id
 :func:`~ai_assistant.orchestration.authorizing.authorization_id_for` derives, so the
@@ -61,10 +62,10 @@ def _harness(*, proposing: bool = True) -> tuple[Harness, FakeGoalAuthorizationS
     """An egress-confirmable harness whose runner and engine share one row store.
 
     **The step carries no argument, and that is what makes a proposal reachable at
-    all.** ADR-0254 §1's completeness condition — every user-facing argument named by a
-    member — holds only **vacuously** while issue #2373 stands, so the one `CONFIRM`
-    that proposes a row on this tree is one over an argument-free egress call (§20's arm
-    54, and arm 59's last case). `proposing=False` restores the ordinary shape, where the
+    all.** ADR-0254 §1's completeness condition, restated over ADR-0266 §7's condition
+    6, holds **vacuously** over the empty coverage this goal mints — so the one
+    `CONFIRM` that proposes a row here is one over an argument-free egress call (§20's
+    arm 54, and arm 59's last case). `proposing=False` restores the ordinary shape, where the
     call carries a recipient and no row is proposed.
 
     ``episode_retention`` is ADR-0256 §1's third rung, which the ladder needs because the
@@ -145,9 +146,10 @@ async def test_a_confirmation_that_proposed_no_row_carries_no_projection() -> No
     """ADR-0254 §1: *"`Confirmation.authorization` is absent (§11)"* — and on this tree
     that is **every** confirmation over a request carrying a user-facing argument.
 
-    §1's completeness condition holds only vacuously while issue #2373 stands, so a row
-    is proposed for no ordinary egress call and the answer establishes nothing: the
-    `CONFIRM` is resolved and the one call is authorised by ADR-0148 §3's route (a).
+    This goal states no bound ADR-0266 §4 reads, so it mints no member and §1's
+    completeness condition holds only where it holds vacuously — a row is proposed for
+    no ordinary egress call and the answer establishes nothing: the `CONFIRM` is
+    resolved and the one call is authorised by ADR-0148 §3's route (a).
     """
     harness, store = _harness(proposing=False)
 

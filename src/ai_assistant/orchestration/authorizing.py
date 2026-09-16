@@ -28,29 +28,26 @@ Nothing here caches the answer or carries it to a dispatch: ADR-0254 §13's rech
 at `ActionPolicy.decide` is untouched and reads the current governing quote at
 every dispatch as if the field were not there.
 
-**What is deliberately absent, and why it is a hole rather than an omission.**
-ADR-0254 requires a row's `coverage` to be minted from the user's own recorded
-words — a `CoverageMember` naming an argument and fixing or bounding it, on a basis
-naming a recorded turn and a span of its utterance. **No clause of ADR-0254,
-ADR-0256, ADR-0249, ADR-0252 or ADR-0253 says how a span is associated with an
-argument key, nor how the member's shape is chosen** (issue #2373, ruled into
-ADR-0266). §10's three resolutions each turn a span into a *value* and none selects
-the span or names the argument; §9 clause (ii) states the property the association
-must have rather than a procedure; and §9's no-model clause forecloses the planner.
-So this module mints **no member at all**, which is §10's own fail-closed sentence —
-*"A resolution the loop cannot take is not taken, and no member is minted"*. **#2373
-is closed and the mint is a lane rather than a gap**: ADR-0266 §11's **L2** carries
-*"§2's act and its four refusals"* and lands it in this package, and until that lane
-does, the only coverage this package has to offer is the empty one. **That
-hole is now one place narrower than it was**: the coverage a proposal is taken over
-is this module's *argument* rather than a literal it writes, so a minter landing at
-:meth:`~ai_assistant.orchestration.runner.StepRunner._propose` reaches a writer that
-already asks about what it minted. Until one does, every caller on this tree passes
-an empty tuple, ADR-0254 §1's completeness condition holds only where it holds
-**vacuously** — on a request carrying no user-facing argument, §20's arm 54 and arm
-59's third case — and no row carries a `quoted`, the evidence route deciding nothing
-about a coverage that carries no `MONEY` member. It is an authority over an
-argument-free call rather than a wildcard over anything (§3).
+**Where the members come from, and it is not this module.** ADR-0254 requires a
+row's `coverage` to be minted from the user's own recorded words, and **no clause of
+ADR-0254, ADR-0256, ADR-0249, ADR-0252 or ADR-0253 said how a span is associated
+with a bound** (issue #2373, ruled into ADR-0266). That decision's §4 answers it — a
+closed four-form reading of a `USER_STATED` constraint's own span, mapped to a
+`MONEY` ceiling — and its §3 records why the argument key was the defect rather than
+the rule that chose it. Its §11's **L2** lands the mint in
+:mod:`ai_assistant.orchestration.stated_bounds`, whose one input is the goal (§5).
+
+**This module stays the writer and is no minter.** `coverage` is a **parameter**, so
+the proposal is taken over what the caller minted rather than over a literal this
+function assumed, and ADR-0266 §8's writer clause — *"`orchestration` mints every
+coverage member"* — is satisfied one module over. **A goal stating no bound still
+proposes over an empty coverage**, which is ADR-0254 §10's own fail-closed sentence:
+*"A resolution the loop cannot take is not taken, and no member is minted"*. §1's
+completeness condition then holds only where it holds **vacuously** — on a request
+carrying no user-facing argument, §20's arm 54 and arm 59's third case — and no row
+carries a `quoted`, the evidence route deciding nothing about a coverage that carries
+no `MONEY` member. It is an authority over an argument-free call rather than a
+wildcard over anything (§3).
 """
 
 from __future__ import annotations
@@ -136,14 +133,17 @@ def horizon(
 
     1. **The instant the user's own act states** — ADR-0254 §12's rung 1, resolved
        by `DATE_FROM_CONTEXT` or `AS_STATED` under §9's clauses entire. **It is
-       unreachable here**, because those are §10's resolutions and §10's resolutions
-       are what #2373 blocks; see this module's own docstring. It is *not* skipped
-       silently: on path (i) the instant this ladder does yield is put in front of
+       unreachable here**, and ADR-0266 §4 is why rather than #2373: that section's
+       mint takes `STATED_BOUND` and no other reading — *"`AS_STATED`,
+       `DATE_FROM_CONTEXT` and `FROM_SHOWN_RECORD` mint nothing through §§1-5"* —
+       and what it does mint is a `MONEY` ceiling, which states no instant. It is
+       *not* skipped silently: on path (i) the instant this ladder does yield is put in front of
        the user by ADR-0254 §11's projection **before they answer**, which is that
        section's whole claim — *"the user reads it before answering"* — so a horizon
        taken from a lower rung is one the answer is given about. That argument is
        path (i)'s alone and does **not** carry to a path-(iii) opening act, where no
-       question is put; path (iii) is blocked on #2373 in any case.
+       question is put; this package writes no opening act, and ADR-0266 §4 puts a
+       `STATED_BOUND` member on one **in no case**.
     2. **The goal's own `deadline`**, transcribed unchanged, where it is **strictly
        after** ``proposed_at``. *"an authority about that objective outliving it
        would authorise calls toward a goal whose own moment has passed."* A
@@ -306,11 +306,11 @@ async def proposed_authorization(  # noqa: PLR0913 — one parameter per operand
             object that already answers `ActionPolicy` under this annotation, which
             is golden rule 1 rather than an exception to it.
         coverage: The coverage the row would carry — condition 6's fourth operand,
-            and what the row is written with. **This module mints none** until
-            ADR-0266 §11's L2 lands the mint (module docstring), so every caller on
-            this tree passes an empty tuple; it is a parameter rather than a literal
-            so that the writer asks about what a minter minted rather than about
-            what this function assumed.
+            and what the row is written with. **This module mints none** (module
+            docstring): ADR-0266 §11's L2 puts the mint in
+            :func:`~ai_assistant.orchestration.stated_bounds.stated_bound_coverage`,
+            and this is a parameter rather than a literal so that the writer asks
+            about what the mint minted rather than about what this function assumed.
         goal: The goal, for rung 2 of the ladder.
         retention: The deployment's turn-retention window, for rung 3.
         standing: The `ESTABLISHED` rows of that goal, live and lapsed, as
