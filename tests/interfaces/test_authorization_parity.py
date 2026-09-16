@@ -47,6 +47,7 @@ TERMINAL: Final = _joined(
         for one in (
             cli._bound_sentence,
             cli._render_coverage,
+            cli._render_confirmation_quote,
             cli._render_confirmation_authorization,
             cli._render_authorization,
             cli._render_standing_authorizations,
@@ -123,6 +124,19 @@ CLAUSES: Final = (
         "§11: the announcement names the remedy and does not take it",
         "revoke-authorization",
         "What this authorises",
+    ),
+    # ADR-0267 §7's member, and the two halves §6 rests its disclosure on. The figure
+    # without the instant is half the clause — "the number the proof rests on **and how
+    # old it is**" — so both are rows, and both are on both surfaces.
+    ("ADR-0267 §7: the question names the figure the act was quoted at", "quoted at", "quoted at"),
+    ("ADR-0267 §6: and when that price was read", "quote.read_at", "quote.read_at"),
+    # **A disclosure and not a check** (§6): nothing expires a quote, no comparison reads
+    # its age, and the window between the reading and the charge is open — so a bare
+    # figure left to be read as a guarantee is the defect, on either surface.
+    (
+        "ADR-0267 §6: the figure is disclosed and is not offered as a check",
+        "still current",
+        "still current",
     ),
 )
 

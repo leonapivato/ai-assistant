@@ -21,6 +21,7 @@ and the CLI does not: that the set crossing to the page is the set `core` derive
 from __future__ import annotations
 
 from datetime import UTC, datetime, timedelta
+from decimal import Decimal
 from typing import TYPE_CHECKING, Any
 
 import pytest
@@ -41,6 +42,7 @@ from ai_assistant.core.types import (
     EgressDestination,
     EgressSpan,
     ExecutionState,
+    QuoteView,
     ReadAnswerOutcome,
     SpanCoverage,
     StepOutcome,
@@ -1270,3 +1272,79 @@ async def test_the_cancellation_is_relayed_with_the_token_and_with_no_second_mem
         await one.whole("POST", "/confirmation/cancel-read", {"token": "r-1", "reason": "no"})
 
         assert engine.calls == [("cancel_read", {"token": "r-1"})]
+
+
+# --- ADR-0267 §7: the figure the act was quoted at, as the page receives it ----
+
+
+#: The projection every arm below is about, quoted or not.
+def _projection(quote: QuoteView | None) -> AuthorizationProjection:
+    """What answering would establish, carrying ``quote`` and nothing invented."""
+    return AuthorizationProjection(
+        coverage=(),
+        expires_at=datetime(2026, 9, 13, 21, 0, tzinfo=UTC),
+        quote=quote,
+    )
+
+
+async def test_the_projection_carries_three_members_and_the_quote_is_the_third() -> None:
+    """ADR-0267 §7's member, at the boundary, asserted as a whole key set.
+
+    The enumeration is a decision (``_outcome_view``'s own discipline), so a member
+    that starts crossing unreviewed is as much a defect as one that stops — and this is
+    the tripwire that would have caught the field crossing as nothing at all.
+
+    **All three values of the** :class:`~ai_assistant.core.types.QuoteView`, because §6
+    rests its disclosure on the number *and* on how old it is.
+    """
+    quote = QuoteView(
+        amount=Decimal("45.50"),
+        currency="EUR",
+        read_at=datetime(2026, 9, 13, 8, 0, tzinfo=UTC),
+    )
+    async with _harness(_holding()) as one:
+        view = await _view(one, _confirmation(_span("body"), authorization=_projection(quote)))
+
+        assert set(view["authorization"]) == {"coverage", "expires_at", "quote"}
+        assert view["authorization"]["quote"] == {
+            "amount": "45.50",
+            "currency": "EUR",
+            "read_at": "2026-09-13T08:00:00+00:00",
+        }
+
+
+async def test_the_amount_crosses_as_its_exact_characters_and_never_as_a_number() -> None:
+    """``_bound_view``'s rule, one value over: a decimal read back through ``JSON.parse``
+    becomes a double, so a price would reach the person **changed** — and a rendering
+    showing a figure the record does not hold is worse than one showing none.
+
+    The amount here has more significant digits than a double carries exactly, so a view
+    that crossed it as a JSON number would come back a different price.
+    """
+    amount = "12345678901234567890.05"
+    quote = QuoteView(
+        amount=Decimal(amount),
+        currency="GBP",
+        read_at=datetime(2026, 9, 13, 8, 0, tzinfo=UTC),
+    )
+    async with _harness(_holding()) as one:
+        view = await _view(one, _confirmation(_span("body"), authorization=_projection(quote)))
+
+        crossed = view["authorization"]["quote"]["amount"]
+        assert crossed == amount
+        assert isinstance(crossed, str)
+
+
+async def test_a_row_that_records_no_figure_crosses_as_null_and_not_as_a_missing_key() -> None:
+    """ADR-0267 §7: the member is *"required with no default"*, and it is **absent
+    exactly where the row's ``quoted`` is absent**.
+
+    ``null`` is the absence the field itself carries; a **missing key** would be a
+    projection the page cannot tell an absent figure from a lost one, which is why the
+    key set above is asserted whole and why this arm asserts the key is present.
+    """
+    async with _harness(_holding()) as one:
+        view = await _view(one, _confirmation(_span("body"), authorization=_projection(None)))
+
+        assert "quote" in view["authorization"]
+        assert view["authorization"]["quote"] is None

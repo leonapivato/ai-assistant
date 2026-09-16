@@ -21,6 +21,7 @@ import asyncio
 import contextlib
 import json
 from datetime import UTC, datetime, timedelta
+from decimal import Decimal
 from typing import TYPE_CHECKING, Final
 
 import pytest
@@ -35,6 +36,7 @@ from ai_assistant.core.types import (
     CoverageView,
     GoalStatus,
     GoalSummary,
+    QuoteView,
     ToolDefinition,
     ValueBound,
 )
@@ -1335,6 +1337,165 @@ async def test_an_empty_coverage_says_what_it_covers_rather_than_nothing(
         row = drive.page.locator("#confirmation-list .confirmation-row")
         await expect(row).to_contain_text("no argument of yours")
         await expect(row).to_contain_text("not permission for anything wider")
+
+
+#: The figure a proposed row was built over (ADR-0267 §7).
+#:
+#: **A different amount in a different currency from the ceiling beside it**, so an arm
+#: asserting the figure cannot pass on the bound: a quote of ``50 GBP`` under a ceiling of
+#: ``up to 50 GBP`` would be satisfied by a page that rendered the bound twice.
+QUOTE: Final = QuoteView(
+    amount=Decimal("45.50"),
+    currency="EUR",
+    read_at=datetime(2026, 9, 13, 8, 0, tzinfo=UTC),
+)
+
+
+@pytest.mark.parametrize("viewport", _VIEWPORTS)
+async def test_the_question_names_the_figure_the_act_was_quoted_at(
+    gateway_browser: Browser, tmp_path: Path, viewport: ViewportSize
+) -> None:
+    """ADR-0267 §7 at the question, driven at both widths.
+
+    *"A confirmation that renders a ceiling without the figure the act was quoted at is
+    not a confirmation of that charge"*, and §6 rests the disclosure on **both** halves:
+    the number the proof rests on and how old it is.
+
+    **Beside and never in place of the ceiling**, which is what the two different
+    currencies here make checkable — and the whole of it is above the approval control,
+    ADR-0233 §8's ordering clause read onto this member exactly as the projection's own
+    arm reads it.
+    """
+    async with driving(gateway_browser, tmp_path, viewport=viewport) as drive:
+        drive.engine.park(
+            "h-1",
+            authorization=AuthorizationProjection(
+                coverage=(
+                    CoverageView(
+                        kind=BoundKind.MONEY, bound=money_bound("50"), span="up to fifty pounds"
+                    ),
+                ),
+                expires_at=AUTHORIZATION_NOW + timedelta(hours=1),
+                quote=QUOTE,
+            ),
+        )
+
+        await drive.page.click("#confirmations-button")
+        await drive.page.wait_for_selector("#confirmation-list .confirmation-row")
+
+        row = drive.page.locator("#confirmation-list .confirmation-row")
+        await expect(row).to_contain_text("quoted at 45.50 EUR")
+        await expect(row).to_contain_text("2026-09-13T08:00:00+00:00")
+        await expect(row).to_contain_text("the amount: up to 50 GBP")
+        assert await drive.page.evaluate(_PROJECTION_IS_ABOVE_THE_CONTROL) is True
+
+
+async def test_the_figure_is_disclosed_and_is_never_offered_as_a_check(
+    gateway_browser: Browser, tmp_path: Path
+) -> None:
+    """ADR-0267 §6: *"That is a disclosure and not a check"*.
+
+    Nothing expires a quote, no comparison reads its age, and the window between the
+    reading and the charge is open — so the page says what the figure is and says that
+    answering is not a warrant that it still holds, rather than leaving a bare number to
+    be read as a guarantee.
+    """
+    async with driving(gateway_browser, tmp_path, viewport=DESKTOP) as drive:
+        drive.engine.park(
+            "h-1",
+            authorization=AuthorizationProjection(
+                coverage=(), expires_at=AUTHORIZATION_NOW + timedelta(hours=1), quote=QUOTE
+            ),
+        )
+
+        await drive.page.click("#confirmations-button")
+        await drive.page.wait_for_selector("#confirmation-list .confirmation-row")
+
+        row = drive.page.locator("#confirmation-list .confirmation-row")
+        await expect(row).to_contain_text("not a warrant that it is still current")
+        shown = await row.inner_text()
+        for claim in ("guaranteed", "held for you", "locked"):
+            assert claim not in shown, claim
+
+
+async def test_a_question_whose_row_records_no_figure_renders_none(
+    gateway_browser: Browser, tmp_path: Path
+) -> None:
+    """ADR-0178 §4 one member in: ``null`` is absence, and absence renders nothing.
+
+    ADR-0267 §7 gives the field three absent cases on the one write path that sets it,
+    and none of them is a figure this page could invent. The projection around it still
+    renders whole.
+    """
+    async with driving(gateway_browser, tmp_path, viewport=DESKTOP) as drive:
+        drive.engine.park(
+            "h-1",
+            authorization=AuthorizationProjection(
+                coverage=(
+                    CoverageView(
+                        kind=BoundKind.MONEY, bound=money_bound("50"), span="up to fifty pounds"
+                    ),
+                ),
+                expires_at=AUTHORIZATION_NOW + timedelta(hours=1),
+                quote=None,
+            ),
+        )
+
+        await drive.page.click("#confirmations-button")
+        await drive.page.wait_for_selector("#confirmation-list .confirmation-row")
+
+        row = drive.page.locator("#confirmation-list .confirmation-row")
+        await expect(row).to_contain_text("the amount: up to 50 GBP")
+        await expect(row).not_to_contain_text("quoted at")
+        await expect(row).not_to_contain_text("still current")
+
+
+async def test_a_quote_that_arrived_malformed_refuses_that_question_and_not_the_page(
+    gateway_browser: Browser, tmp_path: Path
+) -> None:
+    """ADR-0267 §7, in the direction that costs something: a ceiling rendered **without**
+    the figure *"is not a confirmation of that charge"*.
+
+    So a projection carrying a quote this page cannot read refuses **that** confirmation
+    rather than rendering the bound and dropping the figure silently — ADR-0178 §4's own
+    narrowness (*"may refuse that confirmation rather than every confirmation"*), and
+    ``readCoverageView``'s existing arrangement one member over.
+
+    Driven by rewriting the response on the wire, because a conforming hub cannot send
+    this shape: ``QuoteView`` refuses it outright.
+    """
+    async with driving(gateway_browser, tmp_path, viewport=DESKTOP) as drive:
+        drive.engine.park(
+            "h-1",
+            authorization=AuthorizationProjection(
+                coverage=(
+                    CoverageView(
+                        kind=BoundKind.MONEY, bound=money_bound("50"), span="up to fifty pounds"
+                    ),
+                ),
+                expires_at=AUTHORIZATION_NOW + timedelta(hours=1),
+                quote=QUOTE,
+            ),
+        )
+        await drive.page.route("**/confirmations", _without_the_currency)
+
+        await drive.page.click("#confirmations-button")
+        await drive.page.wait_for_selector("#confirmations:not([hidden])")
+
+        panel = drive.page.locator("#confirmations")
+        await expect(panel).to_contain_text("cannot be rendered here")
+        await expect(panel).not_to_contain_text("the amount: up to 50 GBP")
+        await expect(panel).not_to_contain_text("45.50")
+
+
+async def _without_the_currency(route: Route) -> None:
+    """Strip the quote's ``currency`` out of every parked confirmation on the wire."""
+    response = await route.fetch()
+    body = json.loads(await response.text())
+    for one in body["confirmations"]:
+        quote = one["authorization"]["quote"]
+        del quote["currency"]
+    await route.fulfill(response=response, body=json.dumps(body))
 
 
 # --- §11's announcement ---------------------------------------------------------
