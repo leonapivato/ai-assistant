@@ -1533,3 +1533,57 @@ async def test_a_cancellation_inside_the_forecast_stage_leaves_the_same_mark() -
         "the ask was put to the seam, which is what the mark taken before the await says"
     )
     assert serviced.records == ()
+
+
+def test_no_kind_but_the_forecast_may_declare_a_source_on_a_durable_row() -> None:
+    """ADR-0252 §1's prohibition, held at the one site that can fill the field.
+
+    §1 rules ``source`` *"absent on every row this decision's producers write"* and
+    forbids filling it *"with a provider name, a host, an address, a path, a
+    ``Settings`` field name or a credential identity"* — *"a durable row is a worse place
+    for one of those than a log is"*. ADR-0260 §9 opens it for **one** kind, whose value
+    §4 confines to the **source instance** and never a vendor, an origin, a URL, a
+    credential or a place; every other kind's ``ReadKind`` member *is* the whole of its
+    source identity (ADR-0252 §8's limbs 2 and 3).
+
+    **Asserted over every other kind and not over a chosen one**, because the field is
+    the composing site's to police: ADR-0252 §1 does not close the set of kinds that may
+    declare one — it names a ``Reader``'s ``SourceReading.source`` as a producer not
+    built yet — so a guard on the shared type would over-constrain a decision that has
+    not been taken, and one here is exactly as wide as §9 is.
+    """
+    for kind in ReadKind:
+        if kind is ReadKind.FORECAST_READ:
+            continue
+        with pytest.raises(ValueError, match="declares no source"):
+            composed_row(
+                row_id="row-1",
+                goal_id=GOAL.goal_id,
+                attempt_id="attempt-1",
+                ask=_ask_of_kind(kind),
+                outcome=ReadOutcomeKind.EMPTY,
+                records=(),
+                admitted=0,
+                read_at=NOW,
+                source="https://a-provider.example",
+            )
+
+
+def _ask_of_kind(kind: ReadKind) -> ReadAsk:
+    """One well-formed ask of ``kind``, whose arguments its validator requires.
+
+    Args:
+        kind: The kind to build an ask of.
+
+    Returns:
+        The ask.
+    """
+    if kind is ReadKind.SIGHTED_QUERY:
+        return ReadAsk(kind=kind, query="anything at all")
+    if kind is ReadKind.CITATION_HOP:
+        return ReadAsk(kind=kind, labels=("M1",))
+    if kind is ReadKind.LOCAL_FILE:
+        return ReadAsk(kind=kind, entry="F1")
+    if kind is ReadKind.STRUCTURED_READ:
+        return ReadAsk(kind=kind, structure=StructuredAsk(topics=("boiler",)))
+    return ReadAsk(kind=kind)
