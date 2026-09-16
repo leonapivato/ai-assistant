@@ -967,12 +967,17 @@ class SqliteBookingStore:
         figure and make ``IRREVERSIBLE`` a false claim about every booking the store had
         already forgotten the detail of.
 
-        So the stamp is conditional on the store being **genuinely new**, and newness is
-        decided from the whole state the open found: **both** metadata rows absent *and*
-        no ``bookings`` table. Every other shape is refused, and the incomplete pair is
-        the one that matters — either row surviving alone is a store somebody edited, and
-        writing the missing one would either reset a surviving count or bless a version
-        this code never stamped. The rows are written in **one** transaction with the
+        So the stamp is conditional on the store being **genuinely new**, and **exactly
+        two complete states are accepted**: no table and neither metadata row, which is
+        a new store; or the table beside **both** rows, which is an established one.
+        Every third shape is refused — a surviving count with its table dropped is a
+        store that would report bookings it retains no record of *and no pruning
+        explains*, which §2's *"both survive a restart"* forbids as squarely as a reset
+        count does. Newness is decided from the whole state the open found, and the
+        incomplete shape is the one that matters: any part surviving alone is a store
+        somebody edited, and supplying the missing part would either reset a surviving
+        count, bless a version this code never stamped, or hand back an empty record set
+        beside a count that says otherwise. The rows are written in **one** transaction with the
         table, so no interruption of this code can produce an incomplete pair.
 
         Args:
@@ -989,21 +994,26 @@ class SqliteBookingStore:
             conn.execute(_WRITE_META, (_SCHEMA_VERSION_KEY, str(_SCHEMA_VERSION)))
             conn.execute(_WRITE_META, (_COMMIT_COUNT_KEY, "0"))
             return
-        missing = [
-            name
-            for name, value in ((_SCHEMA_VERSION_KEY, version), (_COMMIT_COUNT_KEY, count))
-            if value is None
+        absent = [
+            what
+            for what, present in (
+                (_SCHEMA_VERSION_KEY, version is not None),
+                (_COMMIT_COUNT_KEY, count is not None),
+                ("records table", established),
+            )
+            if not present
         ]
-        if missing:
+        if absent:
             msg = (
                 f"the booking store at {self._path!r} is an established store holding no "
-                f"{' and no '.join(missing)}; the commit count only rises and cannot be "
-                f"reconstructed from the records still retained (ADR-0273 §2), so the "
-                f"store is corrupt and is not opened rather than stamped afresh"
+                f"{' and no '.join(absent)}; its durable state is two things that survive "
+                f"a restart together, the commit count only rises, and neither can be "
+                f"reconstructed from what is left (ADR-0273 §2) — so the store is corrupt "
+                f"and is not opened rather than repaired into one that reads empty"
             )
             raise BookingStoreError(msg, may_have_committed=False)
         if version is not None:
-            # ``missing`` being empty already establishes this; the test is written out
+            # ``absent`` being empty already establishes this; the test is written out
             # so the narrowing is the code's rather than a reader's.
             self._checked_version(version)
 
@@ -1263,11 +1273,11 @@ class SqliteBookingStore:
         because §2 states the figure as one that only rises.
 
         Returns:
-            The count, or ``0`` where the key is absent.
+            The count.
 
         Raises:
-            BookingStoreError: If the store could not be read, or holds a count this
-                code cannot read.
+            BookingStoreError: If the store could not be read, holds no commit count at
+                all, or holds one this code cannot read.
         """
         try:
             stored = self._meta(self._conn, _COMMIT_COUNT_KEY)
@@ -1275,7 +1285,18 @@ class SqliteBookingStore:
             msg = f"failed to read the booking commit count: {exc}"
             raise BookingStoreError(msg, may_have_committed=False) from exc
         if stored is None:
-            return 0
+            # **Never ``0``** (§2). :meth:`_initialise` writes the row inside the setup
+            # transaction, before any reader of this store can run, so an absent row
+            # here is a row something *removed* while the store was open — and reading
+            # it as zero would let the next commit write ``1`` over a count of two. That
+            # is the reset the figure exists to make impossible, reached without a
+            # restart, so reopen-time validation cannot catch it and this must.
+            msg = (
+                f"the booking store at {self._path!r} holds no commit count; the figure "
+                f"only rises and cannot be reconstructed from the records still retained "
+                f"(ADR-0273 §2), so the store is corrupt"
+            )
+            raise BookingStoreError(msg, may_have_committed=False)
         try:
             count = int(stored)
         except ValueError as exc:
