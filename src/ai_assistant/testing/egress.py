@@ -589,6 +589,7 @@ class FakeEgressBinder:
             carried.planned_with_external_content,
             carried.coverage,
             carried.closed_loop,
+            carried.forecast_reach,
         )
         self._refuse_unlocated(binding, carried.spans)
         return self._pair(binding, checked, arguments)
@@ -655,6 +656,13 @@ class FakeEgressBinder:
             # recorded binding carried ``True`` at every answer (#2232). The field's
             # ``False`` default is untouched.
             was.closed_loop,
+            # **ADR-0260 §11 transcribes nothing new here, and says so in terms**: it
+            # mints **no park** for a forecast read — ADR-0244's park is a ``CONFIRM``
+            # on a *search* — so no forecast binding is ever rebound, and the field's
+            # restrictive ``False`` default is the correct value on this path. ADR-0152
+            # §7's and ADR-0247 §7's closed transcription count is therefore untouched
+            # and ADR-0260 supersedes neither.
+            False,
         )
         if binding != was:
             msg = (
@@ -866,19 +874,36 @@ class FakeEgressBinder:
         planned_with_external_content: bool,
         coverage: SpanCoverage,
         closed_loop: bool,
+        forecast_reach: bool,
     ) -> EgressBinding:
         """Derive every field of the binding from the declaration and the arguments.
 
-        Four members are **carried** rather than derived and each arrives resolved:
+        Five members are **carried** rather than derived and each arrives resolved:
         each span's ``provenance`` (ADR-0146 §2), the call's
         ``planned_with_external_content`` (ADR-0181 §3, §4), its ``coverage``
-        (ADR-0233 §4, §5) and its ``closed_loop`` (ADR-0238 §5 — "the seam writes the
+        (ADR-0233 §4, §5), its ``closed_loop`` (ADR-0238 §5 — "the seam writes the
         binding's value from the carrier's unchanged", and this seam holds none of the
         inputs the fact is stated over; on the resuming path it arrives **transcribed**
-        from the approved binding, ADR-0247 §7, the fourth of ADR-0152 §7's count).
-        Nothing here computes, infers or defaults any of them,
-        and a ``PATH_WITHOUT_MODEL`` coverage is refused by the construction below
-        rather than by a check of this fake's own (ADR-0233 §6).
+        from the approved binding, ADR-0247 §7, the fourth of ADR-0152 §7's count) and
+        its ``forecast_reach`` (ADR-0260 §11). Nothing here computes, infers or defaults
+        any of them, and a ``PATH_WITHOUT_MODEL`` coverage is refused by the
+        construction below rather than by a check of this fake's own (ADR-0233 §6).
+
+        **``forecast_reach`` is written from the carrier's value unchanged too, and for
+        ``closed_loop``'s reasons** (ADR-0260 §11). It is ``closed_loop``'s own shape one
+        field along and is **not** a widening of it: every condition the fact is stated
+        over is ``orchestration``'s, the fact is written there and by nothing else, and
+        this fake holds none of its inputs — so nothing here recovers it from the
+        account, the origin, the tool, an argument's value or ``closed_loop``. On the
+        **resuming** path it is not transcribed but defaulted, because ADR-0260 §11 mints
+        no park for a forecast read and no forecast binding is ever rebound.
+
+        **Neither fact is checked against the other here.** A carrier stating both is
+        transcribed rather than refused or normalised: the exclusivity is
+        ``orchestration``'s (§11 — a forecast read never sets ``closed_loop``), and a
+        binding that carried both is caught where it is read, by
+        ``permissions.policy``'s configured-provider match and by ADR-0272 §1's trail
+        check. A check here would be the seam computing the fact, which §11 forbids.
         """
         spans: list[EgressSpan] = []
         for argument in sorted(parameters):
@@ -917,6 +942,7 @@ class FakeEgressBinder:
                 planned_with_external_content=planned_with_external_content,
                 coverage=coverage,
                 closed_loop=closed_loop,
+                forecast_reach=forecast_reach,
             )
         except ValidationError as exc:
             msg = (
