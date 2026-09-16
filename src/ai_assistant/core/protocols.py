@@ -5061,10 +5061,74 @@ class PlanStore(Protocol):
         other transition is untouched, and no lane reads it as a general outcome
         check. Which member a non-cancelled attempt earns stays A10's.
 
+        **A transition whose ``to_state`` is ``ENDED`` carries two further conditions,
+        each decided inside that same indivisible step** (ADR-0262 §4). Both are there
+        because a ``commit_transition`` **does not advance** ``GoalAttempt.version``, so
+        the attempt's own compare-and-swap cannot see a claim land: a caller that read
+        the steps and then committed would otherwise record a terminal — possibly
+        ``VERIFIED`` — attempt over work a concurrent driver had moved underneath it.
+
+        1. **No step of any execution this attempt names stands** ``PENDING``,
+           ``AWAITING_APPROVAL``, ``RUNNING`` **or** ``INDETERMINATE``. That is
+           ADR-0262 §4's third ending condition — the two statuses ADR-0259 §4 and
+           ADR-0261 §3 read for *outstanding*, and the two a claim can still be made
+           from — and it is refused with ``StaleExecutionError``. It is what makes
+           ``VERIFIED``, and with it ``ACHIEVED`` (:meth:`set_goal_status`),
+           unreachable beside a step that may have acted, and what keeps ADR-0259 §4's
+           acts 3 and 4 reachable, neither being reachable from a terminal member.
+        2. **The transition's** ``execution_versions`` **names *exactly* this attempt's**
+           ``execution_ids``, **each at the** ``ExecutionState.version`` **the store
+           holds**. The status set alone would not close the **retry**: ``FAILED`` is
+           outside ``TERMINAL_STEP_STATUSES`` "(it may still be retried)", so a
+           ``FAILED → RUNNING → SUCCEEDED`` retry landing between the comparison and
+           the commit leaves every step terminal at both instants. **Neither conjunct
+           subsumes the other**: the versions say nothing about a step nobody has moved
+           yet, the statuses nothing about a step moved twice.
+
+        **The second conjunct refuses in two classes, and the difference is which of
+        them the caller could have avoided.** A pair whose ``version`` is not the
+        stored one is the **race** the field exists for and refuses with
+        ``StaleExecutionError``, whose documented meaning — the stored execution has
+        advanced since the caller read it — is exactly what happened. An **id set that
+        is not the attempt's** — a missing id, an extra id, a duplicate, a partial
+        snapshot — is a **malformed command** and refuses with a plain ``ValueError``,
+        the class every other malformed field of this command already takes at
+        construction: no write is taken and nothing advanced, so a class promising a
+        fruitful retry would be a false statement about the store. **The completeness
+        half is the load-bearing one**: a subset would leave the omitted execution free
+        to move between the comparison and the commit, which is the whole of the race,
+        so the field is a **snapshot of the set the comparison read** rather than a list
+        of the ones the caller chose to protect. An attempt naming **no** execution
+        therefore carries the empty tuple and nothing else, and one that names an
+        execution is refused for carrying it.
+
+        **The order of the tests is fixed and is what keeps the two classes apart.**
+        The attempt's own ``expected_version`` compare-and-swap is decided **first**, so
+        an execution **appended** after the caller's read — which advances
+        ``GoalAttempt.version`` — is reported as the race it is and never as a malformed
+        set; past that point the set can only be wrong because the caller built it
+        wrongly. The malformed-set limbs are decided **next**, being the caller's own
+        construction error whatever the store's transient state, and the two race limbs
+        last.
+
+        **Both conjuncts bind on ``to_state=ENDED`` and on nothing else.** Every other
+        transition ignores ``execution_versions`` — ``→ CANCELLED`` included, so
+        ADR-0261 §2's act is unaffected whatever it passes — and a phase stamp, an
+        effort counter or a reference append writes exactly as it does today. **No lane
+        reads either as a general outcome check, as a claim check, as a general
+        optimistic lock, or as a licence to re-read and retry *within this turn***: the
+        caller's answer to a refusal is ADR-0262 §4's no-second-bite rule, which defers
+        the re-read the stale class asks for to the **next** turn's own comparison.
+
         Raises:
-            StaleExecutionError: If the stored version has moved on, or a
+            StaleExecutionError: If the stored version has moved on, a
                 ``→ CANCELLED`` transition carries an ``outcome`` that is not the one
-                ADR-0261 §3's limbs yield.
+                ADR-0261 §3's limbs yield, or a ``→ ENDED`` transition is taken over a
+                step that is not yet settled or carries a ``version`` the store has
+                since moved past (ADR-0262 §4).
+            ValueError: If a ``→ ENDED`` transition's ``execution_versions`` is not
+                exactly this attempt's ``execution_ids`` — a malformed command rather
+                than a lost race, and never a ``StaleExecutionError`` (ADR-0262 §4).
             IllegalTransitionError: If the move is not legal from where the attempt
                 stands — a phase earlier than the one held, or any move out of a
                 terminal state.
@@ -5149,17 +5213,31 @@ class PlanStore(Protocol):
         ending the goal's live attempts in the step that closes it, and needs no
         refusal of its own.
 
-        **That an ``ABANDONED`` goal never carries a live attempt is the store's
-        invariant and not one member's**, which is why it is stated here and on
-        :meth:`open_attempt` rather than inside one act. **It is deliberately not
-        stated over ``ACHIEVED``**: a ``→ ACHIEVED`` write over a live attempt is
-        admitted exactly as it is today, and ``ACTIVE`` on ADR-0250 §13's reopen is
-        untouched — which is what keeps the reopen sequence (status first, then the new
-        attempt) the one sequence that works. **This member still refuses no status
-        member**: what is refused is a *write that would leave two records
-        inconsistent*, so ADR-0250 §9's "which acts may write which member is the
-        caller's rule" stays true word for word. **It serialises no openers** (ADR-0261
-        §11).
+        **An ``→ ACHIEVED`` write is refused on the same terms**, decided in the same
+        indivisible step and refused with ``StaleExecutionError`` (ADR-0262 §5). It is
+        the **exact mirror** of the limb above, which ADR-0261 §11 books to that
+        decision by name: the goal's own compare-and-swap cannot see an
+        :meth:`open_attempt` land, so without it an ``ACHIEVED`` goal could carry a
+        live, claimable attempt. **With this limb and :meth:`open_attempt`'s
+        closed-goal limb the interleaving is exhaustive**: an attempt opened
+        **before** this write is one the conjunct sees and refuses the write for, and
+        one opened **after** it meets a closed goal. There is no third case, and no
+        lane closes the gap with a read in the caller, a re-read after the write, a
+        sweep or a lock. **A refusal writes nothing and is not retried by the one act
+        ADR-0262 §5 gives this member**: a lost ``Goal.version`` means the goal moved,
+        and it moves when a turn records a new ``GoalInterpretation`` revision, which
+        may carry a criterion that comparison never saw.
+
+        **That a closed goal never carries a live attempt is the store's invariant and
+        not one member's**, which is why it is stated here and on :meth:`open_attempt`
+        rather than inside one act. **The two closing members are the whole of it**:
+        ``BLOCKED`` is A3's and is constrained by neither, and ``ACTIVE`` on ADR-0250
+        §13's reopen is untouched — which is what keeps the reopen sequence (status
+        first, then the new attempt) the one sequence that works. **This member still
+        refuses no status member**: what is refused is a *write that would leave two
+        records inconsistent*, so ADR-0250 §9's "which acts may write which member is
+        the caller's rule" stays true word for word. **It serialises no openers**
+        (ADR-0261 §11).
 
         Args:
             goal_id: The goal to move.
@@ -5171,9 +5249,9 @@ class PlanStore(Protocol):
             The goal as written, with ``version`` advanced by one.
 
         Raises:
-            StaleExecutionError: If the stored version has moved on, or a
-                ``→ ABANDONED`` write is taken over a goal holding a non-terminal
-                attempt (ADR-0261 §2).
+            StaleExecutionError: If the stored version has moved on, or a write that
+                **closes** the goal — ``→ ABANDONED`` (ADR-0261 §2) or ``→ ACHIEVED``
+                (ADR-0262 §5) — is taken over a goal holding a non-terminal attempt.
             PlanningError: If ``goal_id`` names no stored goal.
         """
         ...
@@ -8955,7 +9033,7 @@ class CoverageAnswers(Protocol):
 class AuthorizationResolution(Protocol):
     """Resolves a recorded route-(d) ``authorised_by`` against the rows (ADR-0254 §7, §16).
 
-    The **trail's** face, and it carries one member. An :class:`AuditTrail`
+    A **read face**, and it carries one member. An :class:`AuditTrail`
     implementation is constructed with one of these beside the
     :class:`RecipientGrantResolution` it already takes, and never with a
     :class:`GoalAuthorizationStore`, so the trail holds a **read and nothing else**:
@@ -8964,13 +9042,31 @@ class AuthorizationResolution(Protocol):
     away from authorising the row it is about to validate, which is the capability
     ADR-0097 §3 removes by splitting.
 
-    **Given to** :class:`AuditTrail` **implementations and to nothing else.** No
-    ``ActionPolicy``, no surface, no :class:`EgressBinder` and no ``interfaces/``
-    adapter holds one. The policy's face carries no ``resolve`` and this face
-    carries no ``live_for``, so neither component can ask the other's question, and
-    :meth:`AuditTrail.record` is the only place a recorded route-(d)
-    ``authorised_by`` is ever resolved against this store — never at render time
-    and never at any later read.
+    **It has two holders and two readers, and ADR-0254 §16's "the face a trail
+    holds" is partially superseded in that one scope** (ADR-0262 §8). Beside the
+    trail, ``orchestration``'s **verification** phase holds one, to read the
+    :class:`~ai_assistant.core.types.Authorization` a step's own pinned route-(d)
+    :class:`~ai_assistant.core.types.PermissionDecision` points at (ADR-0262 §3).
+    **The Protocol itself is untouched** — ``resolve(id)`` and nothing else, the
+    signature, the return and the detached-snapshot discipline unmoved, no member
+    added here or to :class:`GoalAuthorizationStore` — and what the second holder
+    buys is exactly what the narrow type already guarantees: that phase **never
+    authorises anything**, never enumerates, and can name neither ``record`` nor
+    ``settle`` nor ``standing`` nor ``recent`` nor ``live_for``, which
+    ``mypy --strict`` keeps unnameable on it. A reader holding only §16 would build
+    a system in which this Protocol has a single holder and would refuse that
+    construction.
+
+    **Held by :class:`AuditTrail` implementations and by that one phase, and by
+    nothing else.** No ``ActionPolicy``, no surface, no :class:`EgressBinder` and no
+    ``interfaces/`` adapter holds one. The policy's face carries no ``resolve`` and
+    this face carries no ``live_for``, so neither component can ask the other's
+    question, and :meth:`AuditTrail.record` remains the only place a recorded
+    route-(d) ``authorised_by`` is resolved **for the purpose of admitting a
+    write** — never at render time and never at any later read. The verification
+    read decides no admission: it reads a row an act already ran under, which is
+    ADR-0262 §3's "reading the record of an act that already happened is not
+    checking on one's own initiative".
 
     **``ActionPolicy`` is unchanged in signature, and ``AuditTrail``'s own Protocol
     gains no member, no argument and no widened return** (§7). What ADR-0021 §4
