@@ -20,12 +20,14 @@ from decimal import Decimal
 from typing import TYPE_CHECKING, Final
 
 from ai_assistant.core.types import (
+    ActionQuote,
     Authorization,
     AuthorizationBasis,
     AuthorizationDisposition,
     AuthorizationOrigin,
     BoundAccount,
     BoundKind,
+    ChargedOutput,
     CostBasis,
     CoverageMember,
     EgressBinding,
@@ -48,6 +50,7 @@ from ai_assistant.core.types import (
     SpanCoverage,
     StepExecution,
     StepFailure,
+    StepOutputRef,
     StepStatus,
     StepVerification,
     ToolCost,
@@ -198,13 +201,28 @@ def a_goal(
     )
 
 
-def a_member(span: str, *, kind: BoundKind = BoundKind.TERMS) -> CoverageMember:
+def a_member(  # noqa: PLR0913 — one keyword per endpoint of the bound an arm varies
+    span: str,
+    *,
+    kind: BoundKind = BoundKind.TERMS,
+    currency: str = "EUR",
+    maximum: str = "150.00",
+    maximum_exclusive: bool = False,
+    minimum: str | None = None,
+) -> CoverageMember:
     """One member of a confirmed row, resting on **the span the user stated**.
 
     The span is what §2 matches a criterion against, byte for byte; the value beside it
     is whatever that kind admits (ADR-0266 §3) — a ceiling for ``MONEY``, a date for
-    ``PERIOD``, the words themselves for ``TERMS`` — and **no arm here reads it**, which
-    is the point: the comparison joins on the span and never on the value.
+    ``PERIOD``, the words themselves for ``TERMS``.
+
+    **The four money keywords are read by ADR-0271 §3's third conjunct and by nothing
+    else.** Before that decision the comparison joined on the span and never on the
+    value; §3 adds one reading of the member — *"the charge's amount satisfies the
+    confirmed member under ADR-0254 §4's ``MONEY`` reading, taken at the quote's own
+    currency"* — so an arm about that conjunct says which endpoint it moved and every
+    other arm keeps the default ceiling. **A ``MONEY`` member carries a bound and never
+    a fixed value** (ADR-0266 §3), which is why there is no keyword for one.
     """
     basis = AuthorizationBasis(
         act=ACT, span=span, resolution=ValueResolution(rule=ResolutionRule.AS_STATED)
@@ -212,12 +230,58 @@ def a_member(span: str, *, kind: BoundKind = BoundKind.TERMS) -> CoverageMember:
     if kind is BoundKind.MONEY:
         return CoverageMember(
             kind=kind,
-            bound=ValueBound(kind=kind, currency="EUR", maximum=Decimal("150.00")),
+            bound=ValueBound(
+                kind=kind,
+                currency=currency,
+                maximum=Decimal(maximum),
+                maximum_exclusive=maximum_exclusive,
+                minimum=None if minimum is None else Decimal(minimum),
+            ),
             basis=basis,
         )
     if kind is BoundKind.PERIOD:
         return CoverageMember(kind=kind, fixed="2026-09-20", basis=basis)
     return CoverageMember(kind=kind, fixed=span, basis=basis)
+
+
+CHARGED: Final = ChargedOutput(amount="charged_amount", currency="charged_currency")
+"""Where the booking declaration says its acts report what they charged (ADR-0271 §2).
+
+Two keys of the step's ``output`` at depth **one**, and deliberately **not** the keys any
+``quoted_output`` would name: §2 rules that the two fields are *"read for their own fact
+and never for each other's"*, so a fixture whose charge sits at a quote's key could not
+tell an implementation reading the wrong one apart.
+"""
+
+
+def a_charge(amount: FrozenJson = "120", currency: FrozenJson = "EUR") -> dict[str, FrozenJson]:
+    """A stored ``output`` reporting a charge at :data:`CHARGED`'s two keys.
+
+    The values are handed through **unchanged**, including the shapes §2's reading
+    refuses — a float, a boolean, a negative, ``"NaN"``, ``"usd"`` — because the arm
+    about each is an arm about the reading refusing it rather than about a builder
+    declining to write it.
+    """
+    return {CHARGED.amount: amount, CHARGED.currency: currency}
+
+
+def a_quote(amount: str = "120", currency: str = "EUR") -> ActionQuote:
+    """The quote a dispatch was proved against, pinned to its ruling (ADR-0271 §1).
+
+    Carried **by value** and read a second time by nobody: the comparison reads this
+    value off the step's own pinned decision, and *"no component covers a request
+    against it, re-tests it, refreshes it, compares it to a later quote, carries it to a
+    further dispatch"*.
+    """
+    return ActionQuote(
+        intended_action="ia-1",
+        arguments_digest=DIGEST,
+        amount=Decimal(amount),
+        currency=currency,
+        plan=f"plan-{EXECUTION}",
+        read_from=StepOutputRef(step="s-0", field="price"),
+        read_at=AT,
+    )
 
 
 def a_row(  # noqa: PLR0913 — one keyword per field of the stored row an arm varies
@@ -259,6 +323,7 @@ def a_ruling(
     outcome: PermissionOutcome = PermissionOutcome.ALLOW,
     goal: str | None = GOAL,
     subject: str | None = _SUBJECT,
+    proved_quote: ActionQuote | None = None,
 ) -> PermissionRuling:
     """A route-(d) ``ALLOW``, or one of the shapes §2 says is not one.
 
@@ -275,6 +340,11 @@ def a_ruling(
         # a route-(a) `ALLOW` is spelled by passing `goal=None` as well.
         authorised_subject=None if authorised_by is None else subject,
         authorised_goal=goal,
+        # ADR-0271 §1: `permissions` writes it, at the ruling, where the ruling is a
+        # route-(d) `ALLOW` whose coverage carried a `MONEY` member met through
+        # ADR-0266 §7's evidence route. **Absent by default**, which is every other
+        # case and is what makes the charge test *not taken* unless an arm says so.
+        proved_quote=proved_quote,
     )
 
 

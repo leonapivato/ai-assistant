@@ -20,6 +20,7 @@ from typing import TYPE_CHECKING
 import pytest
 from authorizing_builders import a_binding
 from verification_builders import (
+    CHARGED,
     DIGEST,
     EXECUTION,
     OTHER_DIGEST,
@@ -29,10 +30,12 @@ from verification_builders import (
     Decisions,
     Executions,
     Rows,
+    a_charge,
     a_criterion,
     a_decision,
     a_goal,
     a_member,
+    a_quote,
     a_row,
     a_ruling,
     a_step,
@@ -362,14 +365,22 @@ async def test_a_contradicting_call_beside_an_ambiguous_one_reads_unmet() -> Non
     assert _one(comparison) is CriterionResult.UNMET
 
 
-async def test_a_money_criterion_is_unestablished_whatever_else_holds() -> None:
-    """§2's ``MONEY`` rule, pre-ADR-0271: *"no criterion about an amount is ever met here"*.
+async def test_a_money_criterion_with_no_charge_reported_is_unestablished() -> None:
+    """ADR-0262 §12 arm 3's ``MONEY`` case, as ADR-0271 §7(e) **restates** it.
 
-    A confirmed ``MONEY`` member over a booking step **every declaration holds over** →
+    A confirmed ``MONEY`` member over a booking step **every declaration holds over**,
+    whose decision carries **no pin** and whose declaration reports **no charge** →
     ``unestablished``, the attempt ``UNCERTAIN`` at rung 2 and the goal not
-    ``ACHIEVED``. ADR-0271 §3 lands the operand and P3 restates exactly this
-    classification; until then the fail-closed direction is what the record can honestly
-    say about a booking that charges.
+    ``ACHIEVED``. ADR-0262 §2 reached that by a blanket — *"whatever else holds"* — and
+    ADR-0271 §4 **reverses the blanket** while reaching the same answer here by §3's
+    limbs: the charge test is **not taken**, so limb 2 cannot hold and the call
+    establishes nothing (§4).
+
+    **So this arm is kept as the *no charge reported* control** rather than deleted: it
+    is what a deployment that wired a charging capability on ADR-0262 §7's two
+    obligations, and omitted §4's third, still gets. The pair that shows the blanket is
+    gone is
+    ``test_charge_comparison.py::test_an_agreeing_charge_makes_the_money_criterion_met``.
     """
     consequential = a_tool(postconditions=_BOOKED, reversibility=Reversibility.IRREVERSIBLE)
     comparison = await _compared(
@@ -519,12 +530,14 @@ def _booking() -> PermissionDecision:
     )
 
 
-async def test_the_campsite_case_is_uncertain_and_the_goal_is_not_achieved() -> None:
-    """Arm 4: the first two criteria **met**, the third **unestablished** because it is ``MONEY``.
+async def test_the_campsite_case_with_no_charge_reported_is_uncertain() -> None:
+    """Arm 4, kept as the **no charge reported** control (ADR-0271 §7(e)).
 
-    So not ``fully_met``, the attempt ``UNCERTAIN`` at rung 2 and the goal **not**
-    ``ACHIEVED`` — *"which is the whole of what this decision can honestly say about a
-    booking that charges"*.
+    The first two criteria **met** and the third **unestablished** — not now *"because
+    it is ``MONEY``"*, which ADR-0271 §4 removes as a ground, but because this booking's
+    decision carries no pin and its declaration reports no charge, so §3's charge test
+    is **not taken**. Not ``fully_met``, the attempt ``UNCERTAIN`` at rung 2, the goal
+    **not** ``ACHIEVED``.
     """
     riverside, sunday, money = _campsite()
     comparison = await _compared(
@@ -541,6 +554,53 @@ async def test_the_campsite_case_is_uncertain_and_the_goal_is_not_achieved() -> 
     )
     assert comparison.outcome is AttemptOutcome.UNCERTAIN
     assert comparison.report.continues is True
+
+
+async def test_the_campsite_case_with_an_agreeing_charge_is_verified_and_achieved() -> None:
+    """Arm 4 as ADR-0271 §7(e) restates it, and ADR-0262 §11's walkthrough **closed**.
+
+    The same three criteria, the same confirmed row, the same booking — now under a
+    declaration that says where its acts report what they charged, a decision carrying
+    the quote the dispatch was proved against (``120``/``EUR``), and an output reporting
+    a charge of ``120``. **All three criteria are met**, the attempt is ``VERIFIED`` and
+    the goal reaches ``ACHIEVED``: *"A goal that spends money can reach ``ACHIEVED``"*
+    (ADR-0271 §7), which it could not before by a rule rather than by an accident.
+
+    **And the disagreeing half is the finding**: the same records with ``130`` charged
+    against that ``120`` pin, under the user's own ``150`` ceiling, read **unmet** — *"a
+    €130 charge on a €120 quote under a €150 ceiling is a finding, and the turn says the
+    criterion was not established rather than reporting a success"*.
+    """
+    riverside, sunday, money = _campsite()
+    charging = a_tool(
+        postconditions=_BOOKED,
+        reversibility=Reversibility.IRREVERSIBLE,
+        charged_output=CHARGED,
+    )
+    proved = a_decision("d-1", definition=charging, ruling=a_ruling(proved_quote=a_quote("120")))
+
+    agreed = await _compared(
+        a_goal(riverside, sunday, money),
+        a_step("s-1", output={**_HOLDS, **a_charge("120")}),
+        decisions=(proved,),
+        rows=_campsite_row(),
+    )
+    disagreed = await _compared(
+        a_goal(riverside, sunday, money),
+        a_step("s-1", output={**_HOLDS, **a_charge("130")}),
+        decisions=(proved,),
+        rows=_campsite_row(),
+    )
+
+    assert agreed.results == (CriterionResult.MET,) * 3
+    assert agreed.outcome is AttemptOutcome.VERIFIED
+    assert agreed.report.continues is False
+    assert disagreed.results == (
+        CriterionResult.MET,
+        CriterionResult.MET,
+        CriterionResult.UNMET,
+    )
+    assert disagreed.outcome is AttemptOutcome.PARTIAL
 
 
 async def test_the_same_goal_without_the_money_criterion_is_verified() -> None:
