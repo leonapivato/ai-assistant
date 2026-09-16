@@ -2025,17 +2025,29 @@ class GoalAuthorizationStoreContract(GoalAuthorizationsContract, AuthorizationRe
         ``clear_closure`` at the *first* version then answering ``False`` with the
         fence still standing — while one at a **lower** version leaves it where it
         was, and **neither moves a row**.
+
+        **The raise is squeezed from both sides**: a ``clear_closure`` at 8 answers
+        ``False`` against it and one at 9 lifts it, so a store raising to anything
+        but the version it was passed fails here rather than passing on a bound.
         """
         await store.record(established(id="a1"))
         assert await store.end_for_goal(GOAL, at=NOW, goal_version=4) == 1
         assert await store.end_for_goal(GOAL, at=NOW, goal_version=9) == 0
         assert await store.clear_closure(GOAL, goal_version=4) is False
         assert await self._fenced(store)
+        # **Nowhere below 9 either.** A record standing above a version is left
+        # exactly as it was, so this probe writes nothing and everything after it
+        # still reads the record the raise wrote.
+        assert await store.clear_closure(GOAL, goal_version=8) is False
+        assert await self._fenced(store)
         assert await store.end_for_goal(GOAL, at=NOW, goal_version=2) == 0
         assert await self._fenced(store)
         held = await store.resolve("a1")
         assert held is not None
         assert (held.disposition, held.settled_at) == (AuthorizationDisposition.GOAL_CLOSED, NOW)
+        # **And 9 lifts it**, so the record stands no *higher* than the version
+        # passed. Taken last, because it is the one probe here that writes.
+        assert await store.clear_closure(GOAL, goal_version=9) is True
 
     async def test_a_row_admitted_after_a_reopen_is_ended_by_a_call_at_that_same_version(
         self, store: GoalAuthorizationStore
@@ -2073,10 +2085,32 @@ class GoalAuthorizationStoreContract(GoalAuthorizationsContract, AuthorizationRe
         """Arm 1: ``True``, the fence lifted, **and the record stands at that version**.
 
         The lift is asserted by a ``record`` for that goal then succeeding, and the
-        record's survival by a second ``clear_closure`` at the same version answering
-        ``False`` — *"lifts the fence and **removes no record**"*.
+        record standing at **4** by a delayed ``end_for_goal`` either side of it.
+
+        **A second ``clear_closure`` cannot show that record**, which is why it is
+        not what is asserted for it: over a *lifted* record the member answers
+        ``False`` at every version, and over a goal the store holds no record of too,
+        so the states it would have to tell apart all answer alike. What it does show
+        is the clause it is kept for — *"lifts the fence and **removes no record**"*
+        — and it is taken last, after the squeeze, because it writes.
         """
         assert await store.end_for_goal(GOAL, at=NOW, goal_version=4) == 0
+        assert await store.clear_closure(GOAL, goal_version=4) is True
+        assert not await self._fenced(store)
+
+        # **The record stands at exactly 4**, squeezed before anything writes it
+        # again — with a row to move, so that ``0`` below is staleness and not
+        # emptiness.
+        await store.record(established(id="fresh"))
+        assert await store.end_for_goal(GOAL, at=NOW, goal_version=3) == 0, (
+            "one below the record the clear left is stale against it"
+        )
+        assert not await self._fenced(store), "and a stale ending raises no fence"
+        assert await store.end_for_goal(GOAL, at=NOW, goal_version=4) == 1, (
+            "while 4 itself acts, so the record stands no higher than what was passed"
+        )
+        assert await self._fenced(store)
+
         assert await store.clear_closure(GOAL, goal_version=4) is True
         assert not await self._fenced(store)
         assert await store.clear_closure(GOAL, goal_version=4) is False
@@ -2095,13 +2129,27 @@ class GoalAuthorizationStoreContract(GoalAuthorizationsContract, AuthorizationRe
         a reopen that could not admit a fresh row.
 
         A fence standing at 5, cleared at 6: ``True``, the fence lifted — a ``record``
-        for that goal then succeeding — and the record standing at **6**, which a
-        ``clear_closure`` back at 5 shows by answering ``False``.
+        for that goal then succeeding — and the record standing at **6**, the version
+        this call was passed rather than the 5 it found.
+
+        **That last is squeezed by a delayed ``end_for_goal`` either side of 6**, and
+        not by a ``clear_closure`` back at 5: over a lifted record that member
+        answers ``False`` whatever version stands, so it cannot tell a record at 6
+        from one still at 5, or from none at all.
         """
         assert await store.end_for_goal(GOAL, at=NOW, goal_version=5) == 0
         assert await store.clear_closure(GOAL, goal_version=6) is True
         assert not await self._fenced(store)
-        assert await store.clear_closure(GOAL, goal_version=5) is False
+
+        await store.record(established(id="fresh"))
+        assert await store.end_for_goal(GOAL, at=NOW, goal_version=5) == 0, (
+            "5 is stale against the record this clear raised to 6"
+        )
+        assert not await self._fenced(store), "and a stale ending raises no fence"
+        assert await store.end_for_goal(GOAL, at=NOW, goal_version=6) == 1, (
+            "while 6 acts, so the record stands no higher than the version passed"
+        )
+        assert await self._fenced(store)
 
     async def test_clear_closure_against_a_lifted_record_answers_false_and_still_raises_it(
         self, store: GoalAuthorizationStore
@@ -2122,6 +2170,16 @@ class GoalAuthorizationStoreContract(GoalAuthorizationsContract, AuthorizationRe
         assert held is not None
         assert held.disposition is AuthorizationDisposition.ESTABLISHED
         assert not await self._fenced(store)
+        # **Raised to 9 and not merely above 4**, squeezed while that record is still
+        # the one this ``clear_closure`` wrote: 8 is stale against it and 9 acts.
+        assert await store.end_for_goal(GOAL, at=NOW, goal_version=8) == 0, (
+            "and every version below 9 is stale against it, not just the 4 above"
+        )
+        assert not await self._fenced(store), "a stale ending raises no fence"
+        assert await store.end_for_goal(GOAL, at=NOW, goal_version=9) == 1, (
+            "while 9 itself acts, so the record stands at the version passed exactly"
+        )
+        assert await self._fenced(store)
 
     async def test_clear_closure_over_a_goal_with_no_record_writes_none(
         self, store: GoalAuthorizationStore
@@ -2382,8 +2440,9 @@ class GoalAuthorizationStoreContract(GoalAuthorizationsContract, AuthorizationRe
         every authorization for good. Adversarial and architecture review, round 2,
         ``blocker`` each.
 
-        The watermark is asserted by what it *does*: a call at the version itself
-        lifts the fence, and one **below** it is discarded as stale. Negative values
+        The watermark is asserted by what it *does*, **and each member's own record
+        is squeezed before the other rewrites it**: a call at the version itself
+        acts, and one **below** it is discarded as stale. Negative values
         are in the table because nothing here states a floor — that is
         ``PlanStore``'s to decide — and a store inventing one would be deciding a
         rule ADR-0268 leaves alone.
@@ -2391,10 +2450,20 @@ class GoalAuthorizationStoreContract(GoalAuthorizationsContract, AuthorizationRe
         await store.record(established(id="a1"))
         assert await store.end_for_goal(GOAL, at=NOW, goal_version=version) == 1
         assert await self._fenced(store)
+        # **The ending's own record, read back before the clear rewrites it.** One
+        # below it is stale, so it lifts nothing and leaves the fence standing; and
+        # this probe writes nothing, so the clear below still meets that record.
+        assert await store.clear_closure(GOAL, goal_version=version - 1) is False
+        assert await self._fenced(store)
         assert await store.clear_closure(GOAL, goal_version=version) is True
         assert not await self._fenced(store)
-        # Read back exactly: a version one below is stale against what was written.
+        # **And the clear's own record, the same way** — with a fresh row to move,
+        # so that ``0`` is staleness rather than a goal with nothing standing.
+        await store.record(established(id="a2"))
         assert await store.end_for_goal(GOAL, at=NOW, goal_version=version - 1) == 0
+        assert not await self._fenced(store), "a stale ending raises no fence"
+        assert await store.end_for_goal(GOAL, at=NOW, goal_version=version) == 1
+        assert await self._fenced(store)
 
     @pytest.mark.parametrize(
         ("passed", "means"),
@@ -2415,10 +2484,14 @@ class GoalAuthorizationStoreContract(GoalAuthorizationsContract, AuthorizationRe
         a later call was stale admits everything below. Adversarial review, rounds
         10 and 11, ``major`` each.
 
-        So each call's record is squeezed: the version **one below** what was passed
-        is **stale** against it, and the version passed **acts**. Nothing between
-        them is left free, and ``True``/``False`` ride in the same table as the
-        integers they mean — ``operator.index`` normalising them rather than a guard
+        So each call's record is squeezed **before any later call rewrites it**: the
+        version **one below** what was passed is **stale** against it, and the
+        version passed **acts**. Squeezing after the rewrite is what round 12 found
+        in the first revision of this arm — the ``clear_closure`` that set the
+        ending's fence down also raised the record to ``means``, so both halves of
+        the squeeze met *its* record and an ending mapping ``True`` to ``0`` passed.
+        Nothing between them is left free, and ``True``/``False`` ride in the same
+        table as the integers they mean — ``operator.index`` normalising them rather than a guard
         refusing them, because ADR-0268 §1 states the member over ``int`` and Python
         says a ``bool`` is one.
 
@@ -2428,15 +2501,26 @@ class GoalAuthorizationStoreContract(GoalAuthorizationsContract, AuthorizationRe
         await store.record(established(id="a1"))
         if member_name == "clear_closure":
             # A fence has to stand for a clear to do anything, and it must stand
-            # *above* the version under test so the call is not stale against it.
-            assert await store.end_for_goal(GOAL, at=NOW, goal_version=means) == 1
+            # **strictly below** the version under test: at ``means`` the record
+            # would already hold the value this call is meant to write, so a member
+            # that lifted the fence and wrote no version at all would pass.
+            assert await store.end_for_goal(GOAL, at=NOW, goal_version=means - 1) == 1
             assert await store.clear_closure(GOAL, goal_version=passed) is True
         else:
             assert await store.end_for_goal(GOAL, at=NOW, goal_version=passed) == 1
             assert await self._fenced(store)
+            # **Squeezed from below before the clear rewrites it**: one under the
+            # record this call wrote lifts nothing, leaving the fence where it was,
+            # so what the clear then meets is still the ending's own record.
+            assert await store.clear_closure(GOAL, goal_version=means - 1) is False, (
+                "one below the record is stale, so it lifts nothing"
+            )
+            assert await self._fenced(store), "and the fence the ending raised stands"
             assert await store.clear_closure(GOAL, goal_version=means) is True
 
-        # **Below is stale**: a record standing at ``means`` discards this call.
+        # **Below is stale**: a record standing at ``means`` discards this call. The
+        # count is ``0`` either way with nothing left standing, so the fence is what
+        # carries this: a call that was *not* stale would raise one.
         assert await store.end_for_goal(GOAL, at=NOW, goal_version=means - 1) == 0
         assert not await self._fenced(store), "a stale ending raises no fence"
 
