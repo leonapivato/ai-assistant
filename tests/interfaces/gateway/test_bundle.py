@@ -1043,10 +1043,13 @@ def test_a_refresh_that_is_no_longer_the_newest_listing_writes_no_outcome() -> N
 
     assert listing.index("listed += 1;") < listing.index("await relay(")
     assert "const mine = listed;" in listing
-    # Returned from all three paths, the refusals included: a forget whose refresh
+    # Returned from all four paths, the refusals included: a forget whose refresh
     # failed still destroyed something and still owes the owner the sentence saying
-    # so, so a read that ended in a fault must not swallow the outcome as well.
-    assert listing.count("return mine;") == 3
+    # so, so a read that ended in a fault must not swallow the outcome as well. The
+    # fourth is #2404's session guard, and it returns the number for the same reason:
+    # a listing dropped because the session under it ended is still a listing that
+    # began, and the caller comparing against it is asking which read was last.
+    assert listing.count("return mine;") == 4
     assert "if (read === listed) {" in functions["forgetConversation"]
 
 
@@ -1109,6 +1112,117 @@ def test_a_fault_is_written_beside_the_act_that_raised_it() -> None:
     assert set(named) == _FAULT_PANELS
     assert sections >= _FAULT_PANELS
     assert tuple(sorted(unnamed)) == _UNNAMED_FAULTS
+
+
+#: The four panels ``showBootstrap`` names one by one, because for each of them it is
+#: saying something rather than closing a control panel: the bootstrap entry is what it
+#: opens, and the console, the conversations listing and the notification panel are the
+#: three surfaces a session-less page stops *being* rather than stops showing.
+_NAMED_BY_SHOW_BOOTSTRAP: Final = frozenset(
+    {"bootstrap", "console", "conversations", "notifications"}
+)
+
+#: The panels outside the hide sweep on purpose — and there is one, recorded here so
+#: that the census below states a decision instead of blessing whatever the list
+#: happens to contain.
+#:
+#: ``answer`` holds the reply to the owner's last question, which is Tier 1 content and
+#: on the face of it belongs in the sweep. It is left out **here** because hiding it is
+#: not the one line the other panels cost: it is written by the ask paths rather than by
+#: a listing — ``askStreaming`` and ``couldRenderOutcome``'s four callers, the spoken
+#: turn among them — and adding it to the sweep without carrying #2404's guard into
+#: those paths would hide it at session loss only for a reply still in flight to put it
+#: back. Filed as #2446 rather than taken here.
+_OUTSIDE_THE_HIDE_SWEEP: Final = frozenset({"answer"})
+
+
+def test_every_panel_a_session_less_page_may_not_show_is_in_the_hide_sweep() -> None:
+    """#2395: ``goals`` was in every census of this page except the one that hides it.
+
+    ``showBootstrap`` names four panels itself and sweeps ``CONTROL_PANELS`` for the
+    rest, so a panel added to the document and left out of that list is not hidden when
+    the session ends — and the goals panel, which renders outcome statements,
+    clarification text and goal ids, sat behind the bootstrap form for as long as the
+    owner left it open.
+
+    **Taken over the document rather than over the list**, which is the whole point: a
+    check that read the panels out of ``CONTROL_PANELS`` would have passed on the day
+    ``goals`` went missing from it. Every ``section.panel`` the page ships is either
+    named by ``showBootstrap``, in the sweep, or in :data:`_OUTSIDE_THE_HIDE_SWEEP` with
+    its reason written down.
+    """
+    document = _asset("index.html")
+    script = _code("app.js")
+    sections = set(re.findall(r'<section id="([a-z-]+)" class="panel"', document))
+    opened = script.index("const CONTROL_PANELS = [")
+    swept = set(re.findall(r'"([a-z-]+)"', script[opened : script.index("];", opened)]))
+    sweeping = _functions(script)["showBootstrap"]
+
+    assert "goals" in swept
+    assert sections - _NAMED_BY_SHOW_BOOTSTRAP - _OUTSIDE_THE_HIDE_SWEEP == swept
+    assert swept <= sections
+    assert "CONTROL_PANELS.forEach((panel) => show(panel, false));" in sweeping
+    for panel in _NAMED_BY_SHOW_BOOTSTRAP - {"bootstrap"}:
+        assert f'show("{panel}", false);' in sweeping
+    assert 'show("bootstrap", true);' in sweeping
+
+
+def test_every_listing_that_resumes_asks_whether_its_session_still_stands() -> None:
+    """#2404: the generation counters order two listings and say nothing about the
+    session under them.
+
+    Let a listing hang, let any other request meet ``no-live-session`` — ``sessionLost``
+    forgets the header half and puts the bootstrap entry back — and the hanging run is
+    still the latest, so it resumes, renders, and reveals its panel beside a form asking
+    the owner to start a session. PR #2393's adversarial review found it at round 9 in
+    ``listAuthorizations``; this is the sweep.
+
+    **Universally quantified rather than listed**, so a listing added after this is
+    covered by the rule instead of by an enumeration somebody has to remember to
+    extend. The named anchors are there only to prove the scan found anything at all:
+    a regex that matched nothing would otherwise satisfy every assertion in the loop.
+    """
+    script = _code("app.js")
+    functions = _functions(script)
+    checked = []
+    for name, body in functions.items():
+        if "await relay(" not in body:
+            continue
+        resumed = body[body.index("await relay(") :]
+        if not re.search(r'show\("[a-z-]+", true\)', resumed):
+            continue
+        checked.append(name)
+        # Captured before the request goes out -- an era read on resumption is the
+        # value it is being compared against and would never differ from it.
+        assert body.index("const era = sessionEra;") < body.index("await relay("), name
+        assert "if (!sameSession(half, era)) {" in resumed, name
+        assert resumed.index("sameSession(half, era)") < resumed.index('show("'), name
+
+    assert {"readGoals", "readBeliefs", "listConnections", "listAuthorizations"} <= set(checked)
+    # The one listing that reveals its panel *before* it sends: nothing it does after
+    # the await is a reveal, so what the guard has to precede there is the render.
+    standing = functions["listStanding"]
+    assert standing.index("sameSession(half, era)") < standing.index('el("standing-list")')
+
+
+def test_the_session_era_moves_exactly_where_the_stored_half_does() -> None:
+    """The count is only worth comparing if it cannot fall out of step with the half.
+
+    Both writers of the stored half bump it, and nothing else does — so there is no
+    third place a session can begin or end without the requests in flight being told.
+    Asserted as an exact count rather than as two occurrences, because an era bumped
+    somewhere else as well is an era that drops answers the page asked for.
+    """
+    script = _code("app.js")
+    functions = _functions(script)
+
+    assert script.count("sessionEra += 1;") == 2
+    assert "sessionEra += 1;" in functions["rememberHeaderHalf"]
+    assert "sessionEra += 1;" in functions["forgetHeaderHalf"]
+    # Counted before the write, so a store that refuses still ends the era: a page that
+    # cannot hold a session must not leave an earlier one's answers admissible.
+    remembering = functions["rememberHeaderHalf"]
+    assert remembering.index("sessionEra += 1;") < remembering.index("setItem")
 
 
 def test_the_page_foot_keeps_the_slot_for_a_fault_no_panel_owns() -> None:
