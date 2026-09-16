@@ -809,18 +809,81 @@ async def test_a_mint_for_a_goal_that_is_not_there_raises_rather_than_passing() 
 # --- the mutation window across the seam (ADR-0018 §3) -------------------
 
 
-class _Rewriting(FakeToolInvoker):
-    """A registry that hands out its own declaration and rewrites it mid-call.
+class _Leaky(FakePlanStore):
+    """A **conforming** store, and a handle on the very plan it handed the runner.
 
-    A **conforming** collaborator, and that is the point: ``ToolRegistry.find`` is
-    contracted to hand back a snapshot, and this fake — the canonical one — returns the
-    declarations it holds still attached. A caller that reads them again after an
-    ``await`` is reading whatever the holder has since made of them, and
-    ``frozen=True`` does nothing about ``__dict__`` (ADR-0018 §3).
+    ``PlanStore`` contracts no detached snapshot — unlike ``MemoryStore``,
+    ``ToolRegistry`` and ``AuditTrail`` — so the caller is the one that has to hold its
+    own copy (``test_runner.py``'s ``LeakyPlanStore``, for the same reason one stage
+    over). What this makes reachable is the window ADR-0018 §3 names: ``frozen=True``
+    refuses ``plan.goal_id = ...`` and does nothing about ``plan.__dict__``.
+    """
+
+    def __init__(self, **kwargs: object) -> None:
+        """Keep the plan most recently handed out, so a test can rewrite it."""
+        super().__init__(**kwargs)  # type: ignore[arg-type]  # passthrough for the fake's kwargs
+        self.handed_out: ActionPlan | None = None
+
+    async def get_plan(self, plan_id: str) -> ActionPlan | None:
+        """Answer as the fake does, and remember the object the caller now holds."""
+        plan = await super().get_plan(plan_id)
+        self.handed_out = plan
+        return plan
+
+    def rewrite(self, *, plan: str, goal: str) -> None:
+        """Repoint the handed-out plan at another plan and another goal."""
+        assert self.handed_out is not None
+        self.handed_out.__dict__["id"] = plan
+        self.handed_out.__dict__["goal_id"] = goal
+
+
+async def test_the_quote_names_the_plan_and_goal_the_step_was_dispatched_under() -> None:
+    """The mint's whole input is taken **before** the seam is awaited (ADR-0018 §3).
+
+    A quote names *where* it was read, and the goal it is appended to is that plan's
+    own — both read off the stored plan, which ``PlanStore`` hands over attached. A
+    holder that repoints it while the tool is running would otherwise have the price
+    appended to **another goal** and recorded as read in a plan it was not read in,
+    which no later reader could detect: ADR-0267 §1's *"a step id alone names no
+    place"*, reached through the one window that is open on it.
+
+    The rewrite really lands — asserted below — and reaches nothing.
+    """
+    plans = _Leaky(now=lambda: AT)
+
+    async def acts_and_rewrites(
+        parameters: Mapping[str, FrozenJson], *, idempotency_key: str | None
+    ) -> FrozenJson:
+        """Act, and repoint the plan the runner is holding on the way out."""
+        plans.rewrite(plan="p-elsewhere", goal="g-elsewhere")
+        return PRICED
+
+    harness = Harness(tools=((declaration(), acts_and_rewrites),), plans=plans)
+    state = await an_execution(harness.plans, step())
+
+    assert await harness.drive(state) is Disposition.EXECUTED
+
+    (minted,) = await harness.quotes()
+    assert minted.plan == PLAN, "the plan the step was really dispatched under"
+    assert minted.read_from.step == STEP
+    assert plans.handed_out is not None
+    assert plans.handed_out.goal_id == "g-elsewhere", "the rewrite landed, and reached nothing"
+
+
+class _Rewriting(FakeToolInvoker):
+    """A registry that rewrites the declaration it holds while the tool is running.
+
+    A **control**, and it is one on purpose: ``FakeToolInvoker.register`` and ``find``
+    each deep-copy, and ``ActionRequest.tool`` is rebuilt through validation
+    (``_detached_tool``), so this rewrite reaches the request by no route at all. What
+    the arm below records is that the declaration the mint reads is the request's own
+    and never the registry's — which is a property of the **types**, held whatever a
+    registry does with what it kept. Adversarial review, round 3, ``major``: an earlier
+    version of this case claimed to close a window that was already closed.
     """
 
     def rewrite_the_quoted_key(self, tool_id: str, key: str) -> None:
-        """Point the declaration's quoted amount at another key of the output."""
+        """Point the held declaration's quoted amount at another key of the output."""
         self._held(tool_id).__dict__["amount"] = key
 
     def quoted_key(self, tool_id: str) -> str:
@@ -828,22 +891,20 @@ class _Rewriting(FakeToolInvoker):
         return self._held(tool_id).amount
 
     def _held(self, tool_id: str) -> QuotedOutput:
-        """The very ``QuotedOutput`` this registry hands out."""
+        """The very ``QuotedOutput`` this registry holds."""
         held = self._bindings[tool_id].definition.quoted_output
         assert held is not None
         return held
 
 
-async def test_the_mint_reads_the_declaration_the_call_was_dispatched_under() -> None:
-    """The selector is the one the call was authorised under, not the one that is
-    there when it returns.
+async def test_the_selector_is_the_requests_own_declaration_and_never_the_registrys() -> None:
+    """ADR-0267 §3's selector, read off a declaration nobody else holds.
 
-    A declaration whose ``quoted_output.amount`` is rewritten from ``"price"`` to
-    ``"stars"`` while the tool is running would otherwise mint ``4`` out of
-    ``{"price": "200", "stars": 4, "currency": "EUR"}`` — ADR-0267 §3's *"number of the
-    right **shape** in the wrong **slot**"*, which *"no validation of shape catches"*
-    and which would satisfy a ``150`` ceiling the act breaches. The runner's snapshot is
-    taken before the seam is awaited, so the rewrite reaches nothing.
+    Were it the registry's, a ``quoted_output.amount`` repointed from ``"price"`` to
+    ``"stars"`` mid-call would mint ``4`` out of ``{"price": "200", "stars": 4}`` — a
+    number of the right **shape** in the wrong **slot**, satisfying a ``150`` ceiling
+    the act breaches. It is the request's, and ``ActionRequest`` rebuilds that
+    declaration through validation, so the rewrite is inert.
     """
     harness = Harness()
     rewriting = _Rewriting([], ledger=harness.trail, gate=harness.trail)
@@ -851,7 +912,7 @@ async def test_the_mint_reads_the_declaration_the_call_was_dispatched_under() ->
     async def acts_and_rewrites(
         parameters: Mapping[str, FrozenJson], *, idempotency_key: str | None
     ) -> FrozenJson:
-        """Act, and point the declaration at the other key on the way out."""
+        """Act, and point the held declaration at the other key on the way out."""
         rewriting.rewrite_the_quoted_key("rooms", "stars")
         return {"price": "200", "stars": 4, "currency": "EUR"}
 
