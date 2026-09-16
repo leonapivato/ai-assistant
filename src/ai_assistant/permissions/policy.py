@@ -57,6 +57,7 @@ from ai_assistant.permissions._coverage import (
     coverage_subject,
     covers,
     covers_on_argument_route,
+    governing_quote,
     uncovered,
 )
 
@@ -1025,6 +1026,17 @@ class ThresholdActionPolicy:
         per ruling and never a cached answer** (ADR-0193 §7's rule read onto the
         second seam, and it holds on both).
 
+        **A route-(d) ``ALLOW`` is the one ruling that carries a pin** (ADR-0271 §1).
+        Where its coverage carries a ``MONEY`` member — the member ADR-0266 §7's
+        evidence route alone can meet, and which condition 6 therefore proved against
+        a quote — the ruling records **that** quote as ``proved_quote``, by value. The
+        absence is total everywhere else: route (a), route (b), route (c), a
+        ``CONFIRM``, a ``DENY``, and a route-(d) ``ALLOW`` whose coverage names no
+        price all leave it unset, and no path here invents one, back-fills one, or
+        reads one back. It is **stated over the route and not over the quotes**: a
+        goal holding a quote for an act whose row bounds no money pins nothing,
+        because nothing was proved against it.
+
         **Why (d) precedes (b), stated so it is a decision and not an accident**
         (ADR-0254 §6). A record covering a request under both routes is one the user
         made about *this goal*, with a basis naming the turn and the span, an expiry
@@ -1105,12 +1117,32 @@ class ThresholdActionPolicy:
                 recipient = await self._covering(request, subject)
                 consulted = True
             if consulted is False or recipient is not None:
+                # **The pin, and the only place anything writes one** (ADR-0271 §1).
+                # This branch *is* the route-(d) ``ALLOW``, so condition 6 is already
+                # established over ``record.coverage`` and these quotes —
+                # ``_covers_in_full`` above answered it — and what is added here is
+                # **which** quote the evidence route was taken over, never a second
+                # reading of whether it was met. ``governing_quote`` is that one
+                # statement, shared with ADR-0270 §1's seam so the two cannot drift.
+                #
+                # **No second read** (ADR-0267 §5): ``quotes`` is the tuple the one
+                # ``for_action`` of this ruling returned, the same tuple the bar and
+                # the comparison were decided over, so the pinned value is the value
+                # condition 6 was proved against and not one a later read supplies.
+                #
+                # **The operand and never a verdict** (ADR-0271 §1, ADR-0254 §13):
+                # nothing reads it back, and every later dispatch re-reads the
+                # *current* governing quote as if the field were not there. It is
+                # carried **by value** — the field's own validator detaches it, so
+                # what is recorded cannot be moved by a seam that still holds the
+                # object.
                 return PermissionRuling(
                     outcome=PermissionOutcome.ALLOW,
                     reason=_GOAL_AUTHORIZATION,
                     authorised_by=record.id,
                     authorised_subject=record.subject_digest,
                     authorised_goal=record.goal,
+                    proved_quote=governing_quote(record.coverage, quotes),
                 )
         if external:
             # **The third disjunct is what admitted this request** (ADR-0254 §6):

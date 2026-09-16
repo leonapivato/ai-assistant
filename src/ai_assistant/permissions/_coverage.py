@@ -834,13 +834,58 @@ def coverage_answer(
         decided it.
     """
     met = covers_arguments(coverage, subject, quotes)
-    priced = any(member.kind is BoundKind.MONEY for member in coverage)
-    # **Total over an empty tuple**, which ``met and priced`` already excludes — a
-    # ``MONEY`` member is met by the evidence route alone, and that route is met by
-    # nothing where the goal holds no quote for this act. Written so that the
-    # reading stays total if that ever stops being true, rather than raising.
-    governing = quotes[-1] if quotes else None
-    return CoverageAnswer(met=met, quoted=governing if met and priced else None)
+    return CoverageAnswer(met=met, quoted=governing_quote(coverage, quotes) if met else None)
+
+
+def governing_quote(
+    coverage: Sequence[CoverageMember], quotes: Sequence[ActionQuote]
+) -> ActionQuote | None:
+    """The quote the evidence route was taken over, **given condition 6 holds**.
+
+    **One statement of the selection, read by both writers** (ADR-0270 §2, ADR-0271
+    §1). :func:`coverage_answer` carries it across ADR-0270 §1's seam and
+    :meth:`~ai_assistant.permissions.policy.ThresholdActionPolicy.decide` pins it to a
+    route-(d) ``ALLOW``; the two would otherwise state one rule twice, and a rule
+    stated twice is a rule that drifts. **It re-reads nothing**: both callers hand it
+    the quotes the one ``for_action`` of this ruling returned (ADR-0267 §5).
+
+    **It presumes its caller has established condition 6 and does not re-take it.**
+    The predicate is :func:`covers_arguments` and there is not a second one here — a
+    caller holding no such answer has no business asking this question, because a
+    quote that proved nothing is not a quote the evidence route was taken over.
+
+    **Present exactly where the evidence route decided something** (ADR-0270 §2,
+    ADR-0271 §1): a ``coverage`` carrying a ``MONEY`` member, that being the member
+    the evidence route alone can meet (ADR-0266 §7), leaves the governing quote as
+    what condition 6 was proved against; a ``coverage`` carrying none leaves the
+    evidence route deciding nothing, so the answer is ``None`` however many quotes
+    the goal holds.
+
+    **The selection is the position and never a search** (ADR-0266 §7, ADR-0267 §7).
+    It is the **last** member of what that one read returned, taken before any digest
+    is compared — :func:`_met_through_evidence`'s own order — so *"an earlier quote is
+    consulted in no case"*. A reading that scanned for a matching digest would revive
+    a quote a re-quote displaced.
+
+    Args:
+        coverage: The members condition 6 was decided over — the live row's
+            ``coverage`` on the pin's path, the coverage a proposed row would carry on
+            ADR-0270 §1's.
+        quotes: That goal's quotes naming the request's intended action, **in the
+            order the goal holds them**, as the one ``for_action`` read returned them.
+
+    Returns:
+        The governing quote where the evidence route decided this coverage, and
+        ``None`` everywhere else.
+    """
+    if not any(member.kind is BoundKind.MONEY for member in coverage):
+        return None
+    # **Total over an empty tuple**, which a met condition 6 over a priced coverage
+    # already excludes — a ``MONEY`` member is met by the evidence route alone, and
+    # that route is met by nothing where the goal holds no quote for this act.
+    # Written so that the reading stays total if that ever stops being true, rather
+    # than raising.
+    return quotes[-1] if quotes else None
 
 
 def covers_on_argument_route(coverage: Sequence[CoverageMember], subject: CoverageSubject) -> bool:
