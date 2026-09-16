@@ -262,7 +262,12 @@ async def proposed_authorization(  # noqa: PLR0913 — one parameter per operand
 
     **Two copies, taken before the await, and the distinction is what makes the rule
     hold.** The **writer** builds the row from ``subject`` and ``written``, its own
-    copies; the **answerer** is handed a second pair it alone holds. A collaborator
+    copies; the **answerer** is handed a second pair **derived from those**, which it
+    alone holds. Deriving rather than re-copying the caller's values is what makes
+    *"the coverage a row this system would write would carry"* (ADR-0270 §1) a fact
+    about the operands instead of a claim about what did not interleave between two
+    statements: the answer is about the row's own subject by construction, and the
+    row is written for the subject the answer was about. A collaborator
     that rewrites what it was given moves nothing, and a holder that rewrites the
     caller's request — or a value *nested* inside it — moves nothing either, the
     copies being round-trips through a dump rather than new names for the same
@@ -333,7 +338,12 @@ async def proposed_authorization(  # noqa: PLR0913 — one parameter per operand
     if not isinstance(binding, EgressBinding):
         return None
     superseded = _superseded(standing, subject)
-    answer = await answers.coverage_met(detached_request(request), _detached_coverage(coverage))
+    # Derived from the writer's own copies and **never from the caller's values a
+    # second time**: two independent copies of one original are equal only for as
+    # long as nothing moves the original between them, and that is an argument about
+    # interleaving where this is a fact about the values. The answer is then about
+    # the operands the row carries, which is what ADR-0270 §1 states it is about.
+    answer = await answers.coverage_met(detached_request(subject), _detached_coverage(written))
     if not answer.met:
         return None
     # The one value that crosses back, and the answerer may still be holding it.
