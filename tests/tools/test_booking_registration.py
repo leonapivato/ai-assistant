@@ -28,9 +28,11 @@ from booking_harness import (
     ENDPOINT,
     IN_WINDOW,
     REFERENCE,
+    Keyring,
     Records,
     arguments,
     configured,
+    keyring,
     provenance,
     registry_for,
     seam_for,
@@ -58,6 +60,19 @@ _ROOT: Final = Path(__file__).resolve().parents[2]
 
 #: The contract ADR-0273 §3 requires the new module to be named in.
 _CONTRACT: Final = "network transports are confined to the tools egress seam"
+
+
+async def _recording_keyring() -> Keyring:
+    """A keyring that records every name it was asked for.
+
+    Arm 3's *"fabricates nothing"* includes the credential, and *"no credential was
+    read"* is a claim about a call that did **not** happen — only a recording subject
+    can distinguish it from a read whose result was discarded.
+
+    Returns:
+        The keyring, holding the credential under the slot.
+    """
+    return await keyring()
 
 
 def _registered_ids(booking: SimulatedBookingIntegration | None) -> set[str]:
@@ -255,25 +270,70 @@ async def test_the_registration_the_table_holds_is_the_one_the_callable_holds() 
 # --------------------------------------------------------------------------- #
 
 
-async def test_a_call_against_an_unprovisioned_connection_is_refused_and_nothing_is_made() -> None:
+async def test_an_unprovisioned_connection_cannot_be_asked_and_nothing_is_fabricated() -> None:
     """Arm 3 (ADR-0273 §1, ADR-0149 §4).
 
-    *"No connection, credential, identity, reference or endpoint is fabricated,
-    defaulted or inferred to make registration succeed."* Where the store holds no
-    record for the configured reference, the seam refuses at bind time and **writes
-    nothing**: the only thing that happened is a read.
+    *"Enabled with no provisioned connection — registers nothing and fabricates
+    nothing."* The substantive half is **fabricates nothing**, and it is asserted here
+    over every value §1 enumerates: *"no connection, credential, identity, reference or
+    endpoint is fabricated, defaulted or inferred to make registration succeed"*. Where
+    the store holds no record for the configured reference, the seam refuses at bind
+    time; **nothing is written**, no credential is read, and no ruling can be taken — so
+    neither tool can be invoked at all.
+
+    **On *"registers nothing"*: this lane reads it as §1's own sentence — "it registers
+    only against a connection the user provisioned" — and not as a store read at
+    construction, and the grounds are three.** *First*, ADR-0148 §6 puts the
+    connectability read **at the moment the call is bound** and says in terms that it is
+    *"never carried over from registration"*, because *"a registration snapshot would
+    let a ruling be taken — and a confirmation shown — against a reference that had
+    since gone pending"*. A construction-time check is exactly that snapshot. *Second*,
+    ``core/config.py`` already states the rule for the neighbouring settings: *"An
+    unknown or disconnected reference is **not** validated here … A startup check would
+    be a second, staler answer to a question the seam already asks with the record in
+    hand."* *Third*, ``build_send_email_integration``, ``build_web_search_integration``
+    and ``build_forecast_integration`` each read no store, and ADR-0273 §1 puts this
+    factory *"in ``build_forecast_integration``'s shape"*; both it and
+    ``build_composition`` are synchronous, so there is no point in the sanctioned cut at
+    which the store could be awaited.
+
+    What the alternative reading would buy — a deployment whose registry holds no
+    capability while the connection is unprovisioned — is bought here by the refusal
+    below instead, one stage later and with the record actually in hand.
     """
     empty = Records()  # a store with no record for the reference at all
-    booking = await configured(records=empty)
+    keyring = await _recording_keyring()
+    booking = await configured(records=empty, secrets=keyring)
     registry = registry_for(booking)
     seam = seam_for(booking, registry, records=empty)
 
     with pytest.raises(EgressBindingError, match="not connectable"):
         await seam.bind(BOOKING_ACT, parameters=arguments(IN_WINDOW), provenance=provenance())
+    with pytest.raises(EgressBindingError, match="not connectable"):
+        await seam.bind(
+            BOOKING_AVAILABILITY, parameters=arguments(IN_WINDOW), provenance=provenance()
+        )
 
-    assert empty.reads == [REFERENCE]
+    assert empty.reads == [REFERENCE, REFERENCE]
+    assert keyring.reads == [], "a refused binding read a credential"
     assert await booking.store.commit_count() == 0
     assert await booking.store.records() == ()
+
+
+async def test_the_registration_names_the_configured_reference_and_invents_none() -> None:
+    """The rest of §1's *"fabricates nothing"*, over the registration itself.
+
+    Neither registration carries a reference, an endpoint or an identity this lane
+    chose: both name exactly what the operator configured, and there is no default for
+    either. Asserted because a factory that fell back to a placeholder reference would
+    still pass the case above — the seam would refuse a *different* reference, and the
+    refusal would look the same.
+    """
+    booking = await configured(connection="conn-operators-own", endpoint="https://theirs.invalid")
+
+    for integration in (booking.availability, booking.booking):
+        assert integration.registration.reference == "conn-operators-own"
+        assert integration.registration.transport_endpoint == "https://theirs.invalid"
 
 
 # --------------------------------------------------------------------------- #

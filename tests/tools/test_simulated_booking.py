@@ -15,6 +15,7 @@ from __future__ import annotations
 
 import asyncio
 import sqlite3
+import threading
 from collections.abc import Mapping
 from datetime import date, timedelta
 from decimal import Decimal
@@ -57,11 +58,14 @@ from ai_assistant.core.types import (
     AuthorizationBasis,
     BoundKind,
     CoverageMember,
+    EffectClaim,
     EffectKey,
     Goal,
     GoalAttempt,
     GoalInterpretation,
     Ground,
+    IntendedAction,
+    IntendedActionMinting,
     MemorySource,
     PermissionDecision,
     PermissionOutcome,
@@ -92,10 +96,13 @@ from ai_assistant.tools.booking import (
     CHARGED_AMOUNT_KEY,
     CHARGED_CURRENCY_KEY,
     DATE_ARGUMENT,
+    ORIGIN_ARGUMENT,
     PRICE_AMOUNT_KEY,
     PRICE_CURRENCY_KEY,
     SIMULATION_KEY,
     SIMULATION_NOTICE,
+    BookingCatalogue,
+    BookingConfigurationError,
     BookingStoreError,
     SqliteBookingStore,
 )
@@ -109,6 +116,7 @@ if TYPE_CHECKING:
 #: The intended action a quote and a charge are read against, and the plan they sit in.
 _ACTION: Final = "act-1"
 _PLAN: Final = "plan-1"
+_GOAL: Final = "g-1"
 _STEP: Final = "step-1"
 
 #: A bound a case reads a quote against. ADR-0254 §4's ``MONEY`` reading compares an
@@ -183,6 +191,73 @@ def _succeeded(result: ToolResult) -> Mapping[str, FrozenJson]:
     assert result.outcome is ToolOutcome.SUCCEEDED, result.failure
     assert isinstance(result.output, Mapping)
     return result.output
+
+
+async def _seeded_execution(plans: FakePlanStore, parameters: Mapping[str, FrozenJson]) -> str:
+    """Seed one goal, plan and execution, and return the execution's id.
+
+    ADR-0259 §2's claim is keyed on an execution and a step as well as an effect key, so
+    a case about *"two dispatches … under one goal"* needs one of each. The store mints
+    the execution id, which is why it is returned rather than chosen.
+
+    Args:
+        plans: The plan store to seed.
+        parameters: The booking's arguments, carried onto the plan step.
+
+    Returns:
+        The execution's id.
+    """
+    await plans.save_goal(
+        Goal(
+            id=_GOAL,
+            interpretation=(
+                GoalInterpretation(
+                    revision=1,
+                    outcome="book the stay",
+                    outcome_ground=Ground.USER_STATED,
+                    outcome_span="book the stay",
+                    recorded_at=DECIDED_AT,
+                    raised_by="t-1",
+                ),
+            ),
+            provenance=Provenance(
+                source=MemorySource.USER_ASSERTED, confidence=1.0, last_updated=DECIDED_AT
+            ),
+            created_at=DECIDED_AT,
+        )
+    )
+    # **The intended action is minted onto the goal before a plan step may name it**
+    # (ADR-0265 §4): the loop substitutes each action label for an id once, and the
+    # store closes that window. So a plan naming an action the goal does not carry is
+    # refused — which is what makes "one intended action under one goal" a fact the
+    # store holds rather than a label a test wrote.
+    await plans.record_intended_actions(
+        IntendedActionMinting(
+            goal_id=_GOAL,
+            actions=(IntendedAction(id=_ACTION, intent="book the stay"),),
+            expected_version=0,
+        )
+    )
+    # **Two steps naming one intended action**, which is what a replan looks like: the
+    # goal still intends one act, and a second step proposes it again. ADR-0259 §2's
+    # claim is what stands between that and a second booking, and a claim re-made by the
+    # step that already holds it is the *same* holder rather than a repeat — so a case
+    # driving one step twice would assert nothing.
+    steps = tuple(
+        PlanStep(
+            id=step_id,
+            intent="book it",
+            capability=BOOKING_ACT.capability,
+            parameters=parameters,
+            intended_action=_ACTION,
+        )
+        for step_id in ("s-book", "s-rebook")
+    )
+    plan = ActionPlan(
+        id="p-1", goal_id=_GOAL, steps=steps, created_at=DECIDED_AT, targets_revision=1
+    )
+    await plans.save_plan(plan)
+    return (await plans.start_execution(plan.id)).id
 
 
 def _plan_step() -> PlanStep:
@@ -364,16 +439,63 @@ async def test_the_charge_reads_and_adr_0271_s_finding_fires_when_it_disagrees(
 # --------------------------------------------------------------------------- #
 
 
-async def test_two_dispatches_of_one_intended_action_carry_one_effect_key() -> None:
-    """Arm 8 (ADR-0259 §2).
+async def test_two_dispatches_of_one_intended_action_carry_one_key_and_only_one_acts() -> None:
+    """Arm 8 (ADR-0259 §2): one derived key, and **the second is not dispatched**.
 
     The key is **derived** and never minted, supplied, configured or carried as a field,
-    so two calls with the same arguments under the same binding derive the *same* key —
-    which is what the effect claim is keyed on, and what makes the second dispatch a
-    repeat rather than a new act. The two decisions differ in id, which is what makes
-    this two dispatches rather than one object compared with itself.
+    so two authorisations of one intended action under one goal, carrying the same
+    arguments under the same binding, derive the *same* key. That is what the effect
+    claim is keyed on — and this case drives the claim rather than only comparing the
+    keys, because a provider that booked twice would satisfy the comparison and fail the
+    arm.
+
+    **The claim is the production one** (``PlanStore.claim_effect``), and the dispatch
+    is guarded by its answer exactly as ``StepExecutor._effect`` guards one: ``CLAIMED``
+    proceeds, and anything else refuses without reaching the provider. So what the case
+    establishes is the guarantee M33 exists to demonstrate — **one record and a commit
+    count of one**, with a second authorisation that was live and spendable and still
+    booked nothing.
     """
-    booking = await configured()
+    booking = await configured(retained_records=4)
+    registry = registry_for(booking)
+    seam = seam_for(booking, registry)
+    parameters = arguments()
+    binding = await bound(seam, BOOKING_ACT, parameters)
+    plans = FakePlanStore(now=lambda: DECIDED_AT)
+    execution = await _seeded_execution(plans, parameters)
+
+    dispatched: list[str] = []
+    for decision_id, step_id in (("d-1", "s-book"), ("d-2", "s-rebook")):
+        call = authorised(
+            BOOKING_ACT, parameters, binding, decision_id=decision_id, step_id=step_id
+        )
+        assert call.effect_key is not None
+        assert isinstance(call.effect_key, EffectKey)
+        assert call.effect_key.tool_id == BOOKING_ACT_ID
+        assert call.effect_key.egress_endpoint == ENDPOINT
+        outcome = await plans.claim_effect(
+            execution_id=execution, step_id=step_id, effect_key=call.effect_key
+        )
+        if outcome.claim is not EffectClaim.CLAIMED:
+            continue
+        dispatched.append(decision_id)
+        _succeeded(await recorded(registry, call))
+
+    assert dispatched == ["d-1"], "the second dispatch reached the provider"
+    assert len(await booking.store.records()) == 1
+    assert await booking.store.commit_count() == 1
+
+
+async def test_the_second_dispatch_is_the_only_thing_standing_between_it_and_two_bookings() -> None:
+    """The other half of arm 8, and the ground ADR-0273 §2 states for ``NONE``.
+
+    The case above stops the repeat at the **claim**; this one removes the claim and
+    shows the provider booking twice under the identical key — so the arm above is
+    asserting the system's guarantee rather than a provider that happens to deduplicate.
+    Arm 13 states the same fact over two *separately authorised* actions; this states it
+    over the very key the claim refuses.
+    """
+    booking = await configured(retained_records=4)
     registry = registry_for(booking)
     seam = seam_for(booking, registry)
     parameters = arguments()
@@ -381,12 +503,13 @@ async def test_two_dispatches_of_one_intended_action_carry_one_effect_key() -> N
 
     first = authorised(BOOKING_ACT, parameters, binding, decision_id="d-1")
     second = authorised(BOOKING_ACT, parameters, binding, decision_id="d-2")
-
-    assert first.effect_key is not None
-    assert isinstance(first.effect_key, EffectKey)
     assert first.effect_key == second.effect_key
-    assert first.effect_key.tool_id == BOOKING_ACT_ID
-    assert first.effect_key.egress_endpoint == ENDPOINT
+
+    _succeeded(await recorded(registry, first))
+    _succeeded(await recorded(registry, second))
+
+    assert len(await booking.store.records()) == 2
+    assert await booking.store.commit_count() == 2
 
 
 async def test_the_reads_call_derives_no_effect_key_and_the_acts_does() -> None:
@@ -1439,3 +1562,179 @@ def test_the_module_names_no_clock_and_no_random_source() -> None:
     }
 
     assert named & forbidden == set()
+
+
+# --------------------------------------------------------------------------- #
+# what the first adversarial round found
+# --------------------------------------------------------------------------- #
+
+
+@pytest.mark.parametrize(
+    "bound_value",
+    [0, -1, True, 2**63, 2**64],
+    ids=["zero", "negative", "flag", "at-the-ceiling", "above-it"],
+)
+def test_the_factory_refuses_a_record_bound_settings_would_refuse(bound_value: object) -> None:
+    """Arm 12 at the **factory**, which is the other place §5's domain is read.
+
+    ``build_simulated_booking_integration``'s docstring says it *"states the same rules
+    at the one place a provider can be built without going through ``Settings``"*, and
+    that claim has to be true of the **whole** domain and not most of it. ``2**63`` is
+    the case that proves it: it is inside ``Settings``' ``ge=1`` but outside its
+    ``lt=2**63``, and it reaches SQLite as a ``LIMIT`` parameter — so without the
+    ceiling here it raises ``OverflowError`` out of the driver **at the first prune**,
+    which is precisely where §5 forbids the refusal to fall.
+    """
+    with pytest.raises(BookingConfigurationError, match="booking_retained_records"):
+        BookingCatalogue.checked(
+            available_from=AVAILABLE_FROM,
+            available_to=date(2026, 10, 7),
+            price_amount=PRICE,
+            price_currency=CURRENCY,
+            charge_amount=PRICE,
+            charge_currency=CURRENCY,
+            retained_records=bound_value,  # type: ignore[arg-type]  # a case supplies a refused shape
+        )
+
+
+def test_no_provider_is_built_from_a_refused_bound(tmp_path: Path) -> None:
+    """§5: *"and **no provider is built from it**"*.
+
+    The refusal is stated over the whole factory and not only over the catalogue, so a
+    deployment carrying a bad bound gets no integration, no registration and no store
+    file — asserted by the directory being empty afterwards.
+    """
+    with pytest.raises(BookingConfigurationError):
+        SqliteBookingStore(path=tmp_path / "bookings.db", retained=2**63)
+
+    assert list(tmp_path.iterdir()) == []
+
+
+async def test_the_record_carries_both_arguments_it_was_asked(tmp_path: Path) -> None:
+    """§2: the record carries **what it was asked** and what it charged.
+
+    *Asked* is both declared arguments. The origin equals this registration's configured
+    endpoint on every call that reaches the commit, because the four conditions refuse
+    any other — but **the record outlives the configuration**, and a deployment
+    re-pointed between two runs would otherwise leave retained records that cannot say
+    which endpoint each booking named. Asserted **across a restart** for that reason.
+
+    **And nothing else**: only keys the declaration's own ``parameters_schema`` names
+    are persisted, which is the other half of the same clause.
+    """
+    path = tmp_path / "bookings.db"
+    result, booking = await _book(store_path=path)
+    _succeeded(result)
+    booking.store.close()
+
+    reopened = SqliteBookingStore(path=path, retained=2)
+    try:
+        records = await reopened.records()
+        assert len(records) == 1
+        assert records[0][ORIGIN_ARGUMENT] == ENDPOINT
+        assert records[0][DATE_ARGUMENT] == IN_WINDOW.isoformat()
+        assert set(records[0]) == {
+            ORIGIN_ARGUMENT,
+            DATE_ARGUMENT,
+            CHARGED_AMOUNT_KEY,
+            CHARGED_CURRENCY_KEY,
+        }
+    finally:
+        reopened.close()
+
+
+class _SlowStore(SqliteBookingStore):
+    """The real store with one commit parked until a test releases it.
+
+    A subclass for :class:`_FaultAt`'s reason and under the same clause: §2 leaves this
+    class subclassable so an arm can reach a point of the commit against the **real**
+    implementation. What this one reaches is the window in which the worker thread is
+    inside SQLite — the window a store running on the loop thread would have stalled the
+    whole system through.
+    """
+
+    def __init__(self, *, path: Path | str, retained: int, release: threading.Event) -> None:
+        """Arm the park.
+
+        Args:
+            path: The store's path.
+            retained: The record bound.
+            release: Set by the test to let the parked commit finish.
+        """
+        self._release: threading.Event | None = None
+        self.entered = threading.Event()
+        super().__init__(path=path, retained=retained)
+        self._release = release
+
+    def _insert(self, conn: sqlite3.Connection, record: str) -> None:
+        if self._release is not None:
+            self.entered.set()
+            self._release.wait(timeout=10)
+        super()._insert(conn, record)
+
+
+async def test_a_blocked_commit_does_not_stall_the_event_loop(tmp_path: Path) -> None:
+    """The store's work happens off the loop thread, and the loop keeps running.
+
+    ``BEGIN IMMEDIATE`` takes the write lock, and **no SQLite store in this tree sets a
+    busy timeout** (#564) — so under cross-process contention a commit can block for the
+    driver's default. The system composes on **one** event loop (``CLAUDE.md``), so a
+    store calling SQLite on that thread would stall every unrelated task and the
+    invocation seam's own deadline (ADR-0029 §4) along with it. Every other SQLite store
+    in this tree hands off to a worker for exactly that reason, and this asserts that
+    this one does: while a commit is parked inside the store, an unrelated coroutine
+    still makes progress.
+    """
+    release = threading.Event()
+    store = _SlowStore(path=tmp_path / "bookings.db", retained=2, release=release)
+    ticks = 0
+
+    async def tick() -> None:
+        nonlocal ticks
+        while not release.is_set():
+            ticks += 1
+            await asyncio.sleep(0)
+
+    try:
+        committing = asyncio.create_task(store.commit({DATE_ARGUMENT: "2026-10-01"}))
+        ticking = asyncio.create_task(tick())
+        await asyncio.to_thread(store.entered.wait, 10)
+        assert store.entered.is_set(), "the commit never reached the store"
+        progressed = ticks
+        await asyncio.sleep(0)
+        assert ticks > progressed, "the event loop was blocked by the parked commit"
+        release.set()
+        await committing
+        await ticking
+    finally:
+        store.close()
+
+    assert ticks > 0
+
+
+async def test_a_cancelled_commit_leaves_no_worker_holding_the_connection(
+    tmp_path: Path,
+) -> None:
+    """ADR-0060 §1's delivery half, and the family's resource clause beside it.
+
+    The awaiting task cancels, and the cancellation is **re-raised only once the worker
+    has physically returned** — so the store's lock outlives the thread and no later
+    caller reuses a connection a running worker still holds. What is prevented is
+    connection reuse rather than the cancellation itself.
+    """
+    release = threading.Event()
+    store = _SlowStore(path=tmp_path / "bookings.db", retained=2, release=release)
+    try:
+        committing = asyncio.create_task(store.commit({DATE_ARGUMENT: "2026-10-01"}))
+        await asyncio.to_thread(store.entered.wait, 10)
+        committing.cancel()
+        release.set()
+        with pytest.raises(asyncio.CancelledError):
+            await committing
+
+        # The worker ran to completion despite the cancellation, so the store is
+        # usable afterwards rather than left mid-transaction.
+        assert await store.commit_count() == 1
+        assert len(await store.records()) == 1
+    finally:
+        store.close()
