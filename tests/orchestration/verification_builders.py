@@ -194,19 +194,26 @@ def a_member(span: str, *, kind: BoundKind = BoundKind.TERMS) -> CoverageMember:
     return CoverageMember(kind=kind, fixed=span, basis=basis)
 
 
-def a_row(
+def a_row(  # noqa: PLR0913 — one keyword per field of the stored row an arm varies
     authorization_id: str = "auth-1",
     *members: CoverageMember,
     origin: AuthorizationOrigin = AuthorizationOrigin.CONFIRMED,
     goal: str = GOAL,
     disposition: AuthorizationDisposition = AuthorizationDisposition.ESTABLISHED,
     tool_id: str = "bookings",
+    tool: ToolDefinition | None = None,
 ) -> Authorization:
-    """An authorising row of this goal, carrying ``members``."""
+    """An authorising row of this goal, carrying ``members``.
+
+    ``tool`` is the declaration the row was established over. ADR-0254 §7 compares it
+    with the request's **by value**, so a row and the decision that names it carry the
+    same one or ``AuditTrail.record`` would have refused that decision — which is why
+    :func:`paired` exists rather than each arm being trusted to keep them together.
+    """
     return Authorization(
         id=authorization_id,
         goal=goal,
-        tool=a_tool(tool_id=tool_id),
+        tool=tool if tool is not None else a_tool(tool_id=tool_id),
         account=ACCOUNT,
         destinations=(DESTINATION,),
         origin=origin,
@@ -328,6 +335,57 @@ def an_attempt(*execution_ids: str) -> GoalAttempt:
     )
 
 
+def paired(
+    rows: Sequence[Authorization], decisions: Sequence[PermissionDecision]
+) -> tuple[tuple[Authorization, ...], tuple[PermissionDecision, ...]]:
+    """Make every row and the decision that names it a pair the trail could have stored.
+
+    ADR-0254 §7 makes ``AuditTrail.record`` **refuse** a route-(d) decision unless ten
+    conditions hold over the row the store returned, two of which are facts about the
+    *pair* rather than about either side: the row's ``tool`` equals the request's
+    declaration **by value**, and the ruling's ``authorised_subject`` is the row's own
+    **recomputed** digest. A fixture that broke either would be testing §2's comparison
+    over a record the system could not have written — the arms would still pass, because
+    §2 reads neither field, and they would be passing over an impossible state.
+
+    So the reconciliation is done here, once, rather than left to fifty arms: each row is
+    rebuilt carrying the declaration of the decision that names it — which is the
+    declaration the arm is actually about, the one whose ``postconditions`` §2 compares —
+    and each ruling is rebuilt carrying that row's ``subject_digest``. A decision naming
+    no row, or naming one these rows do not hold, is returned untouched: that is exactly
+    the shape the fail-closed arms are about. Adversarial review, round 5, ``blocker``.
+
+    Args:
+        rows: The rows the resolution would answer with.
+        decisions: The rulings the trail holds.
+
+    Returns:
+        The rows and the decisions, made consistent with each other.
+    """
+    named = {
+        decision.ruling.authorised_by: decision
+        for decision in decisions
+        if decision.ruling.authorised_by is not None
+    }
+    rebuilt = tuple(
+        row if row.id not in named else row.model_copy(update={"tool": named[row.id].tool})
+        for row in rows
+    )
+    digests = {row.id: row.subject_digest for row in rebuilt}
+    return rebuilt, tuple(
+        decision
+        if decision.ruling.authorised_by not in digests
+        else decision.model_copy(
+            update={
+                "ruling": decision.ruling.model_copy(
+                    update={"authorised_subject": digests[decision.ruling.authorised_by]}
+                )
+            }
+        )
+        for decision in decisions
+    )
+
+
 class Executions:
     """The plan store, narrowed to the one read the comparison takes."""
 
@@ -368,12 +426,26 @@ class Rows:
     def __init__(self, *rows: Authorization, failure: Exception | None = None) -> None:
         """Hold ``rows``, or raise ``failure`` from every read."""
         self._by_id = {row.id: row for row in rows}
-        self._failure = failure
+        self.failure = failure
         self.calls: list[str] = []
 
     async def resolve(self, authorization_id: str) -> Authorization | None:
         """The row in **every** disposition, or ``None``."""
         self.calls.append(authorization_id)
-        if self._failure is not None:
-            raise self._failure
+        if self.failure is not None:
+            raise self.failure
         return self._by_id.get(authorization_id)
+
+    @property
+    def held(self) -> tuple[Authorization, ...]:
+        """The rows this double holds, in the order it was given them."""
+        return tuple(self._by_id.values())
+
+    def reconcile(self, rows: Sequence[Authorization]) -> None:
+        """Replace what this double holds, **in place**, with ``rows``.
+
+        In place rather than by building a second double, so that an arm reading
+        :attr:`calls` reads the calls the comparison actually made — there is one
+        resolution per comparison and the arm holds it.
+        """
+        self._by_id = {row.id: row for row in rows}

@@ -41,6 +41,7 @@ from verification_builders import (
     an_execution,
     field_equals,
     field_present,
+    paired,
 )
 
 from ai_assistant.core.errors import AuditError, AuthorizationError, PlanningError
@@ -94,13 +95,24 @@ async def _compared(
     executions: Executions | None = None,
     execution_ids: tuple[str, ...] = (EXECUTION,),
 ) -> Comparison:
-    """Run the comparison over one attempt naming ``execution_ids``."""
+    """Run the comparison over one attempt naming ``execution_ids``.
+
+    **The rows and the rulings are reconciled before the comparison sees them**
+    (:func:`~verification_builders.paired`), so every pair an arm compares over is one
+    ``AuditTrail.record`` could have admitted under ADR-0254 §7 — the row's ``tool``
+    equal to the decision's by value, and the ruling's ``authorised_subject`` the row's
+    own recomputed digest. §2 reads neither field, so this changes no arm's verdict; what
+    it removes is a fixture that could only have existed as impossible state.
+    """
+    standing = rows if rows is not None else Rows(a_row("auth-1", a_member(RIVERSIDE)))
+    held, ruled = paired(standing.held, decisions)
+    standing.reconcile(held)
     return await compare(
         goal,
         an_attempt(*execution_ids),
         executions=executions if executions is not None else Executions(an_execution(*steps)),
-        decisions=Decisions(*decisions),
-        rows=rows if rows is not None else Rows(a_row("auth-1", a_member(RIVERSIDE))),
+        decisions=Decisions(*ruled),
+        rows=standing,
     )
 
 
