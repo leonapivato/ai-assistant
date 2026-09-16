@@ -1801,10 +1801,11 @@ class StepRunner:
         completeness condition, so a stage that cannot ask is a stage that cannot
         satisfy it.
 
-        **The coverage is this package's to supply and it mints none.** ADR-0254 §1
-        requires a row's `coverage` to be minted from the user's own recorded words,
-        and no clause says how (#2373, ruled into ADR-0266), so the empty tuple below
-        is the coverage a row would carry — condition 6's fourth operand, put to
+        **The coverage is this package's to supply and it mints none yet.** ADR-0254
+        §1 requires a row's `coverage` to be minted from the user's own recorded
+        words; #2373 is ruled into ADR-0266 and the mint is that decision's **L2**,
+        which has not landed — so the empty tuple below is the coverage a row would
+        carry — condition 6's fourth operand, put to
         ``coverage_met`` and written onto the row unchanged. It is **passed** rather
         than assumed by the writer, so a minter landing here changes one expression
         and no condition.
@@ -1848,8 +1849,9 @@ class StepRunner:
                 request,
                 decision,
                 answers=self._coverage_answers,
-                # #2373: no member is minted anywhere on this tree, so the row's
-                # coverage is empty and condition 6 holds only vacuously.
+                # No member is minted anywhere on this tree until ADR-0266 §11's
+                # L2 lands the mint, so the row's coverage is empty and condition 6
+                # holds only vacuously.
                 coverage=(),
                 goal=goal,
                 retention=self._episode_retention,

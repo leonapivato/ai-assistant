@@ -38,7 +38,10 @@ ADR-0266). §10's three resolutions each turn a span into a *value* and none sel
 the span or names the argument; §9 clause (ii) states the property the association
 must have rather than a procedure; and §9's no-model clause forecloses the planner.
 So this module mints **no member at all**, which is §10's own fail-closed sentence —
-*"A resolution the loop cannot take is not taken, and no member is minted"*. **That
+*"A resolution the loop cannot take is not taken, and no member is minted"*. **#2373
+is closed and the mint is a lane rather than a gap**: ADR-0266 §11's **L2** carries
+*"§2's act and its four refusals"* and lands it in this package, and until that lane
+does, the only coverage this package has to offer is the empty one. **That
 hole is now one place narrower than it was**: the coverage a proposal is taken over
 is this module's *argument* rather than a literal it writes, so a minter landing at
 :meth:`~ai_assistant.orchestration.runner.StepRunner._propose` reaches a writer that
@@ -228,10 +231,11 @@ async def proposed_authorization(  # noqa: PLR0913 — one parameter per operand
             object that already answers `ActionPolicy` under this annotation, which
             is golden rule 1 rather than an exception to it.
         coverage: The coverage the row would carry — condition 6's fourth operand,
-            and what the row is written with. **This module mints none** (#2373),
-            so every caller on this tree passes an empty tuple; it is a parameter
-            rather than a literal so that the writer asks about what a minter
-            minted rather than about what this function assumed.
+            and what the row is written with. **This module mints none** until
+            ADR-0266 §11's L2 lands the mint (module docstring), so every caller on
+            this tree passes an empty tuple; it is a parameter rather than a literal
+            so that the writer asks about what a minter minted rather than about
+            what this function assumed.
         goal: The goal, for rung 2 of the ladder.
         retention: The deployment's turn-retention window, for rung 3.
         standing: The `ESTABLISHED` rows of that goal, live and lapsed, as

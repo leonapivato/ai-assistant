@@ -40,6 +40,7 @@ from ai_assistant.permissions.policy import ThresholdActionPolicy
 from ai_assistant.testing import (
     FakeActionPolicy,
     FakeAuditTrail,
+    FakeCoverageAnswers,
     FakeEgressBinder,
     FakeGoalAuthorizationStore,
     FakePlanStore,
@@ -248,6 +249,83 @@ async def test_a_store_that_refuses_the_write_still_puts_the_question() -> None:
     assert len(await harness.trail.export()) == 1
     assert parked.step(STEP) is not None
     assert parked.step(STEP).status is StepStatus.AWAITING_APPROVAL  # type: ignore[union-attr]
+
+
+async def test_a_stage_holding_no_condition_6_answerer_proposes_nothing() -> None:
+    """ADR-0270 §1's fail-closed default, one seam over from the store's.
+
+    *"Where a component that is not ``permissions`` needs condition 6's answer
+    about a row it would write, it obtains it from this member and by no other
+    means"* — so a stage that cannot ask cannot satisfy ADR-0254 §1's completeness
+    condition, and the disposition is §1's own: the `CONFIRM` is resolved and the
+    one call is authorised by ADR-0148 §3's route (a).
+    """
+    harness = Harness(answering=False)
+
+    await _parked(harness, a_goal(deadline=AT + timedelta(hours=12)))
+
+    assert await harness.rows() == ()
+
+
+async def test_the_stage_asks_the_seam_once_per_recorded_confirm() -> None:
+    """ADR-0270 §3: nothing is memoised and nothing is carried to a dispatch.
+
+    One `CONFIRM`, one question. A stage that asked twice to be sure would take a
+    second durable read for one proposal, and one that cached across proposals
+    would be the *"cached coverage verdict"* ADR-0254 §13 rules out everywhere.
+    """
+    answers = FakeCoverageAnswers()
+    harness = Harness(answers=answers)
+
+    await _parked(harness, a_goal(deadline=AT + timedelta(hours=12)))
+
+    assert answers.call_count == 1
+    (row,) = await harness.rows()
+    assert row.quoted is None
+
+
+async def test_the_stage_asks_about_the_request_and_the_coverage_it_would_write() -> None:
+    """ADR-0270 §1: the operands are the request and the tuple, *"and never the row"*.
+
+    The coverage is empty because nothing on this tree mints a member until
+    ADR-0266 §11's L2 lands, and
+    the row is written with the very tuple that was asked about — which is what
+    makes the answer an answer about *this* proposal.
+    """
+    answers = FakeCoverageAnswers()
+    harness = Harness(answers=answers)
+
+    await _parked(harness, a_goal(deadline=AT + timedelta(hours=12)))
+
+    ((asked, coverage),) = answers.calls
+    assert asked.tool.id == harness.tool.id
+    assert asked.goal == GOAL
+    assert coverage == ()
+    (row,) = await harness.rows()
+    assert row.coverage == coverage
+
+
+async def test_an_unreadable_quote_seam_still_puts_the_question() -> None:
+    """ADR-0270 §4: *"a fault is never an absence"*, and the disposition is §1's own.
+
+    ``coverage_met`` propagates ``GoalQuotes.for_action``'s ``AuthorizationError``
+    rather than answering unmet, and this stage's existing refusal clause catches
+    it one frame up: no row is written, ``Confirmation.authorization`` is absent
+    (ADR-0254 §11), and the question still reaches the user — the cost of an
+    unreadable seam is an authority granted again, never a dispatch refused on the
+    strength of a second store.
+    """
+    answers = FakeCoverageAnswers()
+    answers.fail_coverage_met()
+    harness = Harness(answers=answers)
+
+    parked = await _parked(harness, a_goal(deadline=AT + timedelta(hours=12)))
+
+    assert await harness.rows() == ()
+    assert len(await harness.trail.export()) == 1
+    step = parked.step(STEP)
+    assert step is not None
+    assert step.status is StepStatus.AWAITING_APPROVAL
 
 
 # --- the settlement (ADR-0254 §1's five edges) ---------------------------
