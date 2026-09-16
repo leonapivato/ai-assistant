@@ -870,8 +870,8 @@ class _FaultAt(SqliteBookingStore):
         if self._at == "after-insert":
             raise sqlite3.OperationalError("disk I/O error")
 
-    def _advance(self, conn: sqlite3.Connection) -> None:
-        super()._advance(conn)
+    def _advance(self, conn: sqlite3.Connection, count: int) -> None:
+        super()._advance(conn, count)
         if self._at == "after-advance":
             raise sqlite3.OperationalError("disk I/O error")
 
@@ -1768,8 +1768,8 @@ async def test_a_blocked_commit_does_not_stall_the_event_loop(tmp_path: Path) ->
         await asyncio.sleep(0)
         assert ticks > progressed, "the event loop was blocked by the parked commit"
         release.set()
-        await committing
-        await ticking
+        await asyncio.wait_for(committing, timeout=20)
+        await asyncio.wait_for(ticking, timeout=20)
     finally:
         store.close()
 
@@ -1794,7 +1794,7 @@ async def test_a_cancelled_commit_leaves_no_worker_holding_the_connection(
         committing.cancel()
         release.set()
         with pytest.raises(asyncio.CancelledError):
-            await committing
+            await asyncio.wait_for(committing, timeout=20)
 
         # The worker ran to completion despite the cancellation, so the store is
         # usable afterwards rather than left mid-transaction.
@@ -1861,6 +1861,9 @@ async def test_a_corrupt_commit_count_is_this_stores_error_too(tmp_path: Path, s
     ``ValueError`` for a caller to classify. ``"-1"`` is refused on ADR-0273 §2's own
     ground rather than on the parser's: the count *"only rises"*, so a negative one
     cannot have been written by any operation this provider has.
+
+    **Refused at the open**, not at the first read, which is where an operator meets it
+    and is before any commit can write a figure derived from it.
     """
     path = tmp_path / "bookings.db"
     store = SqliteBookingStore(path=path, retained=4)
@@ -1874,12 +1877,8 @@ async def test_a_corrupt_commit_count_is_this_stores_error_too(tmp_path: Path, s
     finally:
         handle.close()
 
-    reopened = SqliteBookingStore(path=path, retained=4)
-    try:
-        with pytest.raises(BookingStoreError, match="corrupt"):
-            await reopened.commit_count()
-    finally:
-        reopened.close()
+    with pytest.raises(BookingStoreError, match="corrupt"):
+        SqliteBookingStore(path=path, retained=4)
 
 
 @pytest.mark.parametrize(
@@ -2164,5 +2163,107 @@ async def test_a_count_removed_while_the_store_is_open_fails_closed(tmp_path: Pa
             await store.commit({DATE_ARGUMENT: "2026-10-03"})
         assert caught.value.may_have_committed is False
         assert len(await store.records()) == 2
+    finally:
+        store.close()
+
+
+# --------------------------------------------------------------------------- #
+# what the sixth adversarial round found
+# --------------------------------------------------------------------------- #
+
+
+async def test_a_count_below_the_records_it_retains_is_refused(tmp_path: Path) -> None:
+    """The count's floor is the retained cardinality (ADR-0273 §2).
+
+    §2 fixes the figure as *"the number of records ever inserted — **not** the number
+    still retained, which pruning lowers"*, so the rows still held are a floor it can
+    never be under. A **positive** count edited downwards passes the sign test, the
+    numeric test and the presence test, and then lets the next commit write a figure
+    lower than the bookings the store already holds — so the floor is checked on every
+    read, at a restart and live.
+    """
+    path = tmp_path / "bookings.db"
+    store = SqliteBookingStore(path=path, retained=4)
+    await store.commit({DATE_ARGUMENT: "2026-10-01"})
+    await store.commit({DATE_ARGUMENT: "2026-10-02"})
+    store.close()
+
+    _edit(path, "UPDATE meta SET value = '0' WHERE key = 'commit_count'")
+
+    with pytest.raises(BookingStoreError, match="corrupt"):
+        SqliteBookingStore(path=path, retained=4)
+
+
+async def test_a_count_lowered_while_the_store_is_open_is_refused_too(
+    tmp_path: Path,
+) -> None:
+    """The live half of the same floor, which no reopen check can reach."""
+    path = tmp_path / "bookings.db"
+    store = SqliteBookingStore(path=path, retained=4)
+    try:
+        await store.commit({DATE_ARGUMENT: "2026-10-01"})
+        await store.commit({DATE_ARGUMENT: "2026-10-02"})
+
+        _edit(path, "UPDATE meta SET value = '1' WHERE key = 'commit_count'")
+
+        with pytest.raises(BookingStoreError, match="corrupt"):
+            await store.commit_count()
+        with pytest.raises(BookingStoreError) as caught:
+            await store.commit({DATE_ARGUMENT: "2026-10-03"})
+        assert caught.value.may_have_committed is False
+        assert len(await store.records()) == 2
+    finally:
+        store.close()
+
+
+async def test_pruning_leaves_the_count_above_its_floor_rather_than_at_it(
+    tmp_path: Path,
+) -> None:
+    """And the floor is a floor, not an equality — which is what §2 says.
+
+    The case above would pass over an implementation that required ``count == rows``,
+    and that implementation would refuse every store the bound has ever pruned. Three
+    bookings past a bound of one leave one record and a count of three, and the store
+    reopens.
+    """
+    path = tmp_path / "bookings.db"
+    store = SqliteBookingStore(path=path, retained=1)
+    for day in ("2026-10-01", "2026-10-02", "2026-10-03"):
+        await store.commit({DATE_ARGUMENT: day})
+    store.close()
+
+    reopened = SqliteBookingStore(path=path, retained=1)
+    try:
+        assert await reopened.commit_count() == 3
+        assert len(await reopened.records()) == 1
+    finally:
+        reopened.close()
+
+
+async def test_a_slow_worker_still_returns_and_does_not_hang(tmp_path: Path) -> None:
+    """The worker handoff resumes when the worker returns (round 6's finding 1).
+
+    That finding claimed ``_run_to_completion`` *"can hang forever whenever its worker
+    does not finish before the first ``done.is_set()`` check"*. It cannot, and this is
+    the bounded case that says so: ``await asyncio.shield(pending)`` resumes when the
+    **executor future** completes, which is after the worker's ``finally: done.set()``,
+    so the loop re-checks a set event and leaves. The helper is byte-identical to the
+    six copies ``memory``, ``planning``, ``permissions``, ``evaluation``, ``archive``
+    and ``tools/connection_store.py`` carry, so a hang here would hang every store in
+    the tree.
+
+    **Bounded**, which is the half of that finding's direction worth taking: a future
+    regression fails this in seconds instead of stalling the suite.
+    """
+    release = threading.Event()
+    store = _SlowStore(path=tmp_path / "bookings.db", retained=2, release=release)
+    try:
+        committing = asyncio.create_task(store.commit({DATE_ARGUMENT: "2026-10-01"}))
+        await asyncio.to_thread(store.entered.wait, 10)
+        release.set()
+        await asyncio.wait_for(committing, timeout=20)
+
+        assert await asyncio.wait_for(store.commit_count(), timeout=20) == 1
+        assert len(await asyncio.wait_for(store.records(), timeout=20)) == 1
     finally:
         store.close()

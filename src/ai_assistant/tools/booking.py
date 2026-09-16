@@ -1016,6 +1016,12 @@ class SqliteBookingStore:
             # ``absent`` being empty already establishes this; the test is written out
             # so the narrowing is the code's rather than a reader's.
             self._checked_version(version)
+        # **And the count is checked here as well as on every read**, so a store whose
+        # figure was edited below the records it holds is refused at the restart rather
+        # than at the first read — which is where an operator meets it, and before any
+        # commit can write a figure lower still. The rows counted are the pre-prune
+        # ones, which is the right floor: every one of them was inserted.
+        self._read_count_sync(conn)
 
     def _checked_version(self, stored: str) -> None:
         """Refuse a labelled schema this code cannot read (ADR-0049 §1).
@@ -1107,8 +1113,15 @@ class SqliteBookingStore:
             msg = f"failed to open the booking commit: {exc}"
             raise BookingStoreError(msg, may_have_committed=False) from exc
         try:
+            # **The count is read before the record is inserted, and written after.**
+            # Its floor is the retained cardinality (§2), and between the insert and the
+            # increment the store is legitimately one row ahead of the figure — so a
+            # read taken there would report the very inconsistency this transaction is
+            # in the middle of removing. The *write* order is unchanged, which is what
+            # §10 arm 16's injection points are stated over.
+            count = self._read_count_sync(conn)
             self._insert(conn, record)
-            self._advance(conn)
+            self._advance(conn, count)
             self._prune(conn)
         except BaseException as exc:
             rolled_back = True
@@ -1140,13 +1153,17 @@ class SqliteBookingStore:
         """Append the booking record. Overridden by §10 arm 16's fault injection."""
         conn.execute(_INSERT_BOOKING, (record,))
 
-    def _advance(self, conn: sqlite3.Connection) -> None:
+    def _advance(self, conn: sqlite3.Connection, count: int) -> None:
         """Advance the commit count by one, inside the same transaction (§2).
 
         **Never outside it**: §2 names *"a count incremented outside the transaction
         that inserts the record"* as not an implementation of the clause.
+
+        Args:
+            conn: The store's connection, inside the commit's transaction.
+            count: The figure as it stood **before** this commit's insert, read by
+                :meth:`_commit_sync` while the store was still consistent.
         """
-        count = self._read_count_sync()
         conn.execute(_WRITE_META, (_COMMIT_COUNT_KEY, str(count + 1)))
 
     def _prune(self, conn: sqlite3.Connection) -> None:
@@ -1207,6 +1224,11 @@ class SqliteBookingStore:
         **It only rises.** No operation of this provider removes, amends or decrements
         it, and no retention rule, bound or pruning reaches it.
 
+        Args:
+            conn: The connection to read through. Passed rather than taken from
+                ``self``, because this also runs during :meth:`_setup` — before
+                ``self._conn`` is assigned at all.
+
         Returns:
             The count.
 
@@ -1214,7 +1236,7 @@ class SqliteBookingStore:
             BookingStoreError: If the store could not be read.
         """
         async with self._lock:
-            return await _run_to_completion(self._read_count_sync)
+            return await _run_to_completion(self._read_count_sync, self._conn)
 
     def _read_records_sync(self) -> tuple[Mapping[str, FrozenJson], ...]:
         """Every retained record, decoded, oldest first.
@@ -1264,13 +1286,18 @@ class SqliteBookingStore:
             decoded.append(record)
         return tuple(decoded)
 
-    def _read_count_sync(self) -> int:
+    def _read_count_sync(self, conn: sqlite3.Connection) -> int:
         """The stored commit count, as a number.
 
         **Parsed inside the boundary too**, for :meth:`_read_records_sync`'s reason: a
         ``commit_count`` the store cannot read as an integer is a corrupt store, not a
         ``ValueError`` for a caller to classify. A **negative** one is refused as well,
         because §2 states the figure as one that only rises.
+
+        Args:
+            conn: The connection to read through. Passed rather than taken from
+                ``self``, because this also runs during :meth:`_setup` — before
+                ``self._conn`` is assigned at all.
 
         Returns:
             The count.
@@ -1280,7 +1307,7 @@ class SqliteBookingStore:
                 all, or holds one this code cannot read.
         """
         try:
-            stored = self._meta(self._conn, _COMMIT_COUNT_KEY)
+            stored = self._meta(conn, _COMMIT_COUNT_KEY)
         except sqlite3.Error as exc:
             msg = f"failed to read the booking commit count: {exc}"
             raise BookingStoreError(msg, may_have_committed=False) from exc
@@ -1311,7 +1338,44 @@ class SqliteBookingStore:
                 f"{count}; the figure only rises (ADR-0273 §2), so the store is corrupt"
             )
             raise BookingStoreError(msg, may_have_committed=False)
+        # **The count is provably at least the number of rows still retained** (§2).
+        # That section fixes it as *"the number of records ever inserted — not the number
+        # still retained, which pruning lowers"*, so the retained cardinality is a floor
+        # the figure can never be under. A count below it is corrupt whatever its sign:
+        # a positive one edited downwards passes every other test here and then lets the
+        # next commit write a figure lower than the bookings the store already holds.
+        retained = self._retained_rows(conn)
+        if count < retained:
+            msg = (
+                f"the booking store at {self._path!r} holds a commit count of {count} "
+                f"beside {retained} retained record(s); the count is the number ever "
+                f"inserted and pruning only lowers the records (ADR-0273 §2), so a count "
+                f"below them is corrupt"
+            )
+            raise BookingStoreError(msg, may_have_committed=False)
         return count
+
+    def _retained_rows(self, conn: sqlite3.Connection) -> int:
+        """How many booking records the store still holds.
+
+        Read for :meth:`_read_count_sync`'s floor and for nothing else. Cheap by
+        construction: §5's bound is a small integer, so this counts a bounded table.
+
+        Args:
+            conn: The connection to read through, for :meth:`_read_count_sync`'s reason.
+
+        Returns:
+            The row count.
+
+        Raises:
+            BookingStoreError: If the store could not be read.
+        """
+        try:
+            rows = conn.execute("SELECT COUNT(*) FROM bookings").fetchall()
+        except sqlite3.Error as exc:
+            msg = f"failed to read the booking store: {exc}"
+            raise BookingStoreError(msg, may_have_committed=False) from exc
+        return int(rows[0][0]) if rows else 0
 
     def close(self) -> None:
         """Release the connection (ADR-0042 §2). Safe to call more than once."""

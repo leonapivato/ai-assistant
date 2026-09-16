@@ -500,6 +500,12 @@ def _only_a_decimal_amount_or_absent(value: object) -> object:
     raise ValueError(msg)
 
 
+#: The one string shape a configured day may take: ISO-8601's **extended calendar
+#: date**. Positive rather than a list of refused separators, because every spelling of
+#: an instant pydantic truncates shares a shape this does not match (ADR-0273 §5).
+_CALENDAR_DAY: Final = re.compile(r"\d{4}-\d{2}-\d{2}")
+
+
 def _only_a_calendar_day_or_absent(value: object) -> object:
     """Refuse a configured day that is an instant rather than a calendar date.
 
@@ -516,10 +522,12 @@ def _only_a_calendar_day_or_absent(value: object) -> object:
     meaning for a time of day, and a configuration that states one is a configuration
     whose author expected something this component does not do.
 
-    **The string form is narrowed by rejecting a time rather than by restating a date
-    grammar**, so the refusal cannot be walked around by spelling the instant and no
-    second reading of ISO-8601 is introduced here: what a ``date`` field admits once the
-    time is ruled out stays pydantic's own domain.
+    **The string form is narrowed to the extended calendar date**, positively, so the
+    refusal cannot be walked around by spelling the instant differently. A guard that
+    listed the separators it had thought of — ``T`` and a space — let ``2026-10-01t00:00
+    :00`` and ``2026-10-01_00:00:00`` through, each of which pydantic then truncated. The
+    cost is that the basic form ``20261001`` is refused too; that is the conservative
+    direction, and a deployment writes the extended form.
 
     Args:
         value: The raw configured value.
@@ -540,11 +548,17 @@ def _only_a_calendar_day_or_absent(value: object) -> object:
         )
         raise ValueError(msg)
     if isinstance(value, str):
-        if "T" in value or " " in value.strip():
+        # **A positive shape test and not a list of separators.** Pydantic's ``date``
+        # reads ``2026-10-01T00:00:00`` and truncates it, and so does every other
+        # spelling of the same instant — lowercase ``t``, an underscore, a bare space.
+        # A guard naming the separators it had thought of let two of those through
+        # (round 6's finding), so what is tested instead is that the value **is** an
+        # extended calendar date and nothing more.
+        if _CALENDAR_DAY.fullmatch(value) is None:
             msg = (
-                "expected a calendar date such as 2026-10-01, got a value carrying a "
-                "time of day; a day carries none, and truncating one would discard "
-                "what the operator wrote (ADR-0273 §5)"
+                "expected a calendar date in the form 2026-10-01, got a value that is "
+                "not one; a day carries no time of day, and truncating an instant would "
+                "discard what the operator wrote (ADR-0273 §5)"
             )
             raise ValueError(msg)
         return value
