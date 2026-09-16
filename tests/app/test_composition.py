@@ -62,6 +62,7 @@ from ai_assistant.core.protocols import (
     ConnectionPurger,
     GoalAuthorizations,
     GoalAuthorizationStore,
+    GoalQuotes,
     InvocationLedger,
     RecipientGrantResolution,
     RecipientGrants,
@@ -856,6 +857,43 @@ async def test_build_engine_gives_the_policy_and_the_trail_one_authorization_sto
         assert isinstance(seam, AuthorizationResolution)
         assert isinstance(seam, GoalAuthorizationStore)
         assert _trail_authorization_seam(trail_calls) is seam
+    finally:
+        await engine.aclose()
+
+
+async def test_build_engine_passes_the_one_plan_store_as_the_policys_quote_seam(
+    monkeypatch: pytest.MonkeyPatch, tmp_path: Path
+) -> None:
+    """ADR-0267 §5 and §11: the quote seam is the **same** plan store, by identity.
+
+    §11 is explicit that the provider *"cannot be deferred to a later lane"*: ``app/``
+    passes the plan store where a ``GoalQuotes`` is wanted, *"and a store without
+    ``for_action`` does not satisfy the Protocol"*. Left unwired, ADR-0266 §7's
+    evidence route has no operand, **every ``MONEY`` member is unmet**, and every act
+    carrying a stated ceiling asks — a whole route shipped dead with nothing failing,
+    which is the hazard ADR-0193 §1 names one seam over and the one ``authorizations``
+    hit before it was passed.
+
+    **Identity and not merely type**, which is ADR-0042 §2's single-instance
+    obligation reaching a fourth seam. A *second* ``SqlitePlanStore`` over the same
+    file satisfies ``GoalQuotes`` structurally and type-checks, and the two would even
+    agree — until a mint written through one is read back through the other's own
+    connection mid-transaction. What distinguishes the right wiring is that the policy
+    reads the quotes the runner's own store appended, and nothing but this assertion
+    catches it.
+
+    **And the narrow face is what the policy holds**: the constructor annotates
+    ``quotes`` as ``GoalQuotes``, so a policy is one ``record_quote`` call away from
+    minting the price it is about to prove a ceiling against only if that annotation
+    moves — ``mypy --strict`` is the enforcement and this is the wiring half of it.
+    """
+    calls = _spy_on_policy(monkeypatch)
+    engine = build_engine(Settings(embedder=EmbedderKind.HASHING), data_dir=tmp_path)
+    try:
+        seam = _policy_quote_seam(calls)
+        assert isinstance(seam, SqlitePlanStore)
+        assert isinstance(seam, GoalQuotes)
+        assert seam is engine._plans, "the policy reads the store the runner appends to"
     finally:
         await engine.aclose()
 
