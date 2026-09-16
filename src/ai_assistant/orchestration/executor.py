@@ -34,7 +34,7 @@ from __future__ import annotations
 import asyncio
 from dataclasses import dataclass
 from datetime import UTC, datetime, timedelta
-from typing import TYPE_CHECKING
+from typing import TYPE_CHECKING, assert_never
 
 import structlog
 from pydantic import ValidationError
@@ -48,6 +48,8 @@ from ai_assistant.core.errors import (
     ToolBindingError,
 )
 from ai_assistant.core.types import (
+    Disposition,
+    EffectClaim,
     Idempotency,
     StepFailure,
     StepStatus,
@@ -56,6 +58,11 @@ from ai_assistant.core.types import (
     ToolOutcome,
     ToolResult,
 )
+from ai_assistant.orchestration.effects import (
+    condition_elements,
+    conditions_hold,
+    verification_holds,
+)
 
 if TYPE_CHECKING:
     from collections.abc import Mapping
@@ -63,8 +70,11 @@ if TYPE_CHECKING:
     from ai_assistant.core.clock import Clock
     from ai_assistant.core.protocols import PlanStore, ToolInvoker, ToolRegistry
     from ai_assistant.core.types import (
+        EffectKey,
+        EffectOutcome,
         ExecutionState,
         FrozenJsonValue,
+        StepExecution,
         ToolDefinition,
     )
 
@@ -308,6 +318,43 @@ class CallableReach:
     reached: bool = False
 
 
+@dataclass(frozen=True, slots=True)
+class Dispatch:
+    """What one :meth:`StepExecutor.execute` did with the step (ADR-0259 §2).
+
+    **A value rather than a bare ``ExecutionState``, because §2 gives the executor two
+    outcomes that commit nothing** — the step keeps the status it was entered at, and
+    the state alone cannot say whether that is a refusal or a step nobody claimed. It
+    is an `orchestration`-local frozen dataclass on :class:`StepDisposition`'s own
+    terms: a stage type no Protocol returns, so ADR-0085 §5's promoted-surface walk
+    never reaches it. ``StepExecutor.execute`` gains **no argument** for any of this
+    (§2); what widened is what it hands back.
+
+    Attributes:
+        state: Durable execution state after the last transition this drive
+            committed — the caller's own ``state`` unchanged on the two that commit
+            none.
+        refused: :attr:`~ai_assistant.core.types.Disposition.EFFECT_ALREADY_CLAIMED`
+            where the goal had already claimed this act,
+            :attr:`~ai_assistant.core.types.Disposition.EFFECT_UNSCOPED` where a
+            side-effecting step named no intended action, and ``None`` where the drive
+            was not refused on either ground. **No other member ever rides here**: it
+            carries the two §2 mints and nothing about what the seam did, which is
+            ``state``'s to say.
+        satisfied: Whether this step was **satisfied from an earlier holder** (§2)
+            rather than dispatched — committed ``→ SUCCEEDED`` from the status it was
+            entered at, with the store copying the holder's own ``output``. Nothing was
+            invoked, no authorisation was spent and ``attempts`` did not move, so the
+            two facts a caller needs of such a step — that it is the turn's
+            ``satisfied_from_earlier`` entry, and that it recorded no fresh output for
+            ADR-0267 §4 to read a price from — both hang here.
+    """
+
+    state: ExecutionState
+    refused: Disposition | None = None
+    satisfied: bool = False
+
+
 def _checked_timeout(timeout: object) -> timedelta:
     """Refuse a deadline *before* the claim is committed (ADR-0029 §4, §8).
 
@@ -385,7 +432,7 @@ class StepExecutor:
         attempt_id: str,
         timeout: timedelta,  # noqa: ASYNC109 — the seam owns the deadline (ADR-0029 §4)
         reach: CallableReach | None = None,
-    ) -> ExecutionState:
+    ) -> Dispatch:
         """Claim ``step_id``, run ``call``, and commit the outcome.
 
         Retries while ADR-0029 §5 permits one — the failure kind is retryable
@@ -421,8 +468,9 @@ class StepExecutor:
                 the fact being an observation rather than an input.
 
         Returns:
-            The execution state after the last transition this executor
-            committed.
+            A :class:`Dispatch`: the execution state after the last transition this
+            executor committed, together with ADR-0259 §2's two refusals and whether
+            the step was satisfied from an effect the goal had already completed.
 
         Raises:
             CancelledError: If the executing task is cancelled from outside. The
@@ -492,6 +540,15 @@ class StepExecutor:
             )
             raise ToolBindingError(msg)
         trusted = await self._registry.get(authorised.request.tool.id)
+        # **ADR-0259 §2's claim, between the read-back and the `→ RUNNING` commit**,
+        # and taken **once** rather than at each re-claim: §2 places it immediately
+        # before the `PENDING → RUNNING` or `AWAITING_APPROVAL → RUNNING` commit, and a
+        # retry's commit is `FAILED → RUNNING`, which is neither. The `FAILED` row of
+        # §2's table exists so that a *later plan's* step cannot take the key while
+        # this loop's own retry is still coming, not so that the retry re-claims it.
+        settled = await self._effect(state, step_id, authorised)
+        if settled is not None:
+            return settled
 
         state = await self._claim(state, step_id, authorised, attempt_id)
         # Read *after* the claim, because ADR-0029 §5 measures from "the first
@@ -524,7 +581,7 @@ class StepExecutor:
             # read (`_run_once`) — none of which ADR-0029 §5 retries. A recorded
             # result is retried only while §5 permits: retryable *and* safe.
             if result is None or not self._may_retry(result, trusted, started):
-                return state
+                return Dispatch(state)
             try:
                 state = await self._claim(state, step_id, authorised, attempt_id)
             except RetriesExhaustedError:
@@ -532,7 +589,165 @@ class StepExecutor:
                 # an ordinary end to this loop rather than a fault: the step is
                 # already durably FAILED with the reason the tool gave.
                 _log.info("step_retries_exhausted", step_id=step_id)
-                return state
+                return Dispatch(state)
+
+    # --- the effect claim (ADR-0259 §2) ---------------------------------
+
+    async def _effect(self, state: ExecutionState, step_id: str, call: ToolCall) -> Dispatch | None:
+        """Take ADR-0259 §2's claim, or say why nothing is dispatched.
+
+        **The claim is one indivisible store write** and this method neither reads
+        before it nor decides anything the store could have decided: the row's scope —
+        the goal and the intended action — is resolved by the store from the execution's
+        own plan, so no argument carries either and none is computed here. What is
+        decided here is what §11's L2 gives the stage: which of the five
+        :class:`~ai_assistant.core.types.EffectClaim` members was answered, and, on
+        ``COMPLETED``, whether the two reuse conditions the *step* carries hold.
+
+        **The unscoped test reads the decision and never the request** (§1). ADR-0266's
+        lane sets ``ActionRequest.intended_action`` from the plan step the request
+        serves, ``PermissionDecision`` carries the trail's own copy, and ``authorises``
+        compares the two as its sixth conjunct — which ``ToolCall``'s validator and
+        :func:`_detached`'s revalidation each enforce. So the decision's copy *is* the
+        step's, and it is the copy a ``__dict__`` write on ``call.request`` cannot
+        move, which is the discipline §1 states for every value of the key itself.
+        **Both ways the two could still disagree fail closed**: a decision naming none
+        over a stored step that names one returns ``EFFECT_UNSCOPED`` and dispatches
+        nothing, and a decision naming one over a stored step that names none meets the
+        store's own refusal — §2 closes that window *"at the store as well as at the
+        stage"* — which raises and writes nothing.
+
+        Returns:
+            ``None`` where the drive goes on to claim the step and call the tool — a
+            call that is not side-effecting, and a ``CLAIMED`` answer — and a
+            :class:`Dispatch` on every other route, which is terminal for this drive.
+
+        Raises:
+            PlanningError: If the store refuses the claim, or refuses the satisfaction
+                (:meth:`_satisfy`). Both leave the step at its entry status.
+        """
+        key = call.effect_key
+        if key is None:
+            # §1: a call of a tool that is not `side_effecting` has no key, reaches
+            # `claim_effect` never, writes no row and is held to nothing here.
+            return None
+        if call.decision.intended_action is None:
+            # §2, answering the question ADR-0265 §4 left open: dispatching here would
+            # perform an effect **no row could ever recognise**, so every later plan of
+            # the goal would answer `CLAIMED` and repeat it. `claim_effect` is not
+            # called at all.
+            return Dispatch(state, refused=Disposition.EFFECT_UNSCOPED)
+        outcome = await self._plans.claim_effect(
+            execution_id=state.id, step_id=step_id, effect_key=key
+        )
+        match outcome.claim:
+            case EffectClaim.CLAIMED:
+                return None
+            case EffectClaim.COMPLETED:
+                satisfied = await self._satisfy(state, step_id, key, outcome)
+                if satisfied is None:
+                    # §2: "Where any fails, nothing is written" — the step keeps its
+                    # entry status and the walk stops, exactly as for the three below.
+                    return Dispatch(state, refused=Disposition.EFFECT_ALREADY_CLAIMED)
+                return Dispatch(satisfied, satisfied=True)
+            case EffectClaim.COMPLETED_OTHERWISE | EffectClaim.UNCERTAIN | EffectClaim.HELD:
+                # §2: each dispatches nothing, commits no transition and stops the
+                # walk, and **which member produced it is not carried** on the
+                # disposition — what the turn tells the user is the reply surface's.
+                return Dispatch(state, refused=Disposition.EFFECT_ALREADY_CLAIMED)
+            case _:  # pragma: no cover - exhaustive
+                assert_never(outcome.claim)
+
+    async def _satisfy(
+        self, state: ExecutionState, step_id: str, key: EffectKey, outcome: EffectOutcome
+    ) -> ExecutionState | None:
+        """Satisfy the step from the holder, where §2's remaining conditions hold.
+
+        ``claim_effect`` has already established the first of the three — *"the
+        intended action is the same and the keys are equal, which ``claim_effect``
+        establishes together"* — by answering ``COMPLETED`` at all. The other two are
+        properties of the **claiming step** and are checked here: every member of its
+        ``when`` is satisfied for the goal **at this instant** (ADR-0252 §6), and its
+        ``verifies`` holds over the **borrowed** output (ADR-0253 §4).
+
+        **The stage makes no call and writes no output.** It commits ``→ SUCCEEDED``
+        from the status the step was entered at, carrying the satisfaction trio and
+        nothing else; §9 has the store copy ``output`` from the holder row it has just
+        verified and stamp ``finished_at`` from its own clock, and
+        ``StepTransition``'s own validator refuses a transition that carried either.
+        ``attempts`` is not incremented and no authorisation is spent.
+
+        **The holder is read for one reason only** — the ``verifies`` predicate needs
+        the output it is stated over. What is *written* is never taken from that read:
+        the store re-verifies the holder against the goal's own row inside the same
+        indivisible step as the write (§9's five-limbed claim condition), so a holder
+        that moved between the read and the commit is refused rather than copied.
+
+        Returns:
+            The committed state, or ``None`` where a condition failed — where nothing
+            is written and the caller answers ``EFFECT_ALREADY_CLAIMED``.
+
+        Raises:
+            CancelledError: If the executing task was cancelled while the satisfaction
+                was in flight. Raised **after** it has landed: the step is then durably
+                ``SUCCEEDED`` naming the act it borrowed, which is the record ADR-0034
+                §1 wants, and there is nothing left to close.
+            PlanningError: If the store refused the satisfaction — a holder that is not
+                this goal's, a key the row no longer carries, a source status that is
+                not one of §2's two entry statuses. It is the non-stale class, so no
+                caller re-reads and retries it.
+        """
+        borrowed = await self._borrowed(outcome)
+        plan = await self._plans.get_plan(state.plan_id)
+        step = (
+            None if plan is None else next((one for one in plan.steps if one.id == step_id), None)
+        )
+        if borrowed is None or plan is None or step is None:
+            return None
+        if step.when:
+            goal = await self._plans.get_goal(plan.goal_id)
+            if goal is None:
+                return None
+            history = await self._plans.evidence_of(plan.goal_id)
+            if not conditions_hold(
+                step,
+                elements=condition_elements(goal, revision=plan.targets_revision),
+                rows=history.rows,
+                at=self._reading(),
+            ):
+                return None
+        if not verification_holds(step.verifies, borrowed.output):
+            return None
+        committed, cancelled = await self._commit_shielded(
+            StepTransition(
+                execution_id=state.id,
+                step_id=step_id,
+                to_status=StepStatus.SUCCEEDED,
+                expected_version=state.version,
+                satisfied_by_execution=outcome.execution_id,
+                satisfied_by_step=outcome.step_id,
+                satisfied_by_key=key,
+            )
+        )
+        if cancelled:
+            msg = f"step {step_id!r} was satisfied from an earlier effect; its task was cancelled"
+            raise asyncio.CancelledError(msg)
+        return committed
+
+    async def _borrowed(self, outcome: EffectOutcome) -> StepExecution | None:
+        """The holder's own record, or ``None`` where it cannot be resolved.
+
+        ``EffectOutcome``'s validator makes both ids non-``None`` on ``COMPLETED`` and
+        refuses either elsewhere, so the two guards below are the type narrowing that
+        fact does not itself perform. A holder the store cannot return is not an error
+        here: §2 has every failed condition write nothing and stop the walk, and a row
+        naming an execution that has since gone is that case rather than a fault of
+        this drive.
+        """
+        if outcome.execution_id is None or outcome.step_id is None:
+            return None
+        holder = await self._plans.get_execution(outcome.execution_id)
+        return None if holder is None else holder.step(outcome.step_id)
 
     async def _run_once(  # noqa: PLR0913 — the five values one attempt is assembled from, plus ADR-0264 §2's observer; each is a distinct fact about the attempt
         self,

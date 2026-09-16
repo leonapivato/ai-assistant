@@ -88,6 +88,18 @@ def quote_read(
     and not negative, and, at the key it names as its ``currency``, a JSON **string** of
     §1's shape.
 
+    **And a step satisfied from an earlier act reads nothing, which is §4's own rule
+    rather than a fifth condition of substance** (ADR-0259 §2). Such a step is
+    ``SUCCEEDED``, names an intended action — the claim requires one — and carries an
+    ``output`` copied from the holder's row and a ``finished_at`` stamped at the
+    **satisfaction**, so all four conditions above hold on it while none of the facts
+    they stand for does: no price was read, and the instant on the record is not one
+    anybody observed a price at. §4 forbids exactly that — *"minting one from an output
+    recorded earlier would state a reading nobody took at an instant nobody observed"* —
+    so the record's own satisfaction mark is what refuses it. **A re-read of a price is
+    a fresh dispatch and is unaffected**: it records its own output at its own instant
+    and mints an appended quote like any other (§4).
+
     **No** ``verifies`` **is among the four and none is evaluated here** (§4). ADR-0255
     §8 reads that predicate at exactly two sites and rules that one no dependency and no
     interpretation reads *"is evaluated by nothing and imposes nothing"*; a mint
@@ -127,6 +139,11 @@ def quote_read(
     quoted = request.tool.quoted_output
     if (
         recorded.status is not StepStatus.SUCCEEDED
+        # ADR-0259 §2: the output is the **holder's**, recorded by an act this step did
+        # not perform, and `finished_at` is the satisfaction's instant rather than the
+        # reading's. Read on the committed record, so no caller of this function can be
+        # the one place the exclusion is remembered.
+        or recorded.satisfied_by_execution is not None
         or step.intended_action is None
         or quoted is None
         or recorded.finished_at is None

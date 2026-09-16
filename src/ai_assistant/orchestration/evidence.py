@@ -10,10 +10,13 @@ returned; §8's six-limb refresh test, whose result is the ``supersedes`` set a
 ``EvidenceDigest`` sequence ``Planner.plan`` is handed; and §10's ``E`` label
 space over that same sequence.
 
-**What is deliberately not here.** §6's four sufficiency tests and §7's conflict
-predicate have no caller on any tree this lane can reach — §6 says so in terms,
-and the step that declares a condition is A5's — so this module evaluates
-neither. §9's invalidation *predicate* is likewise absent: its two operands are a
+**What is deliberately not here.** §6's four sufficiency tests live in
+:mod:`ai_assistant.orchestration.effects` beside the one caller the tree has for
+them — ADR-0259 §2's reuse conditions, checked where the effect claim is taken —
+and §7's conflict predicate still has none. What this module keeps of §6 is the
+**instant** its recency test is evaluated at, :func:`effective_instant`, because
+§8 limb 6 is stated over that same instant and two statements of one rule are two
+places for it to drift. §9's invalidation *predicate* is likewise absent: its two operands are a
 declared applicability no type in the tree carries, and §9 states that until that
 lands ``GoalRevision.invalidates`` is empty on every revision. Both are named in
 :mod:`ai_assistant.orchestration` rather than stubbed, because a stub is a place
@@ -454,7 +457,7 @@ def composed_row(  # noqa: PLR0913 — one parameter per thing a row is composed
     )
 
 
-def _effective(row: GoalEvidence) -> datetime:
+def effective_instant(row: GoalEvidence) -> datetime:
     """A row's **effective instant**: its ``as_of`` where declared, else ``read_at``.
 
     ADR-0252 §8 limb 6 is stated over this instant and not over ``read_at`` alone,
@@ -557,7 +560,7 @@ def refreshes(later: GoalEvidence, earlier: GoalEvidence) -> bool:
         and bool(later.supported)
         and support_covers_support(later.supported, earlier=earlier.supported)
         and affirmative(later)
-        and _effective(later) > _effective(earlier)
+        and effective_instant(later) > effective_instant(earlier)
     )
 
 

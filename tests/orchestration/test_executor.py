@@ -71,6 +71,7 @@ if TYPE_CHECKING:
         StepTransition,
         ToolInvocation,
     )
+    from ai_assistant.orchestration.executor import Dispatch
 
 
 class InvocableRegistry(ToolRegistry, ToolInvoker, Protocol):
@@ -397,7 +398,7 @@ class LateCancellingPlanStore(FakePlanStore):
     def __init__(self) -> None:
         """Create a store with no target yet; the test assigns one."""
         super().__init__()
-        self.target: asyncio.Task[ExecutionState] | None = None
+        self.target: asyncio.Task[Dispatch] | None = None
 
     async def commit_transition(self, transition: StepTransition) -> ExecutionState:
         """Commit, then cancel the executor if this was the claim."""
@@ -608,7 +609,7 @@ async def test_a_binding_refusal_is_committed_failed_and_not_re_driven() -> None
     assert step.failure.kind is None, "no tool classified a seam rejection (ADR-0039 §3)"
     assert step.finished_at is not None
     assert implementation.calls == [], "the callable was never reached"
-    assert final.step(STEP) == step
+    assert final.state.step(STEP) == step
 
 
 async def test_a_binding_refusal_records_nothing_the_executor_did_not_author() -> None:
@@ -704,7 +705,7 @@ async def test_a_spend_refusal_is_committed_failed_and_not_re_driven(
     assert step.failure.kind is None, "no tool classified a seam refusal (ADR-0039 §3)"
     assert step.finished_at is not None
     assert implementation.calls == [], "the callable was never reached"
-    assert final.step(STEP) == step
+    assert final.state.step(STEP) == step
 
 
 @pytest.mark.parametrize(
@@ -1558,7 +1559,7 @@ async def _assert_unusable_indeterminate(definition: ToolDefinition, seam: Scrip
         timeout=PATIENT,
     )
 
-    assert final.step(STEP) is not None
+    assert final.state.step(STEP) is not None
     assert seam.calls == 1, "an unusable result is a terminal close, not a retry"
     step = await stored_step(store, state)
     assert step.status is StepStatus.INDETERMINATE, "the durable RUNNING was closed as ignorance"

@@ -629,6 +629,21 @@ class StepDisposition:
             disposition to carry one across a process boundary and reads the store
             instead, where a row it cannot read costs that **one** confirmation rather
             than misdescribing it (:meth:`Engine._recovered_confirmation`).
+        satisfied: The step this drive **satisfied from an effect its goal had already
+            completed** (ADR-0259 §2), or ``None`` where it dispatched, was refused, or
+            was never driven. It is the step's **own** id and not the holder's, because
+            ``TurnOutcome.satisfied_from_earlier`` carries *"the ids of the steps this
+            turn satisfied"*: what the user is told is that **this** work is done, and
+            the act it was borrowed from is the durable record's to name
+            (``StepExecution.satisfied_by_execution`` and ``satisfied_by_step``).
+
+            **It rides beside** ``EXECUTED`` **rather than under a disposition of its
+            own** (§9): ``Disposition`` gains exactly two members and neither is this,
+            so a satisfied step reports the disposition every other driven step does
+            and the fact is carried here. The channel is the one :attr:`outbound` and
+            :attr:`opened` already are — a value the stage that knows it computes,
+            folded into the turn's outcome at the capture point and never recomputed
+            from durable state.
     """
 
     disposition: Disposition
@@ -642,6 +657,7 @@ class StepDisposition:
     outbound: OutboundReach | None = None
     opened: tuple[Authorization, ...] = ()
     proposed: Authorization | None = None
+    satisfied: str | None = None
 
 
 class _Ruled(NamedTuple):
@@ -2455,6 +2471,17 @@ class StepRunner:
         here to make it so. A stop between the two leaves the step ``SUCCEEDED`` with
         its output and the goal without that reading, and the act then asks.
 
+        **ADR-0259 §2's two refusals return before either.** ``EFFECT_ALREADY_CLAIMED``
+        and ``EFFECT_UNSCOPED`` each commit nothing, so there is no output to read a
+        price from and no egress classification to make: the step keeps the status it
+        was entered at and this stage hands the refusal back with the state it was
+        given. And a step the executor **satisfied** from an earlier holder takes the
+        mint call like any other and mints nothing, because the reading is refused on
+        the record rather than at this call site
+        (:func:`~ai_assistant.orchestration.quotes.quote_read`) — one place where the
+        borrowed output is recognised, rather than a second condition here that a later
+        caller of that function would not carry.
+
         Raises:
             PlanningError: If the goal cannot be read, or if the quote's write is
                 refused and the refusal is not this mint's own committed write (§4).
@@ -2473,7 +2500,7 @@ class StepRunner:
             goal=planned.goal_id,
         )
         reach = CallableReach()
-        ran = await self._executor.execute(
+        drive = await self._executor.execute(
             state,
             step_id=planned.step.id,
             call=call,
@@ -2481,14 +2508,23 @@ class StepRunner:
             timeout=timeout,
             reach=reach,
         )
+        if drive.refused is not None:
+            # ADR-0259 §2's two refusals, reported as the stage's own disposition. Each
+            # commits nothing, so the state handed back is the one this stage was given
+            # and the step keeps the status it was entered at — `PENDING` from
+            # :meth:`run`, `AWAITING_APPROVAL` from :meth:`resume`. **No tool id and no
+            # decision id ride with either**: nothing was dispatched, and naming the
+            # tool a step would have used reads as a call that was made.
+            return StepDisposition(drive.refused, drive.state)
         disposition = StepDisposition(
             Disposition.EXECUTED,
-            ran,
+            drive.state,
             decision.id,
             call.decision.tool.id,
             outbound=_egress_reach(request, reach),
+            satisfied=planned.step.id if drive.satisfied else None,
         )
-        await self._mint_quote(quoting, ran)
+        await self._mint_quote(quoting, drive.state)
         return disposition
 
     async def _mint_quote(self, quoting: _Quoting, ran: ExecutionState) -> None:
