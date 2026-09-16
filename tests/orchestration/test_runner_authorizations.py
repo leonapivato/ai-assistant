@@ -107,6 +107,7 @@ class Harness:
         answers: CoverageAnswers | None = None,
         wired: bool = True,
         answering: bool = True,
+        bound: bool = True,
         now: datetime = AT,
     ) -> None:
         """Wire the stage over canonical fakes.
@@ -122,6 +123,12 @@ class Harness:
         `permissions` gives rather than a fake's configuration. A case that needs
         the answer counted, faulted or set to something this tree cannot produce
         passes `FakeCoverageAnswers`.
+
+        ``bound=False`` registers the declaration at **no** egress seam, so
+        ``_bound`` answers ``None`` and the request is built on
+        ``_requested``'s other branch (ADR-0152 §8). It is the same call in every
+        other respect, which is what makes it a control for the value that branch
+        must also carry.
         """
         self.tool = a_confirmable_tool() if tool is None else tool
         self.plans = FakePlanStore(now=lambda: now)
@@ -129,7 +136,8 @@ class Harness:
         self.trail = FakeAuditTrail()
         self.invoker = FakeToolInvoker([(self.tool, _succeeds)], ledger=self.trail, gate=self.trail)
         self.binder = FakeEgressBinder()
-        self.binder.register_egress(self.tool, reference=CONNECTION, identity=IDENTITY)
+        if bound:
+            self.binder.register_egress(self.tool, reference=CONNECTION, identity=IDENTITY)
         self.authorizations = (
             FakeGoalAuthorizationStore() if authorizations is None else authorizations
         )
@@ -780,3 +788,55 @@ async def test_a_step_naming_no_act_yields_a_request_carrying_none() -> None:
     assert asked.intended_action is None
     (decision,) = await harness.trail.export()
     assert decision.intended_action is None
+
+
+async def test_an_unbound_call_carries_the_act_on_both_paths() -> None:
+    """ADR-0266 §11's L2 over ``_requested``'s **other** branch (ADR-0152 §8).
+
+    A call the seam does not bind is *"built exactly as it was before this seam
+    existed"* — a second construction, one branch away from the bound one — and
+    ADR-0266 §11 says *"every construction and resume path"*. Without this the
+    value could be dropped from that branch and every other case here would stay
+    green, because the harness always registers the declaration.
+
+    **No row is proposed here and that is not what this asserts**: an unbound call
+    fails ADR-0254 §1's second condition, so what the act rides on is the recorded
+    decision, which is where ADR-0266 §7's evidence route reads it anyway.
+    """
+    harness = Harness(bound=False)
+    state = await harness.an_execution(
+        a_goal(deadline=AT + timedelta(hours=12), constraints=CEILING), act=ACT
+    )
+
+    result = await harness.runner.run(
+        state, STEP, attempt_id=ATTEMPT, timeout=PATIENT, origin=NOTHING_EXTERNAL
+    )
+    assert result.disposition is Disposition.AWAITING_CONFIRMATION
+    await harness.runner.resume(
+        result.state, STEP, attempt_id=ATTEMPT, approved=True, timeout=PATIENT
+    )
+
+    confirmed, resolving = await harness.trail.export()
+    assert confirmed.egress_binding is None
+    assert confirmed.intended_action == ACT
+    assert resolving.intended_action == ACT
+    assert await harness.rows() == ()
+
+
+async def test_an_unbound_call_whose_step_names_no_act_carries_none() -> None:
+    """The control for the case above: the value is the step's and is not invented.
+
+    ADR-0266 §11 arm 7's *"a step carrying none yielding a request carrying
+    `None`"*, over the branch that builds the request from the step's own
+    parameters rather than from what the seam returned.
+    """
+    harness = Harness(bound=False)
+    state = await harness.an_execution(a_goal(deadline=AT + timedelta(hours=12)))
+
+    await harness.runner.run(
+        state, STEP, attempt_id=ATTEMPT, timeout=PATIENT, origin=NOTHING_EXTERNAL
+    )
+
+    (confirmed,) = await harness.trail.export()
+    assert confirmed.egress_binding is None
+    assert confirmed.intended_action is None

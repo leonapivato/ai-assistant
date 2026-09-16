@@ -42,6 +42,7 @@ a written value.
 from __future__ import annotations
 
 import re
+from collections import Counter
 from decimal import Decimal, InvalidOperation
 from typing import TYPE_CHECKING, Final
 
@@ -56,6 +57,8 @@ from ai_assistant.core.types import (
 )
 
 if TYPE_CHECKING:
+    from collections.abc import Mapping
+
     from ai_assistant.core.types import Goal, GoalElement
 
 #: Runs of these are collapsed to one space (ADR-0266 §4). **ASCII whitespace and
@@ -139,23 +142,28 @@ def stated_bound_coverage(goal: Goal | None, /) -> tuple[CoverageMember, ...]:
     """
     if goal is None:
         return ()
+    # **The history is walked once, before any element is read** (§2). Walking it per
+    # candidate would re-scan every retained revision for every constraint, and
+    # neither `GoalInterpretation` nor `Goal` bounds how many elements a revision
+    # carries — so the cost of minting would grow with the square of a number the
+    # types admit without limit, on the one event loop everything else shares.
+    # Adversarial review, round 1, `major`.
+    acts = _earliest_acts(goal)
     minted: list[CoverageMember] = []
     for element in goal.interpretation[-1].constraints:
         if element.ground is not Ground.USER_STATED:
             continue
-        member = _minted(goal, element)
+        member = _minted(acts, element)
         if member is not None:
             minted.append(member)
     # **§5, and it is stated over the whole candidate set rather than pairwise**: a
     # kind two elements reach is minted by neither of them, so a third element of a
     # third kind is unaffected and a kind exactly one element reaches survives.
-    ambiguous = {
-        member.kind for member in minted if sum(other.kind is member.kind for other in minted) > 1
-    }
-    return tuple(member for member in minted if member.kind not in ambiguous)
+    reached = Counter(member.kind for member in minted)
+    return tuple(member for member in minted if reached[member.kind] == 1)
 
 
-def _minted(goal: Goal, element: GoalElement, /) -> CoverageMember | None:
+def _minted(acts: Mapping[str, str | None], element: GoalElement, /) -> CoverageMember | None:
     """The member this one candidate element mints, or ``None`` (ADR-0266 §2, §4).
 
     **§2's refusals, and every one of them is fail-closed.** No member is minted
@@ -164,7 +172,8 @@ def _minted(goal: Goal, element: GoalElement, /) -> CoverageMember | None:
     §10's *"A resolution the loop cannot take is not taken, and no member is
     minted"*), where the earliest carrying revision's **`raised_by` is `None`** (a
     row written before ADR-0249, whose act this system never recorded), or where an
-    **elided history** makes that revision's primacy unprovable (:func:`_act_of`).
+    **elided history** makes that revision's primacy unprovable
+    (:func:`_earliest_acts`, where the last two are decided).
 
     A ``USER_STATED`` element carrying no span is admitted by ADR-0249 §1's
     validator only in the ``FROM_EVIDENCE`` and ``INFERRED`` shapes, which §1
@@ -172,7 +181,8 @@ def _minted(goal: Goal, element: GoalElement, /) -> CoverageMember | None:
     element rather than a proof about one.
 
     Args:
-        goal: The goal the element belongs to, for its retained history.
+        acts: The act each element id of this goal rests on, as
+            :func:`_earliest_acts` resolved it in one walk of the history.
         element: The ``USER_STATED`` constraint being read.
 
     Returns:
@@ -181,7 +191,7 @@ def _minted(goal: Goal, element: GoalElement, /) -> CoverageMember | None:
     """
     if element.id is None or element.span is None:
         return None
-    act = _act_of(goal, element.id)
+    act = acts.get(element.id)
     if act is None:
         return None
     bound = _read_stated_bound(element.span)
@@ -201,41 +211,47 @@ def _minted(goal: Goal, element: GoalElement, /) -> CoverageMember | None:
     )
 
 
-def _act_of(goal: Goal, element_id: str, /) -> str | None:
-    """The act a member resting on this element names, or ``None`` (ADR-0266 §2).
+def _earliest_acts(goal: Goal, /) -> dict[str, str | None]:
+    """The act each element id of this goal rests on, in one walk (ADR-0266 §2).
 
     *"the `raised_by` of the earliest revision of the goal's retained
     `interpretation` that carries an element with that element's `id`"*. Every
-    element of a revision is searched, not its constraints alone: the id names one
+    element of a revision is indexed, not its constraints alone: the id names one
     element of the interpretation and a revision that carried it as a criterion
     still carries it.
 
     **An elided history refuses too, and the test is exact rather than
     approximate.** Where the earliest retained revision carrying the id is the
-    **oldest retained revision** and ``interpretation_elided`` is not 0, no member
-    is minted: ADR-0249 §2 drops the **oldest** revisions, so a dropped one may have
-    carried the element first and the act would name the wrong turn. Where the
-    carrying revision has a retained predecessor not carrying the id it **is** the
-    first, and where nothing was elided the oldest retained revision is. Both are
-    decided from values on the goal, with **no store read**.
+    **oldest retained revision** and ``interpretation_elided`` is not 0, the act is
+    ``None`` and no member is minted: ADR-0249 §2 drops the **oldest** revisions, so
+    a dropped one may have carried the element first and the act would name the
+    wrong turn. Where the carrying revision has a retained predecessor not carrying
+    the id it **is** the first, and where nothing was elided the oldest retained
+    revision is. Both are decided from values on the goal, with **no store read**.
+
+    **An id already indexed is never overwritten**, which is what makes the walk's
+    one pass equivalent to asking each element separately: revisions arrive oldest
+    first (ADR-0249 §1), so the first entry written for an id is the earliest
+    carrier's.
 
     Args:
         goal: The goal whose retained revisions are walked.
-        element_id: The id of the element the member rests on.
 
     Returns:
-        The act, or ``None`` where the element is carried by no retained revision,
-        where an elision leaves its primacy unprovable, or where the carrying
-        revision records no ``raised_by``.
+        Each element id the retained history carries, mapped to the act a member
+        resting on it names — ``None`` where an elision leaves its primacy
+        unprovable or where the earliest carrying revision records no ``raised_by``,
+        which are the same refusal to the one caller.
     """
+    acts: dict[str, str | None] = {}
     for position, revision in enumerate(goal.interpretation):
-        carried = (*revision.constraints, *revision.criteria, *revision.conditions)
-        if not any(element.id == element_id for element in carried):
-            continue
-        if position == 0 and goal.interpretation_elided != 0:
-            return None
-        return revision.raised_by
-    return None  # pragma: no cover — the current revision carries every candidate
+        # The oldest **retained** revision is the first carrier of an id only where
+        # nothing was dropped before it; otherwise a dropped revision may have been.
+        act = None if position == 0 and goal.interpretation_elided != 0 else revision.raised_by
+        for element in (*revision.constraints, *revision.criteria, *revision.conditions):
+            if element.id is not None and element.id not in acts:
+                acts[element.id] = act
+    return acts
 
 
 def _read_stated_bound(span: str, /) -> ValueBound | None:
