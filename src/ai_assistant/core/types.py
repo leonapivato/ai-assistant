@@ -8012,14 +8012,6 @@ class AttemptTransition(BaseModel):
     )
 
 
-#: The three members ADR-0262 §6 fixes :attr:`AttemptReport.continues` at ``False`` for,
-#: with no second fact consulted. The other three take either value, because §6's rule
-#: for them also reads the goal's status, which no field of that report carries.
-_NOTHING_TO_CONTINUE: Final[frozenset[AttemptOutcome]] = frozenset(
-    {AttemptOutcome.VERIFIED, AttemptOutcome.ANSWERED, AttemptOutcome.CONDITION_PREVENTED}
-)
-
-
 class AttemptReport(BaseModel):
     """What one turn's comparison produced, rendered beside the reply (ADR-0262 §6).
 
@@ -8098,10 +8090,20 @@ class AttemptReport(BaseModel):
         three is the honest report for a goal a revision closed, and refusing it here
         would encode half a rule while refusing the other half's true cases.
 
+        **The three are matched inline rather than named**, because ADR-0262 §8's roster
+        for this module is "one model" and "three fields" and then *"**Nothing else** —
+        **no new enumeration**, no new constant"*. A module-level frozenset would be one,
+        private or not.
+
         Raises:
             ValueError: If an outcome §6 fixes at ``False`` carries ``True``.
         """
-        if self.continues and self.outcome in _NOTHING_TO_CONTINUE:
+        nothing_to_continue = {
+            AttemptOutcome.VERIFIED,
+            AttemptOutcome.ANSWERED,
+            AttemptOutcome.CONDITION_PREVENTED,
+        }
+        if self.continues and self.outcome in nothing_to_continue:
             msg = (
                 f"an attempt reported {self.outcome.value} offers nothing to continue: "
                 f"continues is False on VERIFIED, ANSWERED and CONDITION_PREVENTED, "

@@ -960,6 +960,12 @@ class FakeAssistantEngine:
           none. §4's first ending condition is *"a ``ComposedReply`` carrying text and
           **not degraded**"* (ADR-0173 §6), so a truncated or failed composition ends no
           attempt however much text reached the user.
+        * a pass carrying a **clarification** carries none. That member is "the question
+          **this turn raised**" and a question exists only where the store accepted one
+          (ADR-0250 §10), so the attempt stands ``AWAITING_CLARIFICATION`` — which §4's
+          **second** ending condition names among the three paused states an attempt may
+          not end from. ADR-0250 §10's *"A turn that raised a question drives no step of
+          its plan and produces no effect"* is the same fact from the other side.
 
         **A fake that filled the member in anywhere else would hand back a shape no
         conforming engine produces**, which is the looseness ADR-0026 §7 forbids and
@@ -1001,6 +1007,7 @@ class FakeAssistantEngine:
             and outcome.reply is not None
             and not outcome.reply_degraded
             and outcome.routed is None
+            and outcome.clarification is None
         )
         reported = outcome.attempt_report or (self.attempt_report if eligible else None)
         if reported is None:
@@ -1009,8 +1016,8 @@ class FakeAssistantEngine:
             msg = (
                 "this pass ended no attempt, so it carries no report: a report is "
                 "non-None exactly on a turn that ended one, and §4's conditions for "
-                "that begin with a reply that **completed** on a pass that planned and "
-                "took no route (ADR-0262 §4, §6)"
+                "that are a reply that **completed**, on a pass that planned, took no "
+                "route and left the attempt unpaused (ADR-0262 §4, §6)"
             )
             raise ValueError(msg)
         if reported.outcome is AttemptOutcome.CANCELLED:
