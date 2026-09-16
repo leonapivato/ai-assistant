@@ -22,7 +22,7 @@ import contextlib
 import json
 from datetime import UTC, datetime, timedelta
 from decimal import Decimal
-from typing import TYPE_CHECKING, Final
+from typing import TYPE_CHECKING, Any, Final
 
 import pytest
 from browser_drive import DESKTOP, PHONE, driving
@@ -51,6 +51,7 @@ from ai_assistant.testing import (
 )
 
 if TYPE_CHECKING:
+    from collections.abc import Callable
     from pathlib import Path
 
     from browser_drive import Drive
@@ -1282,13 +1283,25 @@ async def test_the_confirmation_says_what_answering_would_leave_standing(
 #: ADR-0233 §8's ordering clause is *"a claim about a rendering that no assertion over
 #: the bytes can check"* (§15), and §11's projection inherits it: an owner who pressed
 #: *yes* having scrolled past the bound has not been shown it.
+#:
+#: **ADR-0267 §7's two lines are measured too**, because the clause reaches them by its
+#: own terms: a confirmation *"that renders a ceiling without the figure the act was
+#: quoted at is not a confirmation of that charge"*, and a figure below the control is a
+#: figure the owner pressing *yes* was not shown. A filter naming only the bound would
+#: have stayed green with ``renderQuote`` moved under the button. Adversarial review,
+#: round 2, ``major``.
+#:
+#: **Filtered rather than required**, so the same probe serves a projection carrying no
+#: quote: the bound's own lines keep ``lines.length > 0`` non-vacuous there.
 _PROJECTION_IS_ABOVE_THE_CONTROL = """
 () => {
   const row = document.querySelector('#confirmation-list .confirmation-row');
   const lines = [...row.querySelectorAll('p')].filter(
     (one) =>
       one.textContent.includes('standing authority') ||
-      one.textContent.includes('the amount:')
+      one.textContent.includes('the amount:') ||
+      one.textContent.includes('quoted at') ||
+      one.textContent.includes('still current')
   );
   const control = row.querySelector('button');
   const top = control.getBoundingClientRect().top;
@@ -1488,13 +1501,71 @@ async def test_a_quote_that_arrived_malformed_refuses_that_question_and_not_the_
         await expect(panel).not_to_contain_text("45.50")
 
 
+async def test_a_projection_with_no_quote_key_at_all_refuses_that_question(
+    gateway_browser: Browser, tmp_path: Path
+) -> None:
+    """ADR-0267 §7: the member is *"required with no default"*, so a **missing key** is
+    not the absence the field carries.
+
+    ``null`` states that the row records no figure and renders as nothing; a key that
+    never arrived states nothing at all, and reading it as absence would put a money
+    ceiling on the screen with the figure the act was quoted at silently dropped — which
+    §7 says is not a confirmation of that charge. So the page refuses that one question,
+    exactly as it does for a quote it cannot read.
+
+    **This is the arm that tells the two apart.** A reader admitting ``undefined`` as
+    absence passes every other case added here, because a conforming gateway always
+    sends the key. Adversarial review, round 2, ``minor`` — taken rather than filed,
+    because it is the arm for a branch of this diff's own reader and it costs one case
+    in the module already being fixed.
+    """
+    async with driving(gateway_browser, tmp_path, viewport=DESKTOP) as drive:
+        drive.engine.park(
+            "h-1",
+            authorization=AuthorizationProjection(
+                coverage=(
+                    CoverageView(
+                        kind=BoundKind.MONEY, bound=money_bound("50"), span="up to fifty pounds"
+                    ),
+                ),
+                expires_at=AUTHORIZATION_NOW + timedelta(hours=1),
+                quote=QUOTE,
+            ),
+        )
+        await drive.page.route("**/confirmations", _without_the_quote)
+
+        await drive.page.click("#confirmations-button")
+        await drive.page.wait_for_selector("#confirmations:not([hidden])")
+
+        panel = drive.page.locator("#confirmations")
+        await expect(panel).to_contain_text("cannot be rendered here")
+        await expect(panel).not_to_contain_text("the amount: up to 50 GBP")
+        await expect(panel).not_to_contain_text("45.50")
+
+
 async def _without_the_currency(route: Route) -> None:
     """Strip the quote's ``currency`` out of every parked confirmation on the wire."""
+    await _rewriting(route, lambda quote, one: quote.pop("currency"))
+
+
+async def _without_the_quote(route: Route) -> None:
+    """Drop the ``quote`` key itself out of every parked confirmation on the wire."""
+    await _rewriting(route, lambda quote, one: one["authorization"].pop("quote"))
+
+
+async def _rewriting(
+    route: Route, edit: Callable[[dict[str, Any], dict[str, Any]], object]
+) -> None:
+    """Apply ``edit`` to every parked confirmation's quote and fulfil the rewrite.
+
+    One rewriter for both cases, because what the two arms differ in is the byte they
+    remove and nothing else — and neither shape is one a conforming hub can send, so
+    both have to be made on the wire rather than through the fake.
+    """
     response = await route.fetch()
     body = json.loads(await response.text())
     for one in body["confirmations"]:
-        quote = one["authorization"]["quote"]
-        del quote["currency"]
+        edit(one["authorization"]["quote"], one)
     await route.fulfill(response=response, body=json.dumps(body))
 
 
