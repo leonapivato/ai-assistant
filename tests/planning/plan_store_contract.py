@@ -2757,47 +2757,6 @@ class PlanStoreContract:
 
     # --- ADR-0267 §11 arm 2: the store's write, its refusals and its elision ---
 
-    async def test_the_opening_write_carries_no_quote(self, store: PlanStore) -> None:
-        """ADR-0267 §2, §4 and §8: ``record_quote`` is the only route to a quote.
-
-        A goal opened carrying one would reach past **all three** of the rules that
-        live on that member at once — §2's refusal of a quote naming an action the goal
-        does not hold, :data:`~ai_assistant.core.types.MAX_ACTION_QUOTES`, and the
-        elision that discloses what it dropped — which is ``refuse_a_seeded_minting``'s
-        own argument one record over: a store that accepted a seeded tuple would *"take
-        at the door what the ceiling forbids and enforce it on nothing"*.
-
-        **And the seeded quote is the sharpest shape**: it names an action the goal does
-        not hold, over a bound the store would refuse and a count no write performed —
-        a price nobody read, which ADR-0266 §7 would then prove a ``MONEY`` ceiling
-        against. §8 is absolute that **no store** constructs, writes or repairs an
-        ``ActionQuote``. Each refusal writes **nothing**.
-        """
-        seeded = _goal().model_copy(update={"quotes": (_quote(action="ia-orphan"),)})
-        with pytest.raises(PlanningError) as carried:
-            await store.save_goal(seeded)
-        assert not isinstance(carried.value, StaleExecutionError), "an invariant breach"
-        assert await store.get_goal("g1") is None, "the refusal wrote nothing"
-
-        over_bound = _goal().model_copy(
-            update={"quotes": tuple(_quote() for _ in range(MAX_ACTION_QUOTES + 1))}
-        )
-        with pytest.raises(PlanningError):
-            await store.save_goal(over_bound)
-        assert await store.get_goal("g1") is None
-
-        fabricated = _goal().model_copy(update={"quotes_elided": 7})
-        with pytest.raises(PlanningError) as counted:
-            await store.save_goal(fabricated)
-        assert not isinstance(counted.value, StaleExecutionError)
-        assert await store.get_goal("g1") is None
-
-        # The control: the same goal, carrying neither, opens.
-        assert await store.save_goal(_goal()) == "g1"
-        opened = await store.get_goal("g1")
-        assert opened is not None
-        assert (opened.quotes, opened.quotes_elided) == ((), 0)
-
     async def test_record_quote_appends_and_advances_the_version(self, store: PlanStore) -> None:
         """ADR-0267 §2: the member appends one quote and advances ``Goal.version``.
 

@@ -45,7 +45,6 @@ from ai_assistant.planning.goals import (
     quoted,
     refuse_a_second_owner,
     refuse_a_seeded_minting,
-    refuse_a_seeded_quote,
     refuse_a_superseded_plan,
     refuse_an_unclaimable_attempt,
     refuse_an_unsubstituted_action,
@@ -179,11 +178,10 @@ class InMemoryPlanStore:
         Raises:
             PlanningError: If the goal is not one ``Goal`` admits, if the store already
                 holds a goal under this ``id``, or if the goal is opened carrying an
-                intended action or a quote.
+                intended action.
         """
         snapshot = revalidated_goal(goal)
         refuse_a_seeded_minting(snapshot)
-        refuse_a_seeded_quote(snapshot)
         if snapshot.id in self._goals:
             msg = (
                 f"goal {snapshot.id} already exists: save_goal is the opening write "

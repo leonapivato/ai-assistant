@@ -286,6 +286,40 @@ def test_a_quoted_output_names_two_different_keys() -> None:
         QuotedOutput(amount="price", currency="price")
 
 
+@pytest.mark.parametrize(
+    "key", ["price.total", "prices[0]", "prices[", "*", "price.*", "a]b", "", "   "]
+)
+def test_a_quoted_output_is_not_constructible_at_a_key_below_depth_one(key: str) -> None:
+    """§3: "Depth is one and no lane adds an addressing syntax to either".
+
+    ``StepOutputRef.field``'s own four forms — *"a dotted expression, an index, a
+    wildcard or a selector"* — refused at construction, where the integration author
+    is. **The alternative is silent**: nothing splits a key, so ``price.total`` would
+    be looked up whole against ``{"price": {"total": "200"}}``, find nothing, mint no
+    quote, and leave every act under that declaration asking for a reason nobody sees.
+
+    **Both fields take it**, and a blank key with them: :data:`EncodableText` admits
+    ``""``, which names a key no output carries while looking like a field somebody
+    filled in.
+    """
+    with pytest.raises(ValidationError):
+        QuotedOutput(amount=key, currency="currency")
+    with pytest.raises(ValidationError):
+        QuotedOutput(amount="price", currency=key)
+
+
+@pytest.mark.parametrize("key", ["price", "total_price", "amount-due", "price/total", "価格"])
+def test_an_ordinary_output_key_is_a_perfectly_good_one(key: str) -> None:
+    """§3's rule is the four addressing forms and nothing wider.
+
+    A provider's output key is whatever the provider called it, so the refusal above
+    is a closed set of characters rather than a grammar of valid keys: a whitelist
+    would refuse legitimate keys nobody anticipated, which is a declaration an
+    integration author could not write for a tool that exists.
+    """
+    assert QuotedOutput(amount=key, currency="currency").amount == key
+
+
 def test_a_declaration_is_constructible_with_a_quoted_output_and_with_none() -> None:
     """§3 and §9's ADR-0016 scope: the default is ``None`` and it costs a question."""
     assert _tool().quoted_output is None
