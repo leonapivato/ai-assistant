@@ -810,16 +810,29 @@ async def test_a_reopen_whose_active_write_is_refused_stale_calls_neither_member
 
 
 async def test_the_ending_takes_the_active_writes_reading_under_an_advancing_clock() -> None:
-    """Arm 5: *"asserted against a clock advanced between the two calls"*.
+    """Arm 5: *"asserted against a clock advanced between the two calls"*, and §1's
+    *"read **once**"* with it.
 
-    A fixed clock cannot see this: an implementation reading the clock a second time
-    between its status write and its ending would pass every arm, and the
-    ``GOAL_CLOSED`` row's ``settled_at`` would be an instant **no act happened at**.
-    Here every reading moves the clock a day on, so the two instants agree only if
-    there was one reading.
+    **Three things, and each is free without the others** — the same trio the
+    abandonment path carries, arrived at the same way (rounds 5, 6 and 9).
 
-    ADR-0268 §1: *"a ``GOAL_CLOSED`` row's ``settled_at`` is the instant of the
-    **act** that ended it and never a second reading taken between the two writes."*
+    The clock **advances**, so an act reading it twice cannot produce one value by
+    luck. Both the ``ACTIVE`` write and the ending were given the **same** value, the
+    status write's own ``at`` being captured rather than inferred from the rows. And
+    the act takes **exactly one reading**, which the first two do not imply: an act
+    making an additional discarded read satisfies both while breaching the clause,
+    and would leave a ``GOAL_CLOSED`` row's ``settled_at`` an instant no act happened
+    at. Adversarial review, round 9, ``major``.
+
+    **The one reading is measured against a baseline turn rather than hard-coded.**
+    A bare count over ``converse`` is not the reopen's: a turn reads the clock for
+    the tracing seam, the engagement stamp and its own machinery whatever it
+    associates to. So two turns run on one harness and one clock — one engaging an
+    **open** goal, which ADR-0250 §13 does not reopen and which therefore takes
+    neither member, and one reopening a closed one — and the difference between
+    their deltas is the reopen's own reading and nothing else. That stays true if
+    the surrounding machinery ever reads differently, where a hard-coded total would
+    break for a reason this arm is not about.
     """
     journal = _Journal()
     clock = _Advancing(AT, step=timedelta(days=1))
@@ -835,11 +848,27 @@ async def test_the_ending_takes_the_active_writes_reading_under_an_advancing_clo
         now=clock,
     )
     conversation = "conversation-1"
+    # The baseline: a goal left **open**, which a turn resumes rather than reopens.
+    open_goal = await _seed(
+        harness.plans,
+        _goal("goal-open", "book a ferry", conversation=conversation),
+        engaged_in=conversation,
+    )
     goal = await _goal_with_two_rows(harness, store, conversation=conversation)
     await harness.engine.abandon_goal(goal.id)
-    closed = await harness.plans.get_goal(goal.id)
-    assert closed is not None
     journal.reset()
+
+    baseline = clock.readings
+    resumed = await harness.engine.converse(
+        "carry on",
+        timeout=PATIENT,
+        conversation_id=(await harness.conversations.begin(None)).id,
+        reference=TurnReference(goal_id=open_goal.id),
+    )
+    overhead = clock.readings - baseline
+    assert resumed.goal_engagement is not None
+    assert resumed.goal_engagement.disposition is EngagementDisposition.RESUMED
+    assert journal.calls == [], "the baseline takes neither member, which is what makes it one"
 
     written: list[datetime] = []
     real_write = plans.set_goal_status
@@ -852,19 +881,30 @@ async def test_the_ending_takes_the_active_writes_reading_under_an_advancing_clo
 
     setattr(plans, "set_goal_status", noting)  # noqa: B010 — an instance lever
 
-    second = (await harness.conversations.begin(None)).id
-    await harness.engine.converse(
+    before = clock.readings
+    reopened = await harness.engine.converse(
         "back to that one",
         timeout=PATIENT,
-        conversation_id=second,
+        conversation_id=(await harness.conversations.begin(None)).id,
         reference=TurnReference(goal_id=goal.id),
     )
 
+    assert reopened.goal_engagement is not None
+    assert reopened.goal_engagement.disposition is EngagementDisposition.REOPENED
+    assert clock.step_would_move, "the clock advances, so one value cannot happen by luck"
+    assert (clock.readings - before) - overhead == 1, (
+        "the reopen reads the clock once (ADR-0268 §1), so a discarded second "
+        "reading is a breach even where the write and the ending get the same value"
+    )
     assert len(written) == 1
-    assert clock.readings > 1, "the clock really is advancing, so a second read would show"
     assert journal.endings[0][1] == written[0], (
         "the ending carries the ACTIVE write's own instant and not a later reading"
     )
+    # **The rows are not re-asserted here**, and deliberately: this store *was* told
+    # of the closure, so the ending finds nothing left to move and the rows still
+    # carry the abandonment's instant. That the reopen's ending stamps the rows it
+    # does move is the legacy-database arm's, where it moves one.
+    assert journal.endings[0][0] == goal.id
 
 
 async def test_a_reopen_overtaken_by_a_later_closure_unfences_nothing() -> None:
