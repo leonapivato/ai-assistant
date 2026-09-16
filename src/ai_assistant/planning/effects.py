@@ -357,7 +357,10 @@ def detached(record: EffectRecord) -> EffectRecord:
     A dump-and-revalidate rather than ``model_copy(deep=True)``, for
     :func:`~ai_assistant.planning.goals.revalidated_goal`'s reason: it is the snapshot
     *and* the guard against persisting a record whose validators a mutation has already
-    been walked past.
+    been walked past. **Taken through the class rather than the instance**, for
+    :func:`detached_key`'s reason: a ``model_dump`` entry in the instance's ``__dict__``
+    shadows the method, and the same bypass that reaches the fields reaches the
+    serializer that reads them.
 
     Args:
         record: The row to store or to hand out.
@@ -369,7 +372,7 @@ def detached(record: EffectRecord) -> EffectRecord:
         PlanningError: If the record does not survive its own validators.
     """
     try:
-        return EffectRecord.model_validate(record.model_dump())
+        return EffectRecord.model_validate(EffectRecord.model_dump(record))
     except ValidationError as exc:
         msg = f"effect row for goal {record.goal_id} is not a valid record: {exc}"
         raise PlanningError(msg) from exc
@@ -389,6 +392,14 @@ def detached_key(key: EffectKey) -> EffectKey:
     ADR-0021 §4's posture, one seam over: the construction-time check catches the honest
     mistake, and re-validating at the boundary is what holds against a deliberate one.
 
+    **The dump is taken through the class and not through the instance**, which is the
+    same bypass one level up: ``model_dump`` is a plain method, so an instance
+    ``__dict__`` entry of that name shadows it, and ``key.model_dump()`` would then hand
+    this function whatever the caller wanted validated — a *different* valid key, stored
+    while the call the caller dispatched carries the original. ``EffectKey.model_dump``
+    is looked up on the class, so no instance entry reaches it, and a subclass carrying
+    extra state is refused by ``extra="forbid"`` rather than silently narrowed.
+
     Args:
         key: The key the caller handed in.
 
@@ -401,7 +412,7 @@ def detached_key(key: EffectKey) -> EffectKey:
             persisted.
     """
     try:
-        return EffectKey.model_validate(key.model_dump())
+        return EffectKey.model_validate(EffectKey.model_dump(key))
     except ValidationError as exc:
         msg = f"the effect key this claim was taken under is not a valid key: {exc}"
         raise PlanningError(msg) from exc
