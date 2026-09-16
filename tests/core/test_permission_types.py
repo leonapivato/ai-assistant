@@ -8,6 +8,7 @@ which several of the ADR's security claims rest on.
 
 from __future__ import annotations
 
+import inspect
 from datetime import UTC, datetime, timedelta, timezone
 from decimal import Decimal
 from typing import Any
@@ -18,6 +19,7 @@ from _int_str_digits import pinned_int_str_digits
 from pydantic import ConfigDict, ValidationError
 
 from ai_assistant.core.types import (
+    ActionQuote,
     ActionRequest,
     CostBasis,
     DataTier,
@@ -270,6 +272,16 @@ def test_a_ruling_has_no_field_naming_a_subject() -> None:
     — read off that record and carried from nowhere else — so it says which
     authority, not which tool, which payload or which step, and it is the conjunct
     that completes §7's four-route partition from the row alone.
+
+    ``proved_quote`` (ADR-0271 §1) joins the roster and **is** a partial
+    counter-example, which is recorded rather than smoothed over: an ``ActionQuote``
+    carries ``plan`` and a ``read_from`` naming the **reading** step, so the sentence
+    above is now *"no field naming the step this ruling is about"*. What the split
+    closes is untouched, and that is the claim this test makes: the value names **no
+    tool and no payload**, so nothing in it can make ``PermissionDecision.authorises``
+    approve a declaration the policy was not handed — that method compares ``tool``,
+    ``parameters_digest`` and ``intended_action``, and reads this field in no case. It
+    is an operand and never a verdict, and nothing resolves the reference.
     """
     assert set(PermissionRuling.model_fields) == {
         "outcome",
@@ -277,7 +289,12 @@ def test_a_ruling_has_no_field_naming_a_subject() -> None:
         "authorised_by",
         "authorised_subject",
         "authorised_goal",
+        "proved_quote",
     }
+    assert not {"tool", "capability", "parameters", "parameters_digest"} & set(
+        ActionQuote.model_fields
+    ), "the one nested record on a ruling still names no tool and no payload"
+    assert "proved_quote" not in inspect.getsource(PermissionDecision.authorises)
 
 
 # --- PermissionDecision -----------------------------------------------------
