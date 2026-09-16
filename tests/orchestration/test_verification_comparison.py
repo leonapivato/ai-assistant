@@ -55,7 +55,6 @@ from ai_assistant.core.types import (
     GoalStatus,
     Idempotency,
     PermissionOutcome,
-    PermissionRuling,
     Reversibility,
     RiskLevel,
     SkipReason,
@@ -564,12 +563,13 @@ async def test_the_same_goal_without_the_money_criterion_is_verified() -> None:
 
 
 async def test_each_conjunct_removed_in_turn_leaves_the_criterion_unestablished() -> None:
-    """Arm 4: the five removals, each on its own and each fail-closed.
+    """Arm 4: the removals, each on its own and each fail-closed.
 
     The row's ``origin`` ``OPENING_ACT``; the row belonging to **another goal**; the
-    step's decision a route-(a), (b) or (c) ``ALLOW``; the same carrying no
-    ``authorised_by``; and the member's ``basis.span`` differing from the criterion's by
-    one character.
+    step's decision a route-(a), a route-(b) and a route-(c) ``ALLOW`` — **each built to
+    ADR-0254 §7's own discriminator and none of them standing in for another**; the same
+    carrying no ``authorised_by`` at all; and the member's ``basis.span`` differing from
+    the criterion's by one character.
     """
     criterion = a_criterion(RIVERSIDE)
     holding = a_step("s-1", output=_HOLDS)
@@ -591,32 +591,49 @@ async def test_each_conjunct_removed_in_turn_leaves_the_criterion_unestablished(
     )
     assert _one(elsewhere) is CriterionResult.UNESTABLISHED, "another goal's row"
 
-    plain = await _compared(
+    # ADR-0254 §7's partition, spelled one limb at a time and never one shape labelled
+    # three ways: route (a) is `resolves` set with `authorised_by` equal to it — the one
+    # conjunct that lives on the **decision** rather than the ruling; route (b) is a
+    # digest with `authorised_goal` unset; route (c) is the pointer alone; and the
+    # policy's own rules are an `ALLOW` with no pointer at all (ADR-0193 §11's third
+    # state). Only route (d) contributes a row, so each of the four is fail-closed.
+    resolving = await _compared(
         a_goal(criterion),
         holding,
         decisions=(
             a_decision(
                 "d-1",
                 definition=declaring,
-                ruling=a_ruling(authorised_by=None, goal=None),
+                resolves="c-1",
+                # A route-(a) `ALLOW` answers a `CONFIRM`; it rests on no standing route,
+                # so it carries no binding and the derivation is overridden here.
+                egress_binding=None,
+                ruling=a_ruling(authorised_by="c-1", subject=None, goal=None),
             ),
         ),
     )
-    assert _one(plain) is CriterionResult.UNESTABLISHED, "a route-(a) ALLOW"
+    assert _one(resolving) is CriterionResult.UNESTABLISHED, "a route-(a) ALLOW"
+
+    fingerprinted = await _compared(
+        a_goal(criterion),
+        holding,
+        decisions=(a_decision("d-1", definition=declaring, ruling=a_ruling(goal=None)),),
+    )
+    assert _one(fingerprinted) is CriterionResult.UNESTABLISHED, "a route-(b) ALLOW"
+
+    pointing = await _compared(
+        a_goal(criterion),
+        holding,
+        decisions=(
+            a_decision("d-1", definition=declaring, ruling=a_ruling(subject=None, goal=None)),
+        ),
+    )
+    assert _one(pointing) is CriterionResult.UNESTABLISHED, "a route-(c) ALLOW"
 
     unbound = await _compared(
         a_goal(criterion),
         holding,
-        decisions=(
-            a_decision(
-                "d-1",
-                definition=declaring,
-                ruling=PermissionRuling(
-                    outcome=PermissionOutcome.ALLOW,
-                    reason="a standing grant of this destination covers this call",
-                ),
-            ),
-        ),
+        decisions=(a_decision("d-1", definition=declaring, ruling=an_unbound_ruling()),),
     )
     assert _one(unbound) is CriterionResult.UNESTABLISHED, "no authorised_by at all"
 
@@ -832,20 +849,34 @@ async def test_an_irreversible_act_with_empty_discloses_is_rung_two() -> None:
     reaches **rung 2** — **the arm that fails against a lexicographic comparison**,
     under which ``"irreversible" > "reversible"`` is ``False``. ADR-0016 §2 overrides
     all four comparison operators for exactly this reason.
+
+    The ruling is :func:`~verification_builders.an_unbound_ruling` so that **the
+    declaration is the only rung-2 cause here**: a route-(d) ``ALLOW`` derives an
+    ``egress_binding``, which §3's third limb makes consequential on its own, and an arm
+    carrying one would stay green with the reversibility comparison deleted.
+    :func:`test_a_decision_carrying_an_egress_binding_is_rung_two` is that limb's own arm.
     """
     irreversible = a_tool(reversibility=Reversibility.IRREVERSIBLE, discloses=())
     comparison = await _compared(
-        a_goal(), a_step("s-1"), decisions=(a_decision("d-1", definition=irreversible),)
+        a_goal(),
+        a_step("s-1"),
+        decisions=(a_decision("d-1", definition=irreversible, ruling=an_unbound_ruling()),),
     )
 
     assert comparison.rung is Rung.CONSEQUENTIAL
 
 
 async def test_a_reversible_act_that_discloses_is_rung_two() -> None:
-    """§3: *"``discloses`` is read beside ``reversibility`` and neither stands alone"*."""
+    """§3: *"``discloses`` is read beside ``reversibility`` and neither stands alone"*.
+
+    Unbound for the reason one arm above: with a route-(d) ruling's derived
+    ``egress_binding`` in play, deleting the ``discloses`` check would leave this green.
+    """
     disclosing = a_tool(reversibility=Reversibility.REVERSIBLE, discloses=(DataTier.OPERATIONAL,))
     comparison = await _compared(
-        a_goal(), a_step("s-1"), decisions=(a_decision("d-1", definition=disclosing),)
+        a_goal(),
+        a_step("s-1"),
+        decisions=(a_decision("d-1", definition=disclosing, ruling=an_unbound_ruling()),),
     )
 
     assert comparison.rung is Rung.CONSEQUENTIAL

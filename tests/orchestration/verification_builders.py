@@ -278,13 +278,14 @@ def a_ruling(
     )
 
 
-def a_decision(
+def a_decision(  # noqa: PLR0913 — one keyword per field of the stored decision an arm varies
     decision_id: str,
     *,
     definition: ToolDefinition | None = None,
     digest: str = DIGEST,
     ruling: PermissionRuling | None = None,
     egress_binding: EgressBinding | None | _Derive = _DERIVE,
+    resolves: str | None = None,
 ) -> PermissionDecision:
     """The ruling a step was claimed under, with the declaration pinned **by value**.
 
@@ -298,6 +299,11 @@ def a_decision(
     (§3's third limb reads the decision's binding). A rung-1 act that still establishes a
     criterion is therefore a **read** authorised against a row — ``side_effecting``
     ``False`` — and the arms that want one say so.
+
+    ``resolves`` is ADR-0254 §7's route-(a) conjunct — *"``resolves`` set,
+    ``authorised_by`` equal to it"* — and it is the one limb of that partition no ruling
+    can spell on its own, because the field is the **decision's** rather than the
+    ruling's.
     """
     decided = ruling if ruling is not None else a_ruling()
     return PermissionDecision(
@@ -306,6 +312,7 @@ def a_decision(
         tool=definition if definition is not None else a_tool(),
         parameters_digest=digest,
         decided_at=AT,
+        resolves=resolves,
         egress_binding=(
             (BINDING if decided.authorised_by is not None else None)
             if isinstance(egress_binding, _Derive)
