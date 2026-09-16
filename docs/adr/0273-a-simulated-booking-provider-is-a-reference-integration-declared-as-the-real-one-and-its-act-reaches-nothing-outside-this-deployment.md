@@ -193,44 +193,42 @@ act it stands in for; that they come out differently is the whole content of §2
 > It declares **`quoted_output: None`**.
 
 > **Normative — the booking has a durable state change, and it is *two* things,
-> because one of them must be prunable and the other must not.** A booking commits,
-> to durable state the provider holds **under the deployment's data directory**:
+> because one must be able to become prunable and the other never can.** A booking
+> commits, to durable state the provider holds **under the deployment's data
+> directory**:
 >
 > 1. a **booking record** carrying what it was asked and what it charged — the
 >    detail, which is the user's; and
 > 2. an advance of a **monotonic commit count**, a non-personal figure the provider
 >    increments on every committed booking and **never decrements**.
 >
-> Both **survive a restart**, and **no operation of this provider removes, amends
-> or decrements the count, which only rises**. The **records** are subject to the
-> retention bound below and to nothing else. **Without a durable effect,
-> `IRREVERSIBLE` would be a claim about nothing** — an implementation returning
-> configured JSON and changing no state would satisfy every arm below while
-> reproducing neither the double booking nor the failed cancellation the
-> walkthrough exists to demonstrate. This decision
-> fixes **no store, no schema and no file format**, and the count is **a figure and
-> not a log**: it carries no identifier, no instant and nothing of what was booked.
+> Both **survive a restart**, and **the provider offers no operation that removes,
+> amends or decrements either**. **Without a durable effect, `IRREVERSIBLE` would
+> be a claim about nothing** — an implementation returning configured JSON and
+> changing no state would satisfy every arm below while reproducing neither the
+> double booking nor the failed cancellation the walkthrough exists to
+> demonstrate. This decision fixes **no store, no schema and no file format**, and
+> the count is **a figure and not a log**: it carries no identifier, no instant and
+> nothing of what was booked.
 
 > **Normative — the whole commit is failure-atomic and serialised, and the commit
-> is all three of the record, the count and the pruning.** A booking's **record
-> insertion**, the **commit count's increment** and **any pruning the retention
-> bound below triggers** are **one serialised, failure-atomic transaction**: they
-> take effect together or not at all, and two commits **never interleave**,
+> is both the record and the count.** A booking's **record insertion** and the
+> **commit count's increment** are **one serialised, failure-atomic transaction**:
+> they take effect together or not at all, and two commits **never interleave**,
 > whether they arrive on one task or on several. So after any interruption a
 > record is **wholly present or wholly absent**, the store reads back on the next
-> start, and **the count equals the number of records ever inserted** — not the
-> number still retained, which pruning lowers. **Two concurrent bookings advance
-> the count by exactly two**, and a commit leaving two records behind one
-> increment is precisely the state this clause forbids. **A naive append that can
-> be truncated or interleaved is not an implementation of this clause, and neither
-> is a count incremented outside the transaction that inserts the record** — a
-> store that cannot be read back, or a count that disagrees with what was
-> inserted, proves nothing about at-most-once. **And a booking the provider
-> refuses before the commit — an unavailable date, an off-schema argument, a
-> condition of §3 unmet — commits none of the three**: no record, no advance and
-> no pruning. **The count counts committed bookings and nothing else**, so a
-> provider that advances it and then refuses has falsified the very figure §2
-> rests the act's irreversibility on.
+> start, and **the count equals the number of records inserted**. **Two concurrent
+> bookings advance the count by exactly two**, and a commit leaving two records
+> behind one increment is precisely the state this clause forbids. **A naive
+> append that can be truncated or interleaved is not an implementation of this
+> clause, and neither is a count incremented outside the transaction that inserts
+> the record** — a store that cannot be read back, or a count that disagrees with
+> what was inserted, proves nothing about at-most-once. **And a booking the
+> provider refuses before the commit — an unavailable date, an off-schema
+> argument, a condition of §3 unmet — commits neither**: no record and no advance.
+> **The count counts committed bookings and nothing else**, so a provider that
+> advances it and then refuses has falsified the very figure §2 rests the act's
+> irreversibility on.
 
 > **Normative — a failure at or after the commit boundary is reported as one that
 > may have committed, and never as a certain failure.** Where the append has
@@ -261,32 +259,35 @@ act it stands in for; that they come out differently is the whole content of §2
 > silence on any of those as permission to omit them** — they are the lane's under
 > the rules that already govern every store here.
 
-> **Normative — the booking *record* is bounded, and ADR-0004 §6's retention limb
-> is why.** It **carries a bound on how many records it retains**, beyond which the
-> oldest are pruned, so the detail does not accumulate indefinitely. **This
-> decision states the requirement and not a figure**, which is the lane's; §5
-> fixes the figure's **domain** and requires the configuration carrying it to be
-> refused at the read when it falls outside. **The bound is enforced at every
-> commit *and* whenever the store is opened**, with the same failure-atomicity, so
-> a deployment that **lowers** the figure between runs prunes down to it on the
-> next open rather than holding indefinitely — and invisibly — detail a
-> since-narrowed bound no longer admits. **A bound enforced only on the commit
-> path is not an implementation of this clause**, and that pruning touches the
-> commit count no more than any other does. That the limb reaches a store outside
-> `memory/` is **ADR-0004's own reading of itself**:
-> its ADR-0268 scope note says of the goal authorization store that *"§6's
-> retention limb is reached by those rows before it is reached by the record"*, so
-> §6's retention obligation is not confined to `memory/` and **this decision
-> narrows it in no respect.**
+> **Normative — ADR-0004 §6's retention limb reaches this store, and this decision
+> defers it rather than discharging or narrowing it.** That the limb reaches a
+> store outside `memory/` is **ADR-0004's own reading of itself**: its ADR-0268
+> scope note says of the goal authorization store that *"§6's retention limb is
+> reached by those rows before it is reached by the record"*, so §6's retention
+> obligation is not confined to `memory/` and **this decision narrows it in no
+> respect.** What this decision declines is to answer it **here**, and it declines
+> on the same ground it declines the view, export and deletion surfaces: **ADR-0101
+> §7 defers that surface for every store in this tree** — ADR-0004 §6's export
+> right *"has none"* — and rules that the two *"land together or neither lands"*.
+> **A retention rule over the booking record is jointly deferred with them**,
+> because a rule that prunes is a deletion route by another name, and this decision
+> will not open one for a **simulated** provider's store while the personal record
+> has none. **So this decision fixes no bound, no figure, no pruning and no
+> enforcement point**, and **no lane reads that silence as licence to accumulate
+> for ever**: §8 books the deferral with what fires it, and the lane that gives
+> ADR-0004 §6 a surface owes this store's rows in the same change, as it owes every
+> other store's.
 
-> **Normative — the commit count is not pruned, and it is what carries the act's
-> irreversibility past the record's retention.** Pruning the oldest booking
-> records removes **detail about** bookings; it does not remove the fact that they
-> happened, because the count stands. **No retention rule, no bound and no pruning
-> decrements it.** This is the whole reason the state is two things: a provider
-> whose only durable artifact were a prunable record would have an effect that
-> retention undoes, which is `RECOVERABLE`, and §2 would be declaring something
-> untrue as soon as the bound was crossed.
+> **Normative — the commit count is never pruned, and it is what carries the act's
+> irreversibility past any retention rule a later decision lands.** A rule that
+> prunes booking records removes **detail about** bookings; it does not remove the
+> fact that they happened, because the count stands. **No retention rule, no bound
+> and no pruning ever decrements it**, and the decision that lands one carries that
+> sentence forward rather than re-opening it. This is the whole reason the state is
+> two things even before a bound exists: a provider whose only durable artifact
+> were a prunable record would have an effect that retention undoes, which is
+> `RECOVERABLE`, and §2 would be declaring something untrue the moment a bound was
+> crossed.
 
 > **Normative — and it claims no exemption from ADR-0004 §6.** A **per-subject**
 > view, export or deletion surface exists for **no** store in this tree —
@@ -300,9 +301,9 @@ act it stands in for; that they come out differently is the whole content of §2
 > unpurgeable.** ADR-0016 §2's scale asks whether **the change the tool made can be
 > undone**, and the answer here is that **no operation of this provider, and none
 > in this system, decrements the count or otherwise undoes a booking**: the count
-> only rises. **The bound removes *detail about* bookings and never the fact of
-> one**, which is why the irreversibility is stated over the count rather than
-> over the record it outlives.
+> only rises. **A retention rule removes *detail about* bookings and never the
+> fact of one**, which is why the irreversibility is stated over the count rather
+> than over the record it will outlive.
 
 > **Normative — the non-recoverability rule is confined to the *wholesale*
 > installation purge, and selective removal is expressly a different question.**
@@ -311,9 +312,10 @@ act it stands in for; that they come out differently is the whole content of §2
 > over this one. **A rule that selectively removed or decremented this provider's
 > commit count would undo its bookings, and the decision that lands one re-declares
 > this tool's `reversibility` in the same change or preserves an irreversible
-> effect beside it.** Pruning **booking records** is neither: §2 keeps the count out
-> of the bound for exactly this reason, so the two rules are not in tension and no
-> later decision has to choose between them. §8 books the selective-removal case.
+> effect beside it.** **A retention rule over booking records is neither**: §2 keeps
+> the count outside any such rule for exactly this reason, so the two are not in
+> tension and no later decision has to choose between them. §8 books the
+> selective-removal case and the deferred retention rule alike.
 
 **The reading is stated because a reviewer can reach the other one, and it is
 worth the paragraph.** ADR-0016 §2's `RECOVERABLE` examples are *"a file in the
@@ -520,21 +522,6 @@ integration exists. §8 carries it with what fires it.
 > those are the implementing lane's, subject to §1's whole-or-absent rule — and
 > fixes only what the shape must be able to say.
 
-> **Normative — the §2 record bound is a strictly positive integer, read from the
-> configuration with everything else here, and refused at the read when it is
-> anything else.** The bound is an integer **`n >= 1`**: a store that retains at
-> least the booking just made is the weakest bound this decision admits, and `0`
-> would prune the record its own booking had just inserted — leaving §10's arm 9
-> nothing to read back and its arm 10 nothing to show. **A configuration carrying
-> `0`, a negative, a JSON boolean (which a naive integer reader admits, `bool`
-> being an `int`), a non-integer — a JSON float, or a string — or a value outside
-> the range the reader accepts for an integer field is refused when the
-> configuration is read, and no provider is built from it**, exactly as a bad
-> amount or currency is. **This decision fixes the domain's floor and not its
-> ceiling**: §2 leaves the *figure* to the lane and this clause leaves the
-> accepted range to it too, requiring only that whatever range it fixes is
-> enforced **at the read** and never at the first prune.
-
 **The disagreeing charge is why this provider offers no hold and no conditional
 execution** (§7). ADR-0271 §3's finding fires when the charge disagrees with the
 pinned quote; a provider validating the quoted amount atomically with the act
@@ -716,14 +703,29 @@ clearance it was never granted.
   footing rather than claiming an exemption from it. **Fired by** ADR-0101 §7's
   own two conditions, and the lane that satisfies either owes this store's rows in
   the same change.
-- **Selective removal of this provider's commit count, and the retention figure
-  itself.** **Not decided** (§2). The bound's number is the lane's; what is
-  reserved here is a decision that would **decrement or selectively erase the
-  count**, because that would undo bookings and therefore change what §2 declares.
+- **Selective removal of this provider's commit count.** **Not decided** (§2).
+  What is reserved here is a decision that would **decrement or selectively erase
+  the count**, because that would undo bookings and therefore change what §2
+  declares.
   **Such a decision re-declares this tool's `reversibility` in the same change, or
   preserves an irreversible effect beside the count.** **Fired by** a decision that
   takes selective erasure — a per-subject deletion surface being the likeliest, and
   the entry above being where it is already booked.
+- **A retention rule over the booking record — a bound, a pruning rule and a
+  figure.** **Not decided** (§2), and **not deferred on its own footing**:
+  ADR-0004 §6's retention limb **does** reach this store, which is stated in §2 and
+  not qualified here, and what this decision does is defer the limb **jointly with
+  ADR-0101 §7's view, export and deletion surfaces**, which that section defers for
+  every store in this tree and rules *"land together or neither lands"*. A rule
+  that prunes the record is a deletion route by another name, and this decision
+  will not open one for a simulated provider's store while the personal record has
+  none. **The lane of this decision therefore builds no bound and prunes nothing**,
+  and **no lane cites this entry as a finding that the record may grow without
+  limit for ever** — it is an obligation booked, not one declined. **Fired by**
+  ADR-0101 §7's own two conditions, together with the entry above; the lane that
+  satisfies either owes this store a retention rule in the same change, and that
+  decision carries §2's *"no retention rule, no bound and no pruning ever
+  decrements the count"* forward rather than re-opening it.
 - **A structured carrier for metadata on an unsuccessful outcome.** **Not
   decided** (§6). `ToolResult` refuses an `output` on a non-`SUCCEEDED` result and
   `ToolFailure` carries `kind` and `message` alone; adding one is a `core/types.py`
@@ -766,8 +768,9 @@ clauses more widely than it now holds?*
   same footing as every other, purged by the same act, and owed to the same
   deferred surface; it claims no exemption, so no sentence of any of them becomes
   false or over-wide. **A reader holding only ADR-0004 §6 is not misled**, because
-  §2 says in terms that it claims no exemption, bounds the record under §6's
-  retention limb, and books the deferred surface in §8. **That limb is read as
+  §2 says in terms that it claims no exemption, that §6's retention limb reaches
+  this store, and that the limb is **deferred jointly with ADR-0101 §7's surfaces
+  rather than discharged or narrowed here** — §8 books both. **That limb is read as
   ADR-0004 itself reads it** — its ADR-0268 scope note applies it to the goal
   authorization store's rows, a store outside `memory/` — so this decision widens
   and narrows nothing about its reach.
@@ -811,7 +814,12 @@ clauses more widely than it now holds?*
 >    `reversibility`, `risk_level`, **`reads`**, **`writes`**, `discloses`, `cost`,
 >    `quoted_output`, `charged_output`, `bounded_arguments` and the booking's
 >    postcondition, **every one of them named**, exactly as §2 states, asserted
->    over the registered definition.
+>    over the registered definition. **And the registered set is asserted to be
+>    exactly those two** — the `ToolRegistry`'s new names and the egress seam's
+>    alike, compared as whole sets against a default `Settings` and not merely
+>    searched for the two members expected — so that a third definition the enabled
+>    integration registers, a cancellation the likeliest, fails this arm instead of
+>    standing unremarked beside them (§1's *"exactly two … and nothing else"*).
 > 5. **The quote is read, under and over a bound** — ADR-0267 §4's mint yields an
 >    `ActionQuote` from the availability step's `output` under the registered
 >    `quoted_output`, **once from a configuration whose price is under a stated
@@ -831,68 +839,52 @@ clauses more widely than it now holds?*
 >    carry one derived `EffectKey`, and the second is not dispatched (ADR-0259 §2).
 > 9. **The durable state, both halves** — a booking appends a record **and**
 >     advances the commit count; both are readable **after a restart**; the
->     provider exposes **no operation that decrements the count**, and none that
->     removes or amends a record outside the retention bound's own pruning
->     (arm 10); the
+>     provider exposes **no operation that removes, amends or decrements either**;
+>     the
 >     store leaves **no artifact outside the configured data directory**; and after
 >     `ai-assistant-purge` over that directory a reopened store holds **no booking
 >     record and no count** (§2).
-> 10. **The bound, and what survives it** — bookings past the configured bound
->     prune the oldest **records**, the store stays readable and within its bound
->     after a restart, and **the commit count still reports every booking made**
->     (§2). This is the arm that shows retention removing detail and not the act.
->     **And a bound *lowered between runs* is enforced on the next open**: a store
->     filled under a larger bound, stopped, reopened under a smaller one and **not
->     booked against**, retains no more records than the new figure and reports
->     **the same commit count as before**. That half is what stops an
->     implementation that prunes only on the commit path and so keeps, forever,
->     the detail a narrowed bound was set to drop.
-> 11. **Off-schema arguments** — a booking request carrying a field the
+> 10. **Off-schema arguments** — a booking request carrying a field the
 >     declaration's `parameters_schema` does not name is refused, and **no record
 >     is appended and no count advanced** (§2). **Every pre-commit refusal arm
 >     asserts the count as well as the records**, this one and arm 6 alike: a
 >     count advanced before a refusal appends nothing and still corrupts the
 >     figure.
-> 12. **A refused configuration** — a configured amount or currency outside the
+> 11. **A refused configuration** — a configured amount or currency outside the
 >     readers' accepted domains is refused when the configuration is read, one arm
->     per refused shape; **and the §2 record bound likewise**, one arm each for
->     `0`, a negative, a boolean, a non-integer and a value outside the accepted
->     range, each asserting that the configuration is refused and **no provider is
->     built** (§5).
-> 13. **The provider deduplicates nothing, which is what `Idempotency.NONE`
+>     per refused shape, each asserting that the configuration is refused and **no
+>     provider is built** (§5).
+> 12. **The provider deduplicates nothing, which is what `Idempotency.NONE`
 >     declares** — **two separately authorised intended actions carrying identical
 >     booking arguments append two records**. Arm 8 shows the system's effect claim
 >     stopping a repeat; this arm shows that **nothing but that claim would have**,
 >     which is the ground §2 states for `NONE` and would otherwise go
 >     unestablished.
-> 14. **Two concurrent bookings** — two calls entering the provider at once leave
+> 13. **Two concurrent bookings** — two calls entering the provider at once leave
 >     **two whole records**, a commit count advanced by **exactly two**, and a
 >     store readable afterwards, which is §2's serialised, failure-atomic commit
 >     with a subject. **The count delta is asserted and not only the records**: a
 >     provider that inserts two records behind one increment passes the record
 >     half and fails this arm.
-> 15. **The commit boundary, both sides** — a fault injected **before** the commit
+> 14. **The commit boundary, both sides** — a fault injected **before** the commit
 >     leaves **no** record and **no count advance**, and is reported as a certain
 >     failure; a fault injected **at or after** it raises
 >     `ClassifiedToolError(effect_may_have_committed=True)` and the step completes
 >     **`INDETERMINATE`**; and after an interruption at the commit boundary the
 >     store **reads back whole**, carrying every record that preceded it, **with a
->     count equal to the number of records ever inserted** (§2).
-> 16. **Injected between the commit's parts** — a fault injected **between each
->     pair of sub-operations** the commit comprises — after the record's insertion
->     and before the count's increment, and after the increment and before any
->     pruning — **one arm per injection point**, each asserting **across a
+>     count equal to the number of records inserted** (§2).
+> 15. **Injected between the commit's two parts** — a fault injected **after the
+>     record's insertion and before the count's increment**, asserting **across a
 >     restart** that the transaction left the store on one side or the other:
 >     either no record and no advance, or the record present with the count
->     advanced by one and the bound respected. **A half-applied commit surviving a
->     restart fails this arm**, and it is what §2's one-transaction clause is
->     stated for.
-> 17. **The four conditions** — a binding whose connectability, endpoint,
+>     advanced by one. **A half-applied commit surviving a restart fails this
+>     arm**, and it is what §2's one-transaction clause is stated for.
+> 16. **The four conditions** — a binding whose connectability, endpoint,
 >     connection reference or recorded identity does not match refuses the call,
 >     **one arm per condition** (ADR-0148 §6).
-> 18. **No network** — the transport-confinement contract covers the new module and
+> 17. **No network** — the transport-confinement contract covers the new module and
 >     fails if the entry is removed.
-> 19. **The uncertain booking, told truthfully** — the `INDETERMINATE` step §4
+> 18. **The uncertain booking, told truthfully** — the `INDETERMINATE` step §4
 >     requires is produced by a configuration that fails **at the commit boundary**,
 >     and the arm asserts the store afterwards: the flag the provider reported was
 >     **true of what it did**. A configuration that fails **before** any commit is
@@ -901,8 +893,16 @@ clauses more widely than it now holds?*
 >     `INDETERMINATE`. **An arm reaching `INDETERMINATE` through a provider that
 >     could not have committed demonstrates a pessimistic misreport rather than an
 >     uncertain effect**, and is not an implementation of this arm.
-> 20. **The honesty statement** — the field on every successful output, and the
+> 19. **The honesty statement** — the field on every successful output, and the
 >     statement in the `message` of a `ToolFailure` **this provider returns** (§6).
+> 20. **One configuration answers identically, on every call and across a
+>     restart** — the same availability request is made **twice against one
+>     provider** and **again against a provider reconstructed from the same
+>     configuration**, and all three outputs are asserted **equal**. §5 promises
+>     exactly this and nothing else here tests it: an implementation reading a
+>     clock it was not given, or a random source, still returns its fixture's
+>     expected value inside a single run, passes every other arm, and leaves the
+>     M33 walkthrough irreproducible.
 
 > **Normative — arm 7 asserts the *reading* and not ADR-0271 §3's finding, because
 > that comparison has not landed in `src/`.** An arm demanding a demonstration a
