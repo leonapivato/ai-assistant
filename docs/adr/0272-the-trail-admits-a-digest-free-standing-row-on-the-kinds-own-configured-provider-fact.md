@@ -196,13 +196,24 @@ the row alone. ADR-0193 §6's pairing refusal, narrowed to route (b) by ADR-0247
 > edit** — it is contract *text* for behaviour this decision fixes, and nothing a client
 > decodes changes.
 
-> **Normative.** **That edit does not discharge #2464, and the lane does not grow to absorb
-> it.** `AuditTrail.record`'s docstring is stale in two further respects this decision does
-> not touch: it states the route-(b) invariant over a scope **ADR-0247 §2 already narrowed**
-> by *"and whose `authorised_subject` is set"*, and it does not mention **ADR-0254 §7's**
-> route-(d) checks at all. Both predate this decision, neither is created by it, and #2464
-> is where they are answered — which is the triage rule for a pre-existing defect, applied
-> rather than set aside because the lane is now editing that file.
+> **Normative.** **In the same edit the lane narrows the route-(b) sentence by *"and whose
+> `authorised_subject` is set"*, because the two paragraphs contradict each other
+> otherwise.** That sentence today refuses *every* non-resolving `ALLOW` carrying an
+> `egress_binding` and an `authorised_by` unless **all eight** route-(b) checks hold, the
+> set `authorised_subject` among them — so a route-(c) row, whose `authorised_subject` is
+> **unset** by construction, would be required to be accepted by one paragraph and refused
+> by the other. **This is transcription and not a decision**: ADR-0247 §2 ratified the
+> narrowing in those words — *"is narrowed by **and whose `authorised_subject` is set**"* —
+> and the file never received it, which is why the contradiction is latent in the tree today
+> and would become visible the moment route (c) is written down beside it. The lane
+> therefore **may not** write the route-(c) paragraph without it.
+
+> **Normative.** **What remains of #2464 after that edit is ADR-0254 §7's route-(d) checks,
+> and the lane does not grow to absorb them.** `_check_goal_authority_shape`'s two checks
+> and the four-route partition are unmentioned in `core/protocols.py`; they predate this
+> decision, no paragraph this lane writes contradicts them, and #2464 is where they are
+> answered — which is the triage rule for a pre-existing defect, applied rather than set
+> aside because the lane is now editing that file.
 
 > **Normative.** **One lane for all four files, and the ground is the triad exception.**
 > Contract text, shared conformance suite, canonical fake and the production implementation
