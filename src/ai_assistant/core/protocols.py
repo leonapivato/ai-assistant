@@ -142,6 +142,8 @@ if TYPE_CHECKING:
         ConversationExport,
         ConversationSummary,
         ConversationTurn,
+        CoverageAnswer,
+        CoverageMember,
         CurrentContext,
         DeferralAdmission,
         DeferralClaim,
@@ -8624,6 +8626,138 @@ class GoalQuotes(Protocol):
             AuthorizationError: If the store cannot be read. **No implementation
                 converts this into an empty tuple**: the request is then not covered,
                 §6's bar is taken, and the fault is reported.
+        """
+        ...
+
+
+@runtime_checkable
+class CoverageAnswers(Protocol):
+    """Whether a proposed row's coverage meets condition 6 (ADR-0270 §1).
+
+    **The proposal path's face onto ADR-0266 §7's condition 6**, and it answers
+    that condition alone. ADR-0254 §15 rules that an ``Authorization`` is *"written
+    and settled by ``orchestration`` and by nothing else"*, §1 makes a path-(i)
+    proposal conditional on the row it would write satisfying condition 6, and
+    ADR-0266 §7 puts condition 6's *"One implementation, in ``permissions``"* —
+    which golden rule 1 forbids ``orchestration`` importing. This member is what
+    joins the three: **where a component that is not ``permissions`` needs
+    condition 6's answer about a row it would write, it obtains it here and by no
+    other means**. It re-implements no conjunct, selects no governing quote,
+    compares no arguments digest, reads no ``BoundedArgument`` and takes no
+    ``ValueBound`` comparison.
+
+    **One member, and no lane adds a second** (§1).
+
+    **A face of its own and not a third member on** :class:`ActionPolicy`, because
+    the answer carries a durable record. :class:`~ai_assistant.core.types.CoverageAnswer`
+    returns an :class:`~ai_assistant.core.types.ActionQuote` read from the goal's
+    quotes, so this member **grants a capability rather than withholding one**. On
+    this tree ``ActionPolicy`` is injected into ``RecipientGrantOperations`` and into
+    parked-read servicing, neither of which writes a proposal; a member there would
+    give both a typed route returning a quote for any goal and action, and
+    ``mypy --strict`` is what makes a separate face a real withholding rather than a
+    convention (ADR-0097 §3, ADR-0193 §1, ADR-0254 §16). **It is one object and not
+    a second implementation**: ``permissions`` satisfies this and ``ActionPolicy``
+    from the policy it already builds — ADR-0193 §1's *"three faces, one object"* —
+    and the composition root passes that one object to the proposal writer under
+    this annotation, which is golden rule 1 rather than an exception to it.
+
+    **It takes the coverage tuple and never the row** (§1). Condition 6 is stated
+    over the request's user-facing arguments, its declaration's
+    ``bounded_arguments``, its ``intended_action`` and the row's ``coverage``, and
+    the first three are on the request — so the request and the tuple are the whole
+    operand. Handing the policy the row about to be written would put one in its
+    hands for the one question that does not need it, and ``id``, ``goal``,
+    ``tool``, ``account``, ``destinations``, ``proposed_at``, ``expires_at``,
+    ``confirmation``, ``supersedes`` and ``disposition`` are read here by nothing.
+
+    **It rules nothing** (§4). It returns no
+    :class:`~ai_assistant.core.types.PermissionRuling`, so it has no field in which
+    to allow, deny or confirm; it sets no ``authorised_by``, no
+    ``authorised_subject`` and no ``authorised_goal``; it is no route of ADR-0148 §3
+    and clears no floor of any of them. The ruling on the request is
+    :meth:`ActionPolicy.decide`'s, unchanged, and a met answer authorises nothing by
+    itself.
+
+    **It establishes nothing and records nothing** (§4). It writes and settles no
+    ``Authorization``, mints no ``CoverageMember``, mints no quote, records no
+    ``PermissionDecision``, and **writes to no store and holds none**: it reads
+    through :class:`GoalQuotes` alone (ADR-0267 §5) and names no concrete store.
+    **And it reads no model output**: ADR-0254 §9's no-model clause and ADR-0266
+    §8's bind entire, so no nomination of an argument, a kind, a member, a bound or
+    a quote reaches it or is read by it.
+
+    **ADR-0254 §13's recheck is untouched, and this member is not it** (§3). The
+    coverage comparison *"taken at ``ActionPolicy.decide``, on the concrete request,
+    at every dispatch"* stands exactly as §13 states it, over a **live** row and all
+    six conditions. **No answer this member returns is cached, carried to a dispatch
+    or read by any later comparison**: §13's *"no cached coverage verdict anywhere"*
+    binds this member exactly as it binds every other, and a proposal-time answer
+    answers that proposal.
+
+    Cancelling :meth:`coverage_met` is governed by this module's cancellation clause
+    (ADR-0060). Its input-observation clause (ADR-0065) has **real bite** here: the
+    member suspends on a durable read, and both arguments are the caller's — a
+    frozen model is rewritable through ``__dict__``, so an implementation that read
+    the request's ``goal`` on the way in and its ``parameters`` on the way out would
+    answer about a request that is neither the one presented nor the one
+    substituted.
+    """
+
+    async def coverage_met(
+        self, request: ActionRequest, coverage: tuple[CoverageMember, ...]
+    ) -> CoverageAnswer:
+        """Whether ``coverage`` satisfies condition 6 for ``request`` (ADR-0270 §1).
+
+        ``coverage`` is the coverage a row this system would write would carry — a
+        **proposal**, so there is no live row anywhere in this call and ADR-0254
+        §3's conditions 1 to 5 have nothing to be taken over. **This evaluates
+        condition 6 and no other condition**: not §6's floors, §1's *"the proposal
+        reads none of §6's floors, and that is deliberate"* binding entire, so a
+        request whose binding carries ``planned_with_external_content`` is answered
+        on condition 6 exactly as one that does not; not §12's ladder; and not §1's
+        other three proposal conditions, which the writer takes for itself.
+
+        **It is ``async`` because the evidence route reads a durable seam**
+        (ADR-0267 §5), as :meth:`GoalAuthorizations.live_for` does.
+
+        **A policy that cannot read a quote answers unmet, and never met** (§4). An
+        implementation constructed with **no** :class:`GoalQuotes` answers ``met``
+        false, and so carries no quote, for any ``coverage`` carrying a member the
+        evidence route alone can meet — which is every ``MONEY`` member (ADR-0266
+        §7). That is ``decide``'s own *"no authorisation source"* floor read one
+        member over, and it is the fail-closed direction.
+
+        Args:
+            request: The concrete action a row would be proposed for. Its
+                user-facing arguments, its declaration's ``bounded_arguments`` and
+                its ``intended_action`` are three of condition 6's four operands.
+            coverage: The coverage the proposed row would carry — condition 6's
+                fourth operand, and **never the row**. Empty is the coverage this
+                system proposes today, and it is met exactly where a request
+                carries no user-facing argument.
+
+        Returns:
+            Whether that coverage satisfies condition 6 for that request, and —
+            **exactly where it does and ``coverage`` carries a ``MONEY`` member** —
+            the governing quote ADR-0266 §7's evidence route was taken over: of the
+            quotes :meth:`GoalQuotes.for_action` returned, the last of them
+            (ADR-0267 §5), and no other. **No implementation sets it on any other
+            ground**, invents a quote, or returns one it did not read. The quote is
+            the operand the proof was taken over and never a verdict: a path-(i)
+            writer records it on the row and **performs no selection of its own**,
+            and no component covers a request against it, re-tests it, refreshes it,
+            compares it to a later quote or caches it (ADR-0270 §2).
+
+        Raises:
+            AuthorizationError: If :meth:`GoalQuotes.for_action` raises one. **A
+                fault is never an absence** (§4): no implementation converts it into
+                a met answer, into an unmet one, or into an empty tuple of quotes,
+                and **no new error class is minted**. A component that asked writes
+                no row where this member faults, ``Confirmation.authorization`` is
+                absent and the one call is confirmed under ADR-0148 §3's route (a) —
+                ADR-0254 §1's own disposition for a failed completeness condition,
+                reached by one further case.
         """
         ...
 

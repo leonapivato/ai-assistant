@@ -148,7 +148,7 @@ OTHER_TOOL: Final[ToolDefinition] = ToolDefinition.model_validate(
 
 def covered(row: Authorization, call: ActionRequest, quotes: Sequence[ActionQuote]) -> bool:
     """Whether condition 6 holds over this pair and these quotes (ADR-0266 §7)."""
-    return covers_arguments(row, coverage_subject(call), quotes)
+    return covers_arguments(row.coverage, coverage_subject(call), quotes)
 
 
 def policy_with(
