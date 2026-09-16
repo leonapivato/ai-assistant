@@ -41,6 +41,7 @@ from ai_assistant.core.types import (
     MAX_ASSOCIATION_CANDIDATES,
     ActionPlan,
     AssociationVerdict,
+    AttemptOutcome,
     AttemptState,
     ClarificationWithdrawal,
     EngagementDisposition,
@@ -197,10 +198,22 @@ async def test_withdrawing_twice_and_withdrawing_nothing_are_both_results() -> N
 async def test_abandoning_closes_the_goal_and_settles_its_question() -> None:
     """§12: ``abandon_goal`` is the only thing in this system that writes ``ABANDONED``.
 
-    "Abandoning writes the goal's status through ``PlanStore.set_goal_status`` and
-    settles its open question ``WITHDRAWN``, and does nothing else. It does **not** move
-    the attempt's state, does not write an ``AttemptOutcome``, does not end an execution
-    and does not cancel anything in flight."
+    "Abandoning … settles its open question ``WITHDRAWN``" — and since ADR-0261 §2 it
+    writes the status through ``PlanStore.close_goal_abandoned``, which in **one**
+    indivisible step also ends every attempt of the goal standing in a non-terminal
+    state. That decision partially supersedes §12's *"does **not** move the attempt's
+    state, does not write an ``AttemptOutcome``"*: **A9 is discharged rather than still
+    owed**, and the attempt this turn paused for a clarification ends ``CANCELLED``
+    carrying the outcome ADR-0261 §3's limbs yield over its own executions — here
+    ``CANCELLED``, limb 4, because it opened none.
+
+    **What §12 says about executions binds verbatim and is asserted here**: the act
+    "does not end an execution and does not cancel anything in flight".
+
+    **The answer stays ``ABANDONED``** on this lane. Mapping
+    ``close_goal_abandoned``'s ``bool`` onto ADR-0261 §6's
+    ``ABANDONED_EFFECT_IN_FLIGHT`` is L2's, so nothing here can produce the fourth
+    member (issue #2435).
     """
     harness = Harness(planner=_Asking())
     paused = await harness.engine.converse(_ASKED, timeout=PATIENT)
@@ -218,8 +231,10 @@ async def test_abandoning_closes_the_goal_and_settles_its_question() -> None:
     assert settled is not None
     assert settled.disposition is GoalQuestionDisposition.WITHDRAWN
     (attempt,) = await harness.plans.attempts_of(goal_id)
-    assert attempt.state is AttemptState.AWAITING_CLARIFICATION, "§12: the attempt is A9's"
-    assert attempt.outcome is None
+    assert attempt.state is AttemptState.CANCELLED, "ADR-0261 §2: the act ends it"
+    assert attempt.outcome is AttemptOutcome.CANCELLED, "and §3's limb 4: it produced nothing"
+    assert attempt.ended_at is not None
+    assert await harness.plans.active_executions() == [], "§12: and it ends no execution"
 
 
 async def test_abandoning_settles_a_question_admitted_while_the_status_was_written() -> None:
@@ -275,12 +290,20 @@ class _AdmitsWhileClosing(FakePlanStore):
 
     late: GoalQuestion | None = None
 
-    async def set_goal_status(self, goal_id: str, /, **fields: Any) -> Any:
-        """Admit the waiting question first, then write the status as the fake does."""
+    async def close_goal_abandoned(self, goal_id: str, /, **fields: Any) -> Any:
+        """Admit the waiting question first, then close the goal as the fake does.
+
+        Overridden on ``close_goal_abandoned`` rather than on ``set_goal_status``
+        since ADR-0261 §2, which is the member the abandoning act now takes. What the
+        case is about is unchanged: ``record_question`` advances no ``Goal.version``
+        (ADR-0250 §9), so a clarification a concurrent turn admits between the act's
+        first read and its closing write is invisible to that write's
+        compare-and-swap.
+        """
         if self.late is not None:
             admitted, self.late = self.late, None
             await super().record_question(admitted)
-        return await super().set_goal_status(goal_id, **fields)
+        return await super().close_goal_abandoned(goal_id, **fields)
 
 
 async def test_abandoning_twice_and_abandoning_nothing_are_both_results() -> None:

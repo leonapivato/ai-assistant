@@ -897,14 +897,20 @@ def test_status_has_two_callers_and_one_store_member_that_writes_abandoned() -> 
     ``ABANDONED`` — and the assertion narrowed from "none" to "these two and no others"
     rather than being dropped.
 
-    **ADR-0261 §2 adds the third population and the arm narrows again rather than
+    **ADR-0261 §2 moves the abandonment's write and the arm narrows again rather than
     widening loosely.** ``PlanStore.close_goal_abandoned`` "**ends a goal's live
     attempts, writes ``ABANDONED`` and returns that same predicate, all in one
     indivisible step**", which is that decision partially superseding ADR-0250 §9's
     sole-route phrase **in the ``ABANDONED`` member alone**; ``ACHIEVED``, ``BLOCKED``
     and ``ACTIVE`` keep ``set_goal_status`` as their only route. So each conforming
     ``PlanStore`` writes the member once, **inside that member's own body and nowhere
-    else** — which is what this arm pins, rather than merely counting three more lines.
+    else** — which is what this arm pins, rather than merely counting three more lines
+    — and the **engine writes it no longer**: ``_abandon_goal`` takes the new member,
+    so ``orchestration`` keeps exactly one literal status write, §13's reopen.
+
+    **The count of *acts* is unchanged and that is the point**: ``abandon_goal`` is
+    still the only thing in this system that writes ``ABANDONED``, and what moved is
+    which member it takes to write it.
 
     The **write** form is what is counted — a ``status=GoalStatus.…`` argument or a
     ``"status": GoalStatus.…`` entry — deliberately distinct from the **declaration**
@@ -919,26 +925,24 @@ def test_status_has_two_callers_and_one_store_member_that_writes_abandoned() -> 
     )
     assert [where for where, _ in writes] == [
         "ai_assistant/orchestration/engine.py",
-        "ai_assistant/orchestration/engine.py",
         "ai_assistant/planning/sqlite_store.py",
         "ai_assistant/planning/store.py",
         "ai_assistant/testing/planning.py",
     ], (
-        "ADR-0250 §20 arm 23 with ADR-0261 §2: the two acts are `orchestration`'s and "
-        f"each conforming store writes ABANDONED once of its own. Found: {writes}"
+        "ADR-0250 §20 arm 23 with ADR-0261 §2: the reopen is `orchestration`'s and each "
+        f"conforming store writes ABANDONED once of its own. Found: {writes}"
     )
     assert sorted(what for _, what in writes) == [
-        "status=GoalStatus.ABANDONED,",
         "status=GoalStatus.ACTIVE,",
         'update={"status": GoalStatus.ABANDONED, "version": stored.version + 1}',
         "updated = _with_status(stored, status=GoalStatus.ABANDONED)",
         "updated = _with_status(stored, status=GoalStatus.ABANDONED)",
     ], (
-        "and they are the abandonment (§12), the reopen (§13) and the three stores' "
-        f"one closing write each (ADR-0261 §2). Found: {writes}"
+        "and they are the reopen (§13) and the three stores' one closing write each "
+        f"(ADR-0261 §2). Found: {writes}"
     )
     assert _enclosing_functions_writing_the_status() == {
-        "ai_assistant/orchestration/engine.py": {"_abandon_goal", "_engaged"},
+        "ai_assistant/orchestration/engine.py": {"_engaged"},
         "ai_assistant/planning/sqlite_store.py": {"_close_goal_abandoned_sync"},
         "ai_assistant/planning/store.py": {"close_goal_abandoned"},
         "ai_assistant/testing/planning.py": {"close_goal_abandoned"},
@@ -986,19 +990,25 @@ def _is_a_goal_status(node: ast.expr) -> bool:
     )
 
 
-def test_set_goal_status_has_exactly_the_two_callers_arm_23_names() -> None:
+def test_the_two_closing_acts_have_exactly_one_caller_each() -> None:
     """§20 arm 23 counted from the **callers**, not from the literals they pass.
 
     The two cases above count occurrences of ``status=GoalStatus.…``. That is the right
     subject for "which statuses are written", and the wrong one for "how many writers
-    there are": a third call passing a *name* — ``set_goal_status(..., status=chosen)``
-    — carries no literal to count and would satisfy both. §9 makes ``set_goal_status``
-    *"the goal's **only** status-mutation route"* and §12 and §13 name exactly two acts
-    that take it, so the population this arm is really about is the **call sites**.
+    there are": a call passing a *name* — ``set_goal_status(..., status=chosen)`` —
+    carries no literal to count and would satisfy both. §12 and §13 name exactly two
+    acts, so the population this arm is really about is the **call sites**.
 
-    Counted from the syntax tree: every call under ``src/`` whose callee is
-    ``set_goal_status``, each of which must sit in ``orchestration/engine.py`` and carry
-    a literal ``GoalStatus`` attribute as its ``status``.
+    **Since ADR-0261 §2 the two acts take two different members**, and the arm counts
+    both rather than one: the reopen (§13) takes ``set_goal_status``, and the
+    abandonment (§12) takes ``close_goal_abandoned``, which writes ``ABANDONED`` and
+    ends the goal's live attempts in one indivisible step. **Exactly one caller each,
+    both in ``orchestration/engine.py``** — a second caller of either would be a second
+    act writing a closed status, which is what arm 23 exists to refuse.
+
+    Counted from the syntax tree: every call under ``src/`` whose callee is either
+    member. The reopen's must carry a literal ``GoalStatus`` attribute as its
+    ``status``; the abandonment's carries none, the member naming its own.
     """
     callers = sorted(
         (str(path.relative_to(_SRC)), _status_argument(node))
@@ -1008,11 +1018,21 @@ def test_set_goal_status_has_exactly_the_two_callers_arm_23_names() -> None:
         and isinstance(node.func, ast.Attribute)
         and node.func.attr == "set_goal_status"
     )
+    closers = sorted(
+        str(path.relative_to(_SRC))
+        for path in _SRC.rglob("*.py")
+        for node in ast.walk(ast.parse(path.read_text()))
+        if isinstance(node, ast.Call)
+        and isinstance(node.func, ast.Attribute)
+        and node.func.attr == "close_goal_abandoned"
+    )
+    assert closers == ["ai_assistant/orchestration/engine.py"], (
+        f"ADR-0261 §2: the abandoning act is the one caller of the closing member. Found: {closers}"
+    )
     assert [where for where, _ in callers] == [
         "ai_assistant/orchestration/engine.py",
-        "ai_assistant/orchestration/engine.py",
-    ], f"ADR-0250 §20 arm 23: exactly two callers of the one status route. Found: {callers}"
-    assert sorted(what for _, what in callers) == ["ABANDONED", "ACTIVE"], (
+    ], f"ADR-0250 §20 arm 23: one caller of the status route, the reopen. Found: {callers}"
+    assert sorted(what for _, what in callers) == ["ACTIVE"], (
         "and each names its member outright, so that no call can carry a status decided "
         f"somewhere this test cannot read. Found: {callers}"
     )
