@@ -75,6 +75,28 @@ async def test_a_quote_rides_back_only_where_a_money_member_is_in_play() -> None
     assert (await seam.coverage_met(BARE, ())).quoted is None
 
 
+async def test_a_met_money_coverage_is_unavailable_without_a_quote_to_prove_it() -> None:
+    """ADR-0270 §2's presence rule in the **other** direction, held over the
+    configuration (adversarial review, round 1, ``blocker``).
+
+    ``quoted`` is *"set where ``met`` is true **and** ``coverage`` carries a ``MONEY``
+    member"*, so a met answer over a priced coverage carrying no quote is not an
+    answer the one implementation can produce — and a consumer seeded with one would
+    be certified against an absent ``Authorization.quoted`` on a row the evidence
+    route did decide. A fake holding no quote is the fake's own reading of §4's *"An
+    implementation constructed with **no** ``GoalQuotes`` answers ``met`` false"*, so
+    it answers **unmet**, which is the fail-closed direction.
+
+    The coverage carrying no ``MONEY`` member is the control: nothing there needs a
+    quote, so the default fake still answers met.
+    """
+    seam = FakeCoverageAnswers(met=True)
+    priced = await seam.coverage_met(PRICED, MONEY_COVERAGE)
+    assert (priced.met, priced.quoted) == (False, None)
+    assert (await seam.coverage_met(DATED, PERIOD_COVERAGE)).met is True
+    assert (await seam.coverage_met(BARE, ())).met is True
+
+
 async def test_an_unmet_answer_drops_the_configured_quote_rather_than_raising() -> None:
     """The same override, in the direction :class:`CoverageAnswer`'s model refuses.
 
@@ -105,7 +127,7 @@ async def test_every_call_is_recorded_detached_and_counted() -> None:
     the pair it was asked about. Recorded detached, because the caller still holds
     both.
     """
-    seam = FakeCoverageAnswers()
+    seam = FakeCoverageAnswers(quote=GOVERNING_QUOTE)
     await seam.coverage_met(PRICED, MONEY_COVERAGE)
     await seam.coverage_met(BARE, ())
     assert seam.call_count == 2
@@ -124,7 +146,7 @@ async def test_an_armed_fault_propagates_and_is_never_an_absence() -> None:
     failed completeness condition. A fake that converted it into an unmet answer
     would certify a writer that never learned to tell the two apart.
     """
-    seam = FakeCoverageAnswers()
+    seam = FakeCoverageAnswers(quote=GOVERNING_QUOTE)
     seam.fail_coverage_met()
     with pytest.raises(AuthorizationError):
         await seam.coverage_met(PRICED, MONEY_COVERAGE)

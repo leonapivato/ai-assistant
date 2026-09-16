@@ -14,16 +14,28 @@ said the coverage was met, over this quote"* says so, rather than arranging a re
 a declaration, a member and a quote that happen to make the production comparison
 answer that way today.
 
-**Two obligations override the configuration**, because a fake that could be
+**Three obligations override the configuration**, because a fake that could be
 configured into violating its own conformance suite would be a trap for the consumer
-it certifies (``FakeMemoryPolicy``'s own three are the precedent).
+it certifies (``FakeMemoryPolicy``'s own three are the precedent). ADR-0270 §2's
+presence rule is *"present exactly where the evidence route decided something"*, and
+**both directions of it are the half
+:class:`~ai_assistant.core.types.CoverageAnswer` cannot hold for itself**: the model
+carries no coverage to test itself against.
 
 * **A quote rides back only where the evidence route could have decided one** — where
   the answer is met **and** ``coverage`` carries a ``MONEY`` member, that being the
-  one kind the evidence route can meet (ADR-0266 §7). ADR-0270 §2's presence rule is
-  *"absent in every other case"*, and it is the half
-  :class:`~ai_assistant.core.types.CoverageAnswer` cannot hold for itself: the model
-  carries no coverage to test itself against.
+  one kind the evidence route can meet (ADR-0266 §7). Configured with a quote, this
+  fake still answers ``None`` for a ``PERIOD``-only or an empty coverage.
+* **A met answer over a ``MONEY``-carrying coverage is not available without one.**
+  Configured with **no** quote, this fake answers ``met`` false for such a coverage
+  however it was configured — which is ADR-0270 §4's own clause, *"An implementation
+  constructed with **no** ``GoalQuotes`` answers ``met`` false … for any ``coverage``
+  carrying a member the evidence route alone can meet"*, read onto a fake that holds
+  no quote to prove one against. Without it a consumer could be seeded *"met"* over a
+  priced coverage and certified against ``quoted=None`` — an answer the one
+  implementation never produces, and the one a path-(i) writer would record as an
+  absent ``Authorization.quoted`` on a row the evidence route did decide. Adversarial
+  review, round 1, ``blocker``.
 * **An unmet answer carries no quote.** The model refuses that outright, so a fake
   configured with a quote and ``met`` false would raise rather than answer — the
   first override covers this one as well, and it is stated because it is the rule a
@@ -66,9 +78,10 @@ class FakeCoverageAnswers:
             met: Whether it answers that the coverage satisfies condition 6.
             quote: The governing quote a met answer over a ``MONEY``-carrying
                 coverage rides back with (ADR-0270 §2). ``None`` — the default —
-                is the answer for every coverage the evidence route decides
-                nothing about, which is every coverage carrying no ``MONEY``
-                member.
+                makes every ``MONEY``-carrying coverage **unmet**, whatever
+                ``met`` says, which is the fail-closed direction and the second
+                override above; it is also the whole answer for every coverage the
+                evidence route decides nothing about.
         """
         self._met = met
         self._quote = None if quote is None else quote.model_copy(deep=True)
@@ -100,8 +113,8 @@ class FakeCoverageAnswers:
 
         Args:
             met: Whether condition 6 holds.
-            quote: The governing quote, subject to the class docstring's first
-                override.
+            quote: The governing quote, subject to the class docstring's first two
+                overrides.
         """
         self._met = met
         self._quote = None if quote is None else quote.model_copy(deep=True)
@@ -138,11 +151,14 @@ class FakeCoverageAnswers:
                 it, recording it so a test can assert what was asked.
             coverage: The coverage that row would carry. Read for **one** thing —
                 whether it carries a ``MONEY`` member, which is what decides whether
-                a quote may ride back at all (ADR-0270 §2).
+                a quote may ride back at all, and whether a met answer is available
+                without one (ADR-0270 §2, §4).
 
         Returns:
             The configured answer, carrying the configured quote exactly where
-            ``met`` is true and ``coverage`` carries a ``MONEY`` member.
+            ``met`` is true and ``coverage`` carries a ``MONEY`` member — and
+            **unmet** where such a coverage has no configured quote to be proved
+            against.
 
         Raises:
             Exception: Whatever :meth:`fail_coverage_met` armed.
@@ -158,9 +174,10 @@ class FakeCoverageAnswers:
             raise self._failure
         async with self._resource.held():
             priced = any(member.kind is BoundKind.MONEY for member in members)
-            quoted = self._quote if self._met and priced else None
+            met = self._met and (self._quote is not None or not priced)
+            quoted = self._quote if met and priced else None
             return CoverageAnswer(
-                met=self._met,
+                met=met,
                 quoted=None if quoted is None else quoted.model_copy(deep=True),
             )
 
