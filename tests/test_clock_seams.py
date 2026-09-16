@@ -130,6 +130,7 @@ from ai_assistant.orchestration import (
     ConversationLifecycle,
     DestinationTrustOperations,
     Engine,
+    ForecastServicer,
     GrantOperations,
     IngestionStage,
     LearningLoop,
@@ -176,6 +177,7 @@ from ai_assistant.testing import (
     FakeEmbedder,
     FakeFeedbackProcessor,
     FakeFetcher,
+    FakeForecaster,
     FakeGoalAssociator,
     FakeGoalAuthorizations,
     FakeGoalAuthorizationStore,
@@ -211,6 +213,7 @@ from ai_assistant.testing import (
     source_grant,
     succeeds,
 )
+from ai_assistant.testing.forecasting import FAKE_FORECAST_READ
 from ai_assistant.testing.searching import FAKE_WEB_SEARCH
 from ai_assistant.tools.builtin import CurrentTime
 
@@ -458,6 +461,33 @@ async def _search_servicer(now: Clock) -> None:
         goal=_goal(),
         plan=_plan(),
     )
+
+
+async def _forecast_servicer(now: Clock) -> None:
+    """ADR-0260 §7's recorder clock, read where the ``PermissionDecision`` is stamped.
+
+    :func:`_search_servicer`'s twin one kind over, and driven the same way: through the
+    seam's real entry point, so the proposal, the binding and the ruling all run first
+    and the reading is the last thing before the trail is written. A
+    ``FakeActionPolicy`` reaches a ``CONFIRM`` on the forecast declaration's own
+    ``discloses`` floor — a **recorded** ruling like any other — so the stamp is reached
+    without a configured pair, a costed declaration or an open channel.
+    """
+    binder = FakeEgressBinder()
+    binder.register_egress(
+        FAKE_FORECAST_READ, reference="conn-forecast", identity="Example Forecast"
+    )
+    await ForecastServicer(
+        forecaster=FakeForecaster(),
+        binder=binder,
+        policy=FakeActionPolicy(),
+        trail=FakeAuditTrail(),
+        now=now,
+        id_factory=lambda: "d-1",
+        # ADR-0260 §11 adds no deadline figure of its own, so this is the one bound
+        # ADR-0241 §3 already gives the servicing.
+        deadline=timedelta(seconds=30),
+    ).service(remaining=10, external=False)
 
 
 async def _clock_source(now: Clock) -> None:
@@ -1231,6 +1261,9 @@ SEAMS = [
     # ADR-0231 §6's recorder clock, propagating rather than translating for the
     # reason `PROPAGATED` records — `Fetcher`'s clause above, one seam over.
     Seam("SearchServicer", _search_servicer, ClockReadingError),
+    # ADR-0260 §7's recorder clock, propagating for `SearchServicer`'s own reason one
+    # kind over: ADR-0260 adds **no** error class to `core.errors` either.
+    Seam("ForecastServicer", _forecast_servicer, ClockReadingError),
     Seam("FakeMemoryStore", _fake_store, MemoryStoreError),
     Seam("FakeMemoryWriter", _fake_writer, MemoryStoreError),
     Seam("FakePlanner", _fake_planner, PlanningError),
@@ -1575,6 +1608,12 @@ PROPAGATED: Final[dict[str, str]] = {
         "process cannot read is none of ADR-0231 §9's three decline causes — a binder, "
         "a policy, a trail — so reporting it as one of them would report one stage's "
         "fault under another stage's member, which §13 forbids in terms"
+    ),
+    "ForecastServicer": (
+        "ADR-0260 adds **no** error class to `core.errors` either, and a clock this "
+        "process cannot read is none of ADR-0260 §8's decline causes — a binder, a "
+        "policy, a trail — so reporting it as one of them would report one stage's "
+        "fault under another stage's member, which §8 forbids in terms"
     ),
     "ConsolidationStage": _UNDECLARED,
     "CurrentTime": ("documented at ``tools/builtin.py:148``, and `tools` is not in §4's list"),
