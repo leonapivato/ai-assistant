@@ -5240,19 +5240,106 @@ class Engine:
         if not is_open(goal):
             return GoalAbandonment.ALREADY_CLOSED
         await self._withdraw_open_question(goal.id)
-        # The answer is deliberately discarded: what it reports is ADR-0261 §6's
-        # fourth `GoalAbandonment` member, which L2 owes together with the retry and
-        # the listing's field (issue #2435).
-        await self._plans.close_goal_abandoned(
-            goal.id,
-            at=self._clock(),
-            expected_version=goal.version,
-        )
+        await self._ending_then_close(goal.id, goal_version=goal.version)
         # §12 again, over the window the goal's compare-and-swap does not cover: a
         # question admitted while the status write was in flight is still this goal's
         # open question, and the goal is now closed.
         await self._withdraw_open_question(goal.id)
         return GoalAbandonment.ABANDONED
+
+    async def _ending_then_close(self, goal_id: str, /, *, goal_version: int) -> None:
+        """One abandonment attempt: the ending, then the closing write (ADR-0268 §1).
+
+        **The two writes of one attempt, in the one order ADR-0268 §1 admits**, and
+        they are **two writes in two stores** — the corpus offers no transaction
+        across them (ADR-0255 §6), so nothing here states, implements or tests them
+        as one.
+
+        **The ending is taken strictly before the closing write**, after the read
+        this attempt's ``expected_version`` came from has found the goal open. That
+        is what makes the ending *total* rather than best-effort: from the instant
+        ``end_for_goal`` returns, and for as long as the fence it raised stands, no
+        row of the goal stands ``PROPOSED`` or ``ESTABLISHED`` and none can be
+        recorded, so the closing write cannot be raced by an establishment. **Taken
+        after the status write it would be exactly that race.**
+
+        **One clock reading serves both**, which §1 requires: a ``GOAL_CLOSED``
+        row's ``settled_at`` is the instant of the **act** that ended it and never a
+        second reading taken between the two writes.
+
+        **The version is this attempt's own ``expected_version`` and never one a
+        write returned.** An overtaken attempt — the store's record already standing
+        above it — ends no row and fences nothing, and that is the universal holding
+        rather than an exception to it: a record standing higher means some act read
+        the goal above this version, so this attempt's own closing write is refused
+        stale anyway.
+
+        **Why this is a method and not two lines at the call site.** ADR-0268 §1
+        takes the ending *"once per closing-write attempt"*, ADR-0261 §2's
+        re-read-and-retry included, *"each carrying that attempt's own instant"*. The
+        retry is ADR-0261 L2's and is not in this tree (#2435, #2451), so the act
+        makes exactly one attempt today — and the pair is stated here so that the
+        lane adding the retry wraps an attempt that already carries its ending,
+        rather than having to remember to add a second call.
+
+        **What each failure leaves** (§1). Where ``end_for_goal`` faults the act ends
+        here having written nothing on this attempt — its step is all-or-nothing —
+        and on a first attempt that is nothing at all. Where it succeeds and the
+        closing write does not, the act propagates and **compensates nothing**: the
+        rows stand ``GOAL_CLOSED``, truthfully under §2's meaning; the goal is left
+        open and fenced, so every call of it asks; and the repair is the user's own
+        abandon and reopen. A ``clear_closure`` here could not tell its own orphaned
+        fence from one a concurrent act is relying on — two acts whose reads both
+        found the goal open at version *v* fence at *v* alike — so the compensation
+        goes, not the fence.
+
+        Args:
+            goal_id: The goal being abandoned.
+            goal_version: The version this attempt's own closing write names as its
+                ``expected_version``.
+
+        Raises:
+            StaleExecutionError: As ``close_goal_abandoned`` raises it, on a lost
+                ``Goal.version`` and on nothing else.
+            AuthorizationError: As ``end_for_goal`` raises it.
+        """
+        at = self._clock()
+        await self._end_authorizations(goal_id, at=at, goal_version=goal_version)
+        # The answer is deliberately discarded: what it reports is ADR-0261 §6's
+        # fourth `GoalAbandonment` member, which L2 owes together with the retry and
+        # the listing's field (issue #2435).
+        await self._plans.close_goal_abandoned(
+            goal_id,
+            at=at,
+            expected_version=goal_version,
+        )
+
+    async def _end_authorizations(self, goal_id: str, /, *, at: datetime, goal_version: int) -> int:
+        """Take ADR-0268 §1's ending over ``goal_id`` where a store is wired.
+
+        **An unwired store ends nothing and is not a silent failure.** ADR-0254 §1
+        makes the authorization store optional and its absence fail-closed: a
+        deployment without one proposes no row at all (``StepRunner._propose``), so
+        there is no row to end and no fence anything could be refused by. The listing
+        already answers empty there and the revocation already answers
+        ``NO_SUCH_AUTHORIZATION``.
+
+        Args:
+            goal_id: The goal whose authorizations end and whose fence is raised.
+            at: The act's own instant, read once.
+            goal_version: The version the act's own status write names as its
+                ``expected_version``.
+
+        Returns:
+            How many rows the ending moved; ``0`` where no store is wired.
+
+        Raises:
+            AuthorizationError: As ``end_for_goal`` raises it.
+        """
+        operations = self._authorization_operations
+        if operations is None:
+            return 0
+        return await operations.end_for_goal(goal_id, at=at, goal_version=goal_version)
 
     async def _withdraw_open_question(self, goal_id: str) -> None:
         """Settle this goal's open question ``WITHDRAWN``, if it holds one (§12).
@@ -9894,12 +9981,37 @@ class Engine:
             else EngagementDisposition.RESUMED
         )
         if disposition is EngagementDisposition.REOPENED:
+            # **ADR-0268 §2: `ACTIVE`, then end, then clear — in that order, both
+            # after a *successful* write and neither before it.** The version both
+            # carry is this write's own ``expected_version`` and never the one it
+            # returns (§1): a later act reads the goal only after this write landed,
+            # so its version is strictly higher and its call raises the record above
+            # this one — and this act's own delayed call then changes nothing.
+            #
+            # **The ending is first, and it is what makes the reopen total rather
+            # than dependent on the closure having run.** On a goal this store was
+            # told about it answers 0; on one it was not — a database predating
+            # ADR-0268 — it ends the rows the closure never reached, which is the
+            # only route by which a row written before a closure otherwise reaches a
+            # call of the reopened goal. **The clear is second and lifts the fence
+            # the ending just wrote**, and without it the goal stays fenced against
+            # every new authorization and the reopened request can establish none.
+            #
+            # **The compare-and-swap is what serialises two reopens**: of two acts
+            # reopening one goal exactly one writes ``ACTIVE``, so exactly one takes
+            # the pair and the loser retires no row the winner established. An
+            # ending taken *before* the write would be one a losing reopen took over
+            # the winner's rows — which is why neither call is hoisted.
+            expected = goal.version
+            at = self._clock()
             goal = await self._plans.set_goal_status(
                 goal.id,
                 status=GoalStatus.ACTIVE,
-                at=self._clock(),
-                expected_version=goal.version,
+                at=at,
+                expected_version=expected,
             )
+            await self._end_authorizations(goal.id, at=at, goal_version=expected)
+            await self._clear_closure(goal.id, goal_version=expected)
         attempts = await self._plans.attempts_of(goal.id)
         current = attempts[-1] if attempts else None
         opens = (
@@ -9929,6 +10041,33 @@ class Engine:
                 and current.state is AttemptState.AWAITING_CLARIFICATION
             ),
         )
+
+    async def _clear_closure(self, goal_id: str, /, *, goal_version: int) -> bool:
+        """Lift ``goal_id``'s write fence where a store is wired (ADR-0268 §1, §2).
+
+        **This has exactly one caller and no second** (§6): the reopen, immediately
+        after that reopen's own ending. No act compensates a failed closing write
+        with it.
+
+        An unwired store lifts nothing, for :meth:`_end_authorizations`'s reason:
+        there is no store to have fenced anything.
+
+        Args:
+            goal_id: The goal whose fence is lifted.
+            goal_version: The version the reopen's ``ACTIVE`` write named as its
+                ``expected_version``.
+
+        Returns:
+            Whether a **standing** fence was lifted; ``False`` where no store is
+            wired.
+
+        Raises:
+            AuthorizationError: As ``clear_closure`` raises it.
+        """
+        operations = self._authorization_operations
+        if operations is None:
+            return False
+        return await operations.clear_closure(goal_id, goal_version=goal_version)
 
     async def _open_question(self, goal_id: str) -> GoalQuestion | None:
         """The goal's open question, settling it where its deadline has passed (§12).

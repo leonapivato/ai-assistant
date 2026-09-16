@@ -356,6 +356,60 @@ class AuthorizationOperations:
             settled_at=self._now(),
         )
 
+    async def end_for_goal(self, goal_id: str, /, *, at: datetime, goal_version: int) -> int:
+        """Take ADR-0268 §1's ending over ``goal_id``, and fence it.
+
+        **A pass-through and nothing more, deliberately.** ``at`` and ``goal_version``
+        are the *act's*, not this object's: §1 has the ending carry the act's own
+        instant — read once, and the same instant its own status write carries — and
+        the version that write names as its ``expected_version``, *"never the one that
+        write returns"*. So this reads **no** clock, unlike every other member here,
+        and holds nothing back: an object that supplied either value from itself would
+        put a second reading between the two writes and key the record to the wrong
+        version.
+
+        **Why this object and not a second holder of the store.** All four of §11's
+        operations read the same store because two holders keyed by it could disagree
+        about what stands; an ending that mutated the store from beside them would be
+        exactly that, one act settling rows a listing is being answered from.
+
+        Args:
+            goal_id: The goal whose authorizations end and whose fence is raised.
+            at: The **act's** own instant, read once by the caller.
+            goal_version: The version the act's own status write names as its
+                ``expected_version``.
+
+        Returns:
+            How many rows the store's step moved.
+
+        Raises:
+            AuthorizationError: If the store could not be read or written.
+        """
+        return await self._authorizations.end_for_goal(goal_id, at=at, goal_version=goal_version)
+
+    async def clear_closure(self, goal_id: str, /, *, goal_version: int) -> bool:
+        """Lift ``goal_id``'s write fence, removing no record (ADR-0268 §1).
+
+        **Exactly one caller**, ADR-0250 §13's reopen, immediately after that reopen's
+        own :meth:`end_for_goal` and only on a successful ``ACTIVE`` write (ADR-0268
+        §6). **No act compensates a failed closing write with it**: a fence a
+        concurrent act is relying on cannot be told from an orphaned one at the same
+        version, so the compensation would clear the record the act that actually
+        closed the goal stands on.
+
+        Args:
+            goal_id: The goal whose fence is lifted.
+            goal_version: The version the reopen's ``ACTIVE`` write named as its
+                ``expected_version``.
+
+        Returns:
+            Whether a **standing** fence was lifted.
+
+        Raises:
+            AuthorizationError: If the store could not be read or written.
+        """
+        return await self._authorizations.clear_closure(goal_id, goal_version=goal_version)
+
     def announced(
         self, opened: Sequence[Authorization], /, *, goal_statement: str
     ) -> tuple[AuthorizationView, ...]:
