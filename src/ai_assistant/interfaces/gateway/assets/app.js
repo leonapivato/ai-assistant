@@ -7744,12 +7744,16 @@ async function watchDeliveries(because) {
 // which is the failure ADR-0175 §4 spends its keep-alive to prevent. An *ending*, by
 // contrast, is exactly the thing that is answered for a session that has already gone.
 //
-// **And the `catch` below needs no guard of its own.** `forgetHeaderHalf` has one
-// caller, `sessionLost`, which releases this stream before it does anything else — so
-// a session lost *in this page* reaches the catch as `open.released` and returns there.
-// What is left for the catch is a socket that failed under a page still holding a
-// session of its own, whose notifications panel is legitimately on screen; it evicts
-// nothing and reveals nothing beside a bootstrap form.
+// **And the `catch` is guarded on the same terms**, which adversarial review's round 1
+// found the version of this that was not. Nothing there can *evict* a half —
+// `forgetHeaderHalf` has one caller, `sessionLost`, which releases this stream before it
+// does anything else, so a session lost in this page reaches the catch as
+// `open.released` and returns. But eviction is not the whole of the rule: the four
+// endings the catch classifies each write a `fault`, and a page that refused to let a
+// superseded stream report a cut while letting it report a black hole would be applying
+// one rule to two halves of one ending. `NO_HEAD` and `WENT_SILENT` are about a cadence
+// the *old* session's gateway stated; `GATEWAY_GONE` says the gateway may have stopped,
+// which is a statement about the process this page is still happily talking to.
 async function readDeliveries(half, era) {
   const reader = new AbortController();
   // This stream, reachable from outside so that a session that ended can end it
@@ -7908,6 +7912,15 @@ async function readDeliveries(half, era) {
     // a wrong explanation for an ending this page performed, and it would land in a
     // panel `showBootstrap` has just hidden.
     if (open.released) {
+      return;
+    }
+    // Not this session's ending to report (#2455), below the release for the reason the
+    // release is above everything: one is this page's own act and the other is a fact
+    // about the session, and an ending this page performed is the one the owner is told
+    // about. Above the classification, because what the four branches below tell apart
+    // is *how* a stream this page is being served by ended, and this is not one.
+    if (!sameSession(half, era)) {
+      stopWatching(OUTLIVED_ITS_SESSION);
       return;
     }
     if (stalled) {

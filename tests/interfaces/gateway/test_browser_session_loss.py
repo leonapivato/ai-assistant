@@ -161,7 +161,19 @@ _DELIVERY_ENDINGS: Final = {
         '{"kind": "fault", "fault": "hub-unreachable", "detail": "no hub there"}\n',
     ),
     "cut": (200, "application/x-ndjson", ""),
+    "misframed": (200, "application/x-ndjson", "[]\n"),
+    "failed": None,
 }
+
+#: The endings above that land in ``readDeliveries``' ``catch`` rather than in either of
+#: its returns — a line the reader refuses, and a socket that failed — added by
+#: adversarial review's round 1. The two *deadline* endings reach the same statement one
+#: line further on and are not driven here: ``HEAD_DEADLINE_MILLISECONDS`` is thirty
+#: seconds and ``SILENT_CADENCES`` a multiple of a gateway's own figure, so driving
+#: either is a wall-clock wait rather than a state the page reaches, which ADR-0216 §7
+#: rules out. What the guard in front of all four is asked here is that it *is* in
+#: front of them, through the two endings a case can order.
+_THROUGH_THE_CATCH: Final = ("misframed", "failed")
 
 #: The endings above that mean *this browser's session is gone* — the only two
 #: ``sessionLost`` acts on, and therefore the only two that could ever have evicted a
@@ -254,13 +266,17 @@ def _delivery(
         The future that ends the stream, and the route handler to install.
     """
     release: asyncio.Future[None] = loop.create_future()
-    status, media, body = _DELIVERY_ENDINGS[ending]
+    answer = _DELIVERY_ENDINGS[ending]
 
     async def stream(one: Route) -> None:
         await release
         # The page may have been navigated away from under a held route by the time this
         # resumes in a failing run; the case's own assertions are what report it.
         with contextlib.suppress(PlaywrightError):
+            if answer is None:
+                await one.abort("connectionreset")
+                return
+            status, media, body = answer
             await one.fulfill(status=status, content_type=media, body=body)
 
     return release, stream
@@ -859,6 +875,14 @@ async def test_a_delivery_stream_that_outlived_its_session_ends_no_other(
     What the first tab is owed is not silence: it stopped watching and gets its control
     and a sentence back. What it must not do is write a fault — nothing went wrong — or
     touch a session that is not its own.
+
+    **Every ending, including the two that go through the ``catch``** (adversarial
+    review, round 1). Nothing reached from there can evict a half — ``sessionLost``
+    releases this stream before it forgets anything, so a session lost *in this page*
+    returns on ``open.released`` — but each of the four branches it classifies writes a
+    ``fault``, and a rule that let a superseded stream report a black hole while refusing
+    it a cut would be two rules for one ending. :data:`_THROUGH_THE_CATCH` says which
+    ids those are, and why the two deadline branches are not among them.
     """
     loop = asyncio.get_running_loop()
     release, stream = _delivery(loop, ending)
@@ -883,9 +907,15 @@ async def test_a_delivery_stream_that_outlived_its_session_ends_no_other(
         assert isinstance(minted, str), minted
         assert minted
 
-        async with drive.page.expect_response("**/deliveries") as stale:
-            release.set_result(None)
-        await (await stale.value).finished()
+        if ending == "failed":
+            async with drive.page.expect_event(
+                "requestfailed", predicate=lambda one: one.url.endswith("/deliveries")
+            ):
+                release.set_result(None)
+        else:
+            async with drive.page.expect_response("**/deliveries") as stale:
+                release.set_result(None)
+            await (await stale.value).finished()
 
         # The first tab's own account of it, which is also what orders every assertion
         # below: only a continuation that ran can have written this line.
