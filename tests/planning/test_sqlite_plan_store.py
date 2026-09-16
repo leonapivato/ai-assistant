@@ -76,6 +76,7 @@ from ai_assistant.testing.cancellation import (
 
 if TYPE_CHECKING:
     from collections.abc import AsyncIterator, Awaitable, Callable, Iterator, Sequence
+    from contextlib import AbstractContextManager
     from pathlib import Path
 
     from ai_assistant.core.protocols import PlanStore
@@ -3460,6 +3461,20 @@ class _PausingScan(SqlitePlanStore):
     #: the order the scan walked them.
     inside: list[bool]
 
+    #: What each transaction this store opened was opened *for*, in order. Recorded by
+    #: overriding the store's own helper rather than by tracing the connection:
+    #: ``set_trace_callback`` on a connection the store is concurrently using from its
+    #: worker thread segfaults (#2441), and this is plain Python on the same thread the
+    #: read already runs on.
+    opened: list[str]
+
+    def _transaction(
+        self, what: str, *, immediate: bool = True
+    ) -> AbstractContextManager[sqlite3.Connection]:
+        """Open the transaction as the store does, and record that it was opened."""
+        self.opened.append(what)
+        return super()._transaction(what, immediate=immediate)
+
     def _step_statuses(self, conn: sqlite3.Connection, attempt: GoalAttempt) -> list[StepStatus]:
         """Read as the store does, then hold the scan open after the first attempt."""
         self.inside.append(conn.in_transaction)
@@ -3496,24 +3511,28 @@ async def test_the_scan_is_one_snapshot_against_a_second_connection(tmp_path: Pa
     **And every attempt of the walk is asserted to be read inside a transaction**, not
     only the first, which the refusal above does not say on its own.
 
-    **What this case does not decide, stated rather than left to be discovered**
-    (issue #2441). A store opening a transaction **per attempt** would hold one while
-    ``a1``'s read was paused, lock the outsider exactly as this does, satisfy the
-    ``in_transaction`` pair, and still read ``a2`` in a newer snapshot — and it is not
-    excluded here, because under this store's **rollback-journal** mode a concurrent
-    commit cannot land mid-scan at all, so the semantic interleaving that would expose
-    it is unreachable. That is precisely the case ADR-0261 §14 arm 9 offers this
-    witness for: "a read taken whole under one transaction or one held lock … has no
-    intermediate read for the hook and yet cannot claim the literal escape, demonstrated
-    by **showing the concurrent transitions are blocked until the snapshot completes**".
-    **A move to WAL would invert both halves** — the outsider's commit would be admitted
-    rather than refused, so this assertion would have to go, and the semantic
-    interleaving would become both reachable and the right thing to drive.
+    **And the walk is asserted to be *one* transaction, which is what the refusal and
+    the pair above still do not say.** A store opening a transaction **per attempt**
+    would hold one while ``a1``'s read was paused, lock this outsider exactly as the
+    shipped one does, and record ``[True, True]`` — and then, in the gap after ``a1``'s
+    transaction closes, a writer that *waits* rather than giving up would commit, and
+    the scan would read ``a2`` in a newer snapshot and answer ``False``. Rollback
+    journal does not close that gap; only there being no gap does. So the count is
+    taken from the store's own transaction helper, overridden in the subclass —
+    **plain Python on the thread the read already runs on**, because
+    ``set_trace_callback`` on a connection the store is concurrently using from its
+    worker is not safe and segfaults (#2441).
+
+    **What a move to WAL would change, stated rather than left to be discovered**
+    (#2441): the outsider's commit would be **admitted** rather than refused, so that
+    half of this case would have to go, and the semantic interleaving would become both
+    reachable and the right thing to drive. The one-transaction count is unaffected by
+    the journal mode and would stay.
     """
     path = tmp_path / "plans.db"
     scanning = _PausingScan(path=path, now=_fixed_now)
     scanning.paused, scanning.resume = threading.Event(), threading.Event()
-    scanning.inside = []
+    scanning.inside, scanning.opened = [], []
     try:
         await scanning.save_goal(_goal())
         await scanning.save_plan(_plan(plan_id="p1"))
@@ -3533,6 +3552,7 @@ async def test_the_scan_is_one_snapshot_against_a_second_connection(tmp_path: Pa
         )
         await scanning.commit_transition(_claim(second, attempt_id="a2"))
 
+        scanning.opened.clear()  # the seeding writes above opened their own
         asking = asyncio.ensure_future(scanning.has_outstanding_effect("g1"))
         await asyncio.to_thread(scanning.paused.wait, 10)
 
@@ -3555,6 +3575,9 @@ async def test_the_scan_is_one_snapshot_against_a_second_connection(tmp_path: Pa
 
         assert scanning.inside == [True, True], (
             "every attempt of the walk was read inside a transaction, not only the first"
+        )
+        assert len(scanning.opened) == 1, (
+            f"the whole walk is one transaction and not one per attempt: {scanning.opened}"
         )
     finally:
         scanning.resume.set()
