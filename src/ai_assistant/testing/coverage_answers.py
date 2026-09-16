@@ -111,6 +111,13 @@ class FakeCoverageAnswers:
     def answer(self, *, met: bool, quote: ActionQuote | None = None) -> None:
         """Reconfigure what the next calls answer.
 
+        **The next calls, and never one already in flight.**
+        :meth:`coverage_met` reads the configuration on its first executed line, so a
+        call suspended inside the modelled resource answers what was configured when
+        it was made — otherwise a test driving two calls concurrently would depend on
+        the scheduler for which configuration each one saw. Adversarial review, round
+        3, ``major``.
+
         Args:
             met: Whether condition 6 holds.
             quote: The governing quote, subject to the class docstring's first two
@@ -164,6 +171,9 @@ class FakeCoverageAnswers:
                 member suspends, ``frozen=True`` does not close ``__dict__``, and a
                 ``kind`` rewritten while it was out would answer about a coverage
                 neither presented nor substituted. Adversarial review, round 2,
+                ``blocker``. **The snapshot the answer is computed from is private**,
+                and what :attr:`calls` publishes is a second copy — a record a test
+                can rewrite is not a snapshot this fake still reads. Round 3,
                 ``blocker``.
 
         Returns:
@@ -177,18 +187,27 @@ class FakeCoverageAnswers:
                 carrying what was armed as its ``__cause__``.
         """
         members = tuple(member.model_copy(deep=True) for member in coverage)
-        self._calls.append((request.model_copy(deep=True), members))
+        self._calls.append(
+            (
+                request.model_copy(deep=True),
+                tuple(member.model_copy(deep=True) for member in members),
+            )
+        )
         if self._failure is not None:
             msg = "fake: the goal's quotes could not be read"
             raise AuthorizationError(msg) from self._failure
+        # **Everything this answer is computed from is read here**, on the first
+        # executed line and before the modelled resource is entered: the coverage's
+        # kinds, and the configuration itself. Either read after the await would make
+        # the answer a function of what happened while the call was suspended.
+        priced = any(member.kind is BoundKind.MONEY for member in members)
+        met = self._met and (self._quote is not None or not priced)
+        quoted = self._quote if met and priced else None
+        answer = CoverageAnswer(
+            met=met, quoted=None if quoted is None else quoted.model_copy(deep=True)
+        )
         async with self._resource.held():
-            priced = any(member.kind is BoundKind.MONEY for member in members)
-            met = self._met and (self._quote is not None or not priced)
-            quoted = self._quote if met and priced else None
-            return CoverageAnswer(
-                met=met,
-                quoted=None if quoted is None else quoted.model_copy(deep=True),
-            )
+            return answer
 
     def suspend_next_operation(self) -> LoopSuspension:
         """Hold the next call that enters the modelled resource open inside it."""
