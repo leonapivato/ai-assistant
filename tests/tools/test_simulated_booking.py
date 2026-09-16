@@ -1927,3 +1927,94 @@ def test_an_instant_is_refused_for_the_uncertain_day_too() -> None:
             retained_records=2,
             indeterminate_date=datetime(2026, 10, 5, 12, tzinfo=UTC),
         )
+
+
+# --------------------------------------------------------------------------- #
+# what the third adversarial round found
+# --------------------------------------------------------------------------- #
+
+
+async def test_an_established_store_with_no_commit_count_is_refused(tmp_path: Path) -> None:
+    """A missing count is a corruption and **never a reset to zero** (ADR-0273 §2).
+
+    This is the one failure the count exists to make impossible. §2 requires it to equal
+    *"the number of records ever inserted"* and states that **no** operation of this
+    provider decrements it — and a store whose count row has gone missing **cannot be
+    reconstructed from the rows it still holds**, because pruning has already removed
+    some of them. Writing ``"0"`` there would decrement the figure and make
+    ``IRREVERSIBLE`` a false claim about every booking whose detail the bound had already
+    pruned.
+
+    So the store refuses to open. The stamp is conditional on the store being **new**,
+    which ``schema_version`` having been absent is what tells it: the two are written in
+    one transaction, and no operation of this provider removes either.
+    """
+    path = tmp_path / "bookings.db"
+    store = SqliteBookingStore(path=path, retained=1)
+    await store.commit({DATE_ARGUMENT: "2026-10-01"})
+    await store.commit({DATE_ARGUMENT: "2026-10-02"})
+    assert await store.commit_count() == 2
+    store.close()
+
+    handle = sqlite3.connect(path)
+    try:
+        handle.execute("DELETE FROM meta WHERE key = 'commit_count'")
+        handle.commit()
+    finally:
+        handle.close()
+
+    with pytest.raises(BookingStoreError, match="corrupt"):
+        SqliteBookingStore(path=path, retained=1)
+
+
+async def test_a_new_store_still_starts_its_count_at_zero(tmp_path: Path) -> None:
+    """The other half of the same rule, so the refusal above is not a refusal of a new store.
+
+    A store that has never been opened carries neither a ``schema_version`` nor a count,
+    and that is an **initialisation** rather than a corruption — which is why the two are
+    told apart by the version row rather than by the count's own absence.
+    """
+    store = SqliteBookingStore(path=tmp_path / "bookings.db", retained=2)
+    try:
+        assert await store.commit_count() == 0
+        assert await store.records() == ()
+    finally:
+        store.close()
+
+    reopened = SqliteBookingStore(path=tmp_path / "bookings.db", retained=2)
+    try:
+        assert await reopened.commit_count() == 0
+    finally:
+        reopened.close()
+
+
+async def test_a_deeply_nested_corrupt_row_is_this_stores_error_too(tmp_path: Path) -> None:
+    """A decoder **resource** failure is a corruption, not a raw builtin (finding 3).
+
+    ``json.loads`` raises ``RecursionError`` rather than a ``JSONDecodeError`` on a
+    deeply nested document, and ``RecursionError`` is **not** a ``ValueError`` — so a
+    clause naming only that one let a corrupt row escape past this layer's error
+    boundary, although :meth:`SqliteBookingStore.records` promises otherwise. The depth
+    here is bounded and modest: the interpreter's limit is reached well inside it, and a
+    case that guessed the threshold would be pinning CPython's recursion limit rather
+    than this store's promise.
+    """
+    path = tmp_path / "bookings.db"
+    store = SqliteBookingStore(path=path, retained=4)
+    await store.commit({DATE_ARGUMENT: "2026-10-01"})
+    store.close()
+
+    depth = 100_000
+    handle = sqlite3.connect(path)
+    try:
+        handle.execute("UPDATE bookings SET record = ?", ("[" * depth + "]" * depth,))
+        handle.commit()
+    finally:
+        handle.close()
+
+    reopened = SqliteBookingStore(path=path, retained=4)
+    try:
+        with pytest.raises(BookingStoreError, match="corrupt"):
+            await reopened.records()
+    finally:
+        reopened.close()

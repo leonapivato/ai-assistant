@@ -859,10 +859,9 @@ class SqliteBookingStore:
             with conn:  # commits on success, rolls back on any exception
                 conn.execute("BEGIN IMMEDIATE")
                 conn.execute(_META_SCHEMA)
-                self._check_schema_version(conn)
+                labelled = self._check_schema_version(conn)
                 conn.execute(_BOOKINGS_SCHEMA)
-                if self._meta(conn, _COMMIT_COUNT_KEY) is None:
-                    conn.execute(_WRITE_META, (_COMMIT_COUNT_KEY, "0"))
+                self._stamp_or_check_count(conn, labelled=labelled)
                 # ADR-0273 §2's bound, enforced on the open path as well as the commit
                 # path, so that a bound lowered between two runs is honoured at once.
                 self._prune(conn)
@@ -919,8 +918,45 @@ class SqliteBookingStore:
             raise BookingStoreError(msg, may_have_committed=False)
         return str(rows[0][0])
 
-    def _check_schema_version(self, conn: sqlite3.Connection) -> None:
-        """Refuse a labelled schema this code cannot read, and stamp one where absent.
+    def _stamp_or_check_count(self, conn: sqlite3.Connection, *, labelled: bool) -> None:
+        """Stamp the commit count on a new store; refuse an established one without it.
+
+        **ADR-0273 §2's count is what carries the act's irreversibility, so a silent
+        reset is the one failure this store must not have.** That clause requires the
+        count to equal *"the number of records ever inserted"* and says **no** operation
+        of this provider decrements it — and a store whose count row has gone missing
+        cannot be reconstructed from the rows it still holds, because pruning has already
+        removed some of them. Writing ``"0"`` there would therefore **decrement** the
+        figure and make ``IRREVERSIBLE`` a false claim about every booking the store had
+        already forgotten the detail of.
+
+        So the stamp is conditional on the store being **genuinely new** — which is
+        exactly what ``schema_version`` having been absent tells us, because the two are
+        written in one transaction and neither this code nor any operation of it removes
+        either.
+
+        Args:
+            conn: The store's connection, inside the setup transaction.
+            labelled: Whether the store already carried a ``schema_version``.
+
+        Raises:
+            BookingStoreError: If an established store holds no commit count.
+        """
+        if not labelled:
+            conn.execute(_WRITE_META, (_COMMIT_COUNT_KEY, "0"))
+            return
+        if self._meta(conn, _COMMIT_COUNT_KEY) is not None:
+            return
+        msg = (
+            f"the booking store at {self._path!r} is an established store holding no "
+            f"commit count; the figure only rises and cannot be reconstructed from the "
+            f"records still retained (ADR-0273 §2), so the store is corrupt and is not "
+            f"opened rather than reset to zero"
+        )
+        raise BookingStoreError(msg, may_have_committed=False)
+
+    def _check_schema_version(self, conn: sqlite3.Connection) -> bool:
+        """Refuse a labelled schema this code cannot read; say whether one is labelled.
 
         Runs inside the setup transaction, after ``meta`` exists and **before** the
         ``bookings`` table is created or read (ADR-0049 §1's ordering).
@@ -928,13 +964,19 @@ class SqliteBookingStore:
         Args:
             conn: The store's connection.
 
+        Returns:
+            Whether the database already carried a ``schema_version``. ``False`` means
+            the store is **new**, which is what
+            :meth:`_stamp_or_check_count` reads to decide whether a missing commit count
+            is an initialisation or a corruption.
+
         Raises:
             BookingStoreError: If the stored version is not one this code understands.
         """
         stored = self._meta(conn, _SCHEMA_VERSION_KEY)
         if stored is None:
             conn.execute(_WRITE_META, (_SCHEMA_VERSION_KEY, str(_SCHEMA_VERSION)))
-            return
+            return False
         try:
             version = int(stored)
         except ValueError as exc:
@@ -949,6 +991,7 @@ class SqliteBookingStore:
                 f"rather than read it blindly"
             )
             raise BookingStoreError(msg, may_have_committed=False)
+        return True
 
     # --- the commit, and the boundary it is classified against -----------
 
@@ -1152,7 +1195,13 @@ class SqliteBookingStore:
         for row in rows:
             try:
                 record = json.loads(str(row[0]))
-            except ValueError as exc:
+            except (RecursionError, ValueError) as exc:
+                # ``RecursionError`` is named beside ``ValueError`` because the decoder
+                # raises it rather than a ``JSONDecodeError`` on a deeply nested
+                # document — and it is **not** a ``ValueError``, so a clause naming only
+                # that one lets a corrupt row escape as a raw builtin past this layer's
+                # error boundary. It is a resource limit reached while reading the
+                # store's own bytes, which is exactly what this promise covers.
                 msg = (
                     f"the booking store at {self._path!r} holds a row that is not "
                     f"readable JSON; the store is corrupt. The row is not rendered."
