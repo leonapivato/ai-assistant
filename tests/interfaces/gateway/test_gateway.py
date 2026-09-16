@@ -628,6 +628,13 @@ async def test_an_admitted_ask_round_trips_and_renders_what_the_hub_returned(
     printed reaching "neither the browser's transcript nor the spoken channel as part of
     what was said". A field carried to a page that must never render it is one an editor
     is invited to render, and this enumeration is where that is decided (ADR-0168 §6).
+
+    **And ``drive_withheld`` joins it, carrying where the goal stands and nothing else.**
+    ADR-0261 §13's L3 puts §7's seven fixed statements on the CLI's surfaces "and on the
+    reply", so the member is rendered here rather than deferred. §7 fixes what it is not —
+    "the field is read, rendered and named as *where the goal stands*, never as *why the
+    step was not claimed*" — so no reason, conjunct or refusal reaches this page, there
+    being none the engine's own read could establish.
     """
     cookie_half, header_half = await _start_session(harness)
     head, body = _ask(harness, header_half=header_half, cookie_half=cookie_half)
@@ -655,6 +662,7 @@ async def test_an_admitted_ask_round_trips_and_renders_what_the_hub_returned(
         "disambiguation",
         "forecast_not_read",
         "attempt_report",
+        "drive_withheld",
         "authorizations",
     }
     assert [call[0] for call in harness.engine.calls] == ["converse"]
@@ -990,22 +998,26 @@ def test_a_new_member_of_a_turn_outcome_cannot_reach_the_page_unnoticed() -> Non
     has implemented §10 entire and left §9's browser deferral entire. ADR-0260 §10 defers
     no surface at all, which is the difference between them.
 
-    **``drive_withheld`` is ADR-0261 §7's member, and the decision taken here is "not
-    rendered" for ``forecast_not_read``'s identical reason.** §13 cuts three lanes — the
-    contract with its ``planning`` implementations, the act and the refusal catch in
-    ``orchestration/``, and the surfaces in ``interfaces/`` — and this member's
-    rendering is **L3's by name**: "the fixed statements §6 and §7 name, on the CLI's
-    abandon and goals surfaces and on the reply". So the member crosses the wire,
-    because it is on ``TurnOutcome`` and this page decodes the whole outcome, and no
-    panel reads it.
+    **``drive_withheld`` is ADR-0261 §7's member, and the decision taken here is now
+    "rendered".** This entry read "not rendered" while L1 and L2 ran, and named the lane
+    that closes it: §13 assigns the rendering to **L3** by name — "the fixed statements §6
+    and §7 name, on the CLI's abandon and goals surfaces and **on the reply**". L3 is that
+    lane. So ``_outcome_view`` carries it, ``renderDriveWithheld`` puts one fixed statement
+    per member on the screen beside the reply, and ``DRIVE_WITHHELD_WORDS`` is total over
+    the seven §7 closes the vocabulary at.
 
-    **The cost in this lane is nil, and that is stated rather than hidden.** L2 owns the
-    driver's catch and the post-refusal read, so on L1's tree a ``ClaimRefused``
-    propagates out of the store like any other ``PlanningError``, no turn composes a
-    withheld drive at all, and the member is ``None`` on every outcome this adapter can
-    see. What a surface owes when it does arrive is not optional — §7 requires one fixed
-    statement per member of a closed seven-member vocabulary, under ADR-0242 §9's
-    all-or-nothing rule, which is the obligation the two entries above already carry.
+    **It was never optional, and §7 is where that is said**: one fixed statement per member
+    of a closed seven, rendered "beside the reply", under ADR-0242 §9's all-or-nothing
+    rule — the obligation ``forecast_not_read``'s and ``attempt_report``'s entries already
+    carry, and which ADR-0262 §11's parity point makes checkable here by putting both
+    surfaces in one lane.
+
+    **The member crosses and nothing is derived from it here.** §7 fixes it as "where the
+    goal stands" and never "why the step was not claimed": one ``ClaimRefused`` covers both
+    liveness raisers and the engine's own post-refusal read cannot establish which fired,
+    so this view carries the value ``orchestration`` computed and asks it no question. It
+    is not read off ``step``, which a withheld drive leaves at the status and version it
+    stood at, nor off ``attempt_report``, which §7's turn does not write at all.
 
     **``satisfied_from_earlier`` is ADR-0259 §2's member, and the decision taken here is
     "not rendered".** That is a decision rather than an omission, and §2 is where it is

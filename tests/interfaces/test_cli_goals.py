@@ -673,11 +673,42 @@ def test_a_withdrawal_says_the_pause_is_still_there_and_that_no_answer_was_recor
     assert "still open and still waiting" in screen
 
 
+#: The exit code ``assistant abandon-goal`` answers for each member, **stated per member
+#: rather than derived from a comparison** (ADR-0261 §14 arm 10).
+#:
+#: **This is the silent regression §10 names.** The assertion here used to read
+#: ``code == (0 if member is GoalAbandonment.ABANDONED else 1)``, and arm 10 rules that a
+#: new member "joins on the **failing** side while staying green" — which
+#: ``ABANDONED_EFFECT_IN_FLIGHT`` did: a successful cancellation reported to a script as a
+#: failure, by a test that went on passing.
+#:
+#: **Zero for both acting members and non-zero for both non-acting ones.** §6 returns
+#: ``ABANDONED_EFFECT_IN_FLIGHT`` "exactly where ``close_goal_abandoned`` answers true" —
+#: the one indivisible step that ended the goal's live attempts and closed it — so it and
+#: ``ABANDONED`` are two reports of one act. ``ALREADY_CLOSED`` and ``NO_SUCH_GOAL`` moved
+#: nothing, and #531's rule is that a script must not read success off either.
+#:
+#: **A table and not a set membership**, so an eighth member is a ``KeyError`` here rather
+#: than a silent addition to whichever side the expression happened to negate.
+_ABANDONMENT_EXIT_CODES: Final[dict[GoalAbandonment, int]] = {
+    GoalAbandonment.ABANDONED: 0,
+    GoalAbandonment.ABANDONED_EFFECT_IN_FLIGHT: 0,
+    GoalAbandonment.ALREADY_CLOSED: 1,
+    GoalAbandonment.NO_SUCH_GOAL: 1,
+}
+
+
 @pytest.mark.parametrize("member", list(GoalAbandonment))
 def test_every_abandonment_member_is_rendered_and_names_no_record(
     member: GoalAbandonment, monkeypatch: pytest.MonkeyPatch, output: StringIO
 ) -> None:
-    """The clause above one vocabulary over, over ``GoalAbandonment``'s three."""
+    """The clause above one vocabulary over, over ``GoalAbandonment``'s **four**.
+
+    **And the exit code, which is where a silent regression lives** (ADR-0261 §14 arm 10).
+    :data:`_ABANDONMENT_EXIT_CODES` carries the table and the reason it is one; what this
+    case adds is that the parametrisation is over the vocabulary itself, so a member
+    arriving without an entry fails here rather than inheriting a comparison's answer.
+    """
     engine = FakeAssistantEngine()
     engine.abandonment = member
     _wire(monkeypatch, engine)
@@ -688,7 +719,26 @@ def test_every_abandonment_member_is_rendered_and_names_no_record(
     assert screen.strip()
     assert GOAL_ID not in screen
     assert QUESTION_ID not in screen
-    assert code == (0 if member is GoalAbandonment.ABANDONED else 1)
+    assert code == _ABANDONMENT_EXIT_CODES[member], member
+
+
+def test_both_successful_cancellations_exit_zero_and_neither_non_acting_member_does() -> None:
+    """ADR-0261 §14 arm 10, stated as the partition rather than member by member.
+
+    "The abandon command answers **zero for ``ABANDONED_EFFECT_IN_FLIGHT`` as well as for
+    ``ABANDONED``** — both are successful cancellations — and non-zero for
+    ``ALREADY_CLOSED`` and ``NO_SUCH_GOAL``."
+
+    Asserted over the table and over ``cli``'s own set, so the two cannot drift: the source
+    names the acting side **positively**, which is what stops the next member of the
+    vocabulary joining the failing side unnoticed, and this is where that naming is checked
+    against the vocabulary it is drawn from.
+    """
+    acting = {member for member, code in _ABANDONMENT_EXIT_CODES.items() if code == 0}
+
+    assert acting == {GoalAbandonment.ABANDONED, GoalAbandonment.ABANDONED_EFFECT_IN_FLIGHT}
+    assert acting == cli._CANCELLATIONS_THAT_ACTED
+    assert set(_ABANDONMENT_EXIT_CODES) == set(GoalAbandonment)
 
 
 def test_an_abandonment_says_what_it_did_not_touch(
