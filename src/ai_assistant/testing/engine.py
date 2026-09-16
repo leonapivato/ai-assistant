@@ -80,6 +80,7 @@ from ai_assistant.core.types import (
     DestinationTrust,
     DestinationTrustRecord,
     Disposition,
+    DriveWithheld,
     EgressBinding,
     ExecutionState,
     ForecastNotRead,
@@ -407,6 +408,11 @@ class FakeAssistantEngine:
             carries, or ``None`` — the default — because a fake services no forecast
             read. Script it to drive a rendering surface over each of the six
             ``ForecastNotRead`` members a fixed statement is owed for.
+        drive_withheld: ADR-0261 §7's member every outcome this engine *composes*
+            carries, or ``None`` — the default — because a fake takes no ``→ RUNNING``
+            claim and so meets no ``ClaimRefused``. Script it to drive a rendering
+            surface over each of the seven ``DriveWithheld`` members a fixed statement
+            is owed for.
         observation: What :meth:`observe` returns.
         answered: What :meth:`answer` returns, or ``None`` to synthesise one from
             the question's own state.
@@ -647,6 +653,25 @@ class FakeAssistantEngine:
         #: which is :attr:`authorizations`' own arrangement: the caller stated the member
         #: and overwriting it would silently discard what they said.
         self.forecast_not_read: ForecastNotRead | None = None
+        #: ADR-0261 §7's member, for every outcome this engine composes, or ``None`` —
+        #: the default.
+        #:
+        #: :attr:`forecast_not_read`'s shape one vocabulary over, and a lever for its
+        #: reason: **no sequence of surface calls on this double reaches any of the
+        #: seven.** A withheld drive needs a ``PlanStore`` to refuse a ``→ RUNNING``
+        #: claim on a liveness conjunct, which this engine never takes — so every member
+        #: would be unreachable in a consumer's test, and the seven are exactly what a
+        #: surface rendering §7's seven fixed statements has to be driven over, on the
+        #: terminal and on the browser alike (ADR-0261 §13's L3).
+        #:
+        #: **``None`` is the honest default and §7 fixes what it means.** The member is
+        #: non-``None`` "exactly on a turn that *returned* after a ``ClaimRefused`` whose
+        #: post-refusal read established one of the seven states", and ``None`` on every
+        #: other returned outcome — which is every pass this double takes.
+        #:
+        #: **A scripted outcome that already carries the member keeps what it carries**,
+        #: which is :attr:`forecast_not_read`'s own arrangement.
+        self.drive_withheld: DriveWithheld | None = None
         self.observation: ObservationReport = ObservationReport()
         self.answered: AnswerOutcome | None = None
         # ADR-0250 §§12, 15's three operations, each defaulting to what the concrete
@@ -950,6 +975,13 @@ class FakeAssistantEngine:
         read, and the member is a lever rather than a default for the reason
         :attr:`forecast_not_read` records.
 
+        **ADR-0261 §7's member rides the same site, on ADR-0260 §10's terms exactly**: a
+        scripted outcome carrying the member keeps it, and the attribute fills in only
+        where the outcome states none. §7 fixes the absence's meaning — the member is
+        non-``None`` "exactly on a turn that *returned* after a ``ClaimRefused``" — so
+        there is nothing to synthesise for a pass that met no refusal, and the member is
+        a lever rather than a default for the reason :attr:`drive_withheld` records.
+
         **ADR-0254 §11's announcement rides the same site**, and its default is the
         opposite one for the opposite reason: §7's member states a fact about the pass
         and so must be filled in, while §11's states *which rows this turn opened* and a
@@ -972,18 +1004,21 @@ class FakeAssistantEngine:
         announced = outcome.authorizations or self.authorizations
         reported = self._reported(outcome)
         forecast = outcome.forecast_not_read or self.forecast_not_read
+        withheld_drive = outcome.drive_withheld or self.drive_withheld
         if (
             stated is None
             and outcome.reply is None
             and announced == outcome.authorizations
             and reported == outcome.attempt_report
             and forecast == outcome.forecast_not_read
+            and withheld_drive == outcome.drive_withheld
         ):
             return outcome
         carried = {name: getattr(outcome, name) for name in TurnOutcome.model_fields}
         carried["authorizations"] = announced
         carried["attempt_report"] = reported
         carried["forecast_not_read"] = forecast
+        carried["drive_withheld"] = withheld_drive
         if stated is None and outcome.reply is None:
             return TurnOutcome(**carried)
         statement = self._outbound() if stated is None else self._detached(stated)

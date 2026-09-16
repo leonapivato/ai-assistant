@@ -311,6 +311,7 @@ from ai_assistant.core.types import (
     DestinationTrustRecord,
     DiscloserProvenance,
     Disposition,
+    DriveWithheld,
     EgressBinding,
     EngagementDisposition,
     FeedbackEvent,
@@ -5077,6 +5078,37 @@ _GOAL_STATUS_WORDS: Final[Mapping[str, str]] = {
 _GOAL_STATUS_UNREADABLE: Final = "in a state this version has no words for"
 
 
+#: ADR-0261 §6's statement for a listing row whose ``effect_in_flight`` is **true**.
+#:
+#: §6 fixes which fact it names and leaves the wording to the lane: that an action of
+#: this goal **is outstanding — claimed, possibly sent, outcome unknown**.
+#:
+#: **It says none of the three things §6 bars.** It does not say the action did not
+#: happen, it does not say it did, and it does not say that anything the user does will
+#: withdraw it — ADR-0244 §11's "no caller assumes the query did not leave" generalised.
+#:
+#: ***In flight* means the claim landed, never that the call left** (§6). The field is
+#: true where a step stands ``INDETERMINATE`` or ``RUNNING``, and asserts **nothing**
+#: about whether ``ToolInvoker.invoke`` was entered: ADR-0014 §4 puts the commit before
+#: the invocation and ADR-0029 §4 makes ``INDETERMINATE`` "the state whose whole meaning
+#: is ignorance". So "may have been sent" is the strongest thing this sentence is allowed
+#: to say, and it does not infer transmission from a status.
+#:
+#: **And it does not name the tool, the call, a destination or an effect key.** §6 is
+#: explicit that *outstanding* "is the step's status and never the presence of an effect
+#: key", that a **read** is included deliberately, and that the word *effect* in the
+#: field's own name "is R78's and not ADR-0259 §1's, so neither name asserts that an
+#: ``EffectKey`` exists" — which is why this says *an action* and says no more.
+#:
+#: **It does not say when it clears or promise that it will.** The field goes false when
+#: the step resolves, by ADR-0259 §3's reconciliation; naming a moment would be this
+#: surface scheduling a pass §6 forbids anything from scheduling.
+_EFFECT_IN_FLIGHT: Final = (
+    "An action of this goal is outstanding: it was claimed, it may have been sent, "
+    "and its outcome is not known."
+)
+
+
 def _render_goals(page: tuple[GoalSummary, ...], *, limit: int, offset: int) -> None:
     """Render one page of the goal listing (ADR-0250 §15).
 
@@ -5101,6 +5133,25 @@ def _render_goals(page: tuple[GoalSummary, ...], *, limit: int, offset: int) -> 
     whether the work is still live; ``paused`` says whether it is waiting. A goal can
     be open and running, open and waiting, or closed — and collapsing the pair would
     lose exactly the state this listing exists to make visible (#2286).
+
+    **``effect_in_flight`` is a third fact and is shown as a third** (ADR-0261 §6), and
+    it is the engine's on ``paused``'s own ground: "the engine computes it, so that two
+    surfaces cannot render it differently, and no adapter derives it" — ADR-0250 §15's
+    clause for ``paused``, one fact over. So this renders the boolean it was handed and
+    walks no attempt, no execution and no step.
+
+    **It is goal-wide and not per-attempt** (§6), which is why it sits on the row rather
+    than beside any one act: a goal reopened after a cancellation that left an
+    ``INDETERMINATE`` step carries that uncertainty on an **older** attempt.
+
+    **And it is *why* the listing carries it at all.** The act's answer is heard once; a
+    user who comes back tomorrow asking "did that booking go through?" reads this
+    listing, "and a listing showing an ``ABANDONED`` goal with nothing beside it would
+    have lost the fact R78 requires". The two are the same predicate over the same scope
+    read at **two instants**: they cannot disagree about one instant and are never
+    required to agree across two, so a row reading **false** beside a goal the act
+    answered ``ABANDONED_EFFECT_IN_FLIGHT`` for is "the accurate answer to a different
+    question" and not a disagreement — nothing here re-reads, caches or reconciles them.
 
     **The elements, the grounds and the attempts are not here and cannot be**:
     ``GoalSummary`` "carries no attempt id, no revision number, no element, no ground,
@@ -5145,6 +5196,8 @@ def _render_goals(page: tuple[GoalSummary, ...], *, limit: int, offset: int) -> 
         waiting = " — waiting on you" if goal.paused else ""
         said = _GOAL_STATUS_WORDS.get(goal.status.value, _GOAL_STATUS_UNREADABLE)
         _print(f"  [dim]State:[/] {said}{waiting}")
+        if goal.effect_in_flight:
+            _print(f"  [yellow]{_EFFECT_IN_FLIGHT}[/]")
         if goal.last_engaged_at is None:
             _print("  [dim]No turn has taken it up yet.[/]")
         else:
@@ -5327,11 +5380,13 @@ def _render_goal_abandonment(outcome: GoalAbandonment) -> None:
     and may have been sent**, naming ``assistant goals`` as where that goal's state,
     and any outcome since established, is read. **No statement says the action did not
     happen, that it did, or that anything the user does will withdraw it**, and *in
-    flight* means the claim landed rather than that the call left. **The exit code is
-    still L3's** and is untouched: ADR-0261 §14 arm 10 rules that the parameterised
-    assertion "a new member joins on the failing side while staying green", and it
-    does — both members are successful cancellations and only one of them answers zero
-    today.
+    flight* means the claim landed rather than that the call left.
+
+    **The exit code is L3's and this lane is L3**, so it is taken here rather than
+    recorded as outstanding: ADR-0261 §14 arm 10 rules the member **zero**, both being
+    successful cancellations, and names the parameterised assertion a new member "joins
+    on the failing side while staying green" as where the silent regression lived.
+    :data:`_CANCELLATIONS_THAT_ACTED` is where the acting side is now named positively.
 
     **``ALREADY_CLOSED`` names no reason**, because the member does not carry one: §12
     reaches it from ``ACHIEVED`` and from ``ABANDONED`` alike, and a statement guessing
@@ -5484,6 +5539,27 @@ async def _drive_withdraw_clarification(engine: AssistantEngine, question_id: st
     return _EXIT_ERROR if withdrawal is ClarificationWithdrawal.NOTHING_TO_WITHDRAW else _EXIT_OK
 
 
+#: The :class:`~ai_assistant.core.types.GoalAbandonment` members that **acted**, and
+#: whose command therefore exits zero (ADR-0261 §14 arm 10).
+#:
+#: **Both are successful cancellations.** ``ABANDONED_EFFECT_IN_FLIGHT`` is returned
+#: "exactly where ``close_goal_abandoned`` answers true" (§6) — the same one call that
+#: ended the goal's attempts and closed it, differing from ``ABANDONED`` only in what it
+#: *reports* about work already claimed. A script reading failure off it would read a
+#: cancellation that happened as one that did not, which is the exact inverse of the rule
+#: the two non-acting members are held to below.
+#:
+#: **A frozenset and not a comparison, because arm 10 is about what a *new* member
+#: joins.** The tree's assertion read ``code == (0 if member is GoalAbandonment.ABANDONED
+#: else 1)`` and §10 names it as where "a silent regression lives": a member added to the
+#: vocabulary joins the **failing** side of a negated comparison while every test stays
+#: green. Naming the acting side positively makes the next member's arrival a failing
+#: test in ``test_cli_goals.py``'s own per-member table rather than a silent misreport.
+_CANCELLATIONS_THAT_ACTED: Final[frozenset[GoalAbandonment]] = frozenset(
+    {GoalAbandonment.ABANDONED, GoalAbandonment.ABANDONED_EFFECT_IN_FLIGHT}
+)
+
+
 async def _drive_abandon_goal(engine: AssistantEngine, goal_id: str) -> int:
     """Give one goal up and say what that did (ADR-0250 §12).
 
@@ -5494,6 +5570,16 @@ async def _drive_abandon_goal(engine: AssistantEngine, goal_id: str) -> int:
     because the goal is closed *anyway* would be this surface ruling on what the user
     meant — a goal already recorded as achieved is a different state from one they
     have just given up, and ADR-0249 §4 keeps them apart deliberately.
+
+    **And both *acting* members exit zero** (ADR-0261 §14 arm 10), which is the rule
+    above read in the direction that matters here: ``ABANDONED_EFFECT_IN_FLIGHT`` is
+    answered "exactly where ``close_goal_abandoned`` answers true" (§6), by the one
+    indivisible step that ended the goal's live attempts and closed it — so it is a
+    cancellation that happened, reporting an action already claimed, and a script that
+    read failure off it would report a successful cancellation as a failure (§10).
+    :data:`_CANCELLATIONS_THAT_ACTED` names that side positively rather than negating
+    ``ABANDONED``, so the next member of the vocabulary cannot join the failing side
+    unnoticed.
 
     Args:
         engine: The façade to relay through.
@@ -5508,7 +5594,7 @@ async def _drive_abandon_goal(engine: AssistantEngine, goal_id: str) -> int:
         _render_error(exc)
         return _EXIT_ERROR
     _render_goal_abandonment(abandonment)
-    return _EXIT_OK if abandonment is GoalAbandonment.ABANDONED else _EXIT_ERROR
+    return _EXIT_OK if abandonment in _CANCELLATIONS_THAT_ACTED else _EXIT_ERROR
 
 
 async def _drive_turn(  # noqa: PLR0913 — one parameter per seam a turn is driven through, and the two approvers are two card types
@@ -7868,6 +7954,18 @@ def _render_turn(outcome: TurnOutcome, *, streamed: _StreamedReply | None = None
     # so neither is guarded on the other, and the order between them carries no meaning
     # beyond putting the goal in front of the reader before what became of it.
     _render_attempt_report(outcome.attempt_report)
+    # ADR-0261 §7's statement, in the same position and under the same rule: beside the
+    # reply and never in place of it. It is a **third vocabulary and not a case of the
+    # two above** — it says where the *goal* stands on a turn whose claim a store
+    # refused, which is a different fact from what an attempt produced and from what
+    # became of a forecast read, and no member of any of the three is derived from,
+    # or suppressed on account of, a member of another.
+    #
+    # **After the report and not before it**, for the reader's sake alone and not
+    # because either is read off the other: §7's turn commits no attempt at all — "and
+    # nothing is written to the attempt here" — so on a conforming turn the line above
+    # is silent and the order between them is never seen.
+    _render_drive_withheld(outcome.drive_withheld)
     _render_disambiguation(outcome.disambiguation)
     _render_clarification(outcome.clarification)
     routed = outcome.routed
@@ -7946,6 +8044,26 @@ def _render_turn(outcome: TurnOutcome, *, streamed: _StreamedReply | None = None
         # is true. Suppressing it there would take a true line off every ordinary
         # attempt-ending turn. `_asserts_work` is where the four are named.
         #
+        # **And not a turn whose drive a store withheld** (ADR-0261 §7). "No action was
+        # needed." one line from "that goal was cancelled, and this turn did nothing
+        # further for it" is the same contradiction on one screen, and it is one **this
+        # lane would otherwise have created**: before §7's statement the refused claim
+        # reached this surface through no route.
+        #
+        # **On the member's presence and on all seven**, which is `forecast_not_read`'s
+        # term rather than `_reached_outside`'s: `OutboundReach` and `AttemptOutcome`
+        # each have a member for having attempted nothing, and `DriveWithheld` has none —
+        # every one of the seven is a turn that was driving a step and did not claim it.
+        #
+        # **And it is unreachable on a conforming turn, which is stated rather than
+        # relied on.** §7's refusal comes from the claim this walk made on a step of the
+        # plan this turn is rendering, so `plan.steps` is non-empty and the enclosing
+        # test already fails. What this term guards is the value this function is
+        # *handed*: the outcome crosses a frame, ADR-0168 §6's rule that a surface
+        # renders what it is given binds here as it does on the browser, and depending
+        # on an invariant silently at one surface and not the other is how the three
+        # findings above each happened.
+        #
         # **The two members #2329 records are deliberately still unguarded**, and that
         # is the triage rule rather than an oversight: `read_confirmation` and
         # `read_answer` are pre-existing, neither is rendered by this lane, and PR
@@ -7957,6 +8075,7 @@ def _render_turn(outcome: TurnOutcome, *, streamed: _StreamedReply | None = None
             and outcome.clarification is None
             and outcome.disambiguation is None
             and outcome.forecast_not_read is None
+            and outcome.drive_withheld is None
             and not _asserts_work(outcome.attempt_report)
             and not _reached_outside(outcome)
         ):
@@ -8247,6 +8366,105 @@ def _render_forecast_not_read(
             _print("[dim]Note: that forecast read was begun and stopped.[/]")
         case ForecastNotRead.UNAVAILABLE:
             _print("[dim]Note: that forecast read produced nothing this turn could use.[/]")
+
+
+#: The one fixed statement ADR-0261 §7 gives each of ``DriveWithheld``'s **seven**
+#: members, and the rule that keeps two of them from collapsing into one.
+#:
+#: **``ATTEMPT_CANCELLED`` and ``ATTEMPT_ENDED`` read alike because §7 writes them one
+#: sentence**, not because this surface folded them: "for ``ATTEMPT_CANCELLED`` and
+#: ``ATTEMPT_ENDED``, that the attempt this plan belonged to is over and that **the goal
+#: is not thereby closed**, asking again starting a new one". The collapse §7 forbids is
+#: a different pair each time — "not :attr:`GOAL_CANCELLED` with :attr:`ATTEMPT_CANCELLED`,
+#: and not :attr:`GOAL_BLOCKED` with :attr:`ATTEMPT_PAUSED`" — and those four read
+#: differently here, which :mod:`tests.interfaces.test_cli_cancellation` pins.
+_ATTEMPT_IS_OVER: Final = (
+    "The attempt that plan belonged to is over. The goal is not closed by that, and "
+    "asking again starts a new attempt."
+)
+
+
+def _render_drive_withheld(member: DriveWithheld | None) -> None:
+    """ADR-0261 §7's statement for this turn, **beside the reply and never in place of it**.
+
+    **One fixed statement per member, written out as a literal**, which is
+    :func:`_render_forecast_not_read`'s ratified shape one vocabulary over: nothing here
+    is assembled from a member's value, its name, a format string over the enumeration,
+    or a mapping a later member would silently join. A member added without its statement
+    is a member with no rendering, and §7's closure at seven is what makes that a review
+    question rather than a runtime one.
+
+    **The member names *where the goal stands*, never *why the step was not claimed***
+    (§7). One ``ClaimRefused`` covers both liveness raisers and says which of the two
+    fired; the read cannot establish it either, and a claim refused on the attempt
+    conjunct over a goal a correction had meanwhile revised answers
+    ``UNDERSTANDING_CHANGED`` — true of the goal while naming the wrong conjunct. So no
+    statement below names a conjunct, a store, a transition, a version or a step.
+
+    **ADR-0242 §9's bar binds on these seven word for word**, and §7 states its own four
+    limbs of it: no statement says that the step would have succeeded, that the effect did
+    not happen, that no step of this plan was ever started, or why a store refused. That
+    last is why ``UNDERSTANDING_CHANGED`` says the plan no longer matches and stops —
+    "so none of it ran" would be exactly the third.
+
+    **Two name ``assistant goals`` and five name nothing**, which is §7's fixed half:
+    ``GOAL_BLOCKED``, because a goal that cannot currently be reached is **still open**
+    (ADR-0250 §1) and the user's question is then what it is waiting on; and
+    ``ATTEMPT_PAUSED``, because the goal is waiting on the user and the listing is where
+    the question it is waiting on is read. The other five name no act at all — there is
+    none that helps, and naming one that cannot is worse than naming none
+    (:func:`_render_forecast_not_read`'s own clause one vocabulary over).
+
+    **``GOAL_BLOCKED`` and ``ATTEMPT_ENDED`` say what is true of each and never that the
+    goal is closed** (§7): ADR-0250 §1 rules ``BLOCKED`` **open**, and ADR-0249 §4 that an
+    attempt reaching a terminal state does not move its goal's status.
+
+    **``ATTEMPT_CANCELLED`` is reached on a goal ADR-0250 §13 has *reopened***, which
+    writes ``ACTIVE`` and leaves the cancelled attempts of the abandonment standing
+    (ADR-0261 §5) — so its statement must not say the goal was given up, when the user has
+    just taken it up again.
+
+    **Silence where the member is absent** (§7). It is non-``None`` "exactly on a turn
+    that *returned* after a ``ClaimRefused`` whose post-refusal read established one of
+    the seven states", and ``None`` on every other returned outcome: every turn that
+    dispatched, every turn that stopped on one of ADR-0255 §2's five, every turn that
+    drove nothing at all, and ADR-0198 §1's restatement. A refusal that **propagates**
+    returns no outcome at all, so it is outside the invariant rather than a silent case
+    of it — and a **driver skip** gains no carrier here, reaching composing through
+    ``undriven`` instead (§7).
+
+    Args:
+        member: What ``TurnOutcome.drive_withheld`` carried, or ``None``.
+    """
+    match member:
+        case None:
+            return
+        case DriveWithheld.GOAL_CANCELLED:
+            _print(
+                "[dim]Note: that goal was cancelled, and this turn did nothing further for it.[/]"
+            )
+        case DriveWithheld.GOAL_ACHIEVED:
+            _print(
+                "[dim]Note: that goal is already reached, and this turn did nothing "
+                "further for it.[/]"
+            )
+        case DriveWithheld.GOAL_BLOCKED:
+            _print(
+                "[dim]Note: that goal cannot currently be reached, and it is still open. "
+                "'assistant goals' is where you read how it stands.[/]"
+            )
+        case DriveWithheld.ATTEMPT_CANCELLED | DriveWithheld.ATTEMPT_ENDED:
+            _print(f"[dim]Note: {_ATTEMPT_IS_OVER}[/]")
+        case DriveWithheld.ATTEMPT_PAUSED:
+            _print(
+                "[dim]Note: that goal is waiting on you. 'assistant goals' is where you "
+                "read what it is waiting for.[/]"
+            )
+        case DriveWithheld.UNDERSTANDING_CHANGED:
+            _print(
+                "[dim]Note: the plan I had no longer matches what that goal now asks. "
+                "Asking again plans it afresh.[/]"
+            )
 
 
 #: The four :class:`~ai_assistant.core.types.AttemptOutcome` members whose §6 statement

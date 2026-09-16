@@ -1281,6 +1281,24 @@ function renderOutcome(outcome, chosenAt, provenance) {
   // differs from the one above it: `ATTEMPT_OUTCOMES_THAT_ASSERT_WORK` carries the split
   // and the reason. `verified` and `answered` each say something a turn that needed no
   // step may truthfully say, and ADR-0262 §12's first arm is a turn of the second kind.
+  //
+  // **And not a turn whose drive a store withheld** (ADR-0261 §7). "No action was
+  // needed." one line above "That goal was cancelled, and this turn did nothing further
+  // for it." is the same contradiction on one screen, and it is one **this lane would
+  // otherwise have created**: before §7's statement the refused claim reached this page
+  // through no route.
+  //
+  // **On the member's presence and on all seven**, which is `forecast_not_read`'s term
+  // rather than the one below it. `OutboundReach` and `AttemptOutcome` each have a
+  // member for having attempted nothing; `DriveWithheld` has none — every one of the
+  // seven is a turn that was driving a step and did not claim it.
+  //
+  // **And it is unreachable on a conforming turn, which is stated rather than relied
+  // on.** §7's refusal comes from the claim the walk made on a step of the plan this
+  // outcome carries, so `steps.length === 0` already fails. What this term guards is the
+  // value this page is *handed*: the outcome arrives over a frame, and depending on an
+  // invariant silently at one surface and not the other is how the findings above each
+  // happened.
   if (
     outcome.steps.length === 0 &&
     outcome.step === null &&
@@ -1290,6 +1308,7 @@ function renderOutcome(outcome, chosenAt, provenance) {
     outcome.clarification === null &&
     outcome.disambiguation === null &&
     outcome.forecast_not_read === null &&
+    outcome.drive_withheld === null &&
     !ATTEMPT_OUTCOMES_THAT_ASSERT_WORK.has(outcome.attempt_report)
   ) {
     line(body, "No action was needed.", "notice");
@@ -1343,6 +1362,17 @@ function renderOutcome(outcome, chosenAt, provenance) {
   // of it. The page receives the **outcome word alone**: `continues` crosses through no
   // route, because §6 puts the offer in the reply and not on a surface.
   renderAttemptReport(body, outcome.attempt_report);
+  // ADR-0261 §7's statement, below the reply and never in place of it — `renderRouted`'s
+  // own placement, read at the member ADR-0261 §13's L3 admits this surface for. It is a
+  // **third vocabulary and not a case of either above it**: it says where the *goal*
+  // stands on a turn whose claim a store refused, which is a different fact from what an
+  // attempt produced and from what became of a forecast read, and no member of any of the
+  // three is derived from, or suppressed on account of, a member of another.
+  //
+  // **After the report and not before it**, for the reader's sake alone: §7's turn
+  // commits no attempt at all, so on a conforming turn the line above is silent and the
+  // order between them is never seen.
+  renderDriveWithheld(body, outcome.drive_withheld);
   // ADR-0254 §11's announcement, beside the reply and never in place of it: an
   // authority a turn opened without putting a question is a fact about what the turn
   // did, composed by the hub and not by a model, and it carries the withdrawal handle
@@ -2017,6 +2047,123 @@ function renderAttemptReport(body, member) {
     return;
   }
   line(body, attemptOutcomeWords(member), "notice");
+}
+
+// ADR-0261 §7's one sentence for the two members it writes together, held once so the
+// pair cannot drift apart: "for `ATTEMPT_CANCELLED` and `ATTEMPT_ENDED`, that the attempt
+// this plan belonged to is over and that **the goal is not thereby closed**, asking again
+// starting a new one".
+const ATTEMPT_IS_OVER =
+  "The attempt that plan belonged to is over. The goal is not closed by that, and " +
+  "asking again starts a new attempt.";
+
+// --- the withheld drive (ADR-0261 §7) ---------------------------------------
+//
+// **One fixed statement per member, written out as a literal**, which is
+// `ATTEMPT_OUTCOME_WORDS`' ratified shape one vocabulary over and §7's own clause: "one
+// fixed statement per member ... rendered beside the reply". Nothing here is assembled
+// from a member's value, a format string over the vocabulary, or a mapping a later
+// member would silently join — and §7 closes the vocabulary at **seven**, which is what
+// makes a member added without its sentence a review question rather than a runtime one.
+//
+// **What each names is fixed and the wording is the lane's** (§7), and these are byte
+// for byte the terminal's. ADR-0262 §11's parity point binds here for its own reason —
+// "a member rendered on one and not the other is the parity failure M4 recorded" — so
+// identical prose is what makes that parity checkable rather than argued.
+//
+// **The member names *where the goal stands*, never *why the step was not claimed***
+// (§7). One `ClaimRefused` covers both liveness raisers and says which of the two fired,
+// and the engine's own read cannot establish it either: a claim refused on the attempt
+// conjunct over a goal a correction had meanwhile revised answers `understanding_changed`,
+// true of the goal while naming the wrong conjunct. So no sentence below names a
+// conjunct, a store, a transition, a version or a step.
+//
+// **ADR-0242 §9's bar binds on these seven word for word**, and §7 states its own four
+// limbs of it: none says the step would have succeeded, none says the effect did not
+// happen, none says that no step of this plan was ever started, and none says why a
+// store refused. That last is why `understanding_changed` says the plan no longer
+// matches and stops there — "so none of it ran" would be exactly the third.
+//
+// **`attempt_cancelled` and `attempt_ended` read alike because §7 writes them one
+// sentence**, not because this page folded them: "for `ATTEMPT_CANCELLED` and
+// `ATTEMPT_ENDED`, that the attempt this plan belonged to is over and that **the goal is
+// not thereby closed**, asking again starting a new one". The collapse §7 forbids is a
+// different pair each time — "not `GOAL_CANCELLED` with `ATTEMPT_CANCELLED`, and not
+// `GOAL_BLOCKED` with `ATTEMPT_PAUSED`" — and those four read differently here.
+//
+// **`goal_blocked` and `attempt_ended` say what is true of each and never that the goal
+// is closed** (§7): ADR-0250 §1 rules `BLOCKED` **open**, and ADR-0249 §4 that an attempt
+// reaching a terminal state does not move its goal's status. And `attempt_cancelled` is
+// reached on a goal ADR-0250 §13 has **reopened**, so it must not say the goal was given
+// up when the user has just taken it up again.
+//
+// **Two name `assistant goals` and five name nothing**, which is §7's fixed half.
+// Naming the terminal's command from this page is this surface's own ratified practice
+// (`UNREADABLE_RULINGS`, `FORECAST_NOT_READ_WORDS`, `ATTEMPT_OUTCOME_WORDS`): inventing a
+// control here would be minting a route no ratified decision gives this surface.
+const DRIVE_WITHHELD_WORDS = {
+  goal_cancelled: "That goal was cancelled, and this turn did nothing further for it.",
+  goal_achieved: "That goal is already reached, and this turn did nothing further for it.",
+  goal_blocked:
+    "That goal cannot currently be reached, and it is still open. " +
+    "'assistant goals' is where you read how it stands.",
+  attempt_cancelled: ATTEMPT_IS_OVER,
+  attempt_ended: ATTEMPT_IS_OVER,
+  attempt_paused:
+    "That goal is waiting on you. 'assistant goals' is where you read what it is waiting for.",
+  understanding_changed:
+    "The plan I had no longer matches what that goal now asks. Asking again plans it afresh.",
+};
+
+// What the page says for a value that is not one of the seven.
+//
+// **Not a bare identifier and not silence**, which is `ATTEMPT_REPORT_UNREADABLE`'s
+// position one vocabulary over: an enum value on the screen is this surface reporting an
+// internal vocabulary to a person, and silence is a turn whose drive was withheld
+// reading exactly like one that drove a step.
+//
+// **Rendered rather than thrown for**, which is `forecastNotReadWords`' own arrangement:
+// nothing on this page is spent, given back or settled by this statement.
+//
+// **And it asserts nothing the page has not been told**, which is the bar §7 puts on the
+// seven read at a value that is none of them: it does not say the step was not claimed,
+// does not say the goal is closed, and names no cause.
+const DRIVE_WITHHELD_UNREADABLE =
+  "Where that goal stands arrived as something this browser has no words for, so it is " +
+  "not reported here rather than reported as something it may not be.";
+
+// Whether a value is one of the seven members ADR-0261 §7 closes the enumeration at.
+//
+// `isAttemptOutcome`'s test one vocabulary over and for its reasons: `Object.hasOwn`
+// rather than a truthiness test, because a value naming an inherited property —
+// `toString`, `constructor` — would otherwise pass as a member and put a function's
+// source text on the screen; and `typeof` in front of it because a property key is a
+// coerced one, so `String(["goal_blocked"])` spells a member.
+function isDriveWithheld(member) {
+  return typeof member === "string" && Object.hasOwn(DRIVE_WITHHELD_WORDS, member);
+}
+
+// The sentence for one member, or the refusal above. Total over whatever it is handed,
+// which is `attemptOutcomeWords`' own arrangement.
+function driveWithheldWords(member) {
+  return isDriveWithheld(member) ? DRIVE_WITHHELD_WORDS[member] : DRIVE_WITHHELD_UNREADABLE;
+}
+
+// ADR-0261 §7's statement, beside the reply and never in place of it.
+//
+// **`null` and an absent member are silence and not a refusal** (§7). The member is
+// non-`null` "exactly on a turn that *returned* after a `ClaimRefused` whose
+// post-refusal read established one of the seven states", and `null` on every other
+// returned outcome: every turn that dispatched, every turn that stopped on one of
+// ADR-0255 §2's five, every turn that drove nothing at all, and ADR-0198 §1's
+// restatement. A refusal that **propagates** returns no outcome at all, so it reaches
+// this page as an error rather than as a silent statement — and a driver **skip** gains
+// no carrier here, reaching composing through the undriven set instead.
+function renderDriveWithheld(body, member) {
+  if (member === null || member === undefined) {
+    return;
+  }
+  line(body, driveWithheldWords(member), "notice");
 }
 
 // --- the goal vocabularies (ADR-0250 §5, §11, §12, §15) ----------------------
@@ -10366,12 +10513,47 @@ async function readGoals(more, run) {
   }
 }
 
+// ADR-0261 §6's statement for a listing row whose `effect_in_flight` is **true**.
+//
+// §6 fixes which fact it names and leaves the wording to the lane: that an action of
+// this goal **is outstanding — claimed, possibly sent, outcome unknown**. Byte for byte
+// the terminal's, which is what makes ADR-0262 §11's parity point checkable here.
+//
+// **It says none of the three things §6 bars**: not that the action did not happen, not
+// that it did, and not that anything the user does will withdraw it.
+//
+// ***In flight* means the claim landed, never that the call left** (§6). The field is
+// true where a step stands `indeterminate` or `running` and asserts nothing about
+// whether the invoker was entered, so "may have been sent" is the strongest thing this
+// sentence is allowed to say.
+//
+// **And it names no tool, no call, no destination and no effect key** — §6 makes
+// *outstanding* "the step's status and never the presence of an effect key", includes a
+// **read** deliberately, and fixes that the word *effect* in the field's own name
+// "asserts that an `EffectKey` exists" nowhere. Which is why this says *an action*.
+const EFFECT_IN_FLIGHT =
+  "An action of this goal is outstanding: it was claimed, it may have been sent, " +
+  "and its outcome is not known.";
+
 // One goal, with everything `GoalSummary` carries and nothing it does not.
 //
 // **Paused and open are two facts and are shown as two.** The status says whether the
 // work is still live; `paused` says whether it is waiting on the owner. A goal can be
 // open and running, open and waiting, or closed — and collapsing the pair would lose
 // exactly the state this listing exists to make visible (#2286).
+//
+// **`effect_in_flight` is a third fact and is shown as a third** (ADR-0261 §6), on
+// `paused`'s own ground: "the engine computes it, so that two surfaces cannot render it
+// differently, and no adapter derives it". So this renders the boolean it was handed and
+// walks no attempt, execution or step. It is goal-wide and not per-attempt, which is why
+// it sits on the row rather than beside any one act.
+//
+// **And it is why the listing carries it at all**: the act's answer is heard once, and
+// "a listing showing an `abandoned` goal with nothing beside it would have lost the fact
+// R78 requires". The row and the act are the same predicate read at **two instants** —
+// they "cannot disagree about one instant, and are never required to agree across two" —
+// so a row reading false beside a goal the act reported an in-flight effect for is the
+// accurate answer to a different question. Nothing here re-reads or reconciles them.
 //
 // **The elements, the grounds, the attempts and the plans are not here and cannot be**:
 // the type "carries no attempt id, no revision number, no element, no ground, no
@@ -10382,6 +10564,9 @@ function renderGoal(list, goal) {
   line(item, goal.outcome, "reply");
   const waiting = goal.paused ? " — waiting on you" : "";
   line(item, `State: ${goalMemberWords(GOAL_STATUS_WORDS, goal.status)}${waiting}`, "hint");
+  if (goal.effect_in_flight) {
+    line(item, EFFECT_IN_FLIGHT, "notification-summary");
+  }
   line(
     item,
     goal.last_engaged_at === null
