@@ -88,6 +88,7 @@ from ai_assistant.planning.goals import (
     cancellation_outcome,
     cancelled,
     capped,
+    ending_execution_ids,
     engaged,
     invalidated,
     minted,
@@ -2157,32 +2158,56 @@ class SqlitePlanStore:
             One status per step, over the executions this store holds. Read on the
             caller's own connection, so the statuses and the write are one step.
         """
-        return [
-            step.status for held in self._executions_named(conn, attempt) for step in held.steps
-        ]
+        return self._step_statuses_of(conn, attempt.execution_ids)
 
-    def _execution_versions(self, conn: sqlite3.Connection, attempt: GoalAttempt) -> dict[str, int]:
-        """The stored ``version`` of every execution ``attempt`` names (ADR-0262 §4).
+    def _step_statuses_of(
+        self, conn: sqlite3.Connection, execution_ids: Sequence[str]
+    ) -> list[StepStatus]:
+        """Every step status of every execution ``execution_ids`` names.
 
-        :meth:`_step_statuses`' companion over the same walk and the same connection,
-        so ADR-0262 §4's two ``→ ENDED`` conjuncts and the write see one fact — which
-        is the whole of why that section puts them in the store.
+        Taken as an id sequence rather than as an attempt, because ADR-0262 §4's ending
+        conjuncts are decided over the **post-transition** set
+        (:func:`~ai_assistant.planning.goals.ending_execution_ids`), which is no attempt
+        this store holds yet.
 
         Args:
             conn: The connection the caller's transaction is running on.
-            attempt: The attempt whose ``execution_ids`` are walked.
+            execution_ids: The executions to walk.
 
         Returns:
-            One entry per execution this store holds, keyed by id. An ``execution_ids``
-            entry the store does not hold contributes none, which
+            One status per step, read on the caller's own connection.
+        """
+        return [
+            step.status
+            for held in self._executions_named(conn, execution_ids)
+            for step in held.steps
+        ]
+
+    def _execution_versions(
+        self, conn: sqlite3.Connection, execution_ids: Sequence[str]
+    ) -> dict[str, int]:
+        """The stored ``version`` of every execution ``attempt`` names (ADR-0262 §4).
+
+        :meth:`_step_statuses_of`'s companion over the same walk and the same
+        connection, so ADR-0262 §4's two ``→ ENDED`` conjuncts and the write see one
+        fact — which is the whole of why that section puts them in the store.
+
+        Args:
+            conn: The connection the caller's transaction is running on.
+            execution_ids: The executions to walk — the **post-transition** set, for
+                :meth:`_step_statuses_of`'s reason.
+
+        Returns:
+            One entry per execution this store holds, keyed by id. An entry the store
+            does not hold contributes none, which
             :meth:`_refuse_a_dangling_execution` makes unreachable through the contract.
         """
-        return {held.id: held.version for held in self._executions_named(conn, attempt)}
+        return {held.id: held.version for held in self._executions_named(conn, execution_ids)}
 
     def _executions_named(
-        self, conn: sqlite3.Connection, attempt: GoalAttempt
+        self, conn: sqlite3.Connection, execution_ids: Sequence[str]
     ) -> list[ExecutionState]:
-        """Every execution ``attempt`` names, as this store holds it.
+        """Every execution ``execution_ids`` names, as this store holds it.
 
         **Read in bounded batches, because ``execution_ids`` is unbounded** — the
         reasoning :meth:`_step_statuses` states, held here so that the two readers over
@@ -2190,12 +2215,12 @@ class SqlitePlanStore:
 
         Args:
             conn: The connection the caller's transaction is running on.
-            attempt: The attempt whose ``execution_ids`` are walked.
+            execution_ids: The executions to walk.
 
         Returns:
             One decoded row per execution this store holds, in no particular order.
         """
-        held = attempt.execution_ids
+        held = tuple(execution_ids)
         size = max(1, min(_EXECUTION_BATCH, conn.getlimit(sqlite3.SQLITE_LIMIT_VARIABLE_NUMBER)))
         found: list[ExecutionState] = []
         for start in range(0, len(held), size):
@@ -3085,12 +3110,17 @@ class SqlitePlanStore:
                     yielded=cancellation_outcome(self._step_statuses(conn, stored)),
                 )
             if transition.to_state is AttemptState.ENDED:
+                # Over the set the attempt **will** name, not the one it names: this
+                # same transition may append an execution, and one appended here would
+                # otherwise reach a terminal attempt unexamined by either conjunct
+                # (ADR-0262 §4).
+                ending = ending_execution_ids(stored, transition.add_execution_id)
                 refuse_an_unendable_attempt(
                     attempt_id=stored.id,
-                    named=stored.execution_ids,
+                    named=ending,
                     declared=transition.execution_versions,
-                    statuses=self._step_statuses(conn, stored),
-                    versions=self._execution_versions(conn, stored),
+                    statuses=self._step_statuses_of(conn, ending),
+                    versions=self._execution_versions(conn, ending),
                 )
             updated = advanced(stored, transition)
             conn.execute(

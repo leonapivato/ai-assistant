@@ -8253,6 +8253,130 @@ class PlanStoreContract:
         assert unmoved.state is stored.state, "the refusal wrote nothing"
         assert unmoved.version == stored.version
 
+    async def test_an_append_that_ends_in_the_same_step_is_decided_over_the_post_set(
+        self, store: PlanStore
+    ) -> None:
+        """§4's conjuncts read the set the attempt **will** name, not the one it names.
+
+        One ``AttemptTransition`` may **append** an execution and end the attempt in the
+        same indivisible step. A store deciding either conjunct against the *stored*
+        ``execution_ids`` lets that execution through both: an attempt naming none takes
+        the empty snapshot and an empty status set, the append then lands, and the store
+        holds a terminal — possibly ``VERIFIED`` — attempt over a ``PENDING`` step.
+        **That is the exact record §4 exists to make unreachable**, so the arm drives it
+        and asserts the refusal writes nothing.
+        """
+        await store.save_goal(_goal())
+        await store.open_attempt(_attempt())
+        await store.save_plan(_plan("p2"))
+        appended = await store.start_execution("p2")
+        stored = await store.get_attempt("a1")
+        assert stored is not None
+        assert stored.execution_ids == (), "the attempt names none until this transition"
+
+        with pytest.raises(StaleExecutionError):
+            await store.commit_attempt(
+                AttemptTransition(
+                    attempt_id="a1",
+                    expected_version=stored.version,
+                    to_state=AttemptState.ENDED,
+                    outcome=AttemptOutcome.VERIFIED,
+                    ended_at=_WHEN,
+                    add_execution_id=appended.id,
+                    execution_versions=((appended.id, appended.version),),
+                )
+            )
+
+        unmoved = await store.get_attempt("a1")
+        assert unmoved is not None
+        assert unmoved.state is stored.state, "the refusal wrote nothing"
+        assert unmoved.version == stored.version
+        assert unmoved.execution_ids == (), "and the append did not land either"
+
+    async def test_an_append_that_ends_in_the_same_step_needs_the_appended_pair(
+        self, store: PlanStore
+    ) -> None:
+        """§4's completeness half over the same transition, with its own class.
+
+        The snapshot must name the appended execution too — "*exactly* the attempt's
+        ``execution_ids``", read after the append this transition makes — and omitting
+        it is a **malformed command**, not a lost race. A store reading the id set
+        against the stored tuple would accept the empty snapshot here.
+
+        **The appended execution is settled ``SKIPPED``**, which is the only settled
+        status it can reach: ADR-0255 §3 binds a claim to the attempt that **names** the
+        execution, and this one is not named until the very transition under test.
+        """
+        await store.save_goal(_goal())
+        await store.open_attempt(_attempt())
+        await store.save_plan(_plan("p2"))
+        appended = await store.start_execution("p2")
+        settled = await self._driven(store, appended, "s1", StepStatus.SKIPPED)
+        stored = await store.get_attempt("a1")
+        assert stored is not None
+
+        with pytest.raises(ValueError) as refusal:  # noqa: PT011 — the class is the assertion
+            await store.commit_attempt(
+                AttemptTransition(
+                    attempt_id="a1",
+                    expected_version=stored.version,
+                    to_state=AttemptState.ENDED,
+                    outcome=AttemptOutcome.VERIFIED,
+                    ended_at=_WHEN,
+                    add_execution_id=settled.id,
+                )
+            )
+
+        assert not isinstance(refusal.value, StaleExecutionError)
+        unmoved = await store.get_attempt("a1")
+        assert unmoved is not None
+        assert unmoved.execution_ids == (), "the refusal wrote nothing"
+
+        landed = await store.commit_attempt(
+            AttemptTransition(
+                attempt_id="a1",
+                expected_version=stored.version,
+                to_state=AttemptState.ENDED,
+                outcome=AttemptOutcome.VERIFIED,
+                ended_at=_WHEN,
+                add_execution_id=settled.id,
+                execution_versions=((settled.id, settled.version),),
+            )
+        )
+        assert landed.state is AttemptState.ENDED, "and the complete snapshot lands"
+        assert landed.execution_ids == (settled.id,)
+
+    async def test_an_append_of_an_id_the_attempt_already_holds_leaves_the_set_alone(
+        self, store: PlanStore
+    ) -> None:
+        """ADR-0249 §12's append rule is untouched by the post-set reading.
+
+        "An identifier the tuple already holds is **ignored** rather than duplicated or
+        refused", so a repeat of the same append on the owning attempt leaves the set
+        where it was — and a snapshot that was correct before it is correct after it. A
+        store that appended the id unconditionally before comparing would see a
+        duplicate and refuse a command nothing is wrong with.
+        """
+        state = await self._with_steps(store, StepStatus.SUCCEEDED)
+        stored = await store.get_attempt("a1")
+        assert stored is not None
+        assert stored.execution_ids == (state.id,)
+
+        ended = await store.commit_attempt(
+            AttemptTransition(
+                attempt_id="a1",
+                expected_version=stored.version,
+                to_state=AttemptState.ENDED,
+                outcome=AttemptOutcome.VERIFIED,
+                ended_at=_WHEN,
+                add_execution_id=state.id,
+                execution_versions=await self._snapshot(store, stored),
+            )
+        )
+
+        assert ended.state is AttemptState.ENDED
+        assert ended.execution_ids == (state.id,), "appended once, not twice"
+
     async def test_the_empty_snapshot_is_accepted_for_an_attempt_naming_no_execution(
         self, store: PlanStore
     ) -> None:
