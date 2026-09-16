@@ -1443,7 +1443,7 @@ _SEARCH_NOT_SERVICED_PROMPTS: Final[Mapping[SearchNotServiced, str]] = MappingPr
 )
 
 
-def _system_prompt(  # noqa: C901, PLR0913 — the pass's own instruction plus one keyword per fact a clause is appended on; ADR-0228 §10, ADR-0240 §8, ADR-0242 §7 and ADR-0264 §6 each add one, none is derivable from another, and one `if` per clause is the decision rather than a shape to fold
+def _system_prompt(  # noqa: C901, PLR0912, PLR0913 — the pass's own instruction plus one keyword per fact a clause is appended on; ADR-0228 §10, ADR-0240 §8, ADR-0242 §7, ADR-0264 §6, ADR-0259 §3 and ADR-0262 §6 each add one, none is derivable from another, and one `if` per clause is the decision rather than a shape to fold
     base: str,
     *,
     unbounded_audience: bool,
