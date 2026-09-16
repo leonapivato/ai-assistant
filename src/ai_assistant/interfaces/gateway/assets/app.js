@@ -997,6 +997,16 @@ const NO_HEAD =
   `That stream was never opened: nothing answered the request for ` +
   `${HEAD_DEADLINE_MILLISECONDS / 1000} seconds, so it was abandoned.`;
 
+// The ending of a stream that outlived the session it was opened under (#2455), in the
+// line that carries the control back rather than in a fault slot. It is not a fault:
+// nothing went wrong, the gateway answered, and the session this browser is using was
+// never touched — which is the whole of what the owner needs told, because the ending
+// this stream really got belongs to a session that is no longer theirs to hear about.
+const OUTLIVED_ITS_SESSION =
+  "That stream was opened under a session this browser no longer holds, so its ending " +
+  "is not this session's to report and nothing about the session in use here was " +
+  "changed. Start watching again.";
+
 const DELIVERY_STREAM_CUT =
   "The connection carrying notifications ended before the gateway finished it, so " +
   "this browser has stopped watching. Nothing the hub still holds was lost: it is " +
@@ -7608,6 +7618,13 @@ async function watchDeliveries(because) {
   if (half === null || watching) {
     return;
   }
+  // **Which session this stream belongs to, read in the same breath as the half it will
+  // be sent under** (#2455). A stream outlives its own session by design — ADR-0175 §7
+  // has an idle session expire under an open one and end it — so the pair every other
+  // caller captures for a request that might be answered late is captured here for a
+  // request that is *expected* to be, and it is captured before `watching` is set so
+  // that nothing between the two can move either half of it.
+  const era = sessionEra;
   watching = true;
   // The condition that ended the *last* stream is cleared here, as every other act
   // clears its own panel before it runs. A re-arm that succeeded above a standing
@@ -7619,7 +7636,7 @@ async function watchDeliveries(because) {
     because ? `Watching for notifications. ${because}` : "Watching for notifications."
   );
   try {
-    await readDeliveries(half);
+    await readDeliveries(half, era);
   } finally {
     // The stream has ended and this page knows it now, so an event held while it was
     // still pending is spent here — **after** the ending has been reported, which is
@@ -7707,7 +7724,33 @@ async function watchDeliveries(because) {
 // events or the owner's click, exactly as before — and where an event arrived while
 // this stream was still pending, `watchDeliveries`' `finally` spends the one reason it
 // held, once, which is the owner's own act being honoured rather than a loop.
-async function readDeliveries(half) {
+//
+// **Both of its endings are guarded against ending a session they no longer belong to**
+// (#2455). `report` is `sessionLost` at one remove, and `sessionLost` calls
+// `forgetHeaderHalf`, which removes the stored half whatever session it belongs to. The
+// stored half is shared by every tab at this origin, so a stream opened under a session
+// that has since expired — which is precisely the stream ADR-0175 §7 describes — could
+// answer `no-live-session` and evict the half of a session *another tab* had started in
+// the meantime, throwing the tab the owner is actually using back to the bootstrap form.
+// #2404 closed that door for every caller that goes through `relay`, by comparing
+// `sameSession(half, era)` before `refused`; this is the same comparison at the one
+// surface that does not, and it is the last of them.
+//
+// **The guard is on the endings and not on the values**, which is a distinction this
+// stream makes and a listing cannot. A value on an open delivery stream arrives while
+// the session holding it is still live — §7 ends the stream with the session, so there
+// is no window in which a dead session delivers — and it is the same owner's
+// notification either way, so suppressing it would drop a real delivery in silence,
+// which is the failure ADR-0175 §4 spends its keep-alive to prevent. An *ending*, by
+// contrast, is exactly the thing that is answered for a session that has already gone.
+//
+// **And the `catch` below needs no guard of its own.** `forgetHeaderHalf` has one
+// caller, `sessionLost`, which releases this stream before it does anything else — so
+// a session lost *in this page* reaches the catch as `open.released` and returns there.
+// What is left for the catch is a socket that failed under a page still holding a
+// session of its own, whose notifications panel is legitimately on screen; it evicts
+// nothing and reveals nothing beside a bootstrap form.
+async function readDeliveries(half, era) {
   const reader = new AbortController();
   // This stream, reachable from outside so that a session that ended can end it
   // (#1542). Registered before anything is armed and cleared in the `finally`, so the
@@ -7792,6 +7835,13 @@ async function readDeliveries(half) {
     hush();
     if (!response.ok) {
       const body = await readBody(response);
+      // Not this session's refusal to report (#2455), and asked after the body is read
+      // rather than before, so what is compared is the session as it stands at the
+      // moment the ending would be acted on.
+      if (!sameSession(half, era)) {
+        stopWatching(OUTLIVED_ITS_SESSION);
+        return;
+      }
       stopWatching();
       refused("notifications", body, response.status);
       return;
@@ -7821,6 +7871,16 @@ async function readDeliveries(half) {
       // the gateway, its hub connection and this socket are all still there, which
       // the absence of an ending already says. It restarts the deadline above and
       // that is the whole of its effect here — which is what §4 spends it on.
+    }
+    // Not this session's ending to report (#2455). It covers the cut as well as the
+    // terminal value, and for the reason #2404's own round-1 finding gives: `fault`
+    // reveals the panel it writes into, so a stream whose body ended under a session
+    // this page no longer holds would re-open the notifications panel — and where the
+    // half went because *this* page re-entered, that is a control panel beside the
+    // bootstrap form.
+    if (!sameSession(half, era)) {
+      stopWatching(OUTLIVED_ITS_SESSION);
+      return;
     }
     stopWatching();
     if (terminal === null) {
