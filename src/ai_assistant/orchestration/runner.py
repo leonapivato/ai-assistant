@@ -88,6 +88,7 @@ from ai_assistant.orchestration.authorizing import (
 )
 from ai_assistant.orchestration.capability_alias import resolve_capability
 from ai_assistant.orchestration.executor import CallableReach
+from ai_assistant.orchestration.quotes import mint_quote, quote_read
 from ai_assistant.orchestration.selection import (
     Preference,
     eligible_candidates,
@@ -952,7 +953,7 @@ class StepRunner:
         await _recorded_ruling(on_ruled, decision)
         if decision.ruling.outcome is PermissionOutcome.ALLOW:
             return await self._execute(
-                state, step, request, decision, attempt_id=attempt_id, timeout=timeout
+                state, planned, request, decision, attempt_id=attempt_id, timeout=timeout
             )
 
         if decision.ruling.outcome is PermissionOutcome.CONFIRM:
@@ -1211,7 +1212,7 @@ class StepRunner:
         await _reported_ruling(on_ruled, decision, step_id=step.id)
         if decision.ruling.outcome is PermissionOutcome.ALLOW:
             disposition = await self._execute(
-                state, step, request, decision, attempt_id=attempt_id, timeout=timeout
+                state, planned, request, decision, attempt_id=attempt_id, timeout=timeout
             )
         else:
             disposition = await self._deny(state, step, decision, confirmed.tool)
@@ -2341,7 +2342,7 @@ class StepRunner:
     async def _execute(  # noqa: PLR0913 — the five values the executor's call is assembled from, plus the attempt it is claimed under (ADR-0255 §3)
         self,
         state: ExecutionState,
-        step: PlanStep,
+        planned: _Planned,
         request: ActionRequest,
         decision: PermissionDecision,
         *,
@@ -2366,24 +2367,78 @@ class StepRunner:
         callable are the whole of. It is carried out of the drive on
         :attr:`StepDisposition.outbound` as a typed classification, so the fold never
         reads a binding or a disposition to reconstruct it (§6).
+
+        **ADR-0267 §4's mint hangs here, which is every path a step's output is
+        recorded.** The executor's terminal transition is the one place in this
+        subsystem that commits an ``output`` at all, and this method is that
+        executor's only caller — reached from :meth:`run` under an ``ALLOW`` and from
+        :meth:`resume` under an approved answer, so both of the runner's dispatch
+        paths take it from one expression rather than from two that could drift
+        apart. The reading is taken from the state the executor **returned**, so the
+        instant and the output are the store's own record rather than the seam's
+        report of them (:func:`~ai_assistant.orchestration.quotes.quote_read`).
+
+        ``planned`` and not a bare ``PlanStep``, because a quote names *where* it was
+        read and a step id alone names no place (§1): the plan is what makes
+        ``read_from`` resolvable on a goal that has replanned, and it is the same
+        single read of a single stored plan ``ActionRequest.goal`` already comes from
+        (:class:`_Planned`).
+
+        **The mint is after the disposition is assembled and not before** (§4): it *"is
+        not atomic with the transition that recorded the output"*, and there is nothing
+        here to make it so. A stop between the two leaves the step ``SUCCEEDED`` with
+        its output and the goal without that reading, and the act then asks.
+
+        Raises:
+            PlanningError: If the goal cannot be read, or if the quote's write is
+                refused and the refusal is not this mint's own committed write (§4).
+                The act has already happened by then, and the walk stops under
+                ADR-0255's own discipline rather than dispatching against a reading
+                the minter could not record.
         """
         call = self._authorised(request, decision)
         reach = CallableReach()
         ran = await self._executor.execute(
             state,
-            step_id=step.id,
+            step_id=planned.step.id,
             call=call,
             attempt_id=attempt_id,
             timeout=timeout,
             reach=reach,
         )
-        return StepDisposition(
+        disposition = StepDisposition(
             Disposition.EXECUTED,
             ran,
             decision.id,
             call.decision.tool.id,
             outbound=_egress_reach(request, reach),
         )
+        await self._mint_quote(planned, request, ran)
+        return disposition
+
+    async def _mint_quote(
+        self, planned: _Planned, request: ActionRequest, ran: ExecutionState
+    ) -> None:
+        """Read the price this step's output stated and record it (ADR-0267 §4).
+
+        Total and silent on the reading — a step the executor did not finish
+        ``SUCCEEDED``, a step naming no intended act, a declaration naming no quoted
+        output, an output that is not an object or does not carry both keys in the
+        shapes §4 admits: every one of them mints nothing, raises nothing, and reaches
+        the store not at all, so the overwhelmingly common step costs no goal read.
+
+        The write is the only part that can raise, and §4 requires that it does rather
+        than swallowing a reading it could not record.
+        """
+        stored = ran.step(planned.step.id)
+        if stored is None:
+            return
+        quote = quote_read(
+            step=planned.step, recorded=stored, request=request, plan=planned.plan.id
+        )
+        if quote is None:
+            return
+        await mint_quote(self._plans, goal_id=planned.goal_id, quote=quote)
 
     async def _deny(
         self,
