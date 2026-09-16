@@ -25,9 +25,11 @@ from test_engine import (
 
 from ai_assistant.core.errors import ModelUnavailableError
 from ai_assistant.core.types import (
+    TERMINAL_ATTEMPT_STATES,
     Disposition,
     EvidenceDigest,
     GoalBrief,
+    GoalStatus,
     Idempotency,
     Message,
     PlannerOutput,
@@ -235,17 +237,41 @@ async def test_the_engine_hands_the_stage_the_steps_it_did_not_drive() -> None:
     Computed by the engine from the step it actually drove, not worked out by the
     stage from the plan — which is the shape §5 refuses, and the one that would
     silently become wrong the day #242 lands and more than one step is driven.
+
+    **And the attempt stays live** (ADR-0262 §4, #2477). This engine drives one step
+    per turn, so the second step is still ``PENDING`` when the turn composes — and §4's
+    third ending condition is that "every step of every execution it names stands
+    ``SUCCEEDED``, ``FAILED`` or ``SKIPPED``". So this turn ends no attempt and writes
+    no ``AttemptOutcome``, which is §4's own stated cost: "an attempt whose walk stopped
+    leaving a step ``PENDING`` … does not end on that turn; the next turn runs ADR-0259
+    §4's reconciliation before planning, whose act 1 disposes of exactly those steps".
+
+    That is asserted here rather than in an arm of its own because this is the tree's
+    one multi-step plan, and the two facts are about the same turn: the stage is told
+    what was not driven, and what was not driven is why nothing ended.
     """
     model = FakeModelProvider(_ANSWER)
     harness = _wired(model, planner=_TwoStepPlanner(), tools=(tool(),))
 
-    await harness.engine.converse("send it", timeout=PATIENT)
+    outcome = await harness.engine.converse("send it", timeout=PATIENT)
 
     lines = _prompt(model).splitlines()
     driven = next(line for line in lines if CAPABILITY in line)
     later = next(line for line in lines if "file_note" in line)
     assert "NOT DRIVEN AT ALL" not in driven
     assert "NOT DRIVEN AT ALL" in later
+
+    assert outcome.turn is not None
+    attempts = await harness.plans.attempts_of(outcome.turn.goal.goal_id)
+    assert len(attempts) == 1
+    assert attempts[0].state not in TERMINAL_ATTEMPT_STATES, (
+        "a step of this attempt's execution is still PENDING, so ADR-0262 §4 ends nothing"
+    )
+    assert attempts[0].outcome is None
+    assert attempts[0].ended_at is None
+    goal = await harness.plans.get_goal(outcome.turn.goal.goal_id)
+    assert goal is not None
+    assert goal.status is GoalStatus.ACTIVE, "and no GoalStatus moved"
 
 
 # --- §8: the passes that owe no answer originate no call at all --------------

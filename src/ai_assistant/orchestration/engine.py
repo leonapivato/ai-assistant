@@ -378,6 +378,23 @@ _DEFAULT_ROUTED_CONFIRMATION_TTL: Final = timedelta(minutes=15)
 #: directly is not a deployment — and the composition root passes the configured value.
 _DEFAULT_GOAL_QUESTION_TTL: Final = timedelta(hours=72)
 
+#: ADR-0262 §4's third ending condition, as the **complement** of the three statuses
+#: that satisfy it: "every step of every execution it names stands ``SUCCEEDED``,
+#: ``FAILED`` or ``SKIPPED`` — so none stands ``PENDING``, ``AWAITING_APPROVAL``,
+#: ``RUNNING`` or ``INDETERMINATE``". Written that way round so a member added to
+#: ``StepStatus`` later is **unsettled** until some decision says otherwise, which is
+#: the direction ADR-0014 §4 refuses to guess in.
+#:
+#: **Spelled out here rather than imported from** ``ai_assistant.planning``, which
+#: golden rule 1 forbids and which ``lint-imports`` enforces: this engine and the store
+#: state the same condition, and ADR-0262 §4 is explicit that the store's copy is the
+#: one that binds — "decided in the same indivisible step as the write", because "a
+#: claim landing beside the engine's read is invisible to the attempt's own
+#: compare-and-swap".
+_SETTLED_STEP_STATUSES: Final[frozenset[StepStatus]] = frozenset(
+    {StepStatus.SUCCEEDED, StepStatus.FAILED, StepStatus.SKIPPED}
+)
+
 #: How many times a resumption re-reads a goal before giving up its engagement stamp.
 #:
 #: ADR-0014 §5 makes a stale write "a detectable, **retryable** failure", and this is the
@@ -10303,7 +10320,12 @@ class Engine:
         held = await self._attempt_of(step.state)
         if held is None:
             return
-        answered = self._answered(composed, step)
+        # ADR-0262 §4's third ending condition, beside §5's two this line already
+        # carries (#2477): an attempt whose walk left a step unsettled does not end on
+        # this turn, so the resumption writes `RUNNING` below exactly as a resumption
+        # whose answer earned no outcome does — the attempt is no longer waiting for the
+        # boundary's answer, and it is not finished either.
+        answered = self._answered(composed, step) and await self._every_step_settled(held)
         await self._move_attempt(
             held,
             to_phase=AttemptPhase.VERIFY,
@@ -10485,6 +10507,67 @@ class Engine:
         )
         stamped = opened.phases + (() if to_phase is None else (to_phase,))
         return replace(opened, attempt=moved, phases=stamped)
+
+    async def _every_step_settled(self, opened: OpenedAttempt | None) -> bool:
+        """Whether ADR-0262 §4's third ending condition holds of this attempt (#2477).
+
+        "**Every step of every execution it names stands ``SUCCEEDED``, ``FAILED`` or
+        ``SKIPPED``** — so none stands ``PENDING``, ``AWAITING_APPROVAL``, ``RUNNING``
+        or ``INDETERMINATE``." §4 states all three ending conditions as this engine's,
+        and this is the third of them; the other two are read off the pass itself
+        (:meth:`_answered` and the attempt's own state).
+
+        **This is a precondition, not a guard, and the store's copy is what binds.**
+        §4 gives the same condition to ``PlanStore.commit_attempt``, "decided in the
+        same indivisible step as the write", because "a claim landing beside the
+        engine's read is invisible to the attempt's own compare-and-swap". So this read
+        cannot be trusted to still hold at the commit and is not asked to be: what it
+        does is keep this engine from **proposing** a write the decision refuses, on the
+        ordinary path where nothing is racing at all — a plan of two steps, of which
+        this turn drove one, which is every multi-step plan until #242 lands.
+
+        **What declining costs is §4's own stated cost, taken rather than papered over**:
+        the attempt does not end on this turn, no ``AttemptOutcome`` is written and no
+        ``GoalStatus`` moves — "every other turn ends no attempt and writes no
+        ``AttemptOutcome`` at all". The next turn runs ADR-0259 §4's reconciliation
+        before planning, "whose act 1 disposes of exactly those steps", so the cost is
+        one turn and is bounded by an act that already runs. **Nothing here sweeps,
+        retries or repairs**, and a goal the user never returns to keeps a live attempt,
+        which is what ``abandon_goal`` is for.
+
+        **Read separately from** :meth:`_execution_versions` **on purpose.** The two
+        answer different questions at different moments: this one decides whether to
+        propose the transition at all, and the snapshot is read at the commit, because
+        "the read is the last one before the write and nothing re-reads after it". A
+        single walk would either decide from a figure read too late or move the decision
+        into the commit helper, and §4 puts the decision at the three sites that make it.
+
+        Args:
+            opened: The attempt as this pass holds it, or ``None`` where the pass opened
+                none — which ends nothing either way, :meth:`_move_attempt` writing
+                nothing at all for such a pass.
+
+        Returns:
+            Whether every step of every execution the attempt names has settled. ``True``
+            for an attempt naming no execution, and for no attempt at all.
+
+        Raises:
+            PlanningError: As ``get_execution`` raises it.
+        """
+        if opened is None:
+            return True
+        for execution_id in opened.attempt.execution_ids:
+            state = await self._plans.get_execution(execution_id)
+            if state is None:  # pragma: no cover — the store's own write-time closure
+                # Unreachable against a store that kept its closure, for the reason
+                # :meth:`_execution_versions` gives. An execution the store lost has no
+                # step to be unsettled, so it withholds nothing here — and the same loss
+                # leaves the snapshot short, which §4 makes a malformed command the store
+                # refuses outright. The transition does not slip through on this branch.
+                continue
+            if any(step.status not in _SETTLED_STEP_STATUSES for step in state.steps):
+                return False
+        return True
 
     async def _execution_versions(self, attempt: GoalAttempt) -> tuple[tuple[str, int], ...]:
         """Every execution this attempt names, at the version this read returns (ADR-0262 §4).
@@ -10937,7 +11020,15 @@ class Engine:
             # ADR-0250 §10 again: a turn that raised a question is **paused**, not
             # finished, so nothing here verifies, ends or earns an outcome for it — and
             # its phase stays where §10 left it.
-            answered = raised is None and self._answered(composed, None)
+            # ADR-0262 §4's third ending condition (#2477): a no-action decision drove
+            # no step, so this is `True` wherever the attempt names no execution — but
+            # an attempt that already carries one from an earlier pass of the same turn
+            # is read rather than assumed.
+            answered = (
+                raised is None
+                and self._answered(composed, None)
+                and await self._every_step_settled(attempt)
+            )
             if raised is None:
                 attempt = await self._move_attempt(
                     attempt,
@@ -11178,7 +11269,16 @@ class Engine:
         # approval" is not counted — and it is the smaller loss by a distance: the
         # alternative loses either the turn (a raise) or the interval the turn actually
         # worked (a swallow).
-        answered = parked is None and self._answered(composed, step)
+        # ADR-0262 §4's third ending condition (#2477), and the site it binds hardest:
+        # this engine drives **one step per turn** until #242 lands, so a plan of two
+        # steps reaches here with the second still `PENDING` and the attempt stays live.
+        # That is §4's stated cost — the next turn's reconciliation disposes of it
+        # before planning — and no outcome is written for a turn that ended nothing.
+        answered = (
+            parked is None
+            and self._answered(composed, step)
+            and await self._every_step_settled(attempt)
+        )
         if parked is None:
             attempt = await self._move_attempt(
                 attempt,
