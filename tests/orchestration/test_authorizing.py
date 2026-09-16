@@ -63,6 +63,7 @@ from ai_assistant.core.types import (
 if TYPE_CHECKING:
     from ai_assistant.core.protocols import CoverageAnswers, GoalQuotes
 
+from ai_assistant.orchestration import authorizing
 from ai_assistant.orchestration.authorization_surface import projection_of
 from ai_assistant.orchestration.authorizing import (
     authorization_id_for,
@@ -1073,38 +1074,69 @@ async def test_a_quote_the_answerer_kept_cannot_move_the_figure_on_the_row() -> 
     )
 
 
-async def test_the_answer_is_about_the_operands_the_row_carries() -> None:
+async def test_the_answer_is_about_the_operands_the_row_carries(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
     """ADR-0270 §1: the question is about *"the coverage a row this system would
     write would carry"*, and the row is written for the subject that was asked about.
 
-    Adversarial review, round 5, ``blocker``. The seam's operands were built from
-    the caller's values a *second* time rather than derived from the writer's own
-    copies. Two independent copies of one original are equal only for as long as
-    nothing moves the original between them — an argument about interleaving, where
-    what the clause needs is a fact about the values. Deriving the seam's pair from
-    ``subject`` and ``written`` makes them one value by construction.
+    Adversarial review, round 5, ``blocker``; the arm itself, round 6, ``major``.
+    The seam's operands were built from the caller's values a *second* time rather
+    than derived from the writer's own copies, so the clause held only for as long
+    as nothing moved the caller's values between two statements.
 
-    **This is the arm that survives the fix**, because the gap it closed has no
-    interleaving point a test could land a mutation in: two adjacent synchronous
-    statements admit none. So what is pinned is the property itself — the request
-    the answer was taken over and the row that answer authorised describe the same
-    call, field for field — which a future refactor back to two independent copies
-    would leave true only by accident.
+    **The window is between the writer's snapshot and the answerer's, and nothing
+    in an ordinary call can reach it** — two adjacent synchronous statements admit
+    no interleaving — so the arm makes one: each detachment helper is wrapped to
+    move the caller's own value the instant it has taken its copy. That is exactly
+    the concurrent writer the clause has to survive, made deterministic. Under the
+    defect the answerer is then handed the moved values while the row is written
+    from the unmoved ones, and the two describe different calls; derived from
+    ``subject`` and ``written`` they are one value and cannot.
     """
-    answers = FakeCoverageAnswers()
+    request = a_request(tool=SITED_TOOL, parameters={"site": "hotel-1"})
     covered = (coverage_member(BoundKind.TERMS, bound=terms_bound("hotel-1")),)
+    substitute = a_tool(tool_id="substitute")
+    copy_request = authorizing.detached_request
+    copy_coverage = authorizing._detached_coverage
 
-    row = await _proposed(
-        request_kwargs={"tool": SITED_TOOL, "parameters": {"site": "hotel-1"}},
-        coverage=covered,
+    def moving_request(value: ActionRequest) -> ActionRequest:
+        taken = copy_request(value)
+        request.__dict__["tool"] = substitute
+        return taken
+
+    def moving_coverage(value: tuple[CoverageMember, ...]) -> tuple[CoverageMember, ...]:
+        taken = copy_coverage(value)
+        covered[0].__dict__["fixed"] = "widened"
+        return taken
+
+    monkeypatch.setattr(authorizing, "detached_request", moving_request)
+    monkeypatch.setattr(authorizing, "_detached_coverage", moving_coverage)
+    answers = FakeCoverageAnswers()
+
+    row = await proposed_authorization(
+        request,
+        a_decision(),
         answers=answers,
+        coverage=covered,
+        goal=a_goal(deadline=AT + timedelta(hours=12)),
+        retention=RETENTION,
+        standing=(),
     )
 
     assert row is not None
     ((asked, coverage),) = answers.calls
+    # The answer and the row describe one call, which is the clause.
     assert asked.tool == row.tool
     assert asked.goal == row.goal
     assert asked.egress_binding is not None
     assert asked.egress_binding.account == row.account
     assert asked.egress_binding.canonical_destination_set == row.destinations
     assert coverage == row.coverage
+    # And it is the call the `CONFIRM` was ruled on, not the moved one.
+    assert asked.tool.id == SITED_TOOL.id
+    assert coverage[0].fixed is None
+    # The move really landed, which is what keeps the assertions above from being
+    # a comparison of two copies of something nothing touched.
+    assert request.tool.id == "substitute"
+    assert covered[0].fixed == "widened"
