@@ -162,6 +162,9 @@ class _Journal:
         self.calls: list[str] = []
         self.endings: list[tuple[str, datetime, int]] = []
         self.clears: list[tuple[str, int]] = []
+        #: The instants the **closing write** was given, so the single-reading clause
+        #: can be asserted over the pair rather than over the ending alone.
+        self.closings: list[datetime] = []
         #: Armed by the case that needs ADR-0268 §9 arm 7's *"closing write raising
         #: after a successful ending"*. ``FakePlanStore`` carries no fault hook of
         #: its own, and putting one on the shipping fake for a single arm would add a
@@ -208,6 +211,7 @@ class _Journal:
             # **Appended before the fault**, because arm 7 asserts the order on this
             # path too: the ending ran, and then the closing write was attempted.
             self.calls.append("close_goal_abandoned")
+            self.closings.append(fields["at"])
             if self.closing_fault is not None:
                 raise self.closing_fault
             return await closing_write(goal_id, **fields)
@@ -221,6 +225,7 @@ class _Journal:
         self.calls.clear()
         self.endings.clear()
         self.clears.clear()
+        self.closings.clear()
 
 
 def _journalled() -> tuple[Harness, FakeGoalAuthorizationStore, _Journal, str]:
@@ -296,17 +301,42 @@ async def test_the_ending_and_the_closing_write_share_one_clock_reading() -> Non
     """ADR-0268 §1: *"that instant is the act's own, read **once**"*.
 
     A ``GOAL_CLOSED`` row's ``settled_at`` is the instant of the **act** that ended
-    it and never a second reading taken between the two writes, so the rows and the
-    goal's own closing instant agree.
+    it and never a second reading taken between the two writes — so the rows, the
+    ending's own argument and the closing write's own argument are one value.
+
+    **Asserted under an advancing clock and over both calls.** A fixed clock cannot
+    falsify this: an act reading the clock a second time for its closing write would
+    pass every arm stated against a constant, and would close the goal at an instant
+    its own rows say nothing happened at. And asserting only over the rows leaves the
+    *other* half free — which is why the closing write's own ``at`` is captured here
+    rather than inferred. Adversarial review, round 5, ``blocker``; the reopen path's
+    half of the same clause was closed in round 1 and this is its twin.
     """
-    harness, store, journal, conversation = _journalled()
-    goal = await _goal_with_two_rows(harness, store, conversation=conversation)
+    journal = _Journal()
+    clock = _Advancing(AT, step=timedelta(days=1))
+    store = FakeGoalAuthorizationStore(now=lambda: AT)
+    plans = FakePlanStore(now=lambda: AT)
+    journal.install(store, plans)
+    harness = Harness(
+        planner=NoStepPlanner(),
+        plans=plans,
+        authorizations=store,
+        episode_retention=timedelta(days=365),
+        associator=_associating(AssociationVerdict.CONTINUES),
+        now=clock,
+    )
+    goal = await _goal_with_two_rows(harness, store, conversation="conversation-1")
+    journal.reset()
 
-    await harness.engine.abandon_goal(goal.id)
+    assert await harness.engine.abandon_goal(goal.id) is GoalAbandonment.ABANDONED
 
-    (_, at, _version) = journal.endings[0]
-    assert {row.settled_at for row in await store.export()} == {at}, (
-        "every row the act ended carries the act's own instant"
+    assert clock.readings > 1, "the clock really is advancing, so a second read would show"
+    (_, ending_at, _version) = journal.endings[0]
+    assert journal.closings == [ending_at], (
+        "the closing write takes the ending's own instant, not a later reading"
+    )
+    assert {row.settled_at for row in await store.export()} == {ending_at}, (
+        "and every row the act ended carries it too"
     )
 
 
