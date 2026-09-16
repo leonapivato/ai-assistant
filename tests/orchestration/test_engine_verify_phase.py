@@ -68,8 +68,11 @@ if TYPE_CHECKING:
     import pytest
 
     from ai_assistant.core.types import (
+        Authorization,
         Goal,
         GoalAttempt,
+        PermissionDecision,
+        ToolDefinition,
         TurnOutcome,
         UtcInstant,
     )
@@ -125,6 +128,7 @@ class _Established:
         self._plans = plans
         self._postconditions = tuple(postconditions)
         self._span = span
+        self._decision: str = ""
 
     def __getattr__(self, name: str) -> Any:
         """Every member but :meth:`get` is the wrapped trail's own."""
@@ -135,23 +139,44 @@ class _Established:
         """The goal this turn opened, as the store recorded it."""
         return self._plans.opened[0].goal_id
 
+    def _declaring(self, stored: PermissionDecision) -> ToolDefinition:
+        """The declaration both sides of the pair carry (ADR-0254 §7)."""
+        return stored.tool.model_copy(update={"postconditions": self._postconditions})
+
     async def get(self, decision_id: str) -> Any:
         """The stored ruling, as a route-(d) ``ALLOW`` over a declaring tool."""
         stored = await self._inner.get(decision_id)
         if stored is None:
             return None
+        self._decision = decision_id
+        declaring = self._declaring(stored)
+        row = self._row(declaring)
         return stored.model_copy(
             update={
-                "ruling": a_ruling(goal=self._goal),
-                "tool": stored.tool.model_copy(update={"postconditions": self._postconditions}),
+                "ruling": a_ruling(goal=self._goal, subject=row.subject_digest),
+                "tool": declaring,
             }
         )
 
+    def _row(self, declaring: ToolDefinition) -> Authorization:
+        """The ``CONFIRMED`` row that ``ALLOW`` names, over that same declaration."""
+        return a_row("auth-1", a_member(self._span), goal=self._goal, tool=declaring)
+
     async def resolve(self, authorization_id: str) -> Any:
-        """The ``CONFIRMED`` row that ``ALLOW`` names, or ``None``."""
+        """The row, or ``None`` — over the declaration the ruling carries (§7).
+
+        **The row and the ruling are one pair the trail could have stored**: ADR-0254 §7
+        compares the row's ``tool`` with the request's by value and recomputes the
+        subject digest, so a double answering a row built over some *other* declaration
+        would be standing in for a record ``record`` would have refused. Adversarial
+        review, round 5, ``blocker``.
+        """
         if authorization_id != "auth-1":
             return None
-        return a_row("auth-1", a_member(self._span), goal=self._goal)
+        stored = await self._inner.get(self._decision)
+        if stored is None:  # pragma: no cover — the drive records before the comparison
+            return None
+        return self._row(self._declaring(stored))
 
 
 class _Criteria(NoStepPlanner):
