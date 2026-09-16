@@ -504,8 +504,8 @@ def _egress_reach(request: ActionRequest, reach: CallableReach) -> OutboundReach
 
 
 @dataclass(slots=True)
-class OutboundObservation:
-    """ADR-0264 §2's egress contribution, carried out of a drive that **raised**.
+class DriveObservation:
+    """What one drive established, carried out of it **even where it raised**.
 
     :attr:`StepDisposition.outbound` carries it out of a drive that returned, and that is
     still the ordinary route. What this is for is the one exit that returns no
@@ -517,17 +517,30 @@ class OutboundObservation:
     which §3 forbids in terms: a send the executor *"reached the callable for, or cannot
     say it did not"* is ``INDETERMINATE``.
 
+    **The same exit loses ADR-0235 §6's carrier too**, and for a sharper reason: that
+    section's rule for ``resume`` is stated *"over the **answer** and not over the send"*
+    — *"``resume`` raises only where no answer was recorded, and returns wherever one
+    was"* — and a resolving answer is recorded **before** the claim (ADR-0037 §4's steps
+    5 and 6). So a resumption whose claim is then refused has an answer on the trail, owes
+    its caller a :class:`~ai_assistant.core.types.RecipientGrantOutcome`, and would
+    otherwise reach the engine with nothing to establish it from.
+
     **An observation and never an input**, which is :class:`CallableReach`'s own shape one
     fold up: the caller creates it, hands it over and reads it afterwards, and a caller
-    that passes none changes nothing. It carries the classification rather than the raw
-    fact, because the fact it is derived from — the request's ``egress_binding`` — is the
-    runner's and reaches no caller.
+    that passes none changes nothing. It carries the egress *classification* rather than
+    the raw fact, because the fact it is derived from — the request's ``egress_binding``
+    — is the runner's and reaches no caller.
     """
 
     #: What this drive established, as :func:`_egress_reach` classified it, or ``None``
     #: where the drive contributed nothing — including where it never reached the stage
     #: that observes.
     reach: OutboundReach | None = None
+
+    #: ADR-0235 §2's pair, published as soon as the resolving answer exists and before
+    #: anything is claimed under it. ``None`` on :meth:`StepRunner.run`, which collects no
+    #: establishing act, and on a ``resume`` supplying no ``remember_recipients_until``.
+    establishing: EstablishingAnswer | None = None
 
 
 @dataclass(frozen=True, slots=True)
@@ -904,7 +917,7 @@ class StepRunner:
         timeout: timedelta,  # noqa: ASYNC109 — passed through to the seam, which owns the deadline (ADR-0029 §4)
         origin: SelectionOrigin,
         on_ruled: Ruled | None = None,
-        outbound: OutboundObservation | None = None,
+        outbound: DriveObservation | None = None,
     ) -> StepDisposition:
         """Select a tool for ``step_id``, rule on it, and run it if allowed.
 
@@ -962,7 +975,7 @@ class StepRunner:
                 and nothing has acted on it — before the step is claimed under an
                 ``ALLOW``, before it is queued under a ``CONFIRM``, before it is skipped
                 under a ``DENY`` (:data:`Ruled`). ``None``, the default, calls nothing.
-            outbound: The caller's :class:`OutboundObservation`, filled with ADR-0264
+            outbound: The caller's :class:`DriveObservation`, filled with ADR-0264
                 §2's egress contribution for this drive **on every exit, the exceptional
                 one included** — which is what carries it out of a claim ADR-0261 §7
                 refused, where there is no disposition to carry it. ``None``, the
@@ -1109,7 +1122,7 @@ class StepRunner:
         timeout: timedelta,  # noqa: ASYNC109 — passed through to the seam, which owns the deadline (ADR-0029 §4)
         remember_recipients_until: datetime | None = None,
         on_ruled: Ruled | None = None,
-        outbound: OutboundObservation | None = None,
+        outbound: DriveObservation | None = None,
     ) -> StepDisposition:
         """Answer a parked ``CONFIRM`` and continue the step (ADR-0037 §4).
 
@@ -1175,7 +1188,8 @@ class StepRunner:
                 where this method raises before a ruling is sought: a refused
                 establishing act (``UngrantableActError``) leaves the confirmation
                 pending (ADR-0235 §2), and nothing was answered.
-            outbound: As :meth:`run` (:class:`OutboundObservation`).
+            outbound: As :meth:`run` (:class:`DriveObservation`), and on this path it also
+                carries ADR-0235 §2's establishing pair, published before the claim.
 
         Returns:
             ``EXECUTED`` or ``DENIED``, and the durable state after it. A
@@ -1329,6 +1343,15 @@ class StepRunner:
         # `PENDING`, so there it raises. Here the observer keeps a record *about* the
         # step, and a record that cannot be kept must not destroy the act it describes.
         await _reported_ruling(on_ruled, decision, step_id=step.id)
+        if establishing_at is not None and outbound is not None:
+            # **Published before the drive, because the drive can leave by raising**
+            # (:class:`DriveObservation`). ADR-0235 §6 states this operation's rule over
+            # the **answer** and not over the send — *"`resume` raises only where no
+            # answer was recorded, and returns wherever one was"* — and the answer is
+            # already on the trail at this line. A claim ADR-0261 §7 then refuses returns
+            # a composed outcome, and that outcome owes a `RecipientGrantOutcome` like
+            # any other resumption that recorded an answer.
+            outbound.establishing = EstablishingAnswer(confirmed=confirmed, answer=decision)
         if decision.ruling.outcome is PermissionOutcome.ALLOW:
             disposition = await self._execute(
                 state,
@@ -2477,7 +2500,7 @@ class StepRunner:
         *,
         attempt_id: str,
         timeout: timedelta,  # noqa: ASYNC109 — passed through to the seam, which owns the deadline (ADR-0029 §4)
-        outbound: OutboundObservation | None = None,
+        outbound: DriveObservation | None = None,
     ) -> StepDisposition:
         """Hand the executor an authorised call and report what it committed.
 

@@ -260,7 +260,7 @@ from ai_assistant.orchestration.routing import (
 from ai_assistant.orchestration.routing import (
     resolve as resolve_route,
 )
-from ai_assistant.orchestration.runner import OutboundObservation
+from ai_assistant.orchestration.runner import DriveObservation
 from ai_assistant.orchestration.speech import (
     DEFAULT_MAX_SPOKEN_AUDIO_BYTES,
     SPOKEN_PARK_SENTENCE,
@@ -2268,8 +2268,9 @@ class _WithheldResumption:
     parked: _Parked
     #: Where the goal stands, as §7's ordered read established it.
     withheld: DriveWithheld
-    #: ADR-0264 §2's contribution from the drive that raised.
-    outbound: OutboundObservation
+    #: What the drive that raised established: ADR-0264 §2's contribution, and ADR-0235
+    #: §2's establishing pair where the resolution collected one.
+    outbound: DriveObservation
 
 
 def _paired_deliveries(
@@ -11873,7 +11874,7 @@ class Engine:
             claiming = _driving(attempt, state)
             # ADR-0264 §2's egress contribution, observed rather than returned, so the
             # one exit that returns no disposition still carries it (below).
-            observed = OutboundObservation()
+            observed = DriveObservation()
             try:
                 disposition = await self._runner.run(
                     state,
@@ -13375,6 +13376,19 @@ class Engine:
                 records=0,
                 composes=resolution.parked.turn is not None,
             )
+            # **ADR-0235 §6's rule is stated over the answer and not over the send**, and
+            # this resolution recorded one: *"`resume` raises only where no answer was
+            # recorded, and returns wherever one was"*, with the returned outcome
+            # carrying *"a `RecipientGrantOutcome` naming what became of the standing
+            # request"*. §4's `None` is for a call that performed **no** establishing act
+            # — an `ask`, a `resume` supplying no instant, a restatement — and this is
+            # none of those. So the act is performed here exactly as it is on the path
+            # that drove, from the pair the runner published before the claim.
+            recipient_grant = await self._establish_recipients(
+                resolution.outbound.establishing,
+                approved=approved,
+                remember_recipients_until=remember_recipients_until,
+            )
             composed = await self._compose(
                 resolution.parked.turn, None, deliveries={}, outbound=withheld_outbound
             )
@@ -13382,6 +13396,7 @@ class Engine:
                 resolution.parked,
                 None,
                 composed,
+                recipient_grant=recipient_grant,
                 outbound_statement=withheld_outbound,
                 drive_withheld=resolution.withheld,
             )
@@ -13884,7 +13899,7 @@ class Engine:
                 allowed_by = decision.id
                 await self._authorized_attempt(resumed, decision.id)
 
-            observed = OutboundObservation()
+            observed = DriveObservation()
             try:
                 disposition = await self._runner.resume(
                     state,
