@@ -99,6 +99,7 @@ if TYPE_CHECKING:
     from ai_assistant.core.protocols import (
         ActionPolicy,
         AuditTrail,
+        CoverageAnswers,
         EgressBinder,
         GoalAuthorizationStore,
         PlanStore,
@@ -699,6 +700,7 @@ class StepRunner:
         executor: StepExecutor,
         binder: EgressBinder | None = None,
         authorizations: GoalAuthorizationStore | None = None,
+        coverage_answers: CoverageAnswers | None = None,
         episode_retention: timedelta | None = None,
         now: Clock = _utcnow,
         id_factory: Callable[[], str] = _uuid,
@@ -729,7 +731,21 @@ class StepRunner:
         proposes nothing and settles nothing**, which is the fail-closed default and
         the shape ADR-0254 §6 gives a policy holding no `GoalAuthorizations` — every
         `CONFIRM` then resolves exactly as it does today and the one call is
-        authorised by ADR-0148 §3's route (a). ``episode_retention`` rides beside it
+        authorised by ADR-0148 §3's route (a).
+
+        ``coverage_answers`` is condition 6's one answerer (ADR-0270 §1), and it rides
+        beside ``authorizations`` because a proposal needs both: §1's completeness
+        condition is *"obtained from this member and by no other means"*, so a stage
+        that cannot ask cannot propose. **It is a face and not a second object** —
+        the composition root passes the very `ThresholdActionPolicy` this stage
+        already holds as ``policy``, ADR-0193 §1's *"three faces, one object"* — and
+        it is a **separate parameter** rather than a read off ``policy`` because the
+        annotation is what withholds the capability from every other `ActionPolicy`
+        holder on this tree (ADR-0270 §1). **A stage constructed without one proposes
+        nothing**, the same fail-closed default and the same disposition: the
+        `CONFIRM` resolves and the one call is authorised by route (a).
+
+        ``episode_retention`` rides beside it
         because ADR-0256 §1 makes the ladder's third rung read that one deployment
         value; ADR-0256 §2 adds **no `Settings` field** for an authorization and this
         stage invents none either, and ``None`` there is *"keep forever"*, on which
@@ -776,6 +792,7 @@ class StepRunner:
         self._executor = executor
         self._binder = binder
         self._authorizations = authorizations
+        self._coverage_answers = coverage_answers
         self._episode_retention = episode_retention
         self._clock = checked_clock(now, owner="StepRunner")
         self._id_factory = id_factory
@@ -1778,8 +1795,19 @@ class StepRunner:
         against a decision that was itself an answer would be a proposal nobody was
         ever shown.
 
-        **A stage holding no store proposes nothing**, which is the fail-closed
-        default (:meth:`__init__`).
+        **A stage holding no store, or no condition-6 answerer, proposes nothing**,
+        which is the fail-closed default (:meth:`__init__`). ADR-0270 §1 makes
+        ``coverage_met`` the only means by which this package obtains §1's
+        completeness condition, so a stage that cannot ask is a stage that cannot
+        satisfy it.
+
+        **The coverage is this package's to supply and it mints none.** ADR-0254 §1
+        requires a row's `coverage` to be minted from the user's own recorded words,
+        and no clause says how (#2373, ruled into ADR-0266), so the empty tuple below
+        is the coverage a row would carry — condition 6's fourth operand, put to
+        ``coverage_met`` and written onto the row unchanged. It is **passed** rather
+        than assumed by the writer, so a minter landing here changes one expression
+        and no condition.
 
         **A refusal or a fault withholds the row and nothing else.** ADR-0254 §1
         already rules the outcome of proposing none: *"`Confirmation.authorization`
@@ -1807,7 +1835,7 @@ class StepRunner:
         Returns:
             The row that was written, or ``None`` where none was.
         """
-        if self._authorizations is None or request.goal is None:
+        if self._authorizations is None or self._coverage_answers is None or request.goal is None:
             return None
         if decision.ruling.outcome is not PermissionOutcome.CONFIRM:
             return None
@@ -1816,9 +1844,13 @@ class StepRunner:
         goal = await self._plans.get_goal(request.goal)
         try:
             standing = await self._authorizations.standing(request.goal)
-            row = proposed_authorization(
+            row = await proposed_authorization(
                 request,
                 decision,
+                answers=self._coverage_answers,
+                # #2373: no member is minted anywhere on this tree, so the row's
+                # coverage is empty and condition 6 holds only vacuously.
+                coverage=(),
                 goal=goal,
                 retention=self._episode_retention,
                 standing=standing,

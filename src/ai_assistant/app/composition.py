@@ -1785,6 +1785,21 @@ def build_composition(  # noqa: PLR0915 — one statement per resource this root
             # deployment value ADR-0256 §1's third rung reads. ``Settings`` gains
             # no authorization field for it (ADR-0256 §2).
             authorizations=goal_authorizations,
+            # **The same object again, under the face that answers condition 6**
+            # (ADR-0270 §1, §6). `permissions` satisfies `ActionPolicy` and
+            # `CoverageAnswers` from the one policy built above — ADR-0193 §1's
+            # "three faces, one object" — and this line is what ADR-0270 §6 assigns
+            # the composition root: *"app/ passes that one object to the proposal
+            # writer under the new annotation"*. It is `orchestration` obtaining
+            # condition 6's answer through a `core` Protocol, which is golden rule 1
+            # rather than an exception to it, and a second implementation over the
+            # same rows is exactly what one object rules out.
+            #
+            # **Without this line no row is ever proposed.** The writer's
+            # completeness condition is obtainable by no other means (§3), so a
+            # stage holding the store and not the answerer proposes nothing — the
+            # fail-closed direction, and the reason the two are wired together.
+            coverage_answers=policy,
             episode_retention=settings.episode_retention,
             # ADR-0144 §4's preference sequence, supplied here because that is
             # where the ADR puts it — an operator's surface, not a user's

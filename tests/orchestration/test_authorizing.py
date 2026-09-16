@@ -5,16 +5,26 @@ ladder are stated as, exercised directly. What a turn then *does* with a
 proposal — writing it, settling it on the answer — is
 ``test_runner_authorizations.py``'s.
 
-**No row here carries a coverage member**, because no clause of the corpus says
-how one is minted from a recorded act (issue #2373, ruled into ADR-0266).
-ADR-0254 §1's completeness condition therefore holds only vacuously, which is
-§10's own fail-closed sentence and §20 arm 59's third case; the arms that need a
-non-empty ``coverage`` are named in the pull request and are not shipped here.
+**The completeness condition is the member's answer and never this module's**
+(ADR-0270 §1, §3): the writer hands `CoverageAnswers.coverage_met` the request and
+the coverage the row would carry, and records `Authorization.quoted` from what
+comes back. Most tests here drive the **real** `ThresholdActionPolicy` under that
+annotation, so what they pin is the answer the one implementation gives; the ones
+that need a fault, a call count or an answer no tree can produce name
+`FakeCoverageAnswers` instead.
+
+**No caller in `orchestration` mints a coverage member**, because no clause of the
+corpus says how one is minted from a recorded act (issue #2373, ruled into
+ADR-0266). So the runner passes an empty tuple and ADR-0254 §1's completeness
+condition holds only vacuously — §10's own fail-closed sentence and §20 arm 59's
+third case. The arms that need a non-empty ``coverage`` drive it **through this
+function's parameter**, which is the shape a minter will fill.
 """
 
 from __future__ import annotations
 
 from datetime import UTC, datetime, timedelta
+from typing import TYPE_CHECKING
 
 import pytest
 from authorizing_builders import (
@@ -33,17 +43,22 @@ from ai_assistant.core.types import (
     Authorization,
     AuthorizationDisposition,
     AuthorizationOrigin,
+    CoverageMember,
     Goal,
     PermissionOutcome,
     PermissionRuling,
     SpanCoverage,
 )
+
+if TYPE_CHECKING:
+    from ai_assistant.core.protocols import CoverageAnswers, GoalQuotes
+
 from ai_assistant.orchestration.authorizing import (
     authorization_id_for,
     horizon,
     proposed_authorization,
-    user_facing_arguments,
 )
+from ai_assistant.permissions.policy import ThresholdActionPolicy
 
 # --- ADR-0256 §1's ladder ------------------------------------------------
 
@@ -107,67 +122,51 @@ def test_a_deadline_the_ladder_takes_is_never_clamped_by_the_window() -> None:
     assert horizon(AT, goal=a_goal(deadline=far), retention=RETENTION) == far
 
 
-# --- ADR-0254 §3's user-facing arguments ---------------------------------
-
-
-def test_a_declaration_classifying_nothing_has_every_argument_user_facing() -> None:
-    """ADR-0254 §3: "Every key it does not name is user-facing"."""
-    request = a_request(
-        parameters={"to": "a@example.com", "subject": "hi"},
-    )
-
-    assert set(user_facing_arguments(request)) == {"to", "subject"}
-
-
-def test_a_system_supplied_key_is_not_user_facing() -> None:
-    """ADR-0254 §3: the classification narrows what is compared and nothing else."""
-    request = a_request(
-        tool=a_tool(system_supplied=("idempotency_key",)),
-        parameters={"to": "a@example.com", "idempotency_key": "k-1"},
-    )
-
-    assert user_facing_arguments(request) == ("to",)
-
-
-def test_a_request_carrying_only_system_supplied_arguments_has_none() -> None:
-    """ADR-0254 §3: "A request carrying system-supplied arguments and no others"."""
-    request = a_request(
-        tool=a_tool(system_supplied=("idempotency_key",)),
-        parameters={"idempotency_key": "k-1"},
-    )
-
-    assert user_facing_arguments(request) == ()
-
-
 # --- ADR-0254 §1's four conditions (§20 arm 59) --------------------------
 
 
-def _proposed(
+def an_answerer(*, quotes: GoalQuotes | None = None) -> CoverageAnswers:
+    """Condition 6's **one** implementation, as the call site reaches it (ADR-0270 §1).
+
+    Every test below that does not name an answerer drives the real comparison
+    through the real policy, so the vacuity this call site preserves is the
+    member's own answer rather than a fake's configuration. ADR-0270 §6's arm 1
+    pins that answer at the member; these are the same fact one seam later, which
+    is what a call-site change is obliged to show it did not move.
+    """
+    return ThresholdActionPolicy(quotes=quotes)
+
+
+async def _proposed(  # noqa: PLR0913 — one parameter per operand the four conditions vary over
     *,
     request_kwargs: dict[str, object] | None = None,
+    coverage: tuple[CoverageMember, ...] = (),
+    answers: CoverageAnswers | None = None,
     goal: Goal | None = None,
     retention: timedelta | None = RETENTION,
     standing: tuple[Authorization, ...] = (),
 ) -> Authorization | None:
     """Run the four conditions over one varied input."""
     request = a_request(**(request_kwargs or {}))  # type: ignore[arg-type]  # heterogeneous test kwargs
-    return proposed_authorization(
+    return await proposed_authorization(
         request,
         a_decision(),
+        answers=an_answerer() if answers is None else answers,
+        coverage=coverage,
         goal=a_goal(deadline=AT + timedelta(hours=12)) if goal is None else goal,
         retention=retention,
         standing=standing,
     )
 
 
-def test_a_confirm_meeting_all_four_conditions_proposes_a_row() -> None:
+async def test_a_confirm_meeting_all_four_conditions_proposes_a_row() -> None:
     """ADR-0254 §1, §20 arm 59's last clause, and arm 54's proposal half.
 
     An argument-free egress call: the row carries ``coverage=()``, which §1
     permits and which covers exactly one request — one carrying no argument at
     all.
     """
-    row = _proposed()
+    row = await _proposed()
 
     assert row is not None
     assert row.id == authorization_id_for("d-1")
@@ -184,34 +183,34 @@ def test_a_confirm_meeting_all_four_conditions_proposes_a_row() -> None:
     assert row.destinations == a_binding().canonical_destination_set
 
 
-def test_a_request_carrying_no_goal_proposes_nothing() -> None:
+async def test_a_request_carrying_no_goal_proposes_nothing() -> None:
     """ADR-0254 §1: such a request "reaches route (d) in no case"."""
-    assert _proposed(request_kwargs={"goal": None}) is None
+    assert await _proposed(request_kwargs={"goal": None}) is None
 
 
-def test_a_request_carrying_no_egress_binding_proposes_nothing() -> None:
+async def test_a_request_carrying_no_egress_binding_proposes_nothing() -> None:
     """ADR-0254 §1: "every clause of this decision is scoped to one"."""
-    assert _proposed(request_kwargs={"binding": None}) is None
+    assert await _proposed(request_kwargs={"binding": None}) is None
 
 
-def test_a_request_carrying_a_user_facing_argument_proposes_nothing() -> None:
+async def test_a_request_carrying_a_user_facing_argument_proposes_nothing() -> None:
     """ADR-0254 §20 arm 59's third case, on #2373's blocked minting.
 
     "a `CONFIRM` on an egress request one of whose arguments no resolution minted
     a member for → **no row is written**". Every user-facing argument is such an
     argument until ADR-0266 lands.
     """
-    assert _proposed(request_kwargs={"parameters": {"to": "a@example.com"}}) is None
+    assert await _proposed(request_kwargs={"parameters": {"to": "a@example.com"}}) is None
 
 
-def test_a_request_carrying_only_system_supplied_arguments_proposes_a_row() -> None:
+async def test_a_request_carrying_only_system_supplied_arguments_proposes_a_row() -> None:
     """ADR-0254 §3: such a request carries no user-facing argument, so §1 holds.
 
     The completeness condition is over **user-facing** arguments alone, so a
     declaration that classifies its whole parameter set is one whose calls this
     lane can still found an authority on.
     """
-    row = _proposed(
+    row = await _proposed(
         request_kwargs={
             "tool": a_tool(system_supplied=("idempotency_key",)),
             "parameters": {"idempotency_key": "k-1"},
@@ -222,9 +221,9 @@ def test_a_request_carrying_only_system_supplied_arguments_proposes_a_row() -> N
     assert row.coverage == ()
 
 
-def test_a_ladder_yielding_no_instant_proposes_nothing() -> None:
+async def test_a_ladder_yielding_no_instant_proposes_nothing() -> None:
     """ADR-0254 §1's fourth condition, and §20 arm 69's no-row case."""
-    assert _proposed(goal=a_goal(deadline=None), retention=None) is None
+    assert await _proposed(goal=a_goal(deadline=None), retention=None) is None
 
 
 # --- the supersession a proposal names (ADR-0254 §1, §5) -----------------
@@ -249,32 +248,32 @@ def _established(tool_id: str = "smtp") -> Authorization:
     )
 
 
-def test_a_proposal_names_the_standing_row_of_that_pair() -> None:
+async def test_a_proposal_names_the_standing_row_of_that_pair() -> None:
     """ADR-0254 §1: a path-(i) proposal may name any `ESTABLISHED` row of the pair.
 
     Naming it is what keeps the uniqueness rule satisfiable: approving a second
     row of one pair would otherwise answer `WOULD_DUPLICATE` and establish
     nothing.
     """
-    row = _proposed(standing=(_established(),))
+    row = await _proposed(standing=(_established(),))
 
     assert row is not None
     assert row.supersedes == "auth-prior-smtp"
 
 
-def test_a_proposal_names_no_row_of_another_declaration() -> None:
+async def test_a_proposal_names_no_row_of_another_declaration() -> None:
     """The uniqueness key is the goal and the declaration **id** (ADR-0254 §1)."""
-    row = _proposed(standing=(_established(tool_id="other"),))
+    row = await _proposed(standing=(_established(tool_id="other"),))
 
     assert row is not None
     assert row.supersedes is None
 
 
-def test_a_proposal_names_a_lapsed_row_of_that_pair() -> None:
+async def test_a_proposal_names_a_lapsed_row_of_that_pair() -> None:
     """ADR-0254 §1: "live or expired" — "That is what renews an authority"."""
     lapsed = _established().model_copy(update={"expires_at": AT - timedelta(minutes=1)})
 
-    row = _proposed(standing=(lapsed,))
+    row = await _proposed(standing=(lapsed,))
 
     assert row is not None
     assert row.supersedes == "auth-prior-smtp"
@@ -283,7 +282,7 @@ def test_a_proposal_names_a_lapsed_row_of_that_pair() -> None:
 # --- finding the proposal an answer names --------------------------------
 
 
-def test_the_proposals_id_is_derived_from_the_confirmation_it_names() -> None:
+async def test_the_proposals_id_is_derived_from_the_confirmation_it_names() -> None:
     """ADR-0254 §16 carries no lookup by `confirmation`, so the id **is** the lookup.
 
     Issue #2375: reading back over a bounded `recent` page lost a proposal that
@@ -291,7 +290,7 @@ def test_the_proposals_id_is_derived_from_the_confirmation_it_names() -> None:
     makes §16's keyed `resolve` an exact lookup at any age, and adds no ninth
     store signature to do it.
     """
-    row = _proposed()
+    row = await _proposed()
 
     assert row is not None
     assert row.confirmation == "d-1"
@@ -330,7 +329,7 @@ _CARRIED_COVERAGES = (SpanCoverage.NOT_COVERED, SpanCoverage.MODEL_ON_EVERY_PATH
 @pytest.mark.parametrize(
     "coverage", _CARRIED_COVERAGES, ids=[member.name for member in _CARRIED_COVERAGES]
 )
-def test_the_proposal_reads_no_floor_of_route_ds(coverage: SpanCoverage) -> None:
+async def test_the_proposal_reads_no_floor_of_route_ds(coverage: SpanCoverage) -> None:
     """ADR-0254 §1: "The proposal reads none of §6's floors, and that is deliberate".
 
     Conditions 3, 4 and 5 of route (d)'s reachability are taken over a concrete
@@ -340,21 +339,23 @@ def test_the_proposal_reads_no_floor_of_route_ds(coverage: SpanCoverage) -> None
     """
     binding = a_binding(coverage=coverage, planned_with_external_content=True)
 
-    assert _proposed(request_kwargs={"binding": binding}) is not None
+    assert await _proposed(request_kwargs={"binding": binding}) is not None
 
 
-def test_the_outcome_test_is_the_writers_and_not_this_functions() -> None:
+async def test_the_outcome_test_is_the_writers_and_not_this_functions() -> None:
     """The four conditions say nothing about the ruling's outcome.
 
     Keeping that guard at the call site is what lets this stay a total function
     of the request and the decision, and it is pinned here so a later lane does
     not come to state it twice.
     """
-    row = proposed_authorization(
+    row = await proposed_authorization(
         a_request(),
         a_decision(
             ruling=PermissionRuling(outcome=PermissionOutcome.ALLOW, reason="allowed outright")
         ),
+        answers=an_answerer(),
+        coverage=(),
         goal=a_goal(deadline=AT + timedelta(hours=12)),
         retention=RETENTION,
         standing=(),

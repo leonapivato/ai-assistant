@@ -37,6 +37,7 @@ from ai_assistant.core.errors import (
 from ai_assistant.core.protocols import (
     ActionPolicy,
     AuditTrail,
+    CoverageAnswers,
     InvocationLedger,
     RecipientGrantStore,
     SpeechSynthesizer,
@@ -135,6 +136,7 @@ from ai_assistant.orchestration.loop import LearningLoop
 from ai_assistant.orchestration.parked_reads import ParkedReadOperations
 from ai_assistant.orchestration.payloads import DEFAULT_MAX_PAYLOAD_BYTES
 from ai_assistant.orchestration.speech import DEFAULT_MAX_SPOKEN_AUDIO_BYTES
+from ai_assistant.permissions.policy import ThresholdActionPolicy
 from ai_assistant.testing import (
     DEFAULT_SEARCH_ORIGIN,
     FakeActionPolicy,
@@ -654,6 +656,7 @@ class Harness:
         # which is exactly what is true of a deployment holding no rows. A case that
         # wires one therefore changes no other case's behaviour.
         authorizations: FakeGoalAuthorizationStore | None = None,
+        coverage_answers: CoverageAnswers | None = None,
         # ADR-0256 §1's third rung, which `StepRunner` reads when an act names no
         # instant and the goal carries no deadline. Only a case wiring `authorizations`
         # can reach it.
@@ -929,6 +932,16 @@ class Harness:
             # ADR-0254 §15's single writer of an `Authorization`, over the store this
             # harness also hands the reader below.
             authorizations=authorizations,
+            # Condition 6's **one** implementation (ADR-0270 §1), so what a proposal
+            # here is refused or allowed by is the real comparison and not a
+            # configuration. `ThresholdActionPolicy` holding no `GoalQuotes` answers
+            # unmet for every `MONEY` member, which is the fail-closed direction and
+            # the shape of this tree — no member is minted anywhere (#2373), so every
+            # coverage the writer puts to it is empty. A case that needs the answer
+            # controlled, counted or faulted passes `FakeCoverageAnswers` instead.
+            coverage_answers=(
+                ThresholdActionPolicy() if coverage_answers is None else coverage_answers
+            ),
             episode_retention=episode_retention,
         )
         # The trace store's *deletion* seam, and only that: ADR-0119 §7 gives the
