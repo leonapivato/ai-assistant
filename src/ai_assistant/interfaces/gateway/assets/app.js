@@ -1262,6 +1262,14 @@ function renderOutcome(outcome, chosenAt, provenance) {
   // members this surface is admitted for.
   renderReadConfirmation(body, outcome.read_confirmation);
   renderReadAnswer(body, outcome.read_answer);
+  // ADR-0260 §10's statement, below the reply and never in place of it — `renderRouted`'s
+  // own placement, read at the member this surface is admitted for by ADR-0262 §11. It is
+  // a **vocabulary of its own and not a case of any member above it**: a turn that parked
+  // a read and did not read a forecast carries both, and neither is suppressed on account
+  // of the other or derived from it (§10 makes the fold non-injective by design). The
+  // order between it and its neighbours carries no meaning beyond the one thing it fixes,
+  // which is that each sits after the reply it stands beside.
+  renderForecastNotRead(body, outcome.forecast_not_read);
   // ADR-0250's four members, in the order a reader needs them: what became of the
   // handle they gave, what this turn did with a goal, the question it could not tell
   // two goals apart with, and the question it raised. **No member is derived from
@@ -1683,6 +1691,129 @@ function renderReadAnswer(body, member) {
     throw new TypeError("read_answer is not one of ADR-0244 §9's members");
   }
   line(body, readAnswerWords(member), "notice");
+}
+
+// --- what a forecast this turn did not read says (ADR-0260 §10) --------------
+//
+// **One fixed statement per member, written out as a literal**, which is
+// `READ_ANSWER_WORDS`' ratified shape one vocabulary further on: nothing below is
+// assembled from a member's value, its name, a format string over the enumeration, or a
+// mapping a later member would silently join. ADR-0260 §10 closes `ForecastNotRead` at
+// six and requires a statement for each, under ADR-0242 §9's all-or-nothing rule — "a
+// surface that renders **no** statement for a member is a surface that has not
+// implemented this section, not a permitted degradation".
+//
+// **This page renders all six of this vocabulary and none of `SearchNotServiced`'s
+// nine, and that is two rules each met as written rather than one applied twice.**
+// ADR-0242 §9 defers *that* vocabulary on this surface in terms — "the browser, until
+// its own lane (§5), renders neither the statement nor the reply's absence of one" — and
+// #2237 carries the lane that ends it. ADR-0260 §10 defers no surface at all, and
+// ADR-0262 §11 places this one by name: "a member rendered on one and not the other is
+// the parity failure M4 recorded". §9's clause is stated over *a vocabulary*, so
+// implementing this one entire leaves that one's deferral entire.
+//
+// **`authorisation_awaited` names `assistant decisions` and the other five name
+// nothing**, which is §10's fixed half — "what is fixed is which command each names and
+// that `UNAVAILABLE` names none" — held identically at both render sites. It is fixed
+// per *member* and not per surface, and this page has no decisions listing of its own,
+// so naming a control here would be inventing a route no ratified decision gives this
+// surface. Naming the terminal's command from the page is this surface's own ratified
+// practice: `UNREADABLE_RULINGS` names `'assistant export-decisions'` for ADR-0186 §7's
+// reason.
+//
+// **And it is the only member that names anything, for a reason that is this seam's and
+// not `SearchNotServiced`'s.** ADR-0260 §11 mints **no park** for a forecast read, so
+// the question is a recorded decision and never a resumable one — nothing to answer from
+// a listing, nothing to withdraw. A statement naming `assistant resume` or
+// `assistant remember-recipients` here would send a user to a listing this read is not
+// in.
+//
+// **ADR-0242 §9's bar binds on all six word for word** (§10). None says that performing
+// the act it names will make the next read happen; none says why a ruling was not an
+// `ALLOW`; none names a floor, a threshold, a settings field, a configuration value, a
+// provider, an origin, a place or a coordinate; and none carries a `ForecastDisposition`
+// or a `ForecastRefusal` value, which §8 keeps for the operator's audit.
+//
+// **`unavailable` names no cause and no act, and does not say that no request was
+// made** (§10). Seven dispositions fold onto it and two of them — a response this system
+// refused as oversized or unattested — reached the provider and returned nothing usable.
+// What tells the user about *that* is ADR-0264 §8's outbound statement, which this page
+// does not yet carry either; **neither is ever read off the other** (§10: "the fact is
+// never derived from `ForecastNotRead`, which is non-injective by design"), so nothing
+// here reaches for one.
+//
+// **`declined` is not cleared by a later read** (§10): a turn that was denied and then
+// answered still carries it, so this sentence can stand beside a reply that does carry
+// forecast records, and it says only that a read this turn asked for was declined when
+// it was ruled on.
+const FORECAST_NOT_READ_WORDS = {
+  not_configured:
+    "No forecast source is configured in this deployment. That is an operator setting.",
+  authorisation_awaited:
+    "That forecast read was put to you as a question instead of being made, and a " +
+    "decision is recorded. 'assistant decisions' is where you read it.",
+  spend_exhausted: "A spending ceiling refused that forecast read. That is an operator setting.",
+  declined: "That forecast read was declined when it was ruled on.",
+  interrupted: "That forecast read was begun and stopped.",
+  unavailable: "That forecast read produced nothing this turn could use.",
+};
+
+// What the page says for a value that is not one of the six.
+//
+// **Not a bare identifier and not silence**, which is `READ_ANSWER_UNREADABLE`'s
+// position one vocabulary over and is the reason #2474 was filed: a member the page says
+// nothing about leaves a turn whose forecast did not happen reading exactly like one
+// whose forecast was never asked for. An enum value put on the screen as itself is this
+// surface reporting an internal vocabulary to a person, which `disclosureWords` and
+// `coverageWords` are both arranged to avoid.
+//
+// **It is rendered rather than thrown for, and that is where this differs from
+// `renderReadAnswer`.** That renderer refuses outright because rendering a sentence had a
+// *consequence* beyond the sentence — `answerConfirmation` keeps a consent token spent on
+// every reply it renders, so a fallback left a pair of controls disabled over a park that
+// may still be `OPEN` (#1536, ADR-0139 §4). Nothing on this page is spent, given back or
+// settled by a forecast statement: it is a sentence and only a sentence, so the honest
+// ending is to say what is known and no more, which is `cancellationWords`' own
+// arrangement.
+//
+// **And it asserts nothing the page has not been told.** It does not say the read did not
+// happen — §10's `declined` is carried by a turn that was denied and then answered — and
+// it names no cause and no act.
+const FORECAST_NOT_READ_UNREADABLE =
+  "What became of a forecast read this turn asked for arrived as something this browser " +
+  "has no words for, so it is not reported here rather than reported as something it " +
+  "may not be.";
+
+// Whether a value is one of the six members ADR-0260 §10 closes the enumeration at.
+//
+// `isReadAnswer`'s test, one vocabulary over and for its reasons: `Object.hasOwn` rather
+// than a truthiness test, because a value naming an inherited property — `toString`,
+// `constructor` — would otherwise pass as a member and put a function's source text on
+// the screen; and `typeof` in front of it because a property key is a coerced one, so
+// `String(["declined"])` spells a member.
+function isForecastNotRead(member) {
+  return typeof member === "string" && Object.hasOwn(FORECAST_NOT_READ_WORDS, member);
+}
+
+// The sentence for one member, or the refusal above. Total over whatever it is handed,
+// which is `readAnswerWords`' own arrangement: a second caller cannot put `undefined` on
+// the screen.
+function forecastNotReadWords(member) {
+  return isForecastNotRead(member) ? FORECAST_NOT_READ_WORDS[member] : FORECAST_NOT_READ_UNREADABLE;
+}
+
+// ADR-0260 §10's statement, beside the reply and never in place of it.
+//
+// **`null` and an absent member are silence and not a refusal** (§10): `None` "means the
+// servicing recorded no `ForecastDisposition`, and means nothing else" — a turn that
+// serviced no forecast read, and a read the provider answered — so the page says nothing
+// about a forecast at all on those turns, which is the byte-identity this member's
+// absence is owed.
+function renderForecastNotRead(body, member) {
+  if (member === null || member === undefined) {
+    return;
+  }
+  line(body, forecastNotReadWords(member), "notice");
 }
 
 // --- the goal vocabularies (ADR-0250 §5, §11, §12, §15) ----------------------

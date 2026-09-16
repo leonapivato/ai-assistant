@@ -30,6 +30,8 @@ from ai_assistant.core.types import (
     ConversationDigest,
     DiscloserProvenance,
     EngagementDisposition,
+    ForecastNotRead,
+    ForecastRefusal,
     GoalAbandonment,
     GoalStatus,
     GrantScope,
@@ -52,6 +54,7 @@ from ai_assistant.interfaces.gateway.server import (
     _relay_fault,
     packaged_bundle,
 )
+from ai_assistant.orchestration.reads import ForecastDisposition
 from ai_assistant.wire.errors import TransportError
 
 _ROOT = Path(__file__).resolve().parents[3] / "src" / "ai_assistant" / "interfaces" / "gateway"
@@ -7835,6 +7838,19 @@ def _keys(block: str) -> set[str]:
     return set(re.findall(r"^  (\w+):", block, re.MULTILINE))
 
 
+def _statements(block: str) -> dict[str, str]:
+    """Each top-level entry of one such map, as the sentence it renders.
+
+    :func:`_keys` answers *which* members are declared; this answers *what each one
+    says*, which is what a bar stated over the words has to be asserted against. The
+    sentences wrap onto continuation lines and are built as ``"..." + "..."``, so the
+    halves are put back together by :func:`_joined` — and reading the map whole would let
+    a fragment barred from one member be satisfied by its absence from another.
+    """
+    parts = re.split(r"^  (\w+):", block, flags=re.MULTILINE)
+    return {parts[index]: _joined(parts[index + 1]) for index in range(1, len(parts), 2)}
+
+
 def test_a_reads_question_says_what_answering_yes_does_and_says_no_more() -> None:
     """ADR-0244 §13's third Normative, which is one sentence and so is the page's.
 
@@ -8064,21 +8080,154 @@ def test_the_page_renders_no_statement_for_any_search_not_serviced_member() -> N
     ``search_not_serviced`` is the one field that carries it, and a page that never reads
     it renders nothing for any of the nine however the words are spelled.
 
-    **And over the key form for the seven that are this enum's alone.** ``declined`` and
+    **And over the key form for the members that are this enum's alone.** ``declined`` and
     ``interrupted`` are values two of these vocabularies share — ``ReadAnswerOutcome`` has
     the first and ``ReadCancellation`` the second — so a key of that name says nothing
-    about which enum it belongs to. The other seven are unambiguous, and a vocabulary
-    declared for one of them is what this would catch.
+    about which enum it belongs to.
+
+    **``ForecastNotRead`` joins that overlap, which narrows this arm rather than weakening
+    it.** ADR-0260 §10 closes that vocabulary at six and this page now renders all six
+    (#2474), and three of its values — ``spend_exhausted``, ``authorisation_awaited`` and
+    ``unavailable`` — are spelled identically in ``SearchNotServiced``. A key of one of
+    those names says nothing about which enum declared it, exactly as ``declined`` already
+    said nothing. **The assertion this arm actually rests on is the one above it**: the
+    member arrives through ``search_not_serviced`` and through no other route, so a page
+    that never reads that field renders nothing for any of the nine however the words are
+    spelled. What is left to the key form is ``trust_missing`` and ``answer_awaited``,
+    which are this enum's alone and are the two whose acts exist only in a terminal.
     """
     script = _code("app.js")
-    shared = {member.value for member in ReadAnswerOutcome} | {
-        member.value for member in ReadCancellation
-    }
+    shared = (
+        {member.value for member in ReadAnswerOutcome}
+        | {member.value for member in ReadCancellation}
+        | {member.value for member in ForecastNotRead}
+    )
 
     assert "search_not_serviced" not in script
     for member in SearchNotServiced:
         if member.value not in shared:
             assert f"\n  {member.value}:" not in script, member.value
+
+
+def test_one_fixed_statement_per_forecast_member_and_no_member_without_one() -> None:
+    """ADR-0260 §10, read off ``core``'s own vocabulary.
+
+    "A surface renders, beside the reply and never in place of it, **one fixed statement
+    per member**", under ADR-0242 §9's rule that "a surface that renders **no** statement
+    for a member is a surface that has not implemented this section, not a permitted
+    degradation". So the map is total over the enum and closed at its count, which is
+    ``READ_ANSWER_WORDS``' own arrangement: a seventh member fails here rather than
+    reaching a person as a bare identifier — the #1113 rule, at this vocabulary.
+
+    **And the lookup is by ownership rather than by truthiness**, which is the arm a plain
+    ``WORDS[member]`` leaves open: a member naming an inherited property — ``toString``,
+    ``constructor`` — comes back as a function and ``line`` would put its source text on
+    the screen. The ``typeof`` in front of it is the same round's: a property key is a
+    coerced one, so ``String(["declined"])`` spells a member.
+    """
+    script = _code("app.js")
+    words = _map(script, "FORECAST_NOT_READ_WORDS")
+    functions = _functions(script)
+
+    assert _keys(words) == {member.value for member in ForecastNotRead}
+    assert (
+        'return typeof member === "string" && Object.hasOwn(FORECAST_NOT_READ_WORDS, member);'
+        in functions["isForecastNotRead"]
+    )
+    assert "isForecastNotRead(member)" in functions["forecastNotReadWords"]
+    assert "FORECAST_NOT_READ_UNREADABLE" in functions["forecastNotReadWords"]
+    assert "forecastNotReadWords(member)" in functions["renderForecastNotRead"]
+
+
+def test_the_page_renders_the_forecast_statement_beside_the_reply_and_not_in_place_of_it() -> None:
+    """ADR-0260 §10's placement, and §10's meaning for an absent member.
+
+    The renderer is reached from ``renderOutcome`` **after** ``renderReply``, which is
+    ``renderRouted``'s own placement and this page's reading of "beside the reply and
+    never in place of it". And ``null`` is silence rather than a refusal: §10 fixes the
+    absence's meaning — ``None`` "means the servicing recorded no ``ForecastDisposition``,
+    and means nothing else" — so a turn that serviced no forecast read and one the
+    provider answered both say nothing about a forecast at all.
+    """
+    script = _code("app.js")
+    functions = _functions(script)
+    outcome = functions["renderOutcome"]
+    render = functions["renderForecastNotRead"]
+
+    assert "renderForecastNotRead(body, outcome.forecast_not_read);" in outcome
+    assert outcome.index("renderReply(body, outcome)") < outcome.index("renderForecastNotRead(")
+    assert "if (member === null || member === undefined) {" in render
+    assert render.index("member === undefined") < render.index("line(body,")
+
+
+def test_no_forecast_statement_says_why_a_ruling_went_the_way_it_did() -> None:
+    """ADR-0242 §9's bar, which ADR-0260 §10 binds on this vocabulary word for word.
+
+    "**No statement says that performing the act it names will make the next read
+    happen**, and none says why a ruling was not an ``ALLOW``. No statement names a floor,
+    a threshold, a ``Settings`` field, a configuration value, a provider, an origin, a
+    place or a coordinate."
+
+    Asserted over the declared sentences as absences, because each is about what they must
+    not say. ``will`` is the whole of the first clause on this surface — a sentence with no
+    future tense cannot promise the next read — and ``because`` is the second's: a
+    statement that explained itself would be saying why a ruling went the way it did.
+    ``ForecastDisposition`` and ``ForecastRefusal`` are asserted from ``orchestration``'s
+    and ``core``'s own enumerations rather than spelled out, so a member renamed there
+    fails here instead of leaving a stale literal behind.
+    """
+    said = _statements(_map(_code("app.js"), "FORECAST_NOT_READ_WORDS"))
+
+    assert set(said) == {member.value for member in ForecastNotRead}
+    for member, sentence in said.items():
+        assert not any(character.isdigit() for character in sentence), member
+        for barred in (
+            "will",
+            "because",
+            "http",
+            "://",
+            "@",
+            "$",
+            "£",
+            "latitude",
+            "longitude",
+            "budget",
+            "threshold",
+            "floor",
+            "forecast_",
+            "settings",
+        ):
+            assert barred not in sentence.lower(), f"{member}: {barred}"
+        for stage in ForecastDisposition:
+            assert stage.value not in sentence, f"{member}: {stage.value}"
+        for refusal in ForecastRefusal:
+            assert refusal.value not in sentence, f"{member}: {refusal.value}"
+
+
+def test_only_the_awaited_forecast_statement_names_a_command_and_it_names_decisions() -> None:
+    """ADR-0260 §10's fixed half: "what is fixed is which command each names and that
+    ``UNAVAILABLE`` names none".
+
+    ``AUTHORISATION_AWAITED`` "says the read was put to the user as a question instead of
+    being made and that a decision is recorded, naming ``assistant decisions`` as where it
+    is read", and it is the only member that names anything at all: ``NOT_CONFIGURED``
+    names "no user act", ``SPEND_EXHAUSTED`` "an operator setting and no user act", and
+    ``UNAVAILABLE`` "no cause and no act".
+
+    **And it names neither of the acts a parked read would have.** ADR-0260 §11 mints no
+    park for a forecast read, so there is nothing to answer from a listing and nothing to
+    withdraw — ``assistant resume``, ``assistant cancel-read`` and ``assistant
+    remember-recipients`` would each send a user to a listing this read is not in.
+    """
+    said = _statements(_map(_code("app.js"), "FORECAST_NOT_READ_WORDS"))
+
+    awaited = said[ForecastNotRead.AUTHORISATION_AWAITED.value]
+    assert "'assistant decisions'" in awaited
+    for barred in ("assistant resume", "assistant cancel-read", "assistant remember-recipients"):
+        assert barred not in awaited, barred
+    for member in ForecastNotRead:
+        if member is not ForecastNotRead.AUTHORISATION_AWAITED:
+            assert "assistant " not in said[member.value], member.value
 
 
 def test_both_accounts_a_park_owes_are_written_where_no_refresh_reaches_them() -> None:
