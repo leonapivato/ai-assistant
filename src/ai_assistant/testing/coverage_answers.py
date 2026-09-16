@@ -129,15 +129,22 @@ class FakeCoverageAnswers:
         that asked then writes no row and the one call is confirmed under ADR-0148
         §3's route (a).
 
+        **The class raised is always** :class:`~ai_assistant.core.errors.AuthorizationError`,
+        whatever is armed here. The Protocol declares that one and ADR-0270 §4 rules
+        that *"no new error class is minted"*, so an injected ``RuntimeError`` is
+        carried as the ``__cause__`` of a fresh ``AuthorizationError`` rather than
+        raised as itself — otherwise a consumer that correctly catches the declared
+        class would crash under a configuration this fake advertises.
+        ``FakeGoalQuotes.fail_for_action`` is the same shape one seam earlier.
+        Adversarial review, round 2, ``blocker``.
+
         Args:
-            error: The fault to raise. An
-                :class:`~ai_assistant.core.errors.AuthorizationError` by default,
-                which is the one class this member raises.
+            error: The **underlying** fault, preserved as ``__cause__``. A plain
+                ``RuntimeError`` by default, standing for whatever made the goal's
+                quotes unreadable.
         """
         self._failure = (
-            error
-            if error is not None
-            else AuthorizationError("fake: the goal's quotes could not be read")
+            error if error is not None else RuntimeError("fake: the plan store is unreadable")
         )
 
     async def coverage_met(
@@ -152,7 +159,12 @@ class FakeCoverageAnswers:
             coverage: The coverage that row would carry. Read for **one** thing —
                 whether it carries a ``MONEY`` member, which is what decides whether
                 a quote may ride back at all, and whether a met answer is available
-                without one (ADR-0270 §2, §4).
+                without one (ADR-0270 §2, §4). **Snapshotted on the first executed
+                line and read only from the snapshot thereafter** (ADR-0065): this
+                member suspends, ``frozen=True`` does not close ``__dict__``, and a
+                ``kind`` rewritten while it was out would answer about a coverage
+                neither presented nor substituted. Adversarial review, round 2,
+                ``blocker``.
 
         Returns:
             The configured answer, carrying the configured quote exactly where
@@ -161,17 +173,14 @@ class FakeCoverageAnswers:
             against.
 
         Raises:
-            Exception: Whatever :meth:`fail_coverage_met` armed.
+            AuthorizationError: If a fault is armed (:meth:`fail_coverage_met`),
+                carrying what was armed as its ``__cause__``.
         """
-        members = tuple(coverage)
-        self._calls.append(
-            (
-                request.model_copy(deep=True),
-                tuple(member.model_copy(deep=True) for member in members),
-            )
-        )
+        members = tuple(member.model_copy(deep=True) for member in coverage)
+        self._calls.append((request.model_copy(deep=True), members))
         if self._failure is not None:
-            raise self._failure
+            msg = "fake: the goal's quotes could not be read"
+            raise AuthorizationError(msg) from self._failure
         async with self._resource.held():
             priced = any(member.kind is BoundKind.MONEY for member in members)
             met = self._met and (self._quote is not None or not priced)

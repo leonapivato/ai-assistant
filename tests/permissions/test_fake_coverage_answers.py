@@ -12,6 +12,7 @@ conformance suite refuses would certify a consumer that relied on it.
 
 from __future__ import annotations
 
+import asyncio
 from decimal import Decimal
 from typing import TYPE_CHECKING
 
@@ -27,6 +28,7 @@ from coverage_answers_contract import (
 )
 
 from ai_assistant.core.errors import AuthorizationError
+from ai_assistant.core.types import BoundKind
 from ai_assistant.testing import FakeCoverageAnswers
 
 if TYPE_CHECKING:
@@ -136,6 +138,45 @@ async def test_every_call_is_recorded_detached_and_counted() -> None:
     assert coverage == MONEY_COVERAGE
     assert recorded is not PRICED, "a recorded call the caller can still rewrite records nothing"
     assert seam.calls[1] == (BARE, ())
+
+
+async def test_a_coverage_rewritten_mid_call_does_not_move_the_answer() -> None:
+    """ADR-0065, over the argument this member actually reads.
+
+    The fake suspends inside its modelled resource, the tuple is the caller's, and
+    ``frozen=True`` does not close ``__dict__``. A ``kind`` rewritten while the call
+    was out would flip the one thing this member reads the coverage for — whether a
+    quote may ride back — so the answer would describe a coverage that is neither the
+    one presented nor the one substituted, which is what ADR-0065 forbids of every
+    Protocol in ``core/protocols.py``. Adversarial review, round 2, ``blocker``.
+    """
+    seam = FakeCoverageAnswers(met=True, quote=GOVERNING_QUOTE)
+    member = MONEY_COVERAGE[0].model_copy(deep=True)
+    held = seam.suspend_next_operation()
+    pending = asyncio.ensure_future(seam.coverage_met(PRICED, (member,)))
+    await held.reached()
+    member.__dict__["kind"] = BoundKind.PERIOD
+    held.release()
+    answer = await pending
+    assert (answer.met, answer.quoted) == (True, GOVERNING_QUOTE)
+    assert seam.calls[0][1][0].kind is BoundKind.MONEY, "the record is the presented coverage too"
+
+
+async def test_an_injected_fault_still_leaves_as_the_declared_class() -> None:
+    """ADR-0270 §4: *"**No new error class is minted**"*, and the Protocol declares one.
+
+    A fake that raised an injected ``RuntimeError`` as itself would crash a consumer
+    that correctly catches :class:`AuthorizationError` — under a configuration this
+    fake advertises. The injected fault is the ``__cause__`` instead, which is
+    ``FakeGoalQuotes.fail_for_action``'s own shape one seam earlier. Adversarial
+    review, round 2, ``blocker``.
+    """
+    seam = FakeCoverageAnswers(quote=GOVERNING_QUOTE)
+    underlying = RuntimeError("backend down")
+    seam.fail_coverage_met(underlying)
+    with pytest.raises(AuthorizationError) as raised:
+        await seam.coverage_met(PRICED, MONEY_COVERAGE)
+    assert raised.value.__cause__ is underlying
 
 
 async def test_an_armed_fault_propagates_and_is_never_an_absence() -> None:
