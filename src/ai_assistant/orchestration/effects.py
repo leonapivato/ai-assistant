@@ -60,6 +60,11 @@ if TYPE_CHECKING:
 #: coercions ``FIELD_EQUALS`` names by name.
 _NUMERIC: tuple[type, ...] = (bool, int, float)
 
+#: A JSON array is held as a ``tuple`` once ``FrozenJsonValue`` has frozen it and as a
+#: ``list`` before that, so :func:`_identical` tests both — and tests them by name
+#: rather than through ``Sequence``, because ``str`` is a ``Sequence`` and a string is a
+#: JSON **scalar**, compared whole.
+
 
 def condition_elements(goal: Goal, *, revision: int | None) -> Mapping[str, GoalElement]:
     """The condition elements of the revision a plan targets, by ``id`` (ADR-0253 §5).
@@ -251,7 +256,27 @@ def _identical(left: FrozenJson, right: FrozenJson) -> bool:
     tolerance, or treats ``1`` as ``true``."* Python's own ``==`` does two of those
     on its own — ``True == 1`` and ``1 == 1.0`` are both true — so a number or a
     boolean on either side additionally has to be the **same** JSON type.
+
+    **And it walks the value rather than checking its top level**, because ``equals``
+    is a ``FrozenJsonValue`` and a JSON object or array is one: ``{"count": true}``
+    equals ``{"count": 1}`` under a top-level ``==``, and ``[1]`` equals ``[1.0]``,
+    which is the same coercion §4 names one level down. A container compares to a
+    container of the **same kind** with the same keys, or the same length, and every
+    member compared this way; a container never compares equal to a scalar.
+    Adversarial review, round 1, ``blocker``.
     """
+    if isinstance(left, Mapping) or isinstance(right, Mapping):
+        if not isinstance(left, Mapping) or not isinstance(right, Mapping):
+            return False
+        return left.keys() == right.keys() and all(
+            _identical(left[key], right[key]) for key in left
+        )
+    if isinstance(left, tuple | list) or isinstance(right, tuple | list):
+        if not isinstance(left, tuple | list) or not isinstance(right, tuple | list):
+            return False
+        return len(left) == len(right) and all(
+            _identical(mine, theirs) for mine, theirs in zip(left, right, strict=True)
+        )
     if isinstance(left, _NUMERIC) or isinstance(right, _NUMERIC):
         return type(left) is type(right) and left == right
     return left == right
