@@ -184,6 +184,68 @@ class TestWhatOnlyAFileCanSay:
         finally:
             second.close()
 
+    async def test_a_standing_fence_and_its_watermark_survive_a_restart(self, path: Path) -> None:
+        """ADR-0268 §1's fence is **durable**, which only a second instance can show.
+
+        Every other arm for the fence runs against one store, so a closure kept in
+        memory — or setup that lost the rows on reopen — would pass them all while
+        admitting a ``record`` for a closed goal after a restart. Adversarial review,
+        round 17, ``major``.
+
+        Both halves are taken across the restart: the **fence** still refuses a
+        ``record``, and the **watermark** still discards a delayed ending one below
+        it, which is the value and not merely the flag.
+        """
+        first = SqliteGoalAuthorizationStore(path=path, now=SHARED_CLOCK.reset())
+        try:
+            await first.record(established(id="a1"))
+            assert await first.end_for_goal(GOAL, at=NOW, goal_version=7) == 1
+        finally:
+            first.close()
+
+        second = SqliteGoalAuthorizationStore(path=path, now=SHARED_CLOCK.reset())
+        try:
+            with pytest.raises(AuthorizationError):
+                await second.record(established(id="across"))
+            # The watermark, not just the fence: one below is stale against it and
+            # lifts nothing, while 7 itself lifts it.
+            assert await second.clear_closure(GOAL, goal_version=6) is False
+            with pytest.raises(AuthorizationError):
+                await second.record(established(id="still"))
+            assert await second.clear_closure(GOAL, goal_version=7) is True
+            assert await second.record(established(id="afresh")) == "afresh"
+        finally:
+            second.close()
+
+    async def test_a_version_two_file_whose_closure_table_is_gone_is_refused(
+        self, path: Path
+    ) -> None:
+        """A file already labelled current is **checked**, never created over.
+
+        ``_CREATE_CLOSURES`` is an ``IF NOT EXISTS``, so running it on a version-2
+        file would put an **empty** closure table back where a lost one had been and
+        let :meth:`_check_objects` match it by construction — every standing fence
+        discarded, and a ``record`` for a closed goal admitted. The create is taken
+        only where ADR-0268 §9 puts it: an unlabelled file, or the version-1 upgrade.
+        Adversarial review, round 17, ``blocker``.
+        """
+        store = SqliteGoalAuthorizationStore(path=path, now=SHARED_CLOCK.reset())
+        try:
+            await store.record(established(id="a1"))
+            assert await store.end_for_goal(GOAL, at=NOW, goal_version=7) == 1
+        finally:
+            store.close()
+
+        connection = sqlite3.connect(path)
+        try:
+            connection.execute("DROP TABLE goal_authorization_closures")
+            connection.commit()
+        finally:
+            connection.close()
+
+        with pytest.raises(AuthorizationError, match="goal_authorization_closures"):
+            SqliteGoalAuthorizationStore(path=path, now=SHARED_CLOCK.reset())
+
     async def test_the_proposal_and_its_expiry_survive_a_restart(self, path: Path) -> None:
         """Arm 40: *"recover the confirmation → the same coverage and the same
         ``expires_at``, and answering then settles that same row"*.
