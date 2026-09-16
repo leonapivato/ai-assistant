@@ -1191,6 +1191,19 @@ _ACTS_THAT_ACCOUNT_FOR_THEMSELVES: Final = frozenset(
 )
 
 
+#: The one *segment* left outside the rule below, as a (function, which ``await relay``)
+#: pair — read the constant above first, because this is the same carve-out at a finer
+#: grain. ``forgetBelief``'s second request is the destruction itself, and what follows it
+#: is the account of what that destruction did: "There was no such belief" for a record
+#: the hub no longer held. That is an act reporting itself, and #2451 is the ruling that
+#: decides whether such an account may open its panel.
+#:
+#: Its three siblings need no entry, and not by luck: ``forgetConversation`` says what it
+#: destroyed through ``sayForgotten``, which writes into a node *inside* the panel and
+#: reveals nothing, and the other two display nothing after their destruction at all.
+_SEGMENTS_THAT_ACCOUNT_FOR_AN_ACT: Final = frozenset({("forgetBelief", 2)})
+
+
 def test_every_resumed_relay_that_displays_anything_compares_its_session() -> None:
     """The rule over the whole script, and the exclusions named (#2404).
 
@@ -1207,6 +1220,14 @@ def test_every_resumed_relay_that_displays_anything_compares_its_session() -> No
     conversation's turn count or a notification's summary onto a page that is asking for a
     session.
 
+    **Every request of a function, and not just its first** — adversarial review round 5,
+    ``major``, about the version of this test that sliced from the first ``await relay``
+    and read to the end. A guard after a *prerequisite* read satisfied that reading
+    whatever the function then did with a second request, so ``writePreferences``' second
+    guard could have been deleted with every case here still green. Each request's segment
+    is now asked its own question, and the one segment outside the rule is named in
+    :data:`_SEGMENTS_THAT_ACCOUNT_FOR_AN_ACT` rather than hidden by a slice.
+
     The only functions outside it are the acts of :data:`_ACTS_THAT_ACCOUNT_FOR_THEMSELVES`
     and those that display nothing at all, which need no guard and are selected out by the
     same test that selects everything else in.
@@ -1216,20 +1237,33 @@ def test_every_resumed_relay_that_displays_anything_compares_its_session() -> No
     for name, body in functions.items():
         if "await relay(" not in body or name in _ACTS_THAT_ACCOUNT_FOR_THEMSELVES:
             continue
-        resumed = body[body.index("await relay(") :]
-        displays = [
-            resumed.index(one) for one in ('show("', "window.confirm(", "fault(") if one in resumed
-        ]
-        if not displays:
+        sending = [one.start() for one in re.finditer("await relay\\(", body)]
+        asked = []
+        for which, opened in enumerate(sending, start=1):
+            closed = sending[which] if which < len(sending) else len(body)
+            segment = body[opened:closed]
+            displays = [
+                segment.index(one)
+                for one in ('show("', "window.confirm(", "fault(")
+                if one in segment
+            ]
+            if not displays or (name, which) in _SEGMENTS_THAT_ACCOUNT_FOR_AN_ACT:
+                continue
+            asked.append((name, which, segment, min(displays)))
+        if not asked:
+            # Nothing it does after a request is display, so it has nothing to guard --
+            # `answerConfirmation` and `cancelRead`, whose endings are records rather
+            # than renderings, and `stateAfterAct`, which writes into an act's own log.
             continue
-        checked.append(name)
-        # Captured before the request goes out -- an era read on resumption is the value
-        # it is being compared against and would never differ from it.
+        # Captured before the first request goes out -- an era read on resumption is the
+        # value it is being compared against and would never differ from it.
         assert body.index("const era = sessionEra;") < body.index("await relay("), name
-        assert "if (!sameSession(half, era)) {" in resumed, name
-        assert resumed.index("if (!sameSession(half, era)) {") < min(displays), name
+        for one, which, segment, displayed in asked:
+            checked.append((one, which))
+            assert "if (!sameSession(half, era)) {" in segment, (one, which)
+            assert segment.index("if (!sameSession(half, era)) {") < displayed, (one, which)
 
-    assert {"readGoals", "forgetBelief", "forgetNotification", "listConnections"} <= set(checked)
+    assert {("readGoals", 1), ("forgetBelief", 1), ("writePreferences", 2)} <= set(checked)
     # And the exclusions are real functions of this script rather than names that have
     # gone stale: a set holding a function that no longer exists silently excuses nothing,
     # which is exactly how a list like this rots into a permission.
