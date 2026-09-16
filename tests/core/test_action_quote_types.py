@@ -18,6 +18,7 @@ export limbs.
 
 from __future__ import annotations
 
+import inspect
 from datetime import UTC, datetime
 from decimal import Decimal
 
@@ -53,6 +54,7 @@ from ai_assistant.core.types import (
     ToolDefinition,
 )
 from ai_assistant.testing import authorization
+from ai_assistant.wire import envelope
 from ai_assistant.wire.envelope import PROTOCOL_VERSION
 
 _WHEN = datetime(2026, 1, 1, tzinfo=UTC)
@@ -417,14 +419,31 @@ def test_the_projection_carries_a_quote_member_that_is_required_with_no_default(
 # --- arm 8: the wire and the export -------------------------------------------
 
 
+def _envelope_source() -> str:
+    """``wire/envelope.py``'s own text, which is where the version log lives."""
+    return inspect.getsource(envelope)
+
+
 def test_the_protocol_version_has_advanced_by_exactly_one() -> None:
     """§11: "``PROTOCOL_VERSION`` moves by exactly one, in Q1" — 47 → 48.
 
     Two grounds and no third: ``ToolDefinition`` gains ``quoted_output`` and crosses a
     frame inside a ``PermissionDecision``; ``AuthorizationProjection`` gains ``quote``
     and crosses one inside a ``Confirmation``. **``Goal`` is not one of them.**
+
+    **What Q1 took is a move of exactly one, and the figure it took has since moved
+    on**, which is what every entry in ``wire/envelope.py``'s log instructs: "a lane
+    that lands after this one re-bumps rather than reusing the figure". ADR-0261 §10's
+    L1 landed after Q1 and re-bumped to **49**, so what is asserted here is Q1's
+    **entry** — the durable record that 48 was its, with its grounds — rather than a
+    current figure Q1 has no claim on. The tree's live figure is pinned once, in
+    ``tests/core/test_engine_surface_closure.py``, beside the promoted method set that
+    ADR-0124 §9 pairs it with; a second absolute pin here would be a second place to
+    update and a second place to get wrong.
     """
-    assert PROTOCOL_VERSION == 48
+    entry = _envelope_source().split("#: **48 since ADR-0267 §11**")
+    assert len(entry) == 2, "48 is recorded as Q1's, in the log the version log is"
+    assert PROTOCOL_VERSION >= 48, "and the figure never goes backwards"
 
 
 def test_the_export_carries_the_quotes_inside_its_goals_and_gains_no_member() -> None:
@@ -439,9 +458,9 @@ def test_the_export_carries_the_quotes_inside_its_goals_and_gains_no_member() ->
         goals=(_goal(quotes=(quote,)),),
         evidence=(EvidenceHistory(goal_id="g1"),),
     )
-    assert export.schema_version == 14
+    assert export.schema_version == 15
     assert "quotes" not in PlanExport.model_fields
     assert export.goals[0].quotes == (quote,)
     restored = PlanExport.model_validate_json(export.model_dump_json())
     assert restored.goals[0].quotes == (quote,)
-    assert restored.schema_version == 14
+    assert restored.schema_version == 15
