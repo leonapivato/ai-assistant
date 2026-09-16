@@ -89,6 +89,8 @@ from ai_assistant.core.types import (
     GoalInterpretation,
     Ground,
     Idempotency,
+    IntendedAction,
+    IntendedActionMinting,
     MemoryDecision,
     MemoryDecisionKind,
     MemoryKind,
@@ -714,8 +716,20 @@ def _tool() -> ToolDefinition:
 
 
 def _request(*, execution_id: str | None = None) -> ActionRequest:
-    """The one request the permission and execution seams are driven over."""
-    return ActionRequest(tool=_tool(), parameters={}, step_id="s1", execution_id=execution_id)
+    """The one request the permission and execution seams are driven over.
+
+    It names the act its step is an attempt at (ADR-0265 §4), because ADR-0259 §2
+    refuses to dispatch a side-effecting call whose authorised request names none —
+    and the executor's clock is read **after** the claim, so a refusal there would
+    leave these seams reading no clock at all.
+    """
+    return ActionRequest(
+        tool=_tool(),
+        parameters={},
+        step_id="s1",
+        execution_id=execution_id,
+        intended_action="ia1",
+    )
 
 
 def _decision(request: ActionRequest) -> PermissionDecision:
@@ -731,11 +745,25 @@ def _decision(request: ActionRequest) -> PermissionDecision:
 async def _claimed(store: FakePlanStore) -> str:
     """Store a goal and a one-step plan, open an execution, and answer its id."""
     await store.save_goal(_goal_record())
+    await store.record_intended_actions(
+        IntendedActionMinting(
+            goal_id="g1",
+            actions=(IntendedAction(id="ia1", intent="send the note"),),
+            expected_version=0,
+        )
+    )
     await store.save_plan(
         ActionPlan(
             id="p1",
             goal_id="g1",
-            steps=(PlanStep(id="s1", intent="send the note", capability="send_email"),),
+            steps=(
+                PlanStep(
+                    id="s1",
+                    intent="send the note",
+                    capability="send_email",
+                    intended_action="ia1",
+                ),
+            ),
             created_at=_AWARE,
             rationale="because",
             targets_revision=1,
