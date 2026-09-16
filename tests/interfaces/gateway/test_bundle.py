@@ -7098,6 +7098,15 @@ def test_a_refusal_the_gateway_answered_is_not_always_one_it_did_not_land() -> N
     # takes the not-known branch below and strands a consent token over a request the
     # gateway refused at the door. Adversarial review of #2404, round 1, `major`.
     assert relay.index("noticed(body);") < relay.index("refused(panelId, body, response.status);")
+    # **And the condition is written rather than withheld**, by the one writer that opens
+    # no panel. Withholding it altogether is the mistake at the other end, and the case
+    # that shows it is two tabs: a ceremony open in one, a session started in the other,
+    # the consent then sent under a half the gateway no longer admits — a page looking
+    # straight at the panel it pressed the control in, told nothing at all. Adversarial
+    # review, round 3, `major`.
+    assert "writeCondition(describe(body, response.status), panelId);" in relay
+    writing = _functions(_code("app.js"))["writeCondition"]
+    assert "show(" not in writing
     # And exactly one caller asks. Every other entry point reaching `relay` is unchanged
     # by this, which is the whole reason it is a callback.
     # And exactly one call site passes it, asserted over the *shape* rather than over

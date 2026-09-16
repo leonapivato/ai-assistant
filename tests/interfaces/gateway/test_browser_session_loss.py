@@ -43,6 +43,7 @@ from typing import TYPE_CHECKING, Final
 
 import pytest
 from browser_drive import DESKTOP, PHONE, driving
+from gateway_mint import bootstrap_value
 from playwright.async_api import Error as PlaywrightError
 from playwright.async_api import expect
 from test_browser_confirmations import _email, _read
@@ -304,9 +305,15 @@ async def test_a_refusal_answered_to_a_dead_session_opens_no_panel(
     ``relay`` renders a refusal **before** it returns — ``refused`` → ``report`` →
     ``fault`` → ``show(panel, true)`` — so a listing refused for some ordinary reason
     after its session has ended re-opens its panel beside the bootstrap form carrying
-    the condition. It is a panel with nothing of the owner's in it, which is why the
-    same reveal is left alone everywhere a session still stands, and it is still a
-    control panel on a page that is asking for a session.
+    the condition.
+
+    **This is the one path where the condition goes with the opening**, and it is the
+    narrower claim of the two. A refusal ``relay`` read is written into the panel's own
+    slot without opening it (``writeCondition``), because a page still looking at that
+    panel is owed it. Nothing was read here: the request failed in transit, so what is
+    withheld is ``GATEWAY_GONE`` — a sentence about a gateway that "may have stopped",
+    written over a session that has already ended, into a panel the owner has closed.
+    What became of a request nobody read is not known, and #2451 is where that is put.
     """
     loop = asyncio.get_running_loop()
     release: asyncio.Future[None] = loop.create_future()
@@ -335,7 +342,7 @@ async def test_a_refusal_answered_to_a_dead_session_opens_no_panel(
         await drive.admit()
 
         await expect(drive.page.locator("#beliefs")).to_be_hidden()
-        assert "404" not in await drive.page.locator("#beliefs").evaluate(
+        assert "The gateway did not answer" not in await drive.page.locator("#beliefs").evaluate(
             "node => node.textContent"
         )
 
@@ -569,3 +576,72 @@ async def test_a_record_read_to_be_confirmed_over_is_not_put_after_its_session_e
 
         assert raised == []
         await expect(drive.page.locator("#conversations")).to_be_hidden()
+
+
+@pytest.mark.parametrize("viewport", [DESKTOP, PHONE], ids=["desktop", "phone"])
+async def test_a_destruction_consented_under_a_session_that_ended_is_told_about(
+    gateway_browser: Browser, tmp_path: Path, viewport: ViewportSize
+) -> None:
+    """Two tabs, and the case that decides how a stale refusal is reported.
+
+    ``window.confirm`` blocks *this page's* script thread and nothing else, and a session
+    belongs to the browser rather than to a tab. So: the destroy ceremony is on screen in
+    one tab, a fresh session is started in another — which replaces the cookie the first
+    tab's requests carry — and the consent then goes out under a header half the gateway
+    no longer admits. It is refused at the door.
+
+    Two things must be true of that refusal and the first draft of this lane had neither.
+    It must not be reported as **re-entry**: ``sessionLost`` would forget the half of the
+    session the other tab has just started, which is a dead request ending a live one.
+    And it must not be **withheld**: this tab is looking straight at the panel it pressed
+    the control in, having just consented to a destruction, and silence there leaves the
+    owner believing it happened. Adversarial review, round 3, ``major``.
+
+    Nothing here turns on the first tab *noticing* the storage change — it cannot, and
+    that is measured rather than assumed: its renderer is blocked by the ceremony, so a
+    cross-tab write to the shared half is not visible to it until after the script that
+    reads it has run. What it acts on is the answer it gets.
+    """
+    loop = asyncio.get_running_loop()
+    answering: list[asyncio.Task[None]] = []
+
+    async with driving(gateway_browser, tmp_path, viewport=viewport) as drive:
+        elsewhere = await drive.page.context.new_page()
+        await elsewhere.goto(f"{drive.origin}/")
+
+        async def consent(one: Dialog) -> None:
+            # A whole second session, through the page's own form: minted, disclosed and
+            # promoted, which is what replaces the cookie this tab's next request carries.
+            #
+            # The half is dropped and the page reloaded first, because that tab is holding
+            # the *same* session and shows the console rather than the entry form — the
+            # storage is shared, which is the whole premise. It is done here rather than
+            # in the setup because the first tab reads the half it sends before the
+            # ceremony opens, and a page with none goes to the bootstrap form instead.
+            await elsewhere.evaluate(
+                "() => window.localStorage.removeItem('assistant.session.header-half')"
+            )
+            await elsewhere.reload()
+            await elsewhere.fill("#bootstrap-value", bootstrap_value(drive.gateway))
+            await elsewhere.click("#bootstrap-form button[type=submit]")
+            await elsewhere.wait_for_selector("#console:not([hidden])")
+            await one.accept()
+
+        drive.page.on("dialog", lambda one: answering.append(loop.create_task(consent(one))))
+        _seed_conversation(drive, "c-1", turns=3)
+        await _open_listing(drive)
+
+        await (
+            drive.page.locator("#conversation-list .conversation-row")
+            .first.get_by_role("button", name="Forget")
+            .click()
+        )
+
+        # The condition, in the panel the owner is looking at.
+        await expect(drive.page.locator("#conversations")).to_contain_text(
+            "The two halves of this browser's session no longer match."
+        )
+        # And the session the other tab holds is still theirs: this tab was not thrown
+        # back to the bootstrap form by a request that belonged to the session before it.
+        await expect(drive.page.locator("#bootstrap")).to_be_hidden()
+        assert "is gone" not in await drive.page.inner_text("#conversations")
