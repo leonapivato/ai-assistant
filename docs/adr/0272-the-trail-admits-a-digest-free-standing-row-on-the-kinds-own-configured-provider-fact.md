@@ -27,15 +27,16 @@
   conjuncts, §7's *"bind, then rule, then record, then send"*, §11's `forecast_reach` with
   its restrictive default and its **`closed_loop` is untouched** clause, §12's three lanes
   and §13's arms.
-- **This *is* a contract change, and this document is the ADR golden rule 5 requires for
-  one** — ratified and merged as its own PR before the lane that implements it (ADR-0015).
-  What it changes is **what `AuditTrail.record` accepts**, in one conjunct of one write-path
-  check. What it moves is **no `core` type, no member, no signature and no
+- **This is a breaking `AuditTrail` Protocol change, flagged here under golden rule 5**, and
+  this document is the ADR that rule requires for one — ratified and merged as its own PR
+  before anything implements against it (ADR-0015). What changes is **what
+  `AuditTrail.record` accepts**: a row it refuses today is admitted, and a row it admits
+  today is refused (§1). **§3 puts the revised invariant on the Protocol itself**, in
+  `core/protocols.py`, rather than leaving a cross-subsystem behaviour stated only in one
+  implementation. What does **not** move is any **type, member, signature or
   `PROTOCOL_VERSION`**: `CarriedProvenance` and `EgressBinding` already carry both booleans
-  (ADR-0260 §11, landed by that ADR's L1), no `Settings` value reaches the trail, and no
-  stored row is revalidated, rewritten or re-derived. **And it moves no line of
-  `core/protocols.py`**, which §3 states as a fact about that file read at `origin/main`
-  `46403478` rather than as a posture, and conditions on a lane that finds otherwise.
+  (ADR-0260 §11, landed by that ADR's L1), nothing a client decodes changes, no `Settings`
+  value reaches the trail, and no stored row is revalidated, rewritten or re-derived.
 
 ## Context
 
@@ -175,25 +176,41 @@ the row alone. ADR-0193 §6's pairing refusal, narrowed to route (b) by ADR-0247
 
 ### 3. The one implementing lane, and what it owes
 
-> **Normative.** **One lane, one PR, in `permissions/` and `ai_assistant.testing` plus the
-> shared conformance suite.** It takes `_check_configuration_authority` in
+> **Normative.** **One lane, one PR: the contract text, the production trail, the canonical
+> fake and the shared conformance suite.** It takes `_check_configuration_authority` in
 > `src/ai_assistant/permissions/audit.py` and the same check in `FakeAuditTrail` in
 > `src/ai_assistant/testing/permissions.py` to §1's conjunct, in one change and with the two
 > messages staying identical, and corrects in that same change every docstring citing the
 > rule it moved. **It touches no `wire` version, no store schema, no `Settings` field and no
 > byte of `orchestration/`.**
 
-> **Normative.** **It moves no line of `core/protocols.py`, because no line of that file
-> states the rule §1 moves — and where one is found, the lane corrects it in the same
-> change.** `AuditTrail.record`'s docstring states the **route-(b)** eight-check invariant
-> and names neither `closed_loop`, nor route (c), nor the digest-free admission at all; it
-> likewise names neither ADR-0247 §2's own narrowing of that invariant's scope nor ADR-0254
-> §7's route-(d) checks, so its staleness **predates this decision and is not created by
-> it**. That drift is filed as #2464 and is **not** absorbed by this lane, which is the
-> triage rule for a pre-existing defect. The conditional half is ADR-0260 §12's
-> correct-every-docstring clause binding here: a `core` docstring citing the moved rule is
-> documentation of this decision, which golden rule 5's own sequence permits the lane to
-> write because this ADR is merged ahead of it.
+> **Normative.** **The lane states route (c)'s revised invariant on `AuditTrail.record` in
+> `core/protocols.py`, beside the route-(b) eight checks already stated there.** What it
+> writes is §1's rule and no more: a non-resolving `ALLOW` carrying an `egress_binding` and
+> an `authorised_by` with no `authorised_subject` is accepted only where the binding carries
+> **exactly one** of `closed_loop` and `forecast_reach` and the pointer equals the binding's
+> own `account.reference`, with the `InvalidAuthorisationError` the `Raises:` section
+> already names. **A behaviour two subsystems depend on belongs in the contract** (golden
+> rule 1), and golden rule 5's sequence is what permits the lane to write it: this ADR is
+> merged ahead of it. **No signature, type, member or `PROTOCOL_VERSION` moves with that
+> edit** — it is contract *text* for behaviour this decision fixes, and nothing a client
+> decodes changes.
+
+> **Normative.** **That edit does not discharge #2464, and the lane does not grow to absorb
+> it.** `AuditTrail.record`'s docstring is stale in two further respects this decision does
+> not touch: it states the route-(b) invariant over a scope **ADR-0247 §2 already narrowed**
+> by *"and whose `authorised_subject` is set"*, and it does not mention **ADR-0254 §7's**
+> route-(d) checks at all. Both predate this decision, neither is created by it, and #2464
+> is where they are answered — which is the triage rule for a pre-existing defect, applied
+> rather than set aside because the lane is now editing that file.
+
+> **Normative.** **One lane for all four files, and the ground is the triad exception.**
+> Contract text, shared conformance suite, canonical fake and the production implementation
+> are ADR-0137 §2's sanctioned single unit of work — *"the contract triad together with its
+> primary production implementation is one unit of work"* — and `permissions/audit.py` is
+> the consumer whose demands shape it. **This is not a licence taken for a wider diff**: no
+> other subsystem is touched, and a lane that split the four would land a conformance suite
+> the store fails.
 
 > **Normative.** **The arms ride in `tests/permissions/audit_trail_contract.py`, so that the
 > store and the fake are held to one contract.** Four arms over a digest-free standing row
@@ -201,6 +218,15 @@ the row alone. ADR-0193 §6's pairing refusal, narrowed to route (b) by ADR-0247
 > `forecast_reach` alone is **recorded**; one carrying `closed_loop` alone is **recorded**,
 > and that arm is the search regression, unchanged in what it asserts; one carrying
 > **neither** fact is **refused**; one carrying **both** is **refused**.
+
+> **Normative.** **Each acceptance arm asserts the recipient-grant seam was consulted zero
+> times**, in the idiom that suite already uses for route (c) — a counting seam, asserted at
+> `call_count == 0`, or one that raises if consulted. Without it an implementation that
+> resolved `authorised_by` on the forecast branch and ignored the answer passes every result
+> assertion, and a resolver outage then refuses a valid route-(c) forecast row — the store
+> read §1 forbids, bought back through the one place no result assertion looks. ADR-0247 §2
+> is the clause: such a row *"needs **no store read**"*, which is what keeps a revoked or
+> cleared grant from changing a recorded decision's meaning (ADR-0193 §9).
 
 > **Normative.** **The pointer half is pinned over *each* admitted fact, not over one of
 > them.** A mismatched-pointer arm written on the search binding alone leaves an
