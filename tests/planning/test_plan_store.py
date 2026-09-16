@@ -103,7 +103,24 @@ async def test_a_fresh_store_does_not_reuse_a_prior_instances_execution_id() -> 
     assert first_id != second_id
 
 
-async def test_a_satisfaction_stamps_the_stores_clock_and_not_the_trackers() -> None:
+@pytest.mark.parametrize(
+    ("store_at", "tracker_at"),
+    [
+        pytest.param(
+            datetime(2026, 6, 1, tzinfo=UTC),
+            datetime(2030, 1, 1, tzinfo=UTC),
+            id="a-tracker-running-ahead",
+        ),
+        pytest.param(
+            datetime(2030, 1, 1, tzinfo=UTC),
+            datetime(2026, 6, 1, tzinfo=UTC),
+            id="a-tracker-running-behind",
+        ),
+    ],
+)
+async def test_a_satisfaction_stamps_the_stores_clock_and_not_the_trackers(
+    store_at: datetime, tracker_at: datetime
+) -> None:
     """ADR-0259 §9: the **store** stamps ``finished_at``, whatever the tracker reads.
 
     This store takes its transition tracker by injection, so the two clocks are
@@ -111,11 +128,15 @@ async def test_a_satisfaction_stamps_the_stores_clock_and_not_the_trackers() -> 
     clock" a claim with a way to be false. Decided here rather than in the shared suite:
     the ``tracker`` keyword is this class's own affordance, and a contract arm could only
     assert the two agree where the default wiring already makes them one value.
+
+    **Both orderings**, because one of them is the coherence case and the other is not.
+    A state stamped at the tracker's clock while the step it carries is stamped at the
+    store's would, with the tracker behind, be a record that **finished before it was
+    written** — and an arm that only ran the tracker ahead would pass on exactly the
+    implementation that produces it. So both instants are asserted to be the store's.
     """
     from plan_store_contract import _KEY, PlanStoreContract  # noqa: PLC0415 — the suite's helpers
 
-    store_at = datetime(2026, 6, 1, tzinfo=UTC)
-    tracker_at = datetime(2030, 1, 1, tzinfo=UTC)
     store = InMemoryPlanStore(now=lambda: store_at, tracker=PlanExecution(now=lambda: tracker_at))
     suite = PlanStoreContract()
 
@@ -141,3 +162,6 @@ async def test_a_satisfaction_stamps_the_stores_clock_and_not_the_trackers() -> 
     assert step is not None
     assert step.finished_at == store_at, "the satisfaction's instant is the store's"
     assert step.finished_at != tracker_at
+    assert committed.updated_at == store_at, (
+        "and the state's is the same one, so it is never written before its step finished"
+    )

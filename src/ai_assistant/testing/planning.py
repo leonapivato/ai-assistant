@@ -2669,7 +2669,11 @@ class FakePlanStore:
                         for step in stored.steps
                     ),
                     "version": stored.version + 1,
-                    "updated_at": self._now(),
+                    # Read once, so the instant on the step and the instant on the state
+                    # are the same value: a state written earlier than the step it
+                    # carries says it finished would be a record that finished before it
+                    # was written, which the real tracker's own stamping refuses.
+                    "updated_at": self._now() if borrowed is None else borrowed.finished_at,
                 }
             ).model_dump()
         )

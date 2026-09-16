@@ -14075,10 +14075,21 @@ class PlanExport(BaseModel):
         other execution while every id still resolves, which three independent
         lookups would admit.
 
+        **And the pair is unique across the document**, which is ADR-0259 §2's "at most
+        one row per ``(goal_id, intended_action_id)``" stated over the export rather
+        than left as a store's private invariant. A document carrying two current rows
+        for one act — whatever their keys — leaves a reader unable to say which claim
+        stands, which is the same defect as a duplicate id and is refused the same way.
+
         Raises:
-            ValueError: If any row's holder does not resolve, or resolves to a step
-                of another execution or an execution of another goal.
+            ValueError: If two rows name one goal and intended action, or if any row's
+                holder does not resolve, or resolves to a step of another execution or
+                an execution of another goal.
         """
+        scopes = {(row.goal_id, row.intended_action_id) for row in self.effects}
+        if len(scopes) != len(self.effects):
+            msg = "export contains two effect rows for one goal and intended action"
+            raise ValueError(msg)
         for row in self.effects:
             holder = executions.get(row.execution_id)
             if holder is None or holder.step(row.step_id) is None:
