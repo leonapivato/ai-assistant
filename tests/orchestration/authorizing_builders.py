@@ -141,11 +141,17 @@ def a_request(
     parameters: Mapping[str, FrozenJson] | None = None,
     goal: str | None = GOAL,
     binding: EgressBinding | None = DEFAULT_BINDING,
+    intended_action: str | None = None,
 ) -> ActionRequest:
     """The concrete request a `CONFIRM` was ruled over.
 
     ``binding=None`` is a request that is **not** an egress call, which is
     ADR-0254 §1's second proposal condition failing.
+
+    ``intended_action`` is the act the step is an attempt at (ADR-0265 §1), which
+    ADR-0266 §7's evidence route selects the governing quote by. ``None`` — the
+    default — is met by that route in no case, so a ``MONEY`` member over such a
+    request is unmet whatever the goal holds (ADR-0267 §7).
     """
     carried: Mapping[str, FrozenJson] = {} if parameters is None else parameters
     if binding is DEFAULT_BINDING and carried:
@@ -156,6 +162,7 @@ def a_request(
         tool=tool if tool is not None else a_tool(),
         parameters=carried,
         goal=goal,
+        intended_action=intended_action,
         step_id="step-1",
         execution_id="e-1",
         egress_binding=binding,
