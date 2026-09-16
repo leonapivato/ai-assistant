@@ -999,6 +999,25 @@ def test_a_new_member_of_a_turn_outcome_cannot_reach_the_page_unnoticed() -> Non
     as work it did not do. That is the same gap ``recipient_grant``'s entry opened, and
     it is A9's to close.
 
+    **``attempt_report`` is ADR-0262 §6's member, and the decision taken here is "not
+    rendered".** That is a decision rather than an omission, and ADR-0262 §11 is where it
+    is made: the lane that lands this member is **L1**, "``core`` (with ``wire`` and
+    ``testing``)", and §11 assigns both surfaces to **L5** — "``interfaces``. §6's six
+    fixed statements, on the CLI and on the browser — **both surfaces**, since a member
+    rendered on one and not the other is the parity failure M4 recorded." So the member
+    crosses the wire, because it is on ``TurnOutcome`` and this page decodes the whole
+    outcome, and no panel reads it.
+
+    **The cost in this lane is nil, and that is stated rather than hidden.** L1 lands the
+    ``core`` surface alone: nothing computes a comparison until L4, which "replaces the
+    unconditional ``AttemptOutcome.ANSWERED`` at the three sites that write it today", so
+    no turn ends an attempt under §4 and the member is ``None`` on every outcome this
+    adapter can see. What a surface owes when it does arrive is **not** optional — §6
+    requires one fixed statement per member of a closed vocabulary, under ADR-0242 §9's
+    all-or-nothing rule, which is the obligation ``forecast_not_read``'s and
+    ``drive_withheld``'s entries already carry — and L5 owes it on **both** surfaces at
+    once, which is where this member's obligation is stricter than either of theirs.
+
     **This assertion is the tripwire firing as designed**, which is what the test's own
     name says: a member reaching the page unnoticed is what it exists to prevent, and a
     lane that adds one names it here and states which way the decision went. Nothing
@@ -1025,6 +1044,7 @@ def test_a_new_member_of_a_turn_outcome_cannot_reach_the_page_unnoticed() -> Non
         "authorizations",
         "drive_withheld",
         "satisfied_from_earlier",
+        "attempt_report",
     }
 
 

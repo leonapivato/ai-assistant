@@ -39,6 +39,7 @@ from pydantic import (
     BaseModel,
     ConfigDict,
     Field,
+    NonNegativeInt,
     SecretStr,
     TypeAdapter,
     ValidationInfo,
@@ -7937,6 +7938,9 @@ class AttemptTransition(BaseModel):
         add_execution_id: An execution to append to :attr:`GoalAttempt.execution_ids`.
         add_authorization_id: An authorization to append to
             :attr:`GoalAttempt.authorization_ids`.
+        execution_versions: The :attr:`ExecutionState.version` of **every** execution
+            the attempt names, as the caller read them when it computed the comparison
+            an ``\u2192 ENDED`` transition reports (ADR-0262 §4). See the field.
     """
 
     model_config = ConfigDict(extra="forbid", frozen=True)
@@ -7959,6 +7963,105 @@ class AttemptTransition(BaseModel):
     )
     add_authorization_id: Identifier | None = Field(
         default=None, description="An authorization id to append."
+    )
+    # ``NonNegativeInt`` rather than a field-level ``ge``: the floor belongs to the
+    # *version* and not to the tuple, and pydantic's alias is ``Annotated[int, Ge(0)]``
+    # — the same constraint object ``ExecutionState.version``'s own ``Field(ge=0)``
+    # carries, declared where ``tests/core/test_int_bound_coverage.py``'s walk reaches
+    # it rather than in a validator a reader has to find.
+    execution_versions: tuple[tuple[Identifier, NonNegativeInt], ...] = Field(
+        default=(),
+        description=(
+            "The versions the comparison behind an ``\u2192 ENDED`` transition was "
+            "computed against, each pair an execution id and the "
+            ":attr:`ExecutionState.version` the caller **read** (ADR-0262 §4). "
+            "Possibly empty, and empty is what an attempt naming no execution "
+            "carries.\n\n"
+            "**A snapshot of the set the comparison read and never a list of the ones "
+            "the caller chose to protect**: a subset would leave the omitted execution "
+            "free to move between the comparison and the commit, which is the whole of "
+            "the race. What reads it is the ``\u2192 ENDED`` limb **alone** \u2014 "
+            "every other transition ignores it, ``\u2192 CANCELLED`` included, so "
+            "ADR-0261 §2's act is unaffected whatever it passes and every caller that "
+            "stamps a phase, moves an effort counter or appends an id writes exactly "
+            "as it does today.\n\n"
+            "**Each version declares** :attr:`ExecutionState.version`'s **own "
+            "``ge=0`` domain**, on the element rather than in prose, so a pair carrying "
+            "a figure no execution can hold is refused where every other malformed "
+            "field of a command is \u2014 at construction, with the ``ValueError`` a "
+            "frozen model raises \u2014 and never reaches a store to be reported as a "
+            "lost race, which is a class promising a fruitful retry for a command "
+            "nothing could have retried. **No lane widens the domain or coerces a "
+            "value into it.**\n\n"
+            "**Whether the pairs' ids are exactly the attempt's, and whether each "
+            "version is the one stored, are the store's questions and not this type's** "
+            "(ADR-0262 §4): a missing id, an extra id and a duplicate are a malformed "
+            "command, and a version that is not the stored one is the race the field "
+            "exists for. This model states neither refusal \u2014 an "
+            "``AttemptTransition`` cannot see the attempt it names, and a check here "
+            "would be a second spelling free to disagree with the one deciding the "
+            "write."
+        ),
+    )
+
+
+class AttemptReport(BaseModel):
+    """What one turn's comparison produced, rendered beside the reply (ADR-0262 §6).
+
+    **Exactly two fields, and it carries no third**: no goal id, no attempt id, no
+    criterion, no criterion text, no count, no evidence reference, no step id, no
+    instant and no prose. That is ADR-0249 §9's containment reached for its own
+    reason — *"an implementation that rendered every field of every value it was
+    handed … discloses none of those, because there is none on the value to
+    disclose"* — and it is why a surface rendering this whole value discloses nothing
+    about what the goal is or what was compared.
+
+    **What it speaks of is the comparison, and it claims nothing about the two
+    commits, which have not happened when it is composed** (§6). ADR-0262 §1 puts the
+    comparison **before** the composing stage and the ``commit_attempt`` and
+    ``set_goal_status`` writes **after** it, so :attr:`outcome` is the member §4's
+    limbs yielded and :attr:`continues` is computed from it and the goal's status **as
+    the comparison read them**. **Nothing here asserts that an attempt was ended, that
+    a status was written, or that a goal is now closed**, which is why none of §6's
+    six fixed statements names the goal's status: a statement a later commit could
+    falsify is one that decision does not write.
+
+    **It rides** :attr:`TurnOutcome.attempt_report` **alone.** No stored record and no
+    export carries one, and the comparison's own results are computed and discarded —
+    no value of it outlives the turn. A surface renders the statement on the one turn
+    the member is non-``None``; where a user asks later how a goal stands, ``assistant
+    goals`` reads the goal's status and the attempt's stored outcome (§6).
+
+    Attributes:
+        outcome: The member §4's six limbs yielded for the attempt this turn
+            compared. **Never** ``AttemptOutcome.CANCELLED``, which that function
+            reaches by no limb — a cancelled attempt is ADR-0261 §2's act and
+            ADR-0249 §5's *"no transition leaves a terminal member"* is what keeps it
+            out of reach rather than a courtesy.
+        continues: Whether the goal's work is unfinished and the user may take it
+            further. **Computed from two facts and never by a model** (§6): ``True``
+            exactly where :attr:`outcome` is ``PARTIAL``, ``FAILED`` or ``UNCERTAIN``
+            **and** the goal is open (ADR-0250 §1's ``ACTIVE`` or ``BLOCKED``), and
+            ``False`` on ``VERIFIED``, on ``ANSWERED`` and on ``CONDITION_PREVENTED``.
+            **No lane derives it from a model's opinion, makes it configurable, or
+            sets it on a closed goal.**
+
+            **Required rather than defaulted**, because either value is a claim: the
+            composing stage's instruction *requires* the answer to end with an offer
+            to continue where it is set, so a default would silently decide whether a
+            user is offered one. The two facts it is computed from are in front of
+            whoever constructs this value.
+    """
+
+    model_config = ConfigDict(extra="forbid", frozen=True)
+
+    outcome: AttemptOutcome = Field(
+        description="The member the comparison yielded for the attempt this turn ended."
+    )
+    continues: bool = Field(
+        description=(
+            "Whether the goal's work is unfinished and the user may take it further (ADR-0262 §6)."
+        )
     )
 
 
@@ -16013,6 +16116,38 @@ def _bounded_arguments(value: tuple[BoundedArgument, ...]) -> tuple[BoundedArgum
     return value
 
 
+def _postconditions(value: tuple[StepVerification, ...]) -> tuple[StepVerification, ...]:
+    """Refuse ``OUTPUT_PRESENT`` as a declared postcondition (ADR-0262 §2).
+
+    *"The producing step's ``output`` is not ``None``"* is the circularity R48 exists
+    to close, one level down from the reply: a declaration establishing a criterion
+    because the call it verifies returned **anything at all** would let a goal reach
+    ``ACHIEVED`` on the fact that a tool answered. ``FIELD_PRESENT`` and
+    ``FIELD_EQUALS`` name a key of the output object and, for the second, the literal
+    it must equal byte-exactly, so each says something about *what* came back.
+
+    **It is not a criticism of ``verifies``'s own vocabulary** (ADR-0253 §4). There
+    ``OUTPUT_PRESENT`` answers *did this step produce what the plan said it would*,
+    which is a question about one step's own run and is answered honestly by *it
+    returned something*. Here the question is whether the user's goal was reached,
+    and that answer establishes nothing about it. The member stays in the enumeration
+    and stays constructible as a :class:`StepVerification`; what is refused is
+    declaring one **on a tool**.
+
+    Raises:
+        ValueError: If any member's ``kind`` is ``VerificationKind.OUTPUT_PRESENT``.
+    """
+    if any(one.kind is VerificationKind.OUTPUT_PRESENT for one in value):
+        msg = (
+            "a tool declares no OUTPUT_PRESENT postcondition: 'the producing step's "
+            "output is not None' establishes nothing about a goal's criteria, and a "
+            "criterion met by a tool having answered at all is the circularity R48 "
+            "closes one level down from the reply (ADR-0262 §2)"
+        )
+        raise ValueError(msg)
+    return value
+
+
 class QuotedOutput(BaseModel):
     """Where a declaration says a price may be read from its output (ADR-0267 §3).
 
@@ -16206,6 +16341,37 @@ class ToolDefinition(BaseModel):
     parameters_schema: FrozenJsonMapping = Field(
         default=_EMPTY_PARAMS,
         description="JSON Schema (draft 2020-12) for the call's arguments; enforced by ADR-0145.",
+    )
+    postconditions: Annotated[tuple[StepVerification, ...], AfterValidator(_postconditions)] = (
+        Field(
+            default=(),
+            description=(
+                "What a **successful** invocation of this tool establishes about its own "
+                "output, possibly empty and **declared by whoever registers the tool** "
+                "(ADR-0262 §2). It is ADR-0016 §1's own shape, *\u201cDeclared, not "
+                "inferred\u201d*, and the verification phase holds an act's stored output "
+                "against these declarations and authors no predicate of its own \u2014 so "
+                "**no model supplies one**, and no lane mints a postcondition for a tool "
+                "that declared none or infers one from ``parameters_schema``. It is a "
+                "declaration **beside** that schema and never a keyword inside it.\n\n"
+                "**A member whose kind is ``OUTPUT_PRESENT`` is not constructible here** "
+                "and ``_postconditions`` says why; ``FIELD_PRESENT`` and ``FIELD_EQUALS`` "
+                "are admitted, the second comparing byte-exactly as ADR-0253 §4 compares a "
+                "literal. **No lane adds a kind or relaxes the comparison.**\n\n"
+                "**This is a fourth exception to this class's required-field rule, "
+                "recorded rather than argued away** (ADR-0262's ADR-0016 scope), and it is "
+                "taken on §1's own fail-closed ground rather than on the field being "
+                "outside a permission decision's reach \u2014 it **is** within one, since "
+                "ADR-0254 §3's condition 3 compares the request's declaration with the "
+                "row's **by value**, so editing a postcondition moves a route-(d) coverage "
+                "answer exactly as editing a severity does. The empty tuple is an "
+                "exception because it makes the **opposite** claim to the one ADR-0016 §1 "
+                "refuses: it declares nothing, so **nothing is verified**, no criterion "
+                "resting on this tool is ever met and no goal of it reaches "
+                "``GoalStatus.ACHIEVED`` \u2014 a value that can only refuse to establish "
+                "and never establish."
+            ),
+        )
     )
 
     @field_validator("description")
@@ -27084,6 +27250,43 @@ class TurnOutcome(BaseModel):
             turn carries one: an undecided turn with no reply would answer a **spoken**
             request with silence, since ADR-0200 §4 makes ``spoken`` the rendering of
             ``outcome.reply`` and of nothing else.
+        attempt_report: What the turn's own comparison produced for the attempt it
+            **ended**, or ``None`` on every other returned outcome (ADR-0262 §6).
+            ADR-0262 is the decision that added it, as ADR-0261 is
+            :attr:`drive_withheld`'s.
+
+            **Non-``None`` exactly on a turn that ended an attempt under ADR-0262
+            §4**, and ``None`` on every other outcome — a turn that engaged no goal, a
+            routed operation (ADR-0197 §7), ADR-0198 §1's restatement, and every turn
+            whose attempt stayed live. **A refused ``commit_attempt`` leaves it
+            absent**, which ADR-0262 §6 books as the stated cost of that refusal: the
+            reply the composing stage already produced stands as composed and is not
+            falsified, and what the user does not get is the outcome word beside it — a
+            silence rather than a false claim, the fail-closed direction. The next turn
+            that engages the goal compares afresh and renders the statement for what is
+            then true; **no lane re-renders the refused turn's statement, stores it for
+            a later turn, retracts the reply or appends a second message.**
+
+            **A surface renders one fixed statement per** :class:`AttemptOutcome`
+            **member, beside the reply and never in place of it** (§6), and a surface
+            that renders no statement for a member it was given has not implemented
+            that section and is not permissibly degraded (ADR-0242 §9's bar). **The
+            offer to continue is in the reply and not here**: the composing stage is
+            given both of this value's fields and its instruction requires the answer
+            to end with an offer where :attr:`AttemptReport.continues` is set, because
+            an offer a surface printed would reach neither the browser's transcript nor
+            the spoken channel as part of what was said.
+
+            **This is not ADR-0250 §5's announcement and neither displaces the other**:
+            that sentence is about *which goal a turn is about* and this is about *what
+            the attempt produced*. A turn may owe both, one or neither, and **no lane
+            derives either from the other or collapses them.**
+
+            **A widening rather than a change**, which is :attr:`drive_withheld`'s move
+            and :attr:`recipient_grant`'s: a ``None``-defaulting member alters neither
+            ADR-0170 §4's three ``reply``-``None`` shapes nor its one
+            :attr:`reply_degraded` shape, so no clause of ADR-0170 is superseded, and
+            the value it adds to ADR-0198 §2's enumeration changes no value that fixes.
         drive_withheld: Where this turn's goal stands, on a turn that returned after a
             store refused its claim, and ``None`` on every other returned outcome
             (ADR-0261 §7). See the field for the whole of the rule — what makes it
@@ -27221,6 +27424,26 @@ class TurnOutcome(BaseModel):
             "authority comes into being rather than only afterwards. The confirmation's "
             "no-identifier rule is stated over a row the user has **not** established "
             "and is not read onto this member."
+        ),
+    )
+    attempt_report: AttemptReport | None = Field(
+        default=None,
+        description=(
+            "What the turn's own comparison produced for the attempt it **ended**, or "
+            "``None`` on every other returned outcome (ADR-0262 §6).\n\n"
+            "**Non-``None`` exactly on a turn that ended an attempt under ADR-0262 §4** "
+            "\u2014 so ``None`` on a turn that engaged no goal, on a routed operation "
+            "(ADR-0197 §7), on ADR-0198 §1's restatement, on every turn whose attempt "
+            "stayed live, and on the turn whose ``commit_attempt`` was refused after "
+            "the reply was composed. **It carries the value the comparison computed, by "
+            "value, and never a second computation**: no surface derives it from a "
+            "plan, an attempt, a store read of its own or the reply, and no component "
+            "recomputes it downstream.\n\n"
+            "**A widening rather than a change**, which is ``drive_withheld``'s move "
+            "and ``recipient_grant``'s: a ``None``-defaulting member alters neither "
+            "ADR-0170 §4's three ``reply``-``None`` shapes nor its one "
+            "``reply_degraded`` shape. In particular **this fact does not set** "
+            "``reply_degraded``."
         ),
     )
     drive_withheld: DriveWithheld | None = Field(

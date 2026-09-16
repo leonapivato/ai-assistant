@@ -2255,7 +2255,61 @@ from ai_assistant.wire.errors import (
 #: **Nothing else under** ``wire/`` **changes**: the connect exchange gains no member, no
 #: existing frame's encoding changes, no :class:`FrameKind` is added, no codec entry is
 #: registered, and the error mapping is untouched — this lane mints no error class.
-PROTOCOL_VERSION: Final[int] = 50
+#: **51 since ADR-0262 §8**, and the ground is stated rather than weighed: *"``
+#: PROTOCOL_VERSION`` therefore moves by exactly one, in the lane that lands the ``core``
+#: change, with ``wire/envelope.py``'s log entry naming this ADR"*. **Two grounds, one
+#: bump, and there is no third.**
+#:
+#: **The first, and it is ADR-0124 §9's second limb read at the promoted surface.**
+#: :class:`~ai_assistant.core.types.TurnOutcome` gains ``attempt_report``, defaulted
+#: ``None`` and — because ``wire/codec.py`` renders a model by ``model_dump()`` and that
+#: model sets ``extra="forbid"`` — emitted on **every** outcome that crosses, which a
+#: client at 50 fails with ``extra_forbidden``. That is the entry at 8's own reading and
+#: the entry at 50's second ground, stated over one more member.
+#:
+#: **The second.** :class:`~ai_assistant.core.types.ToolDefinition` gains
+#: ``postconditions``, and it crosses because ``ActionRequest.tool`` and
+#: ``PermissionDecision.tool`` embed the **whole** definition by value — ADR-0021 §1's
+#: *"There is no name left to rebind"* — so the new tuple rides every decision a promoted
+#: method returns, and ``ToolDefinition`` sets ``extra="forbid"`` too. The member inside
+#: it, :class:`~ai_assistant.core.types.StepVerification`, is a shape that already
+#: crosses on a :class:`~ai_assistant.core.types.PlanStep`, so **no new class of content
+#: crosses any seam** (ADR-0262 §8): the same kind, key and literal, inside a record the
+#: audit trail already keeps whole.
+#:
+#: **What earns no ground of its own, said rather than left to inference.**
+#: :class:`~ai_assistant.core.types.AttemptReport` is minted and reaches a frame only
+#: **inside** ``TurnOutcome``'s new member, so it rides the first ground rather than
+#: adding to it. :class:`~ai_assistant.core.types.AttemptTransition` gains
+#: ``execution_versions``, and it crosses nowhere at all: that model is ``PlanStore``'s
+#: write command, ``PlanStore`` is not promoted (ADR-0255 §11), and no wire operation
+#: takes one. **No enumeration gains a member** — not ``AttemptOutcome``, not
+#: ``GoalStatus``, not ``AttemptState``, not ``AttemptPhase``, not ``VerificationKind``
+#: — so no peer emits a value another's closed enumeration refuses, and ``core/errors.py``
+#: gains no class.
+#:
+#: **No integer is fixed in the ADR** (§8): *"No integer is fixed here"*, the figure
+#: being whatever the tree holds when this lane lands plus one. As a dated observation
+#: ADR-0262 §8 read **44**; this lane branched at 50 and is written **51**. A lane that
+#: lands after this one re-bumps rather than reusing the figure.
+#:
+#: **No stored-record version moves with this lane and no migration is owed here**
+#: (ADR-0262 §8). The audit trail's ``_SCHEMA_VERSION`` moves for ``postconditions``,
+#: but it moved in **LA**, the lane before this one, so that ``ToolDefinition`` is a
+#: stored shape is answered there and not by this bump. The plan store's
+#: ``_SCHEMA_VERSION`` and ``PlanExport.schema_version`` **do not move**: no shape that
+#: store persists changes, ``AttemptTransition`` being a command rather than a stored
+#: record (ADR-0249 §12), and ``AttemptReport`` is carried by no stored record and by no
+#: export, riding ``TurnOutcome`` alone. The parked-read store's marker, the
+#: authorization store's and ``ConversationExport.schema_version`` are untouched, and
+#: ``core.config.Settings`` gains nothing.
+#:
+#: **Nothing else under** ``wire/`` **changes** (ADR-0262 §8): the connect exchange gains
+#: no member, no existing frame's encoding changes, no :class:`FrameKind` or codec entry
+#: is registered, the promoted method set does not move, no gateway route is added, and
+#: the error mapping gains nothing. **No compatibility shim, negotiation or lenient
+#: decode is added** — ADR-0084 §3's exact-match handshake is the mechanism.
+PROTOCOL_VERSION: Final[int] = 51
 
 #: ADR-0085 §8a: "The correlation id is a UUID string and is at most 36 bytes.
 #: Bounding it is what makes the reserve a constant rather than an aspiration; a
