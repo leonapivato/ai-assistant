@@ -212,8 +212,26 @@ _MIN_SQLITE_INT = -(2**63)
 #: reader has a marker to judge the file by — the seam ADR-0049 §1 describes and
 #: the ``SqlitePlanStore`` pattern this follows.
 #:
+#: **Version 4 is the record carrying a charged tool declaration and a pinned
+#: quote** (ADR-0271 §8). Nothing about the *tables* changes at this step either:
+#: what changes is again the JSON a ``decisions`` row holds. ``ToolDefinition``
+#: grows a ``charged_output`` field and ``PermissionRuling`` a ``proved_quote``
+#: one, and ``PermissionDecision`` embeds both by value — the definition through
+#: ``ActionRequest.tool`` and ``PermissionDecision.tool`` (ADR-0021 §1), the ruling
+#: because ``from_request`` transcribes it whole. Both models set
+#: ``extra="forbid"``, so version-3 code opening a file newer code has written
+#: decisions into **cannot decode those rows at all**, while its marker still tells
+#: it it may — ADR-0262 §8's own sentence about ``postconditions``, true of these
+#: two fields word for word (ADR-0271 §8). The fields themselves land in
+#: ADR-0271's P1 lane; this one moves the marker ahead of them, so that the code
+#: predating the widening already refuses such a trail (ADR-0271 §8's P0, on
+#: ADR-0262 §11's LA-before-L1 shape). What the marker protects is code predating
+#: P0: code *at* P0 but not P1 accepts the marker it set, so a P1-written record
+#: reaches it as a refused row rather than a refused open — bounded by the merge
+#: order, an acceptance ADR-0271 §8 names and records at #2433.
+#:
 #: **Version 3 is the record carrying a postcondition-bearing tool declaration**
-#: (ADR-0262 §8). Nothing about the *tables* changes at this step: what changes is
+#: (ADR-0262 §8). Nothing about the *tables* changed at that step: what changed was
 #: the JSON a ``decisions`` row holds. ``ActionRequest.tool`` and
 #: ``PermissionDecision.tool`` embed the whole ``ToolDefinition`` by value
 #: (ADR-0021 §1), that model sets ``extra="forbid"``, and the definition grows a
@@ -221,9 +239,7 @@ _MIN_SQLITE_INT = -(2**63)
 #: written decisions into **cannot decode those rows at all**, while its marker
 #: still tells it it may. ADR-0049 §1 rules that a downgrade is a fault to report;
 #: moving the marker is what lets it be reported at *open*, before any read,
-#: rather than at the first row that fails to validate. The field itself lands in
-#: ADR-0262's next lane — this one moves the marker ahead of it, so that the code
-#: predating the widening already refuses such a trail (ADR-0262 §11's LA).
+#: rather than at the first row that fails to validate (ADR-0262 §11's LA).
 #:
 #: **Version 2 is the invocation shape** (ADR-0192 §2): the ``invocations`` table
 #: beside ``decisions``, one identifier space over both, and a ``clear()`` that
@@ -234,19 +250,19 @@ _MIN_SQLITE_INT = -(2**63)
 #: requires to be total, silently partial — and its uniqueness check sees only
 #: ``decisions``, so it can record a decision under an id an invocation already
 #: holds, which the joined reads then resolve to two rows under one identifier.
-_SCHEMA_VERSION = 3
+_SCHEMA_VERSION = 4
 
 #: The versions this code can *open*. Anything else is refused, newer or older
-#: (ADR-0049 §1). Every previously openable value stays openable: a version-1 or
-#: version-2 file is opened and brought to :data:`_SCHEMA_VERSION` by the same
-#: additive create-and-migrate every open runs, then restamped — so no trail
-#: already on disk becomes unopenable, which is the failure
-#: :meth:`SqliteAuditTrail._check_schema_version` exists to avoid. A version-2
-#: file needs no table work at all to reach version 3 (the step is the record
-#: shape, not the schema), and gets the restamp regardless, because the restamp is
-#: what stops version-2 code opening it afterwards and failing on the first row it
-#: cannot decode (ADR-0262 §8).
-_OPENABLE_VERSIONS: Final[frozenset[int]] = frozenset({1, 2, _SCHEMA_VERSION})
+#: (ADR-0049 §1). Every previously openable value stays openable: a version-1,
+#: version-2 or version-3 file is opened and brought to :data:`_SCHEMA_VERSION` by
+#: the same additive create-and-migrate every open runs, then restamped — so no
+#: trail already on disk becomes unopenable, which is the failure
+#: :meth:`SqliteAuditTrail._check_schema_version` exists to avoid. Neither the step
+#: to version 3 nor the step to version 4 needs any table work at all (each is the
+#: record shape, not the schema), and each gets the restamp regardless, because the
+#: restamp is what stops code at the older version opening the file afterwards and
+#: failing on the first row it cannot decode (ADR-0262 §8, ADR-0271 §8).
+_OPENABLE_VERSIONS: Final[frozenset[int]] = frozenset({1, 2, 3, _SCHEMA_VERSION})
 
 #: Created first and on its own, so a database labelled with a schema this code
 #: cannot read is refused *before* the ``decisions`` table is created, migrated or
@@ -1164,14 +1180,16 @@ class SqliteAuditTrail:
         reason.** The step from 1 to 2 is the ``invocations`` table, which
         ``CREATE TABLE IF NOT EXISTS`` adds to any file at all, so the migration is
         the open — and refusing here would strand every trail written before
-        ADR-0192 landed. The step from 2 to 3 needs no table work whatever: what
-        version 3 names is the *record* a ``decisions`` row holds, a
-        ``ToolDefinition`` carrying ``postconditions`` (ADR-0262 §8). The restamp is
-        not decoration in either case: it is what stops a *previous* version of this
-        code from opening the file afterwards — maintaining neither ADR-0192 §6's
-        total erasure nor §2's single identifier space over both row kinds at the
-        older step, and at the newer one failing to decode an ``extra="forbid"``
-        record it was still told it could read.
+        ADR-0192 landed. Neither of the later steps needs any table work whatever:
+        what version 3 names is the *record* a ``decisions`` row holds, a
+        ``ToolDefinition`` carrying ``postconditions`` (ADR-0262 §8), and what
+        version 4 names is that same record again, a declaration carrying
+        ``charged_output`` and a ruling carrying ``proved_quote`` (ADR-0271 §8). The
+        restamp is not decoration in any of the three cases: it is what stops a
+        *previous* version of this code from opening the file afterwards —
+        maintaining neither ADR-0192 §6's total erasure nor §2's single identifier
+        space over both row kinds at the oldest step, and at each newer one failing
+        to decode an ``extra="forbid"`` record it was still told it could read.
 
         **Any other stored version is refused**, newer or older, matching
         ``SqlitePlanStore`` (ADR-0049 §1). A stored value outside
