@@ -27,6 +27,16 @@ is established from a ``GoalElement.text``, a ``GoalInterpretation.outcome``, an
 ``IntendedAction.intent``, a ``StepFailure.message``, a composed reply or any other
 free text.
 
+**The predicate is the tree's one statement of ADR-0253 §4 and is not restated here.**
+:func:`~ai_assistant.orchestration.effects.verification_holds` is that statement — its
+own module records that *"this module is the one statement of each, so the driver reads
+it rather than restating it"* — and it already carries §4's refusal of every numeric and
+boolean coercion, walked into containers. A second spelling here would be *"one carrier
+for two facts"* read in the other direction: two implementations of one rule, free to
+disagree about whether an integer ``1`` satisfies a declaration naming ``1.0``.
+**``VerificationKind.OUTPUT_PRESENT`` is unreachable through it from here**, L1's
+validator refusing that kind as a declared postcondition (§2's R48 clause).
+
 **Store failures are never converted into verdicts** (§2). An
 :class:`~ai_assistant.core.errors.AuthorizationError`, an
 :class:`~ai_assistant.core.errors.AuditError` or any other failure of the two reads
@@ -49,7 +59,6 @@ that a criterion resting on one falls to §2's *"otherwise"* and reads
 from __future__ import annotations
 
 from collections import defaultdict
-from collections.abc import Awaitable, Callable, Mapping, Sequence
 from dataclasses import dataclass
 from enum import StrEnum
 from typing import TYPE_CHECKING, Protocol
@@ -64,10 +73,12 @@ from ai_assistant.core.types import (
     Reversibility,
     SkipReason,
     StepStatus,
-    VerificationKind,
 )
+from ai_assistant.orchestration.effects import verification_holds
 
 if TYPE_CHECKING:
+    from collections.abc import Awaitable, Callable, Mapping, Sequence
+
     from ai_assistant.core.protocols import AuthorizationResolution
     from ai_assistant.core.types import (
         Authorization,
@@ -79,7 +90,6 @@ if TYPE_CHECKING:
         GoalElement,
         PermissionDecision,
         StepExecution,
-        StepVerification,
         ToolDefinition,
     )
 
@@ -147,12 +157,29 @@ class Comparison:
         report: The two values §6 hands the composing stage and rides
             ``TurnOutcome.attempt_report``, **where the attempt ends** — which is the
             engine's own test and not this value's.
+        versions: **The snapshot of the set this comparison read** (§4) — one pair per
+            execution the attempt names, in ``execution_ids``' own order, each at the
+            ``ExecutionState.version`` this comparison's own read returned. It rides the
+            ending transition and is compared there, which is what closes the window the
+            status set only narrows: a ``FAILED → RUNNING → SUCCEEDED`` retry landing
+            between the comparison and the commit leaves every step terminal at both
+            instants, and *"the version pairs close it"*.
+
+            **It is the comparison's read and never a later one.** §4 fixes the field as
+            *"the ``ExecutionState.version`` the caller read **when it computed the
+            comparison**"*, so a figure re-read at the commit would report the ground as
+            unmoved over exactly the interval the field exists to cover — the composing
+            stage, which is an arbitrarily slow model call. **An execution the store did
+            not answer for contributes no pair**, which leaves the snapshot short, and §4
+            makes a short snapshot a malformed command the store refuses outright rather
+            than a write that silently protects less than it claims.
     """
 
     outcome: AttemptOutcome
     rung: Rung
     results: tuple[CriterionResult, ...]
     report: AttemptReport
+    versions: tuple[tuple[str, int], ...]
 
 
 class _Executions(Protocol):
@@ -289,79 +316,9 @@ def classify_bound_step(bound: _BoundStep, *, kind: BoundKind) -> _Verdict:
         # The empty tuple is the fail-closed claim (ADR-0016 §1 as ADR-0262 partially
         # supersedes it): a tool declaring none establishes nothing here.
         return _Verdict.NEITHER
-    if all(_holds(one, bound.output) for one in declared):
+    if all(verification_holds(one, bound.output) for one in declared):
         return _Verdict.SATISFYING
     return _Verdict.CONTRADICTING
-
-
-def _holds(predicate: StepVerification, output: FrozenJson) -> bool:
-    """Whether one declared postcondition holds over a step's own stored output.
-
-    **The comparison is arithmetic** (ADR-0253 §4, binding word for word here): no
-    model call, no prompt, no similarity measure, no fold, no coercion and no
-    tolerance. ``FIELD_PRESENT`` wants a JSON **object** carrying the key whose value
-    is not JSON ``null``; ``FIELD_EQUALS`` wants that **and** byte-exact equality with
-    the declared literal.
-
-    ``OUTPUT_PRESENT`` is unreachable: ADR-0262 §2 makes it unconstructible as a
-    declared postcondition — *"the producing step's ``output`` is not ``None``"* is the
-    circularity R48 exists to close — and L1's validator refuses it at construction, so
-    a definition carrying one never reaches this comparison.
-
-    Args:
-        predicate: One member of the operative definition's ``postconditions``.
-        output: The step's own stored output.
-
-    Returns:
-        Whether it holds.
-    """
-    if predicate.field is None:  # pragma: no cover — L1's validator refuses OUTPUT_PRESENT here,
-        # and the two admitted kinds each carry a ``field`` or do not construct.
-        return False
-    if not isinstance(output, Mapping):
-        return False
-    held = output.get(predicate.field)
-    if held is None:
-        return False
-    if predicate.kind is VerificationKind.FIELD_PRESENT:
-        return True
-    return _identical(held, predicate.equals)
-
-
-def _identical(held: object, declared: object) -> bool:
-    """Byte-exact equality, with ``True`` and ``1`` kept apart (ADR-0253 §4).
-
-    Python's own ``==`` makes ``1 == True`` and ``0 == False``, which is exactly the
-    coercion §4 refuses — *"no lane … treats ``1`` as ``true``"* — so the comparison
-    is over the value **and** its type for the two scalars where the two disagree.
-    Containers are walked for the same reason, a list of numbers being free to hold one.
-
-    Args:
-        held: What the output carried at the declared key.
-        declared: The literal ``FIELD_EQUALS`` names.
-
-    Returns:
-        Whether the two are the same JSON value.
-    """
-    if isinstance(held, bool) != isinstance(declared, bool):
-        return False
-    if isinstance(held, Mapping) and isinstance(declared, Mapping):
-        return len(held) == len(declared) and all(
-            key in declared and _identical(value, declared[key]) for key, value in held.items()
-        )
-    if isinstance(held, Mapping) or isinstance(declared, Mapping):
-        return False
-    held_seq = isinstance(held, tuple | list)
-    declared_seq = isinstance(declared, tuple | list)
-    if held_seq and declared_seq:
-        left: tuple[object, ...] = tuple(held)  # type: ignore[arg-type]
-        right: tuple[object, ...] = tuple(declared)  # type: ignore[arg-type]
-        return len(left) == len(right) and all(
-            _identical(one, other) for one, other in zip(left, right, strict=True)
-        )
-    if held_seq or declared_seq:
-        return False
-    return bool(held == declared)
 
 
 def continues_on(outcome: AttemptOutcome, status: GoalStatus) -> bool:
@@ -432,7 +389,7 @@ async def compare(
         AuthorizationError: As ``resolve`` raises it, on the same rule.
     """
     criteria = goal.interpretation[-1].criteria
-    acts = await _acts(attempt, executions=executions, decisions=decisions)
+    acts, versions = await _acts(attempt, executions=executions, decisions=decisions)
     rung = _rung(acts)
     authorising = await _authorising_rows(acts, goal_id=goal.id, rows=rows)
     results = tuple(
@@ -444,12 +401,13 @@ async def compare(
         rung=rung,
         results=results,
         report=AttemptReport(outcome=outcome, continues=continues_on(outcome, goal.status)),
+        versions=versions,
     )
 
 
 async def _acts(
     attempt: GoalAttempt, *, executions: _Executions, decisions: _Decisions
-) -> tuple[_Act, ...]:
+) -> tuple[tuple[_Act, ...], tuple[tuple[str, int], ...]]:
     """Every step of every execution the attempt names, with its provenance followed.
 
     One walk serves §2 and §3, because both ask the same question about a step's
@@ -472,7 +430,9 @@ async def _acts(
         decisions: The audit trail, narrowed.
 
     Returns:
-        One :class:`_Act` per step, in execution order.
+        One :class:`_Act` per step, in execution order, and §4's version snapshot over
+        the same reads — so the pairs the ending transition carries are **this
+        comparison's** own figures rather than a second read's.
 
     Raises:
         PlanningError: As ``get_execution`` raises it.
@@ -486,13 +446,19 @@ async def _acts(
         return held[execution_id]
 
     acts: list[_Act] = []
+    versions: list[tuple[str, int]] = []
     for execution_id in attempt.execution_ids:
         state = await read(execution_id)
         if state is None:  # pragma: no cover — the store's own write-time closure
+            # Unreachable against a store that kept its write-time closure. There is
+            # **no version to report** and none is invented: the pair is omitted, which
+            # leaves the snapshot short, and §4 makes a short snapshot a malformed
+            # command the store refuses outright.
             continue
+        versions.append((execution_id, state.version))
         for step in state.steps:
             acts.append(await _act(step, read=read, decisions=decisions))
-    return tuple(acts)
+    return tuple(acts), tuple(versions)
 
 
 async def _act(

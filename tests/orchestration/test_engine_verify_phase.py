@@ -22,6 +22,7 @@ from datetime import timedelta
 from typing import TYPE_CHECKING, Any
 
 from test_engine import (
+    AT,
     PATIENT,
     Harness,
     NoStepPlanner,
@@ -39,11 +40,13 @@ from verification_builders import (
     field_equals,
 )
 
-from ai_assistant.core.errors import StaleExecutionError
+from ai_assistant.core.errors import StaleExecutionError, ToolError
 from ai_assistant.core.types import (
+    ActionPlan,
     AttemptOutcome,
     AttemptPhase,
     AttemptState,
+    AttemptTransition,
     GoalStatus,
     Ground,
     Idempotency,
@@ -51,16 +54,20 @@ from ai_assistant.core.types import (
     ProposedQuestion,
     ProposedUnderstanding,
     StepStatus,
+    StepTransition,
     StepVerification,
 )
+from ai_assistant.orchestration import engine as engine_module
+from ai_assistant.orchestration import verification
 from ai_assistant.orchestration.composing import ComposingStage
 from ai_assistant.testing import FakeModelProvider, FakeStreamingCompleter
 
 if TYPE_CHECKING:
     from collections.abc import Sequence
 
+    import pytest
+
     from ai_assistant.core.types import (
-        AttemptTransition,
         Goal,
         GoalAttempt,
         TurnOutcome,
@@ -260,21 +267,24 @@ async def test_s1_ends_answered_at_verify_with_the_goal_still_active() -> None:
 # --------------------------------------------------------------------------- #
 
 
-async def test_the_comparison_runs_before_composing_and_the_commits_after_it() -> None:
+async def test_the_comparison_runs_before_composing_and_the_commits_after_it(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
     """Arm 2: *"the order is forced, not assumed"*.
 
     The composing stage records whether it was entered: at the instant the comparison
-    ran it had **not** been, and by the time either commit was taken it **had**. The
-    order is read off the store's own calls, so an implementation that computed the
-    verdict after composing fails here whatever it then wrote.
+    ran it had **not** been, and by the time the commit was taken it **had**.
+
+    **The comparison is instrumented at itself and not at a store read it shares.** The
+    engine takes several ``get_goal`` reads in a turn — the engagement's among them — so
+    a probe keyed on one of those would be satisfied by a turn that compared *after*
+    composing, and would detect no ADR-0262 §1 regression at all. What is wrapped here is
+    the comparison function the engine calls and nothing else, so each recorded event
+    belongs to exactly one of the three moments §1 puts in order.
     """
     entered: list[str] = []
 
     class _Watching(_Statuses):
-        async def get_goal(self, goal_id: str) -> Goal | None:
-            entered.append("compared")
-            return await super().get_goal(goal_id)
-
         async def commit_attempt(self, transition: AttemptTransition) -> GoalAttempt:
             if transition.to_state is AttemptState.ENDED:
                 entered.append("committed")
@@ -282,6 +292,12 @@ async def test_the_comparison_runs_before_composing_and_the_commits_after_it() -
 
     plans = _Watching()
     harness = Harness(planner=NoStepPlanner(), plans=plans)
+
+    async def _compared(*args: Any, **kwargs: Any) -> Any:
+        entered.append("compared")
+        return await verification.compare(*args, **kwargs)
+
+    monkeypatch.setattr(engine_module, "compare", _compared)
 
     stage: Any = harness.composing
     original = stage.compose
@@ -294,13 +310,65 @@ async def test_the_comparison_runs_before_composing_and_the_commits_after_it() -
 
     await harness.engine.converse(_ASKED, timeout=PATIENT)
 
-    assert "composed" in entered
-    assert "committed" in entered
-    compared = entered.index("compared")
-    composed = entered.index("composed")
-    committed = entered.index("committed")
-    assert compared < composed, "§1: the comparison is wholly before the composing stage"
-    assert composed < committed, "§1: the commits are taken after it"
+    assert entered == ["compared", "composed", "committed"], (
+        "§1: the comparison wholly before the composing stage, and the commits after it"
+    )
+
+
+async def test_an_execution_appended_while_composing_refuses_the_ending() -> None:
+    """§4's other conjunct: the attempt's own compare-and-swap, over the same window.
+
+    An execution appended to the attempt advances ``GoalAttempt.version``, so an ending
+    transition computed against the row the comparison read is refused on its
+    ``expected_version`` — *"an execution appended after the caller's read is reported as
+    the race it is and never as a malformed set"*, which is what keeps the two refusals
+    apart. **The arm that fails against an implementation re-reading the attempt after
+    composing**, which would take the compare-and-swap over ground that had already
+    moved and would then commit an outcome computed without that execution's answer.
+    """
+    plans = _Statuses()
+    harness = Harness(planner=NoStepPlanner(), plans=plans)
+    stage: Any = harness.composing
+    original = stage.compose
+    appended: list[str] = []
+
+    async def _compose(*args: Any, **kwargs: Any) -> Any:
+        """Append a second execution of this goal inside the window §4 is about."""
+        if not appended:
+            appended.append("once")
+            stored = plans.opened[0]
+            goal = await plans.get_goal(stored.goal_id)
+            assert goal is not None
+            other = ActionPlan(
+                id="plan-second",
+                goal_id=stored.goal_id,
+                steps=(),
+                created_at=AT,
+                targets_revision=goal.revision,
+            )
+            await plans.save_plan(other)
+            second = await plans.start_execution(other.id)
+            held = await plans.get_attempt(stored.id)
+            assert held is not None
+            await plans.commit_attempt(
+                AttemptTransition(
+                    attempt_id=stored.id,
+                    expected_version=held.version,
+                    add_execution_id=second.id,
+                )
+            )
+        return await original(*args, **kwargs)
+
+    stage.compose = _compose
+
+    outcome = await harness.engine.converse(_ASKED, timeout=PATIENT)
+
+    attempt = await plans.get_attempt(plans.opened[0].id)
+    assert attempt is not None
+    assert attempt.state is not AttemptState.ENDED, "the appended execution moved the row"
+    assert attempt.outcome is None
+    assert plans.statuses == []
+    assert outcome.attempt_report is None
 
 
 async def test_a_reply_quoting_every_declared_value_establishes_nothing() -> None:
@@ -432,6 +500,81 @@ async def test_every_other_member_ends_an_attempt_and_moves_no_status() -> None:
     assert ending is not None
     assert ending.outcome is AttemptOutcome.ANSWERED
     assert plans.statuses == []
+
+
+# --------------------------------------------------------------------------- #
+# §4's two conjuncts, over the window the composing stage opens                #
+# --------------------------------------------------------------------------- #
+
+
+async def test_the_ending_carries_the_versions_the_comparison_read() -> None:
+    """§4: the snapshot is *"the ``ExecutionState.version`` the caller read"* at the comparison.
+
+    A step that **failed** is retried and succeeds while the composing stage is out —
+    ``FAILED → RUNNING → SUCCEEDED``, every step terminal at both instants and the status
+    conjunct therefore silent. *"The version pairs close it."* So the ending transition
+    must carry the figure the comparison read, the store must refuse it, and the turn
+    must come back carrying **no report**: an outcome computed from the failure is not
+    written over an execution whose answer the comparison never saw.
+
+    **This is the arm that fails against an implementation re-reading the versions at
+    the commit**, which would report the ground as unmoved over exactly the interval the
+    field exists to cover — an arbitrarily slow model call.
+    """
+
+    async def _fails(parameters: object, *, idempotency_key: str | None) -> None:
+        del parameters, idempotency_key
+        msg = "the provider refused it"
+        raise ToolError(msg)
+
+    plans = _Statuses()
+    harness = Harness(tools=(tool(),), plans=plans, tool_handler=_fails)
+    stage: Any = harness.composing
+    original = stage.compose
+    retried: list[int] = []
+
+    async def _compose(*args: Any, **kwargs: Any) -> Any:
+        """Land ADR-0262 §4's retry inside the composing call it opens the window for."""
+        if not retried:
+            attempt = plans.opened[0]
+            (execution_id,) = (await plans.get_attempt(attempt.id)).execution_ids  # type: ignore[union-attr]
+            state = await plans.get_execution(execution_id)
+            assert state is not None
+            retried.append(state.version)
+            state = await plans.commit_transition(
+                StepTransition(
+                    execution_id=execution_id,
+                    step_id="step-1",
+                    to_status=StepStatus.RUNNING,
+                    expected_version=state.version,
+                    attempt_id=attempt.id,
+                )
+            )
+            await plans.commit_transition(
+                StepTransition(
+                    execution_id=execution_id,
+                    step_id="step-1",
+                    to_status=StepStatus.SUCCEEDED,
+                    expected_version=state.version,
+                    output={"booked": True},
+                )
+            )
+        return await original(*args, **kwargs)
+
+    stage.compose = _compose
+
+    outcome = await harness.engine.converse(_SEND, timeout=PATIENT)
+
+    ending = _ended(plans)
+    assert ending is not None, "the engine proposed the ending the comparison computed"
+    ((_, carried),) = ending.execution_versions
+    assert carried == retried[0], "the version the comparison read, not the retry's"
+    attempt = await plans.get_attempt(plans.opened[0].id)
+    assert attempt is not None
+    assert attempt.state is not AttemptState.ENDED, "the store refused the stale commit"
+    assert attempt.outcome is None
+    assert plans.statuses == [], "§4: no second bite, and no GoalStatus write"
+    assert outcome.attempt_report is None, "§6: a silence rather than a false outcome word"
 
 
 # --------------------------------------------------------------------------- #
