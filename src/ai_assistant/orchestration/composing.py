@@ -87,6 +87,7 @@ import structlog
 from ai_assistant.core.errors import ModelError
 from ai_assistant.core.streams import closing_stream
 from ai_assistant.core.types import (
+    AttemptOutcome,
     BeliefBand,
     Disposition,
     EpisodicMemory,
@@ -103,7 +104,13 @@ from ai_assistant.core.types import (
     band_of,
     rests_on_recorded_external_content,
 )
-from ai_assistant.orchestration.goals import CLARIFICATION_PROMPT, ELISION_PROMPT, GoalFacts
+from ai_assistant.orchestration.goals import (
+    CLARIFICATION_PROMPT,
+    CONTINUES_PROMPT,
+    ELISION_PROMPT,
+    UNVERIFIED_PROMPT,
+    GoalFacts,
+)
 from ai_assistant.orchestration.payloads import JSON_STRING_QUOTE_BYTES, encoded_text_bytes
 from ai_assistant.orchestration.reads import READ_BUDGET, StructuredFacts
 
@@ -1558,14 +1565,31 @@ def _system_prompt(  # noqa: C901, PLR0913 — the pass's own instruction plus o
         clauses.append(CLARIFICATION_PROMPT)
     if about.elided:
         clauses.append(ELISION_PROMPT)
-    # ADR-0259 §3's surfacing, appended last because it is a fact about an act an
-    # **earlier** turn started rather than about anything this pass looked up or did
-    # with the user's objective — which a reader has to have met both to place. It is
-    # owed whether or not this turn's check then established the effect: what the user
-    # is told is that the assistant was unsure, and a step the check resolved is one it
-    # was unsure about when the turn began.
+    # ADR-0259 §3's surfacing, appended after ADR-0250's two because it is a fact about
+    # an act an **earlier** turn started rather than about anything this pass looked up
+    # or did with the user's objective — which a reader has to have met both to place.
+    # It is owed whether or not this turn's check then established the effect: what the
+    # user is told is that the assistant was unsure, and a step the check resolved is
+    # one it was unsure about when the turn began.
     if uncertain_effect:
         clauses.append(_UNCERTAIN_EFFECT_PROMPT)
+    # ADR-0262 §6's two clauses, appended last of all because they are about what the
+    # turn's comparison **established** rather than about what it did — which a reader
+    # has to have met the work to place. They follow ADR-0259 §3's clause because the
+    # two acts stand in that order within the turn: the reconciliation check runs before
+    # planning and speaks of what an earlier turn left unsure, while the comparison runs
+    # after the walk and speaks of what this turn settled. The comparison ran wholly
+    # before this stage was entered (§1), so what is passed here is a value already
+    # fixed: no clause of this function re-runs it, and nothing the model writes can
+    # move it.
+    #
+    # **The two are independent.** A turn may owe the second and not the first — a
+    # `CONDITION_PREVENTED` attempt offers nothing to continue and must still not be
+    # narrated as done — so neither is derived from the other.
+    if about.outcome is not None and about.outcome is not AttemptOutcome.VERIFIED:
+        clauses.append(UNVERIFIED_PROMPT)
+    if about.continues:
+        clauses.append(CONTINUES_PROMPT)
     return "\n\n".join(clauses)
 
 

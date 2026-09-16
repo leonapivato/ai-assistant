@@ -853,7 +853,7 @@ def test_a_goal_summary_carries_no_attempt_and_no_element() -> None:
 # --- §§9, 12, 13: what this lane deliberately writes nowhere --------------
 
 
-def test_neither_achieved_nor_blocked_is_written_anywhere_under_src() -> None:
+def test_achieved_has_one_producer_and_blocked_still_has_none() -> None:
     """§20 arm 23's permanent half, asserted over the shipped tree.
 
     The arm reads in full: "the only assignment of ``GoalStatus.ABANDONED`` under
@@ -863,8 +863,20 @@ def test_neither_achieved_nor_blocked_is_written_anywhere_under_src() -> None:
     review convention, so that a later lane cannot supply one without the ADR that
     decides it."
 
-    This case is the half that holds **forever**: ``ACHIEVED`` is A10's, ``BLOCKED`` is
-    A3's, and §12 rules that neither "gains a producer here".
+    ``ACHIEVED`` is A10's and ``BLOCKED`` is A3's, and §12 rules that neither "gains a
+    producer here" — *here* being ADR-0250's own lane. **A10 has now landed, so the arm
+    narrows rather than being dropped**, which is what its own closing clause asks for:
+    a later lane may not supply a producer *"without the ADR that decides it"*, and
+    ADR-0262 §5 is that ADR. It rules that ``GoalStatus.ACHIEVED`` has **exactly one**
+    producer — ``orchestration``'s ``VERIFY`` phase, on §4's limb 5 alone, immediately
+    after the ``commit_attempt`` that ended the attempt — and that *"no expiry, no
+    silence, no timeout, no sweep, no reclaim, no model output, no inference and no
+    other member of any Protocol writes ``ACHIEVED``"*. So the assertion becomes **that
+    one site and no other**, on the same narrowing the two cases below already took for
+    ``ACTIVE`` and ``ABANDONED``.
+
+    **``BLOCKED`` is untouched and stays at zero**: it is A3's, no lane has landed it,
+    and §5 binds on ``ACHIEVED`` alone.
 
     **What it is stated over narrowed when ADR-0250 §19's M3 landed.** M1 could assert
     the two members were not *named* anywhere, because nothing read them; §1's own
@@ -875,16 +887,25 @@ def test_neither_achieved_nor_blocked_is_written_anywhere_under_src() -> None:
     counts, and an ``ACHIEVED`` or ``BLOCKED`` status reaching a record is what it
     refuses.
     """
-    written = sorted(
+    achieved = sorted(
+        f"{path.relative_to(_SRC)}"
+        for path in _SRC.rglob("*.py")
+        for line in path.read_text().splitlines()
+        if re.search(r'(?:\bstatus=|"status":\s*)GoalStatus\.ACHIEVED\b', line)
+    )
+    blocked = sorted(
         f"{path.relative_to(_SRC)}:{number}"
         for path in _SRC.rglob("*.py")
         for number, line in enumerate(path.read_text().splitlines(), start=1)
-        if re.search(r'(?:\bstatus=|"status":\s*)GoalStatus\.(?:ACHIEVED|BLOCKED)\b', line)
+        if re.search(r'(?:\bstatus=|"status":\s*)GoalStatus\.BLOCKED\b', line)
     )
-    assert written == [], (
-        "ADR-0250 §12: GoalStatus.ACHIEVED gains no producer here (A10's, and the "
-        "owner's correction 2) and GoalStatus.BLOCKED gains none either (A3's, by "
-        f"ADR-0249 §4's own words). Found: {written}"
+    assert achieved == ["ai_assistant/orchestration/engine.py"], (
+        "ADR-0262 §5: GoalStatus.ACHIEVED has exactly one producer — the VERIFY "
+        f"phase's own act, on §4's limb 5 alone. Found: {achieved}"
+    )
+    assert blocked == [], (
+        "ADR-0250 §12: GoalStatus.BLOCKED gains no producer here (A3's, by ADR-0249 "
+        f"§4's own words). Found: {blocked}"
     )
 
 
@@ -925,24 +946,30 @@ def test_status_has_two_callers_and_one_store_member_that_writes_abandoned() -> 
     )
     assert [where for where, _ in writes] == [
         "ai_assistant/orchestration/engine.py",
+        "ai_assistant/orchestration/engine.py",
         "ai_assistant/planning/sqlite_store.py",
         "ai_assistant/planning/store.py",
         "ai_assistant/testing/planning.py",
     ], (
-        "ADR-0250 §20 arm 23 with ADR-0261 §2: the reopen is `orchestration`'s and each "
-        f"conforming store writes ABANDONED once of its own. Found: {writes}"
+        "ADR-0250 §20 arm 23 with ADR-0261 §2 and ADR-0262 §5: the reopen and the "
+        "`ACHIEVED` write are `orchestration`'s and each conforming store writes "
+        f"ABANDONED once of its own. Found: {writes}"
     )
     assert sorted(what for _, what in writes) == [
+        "status=GoalStatus.ACHIEVED,",
         "status=GoalStatus.ACTIVE,",
         'update={"status": GoalStatus.ABANDONED, "version": stored.version + 1}',
         "updated = _with_status(stored, status=GoalStatus.ABANDONED)",
         "updated = _with_status(stored, status=GoalStatus.ABANDONED)",
     ], (
-        "and they are the reopen (§13) and the three stores' one closing write each "
-        f"(ADR-0261 §2). Found: {writes}"
+        "and they are the reopen (§13), ADR-0262 §5's one producer, and the three "
+        f"stores' one closing write each (ADR-0261 §2). Found: {writes}"
     )
     assert _enclosing_functions_writing_the_status() == {
-        "ai_assistant/orchestration/engine.py": {"_engaged"},
+        # ADR-0262 §5's one producer sits beside the reopen and in its own act, which
+        # is what "`GoalStatus.ACHIEVED` has exactly one producer and it is the act
+        # below" is asserted as here: one function, named for what it writes.
+        "ai_assistant/orchestration/engine.py": {"_engaged", "_achieved"},
         "ai_assistant/planning/sqlite_store.py": {"_close_goal_abandoned_sync"},
         "ai_assistant/planning/store.py": {"close_goal_abandoned"},
         "ai_assistant/testing/planning.py": {"close_goal_abandoned"},
@@ -1031,8 +1058,12 @@ def test_the_two_closing_acts_have_exactly_one_caller_each() -> None:
     )
     assert [where for where, _ in callers] == [
         "ai_assistant/orchestration/engine.py",
-    ], f"ADR-0250 §20 arm 23: one caller of the status route, the reopen. Found: {callers}"
-    assert sorted(what for _, what in callers) == ["ACTIVE"], (
+        "ai_assistant/orchestration/engine.py",
+    ], (
+        "ADR-0250 §20 arm 23 with ADR-0262 §5: two callers of the status route, the "
+        f"reopen and `ACHIEVED`'s one producer. Found: {callers}"
+    )
+    assert sorted(what for _, what in callers) == ["ACHIEVED", "ACTIVE"], (
         "and each names its member outright, so that no call can carry a status decided "
         f"somewhere this test cannot read. Found: {callers}"
     )
@@ -1066,9 +1097,17 @@ def test_no_forbidden_status_is_carried_anywhere_a_write_could_reach() -> None:
     the value of an assignment, which are the two ways a value travels to a writer. §1's
     own definition of an open goal (*"``ACTIVE`` or ``BLOCKED``"*) is a read and is
     untouched by this.
+
+    **A10 has landed, so the propagation half narrows with the assignment half.**
+    ADR-0262 §5 gives ``ACHIEVED`` exactly one producer, and the ``status=`` keyword of
+    that one ``set_goal_status`` call is the one position the member may travel
+    through — asserted as that exact site rather than as a count, so a second route
+    still fails here. **``BLOCKED`` stays at zero**, §5 binding on ``ACHIEVED`` alone.
     """
+    # The **member** rather than the line, so the assertion pins which of the two
+    # travelled and where, and survives an edit that moves the site by a line.
     carried = sorted(
-        f"{path.relative_to(_SRC)}:{value.lineno}"
+        f"{path.relative_to(_SRC)}:{value.attr}"
         for path in _SRC.rglob("*.py")
         for node in ast.walk(ast.parse(path.read_text()))
         for value in _values_that_travel(node)
@@ -1077,10 +1116,10 @@ def test_no_forbidden_status_is_carried_anywhere_a_write_could_reach() -> None:
         and value.value.id == "GoalStatus"
         and value.attr in {"ACHIEVED", "BLOCKED"}
     )
-    assert carried == [], (
-        "ADR-0250 §12: ACHIEVED is A10's and BLOCKED is A3's, so neither may be passed "
-        "to a call or bound to a name under src/ — a member that can travel can reach "
-        f"`set_goal_status`. Found: {carried}"
+    assert carried == ["ai_assistant/orchestration/engine.py:ACHIEVED"], (
+        "ADR-0262 §5: ACHIEVED travels exactly once, into the `set_goal_status` call of "
+        "its one producer; ADR-0250 §12: BLOCKED is A3's and may not travel at all — a "
+        f"member that can travel can reach a writer. Found: {carried}"
     )
 
 

@@ -2072,6 +2072,20 @@ def build_composition(  # noqa: PLR0915 — one statement per resource this root
             # the seam's act and no lane outside `tools/` calls it: withholding the
             # member is what makes "the scan never claims" a **type** rather than a
             # prohibition this composition is trusted to keep (ADR-0029 §1).
+            # ADR-0262 §3's one new collaborator, wired by L4 as §11 says it is: the
+            # **same** goal-authorization store the policy, the trail and the runner
+            # already hold, handed over under a **fourth** position and its third face
+            # (ADR-0254 §16). The engine's annotation is `AuthorizationResolution`, so
+            # what this line gives the verification phase is `resolve(id)` and nothing
+            # else — it can name neither `record` nor `settle` nor `standing` nor
+            # `recent` nor `live_for`, which is what makes "that phase never authorises
+            # anything" a property of the type rather than of this wiring.
+            #
+            # **Verification establishes nothing without this line.** A phase wired with
+            # no resolution resolves no authorising row, so every criterion reads
+            # `unestablished`, no attempt reaches `VERIFIED` and no goal reaches
+            # `ACHIEVED` — the fail-closed direction, and not an error.
+            authorizations=goal_authorizations,
             recovery=RecoveryScan(plans=plans, trail=trail, completer=trail),
             # The very trail the three drivers record into, handed over **whole**
             # here and narrowed to `SourceReadRecorder` at each of them (ADR-0185 §4,

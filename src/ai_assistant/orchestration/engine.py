@@ -116,6 +116,7 @@ from ai_assistant.core.types import (
     TERMINAL_ATTEMPT_STATES,
     AttemptOutcome,
     AttemptPhase,
+    AttemptReport,
     AttemptState,
     AttemptTransition,
     AuthorizationProjection,
@@ -264,6 +265,7 @@ from ai_assistant.orchestration.speech import (
     transcribe_within,
 )
 from ai_assistant.orchestration.traces import Observation, OperationTraces
+from ai_assistant.orchestration.verification import Comparison, compare
 
 if TYPE_CHECKING:
     from collections.abc import AsyncIterator, Sequence
@@ -271,6 +273,7 @@ if TYPE_CHECKING:
     from ai_assistant.core.clock import Clock
     from ai_assistant.core.protocols import (
         AuditTrail,
+        AuthorizationResolution,
         DeferralStore,
         GoalAssociator,
         MemoryStore,
@@ -1515,6 +1518,26 @@ class _GoalPass:
 
 
 @dataclass(frozen=True, slots=True)
+class _Verified:
+    """What one pass's ``VERIFY`` comparison produced, with the goal it read (ADR-0262).
+
+    **The goal's ``version`` travels with the comparison because §5's write is taken
+    under it** — *"the ``version`` it read **before** the comparison ran"* — and because
+    a second read between the comparison and the write would be free to answer
+    differently, which is the interleaving §5's no-retry rule is about.
+
+    Attributes:
+        comparison: §3's rung, §2's three results, §4's member and §6's two values.
+        goal_id: The goal compared.
+        goal_version: Its ``version`` at the instant the comparison read it.
+    """
+
+    comparison: Comparison
+    goal_id: str
+    goal_version: int
+
+
+@dataclass(frozen=True, slots=True)
 class _Association:
     """What ADR-0250 §3 decided about this turn's goal, before it planned.
 
@@ -1618,6 +1641,11 @@ def _summary_of(
 
 #: The three :class:`~ai_assistant.core.types.AttemptState` members ADR-0249 §5 calls a
 #: **pause**, stated once so the engine's derivation and a reader cannot disagree.
+#:
+#: **It is also ADR-0262 §4's second ending condition** (:meth:`Engine._paused`): *"the
+#: attempt is **not paused** — its ``state`` is none of ``AWAITING_CLARIFICATION``,
+#: ``AWAITING_AUTHORIZATION`` or ``BLOCKED``"*, cited there as §5's own derivation, so
+#: the two read one set rather than two that agree.
 _PAUSED_ATTEMPT_STATES: Final[frozenset[AttemptState]] = frozenset(
     {
         AttemptState.AWAITING_CLARIFICATION,
@@ -2358,6 +2386,7 @@ class Engine:
         reconciliation: ReconciliationStage | None = None,
         parked_reads: ParkedReadOperations | None = None,
         authorization_operations: AuthorizationOperations | None = None,
+        authorizations: AuthorizationResolution | None = None,
         transcriber: SpeechTranscriber | None = None,
         synthesizer: SpeechSynthesizer | None = None,
         speakable_attested_sources: frozenset[str] = frozenset(),
@@ -2799,6 +2828,22 @@ class Engine:
                 :meth:`standing_authorizations` answers empty and
                 :meth:`revoke_authorization` answers ``NO_SUCH_AUTHORIZATION`` — which
                 is exactly what is true of a deployment that holds no rows.
+            authorizations: ADR-0262 §3's **one new collaborator**, and the whole of
+                what that decision adds to this engine: the ``resolve(id)``-and-nothing-
+                else face ADR-0254 §16 mints, held so that the ``VERIFY`` comparison can
+                read the :class:`~ai_assistant.core.types.Authorization` a step's own
+                pinned route-(d) decision points at. **It cannot name ``record``,
+                ``settle``, ``standing``, ``recent`` or ``live_for``**, which
+                ``mypy --strict`` keeps unnameable on it, and what that buys is that
+                this phase *"never authorises anything"* and never enumerates. It is
+                the **same object** ``authorization_operations`` and ``StepRunner``
+                hold, under a third face (ADR-0254 §16).
+
+                ``None`` where a deployment wired none, which resolves no row: every
+                criterion is then ``unestablished``, no attempt reaches ``VERIFIED``
+                and no goal reaches ``ACHIEVED``. That is the fail-closed direction
+                ADR-0262 §2 runs in throughout — *"a value that can only refuse to
+                establish and never establish"* — and never an error.
             transcriber: The speech-recognition seam ``converse_spoken`` transcribes
                 through (ADR-0200 §1, §2), already wrapped in whatever deadline
                 decorator the composition root wired (ADR-0118 §2) — ``None`` on a
@@ -3100,6 +3145,10 @@ class Engine:
         # answers empty and the revocation answers ``NO_SUCH_AUTHORIZATION``, which
         # is what is true of a store that holds no row with that id.
         self._authorization_operations = authorization_operations
+        # ADR-0262 §3's read seam, and the only collaborator that decision adds. It is
+        # held **whole and narrow**: the annotation is the narrowing, so nothing on
+        # this engine can reach a member of the authorization store beyond ``resolve``.
+        self._authorizations = authorizations
         self._transcriber = transcriber
         self._synthesizer = synthesizer
         self._speakable_attested_sources = frozenset(speakable_attested_sources)
@@ -10460,7 +10509,8 @@ class Engine:
         *,
         since: datetime,
         allowed_by: str | None,
-    ) -> None:
+        verified: _Verified | None,
+    ) -> AttemptReport | None:
         """Stamp ``VERIFY`` and end the resumed attempt where §5 admits it (§12).
 
         The second half of a resumption's bookkeeping, committed once the answer exists:
@@ -10494,40 +10544,65 @@ class Engine:
                 none at all — ADR-0152 §7's unbindable rebind, after which the
                 confirmation is still a standing question and nothing about the attempt
                 has become true. Nothing is written there.
+            verified: The comparison this resumption ran **before** it composed
+                (ADR-0262 §1), or ``None`` where it ran none.
+
+        Returns:
+            ADR-0262 §6's report, where this commit ended the attempt, and ``None``
+            where it did not or where the commit was refused.
 
         Raises:
             PlanningError: As the store raises it.
         """
         if allowed_by is None:
-            return
+            return None
         held = await self._attempt_of(step.state)
         if held is None:
-            return
-        # ADR-0262 §4's third ending condition, beside §5's two this line already
-        # carries (#2477): an attempt whose walk left a step unsettled does not end on
-        # this turn, so the resumption writes `RUNNING` below exactly as a resumption
-        # whose answer earned no outcome does — the attempt is no longer waiting for the
-        # boundary's answer, and it is not finished either.
-        answered = self._answered(composed, step) and await self._every_step_settled(held)
+            return None
+        # ADR-0262 §4's three ending conditions. The first is the reply — read as the
+        # one `bool` §1 admits — and the third is every step of every execution the
+        # attempt names having settled (#2477); an attempt whose walk left one unsettled
+        # does not end on this turn.
+        #
+        # **The second is not read off the stored row here, and that is deliberate.**
+        # §4 asks whether the attempt is *paused*, and this resumption **is** the user's
+        # answer: the boundary already committed it out of `AWAITING_AUTHORIZATION` at
+        # the instant the answer was recorded, and where that write did not land the row
+        # still says so while nothing is waiting on it. Reading the row would decline to
+        # end an attempt on the strength of a write this very commit repairs.
+        ends = (
+            verified is not None
+            and self._composed_a_reply(composed)
+            and await self._every_step_settled(held)
+        )
+        if ends:
+            return (
+                await self._ended(
+                    held,
+                    verified,
+                    working=self._worked(held, since),
+                    add_authorization_id=allowed_by,
+                )
+            )[1]
         await self._move_attempt(
             held,
             to_phase=AttemptPhase.VERIFY,
             # **``RUNNING`` is written rather than left alone**, and that is the state's
-            # half of the recovery above. A resumption whose answer earns no outcome —
-            # a refusal, a tool that failed, a composition that produced nothing — still
-            # *has* an answer, so the attempt is no longer waiting for one; and where the
-            # boundary's write did not land, the row still says
-            # ``AWAITING_AUTHORIZATION``. Leaving it would pair §5's paused state with a
-            # phase that has reached ``VERIFY``, over a token nothing can answer again.
-            # Where the boundary did land, the row is already ``RUNNING`` and this
-            # changes nothing. **Which ``AttemptOutcome`` such an attempt earns is
-            # A10's** (§13), so none is written and §4's stated cost is taken.
-            to_state=AttemptState.ENDED if answered else AttemptState.RUNNING,
-            outcome=AttemptOutcome.ANSWERED if answered else None,
-            ended_at=self._clock() if answered else None,
+            # half of the recovery above. A resumption whose answer ends no attempt —
+            # a refusal, a tool that failed, a composition that produced nothing, a walk
+            # that left a step unsettled — still *has* an answer, so the attempt is no
+            # longer waiting for one; and where the boundary's write did not land, the
+            # row still says ``AWAITING_AUTHORIZATION``. Leaving it would pair §5's
+            # paused state with a phase that has reached ``VERIFY``, over a token
+            # nothing can answer again. Where the boundary did land, the row is already
+            # ``RUNNING`` and this changes nothing. **No ``AttemptOutcome`` is written
+            # on such a turn** (ADR-0262 §4), and §4's stated cost is taken: the next
+            # turn that engages the goal runs its own comparison.
+            to_state=AttemptState.RUNNING,
             working=self._worked(held, since),
             add_authorization_id=allowed_by,
         )
+        return None
 
     def _worked(self, opened: OpenedAttempt | None, since: datetime) -> timedelta | None:
         """The attempt's ledger, advanced by the interval since ``since`` (ADR-0249 §5).
@@ -10559,52 +10634,33 @@ class Engine:
         return opened.attempt.effort.working + max(self._clock() - since, timedelta(0))
 
     @staticmethod
-    def _answered(composed: ComposedReply | None, step: StepOutcome | None) -> bool:
-        """Whether ADR-0249 §5's ``ANSWERED`` is **literally** true of this pass.
+    def _composed_a_reply(composed: ComposedReply | None) -> bool:
+        """ADR-0262 §4's **first** ending condition, and the only fact it reads of the reply.
 
-        §5 fixes the member's whole content: "**``ANSWERED`` means the attempt produced
-        an answer and nothing was verified.** It is not a weaker ``VERIFIED`` and no lane
-        reads it as one: it asserts that **a reply exists**, that **no step failed** and
-        that **no condition blocked**, and it asserts nothing about whether the reply is
-        correct." Each of the three is checked here, and a pass failing any of them ends
-        no attempt — **which member it earns instead is A10's** (§13), and §4's stated
-        cost is taken rather than papered over: "an attempt … ends with an outcome saying
-        what happened, and its disposition records that nobody established the outcome".
+        *"The turn **composed a reply that completed** — a ``ComposedReply`` carrying
+        text and not degraded (ADR-0173 §6), read as the one ``bool`` §1 admits."* §1 is
+        explicit that this is the whole of what the commits read about the reply: they
+        read **that one exists** and *"read nothing of its content"*. **No lane passes a
+        ``ComposedReply`` or any part of one into the comparison, re-runs the comparison
+        after composing, or lets a composing failure change which member §4's limbs
+        yield** — a composition that did not complete ends no attempt at all.
 
-        **A reply exists** means a reply this pass actually produced. A composition that
-        returned no text produced no answer at all, and one that **did not complete**
-        (ADR-0173 §6's fourth outcome) produced a reply that stopped part way — neither is
-        "the attempt produced an answer", and §12's "no lane writes an attempt that claims
-        a result before it happened" is the clause that makes the distinction matter.
-
-        **No step failed** is read off the execution and not off the disposition.
-        :attr:`~ai_assistant.core.types.Disposition.EXECUTED` says the tool was
-        *reached*, not that it succeeded: a tool answering ``INVALID_REQUEST`` leaves
-        that disposition beside a step whose
-        :class:`~ai_assistant.core.types.StepStatus` is ``FAILED``, which is exactly the
-        case §5's second conjunct names.
-
-        **No condition blocked** covers the remaining dispositions — a denial, no capable
-        tool, an ambiguous capability, invalid parameters — and a turn still awaiting a
-        confirmation, which has not finished at all.
+        **This replaces ADR-0249 §5's own ``_answered`` test as the gate on ending**, and
+        that is ADR-0262 §11's L4 in terms: the three sites that wrote an unconditional
+        ``AttemptOutcome.ANSWERED`` gated it on §5's *"a reply exists, no step failed, no
+        condition blocked"*, and that value is now **limb 6** rather than the only
+        answer. §5's other two conjuncts have not been dropped: they are §4's own
+        ``failed`` and ``blocked``, read by limbs 1 and 2, which is where an attempt that
+        fails one of them now earns a member instead of earning none.
 
         Args:
-            composed: What the composing stage produced for this pass, or ``None``
-                where it produced nothing at all — which is no answer either.
-            step: The step this pass drove, or ``None`` on a no-action decision — which
-                has no step to fail and no condition to block.
+            composed: What the composing stage produced for this pass, or ``None`` where
+                it produced nothing at all — which is no answer either.
 
         Returns:
-            Whether this pass may write ``ANSWERED``.
+            Whether a reply exists.
         """
-        if composed is None or composed.text is None or composed.degraded:
-            return False
-        if step is None:
-            return True
-        if step.confirmation is not None or step.disposition is not Disposition.EXECUTED:
-            return False
-        state = step.state.step(step.step_id)
-        return state is not None and state.status is StepStatus.SUCCEEDED
+        return composed is not None and composed.text is not None and not composed.degraded
 
     async def _move_attempt(  # noqa: PLR0913 — one parameter per member of the frozen command a move may set; a bundle here would be a second spelling of `AttemptTransition`
         self,
@@ -10809,6 +10865,213 @@ class Engine:
                 continue
             pairs.append((execution_id, state.version))
         return tuple(pairs)
+
+    async def _compared(self, opened: OpenedAttempt | None) -> _Verified | None:
+        """ADR-0262's comparison, run **before this turn composes anything** (§1).
+
+        §1 puts *"§2's three results over every criterion, and §3's rung"* in the turn's
+        ``AttemptPhase.VERIFY``, *"after the walk has ended and **wholly before the
+        composing stage**"*, and the commits §4 and §5 name after it. **At the instant
+        this runs no reply exists**, so no implementation can take one as an operand —
+        which is what makes the circularity unreachable rather than merely forbidden.
+        **No lane passes a ``ComposedReply`` or any part of one in here, and no lane
+        re-runs the comparison after composing.**
+
+        **The goal is read here and the version it returns is what §5's write is taken
+        under** — *"the ``version`` it read **before** the comparison ran"*. Reading it
+        afterwards would take the write under a version that may already carry a
+        revision the comparison never saw, which is exactly the write §5's no-retry rule
+        exists to refuse.
+
+        **The criteria are that goal's *current* interpretation's and nothing else is
+        one** (§1): not an earlier revision's, not the plan's expectations, not a step's
+        ``verifies``, not a ``constraints`` or ``conditions`` element.
+
+        Args:
+            opened: The attempt as this pass holds it, or ``None`` where the pass opened
+                none — which compares nothing and ends nothing.
+
+        Returns:
+            The comparison beside the goal it was computed against, or ``None`` where
+            there is no attempt or the store no longer holds its goal.
+
+        Raises:
+            PlanningError: As the store's reads raise it. **A store failure is never
+                converted into a verdict** (§2).
+        """
+        if opened is None:
+            return None
+        goal = await self._plans.get_goal(opened.attempt.goal_id)
+        if goal is None:  # pragma: no cover — the store's own write-time closure
+            # An attempt whose goal the store no longer holds has no criteria to compare
+            # and no status to move. Nothing is invented for it and nothing is reported:
+            # the attempt does not end on this turn, which is §4's own stated cost.
+            return None
+        comparison = await compare(
+            goal,
+            opened.attempt,
+            executions=self._plans,
+            decisions=self._trail,
+            rows=self._authorizations,
+        )
+        return _Verified(comparison=comparison, goal_id=goal.id, goal_version=goal.version)
+
+    def _pass_to_composing(self, verified: _Verified | None, facts: GoalFacts) -> GoalFacts:
+        """Fold §6's two values into what the composing stage is told.
+
+        ADR-0262 §6: *"the stage is **given** the outcome member and ``continues``"*, on
+        ADR-0170 §5's construction. Both are the **comparison's** — §1 puts the commits
+        after this stage, so neither asserts that an attempt was ended, that a status was
+        written or that a goal is now closed.
+
+        Args:
+            verified: This pass's comparison, or ``None`` where it ran none.
+            facts: The rest of what this pass tells the stage about its goal.
+
+        Returns:
+            Those facts, carrying §6's two values.
+        """
+        if verified is None:
+            return facts
+        return replace(
+            facts,
+            outcome=verified.comparison.outcome,
+            continues=verified.comparison.report.continues,
+        )
+
+    async def _ended(
+        self,
+        opened: OpenedAttempt | None,
+        verified: _Verified | None,
+        *,
+        working: timedelta | None,
+        add_authorization_id: str | None = None,
+    ) -> tuple[OpenedAttempt | None, AttemptReport | None]:
+        """Take §4's ending commit and, on limb 5 alone, §5's ``ACHIEVED`` write.
+
+        **Both are taken after the composing stage** (§1), from the values the
+        comparison already fixed and from **no value the reply produced** — the only
+        fact either reads about the reply is *that one exists*, which the caller has
+        already decided.
+
+        **The write is one ``AttemptTransition`` and this phase takes no second bite**
+        (§4). A refusal means the ground moved under the comparison, so the phase
+        *"writes nothing further, does not retry, does not recompute, takes no
+        ``GoalStatus`` write and does not fail the turn"*, and the turn returns with
+        ``attempt_report`` **absent** — which §6 makes a **silence rather than a false
+        claim**: the reply the stage already composed stands as composed, is not
+        re-rendered, retracted or annotated, and *"the next turn that engages the goal
+        compares afresh against the then-current criteria"*.
+
+        **The ledger rides this one commit and is lost with it.** That is §4's rule
+        read as written — one transition, no second write — and the alternative is the
+        thing §4 refuses, a phase that writes again after a refusal.
+
+        Args:
+            opened: The attempt as this pass holds it.
+            verified: This pass's comparison. ``None`` compares nothing and ends
+                nothing.
+            working: The ledger's new value.
+            add_authorization_id: A decision this pass recorded, appended on the same
+                transition (ADR-0249 §12).
+
+        Returns:
+            The attempt as it now stands, and the report §6 hands the surface — ``None``
+            where the commit was refused.
+
+        Raises:
+            PlanningError: As ``commit_attempt`` raises it, which is not a refusal of
+                the ending but a failure of the store.
+        """
+        if verified is None:  # pragma: no cover — the callers test the same fact first
+            return opened, None
+        try:
+            moved = await self._move_attempt(
+                opened,
+                to_phase=AttemptPhase.VERIFY,
+                to_state=AttemptState.ENDED,
+                outcome=verified.comparison.outcome,
+                ended_at=self._clock(),
+                working=working,
+                add_authorization_id=add_authorization_id,
+            )
+        except StaleExecutionError:
+            _log.info(
+                "attempt_ending_refused",
+                attempt_id=None if opened is None else opened.attempt.id,
+                outcome=verified.comparison.outcome.value,
+            )
+            return opened, None
+        if verified.comparison.outcome is AttemptOutcome.VERIFIED:
+            await self._achieved(verified)
+        return moved, verified.comparison.report
+
+    async def _achieved(self, verified: _Verified) -> None:
+        """``GoalStatus.ACHIEVED``'s one producer, and its no-retry rule (ADR-0262 §5).
+
+        Called **immediately after** the ``commit_attempt`` §4 names has committed, and
+        **only** where §4's function yielded ``VERIFIED`` — limb 5 — on the attempt it
+        has just ended. *"No expiry, no silence, no timeout, no sweep, no reclaim, no
+        model output, no inference and no other member of any Protocol writes
+        ``ACHIEVED``."*
+
+        **The two writes are ordered, the attempt first**, which is what makes §5's
+        store conjunct satisfiable: a status written first would leave an ``ACHIEVED``
+        goal carrying a live, claimable attempt for the width of a store call — R53's
+        failure with a window in it.
+
+        **A refusal writes nothing and is never retried**, because a retry could close a
+        goal against criteria nothing compared. *"A lost ``Goal.version`` means the goal
+        moved, and it moves when a turn records a new ``GoalInterpretation`` revision —
+        which may carry a **criterion this comparison never saw**."* So on any refusal
+        the act *"writes nothing, takes no re-read, makes no second call"*, does not
+        fail the turn, and leaves the attempt ``ENDED``/``VERIFIED`` under an open goal,
+        which §6's ``VERIFIED`` statement is worded to stay true of.
+
+        **An attempt reaching a terminal state still moves no goal status**, and this is
+        no exception to ADR-0249 §4: one act takes both writes because one comparison
+        decided both, and an attempt ending ``ANSWERED``, ``PARTIAL``, ``FAILED``,
+        ``UNCERTAIN`` or ``CONDITION_PREVENTED`` moves no status at all.
+
+        Args:
+            verified: The comparison, with the goal and the version it was read at.
+
+        Raises:
+            PlanningError: As ``set_goal_status`` raises it, which is a failure of the
+                store rather than the refusal §5 rules on.
+        """
+        try:
+            await self._plans.set_goal_status(
+                verified.goal_id,
+                status=GoalStatus.ACHIEVED,
+                at=self._clock(),
+                expected_version=verified.goal_version,
+            )
+        except StaleExecutionError:
+            # §5's residual, legible and self-healing: the attempt reads
+            # ``ENDED``/``VERIFIED`` under an open goal — "the attempt established the
+            # outcome as the goal then stood, and the goal has since moved" — which is
+            # not a false claim in either direction. The next turn opens a new attempt
+            # and reaches ``VERIFY`` with the **then-current** criteria.
+            _log.info("goal_achieved_refused", goal_id=verified.goal_id)
+
+    def _paused(self, opened: OpenedAttempt | None) -> bool:
+        """ADR-0262 §4's **second** ending condition, read off the attempt this pass holds.
+
+        *"The attempt is **not paused** — its ``state`` is none of
+        ``AWAITING_CLARIFICATION``, ``AWAITING_AUTHORIZATION`` or ``BLOCKED``"*, which is
+        ADR-0249 §5's own *paused* derivation. The clause's other half — *"and no step of
+        its executions stands ``AWAITING_APPROVAL``"* — is already the third condition's,
+        that status being outside :data:`_SETTLED_STEP_STATUSES`.
+
+        Args:
+            opened: The attempt as this pass holds it.
+
+        Returns:
+            Whether it is paused. ``False`` for no attempt at all, which ends nothing
+            either way.
+        """
+        return opened is not None and opened.attempt.state in _PAUSED_ATTEMPT_STATES
 
     async def _run_turn(  # noqa: C901, PLR0913, PLR0915 — C901: ADR-0250 §3 and §10 add two branches to one sequence — a turn that could not decide which goal it was about returns before the loop, and a turn that raised a question takes the undriven path whatever its plan proposed — and each is a fact about *this* pass that a helper could only take back by threading this pass's whole local state through a parameter list. PLR0913: the utterance, the budget, the conversation, the two composers, the supply filter and the spoken capture; every one is a distinct fact about the pass, and collapsing any pair would put a flag where a value belongs. PLR0915: one pass is one sequence — admit, persist, authorise, drive, compose, capture — and the four statements ADR-0249 §12's authorization boundary adds are a closure over this pass's own attempt carrier, which a helper could only take back by putting that carrier in a mutable cell
         self,
@@ -11195,6 +11458,13 @@ class Engine:
                 # through all six.
                 attempt = await self._move_attempt(attempt, to_phase=AttemptPhase.AUTHORIZE)
                 attempt = await self._move_attempt(attempt, to_phase=AttemptPhase.EXECUTE)
+            # ADR-0262 §1: the comparison is evaluated in `AttemptPhase.VERIFY`, after
+            # the walk has ended and **wholly before the composing stage** — so it runs
+            # here, above the `compose` call, and at this instant **no reply exists** for
+            # an implementation to take as an operand. **A turn that raised a question
+            # compares nothing**: ADR-0250 §10 pauses its attempt and leaves its phase
+            # where it stood, so it never reaches `VERIFY` at all.
+            verified = None if raised is not None else await self._compared(attempt)
             # ADR-0264 §6's assembly, once for this pass. This branch drove no step, so
             # the egress contribution is `None` — a turn that drove nothing reached
             # nothing on a send's account — and the pass composes, which is what makes
@@ -11225,18 +11495,28 @@ class Engine:
                 search_not_serviced,
                 outbound,
                 _GoalPass(
-                    facts=GoalFacts(
-                        # ADR-0250 §10: "**The turn still declines to act in that
-                        # case.** … **Its reply still states the ambiguity**; what is
-                        # missing is a durable question to answer." So what reaches
-                        # composing is the text the **planner raised**, not the one the
-                        # store accepted: a turn whose `record_question` answered
-                        # `False` or raised has nothing durable outstanding and still
-                        # owes the user the question it could not settle. The outcome's
-                        # own `clarification` and the attempt's pause stay conditional
-                        # on the write, because those two *assert* a record.
-                        clarification=None if raised is None else raised.text,
-                        elided=elided,
+                    # ADR-0262 §6: the stage is **given** the comparison's outcome member
+                    # and its `continues`, on ADR-0170 §5's construction — and its
+                    # instruction requires the offer where `continues` is set and
+                    # requires it not to narrate as verified an outcome that was not.
+                    # Both are the **comparison's** values: §1 puts the two commits after
+                    # this stage, so neither asserts that an attempt was ended, that a
+                    # status was written, or that a goal is now closed.
+                    facts=self._pass_to_composing(
+                        verified,
+                        GoalFacts(
+                            # ADR-0250 §10: "**The turn still declines to act in that
+                            # case.** … **Its reply still states the ambiguity**; what is
+                            # missing is a durable question to answer." So what reaches
+                            # composing is the text the **planner raised**, not the one the
+                            # store accepted: a turn whose `record_question` answered
+                            # `False` or raised has nothing durable outstanding and still
+                            # owes the user the question it could not settle. The outcome's
+                            # own `clarification` and the attempt's pause stay conditional
+                            # on the write, because those two *assert* a record.
+                            clarification=None if raised is None else raised.text,
+                            elided=elided,
+                        ),
                     ),
                     engagement=engagement,
                     clarification=clarification,
@@ -11248,31 +11528,37 @@ class Engine:
                     uncertain_effect=bool(reconciled.uncertain),
                 ),
             )
-            # §5, §6: written **after the answer exists**, and only where §5's own
-            # three conjuncts are literally true (:meth:`_answered`). Nothing here claims
-            # a result before it happened, and nothing moves `GoalStatus`: §4 gives
-            # `ACHIEVED` no producer, and "producing a reply never by itself establishes
-            # that a goal was achieved". `VERIFY` is stamped either way — the phase says
-            # where the attempt stands, not what it earned.
-            # ADR-0250 §10 again: a turn that raised a question is **paused**, not
-            # finished, so nothing here verifies, ends or earns an outcome for it — and
-            # its phase stays where §10 left it.
-            # ADR-0262 §4's third ending condition (#2477): a no-action decision drove
-            # no step, so this is `True` wherever the attempt names no execution — but
-            # an attempt that already carries one from an earlier pass of the same turn
-            # is read rather than assumed.
-            answered = (
+            # ADR-0262 §4, §5: the two commits, taken **after** the composing stage and
+            # from the values the comparison already fixed — and from no value the reply
+            # produced. The only fact either reads about the reply is **that one
+            # exists**, which is the first of §4's three ending conditions; the second is
+            # the attempt's own state, and the third is every step of every execution it
+            # names having settled (#2477).
+            #
+            # **`VERIFY` is stamped either way** — the phase says where the attempt
+            # stands, not what it earned — and a turn that raised a question stamps
+            # nothing: ADR-0250 §10 makes it **paused**, not finished, and its phase
+            # stays where §10 left it.
+            #
+            # **The unconditional `ANSWERED` this site wrote is now §4's limb 6** and no
+            # longer the only answer a turn can earn: which member this attempt takes is
+            # the comparison's, over the criteria, the rung and §4's three derived facts.
+            ends = (
                 raised is None
-                and self._answered(composed, None)
+                and verified is not None
+                and self._composed_a_reply(composed)
+                and not self._paused(attempt)
                 and await self._every_step_settled(attempt)
             )
-            if raised is None:
+            report: AttemptReport | None = None
+            if ends:
+                attempt, report = await self._ended(
+                    attempt, verified, working=self._worked(attempt, drove_from)
+                )
+            elif raised is None:
                 attempt = await self._move_attempt(
                     attempt,
                     to_phase=AttemptPhase.VERIFY,
-                    to_state=AttemptState.ENDED if answered else None,
-                    outcome=AttemptOutcome.ANSWERED if answered else None,
-                    ended_at=self._clock() if answered else None,
                     working=self._worked(attempt, drove_from),
                 )
             return await self._capture(
@@ -11311,6 +11597,10 @@ class Engine:
                 goal_engagement=engagement,
                 clarification=clarification,
                 reference=association.reference,
+                # ADR-0262 §6: present exactly where this pass **ended** the attempt,
+                # and `None` where it did not — including where the ending commit was
+                # refused, which §6 makes a silence rather than a false outcome word.
+                attempt_report=report,
             )
         first = turn.plan.steps[0]
         # Admit-and-reserve *before* anything is persisted or driven, atomically
@@ -11463,6 +11753,11 @@ class Engine:
         # destination class, and where the executor proved the callable was never
         # reached it contributes nothing at all and leaves the search's own answer
         # standing (§13 item 8).
+        # ADR-0262 §1: the comparison runs here, **wholly before the composing stage**
+        # and after the walk has ended — at this instant no reply exists. **A parked
+        # turn compares nothing**: its attempt is `AWAITING_AUTHORIZATION`, which is
+        # §4's second ending condition refusing it, and the pass owes no answer at all.
+        verified = None if parked is not None else await self._compared(attempt)
         outbound = outbound_statement(
             search=searched_reach,
             # ADR-0260 §10's second class, as on the branch above and for its reason.
@@ -11492,21 +11787,24 @@ class Engine:
             # which is what `elided` already is. The outcome's own members ride here
             # too, because the streaming composer measures its ceiling against them.
             _GoalPass(
-                facts=GoalFacts(elided=elided),
+                # ADR-0262 §6's two values, on the same terms as the undriven branch
+                # above: the comparison's own, given to the stage rather than derived
+                # by it, and asserting nothing about the two commits below.
+                facts=self._pass_to_composing(verified, GoalFacts(elided=elided)),
                 engagement=engagement,
                 reference=association.reference,
                 # ADR-0259 §3's surfacing, as the undriven branch above carries it.
                 uncertain_effect=bool(reconciled.uncertain),
             ),
         )
-        # §5, §6: `VERIFY` is stamped once the answer exists, and the attempt **ends**
-        # only where §5's own definition of `ANSWERED` is literally satisfied
-        # (:meth:`_answered`). A parked turn is still waiting; a composition that
-        # produced no text or did not complete produced no answer; a step that failed,
-        # was denied, found no capable tool or carried invalid parameters is a turn whose
-        # attempt this decision disposes of not at all, and **which `AttemptOutcome` it
-        # earns is A10's** (§13). That gap is §4's stated cost taken deliberately: an
-        # outcome nothing established would be worse.
+        # ADR-0262 §4, §5: `VERIFY` is stamped once the answer exists, and the attempt
+        # **ends** where §4's three ending conditions hold — a reply that completed, an
+        # attempt that is not paused, and every step of every execution it names
+        # settled. **The unconditional `ANSWERED` this site wrote is now limb 6**: a
+        # step that failed, was denied, found no capable tool or carried invalid
+        # parameters is no longer a turn whose attempt is disposed of not at all, but
+        # one whose member §4's limbs decide over the criteria, the rung and its three
+        # derived facts.
         #
         # **A parked turn writes nothing here**, and the ledger is why the line is a
         # branch rather than a conditional argument: its interval was closed at the
@@ -11521,18 +11819,22 @@ class Engine:
         # steps reaches here with the second still `PENDING` and the attempt stays live.
         # That is §4's stated cost — the next turn's reconciliation disposes of it
         # before planning — and no outcome is written for a turn that ended nothing.
-        answered = (
+        ends = (
             parked is None
-            and self._answered(composed, step)
+            and verified is not None
+            and self._composed_a_reply(composed)
+            and not self._paused(attempt)
             and await self._every_step_settled(attempt)
         )
-        if parked is None:
+        report = None
+        if ends:
+            attempt, report = await self._ended(
+                attempt, verified, working=self._worked(attempt, drove_from)
+            )
+        elif parked is None:
             attempt = await self._move_attempt(
                 attempt,
                 to_phase=AttemptPhase.VERIFY,
-                to_state=AttemptState.ENDED if answered else None,
-                outcome=AttemptOutcome.ANSWERED if answered else None,
-                ended_at=self._clock() if answered else None,
                 working=self._worked(attempt, drove_from),
             )
         return await self._capture(
@@ -11586,6 +11888,9 @@ class Engine:
             satisfied_from_earlier=told_once(
                 () if disposition.satisfied is None else (disposition.satisfied,)
             ),
+            # ADR-0262 §6, on the same terms as the undriven branch: present exactly
+            # where this pass ended the attempt, and `None` where it did not.
+            attempt_report=report,
         )
 
     # --- ADR-0197's routing stage, driven --------------------------------
@@ -12797,10 +13102,29 @@ class Engine:
         outbound = outbound_statement(
             search=None, egress=egress, records=0, composes=parked.turn is not None
         )
-        composed = await self._compose(parked.turn, step, deliveries={}, outbound=outbound)
+        # ADR-0262 §1: the comparison runs **wholly before the composing stage**, on
+        # this path as on every other — the resumption's walk has ended by the time the
+        # answer was recorded and the step driven, and at this instant no reply exists.
+        # The attempt is read here for the comparison; the commit reads it again, which
+        # is what lets it record the facts a refused boundary write did not
+        # (:meth:`_finished_attempt`).
+        verified = (
+            None if allowed_by is None else await self._compared(await self._attempt_of(step.state))
+        )
+        composed = await self._compose(
+            parked.turn,
+            step,
+            deliveries={},
+            outbound=outbound,
+            # ADR-0262 §6's two values, given to the stage exactly as they are on a
+            # turn's own two branches.
+            goal=_GoalPass(facts=self._pass_to_composing(verified, GoalFacts())),
+        )
         # `resumed_from` is read above the resolution, so the ledger counts this pass's
         # own work and not the interval the park spent waiting for the user (§5).
-        await self._finished_attempt(step, composed, since=resumed_from, allowed_by=allowed_by)
+        report = await self._finished_attempt(
+            step, composed, since=resumed_from, allowed_by=allowed_by, verified=verified
+        )
         return await self._capture_resumption(
             parked,
             step,
@@ -12808,6 +13132,7 @@ class Engine:
             recipient_grant=recipient_grant,
             outbound_statement=outbound,
             satisfied=satisfied,
+            attempt_report=report,
         )
 
     async def _resume_read(
@@ -13401,7 +13726,7 @@ class Engine:
             confirmation=None,
         )
 
-    async def _capture_resumption(  # noqa: PLR0913 — the park, what became of its step, the reply, and the three facts about the act the capture cannot re-derive; each is a distinct fact about the resolution
+    async def _capture_resumption(  # noqa: PLR0913 — the park, what became of its step, the reply, and the four facts about the act the capture cannot re-derive — the recipient establishment, the outbound statement, what the step was satisfied from and ADR-0262 §6's report; each is a distinct fact about the resolution
         self,
         parked: _Parked,
         step: StepOutcome,
@@ -13410,6 +13735,7 @@ class Engine:
         recipient_grant: RecipientGrantOutcome | None = None,
         outbound_statement: OutboundStatement | None = None,
         satisfied: str | None = None,
+        attempt_report: AttemptReport | None = None,
     ) -> TurnOutcome:
         """Record the resolution in the conversation that parked, or say it was not.
 
@@ -13447,6 +13773,10 @@ class Engine:
                 # the conversation index could not resolve does not unmake the fact
                 # that this resolution satisfied its step from an earlier act.
                 satisfied_from_earlier=told_once(() if satisfied is None else (satisfied,)),
+                # ADR-0262 §6's member, on those same terms and for that same reason:
+                # the attempt ended, and an episode that failed to write leaves that
+                # exactly as true as it was.
+                attempt_report=attempt_report,
             )
         return await self._capture(
             origin.conversation_id,
@@ -13496,6 +13826,10 @@ class Engine:
             # ADR-0259 §2: what this resolution satisfied, carried by value from the
             # drive exactly as on the `converse` path.
             satisfied_from_earlier=told_once(() if satisfied is None else (satisfied,)),
+            # ADR-0262 §6's member, carried through from the resumption that ended the
+            # attempt — the one value of this pass's own comparison that reaches the
+            # surface, and absent where that pass's ending commit was refused.
+            attempt_report=attempt_report,
         )
 
     async def _capture(  # noqa: PLR0913 — the capture point's five inputs plus the parked binding, the routed account, the utterance a routed pass has no turn to carry, the user's own words the transcript archive keeps, the turn's disclosure evaluation, its origin mark and its spoken capture; every one is a distinct fact about the pass
@@ -13526,6 +13860,7 @@ class Engine:
         disambiguation: GoalDisambiguation | None = None,
         authorizations: tuple[AuthorizationView, ...] = (),
         satisfied_from_earlier: tuple[str, ...] | None = None,
+        attempt_report: AttemptReport | None = None,
     ) -> TurnOutcome:
         """Record the exchange and fold what became of it into the outcome (§3, §9).
 
@@ -13730,6 +14065,15 @@ class Engine:
             # drove none; `()` is unconstructable, so `None` is the one spelling of it
             # (:func:`~ai_assistant.orchestration.effects.told_once`).
             satisfied_from_earlier=satisfied_from_earlier,
+            # ADR-0262 §6's member, folded in at the one place a ``TurnOutcome`` is
+            # built and on the same terms as every member above it: the value the
+            # comparison fixed, by value and never a second computation. It is
+            # **non-``None`` exactly on a turn that ended an attempt under §4** and
+            # ``None`` on every other returned outcome — a turn that engaged no goal, a
+            # routed operation, ADR-0198 §1's restatement, every turn whose attempt
+            # stayed live, and every turn whose ending commit was **refused**, which §6
+            # makes a silence rather than a false claim.
+            attempt_report=attempt_report,
         )
 
     async def _learn(self, event: FeedbackEvent) -> LearnOutcome:
