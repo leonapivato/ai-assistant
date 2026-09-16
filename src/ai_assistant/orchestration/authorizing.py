@@ -58,9 +58,11 @@ from __future__ import annotations
 from typing import TYPE_CHECKING, Final
 
 from ai_assistant.core.types import (
+    ActionRequest,
     Authorization,
     AuthorizationDisposition,
     AuthorizationOrigin,
+    CoverageMember,
     EgressBinding,
 )
 
@@ -69,18 +71,58 @@ if TYPE_CHECKING:
     from datetime import datetime, timedelta
 
     from ai_assistant.core.protocols import CoverageAnswers
-    from ai_assistant.core.types import (
-        ActionRequest,
-        CoverageMember,
-        Goal,
-        PermissionDecision,
-    )
+    from ai_assistant.core.types import Goal, PermissionDecision
 
 
 #: The namespace every id derived from a confirmation is written under
 #: (:func:`authorization_id_for`). One literal, defined once, because the writer
 #: and the reader must agree on it exactly or a settlement silently finds nothing.
 _DERIVED_ID_PREFIX: Final = "goal-authorization-for-confirmation:"
+
+
+def detached_request(request: ActionRequest) -> ActionRequest:
+    """The copy a seam is given, so it never holds the one that is written or run.
+
+    **Two callers, one rule, and one implementation of it.**
+    :meth:`~ai_assistant.orchestration.runner.StepRunner._record` hands this to
+    ``ActionPolicy.decide`` before the request is bound and executed, and
+    :func:`proposed_authorization` hands it to ``CoverageAnswers.coverage_met``
+    before the row is written. The argument below is stated over the ruling because
+    that is where it was first made; it reads identically one seam over, a row a
+    collaborator substituted the subject of being an authority the user never
+    granted.
+
+    **This is what keeps ADR-0021 §3's central guarantee true at the seam.**
+    ``PermissionRuling`` has no field naming a tool, a payload or a step
+    precisely so a policy cannot substitute the subject of the decision it is
+    answering about; the ADR calls that absence "the security property, not an
+    economy", and says splitting the types "removes the capability rather than
+    forbidding it". Handing ``decide`` the very object that is then bound into
+    the ``PermissionDecision`` and executed hands the capability straight back:
+    ``frozen=True`` refuses ``request.tool = ...`` and does nothing about
+    ``request.__dict__`` (ADR-0018 §3), so a policy could rule ``ALLOW`` on a
+    harmless declaration and swap in another registered one before returning.
+    Everything downstream would then agree with itself — the decision, the
+    ``ToolCall`` and the invoker all describe the substitute — and the tool the
+    user's policy actually approved would never have run.
+
+    **The timing is the whole of it: the copy is taken before ``decide`` is
+    reached, not after it returns.** A copy taken afterwards faithfully preserves
+    a substitution already made, which is the same hole one instruction later.
+
+    A policy that keeps its copy and mutates it *later* is then harmless — it
+    holds a value nothing reads — so the comparisons that follow (the subject
+    check in :meth:`~ai_assistant.orchestration.runner.StepRunner._record`, and
+    ``ToolCall``'s own ``authorises``) answer about the request that was really
+    ruled on. **And an answerer that mutates its copy *during* the call is harmless
+    for the same reason** (ADR-0270 §1's input-observation clause): what it holds is
+    not what :func:`proposed_authorization` writes the row from.
+
+    Raises:
+        ValueError: If the request does not survive revalidation. Not reachable
+            through a value this module has just constructed.
+    """
+    return ActionRequest.model_validate(request.model_dump())
 
 
 def horizon(
@@ -207,6 +249,22 @@ async def proposed_authorization(  # noqa: PLR0913 — one parameter per operand
     `planned_with_external_content` authorises no such dispatch and may still cover
     a later request of that goal that carries none.
 
+    **The seam is given its own copies, and the row is written from values read on
+    this side of the await.** :func:`detached_request` is the rule
+    ``ActionPolicy.decide`` is already held to one seam over, and it reads the same
+    here: ``frozen=True`` refuses ``request.tool = ...`` and does nothing about
+    ``request.__dict__`` (ADR-0018 §3), so an answerer handed the writer's own object
+    could answer ``met`` about a harmless call and substitute another registered
+    declaration — or another coverage member — before returning, and the row written
+    for the substitute would name the ``CONFIRM`` the *original* was recorded under.
+    Approving it would establish an authority the user was never shown. Two things
+    close that, and each closes a different door: the collaborator is handed copies,
+    so it cannot reach the writer's objects at all; and every value the row is
+    written from is read **before** the one await, so a substitution made anywhere
+    reaches nothing. ``decision``, ``goal``, ``retention`` and ``standing`` are not
+    handed to the seam and are reachable by it through no route, which is why the
+    snapshot is exactly the request's operands and the coverage.
+
     **The seam is asked at most once per proposal, and its answer outlives the call
     only as the row's ``quoted``** (ADR-0270 §3). The question is put where the
     third condition is taken, so a `CONFIRM` an earlier condition already refused
@@ -253,7 +311,15 @@ async def proposed_authorization(  # noqa: PLR0913 — one parameter per operand
     binding = request.egress_binding
     if not isinstance(binding, EgressBinding):
         return None
-    answer = await answers.coverage_met(request, coverage)
+    # Everything the row is written from, read on this side of the one await. A
+    # value read afterwards would be one the collaborator had a turn to move.
+    row_goal = request.goal
+    tool = request.tool
+    account = binding.account
+    destinations = binding.canonical_destination_set
+    superseded = _superseded(standing, request)
+    written = _detached_coverage(coverage)
+    answer = await answers.coverage_met(detached_request(request), _detached_coverage(coverage))
     if not answer.met:
         return None
     expires_at = horizon(decision.decided_at, goal=goal, retention=retention)
@@ -261,20 +327,33 @@ async def proposed_authorization(  # noqa: PLR0913 — one parameter per operand
         return None
     return Authorization(
         id=authorization_id_for(decision.id),
-        goal=request.goal,
-        tool=request.tool,
-        account=binding.account,
-        destinations=binding.canonical_destination_set,
+        goal=row_goal,
+        tool=tool,
+        account=account,
+        destinations=destinations,
         origin=AuthorizationOrigin.CONFIRMED,
-        coverage=coverage,
+        coverage=written,
         quoted=answer.quoted,
         proposed_at=decision.decided_at,
         expires_at=expires_at,
         confirmation=decision.id,
-        supersedes=_superseded(standing, request),
+        supersedes=superseded,
         disposition=AuthorizationDisposition.PROPOSED,
         settled_at=None,
     )
+
+
+def _detached_coverage(coverage: tuple[CoverageMember, ...]) -> tuple[CoverageMember, ...]:
+    """Revalidated copies of ``coverage``, for :func:`detached_request`'s reason.
+
+    A ``CoverageMember`` is frozen and rewritable through ``__dict__`` exactly as an
+    ``ActionRequest`` is, and it is the other half of condition 6's operand — so a
+    member whose ``bound`` was widened while the seam was suspended would be written
+    onto the row as an authority over values the user never stated. Called twice, so
+    what the answerer holds and what the row carries are two objects and neither is
+    the caller's.
+    """
+    return tuple(CoverageMember.model_validate(member.model_dump()) for member in coverage)
 
 
 def _superseded(standing: Sequence[Authorization], request: ActionRequest, /) -> str | None:
@@ -339,6 +418,7 @@ def authorization_id_for(confirmation_id: str, /) -> str:
 
 __all__ = [
     "authorization_id_for",
+    "detached_request",
     "horizon",
     "proposed_authorization",
 ]

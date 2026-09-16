@@ -81,7 +81,11 @@ from ai_assistant.core.types import (
     StepTransition,
     ToolCall,
 )
-from ai_assistant.orchestration.authorizing import authorization_id_for, proposed_authorization
+from ai_assistant.orchestration.authorizing import (
+    authorization_id_for,
+    detached_request,
+    proposed_authorization,
+)
 from ai_assistant.orchestration.capability_alias import resolve_capability
 from ai_assistant.orchestration.executor import CallableReach
 from ai_assistant.orchestration.selection import (
@@ -125,39 +129,6 @@ def _utcnow() -> datetime:
 
 def _uuid() -> str:
     return str(uuid.uuid4())
-
-
-def _detached_request(request: ActionRequest) -> ActionRequest:
-    """The copy the policy rules on, so it never holds the one that is executed.
-
-    **This is what keeps ADR-0021 §3's central guarantee true at the seam.**
-    ``PermissionRuling`` has no field naming a tool, a payload or a step
-    precisely so a policy cannot substitute the subject of the decision it is
-    answering about; the ADR calls that absence "the security property, not an
-    economy", and says splitting the types "removes the capability rather than
-    forbidding it". Handing ``decide`` the very object that is then bound into
-    the ``PermissionDecision`` and executed hands the capability straight back:
-    ``frozen=True`` refuses ``request.tool = ...`` and does nothing about
-    ``request.__dict__`` (ADR-0018 §3), so a policy could rule ``ALLOW`` on a
-    harmless declaration and swap in another registered one before returning.
-    Everything downstream would then agree with itself — the decision, the
-    ``ToolCall`` and the invoker all describe the substitute — and the tool the
-    user's policy actually approved would never have run.
-
-    **The timing is the whole of it: the copy is taken before ``decide`` is
-    reached, not after it returns.** A copy taken afterwards faithfully preserves
-    a substitution already made, which is the same hole one instruction later.
-
-    A policy that keeps its copy and mutates it *later* is then harmless — it
-    holds a value nothing reads — so the comparisons that follow (the subject
-    check in :meth:`StepRunner._record`, and ``ToolCall``'s own ``authorises``)
-    answer about the request that was really ruled on.
-
-    Raises:
-        ValueError: If the request does not survive revalidation. Not reachable
-            through a value this module has just constructed.
-    """
-    return ActionRequest.model_validate(request.model_dump())
 
 
 def _detached_step(step: PlanStep) -> PlanStep:
@@ -945,8 +916,8 @@ class StepRunner:
         # cannot be reached or replaced before the request is built (ADR-0152 §1).
         request = _requested(tool, step, state, bound, goal=planned.goal_id)
         # The policy rules on its *own* copy, and never on the object that is
-        # then bound and executed (`_detached_request`).
-        ruling = await self._policy.decide(_detached_request(request))
+        # then bound and executed (`detached_request`).
+        ruling = await self._policy.decide(detached_request(request))
         decision, proposed = await self._record(request, ruling)
 
         # Branch on the *recorded* ruling, never the policy's own object. The
