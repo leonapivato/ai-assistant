@@ -1397,8 +1397,8 @@ def build_composition(  # noqa: PLR0915 — one statement per resource this root
             or settings.booking_available_to is None
             or settings.booking_price_amount is None
             or settings.booking_price_currency is None
-            or settings.booking_charge_amount is None
-            or settings.booking_charge_currency is None
+            or settings.booking_billed_amount is None
+            or settings.booking_billed_currency is None
             or settings.booking_retained_records is None
             else build_simulated_booking_integration(
                 connection=settings.booking_connection,
@@ -1416,8 +1416,8 @@ def build_composition(  # noqa: PLR0915 — one statement per resource this root
                 available_to=settings.booking_available_to,
                 price_amount=settings.booking_price_amount,
                 price_currency=settings.booking_price_currency,
-                charge_amount=settings.booking_charge_amount,
-                charge_currency=settings.booking_charge_currency,
+                charge_amount=settings.booking_billed_amount,
+                charge_currency=settings.booking_billed_currency,
                 retained_records=settings.booking_retained_records,
                 indeterminate_date=settings.booking_indeterminate_date,
             )

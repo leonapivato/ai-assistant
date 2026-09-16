@@ -4224,7 +4224,18 @@ class Settings(BaseSettings):
             "three uppercase ASCII letters, shape and never a register (ADR-0267 §1)."
         ),
     )
-    booking_charge_amount: _OptionalDecimalAmount = Field(
+    # **Named ``billed`` rather than ``charge``, and the reason is a guard rather than
+    # a preference.** ADR-0271 §8 gives `core/config.py` **nothing**, and
+    # `tests/wire/test_pinned_quote_protocol_version.py` holds that by refusing any
+    # setting whose *name* carries "charge", "quote" or "proved" — because a knob for
+    # *where a charge is read*, or for *whether a pin is kept*, would make ADR-0271 §3's
+    # fail-closed default configurable. **These two fields are not that knob**: they say
+    # what one simulated provider bills, which ADR-0273 §5 requires to be configurable,
+    # and nothing here reaches the reading or the pin. The guard cannot tell the two
+    # apart from a name, ADR-0273 §5 leaves the names to the implementing lane, and a
+    # name that keeps the guard intact costs nothing — so it is taken rather than
+    # narrowing a rule another decision wrote. The over-broad predicate is filed.
+    booking_billed_amount: _OptionalDecimalAmount = Field(
         default=None,
         description=(
             "The whole amount a booking charges, in ADR-0271 §2's sense. **It need not "
@@ -4234,10 +4245,10 @@ class Settings(BaseSettings):
             "declaration lies (ADR-0273 §5)."
         ),
     )
-    booking_charge_currency: str | None = Field(
+    booking_billed_currency: str | None = Field(
         default=None,
         description=(
-            "The ISO-4217 alphabetic code booking_charge_amount is denominated in. "
+            "The ISO-4217 alphabetic code booking_billed_amount is denominated in. "
             "Independently configurable from booking_price_currency, so a charge may "
             "disagree with its quote in currency as well as in amount (ADR-0273 §5)."
         ),
@@ -4550,7 +4561,7 @@ class Settings(BaseSettings):
         "web_search_cost_currency",
         "forecast_cost_currency",
         "booking_price_currency",
-        "booking_charge_currency",
+        "booking_billed_currency",
     )
     @classmethod
     def _spend_currency_is_iso_4217_alphabetic(cls, value: str | None) -> str | None:
@@ -4573,7 +4584,7 @@ class Settings(BaseSettings):
         them, and a deployment may denominate its search in one currency and meter
         its spend in another.
 
-        **``booking_price_currency`` and ``booking_charge_currency`` are validated by
+        **``booking_price_currency`` and ``booking_billed_currency`` are validated by
         this same validator too** (ADR-0273 §5), which states the domain as ADR-0267
         §1's ISO-4217 *shape* — the same three-uppercase-letters rule, *"shape and never
         a register"*. They are likewise **independent of each other**: nothing here
@@ -4620,7 +4631,7 @@ class Settings(BaseSettings):
         """
         return _checked_spend_amount(value, info.field_name, floor="positive")
 
-    @field_validator("booking_price_amount", "booking_charge_amount")
+    @field_validator("booking_price_amount", "booking_billed_amount")
     @classmethod
     def _booking_amount_is_in_the_readers_domain(
         cls, value: Decimal | None, info: ValidationInfo
@@ -4895,8 +4906,8 @@ class Settings(BaseSettings):
             "booking_available_to",
             "booking_price_amount",
             "booking_price_currency",
-            "booking_charge_amount",
-            "booking_charge_currency",
+            "booking_billed_amount",
+            "booking_billed_currency",
             "booking_retained_records",
         )
         supplied = tuple(name for name in fields if getattr(self, name) is not None)

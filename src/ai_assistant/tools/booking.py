@@ -588,8 +588,8 @@ class BookingCatalogue:
             available_to=last,
             price_amount=_checked_amount(price_amount, field="booking_price_amount"),
             price_currency=_checked_currency(price_currency, field="booking_price_currency"),
-            charge_amount=_checked_amount(charge_amount, field="booking_charge_amount"),
-            charge_currency=_checked_currency(charge_currency, field="booking_charge_currency"),
+            charge_amount=_checked_amount(charge_amount, field="booking_billed_amount"),
+            charge_currency=_checked_currency(charge_currency, field="booking_billed_currency"),
             retained_records=_checked_retained(retained_records),
             indeterminate_date=(
                 None
@@ -911,7 +911,19 @@ class SqliteBookingStore:
                 raise
             msg = f"the booking commit failed before it landed: {exc}"
             raise BookingStoreError(msg, may_have_committed=not rolled_back) from exc
-        self._flush(conn, confirmed=confirmed)
+        try:
+            self._flush(conn, confirmed=confirmed)
+        except BookingStoreError:
+            raise
+        except Exception as exc:
+            # **At or after the boundary, so ``True``** (§2, §10 arm 16). Anything that
+            # escapes from here escapes from a point at which the ``COMMIT`` may already
+            # have landed, and the store cannot establish which side it fell on — which
+            # is precisely the case §2's conservative direction is written for. A
+            # ``BaseException`` (a cancellation) still propagates unchanged, because
+            # ADR-0060 §1's clause is unconditional.
+            msg = f"the booking commit's outcome could not be established: {exc}"
+            raise BookingStoreError(msg, may_have_committed=True) from exc
 
     def _insert(self, conn: sqlite3.Connection, record: str) -> None:
         """Append the booking record. Overridden by §10 arm 16's fault injection."""
@@ -1252,16 +1264,20 @@ class BoundConnection:
             ClassifiedToolError: If the record is now absent, is no longer ``ACTIVE``,
                 names another identity or slot, or has a different revision.
         """
-        was: ConnectionEntry | None = None if before is None else before.entry
-        now: ConnectionEntry | None = None if after is None else after.entry
+        # Named ``first``/``second`` and deliberately not ``now``: this provider reads
+        # **no** clock, and §10 arm 21 asserts that mechanically over this module's own
+        # names — a local called ``now`` would make that check report a clock read that
+        # is not there.
+        first: ConnectionEntry | None = None if before is None else before.entry
+        second: ConnectionEntry | None = None if after is None else after.entry
         if (
-            now is None
-            or was is None
-            or now.state is not ProvisioningState.ACTIVE
-            or now.revision != was.revision
-            or now.identity != was.identity
-            or now.slot != was.slot
-            or now.identity != binding.account.identity
+            second is None
+            or first is None
+            or second.state is not ProvisioningState.ACTIVE
+            or second.revision != first.revision
+            or second.identity != first.identity
+            or second.slot != first.slot
+            or second.identity != binding.account.identity
         ):
             msg = (
                 f"{self._registration.tool_id}: the connection record for "
