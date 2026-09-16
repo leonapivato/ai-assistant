@@ -895,7 +895,11 @@ class _SubstitutingAnswers:
             # a name bound to ``request.tool`` before the await aliases this very
             # object, so rewriting a field of it moves what a shallow snapshot
             # would write. Adversarial review, round 2, ``blocker``.
-            self.racing.__dict__["tool"] = self.substitute
+            # **The nested object itself, and it is never replaced first.**
+            # Rebinding ``racing.__dict__["tool"]`` would leave a name taken
+            # before the await pointing at the untouched original, so the arm
+            # would pass the very implementation it exists to reject. What moves
+            # here is the declaration a shallow snapshot would still be holding.
             self.racing.tool.__dict__["id"] = "substitute"
             self.racing.__dict__["goal"] = "g-substituted"
         for member in self.racing_coverage:
@@ -1012,3 +1016,58 @@ async def test_a_holder_racing_the_await_cannot_move_what_the_row_names() -> Non
     assert request.tool.id == "substitute"
     assert request.goal == "g-substituted"
     assert coverage[0].fixed == "widened"
+
+
+@final
+class _RetainingAnswers:
+    """An answerer that keeps the quote it handed back, and rewrites it afterwards.
+
+    ADR-0267 §7 makes ``quoted`` *"written once and never edited"*, and ADR-0270
+    §2 makes it the operand the proof was taken over. ``Authorization`` stores a
+    model field **by reference**, so a writer that passed the answer's own object
+    straight through would leave the figure on the row — and therefore the figure
+    the projection renders — a value the answerer could still move.
+    """
+
+    def __init__(self, quote: ActionQuote) -> None:
+        """Answer met, carrying ``quote``, and keep it."""
+        self.quote = quote
+
+    async def coverage_met(
+        self, request: ActionRequest, coverage: tuple[CoverageMember, ...]
+    ) -> CoverageAnswer:
+        """The configured met answer, carrying the object this object retains."""
+        del request, coverage
+        return CoverageAnswer(met=True, quoted=self.quote)
+
+
+async def test_a_quote_the_answerer_kept_cannot_move_the_figure_on_the_row() -> None:
+    """ADR-0267 §7's write-once rule, held at the one place the figure enters a row.
+
+    Adversarial review, round 3, ``blocker``. The answer is the collaborator's
+    value and the row is the durable record, so the figure is copied across rather
+    than referenced: a price the user was shown, and an approval established, is
+    not one a later rewrite may edit.
+    """
+    request = a_priced_request()
+    answers = _RetainingAnswers(a_quote(request))
+
+    row = await _proposed(
+        request_kwargs={
+            "tool": PRICED_TOOL,
+            "parameters": {"site": "hotel-1"},
+            "intended_action": ACT,
+        },
+        coverage=PRICE_CEILING,
+        answers=answers,
+    )
+
+    assert row is not None
+    assert row.quoted is not None
+    assert row.quoted is not answers.quote, "the row holds its own copy"
+    answers.quote.__dict__["amount"] = Decimal("999")
+
+    assert row.quoted.amount == Decimal("120")
+    assert projection_of(row).quote == QuoteView(
+        amount=Decimal("120"), currency="EUR", read_at=answers.quote.read_at
+    )
