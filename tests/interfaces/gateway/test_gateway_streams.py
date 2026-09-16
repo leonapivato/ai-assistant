@@ -831,6 +831,18 @@ async def test_an_open_stream_is_not_use_of_the_session_and_dies_with_it() -> No
     every stream a session held at the moment that session ends." A held-open stream
     sends no further request, so without that the gateway would learn of the session's
     death only from a request that never comes.
+
+    **And §2's first clause on the way out, which is what this arm used to assert the
+    opposite of** (#2498). It read ``assert await _read_all(reader) == []`` — a body
+    that stopped carrying with no terminal value on it — and that empty read *was* the
+    defect rather than the rule: ADR-0175 §2 gives a reader two endings and rules that
+    the one without a terminal value "has a transport failure and the front end reports
+    it as one". A browser duly reported one, telling the owner the gateway "may have
+    stopped" and to start it — about the process the last two lines here show listening
+    and answering. A session that ended is not a transport failure, so the gateway
+    writes the terminal value naming the condition and *then* ends the stream. Both
+    halves are asserted by reading to the end: the value, and that it was the only
+    thing after the keep-alive.
     """
     engine = _Delivering([None, None])
     async with _harness(engine, gateway_session_idle_timeout=timedelta(minutes=5)) as one:
@@ -842,7 +854,7 @@ async def test_an_open_stream_is_not_use_of_the_session_and_dies_with_it() -> No
         one.timers.fire_all()
         await asyncio.sleep(0)
 
-        assert await _read_all(reader) == []
+        assert await _read_all(reader) == [{"kind": "fault", "fault": "no-live-session"}]
         status, body = await one.whole("POST", "/ask", {"utterance": "what is on today"})
         assert (status, body) == (401, {"fault": "no-live-session"})
 
@@ -1239,6 +1251,14 @@ async def test_a_session_ending_closes_an_answer_stream_still_waiting_to_compose
     and the hub connection §7 counts — for however long the turn took. Ending the
     stream cancels the task driving it, which unwinds through ``closing_stream``
     (ADR-0173's own obligation, §3) and through the release the body owes.
+
+    **An answer stream is ended by the same act and so carries the same named ending**
+    (#2498): the gateway names the condition on every stream a session held, because
+    the condition is the session's and not the stream shape's. What the *page* makes of
+    it differs and is app.js's own reading — ``describeDeliveryEnd`` adds
+    ``IDLE_WHILE_WATCHING`` on a delivery stream alone, "an answer stream's own request
+    refreshed the idle timeout on its way in" — but that is a sentence chosen from the
+    value, not a second value.
     """
     engine = _Stalling()
     async with _harness(engine, gateway_session_idle_timeout=timedelta(minutes=5)) as one:
@@ -1250,7 +1270,7 @@ async def test_a_session_ending_closes_an_answer_stream_still_waiting_to_compose
         one.timers.fire_all()
 
         await asyncio.wait_for(engine.closed.wait(), timeout=5)
-        assert await _read_all(reader) == []
+        assert await _read_all(reader) == [{"kind": "fault", "fault": "no-live-session"}]
 
 
 async def test_a_session_that_dies_while_the_head_is_written_still_ends_the_stream() -> None:
