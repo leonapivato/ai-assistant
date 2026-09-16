@@ -20367,6 +20367,88 @@ class CoverageMember(BaseModel):
         return self
 
 
+class CoverageAnswer(BaseModel):
+    """Whether a proposed row's coverage meets condition 6, and over which quote.
+
+    ADR-0270 §2. The whole of what
+    :meth:`~ai_assistant.core.protocols.CoverageAnswers.coverage_met` returns, and
+    the whole of what crosses that seam: **two fields and no third**. No route, no
+    digest, no unmet member's kind, no ruling and no record.
+
+    **It carries no account of *why* a coverage was not met, and that is decided
+    rather than deferred** (§2). Where :attr:`met` is false no row is written,
+    ``Confirmation.authorization`` is absent (ADR-0254 §11) and the one call is
+    confirmed under ADR-0148 §3's route (a) — so no surface renders a projection of
+    a row that does not exist and **no caller has a use for which conjunct failed**.
+    The account of an uncovered request a user does see is ``ActionPolicy.decide``'s,
+    taken at dispatch over a **live** row and rendered by ``permissions`` (ADR-0254
+    §4), and it is untouched. A closed vocabulary nothing reads is the one-sided enum
+    ADR-0249 §10 names; the decision that gives a caller a use for the reason
+    **widens the member**, and golden rule 5 makes that visible rather than cheap.
+
+    **It crosses no frame** (§6). It is returned across a Protocol within one
+    process, is a field of no model any frame carries and of no stored record, and
+    ``wire/codec.py`` renders none of it — so neither ``PROTOCOL_VERSION`` nor
+    ``PlanExport.schema_version`` moves for it.
+    """
+
+    model_config = ConfigDict(extra="forbid", frozen=True)
+
+    met: bool = Field(
+        description=(
+            "Whether that coverage satisfies ADR-0266 §7's condition 6 for that "
+            "request (ADR-0270 §2). It is condition 6 and **no other condition**: "
+            "not ADR-0254 §3's conditions 1 to 5, not §6's floors and not §12's "
+            "ladder, so a true answer authorises nothing by itself."
+        )
+    )
+    quoted: ActionQuote | None = Field(
+        default=None,
+        description=(
+            "The governing quote ADR-0266 §7's evidence route was taken over for "
+            "this request — of the quotes GoalQuotes.for_action returned, the last "
+            "of them (ADR-0267 §5), and no other. Present exactly where met is true "
+            "and the coverage carries a MONEY member; absent in every other case "
+            "(ADR-0270 §2). It is the operand the proof was taken over and never a "
+            "verdict: no component covers a request against it, re-tests it, "
+            "refreshes it, compares it to a later quote, caches it, or reads it — or "
+            "its absence — as evidence of anything a comparison decided."
+        ),
+    )
+
+    @model_validator(mode="after")
+    def _an_unmet_answer_carries_no_quote(self) -> CoverageAnswer:
+        """Refuse :attr:`quoted` set where :attr:`met` is false (ADR-0270 §2).
+
+        **The one half of §2's presence rule a model can hold.** Where ``met`` is
+        false the evidence route decided nothing — a ``coverage`` carrying no
+        ``MONEY`` member leaves it nothing to decide, and a request carrying no
+        ``intended_action``, or a goal no quote of which names that action, leaves
+        any ``MONEY`` member unmet — so a quote riding back on an unmet answer
+        states that a proof was taken which was not. The other half, that ``quoted``
+        is **absent** on a met answer whose coverage carries no ``MONEY`` member, is
+        not representable here: this model carries no coverage to test itself
+        against, and the obligation is the implementation's (ADR-0270 §2) and the
+        conformance suite's.
+
+        **A row is written from this value** (§2): a path-(i) writer records
+        ``quoted`` on the ``Authorization`` and performs no selection of its own, so
+        a quote admitted beside an unmet answer would reach a row the answer did not
+        authorise the proposal of.
+
+        Raises:
+            ValueError: If ``quoted`` is set and ``met`` is false.
+        """
+        if self.quoted is not None and not self.met:
+            msg = (
+                "a coverage answer that is not met carries no quote: the evidence "
+                "route decided nothing, and a quote beside an unmet answer states a "
+                "proof that was not taken (ADR-0270 §2)"
+            )
+            raise ValueError(msg)
+        return self
+
+
 class AuthorizationOrigin(StrEnum):
     """How the authority this row records came into being (ADR-0254 §1).
 

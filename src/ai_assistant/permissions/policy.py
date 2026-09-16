@@ -51,6 +51,8 @@ from ai_assistant.core.types import (
 )
 from ai_assistant.permissions._coverage import (
     account_of,
+    coverage_answer,
+    coverage_members,
     coverage_subject,
     covers,
     covers_on_argument_route,
@@ -66,6 +68,8 @@ if TYPE_CHECKING:
         ActionRequest,
         Authorization,
         CanonicalDestination,
+        CoverageAnswer,
+        CoverageMember,
         EgressBinding,
         PermissionDecision,
         RecipientGrant,
@@ -391,7 +395,14 @@ def _at_configured_provider(
 class ThresholdActionPolicy:
     """An ``ActionPolicy`` combining user thresholds with the contract's floors.
 
-    Structurally implements :class:`~ai_assistant.core.protocols.ActionPolicy`.
+    Structurally implements :class:`~ai_assistant.core.protocols.ActionPolicy` **and
+    :class:`~ai_assistant.core.protocols.CoverageAnswers`** (ADR-0270 §1) — *"three
+    faces, one object"* (ADR-0193 §1), one more time. ``coverage_met`` is the face
+    ``orchestration`` obtains ADR-0266 §7's condition 6 through for a row it would
+    propose, and it is this class's own comparison rather than a second
+    implementation of it: the composition root passes this one object to the
+    proposal writer under the narrow annotation, which is golden rule 1 rather than
+    an exception to it.
 
     The rule table, combined by taking the **most restrictive** result:
 
@@ -1055,7 +1066,7 @@ class ThresholdActionPolicy:
                     reason=_QUOTE_SEAM_UNREADABLE,
                 )
                 return _Authority(barred=True, record=None, account=None)
-        defects = uncovered(record, subject, quotes)
+        defects = uncovered(record.coverage, subject, quotes)
         if defects:
             return _Authority(
                 barred=True,
@@ -1128,7 +1139,7 @@ class ThresholdActionPolicy:
             return False
         if not covers(record, subject, quotes):
             return False
-        return not external or covers_on_argument_route(record, subject)
+        return not external or covers_on_argument_route(record.coverage, subject)
 
     def _only_the_disclosure_floor(
         self,
@@ -1341,6 +1352,72 @@ class ThresholdActionPolicy:
             reason="the user approved the confirmation",
             authorised_by=confirmed.id,
         )
+
+    async def coverage_met(
+        self, request: ActionRequest, coverage: tuple[CoverageMember, ...]
+    ) -> CoverageAnswer:
+        """Whether ``coverage`` satisfies condition 6 for ``request`` (ADR-0270 §1).
+
+        **The one implementation's face, and not a second implementation.** The
+        comparison is ``_coverage.py``'s — the same ``covers_arguments`` ADR-0254
+        §6's bar and route (d) are decided by — over the same two routes and the
+        same selection of the governing quote. What this member adds is the seam
+        read and the answer's shape, so ADR-0266 §7's *"One implementation, in
+        ``permissions``"* stays one.
+
+        **Condition 6 and no other condition** (§1). There is no live row here — a
+        proposal is written ``PROPOSED`` — so ADR-0254 §3's conditions 1 to 5 have
+        nothing to be taken over; §6's floors are read by nothing, §1's *"the
+        proposal reads none of §6's floors, and that is deliberate"* binding entire,
+        so a request whose binding carries ``planned_with_external_content`` is
+        answered exactly as one that does not; and §12's ladder and §1's other three
+        proposal conditions are the writer's.
+
+        **The seam is read at most once, and only where a ceiling could be proved by
+        one** (ADR-0267 §5) — the same arithmetic ``_authority`` takes: zero reads on
+        a request carrying no ``goal`` or no ``intended_action``, on a policy holding
+        no ``GoalQuotes``, and on a ``coverage`` carrying **no ``MONEY`` member**, the
+        last because the evidence route meets a member of no other kind in any case.
+        **Nothing is memoised**: two calls with equal arguments each read, and no
+        answer is carried to a later :meth:`decide`, which is ADR-0254 §13's *"no
+        cached coverage verdict anywhere"*.
+
+        **A fault propagates** (ADR-0270 §4). ``decide``'s own fault clause converts
+        an unreadable seam into ADR-0254 §6's bar because it is producing a *ruling*;
+        here there is no ruling to take, so an
+        :class:`~ai_assistant.core.errors.AuthorizationError` leaves as itself and is
+        **never** turned into a met answer, an unmet one, or an empty tuple of
+        quotes. A component that asked writes no row, and the one call is confirmed
+        under ADR-0148 §3's route (a).
+
+        **A policy holding no ``GoalQuotes`` answers unmet** for any ``coverage``
+        carrying a ``MONEY`` member (§4), the empty tuple leaving the evidence route
+        met by nothing — the fail-closed direction, and the same arithmetic that
+        makes this tree's ``ALLOW``s unmoved.
+
+        Args:
+            request: The concrete action a row would be proposed for.
+            coverage: The coverage that row would carry — condition 6's fourth
+                operand, and **never the row** (§1).
+
+        Returns:
+            Whether condition 6 holds, and the governing quote where the evidence
+            route decided it (ADR-0270 §2).
+
+        Raises:
+            AuthorizationError: If ``GoalQuotes.for_action`` raises one.
+        """
+        subject = coverage_subject(request)
+        members = coverage_members(coverage)
+        quotes: tuple[ActionQuote, ...] = ()
+        if (
+            self._quotes is not None
+            and subject.goal is not None
+            and subject.intended_action is not None
+            and any(member.kind is BoundKind.MONEY for member in members)
+        ):
+            quotes = await self._quotes.for_action(subject.goal, subject.intended_action)
+        return coverage_answer(members, subject, quotes)
 
 
 __all__ = ["ThresholdActionPolicy"]

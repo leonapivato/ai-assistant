@@ -311,7 +311,10 @@ def defects(
     the property arm 3(b) states, kept whole while its covered limb rides with the
     quote decision (ADR-0266 §11).
     """
-    return {(one.subject, one.failure) for one in uncovered(row, coverage_subject(call), quotes)}
+    return {
+        (one.subject, one.failure)
+        for one in uncovered(row.coverage, coverage_subject(call), quotes)
+    }
 
 
 def refuses(row: Authorization, call: ActionRequest, argument: str) -> bool:
@@ -1088,7 +1091,7 @@ class TestTheTwoRoutesAndConditionSixsThreeConjuncts:
         """
         row = live()
         undeclared = request(binding(SITE, external=True), body="chosen by a plan")
-        assert not covers_on_argument_route(row, coverage_subject(undeclared))
+        assert not covers_on_argument_route(row.coverage, coverage_subject(undeclared))
         gate, _, _ = policy(row, recipients=grants())
         ruling = await gate.decide(undeclared)
         assert ruling.outcome is PermissionOutcome.CONFIRM

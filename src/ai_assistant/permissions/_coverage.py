@@ -63,6 +63,8 @@ from ai_assistant.core.types import (
     BoundAccount,
     BoundKind,
     CanonicalDestination,
+    CoverageAnswer,
+    CoverageMember,
     FrozenJsonMapping,
     ToolDefinition,
     canonical_json_bytes,
@@ -77,7 +79,6 @@ if TYPE_CHECKING:
         ActionRequest,
         Authorization,
         BoundedArgument,
-        CoverageMember,
         FrozenJson,
         SpanCoverage,
         ValueBound,
@@ -229,6 +230,39 @@ def coverage_subject(request: ActionRequest) -> CoverageSubject:
             )
         ),
         coverage=None if binding is None else binding.coverage,
+    )
+
+
+def coverage_members(coverage: Sequence[CoverageMember]) -> tuple[CoverageMember, ...]:
+    """Read the proposed coverage once and detached (ADR-0065; ADR-0270 §1).
+
+    :func:`coverage_subject`'s discipline over
+    :meth:`~ai_assistant.core.protocols.CoverageAnswers.coverage_met`'s **second**
+    argument. That member suspends on a durable read, the tuple is the caller's, and
+    ``frozen=True`` does not close the bypass: ``member.__dict__["bound"]`` is
+    rewritable on a shared object while the seam is out. A policy that counted a
+    ``MONEY`` member on the way in and compared its ceiling on the way out would
+    answer about a coverage that is **neither** the one presented nor the one
+    substituted — and a met answer authorises the proposal of a row carrying the
+    coverage the caller ends up writing.
+
+    **Rebuilt through validation and never deep-copied**, which is
+    :func:`coverage_subject`'s own detachment continued onto this argument rather
+    than a new discipline.
+
+    Args:
+        coverage: The coverage a proposed row would carry, as the caller passed it.
+
+    Returns:
+        An equal tuple sharing no object with it.
+
+    Raises:
+        ValueError: If a member cannot be read as a ``CoverageMember`` at all, or
+            carries state the class declares no field for — an argument fault, and
+            never a ruling (:func:`~ai_assistant.permissions._detachment.field_state`).
+    """
+    return tuple(
+        CoverageMember.model_validate(field_state(CoverageMember, member)) for member in coverage
     )
 
 
@@ -524,24 +558,26 @@ def _member_defects(
     return tuple(found)
 
 
-def _examined_currency_keys(row: Authorization, subject: CoverageSubject) -> frozenset[str]:
+def _examined_currency_keys(
+    coverage: Sequence[CoverageMember], subject: CoverageSubject
+) -> frozenset[str]:
     """The currency keys §7's conditional exemption reaches.
 
     **A key a ``BoundedArgument`` names as its ``currency_argument`` is not an
     argument the declaration declares at no kind — but only where the comparison
     that consumes it was actually taken.** It is exempt where the request carries a
-    value at that ``BoundedArgument``'s own ``argument``, the row carries a ``MONEY``
-    member, and that member is met **on the argument route** against it, whose §4
-    comparison reads the currency key there.
+    value at that ``BoundedArgument``'s own ``argument``, ``coverage`` carries a
+    ``MONEY`` member, and that member is met **on the argument route** against it,
+    whose §4 comparison reads the currency key there.
 
     **In every other case it is an ordinary user-facing argument the declaration
     declares at no kind**: a request carrying the currency and no amount, or one
-    whose row holds no ``MONEY`` member, leaves it compared by nothing — so §7's
+    whose coverage holds no ``MONEY`` member, leaves it compared by nothing — so §7's
     third conjunct reaches it and the request is uncovered without a quote. An
     unconditional exemption would let ``{"currency": "EUR"}`` and
     ``{"currency": "USD"}`` both pass an empty row.
     """
-    money = next((member for member in row.coverage if member.kind is BoundKind.MONEY), None)
+    money = next((member for member in coverage if member.kind is BoundKind.MONEY), None)
     if money is None:
         return frozenset()
     return frozenset(
@@ -555,7 +591,9 @@ def _examined_currency_keys(row: Authorization, subject: CoverageSubject) -> fro
 
 
 def uncovered(
-    row: Authorization, subject: CoverageSubject, quotes: Sequence[ActionQuote]
+    coverage: Sequence[CoverageMember],
+    subject: CoverageSubject,
+    quotes: Sequence[ActionQuote],
 ) -> tuple[CoverageDefect, ...]:
     """Every way ADR-0266 §7's **condition 6** fails over this pair, told apart.
 
@@ -565,15 +603,16 @@ def uncovered(
 
     The three conjuncts, each in one direction and neither dropped:
 
-    1. **Every member of the row is met**, by the two routes (:func:`_member_defect`).
+    1. **Every member of ``coverage`` is met**, by the two routes
+       (:func:`_member_defects`).
        A member met by no route leaves the request uncovered, which is ADR-0254 §3's
        second direction — *"an act that fixed ``refundable_only`` to ``true``
        authorised a call **carrying** that value"*.
     2. **Every user-facing argument the declaration declares in a ``BoundedArgument``
-       is covered by the member of that argument's kind**, a request carrying no
+       is covered by the member of that argument's kind**, a coverage carrying no
        member of that kind being uncovered — §3's first direction.
     3. **Where the request carries any user-facing argument the declaration declares
-       at no kind, at least one member of the row is met through the evidence
+       at no kind, at least one member of ``coverage`` is met through the evidence
        route**, whose digest pins every argument the request carries. Without it a
        row fixing ``subject`` to *"urgent"* would cover a later ``send_message``
        carrying a different ``body``; with it the owner's booking case, whose
@@ -582,8 +621,16 @@ def uncovered(
 
     **There is no default, no wildcard and no omission that reads as consent.**
 
+    **Stated over the coverage tuple and never over the row** (ADR-0270 §1). The
+    three conjuncts read the row's ``coverage`` and nothing else of it, and
+    ``CoverageAnswers.coverage_met`` answers this same condition about a row that
+    does not exist yet — so the operand is the tuple, and ``covers`` supplies the
+    live row's own.
+
     Args:
-        row: The live record the one ``live_for`` read returned.
+        coverage: The members the authority carries — the live row's ``coverage``
+            where ``live_for`` returned one, and the coverage a proposed row
+            **would** carry at ``coverage_met``.
         subject: The one observation of the request this ruling is decided over.
         quotes: That goal's quotes naming the request's intended action, **in the order
             the goal holds them**, as the one ``for_action`` read returned them.
@@ -593,15 +640,15 @@ def uncovered(
         rendering of them is deterministic without the renderer sorting.
     """
     found: set[CoverageDefect] = set()
-    kinds = {member.kind: member for member in row.coverage}
-    # **The first conjunct** — every member of the row is met, by the two routes,
-    # and a member met by neither reports both failures rather than the first.
-    for member in row.coverage:
+    kinds = {member.kind: member for member in coverage}
+    # **The first conjunct** — every member of ``coverage`` is met, by the two
+    # routes, and a member met by neither reports both failures rather than the first.
+    for member in coverage:
         found.update(_member_defects(member, subject, quotes))
     carried = user_facing(subject)
     declared = {one.argument: one for one in subject.tool.bounded_arguments}
     # **The second** — every user-facing argument the declaration declares is covered
-    # by the member of that argument's kind, a row carrying none being uncovered.
+    # by the member of that argument's kind, a coverage carrying none being uncovered.
     for key in carried & set(declared):
         at_kind = kinds.get(declared[key].kind)
         if at_kind is None:
@@ -611,9 +658,9 @@ def uncovered(
     # **The third** — an argument the declaration declares at no kind needs a member
     # met through the evidence route, whose digest pins every argument the request
     # carries.
-    undeclared = carried - set(declared) - _examined_currency_keys(row, subject)
+    undeclared = carried - set(declared) - _examined_currency_keys(coverage, subject)
     if undeclared and not any(
-        _met_through_evidence(member, subject, quotes) for member in row.coverage
+        _met_through_evidence(member, subject, quotes) for member in coverage
     ):
         found.update(CoverageDefect(key, CoverageFailure.UNNAMED) for key in undeclared)
     return tuple(sorted(found, key=lambda defect: (defect.failure.value, defect.subject)))
@@ -701,7 +748,9 @@ def account_of(defects: Sequence[CoverageDefect], tool: ToolDefinition) -> str:
 
 
 def covers_arguments(
-    row: Authorization, subject: CoverageSubject, quotes: Sequence[ActionQuote]
+    coverage: Sequence[CoverageMember],
+    subject: CoverageSubject,
+    quotes: Sequence[ActionQuote],
 ) -> bool:
     """ADR-0254 §3's **condition 6** as ADR-0266 §7 restates it, alone (§6's bar).
 
@@ -715,7 +764,7 @@ def covers_arguments(
     is no default, no wildcard, no "not sent therefore unconstrained" and no
     omission that reads as consent.**
 
-    **The empty case holds vacuously** (§1, §3): a row with ``coverage=()`` has no
+    **The empty case holds vacuously** (§1, §3): an empty ``coverage`` has no
     member to meet, and a request carrying no user-facing argument declares nothing
     and leaves the third conjunct's set empty — so condition 6 holds, and that is
     the one request such a row covers. A request carrying system-supplied arguments
@@ -727,17 +776,74 @@ def covers_arguments(
     member either.
 
     Args:
-        row: The live record the one ``live_for`` read returned.
+        coverage: The members the authority carries — the live row's ``coverage``,
+            or the coverage a proposed row would carry (ADR-0270 §1).
         subject: The one observation of the request this ruling is decided over.
         quotes: That goal's quotes naming the request's intended action, oldest first.
 
     Returns:
         Whether condition 6 holds over that pair.
     """
-    return not uncovered(row, subject, quotes)
+    return not uncovered(coverage, subject, quotes)
 
 
-def covers_on_argument_route(row: Authorization, subject: CoverageSubject) -> bool:
+def coverage_answer(
+    coverage: Sequence[CoverageMember],
+    subject: CoverageSubject,
+    quotes: Sequence[ActionQuote],
+) -> CoverageAnswer:
+    """Condition 6's answer, and the governing quote it was proved over (ADR-0270 §2).
+
+    :meth:`~ai_assistant.core.protocols.CoverageAnswers.coverage_met`'s whole
+    computation, and it is :func:`covers_arguments` with the one value §2 makes the
+    answer carry. **Not a second reading of condition 6**: the predicate is the one
+    above, and what this adds is which quote it was decided against.
+
+    **The quote is present exactly where the evidence route decided something**, and
+    its absence is total over every other case (§2): where ``met`` is true **and**
+    ``coverage`` carries a ``MONEY`` member, that member being the one the evidence
+    route alone can meet (ADR-0266 §7). A ``coverage`` carrying no ``MONEY`` member
+    leaves nothing the evidence route decided; a request carrying no
+    ``intended_action``, or a goal no quote of which names that action, leaves any
+    ``MONEY`` member unmet and ``met`` false. **Nothing sets it on any other ground**,
+    invents a quote, or returns one this call did not read.
+
+    **The selection is the position and never a search** (ADR-0266 §7, ADR-0267 §7).
+    The governing quote is the **last** member of what the one ``for_action`` read
+    returned — taken before any digest is compared, which is
+    :func:`_met_through_evidence`'s own order — so *"an earlier quote is consulted in
+    no case"*. A reading that scanned for a matching digest first would revive a
+    quote a re-quote displaced, and would hand that one back here.
+
+    **It is the operand and never a verdict** (§2). A path-(i) writer records it on
+    the row and performs no selection of its own; **no comparison reads it**, and
+    ADR-0254 §13's recheck reads the *current* governing quote at every dispatch as
+    if the field were not there.
+
+    Args:
+        coverage: The coverage a proposed row would carry — condition 6's fourth
+            operand, and never the row (ADR-0270 §1).
+        subject: The one pre-suspension observation of the request.
+        quotes: That goal's quotes naming the request's intended action, **in the
+            order the goal holds them**, as the one ``for_action`` read returned
+            them. Empty where the seam was not read at all, which leaves every
+            ``MONEY`` member unmet — the fail-closed direction.
+
+    Returns:
+        Whether condition 6 holds, and the governing quote where the evidence route
+        decided it.
+    """
+    met = covers_arguments(coverage, subject, quotes)
+    priced = any(member.kind is BoundKind.MONEY for member in coverage)
+    # **Total over an empty tuple**, which ``met and priced`` already excludes — a
+    # ``MONEY`` member is met by the evidence route alone, and that route is met by
+    # nothing where the goal holds no quote for this act. Written so that the
+    # reading stays total if that ever stops being true, rather than raising.
+    governing = quotes[-1] if quotes else None
+    return CoverageAnswer(met=met, quoted=governing if met and priced else None)
+
+
+def covers_on_argument_route(coverage: Sequence[CoverageMember], subject: CoverageSubject) -> bool:
     """Whether every argument of this request is covered on the **argument** route.
 
     **ADR-0266 §7's narrowing of ADR-0254 §6's lineage discharge, in the narrowing
@@ -765,16 +871,17 @@ def covers_on_argument_route(row: Authorization, subject: CoverageSubject) -> bo
     argument has nothing outside content could have steered.
 
     Args:
-        row: The live record the one ``live_for`` read returned.
+        coverage: The live row's ``coverage`` — this reading is ADR-0254 §6's
+            lineage discharge and is taken over a live row in every case.
         subject: The one observation of the request this ruling is decided over.
 
     Returns:
         Whether every user-facing argument the request carries is covered by a
         member on the argument route.
     """
-    kinds = {member.kind: member for member in row.coverage}
+    kinds = {member.kind: member for member in coverage}
     declared = {one.argument: one for one in subject.tool.bounded_arguments}
-    exempt = _examined_currency_keys(row, subject)
+    exempt = _examined_currency_keys(coverage, subject)
     for key in user_facing(subject):
         if key in exempt:
             continue
@@ -807,7 +914,7 @@ def covers(row: Authorization, subject: CoverageSubject, quotes: Sequence[Action
       domain matching, no treating an account member as covering a recipient member
       or the reverse, and **no re-canonicalising either side**: the canonicaliser
       is ADR-0148 §2's, at the seam, and there is not a second one here.
-    * **6** — :func:`covers_arguments`.
+    * **6** — :func:`covers_arguments`, over the row's own ``coverage``.
 
     **A request carrying no ``egress_binding`` is covered by no row**: it names no
     account and no destination set, so conditions 4 and 5 have nothing to compare.
@@ -827,7 +934,7 @@ def covers(row: Authorization, subject: CoverageSubject, quotes: Sequence[Action
         return False
     if any(member not in row.destinations for member in subject.destinations):
         return False
-    return covers_arguments(row, subject, quotes)
+    return covers_arguments(row.coverage, subject, quotes)
 
 
 def _satisfies(

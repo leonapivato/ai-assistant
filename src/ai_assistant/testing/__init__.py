@@ -32,6 +32,7 @@ from ai_assistant.testing.connections import (
 )
 from ai_assistant.testing.context import FakeContextProvider
 from ai_assistant.testing.conversations import FakeConversationStore
+from ai_assistant.testing.coverage_answers import FakeCoverageAnswers
 from ai_assistant.testing.deferrals import FakeDeferralStore
 from ai_assistant.testing.destination_trust import FakeDestinationTrustStore
 from ai_assistant.testing.egress import FakeEgressBinder
@@ -285,6 +286,7 @@ __all__ = [
     "FakeConnectionPurger",
     "FakeContextProvider",
     "FakeConversationStore",
+    "FakeCoverageAnswers",
     "FakeDeferralStore",
     "FakeDestinationTrustStore",
     "FakeEgressBinder",
