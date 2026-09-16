@@ -297,19 +297,26 @@ class _Quoting:
     *"``frozen=True`` refuses ``request.tool = ...`` and does nothing about
     ``request.__dict__``"* (ADR-0018 §3).
 
-    It is not a hypothetical reach in this tree. ``ToolRegistry.find`` is contracted to
-    hand back a snapshot but ``PlanStore`` is **not** (:class:`_Planned`), and a
-    conforming registry — ``FakeToolInvoker`` among them — may hand out the very
-    declaration it holds; a binder may keep the copy it derived. A
-    ``quoted_output.amount`` rewritten from ``"price"`` to ``"stars"`` while the tool
-    was running would mint ``4`` from ``{"price": "200", "stars": 4}`` and satisfy a
-    150 ceiling the act breaches — ADR-0267 §3's *"right **shape** in the wrong
-    **slot**"*, reached through the one window §3's writer clause does not close.
-    Adversarial review, round 2, ``blocker``.
+    **The plan and the goal are the reachable half, and they are the sharp one.**
+    ``PlanStore`` contracts no detached snapshot (:class:`_Planned`, ``LeakyPlanStore``),
+    so ``planned.plan`` is an object a holder still has, and ``plan.__dict__`` is open.
+    A ``goal_id`` repointed while the tool was running would append the price to
+    **another goal**; an ``id`` repointed would record it as read in a plan it was not
+    read in, which no later reader could detect — ADR-0267 §1's *"a step id alone names
+    no place"*, defeated. Both are ``str`` and are taken **by value** here, which closes
+    it outright.
+
+    **The request's copy is defence in depth and is not load-bearing**, which is stated
+    rather than implied: ``ActionRequest.tool`` is rebuilt through validation
+    (``_detached_tool``) and ``parameters`` is frozen on validation, so the declaration
+    the selector comes from is already nobody else's and no conforming collaborator
+    holds the request itself. The copy is taken anyway on
+    :func:`detached_request`'s own posture — *"removes the capability rather than
+    forbidding it"* — for a value the mint reads across the longest suspension this
+    stage has. Adversarial review, rounds 2 and 3.
 
     The step needs no copy of its own, :meth:`StepRunner._planned` having already
-    detached it; the plan and the goal are ``str`` and are taken **by value**, which is
-    the whole of what they need.
+    detached it.
 
     Attributes:
         request: A detached copy of the request the executor is about to run, for its
