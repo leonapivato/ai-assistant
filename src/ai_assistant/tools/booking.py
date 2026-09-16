@@ -71,7 +71,7 @@ import sqlite3
 import stat
 import threading
 from dataclasses import dataclass
-from datetime import date
+from datetime import date, datetime
 from decimal import Decimal, DecimalException
 from pathlib import Path
 from typing import TYPE_CHECKING, Any, Final, final
@@ -448,6 +448,20 @@ def _checked_day(value: date | str, *, field: str) -> date:
     Raises:
         BookingConfigurationError: If it is not one.
     """
+    if isinstance(value, datetime):
+        # **Stated because the implementation language will not state it**, exactly as
+        # the amount reader states that a flag is not a price: ``datetime`` is a
+        # subclass of ``date``, so an ``isinstance`` check admits one — and a catalogue
+        # built from it compares a ``datetime`` against an invocation's plain ``date``
+        # and raises ``TypeError`` out of the comparison rather than answering. A day is
+        # a calendar day; an instant is not one, and silently taking its date part would
+        # discard a time the operator wrote.
+        msg = (
+            f"{field} must be an ISO-8601 calendar date and not an instant "
+            f"(ADR-0273 §5); a datetime carries a time of day this provider has no "
+            f"meaning for"
+        )
+        raise BookingConfigurationError(msg)
     if isinstance(value, date):
         return value
     try:
@@ -1041,8 +1055,7 @@ class SqliteBookingStore:
         **Never outside it**: §2 names *"a count incremented outside the transaction
         that inserts the record"* as not an implementation of the clause.
         """
-        stored = self._meta(conn, _COMMIT_COUNT_KEY)
-        count = 0 if stored is None else int(stored)
+        count = self._read_count_sync()
         conn.execute(_WRITE_META, (_COMMIT_COUNT_KEY, str(count + 1)))
 
     def _prune(self, conn: sqlite3.Connection) -> None:
@@ -1095,8 +1108,7 @@ class SqliteBookingStore:
             BookingStoreError: If the store could not be read.
         """
         async with self._lock:
-            rows = await _run_to_completion(self._read_records_sync)
-        return tuple(json.loads(str(row)) for row in rows)
+            return await _run_to_completion(self._read_records_sync)
 
     async def commit_count(self) -> int:
         """How many bookings this store has ever committed (§2).
@@ -1111,33 +1123,87 @@ class SqliteBookingStore:
             BookingStoreError: If the store could not be read.
         """
         async with self._lock:
-            stored = await _run_to_completion(self._read_count_sync)
-        return 0 if stored is None else int(stored)
+            return await _run_to_completion(self._read_count_sync)
 
-    def _read_records_sync(self) -> tuple[str, ...]:
-        """Every retained record's stored JSON, oldest first.
+    def _read_records_sync(self) -> tuple[Mapping[str, FrozenJson], ...]:
+        """Every retained record, decoded, oldest first.
+
+        **The decode happens inside this store's error boundary and not above it.** A
+        row that is not a JSON object — malformed text, or a bare scalar — is a corrupt
+        store, which is this layer's fault to report rather than a ``JSONDecodeError``
+        escaping past its own seam (#238's rule, one store along). Callers are promised
+        a mapping per record and a :class:`BookingStoreError` otherwise, and that
+        promise is kept here.
+
+        Returns:
+            The records, rebuilt from their stored JSON so nothing shares an object
+            graph with the store.
 
         Raises:
-            BookingStoreError: If the store could not be read.
+            BookingStoreError: If the store could not be read, or holds a row this
+                code cannot read as a booking record.
         """
         try:
             rows = self._conn.execute(_READ_BOOKINGS).fetchall()
         except sqlite3.Error as exc:
             msg = f"failed to read the booking store: {exc}"
             raise BookingStoreError(msg, may_have_committed=False) from exc
-        return tuple(str(row[0]) for row in rows)
+        decoded: list[Mapping[str, FrozenJson]] = []
+        for row in rows:
+            try:
+                record = json.loads(str(row[0]))
+            except ValueError as exc:
+                msg = (
+                    f"the booking store at {self._path!r} holds a row that is not "
+                    f"readable JSON; the store is corrupt. The row is not rendered."
+                )
+                raise BookingStoreError(msg, may_have_committed=False) from exc
+            if not isinstance(record, dict):
+                msg = (
+                    f"the booking store at {self._path!r} holds a row that is not a "
+                    f"booking record; the store is corrupt. The row is not rendered."
+                )
+                raise BookingStoreError(msg, may_have_committed=False)
+            decoded.append(record)
+        return tuple(decoded)
 
-    def _read_count_sync(self) -> str | None:
-        """The stored commit count, as text.
+    def _read_count_sync(self) -> int:
+        """The stored commit count, as a number.
+
+        **Parsed inside the boundary too**, for :meth:`_read_records_sync`'s reason: a
+        ``commit_count`` the store cannot read as an integer is a corrupt store, not a
+        ``ValueError`` for a caller to classify. A **negative** one is refused as well,
+        because §2 states the figure as one that only rises.
+
+        Returns:
+            The count, or ``0`` where the key is absent.
 
         Raises:
-            BookingStoreError: If the store could not be read.
+            BookingStoreError: If the store could not be read, or holds a count this
+                code cannot read.
         """
         try:
-            return self._meta(self._conn, _COMMIT_COUNT_KEY)
+            stored = self._meta(self._conn, _COMMIT_COUNT_KEY)
         except sqlite3.Error as exc:
             msg = f"failed to read the booking commit count: {exc}"
             raise BookingStoreError(msg, may_have_committed=False) from exc
+        if stored is None:
+            return 0
+        try:
+            count = int(stored)
+        except ValueError as exc:
+            msg = (
+                f"the booking store at {self._path!r} holds a non-numeric commit count "
+                f"{stored!r}; the store is corrupt"
+            )
+            raise BookingStoreError(msg, may_have_committed=False) from exc
+        if count < 0:
+            msg = (
+                f"the booking store at {self._path!r} holds a negative commit count "
+                f"{count}; the figure only rises (ADR-0273 §2), so the store is corrupt"
+            )
+            raise BookingStoreError(msg, may_have_committed=False)
+        return count
 
     def close(self) -> None:
         """Release the connection (ADR-0042 §2). Safe to call more than once."""

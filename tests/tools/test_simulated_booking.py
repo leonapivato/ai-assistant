@@ -17,7 +17,7 @@ import asyncio
 import sqlite3
 import threading
 from collections.abc import Mapping
-from datetime import date, timedelta
+from datetime import UTC, date, datetime, timedelta
 from decimal import Decimal
 from typing import TYPE_CHECKING, Final
 
@@ -34,6 +34,7 @@ from booking_harness import (
     IN_WINDOW,
     PRICE,
     REFERENCE,
+    TIMEOUT,
     UNAVAILABLE,
     UNCERTAIN,
     Records,
@@ -58,8 +59,8 @@ from ai_assistant.core.types import (
     AuthorizationBasis,
     BoundKind,
     CoverageMember,
-    EffectClaim,
     EffectKey,
+    ExecutionState,
     Goal,
     GoalAttempt,
     GoalInterpretation,
@@ -87,6 +88,7 @@ from ai_assistant.core.types import (
     ValueResolution,
 )
 from ai_assistant.orchestration.charges import ChargeTest, charge_read, charge_test
+from ai_assistant.orchestration.executor import Dispatch, StepExecutor
 from ai_assistant.orchestration.quotes import quote_read
 from ai_assistant.orchestration.reconciling import ReconciliationStage
 from ai_assistant.testing import FakeAuditTrail, FakePlanStore
@@ -112,6 +114,7 @@ if TYPE_CHECKING:
 
     from ai_assistant.core.types import FrozenJson, ToolCall, ToolResult
     from ai_assistant.tools.builtin import SimulatedBookingIntegration
+    from ai_assistant.tools.registry import InMemoryToolRegistry
 
 #: The intended action a quote and a charge are read against, and the plan they sit in.
 _ACTION: Final = "act-1"
@@ -193,8 +196,10 @@ def _succeeded(result: ToolResult) -> Mapping[str, FrozenJson]:
     return result.output
 
 
-async def _seeded_execution(plans: FakePlanStore, parameters: Mapping[str, FrozenJson]) -> str:
-    """Seed one goal, plan and execution, and return the execution's id.
+async def _seeded_execution(
+    plans: FakePlanStore, parameters: Mapping[str, FrozenJson]
+) -> ExecutionState:
+    """Seed one goal, plan and execution, and return the execution.
 
     ADR-0259 §2's claim is keyed on an execution and a step as well as an effect key, so
     a case about *"two dispatches … under one goal"* needs one of each. The store mints
@@ -205,7 +210,8 @@ async def _seeded_execution(plans: FakePlanStore, parameters: Mapping[str, Froze
         parameters: The booking's arguments, carried onto the plan step.
 
     Returns:
-        The execution's id.
+        The execution as the store minted it. The store mints its id, which is why the
+        state is returned rather than an id the case chose.
     """
     await plans.save_goal(
         Goal(
@@ -257,7 +263,23 @@ async def _seeded_execution(plans: FakePlanStore, parameters: Mapping[str, Froze
         id="p-1", goal_id=_GOAL, steps=steps, created_at=DECIDED_AT, targets_revision=1
     )
     await plans.save_plan(plan)
-    return (await plans.start_execution(plan.id)).id
+    return await plans.start_execution(plan.id)
+
+
+async def _record(registry: InMemoryToolRegistry, call: ToolCall) -> None:
+    """Record the call's ruling in the registry's own trail.
+
+    :func:`booking_harness.recorded` does this and then invokes; a case driving the real
+    executor needs the first half alone, because the executor performs the invocation
+    itself.
+
+    Args:
+        registry: The registry, whose ledger face is the trail this harness wired.
+        call: The authorised call.
+    """
+    ledger = registry.ledger
+    assert isinstance(ledger, FakeAuditTrail), "this harness claims through the trail it wired"
+    await ledger.record(call.decision)
 
 
 def _plan_step() -> PlanStep:
@@ -444,17 +466,22 @@ async def test_two_dispatches_of_one_intended_action_carry_one_key_and_only_one_
 
     The key is **derived** and never minted, supplied, configured or carried as a field,
     so two authorisations of one intended action under one goal, carrying the same
-    arguments under the same binding, derive the *same* key. That is what the effect
-    claim is keyed on — and this case drives the claim rather than only comparing the
-    keys, because a provider that booked twice would satisfy the comparison and fail the
-    arm.
+    arguments under the same binding, derive the *same* key.
 
-    **The claim is the production one** (``PlanStore.claim_effect``), and the dispatch
-    is guarded by its answer exactly as ``StepExecutor._effect`` guards one: ``CLAIMED``
-    proceeds, and anything else refuses without reaching the provider. So what the case
-    establishes is the guarantee M33 exists to demonstrate — **one record and a commit
-    count of one**, with a second authorisation that was live and spendable and still
-    booked nothing.
+    **Driven through the production dispatcher** — :class:`~ai_assistant.orchestration
+    .executor.StepExecutor`, which is what claims the effect and decides whether the
+    callable runs at all. A case that made the claim itself and skipped the dispatch by
+    hand would be a **restatement of the guard** rather than a test of it: a regression
+    that dispatched after ``HELD``, ``UNCERTAIN`` or ``COMPLETED_OTHERWISE`` would pass
+    it unchanged. Here the executor is handed both calls and decides for itself.
+
+    **Two steps and not one**, because a claim re-made by the step that already holds it
+    is the *same* holder rather than a repeat — which is what a replan looks like: the
+    goal still intends one act, and a second step proposes it again.
+
+    What the case establishes is the guarantee M33 exists to demonstrate: **one record
+    and a commit count of one**, with a second authorisation that was live and spendable
+    and still booked nothing.
     """
     booking = await configured(retained_records=4)
     registry = registry_for(booking)
@@ -462,26 +489,63 @@ async def test_two_dispatches_of_one_intended_action_carry_one_key_and_only_one_
     parameters = arguments()
     binding = await bound(seam, BOOKING_ACT, parameters)
     plans = FakePlanStore(now=lambda: DECIDED_AT)
-    execution = await _seeded_execution(plans, parameters)
+    state = await _seeded_execution(plans, parameters)
+    await plans.open_attempt(
+        GoalAttempt(
+            id="a-1",
+            goal_id=_GOAL,
+            opened_at=DECIDED_AT,
+            plan_ids=("p-1",),
+            execution_ids=(state.id,),
+            state=AttemptState.RUNNING,
+        )
+    )
+    executor = StepExecutor(
+        plans=plans, registry=registry, invoker=registry, now=lambda: DECIDED_AT
+    )
 
-    dispatched: list[str] = []
+    keys: list[EffectKey] = []
+    drives: list[Dispatch] = []
     for decision_id, step_id in (("d-1", "s-book"), ("d-2", "s-rebook")):
         call = authorised(
-            BOOKING_ACT, parameters, binding, decision_id=decision_id, step_id=step_id
+            BOOKING_ACT,
+            parameters,
+            binding,
+            decision_id=decision_id,
+            step_id=step_id,
+            execution_id=state.id,
+            goal=_GOAL,
+            intended_action=_ACTION,
         )
         assert call.effect_key is not None
         assert isinstance(call.effect_key, EffectKey)
-        assert call.effect_key.tool_id == BOOKING_ACT_ID
-        assert call.effect_key.egress_endpoint == ENDPOINT
-        outcome = await plans.claim_effect(
-            execution_id=execution, step_id=step_id, effect_key=call.effect_key
+        keys.append(call.effect_key)
+        await _record(registry, call)
+        current = await plans.get_execution(state.id)
+        assert current is not None
+        drives.append(
+            await executor.execute(
+                current, step_id=step_id, call=call, attempt_id="a-1", timeout=TIMEOUT
+            )
         )
-        if outcome.claim is not EffectClaim.CLAIMED:
-            continue
-        dispatched.append(decision_id)
-        _succeeded(await recorded(registry, call))
 
-    assert dispatched == ["d-1"], "the second dispatch reached the provider"
+    assert keys[0] == keys[1]
+    assert keys[0].tool_id == BOOKING_ACT_ID
+    assert keys[0].egress_endpoint == ENDPOINT
+
+    first, second = drives
+    assert first.refused is None, "the first booking was refused"
+    assert not first.satisfied, "the first booking was satisfied from nothing"
+    # **Satisfied from the earlier holder rather than refused**, which is ADR-0259 §2's
+    # ``COMPLETED`` answer: the second step takes the first's recorded output and
+    # **reaches the callable not at all**. Either shape would satisfy the arm — what it
+    # forbids is a *fresh* dispatch — so both are admitted here and the store is what
+    # decides.
+    assert second.satisfied or second.refused is not None, "the second dispatch ran"
+
+    # The decisive half, and the reason the arm is not about a disposition: the provider
+    # committed **once**, though the second authorisation was live, spendable and
+    # carried the identical key.
     assert len(await booking.store.records()) == 1
     assert await booking.store.commit_count() == 1
 
@@ -1738,3 +1802,128 @@ async def test_a_cancelled_commit_leaves_no_worker_holding_the_connection(
         assert len(await store.records()) == 1
     finally:
         store.close()
+
+
+# --------------------------------------------------------------------------- #
+# what the second adversarial round found
+# --------------------------------------------------------------------------- #
+
+
+@pytest.mark.parametrize(
+    ("row", "why"),
+    [
+        ("{not json", "a row that is not readable JSON at all"),
+        ('"2026-10-01"', "a valid JSON scalar, which is not a booking record"),
+        ("[]", "a valid JSON array, likewise"),
+        ("null", "and a JSON null"),
+    ],
+)
+async def test_a_corrupt_booking_row_is_this_stores_error_and_not_a_raw_one(
+    tmp_path: Path, row: str, why: str
+) -> None:
+    """A store that cannot be read says so in its own vocabulary.
+
+    :meth:`SqliteBookingStore.records` promises a mapping per record and documents
+    ``BookingStoreError``; a ``JSONDecodeError`` or a bare scalar escaping past it would
+    be a raw builtin crossing this layer's error boundary, which #238 settled for the
+    neighbouring store — and a caller would have no way to tell "the store is corrupt"
+    from "the provider is broken". **The row is never rendered**: a stored record
+    carries what the user asked, which is Tier 1.
+    """
+    path = tmp_path / "bookings.db"
+    store = SqliteBookingStore(path=path, retained=4)
+    await store.commit({DATE_ARGUMENT: "2026-10-01"})
+    store.close()
+
+    handle = sqlite3.connect(path)
+    try:
+        handle.execute("UPDATE bookings SET record = ?", (row,))
+        handle.commit()
+    finally:
+        handle.close()
+
+    reopened = SqliteBookingStore(path=path, retained=4)
+    try:
+        with pytest.raises(BookingStoreError, match="corrupt") as caught:
+            await reopened.records()
+        assert row not in str(caught.value)
+        assert caught.value.may_have_committed is False
+    finally:
+        reopened.close()
+    assert why
+
+
+@pytest.mark.parametrize("stored", ["oops", "", "1.5", "-1"])
+async def test_a_corrupt_commit_count_is_this_stores_error_too(tmp_path: Path, stored: str) -> None:
+    """The same, for the figure §2 rests the act's irreversibility on.
+
+    A count this code cannot read as a non-negative integer is a corrupt store, not a
+    ``ValueError`` for a caller to classify. ``"-1"`` is refused on ADR-0273 §2's own
+    ground rather than on the parser's: the count *"only rises"*, so a negative one
+    cannot have been written by any operation this provider has.
+    """
+    path = tmp_path / "bookings.db"
+    store = SqliteBookingStore(path=path, retained=4)
+    await store.commit({DATE_ARGUMENT: "2026-10-01"})
+    store.close()
+
+    handle = sqlite3.connect(path)
+    try:
+        handle.execute("UPDATE meta SET value = ? WHERE key = 'commit_count'", (stored,))
+        handle.commit()
+    finally:
+        handle.close()
+
+    reopened = SqliteBookingStore(path=path, retained=4)
+    try:
+        with pytest.raises(BookingStoreError, match="corrupt"):
+            await reopened.commit_count()
+    finally:
+        reopened.close()
+
+
+@pytest.mark.parametrize(
+    ("first", "last"),
+    [
+        (datetime(2026, 10, 1, 12, tzinfo=UTC), date(2026, 10, 7)),
+        (date(2026, 10, 1), datetime(2026, 10, 7, 12, tzinfo=UTC)),
+        (datetime(2026, 10, 1, 12, tzinfo=UTC), datetime(2026, 10, 7, 12, tzinfo=UTC)),
+    ],
+    ids=["first-is-an-instant", "last-is-an-instant", "both-are"],
+)
+def test_an_instant_is_not_a_calendar_day(first: object, last: object) -> None:
+    """A ``datetime`` is refused where a day is asked for (ADR-0273 §5).
+
+    **Stated because the implementation language will not state it**, exactly as the
+    amount reader states that a flag is not a price: ``datetime`` is a subclass of
+    ``date``, so an ``isinstance`` check admits one. A catalogue built from a mixed pair
+    raises ``TypeError`` out of the window comparison, and one built from two instants
+    raises it later still, when an invocation's plain ``date`` is compared against it —
+    each bypassing the ``BookingConfigurationError`` the factory promises. Silently
+    taking the date part would discard a time the operator wrote.
+    """
+    with pytest.raises(BookingConfigurationError, match="not an instant"):
+        BookingCatalogue.checked(
+            available_from=first,  # type: ignore[arg-type]  # a case supplies a refused shape
+            available_to=last,  # type: ignore[arg-type]
+            price_amount=PRICE,
+            price_currency=CURRENCY,
+            charge_amount=PRICE,
+            charge_currency=CURRENCY,
+            retained_records=2,
+        )
+
+
+def test_an_instant_is_refused_for_the_uncertain_day_too() -> None:
+    """The same refusal on the one optional day, so the rule is the field's own."""
+    with pytest.raises(BookingConfigurationError, match="booking_indeterminate_date"):
+        BookingCatalogue.checked(
+            available_from=AVAILABLE_FROM,
+            available_to=date(2026, 10, 7),
+            price_amount=PRICE,
+            price_currency=CURRENCY,
+            charge_amount=PRICE,
+            charge_currency=CURRENCY,
+            retained_records=2,
+            indeterminate_date=datetime(2026, 10, 5, 12, tzinfo=UTC),
+        )

@@ -324,6 +324,9 @@ def authorised(  # noqa: PLR0913 — one keyword per fact a ruling fixes; a case
     *,
     decision_id: str = "d-1",
     step_id: str = "step-1",
+    execution_id: str | None = None,
+    goal: str | None = None,
+    intended_action: str | None = None,
     decided_at: datetime | None = None,
 ) -> ToolCall:
     """One authorised call, as the runner would have built it.
@@ -334,6 +337,13 @@ def authorised(  # noqa: PLR0913 — one keyword per fact a ruling fixes; a case
         binding: The binding the seam derived.
         decision_id: The decision's id, which a case varies to make two dispatches.
         step_id: The step the request serves.
+        execution_id: The execution the step belongs to, where a case drives the real
+            executor — which refuses a call authorised for another execution, so the two
+            have to agree (ADR-0044 §1, #253).
+        goal: The goal the request serves, likewise.
+        intended_action: The act this call performs (ADR-0265 §4). ADR-0259 §2's effect
+            claim is refused outright for a decision naming none — the dispatch is
+            ``EFFECT_UNSCOPED`` — so a case driving the real executor supplies it.
         decided_at: When the ruling was taken.
 
     Returns:
@@ -343,6 +353,9 @@ def authorised(  # noqa: PLR0913 — one keyword per fact a ruling fixes; a case
         tool=definition,
         parameters=parameters,
         step_id=step_id,
+        execution_id=execution_id,
+        goal=goal,
+        intended_action=intended_action,
         egress_binding=binding,
     )
     decision = PermissionDecision.from_request(
