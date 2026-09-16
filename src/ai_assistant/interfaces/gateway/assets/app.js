@@ -302,12 +302,18 @@ let sessionEra = 0;
 // tab* started, where the storage this page reads changed under it and nothing here
 // counted anything.
 //
-// **It governs what a resumed continuation renders and reveals, and nothing else.** A
-// *condition* is still reported where it was before: `relay` writes a refusal into its
-// panel before it returns, and each caller's `catch` writes a transport failure. A panel
-// carrying nothing but a fault says nothing about the owner, so ADR-0168 §9's rule
-// against flattening a condition into silence keeps that path and does not reach this
-// one, where what would be revealed is the owner's own rows.
+// **It governs everything a resumed continuation puts on the screen** — the rows, the
+// reveal, and the condition. The first draft guarded only the first two, on the reading
+// that a panel carrying nothing but a fault says nothing about the owner and that
+// ADR-0168 §9's rule against flattening a condition into silence should keep that path;
+// adversarial review's round 1 took the reading apart, and it does not hold. `fault`
+// reveals the panel it writes into, so a listing whose request fails after its session
+// ended re-opens a control panel beside the bootstrap form — moments after
+// `showBootstrap` hid every panel and `clearFaults` cleared every slot, and the two
+// cannot both be the page's account of itself. §9 is about a condition reaching the
+// owner in the act they are waiting on; here the act belonged to a session that no
+// longer exists, the page has said so in its own words, and there is nothing the owner
+// could do with the condition but start the session the form is already asking for.
 function sameSession(half, era) {
   return era === sessionEra && headerHalf() === half;
 }
@@ -4069,6 +4075,10 @@ async function readPending(quiet) {
     body.confirmations.forEach((one) => renderConfirmation(list, one));
     show("confirmations", true);
   } catch (_) {
+    // Not this session's condition to report (#2404).
+    if (!sameSession(half, era)) {
+      return;
+    }
     fault(GATEWAY_GONE, "confirmations");
   }
 }
@@ -7816,21 +7826,29 @@ async function relay(half, path, payload, panelId, stopping, noticed) {
   // form. A dead request ending a live session, from the one door a comparison after the
   // `await` cannot reach.
   //
-  // **`conversationLost` above it and `noticed` below it are deliberately outside this.**
-  // A conversation "belongs to the hub and outlives every session", which is what the
+  // **`conversationLost` above it and `noticed` below are deliberately outside it**, and
+  // adversarial review's round 1 found the version where `noticed` was not. A
+  // conversation "belongs to the hub and outlives every session", which is what the
   // re-entry sentence tells the owner, so `no-such-conversation` is as true of the
   // conversation this view holds whichever session asked — and it guards itself anyway,
-  // on a selection `forgetHeaderHalf` has already cleared. `noticed` is the one caller
-  // being told *which* refusal its act met (ADR-0177 §7's not-known branch): that is a
-  // fact about the act rather than about the panel, and withholding it would strand a
-  // consent token rather than protect anything.
+  // on a selection `forgetHeaderHalf` has already cleared.
+  //
+  // **`noticed` is a fact about the act, not about the panel**, and withholding it costs
+  // the owner something rather than protecting them. It is the one caller being told
+  // *which* refusal its act met: `answerConfirmation` and `cancelRead` read the condition
+  // to sort ADR-0177 §7's third clause, and `refusal` left null is read as "a refusal
+  // this page cannot classify at all", which takes the not-known branch — a stranded
+  // consent token, a re-read of the listing, and a row telling the owner the action may
+  // have been carried out. Of a request the gateway refused *at the door*, which the hub
+  // demonstrably never saw. So it is told, and the page classifies the answer it really
+  // got; what the guard below withholds is the reveal.
+  if (noticed !== undefined) {
+    noticed(body);
+  }
   if (!sameSession(half, era)) {
     return null;
   }
   refused(panelId, body, response.status);
-  if (noticed !== undefined) {
-    noticed(body);
-  }
   return null;
 }
 
@@ -7907,6 +7925,10 @@ async function listConversations() {
     body.conversations.forEach((one) => renderConversation(list, one));
     show("conversations", true);
   } catch (_) {
+    // Not this session's condition to report (#2404).
+    if (!sameSession(half, era)) {
+      return mine;
+    }
     // An abort is not a transport failure, and only the newest read is entitled to
     // say the gateway has gone — the same comparison `resumeConversation` makes, for
     // the same reason.
@@ -8305,6 +8327,10 @@ async function listSources() {
     body.sources.forEach((one) => renderSource(list, one));
     show("sources", true);
   } catch (_) {
+    // Not this session's condition to report (#2404).
+    if (!sameSession(half, era)) {
+      return;
+    }
     fault(GATEWAY_GONE, "sources");
   }
 }
@@ -8550,6 +8576,10 @@ async function listStanding() {
         : "Read just now.";
     body.standing.forEach((one) => renderStanding(list, one));
   } catch (_) {
+    // Not this session's condition to report (#2404).
+    if (!sameSession(half, era)) {
+      return;
+    }
     el("standing-state").textContent =
       "I could not read what you currently authorise, so it is unread.";
     fault(GATEWAY_GONE, "standing");
@@ -8611,6 +8641,10 @@ async function listGrantHistory() {
     body.grants.forEach((one) => renderHistory(list, one));
     show("history", true);
   } catch (_) {
+    // Not this session's condition to report (#2404).
+    if (!sameSession(half, era)) {
+      return;
+    }
     fault(GATEWAY_GONE, "history");
   }
 }
@@ -8748,6 +8782,10 @@ async function readBeliefs(more, run) {
     offerMore(list, body.beliefs.length, () => readBeliefs(true, run));
     show("beliefs", true);
   } catch (_) {
+    // Not this session's condition to report (#2404).
+    if (!sameSession(half, era)) {
+      return;
+    }
     fault(GATEWAY_GONE, "beliefs");
   }
 }
@@ -9176,6 +9214,10 @@ async function readQuestions(path, more, run) {
     offerMore(list, body.questions.length, () => readQuestions(path, true, run));
     show("questions", true);
   } catch (_) {
+    // Not this session's condition to report (#2404).
+    if (!sameSession(half, era)) {
+      return;
+    }
     fault(GATEWAY_GONE, "questions");
   }
 }
@@ -9670,6 +9712,10 @@ async function readNotifications(more, run) {
     offerMore(list, body.notifications.length, () => readNotifications(true, run));
     show("review", true);
   } catch (_) {
+    // Not this session's condition to report (#2404).
+    if (!sameSession(half, era)) {
+      return;
+    }
     fault(GATEWAY_GONE, "review");
   }
 }
@@ -9858,6 +9904,10 @@ async function readGoals(more, run) {
     offerMore(list, body.goals.length, () => readGoals(true, run));
     show("goals", true);
   } catch (_) {
+    // Not this session's condition to report (#2404).
+    if (!sameSession(half, era)) {
+      return;
+    }
     fault(GATEWAY_GONE, "goals");
   }
 }
@@ -10741,6 +10791,10 @@ async function listAuthorizations(goal) {
     }
     show("authorizations", true);
   } catch (_) {
+    // Not this session's condition to report (#2404).
+    if (!sameSession(half, era)) {
+      return;
+    }
     // An abort is not a transport failure, and only the newest read is entitled to say
     // the gateway has gone — `listConversations`' own comparison, for its own reason.
     if (run === authorizationRuns) {
@@ -10939,6 +10993,10 @@ async function listTuning() {
     renderTuning(body.preferences);
     show("tuning", true);
   } catch (_) {
+    // Not this session's condition to report (#2404).
+    if (!sameSession(half, era)) {
+      return;
+    }
     fault(GATEWAY_GONE, "tuning");
   }
 }
@@ -10981,6 +11039,10 @@ async function writePreferences(change) {
     renderTuning(written.preferences);
     show("tuning", true);
   } catch (_) {
+    // Not this session's condition to report (#2404).
+    if (!sameSession(half, era)) {
+      return;
+    }
     fault(GATEWAY_GONE, "tuning");
   }
 }
@@ -11450,6 +11512,10 @@ async function listConnections() {
     held.accounts.forEach((account) => renderAccount(panel, account));
     offerConnect(form);
   } catch (_) {
+    // Not this session's condition to report (#2404).
+    if (!sameSession(half, era)) {
+      return;
+    }
     fault(GATEWAY_GONE, "connections");
   }
 }
@@ -11847,6 +11913,10 @@ async function listConnectionLog() {
     }
     held.acts.forEach((one) => renderConnectionAct(list, one));
   } catch (_) {
+    // Not this session's condition to report (#2404).
+    if (!sameSession(half, era)) {
+      return;
+    }
     fault(GATEWAY_GONE, "connection-log");
   }
 }
@@ -11901,6 +11971,10 @@ async function observe() {
     renderObservation(body.observation);
     show("observation", true);
   } catch (_) {
+    // Not this session's condition to report (#2404).
+    if (!sameSession(half, era)) {
+      return;
+    }
     fault(GATEWAY_GONE, "observation");
   }
 }
