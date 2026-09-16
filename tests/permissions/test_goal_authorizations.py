@@ -414,7 +414,9 @@ class TestWhatOnlyAFileCanSay:
         with pytest.raises(AuthorizationError, match="schema_version=99"):
             SqliteGoalAuthorizationStore(path=path, now=SHARED_CLOCK.reset())
 
-    @pytest.mark.parametrize("planted", [4.5, "abc", "007", " 4", "+4"], ids=str)
+    @pytest.mark.parametrize(
+        "planted", [4.5, "xyz", "007", " 4", "+4", "ABC", "0x4", "1" * 4301], ids=str
+    )
     async def test_a_closure_record_that_cannot_be_read_exactly_is_refused(
         self, path: Path, planted: object
     ) -> None:
@@ -433,12 +435,17 @@ class TestWhatOnlyAFileCanSay:
         not write gets past it, the decode refuses the record as an
         ``AuthorizationError`` **without mutating anything**.
 
-        ``'007'``, ``' 4'`` and ``'+4'`` are in the table because ``int`` accepts all
-        three while none is what was written: two spellings of one number would both
-        decode and only one would compare equal to the record. **A planted *integer*
-        is deliberately absent**: the column's ``TEXT`` affinity converts one into
-        exactly the canonical form this store writes, so it reads back exactly and is
-        not corruption at all.
+        ``'007'``, ``' 4'``, ``'+4'``, ``'ABC'`` and ``'0x4'`` are in the table
+        because ``int(…, 16)`` accepts every one of them while none is what was
+        written: two spellings of one number would both decode and only one would
+        compare equal to the record. ``'1' * 4301`` is there because it is valid
+        base-16 text of a magnitude a *decimal* decoder could not have read at all —
+        the ceiling this encoding exists not to have — so it must read back exactly
+        rather than raise (below).
+
+        **A planted *integer* is deliberately absent**: the column's ``TEXT``
+        affinity converts one into exactly the canonical form this store writes, so
+        it reads back exactly and is not corruption at all.
         """
         store = SqliteGoalAuthorizationStore(path=path, now=SHARED_CLOCK.reset())
         try:
@@ -461,9 +468,16 @@ class TestWhatOnlyAFileCanSay:
         second = SqliteGoalAuthorizationStore(path=path, now=SHARED_CLOCK.reset())
         try:
             before = await second.export()
-            with pytest.raises(AuthorizationError, match="canonical decimal text"):
+            if planted == "1" * 4301:
+                # **Not corruption**: canonical base-16 text of a 4301-digit
+                # magnitude, which is exactly what the encoding exists to hold and
+                # what a decimal one could not have converted in either direction.
+                assert await second.end_for_goal(GOAL, at=NOW, goal_version=0) == 0
+                assert await second.clear_closure(GOAL, goal_version=int(planted, 16)) is True
+                return
+            with pytest.raises(AuthorizationError, match="canonical base-16 text"):
                 await second.end_for_goal(GOAL, at=NOW, goal_version=4)
-            with pytest.raises(AuthorizationError, match="canonical decimal text"):
+            with pytest.raises(AuthorizationError, match="canonical base-16 text"):
                 await second.clear_closure(GOAL, goal_version=4)
             assert await second.export() == before, "and nothing is mutated on the way out"
         finally:

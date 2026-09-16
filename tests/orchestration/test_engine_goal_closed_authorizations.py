@@ -167,6 +167,12 @@ class _Journal:
         #: its own, and putting one on the shipping fake for a single arm would add a
         #: knob to every consumer's double.
         self.closing_fault: Exception | None = None
+        #: Armed to fault **one** ending member rather than the store. ADR-0268 §9
+        #: arm 10 injects each reopen call *separately*, and the canonical fake's
+        #: ``fail_writes`` is store-wide — so arming it before the reopen faults the
+        #: act's own ``end_for_goal`` first and ``clear_closure`` is never reached at
+        #: all. Adversarial review, round 3, ``blocker``.
+        self.ending_faults: dict[str, Exception] = {}
         #: The store's own members, unwrapped. Set by :meth:`install`.
         self.raw: _Raw
 
@@ -185,11 +191,17 @@ class _Journal:
         async def ending(goal: str, /, *, at: datetime, goal_version: int) -> int:
             self.calls.append("end_for_goal")
             self.endings.append((goal, at, goal_version))
+            # **Recorded before the fault**, so the arm can assert the call was made
+            # and then failed rather than never made.
+            if (fault := self.ending_faults.get("end_for_goal")) is not None:
+                raise fault
             return await end_for_goal(goal, at=at, goal_version=goal_version)
 
         async def clearing(goal: str, /, *, goal_version: int) -> bool:
             self.calls.append("clear_closure")
             self.clears.append((goal, goal_version))
+            if (fault := self.ending_faults.get("clear_closure")) is not None:
+                raise fault
             return await clear_closure(goal, goal_version=goal_version)
 
         async def closing(goal_id: str, /, **fields: Any) -> bool:
@@ -981,39 +993,29 @@ async def test_a_reopen_call_faulting_on_a_pre_decision_database_leaves_it_unfen
     a goal asks"*.
 
     *"And on both, ``clear_closure`` raising leaves whatever the ending left"* — here
-    a goal the ending has just fenced for the first time, so that half **does** ask.
+    a goal the reopen's own ending has just fenced for the first time, so that half
+    **does** ask, and the repair is the user's two acts.
+
+    **The fault is member-specific and the call sequence is asserted**, because a
+    store-wide one faults the act's own ``end_for_goal`` first and ``clear_closure``
+    is never reached — an engine that swallowed, retried or compensated a real
+    clearing fault would pass a case that never made the call. Adversarial review,
+    round 3, ``blocker``.
 
     **Driven through ``Engine.converse``**, because the fault is about what the
     *reopen* leaves: a direct call proves the store is all-or-nothing and says
-    nothing about whether the act compensates, retries or swallows. Adversarial
-    review, round 2, ``blocker``.
+    nothing about whether the act compensates, retries or swallows.
     """
     harness, store, journal, conversation = _journalled()
     goal = await _legacy_goal(harness, store, conversation=conversation)
+    journal.ending_faults[failing] = AuthorizationError(f"fake: {failing} is unwritable")
 
-    real_write = harness.plans.set_goal_status
-
-    async def arming(goal_id: str, /, **fields: Any) -> Goal:
-        """Arm the store's fault **after** the ``ACTIVE`` write has succeeded."""
-        written = await real_write(goal_id, **fields)
-        if fields.get("status") is GoalStatus.ACTIVE:
-            if failing == "clear_closure":
-                # Let the ending land — at the version the act's own ``ACTIVE``
-                # write expected, which is what the act would have passed — and fail
-                # only the clear.
-                await journal.raw.end_for_goal(
-                    goal_id, at=AT, goal_version=fields["expected_version"]
-                )
-            store.fail_writes()
-        return written
-
-    setattr(harness.plans, "set_goal_status", arming)  # noqa: B010 — an instance lever
-    journal.reset()
-
-    with pytest.raises(AuthorizationError):
+    with pytest.raises(AuthorizationError, match=failing):
         await _reopen(harness, goal.id)
 
-    store.stop_failing()
+    expected = ["end_for_goal"] if failing == "end_for_goal" else ["end_for_goal", "clear_closure"]
+    assert journal.calls == expected, "the faulting call was reached, and nothing followed it"
+
     held = await harness.plans.get_goal(goal.id)
     assert held is not None
     assert held.status is GoalStatus.ACTIVE, "the ACTIVE write landed; the act propagates after it"
@@ -1029,13 +1031,15 @@ async def test_a_reopen_call_faulting_on_a_pre_decision_database_leaves_it_unfen
             "unfenced: an end_for_goal that faults writes no fence either"
         )
     else:
-        assert legacy.disposition is AuthorizationDisposition.GOAL_CLOSED
+        assert legacy.disposition is AuthorizationDisposition.GOAL_CLOSED, (
+            "the ending landed; only the clear failed"
+        )
         with pytest.raises(AuthorizationError):
             await store.record(_row(goal.id, "tool_three", row_id="fenced"))
 
     # **The repair is the user's own two acts, on both halves.**
+    journal.ending_faults.clear()
     assert await harness.engine.abandon_goal(goal.id) is GoalAbandonment.ABANDONED
-    setattr(harness.plans, "set_goal_status", real_write)  # noqa: B010
     await _reopen(harness, goal.id)
     assert await store.record(_row(goal.id, "tool_four", row_id="repaired")) == "repaired"
 
@@ -1050,44 +1054,33 @@ async def test_a_reopen_call_faulting_on_a_goal_closed_under_this_decision_leave
     The closure raised a fence, so neither fault lifts it: an ``end_for_goal`` that
     raises writes nothing and leaves the closure's fence standing, and a
     ``clear_closure`` that raises leaves what the ending left — which on this
-    database is a fence, raised at the closure and re-raised by the reopen's own
-    ending. **Every call of that goal asks** until the user repairs it, which is
-    ADR-0254 §12's own stated cost reached by one further route, and *"the repair is
-    the user's own two acts and no mechanism"*.
+    database is a fence either way. **Every call of that goal asks** until the user
+    repairs it, which is ADR-0254 §12's own stated cost reached by one further route,
+    and *"the repair is the user's own two acts and no mechanism"*.
+
+    **Nothing compensates**, asserted over the call sequence: no second
+    ``clear_closure`` follows a failed one, and none follows a failed ending.
     """
     harness, store, journal, conversation = _journalled()
     goal = await _goal_with_two_rows(harness, store, conversation=conversation)
     assert await harness.engine.abandon_goal(goal.id) is GoalAbandonment.ABANDONED
     journal.reset()
+    journal.ending_faults[failing] = AuthorizationError(f"fake: {failing} is unwritable")
 
-    real_write = harness.plans.set_goal_status
-
-    async def arming(goal_id: str, /, **fields: Any) -> Goal:
-        """Arm the store's fault after the ``ACTIVE`` write has succeeded."""
-        written = await real_write(goal_id, **fields)
-        if fields.get("status") is GoalStatus.ACTIVE:
-            if failing == "clear_closure":
-                await journal.raw.end_for_goal(
-                    goal_id, at=AT, goal_version=fields["expected_version"]
-                )
-            store.fail_writes()
-        return written
-
-    setattr(harness.plans, "set_goal_status", arming)  # noqa: B010 — an instance lever
-
-    with pytest.raises(AuthorizationError):
+    with pytest.raises(AuthorizationError, match=failing):
         await _reopen(harness, goal.id)
 
-    store.stop_failing()
+    expected = ["end_for_goal"] if failing == "end_for_goal" else ["end_for_goal", "clear_closure"]
+    assert journal.calls == expected, "the faulting call was reached, and nothing followed it"
+
     held = await harness.plans.get_goal(goal.id)
     assert held is not None
     assert held.status is GoalStatus.ACTIVE
     with pytest.raises(AuthorizationError):
         await store.record(_row(goal.id, "tool_three", row_id="refused"))
-    assert journal.clears == [], "a fault in either call compensates nothing"
 
     # The repair, again the user's own two acts.
+    journal.ending_faults.clear()
     assert await harness.engine.abandon_goal(goal.id) is GoalAbandonment.ABANDONED
-    setattr(harness.plans, "set_goal_status", real_write)  # noqa: B010
     await _reopen(harness, goal.id)
     assert await store.record(_row(goal.id, "tool_four", row_id="repaired")) == "repaired"
