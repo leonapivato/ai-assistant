@@ -29,6 +29,7 @@ from ai_assistant.core.types import (
     ActionQuote,
     ActionQuoteMinting,
     CostBasis,
+    DataTier,
     Disposition,
     Goal,
     GoalAttempt,
@@ -980,3 +981,36 @@ async def test_the_plan_and_goal_are_the_ones_the_request_was_built_from() -> No
     assert minted.plan == PLAN, "the plan the request was built from"
     assert plans.handed_out is not None
     assert plans.handed_out.goal_id == "g-elsewhere", "the rewrite landed, and reached nothing"
+
+
+async def test_the_answered_step_mints_on_the_resume_path_too() -> None:
+    """§11's Q2 is *"§4's mint on **every path** a step's output is recorded"*.
+
+    This stage has two, and they are one expression: :meth:`StepRunner.run` under an
+    `ALLOW` and :meth:`StepRunner.resume` under an approved answer both reach
+    ``_execute``, which is the executor's only caller — so a step the user had to
+    approve records the price its output states exactly as an allowed one does. A
+    declaration that discloses off-device parks, and the answer releases it.
+    """
+    disclosing = declaration(discloses=(DataTier.PERSONAL,))
+    harness = Harness(tools=((disclosing, returning(PRICED)),))
+    state = await an_execution(harness.plans, step())
+
+    assert await harness.drive(state) is Disposition.AWAITING_CONFIRMATION
+    assert await harness.quotes() == (), "nothing is read from a step that has not run"
+    parked = await harness.plans.get_execution(state.id)
+    assert parked is not None
+
+    resumed = await harness.runner.resume(
+        parked, STEP, attempt_id=ATTEMPT, approved=True, timeout=PATIENT
+    )
+
+    assert resumed.disposition is Disposition.EXECUTED
+    (minted,) = await harness.quotes()
+    assert (minted.amount, minted.currency) == (Decimal("120"), "EUR")
+    assert minted.intended_action == ACT
+    assert minted.plan == PLAN
+    assert minted.read_from == StepOutputRef(step=STEP, field="price")
+    assert minted.read_at == AT, "the step's instant, not the answer's"
+    resolving = harness.policy.requests[-1]
+    assert minted.arguments_digest == resolving.parameters_digest, "the resumed request's own"
