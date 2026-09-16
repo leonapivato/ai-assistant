@@ -45,6 +45,7 @@ from ai_assistant.orchestration.effects import (
     conditions_hold,
     verification_holds,
 )
+from ai_assistant.orchestration.evidence import DURABLE_KINDS
 
 if TYPE_CHECKING:
     from collections.abc import Iterator
@@ -92,9 +93,15 @@ def a_read_row(  # noqa: PLR0913 — one keyword per axis a row of §6's table v
         supported_elided=0,
         read_at=read_at,
         as_of=as_of,
-        # A `WEB_SEARCH` row names no record — "its records are minted for one turn and
-        # resolve in no store" (ADR-0252 §1) — so the axis this builder varies decides it.
-        records=() if read_kind is ReadKind.WEB_SEARCH else ("r-1",),
+        # **An ephemeral kind names no record** — "its records are minted for one turn
+        # and resolve in no store" (ADR-0252 §1) — so the axis this builder varies
+        # decides it, and the set is read from the composing site rather than restated
+        # here. `WEB_SEARCH` and `LOCAL_FILE` are §1's own two; `FORECAST_READ` is the
+        # third, which ADR-0260 §9 puts on that side ("a forecast row names no record
+        # and its count stands alone") and §15 records as an amendment to §1's list.
+        # **The counts are unchanged, which is the point of the side**: `returned` and
+        # `admitted` stand alone below.
+        records=("r-1",) if read_kind in DURABLE_KINDS else (),
         returned=1,
         admitted=1,
         verdict=verdict.value,
