@@ -886,7 +886,15 @@ clauses more widely than it now holds?*
 >     either no record and no advance, or the record present with the count
 >     advanced by one and the bound respected. **A half-applied commit surviving a
 >     restart fails this arm**, and it is what §2's one-transaction clause is
->     stated for.
+>     stated for. **Each injection point asserts what was *told* beside what was
+>     left, keyed to the commit itself and never to the injection point**: a fault
+>     falling **before** the commit or flush whose rollback the store confirms
+>     reports `effect_may_have_committed=False` and completes **`FAILED`**; a fault
+>     **at or after** the commit or flush itself reports **`True`** and completes
+>     **`INDETERMINATE`**; and where the implementation cannot establish **which
+>     side of the commit the fault fell**, **`True`**. §2's boundary is the commit
+>     or flush and never the first sub-operation, and arm 19's pessimism caveat is
+>     what forbids the indiscriminate `True`.
 > 17. **The four conditions** — a binding whose connectability, endpoint,
 >     connection reference or recorded identity does not match refuses the call,
 >     **one arm per condition** (ADR-0148 §6).
