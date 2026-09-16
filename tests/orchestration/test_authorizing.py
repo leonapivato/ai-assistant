@@ -14,8 +14,9 @@ that need a fault, a call count or an answer no tree can produce name
 `FakeCoverageAnswers` instead.
 
 **No caller in `orchestration` mints a coverage member**, because no clause of the
-corpus says how one is minted from a recorded act (issue #2373, ruled into
-ADR-0266). So the runner passes an empty tuple and ADR-0254 §1's completeness
+corpus said how one is minted from a recorded act until ADR-0266 (#2373, ruled
+there), and that decision's §11 **L2** lands the mint and has not landed. So the
+runner passes an empty tuple and ADR-0254 §1's completeness
 condition holds only vacuously — §10's own fail-closed sentence and §20 arm 59's
 third case. The arms that need a non-empty ``coverage`` drive it **through this
 function's parameter**, which is the shape a minter will fill.
@@ -211,7 +212,7 @@ async def test_a_request_carrying_no_egress_binding_proposes_nothing() -> None:
 
 
 async def test_a_request_carrying_a_user_facing_argument_proposes_nothing() -> None:
-    """ADR-0254 §20 arm 59's third case, on #2373's blocked minting.
+    """ADR-0254 §20 arm 59's third case, on the minting gap ADR-0266 §11's L2 closes.
 
     "a `CONFIRM` on an egress request one of whose arguments no resolution minted
     a member for → **no row is written**". Every user-facing argument is such an
@@ -725,7 +726,8 @@ async def test_a_met_coverage_over_a_user_facing_argument_proposes_a_row_now() -
     question, refusing every request carrying a user-facing argument whatever the
     coverage; now condition 6 is the member's answer, and a coverage that meets
     the argument **does** found an authority. Nothing on this tree mints such a
-    coverage (#2373), which is why the row here is proposed over one the test
+    coverage until ADR-0266 §11's L2 lands, which is why the row here is proposed
+    over one the test
     supplies.
     """
     covered = (coverage_member(BoundKind.TERMS, bound=terms_bound("hotel-1")),)

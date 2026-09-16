@@ -60,6 +60,7 @@ from ai_assistant.core.errors import (
 from ai_assistant.core.protocols import (
     AuthorizationResolution,
     ConnectionPurger,
+    CoverageAnswers,
     GoalAuthorizations,
     GoalAuthorizationStore,
     GoalQuotes,
@@ -894,6 +895,42 @@ async def test_build_engine_passes_the_one_plan_store_as_the_policys_quote_seam(
         assert isinstance(seam, SqlitePlanStore)
         assert isinstance(seam, GoalQuotes)
         assert seam is engine._plans, "the policy reads the store the runner appends to"
+    finally:
+        await engine.aclose()
+
+
+async def test_build_engine_gives_the_proposal_writer_the_policys_condition_6_face(
+    tmp_path: Path,
+) -> None:
+    """ADR-0270 §6: *"app/ passes that one object to the proposal writer under the new
+    annotation in the lane that moves the call site"*.
+
+    **The row-proposing path is dead without this line.** ADR-0270 §1 and §3 make
+    ``coverage_met`` the only means by which a component that is not ``permissions``
+    obtains condition 6's answer, and ``StepRunner`` proposes nothing holding no
+    answerer — so a root that wired the store and not this face would leave every
+    ``CONFIRM`` resolving under ADR-0148 §3's route (a) with nothing failing, which is
+    the fail-closed direction but also a whole decision shipped inert. That is the
+    hazard ADR-0193 §1 names one seam over and the one ``authorizations`` and
+    ``quotes`` each hit before they were passed.
+
+    **Identity and not merely type, and it is the identity that carries the meaning
+    here.** ADR-0193 §1's *"three faces, one object"*: ``permissions`` satisfies
+    ``ActionPolicy`` and ``CoverageAnswers`` from the policy it already builds, and a
+    *second* ``ThresholdActionPolicy`` over the same seams would type-check, answer
+    condition 6 identically, and still be the second implementation ADR-0266 §7's
+    *"One implementation, in ``permissions``"* exists to forbid — two objects that
+    could be constructed with different thresholds, a different quote seam or a
+    different authorization store, and nothing downstream would look wrong. What
+    distinguishes the right wiring is that the object which **rules** on the dispatch
+    is the object which **answered** the proposal, and only this assertion catches it.
+    """
+    engine = build_engine(Settings(embedder=EmbedderKind.HASHING), data_dir=tmp_path)
+    try:
+        answers = engine._runner._coverage_answers
+        assert isinstance(answers, ThresholdActionPolicy)
+        assert isinstance(answers, CoverageAnswers)
+        assert answers is engine._runner._policy, "one object, under two annotations"
     finally:
         await engine.aclose()
 
