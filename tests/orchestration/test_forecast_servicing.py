@@ -47,6 +47,7 @@ from ai_assistant.core.types import (
     EvidenceBasis,
     EvidenceStanding,
     ForecastNotRead,
+    ForecastOutcome,
     ForecastRefusal,
     OutboundDestination,
     OutboundReach,
@@ -91,7 +92,6 @@ if TYPE_CHECKING:
 
     from ai_assistant.core.protocols import Fetcher, Forecaster
     from ai_assistant.core.types import (
-        ForecastOutcome,
         MemoryRecord,
         SourceListing,
         ToolCall,
@@ -553,21 +553,107 @@ async def test_each_indeterminate_refusal_carries_nothing_either_way(
 
 
 def test_provider_refused_establishes_nothing_over_both_of_its_causes() -> None:
-    """§13's arm (h)'s "**over both its causes**", and the arm it inherits.
+    """§13's arm (h)'s "**over both its causes**", as a property of the member.
 
     §10 records ``PROVIDER_REFUSED`` for **a response the provider gave and this system
     refused** and for **ADR-0148 §6's pre-transmit refusal**, "whose limbs discard the
     credential and open no channel" — and "**it carries no value separating them**", so
     a site holding it cannot tell whether octets arrived. The member is therefore one
     value with one classification: reading it as a response at one seam and as a
-    non-send at another "is what ADR-0264 §13's third arm exists to catch", and this
-    asserts that the classification is a property of the member and not of the path
-    that produced it.
+    non-send at another "is what ADR-0264 §13's third arm exists to catch".
     """
     assert forecast_contact_of(ForecastDisposition.PROVIDER_REFUSED) is (
         OutboundReach.INDETERMINATE
     )
     assert forecast_not_read(ForecastDisposition.PROVIDER_REFUSED) is ForecastNotRead.UNAVAILABLE
+
+
+@final
+class _RefusingBeforeAnyByte:
+    """A forecaster refusing the way ADR-0148 §6 refuses — **before a byte is transmitted**.
+
+    §6 gives that refusal ``ForecastRefusal.PROVIDER_REFUSED``, the same member a
+    response this system refused earns, and states why: "that is what ``WebSearcher``
+    does with these same limbs today, and one fault classified two ways at two seams is
+    what ADR-0264 §13's third arm exists to catch."
+
+    **Which of ADR-0148 §6's four conditions fired is L1's arm**: §13's arm (c) drives
+    them over the production forecaster and ends "at the forecaster boundary, which is
+    where L1 ends", and this seam's only observable at that boundary is the returned
+    member. What this class supplies is the **other** cause of that one member, so the
+    servicing's treatment of it can be compared with the response-refusal path's — and
+    the comparison is the arm: a servicing that told them apart would be reading a value
+    §6 says the member does not carry.
+    """
+
+    __slots__ = ("_inner", "channels")
+
+    def __init__(self, inner: Forecaster) -> None:
+        """Wrap a forecaster whose ``request`` answers normally.
+
+        Args:
+            inner: The forecaster to propose through.
+        """
+        self._inner = inner
+        self.channels = 0
+
+    @property
+    def name(self) -> str:
+        """The wrapped source's own identity."""
+        return self._inner.name
+
+    async def request(self) -> Any:
+        """Propose exactly what the wrapped forecaster proposes.
+
+        Returns:
+            The proposal.
+        """
+        return await self._inner.request()
+
+    async def read(self, call: ToolCall, /, *, timeout: TimeDelta) -> ForecastOutcome:  # noqa: ASYNC109 — the seam owns the deadline (ADR-0241 §1); this stands in for the production forecaster and carries its signature
+        """Discard the credential and open no channel, as ADR-0148 §6's limbs do.
+
+        Args:
+            call: The authorised call.
+            timeout: The bound.
+
+        Returns:
+            The refusal §6 gives that path, carrying nothing that says a byte moved.
+        """
+        _ = call, timeout
+        return ForecastOutcome(refusal=ForecastRefusal.PROVIDER_REFUSED)
+
+
+async def test_the_servicing_treats_both_causes_of_provider_refused_identically() -> None:
+    """§13's arm (h)'s "**over both its causes**", driven over the production servicing.
+
+    A response the provider gave and this system refused, and ADR-0148 §6's pre-transmit
+    refusal, reach this site as **one member carrying no value that separates them**
+    (§6, §10). So the arm is an *identity*: everything the servicing records, folds and
+    carries must be the same for both, and an implementation that read one of them as a
+    response — the failure ADR-0264 §13's third arm exists to catch — would differ here.
+
+    **The channel is what the two causes actually differ in**, and it is deliberately
+    unobservable from this side: §6 puts the price of that in §10, "which puts the member
+    on the nothing-either-way side for precisely that reason".
+    """
+    answered_then_refused = forecaster(refusal=ForecastRefusal.PROVIDER_REFUSED)
+    refused_before_sending = _RefusingBeforeAnyByte(forecaster())
+
+    response, response_audit = await _service(forecast=servicer(seam=answered_then_refused))
+    pre_transmit, pre_transmit_audit = await _service(
+        forecast=servicer(seam=refused_before_sending)
+    )
+
+    assert response_audit.servicings[-1].forecast is ForecastDisposition.PROVIDER_REFUSED
+    assert pre_transmit_audit.servicings[-1].forecast is ForecastDisposition.PROVIDER_REFUSED
+    assert response.forecast_not_read is pre_transmit.forecast_not_read
+    assert response.forecast_contact is pre_transmit.forecast_contact
+    assert response.forecast_records == pre_transmit.forecast_records
+    assert response.forecast_contact is OutboundReach.INDETERMINATE, (
+        "§10 ranks silence above a false claim over both causes"
+    )
+    assert response.forecast_not_read is ForecastNotRead.UNAVAILABLE
 
 
 @pytest.mark.parametrize(
