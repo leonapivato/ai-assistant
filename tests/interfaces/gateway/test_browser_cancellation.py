@@ -449,11 +449,26 @@ async def test_the_abandonment_reports_the_claimed_action_by_its_facts(
     each names" — the statement being rendered directly above the listing it would
     otherwise be pointing at.
 
-    **And it asserts no outcome**: not that the action did not happen, not that it did, and
-    not that anything the owner does will withdraw it.
+    **The listing is seeded ``effect_in_flight=False`` so the act is what is being read,
+    and that is not a contrivance**: §6 rules the act's answer and the listing's field "the
+    same predicate over the same scope, read at **two instants**", which "cannot disagree
+    about one instant, and are never required to agree across two" — and arm 10 states this
+    exact pair as **correct**, where the step resolves ``SUCCEEDED`` after the act's one
+    call and before the listing is taken. So the shape is one R78 requires the surfaces to
+    render, and it is also the only shape in which this case can see what it is about: the
+    row's own sentence carries the words *claimed* and *may have been sent* too, so a
+    listing seeded **true** makes the assertion below pass over the row and stay green with
+    the abandonment renderer deleted. Adversarial review, round 1, ``major``.
+
+    **And the slot is ``#goal-said``, not the panel**, for the same reason: the statement
+    the act produced has an element of its own, and reading the panel whole is what let the
+    row stand in for it.
+
+    **It asserts no outcome**: not that the action did not happen, not that it did, and not
+    that anything the owner does will withdraw it.
     """
     async with driving(gateway_browser, tmp_path) as drive:
-        drive.engine.goal_summaries = [_summary(effect_in_flight=True)]
+        drive.engine.goal_summaries = [_summary(effect_in_flight=False)]
         drive.engine.abandonment = GoalAbandonment.ABANDONED_EFFECT_IN_FLIGHT
 
         # ``Dialog.accept`` is a coroutine, so the handler cannot be a lambda: a page
@@ -469,13 +484,20 @@ async def test_the_abandonment_reports_the_claimed_action_by_its_facts(
 
         drive.page.on("dialog", lambda dialog: running.append(loop.create_task(_accept(dialog))))
         await _open_goals(drive)
-        await drive.page.get_by_role("button", name="Give this up").click()
-        await drive.page.wait_for_function(
-            "expected => document.getElementById('goals').textContent.includes(expected)",
-            arg="may have been sent",
-        )
+        # Nothing on the screen says either of the two things the act is about to say,
+        # which is what makes the wait below a wait on the act.
+        listed = await drive.page.locator("#goals").inner_text()
+        assert "claimed" not in listed
+        assert "may have been sent" not in listed
 
-        said = await drive.page.locator("#goals").inner_text()
+        await drive.page.get_by_role("button", name="Give this up").click()
+        # The slot the act writes into, waited on as a condition the page exposes
+        # (ADR-0216 §7) rather than as a duration this case guessed.
+        await drive.page.wait_for_selector("#goal-said:not([hidden])")
+        said = await drive.page.locator("#goal-said").inner_text()
+
         assert "claimed" in said
+        assert "may have been sent" in said
+        assert "This listing" in said
         for barred in ("did not happen", "will be undone", "withdraw"):
             assert barred not in said.lower(), barred
