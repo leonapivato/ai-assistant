@@ -2068,15 +2068,57 @@ class TestAGoalWhoseRowsAreAllGoalClosedReachesRouteDInNoCase:
     """
 
     @staticmethod
-    async def _ended() -> FakeGoalAuthorizationStore:
-        """One established row of :data:`GOAL`, its goal then closed by the ending."""
+    async def _live() -> FakeGoalAuthorizationStore:
+        """One established row of :data:`GOAL`, standing and live."""
         store = FakeGoalAuthorizationStore(now=SHARED_CLOCK.reset())
         await store.record(live(id="a1"))
         await store.settle("a1", to=AuthorizationDisposition.ESTABLISHED, settled_at=AT)
         assert await store.live_for(GOAL, TOOL.id) is not None, "a live authority first"
+        return store
+
+    @classmethod
+    async def _ended(cls) -> FakeGoalAuthorizationStore:
+        """That row's goal then closed by the ending."""
+        store = await cls._live()
         assert await store.end_for_goal(GOAL, at=NOW, goal_version=4) == 1
         assert await store.live_for(GOAL, TOOL.id) is None, "and none after the ending"
         return store
+
+    async def test_one_policy_that_ruled_route_d_stops_ruling_it_once_the_goal_closes(
+        self,
+    ) -> None:
+        """Arm 6 is a **recheck**, so it is taken across the ending on one policy.
+
+        The two cases below build their policy over a goal that has already closed,
+        which leaves one regression standing: a policy that reads ``live_for`` every
+        ruling as arm 51 requires, sees the new ``None``, and rules route (d) from the
+        record the *previous* ruling returned. Nothing in a suite that never obtained
+        a route-(d) ``ALLOW`` from that instance can fail against it.
+
+        So this is one :class:`ThresholdActionPolicy`, ruling **twice** over the same
+        request: route (d) while the row stands, and no route (d) once the goal has
+        closed under it. Adversarial review, round 15, ``blocker``.
+        """
+        store = await self._live()
+        recipients = grants()
+        gate = ThresholdActionPolicy(grants=recipients, authorizations=store)
+
+        first = await gate.decide(booking())
+        assert (first.outcome, first.authorised_by, first.authorised_goal) == (
+            PermissionOutcome.ALLOW,
+            "a1",
+            GOAL,
+        ), "route (d) while the row is live"
+        assert recipients.call_count == 0, "which is route (d) foreclosing route (b)"
+
+        assert await store.end_for_goal(GOAL, at=NOW, goal_version=4) == 1
+
+        second = await gate.decide(booking())
+        assert second.outcome is PermissionOutcome.ALLOW
+        assert (second.authorised_by, second.authorised_goal) == ("g-1", None), (
+            "the grant rules it now, and the record this policy already read does not"
+        )
+        assert recipients.call_count == 1
 
     async def test_a_covering_grant_rules_route_b_and_the_ended_record_authorises_nothing(
         self,
