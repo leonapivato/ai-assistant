@@ -2267,3 +2267,60 @@ async def test_a_slow_worker_still_returns_and_does_not_hang(tmp_path: Path) -> 
         assert len(await asyncio.wait_for(store.records(), timeout=20)) == 1
     finally:
         store.close()
+
+
+# --------------------------------------------------------------------------- #
+# what the seventh adversarial round found
+# --------------------------------------------------------------------------- #
+
+
+@pytest.mark.parametrize(
+    ("spelling", "why"),
+    [
+        ("20261001", "ISO-8601's basic form"),
+        ("2026-W40-4", "an ISO week date"),
+        ("2026-274", "an ISO ordinal date"),
+        ("2026-10-01T00:00:00", "and the instant, already refused"),
+    ],
+)
+def test_the_factory_and_settings_share_one_day_domain(spelling: str, why: str) -> None:
+    """The factory states the **same** rules, over the whole domain (ADR-0273 §5).
+
+    ``build_simulated_booking_integration``'s docstring promises *"the same rules at the
+    one place a provider can be built without going through ``Settings``"*, and the
+    previous round's repair made that promise false in one direction: ``Settings`` was
+    narrowed to the extended calendar date while ``_checked_day`` still read whatever
+    ``date.fromisoformat`` accepts — the basic form, ISO week dates, ordinal dates. Two
+    configuration domains for one configuration is the defect, whichever is wider.
+
+    It is also now **one** rule with the ``date`` *argument*'s own schema pattern, so the
+    provider cannot accept a spelling at the configuration end that it refuses at the
+    call end.
+    """
+    with pytest.raises(BookingConfigurationError, match="calendar date"):
+        BookingCatalogue.checked(
+            available_from=spelling,
+            available_to="2026-12-31",
+            price_amount=PRICE,
+            price_currency=CURRENCY,
+            charge_amount=PRICE,
+            charge_currency=CURRENCY,
+            retained_records=2,
+        )
+    assert why
+
+
+def test_the_extended_form_is_what_both_ends_accept() -> None:
+    """And the extended form loads, which is what makes the refusals above refusals."""
+    catalogue = BookingCatalogue.checked(
+        available_from="2026-10-01",
+        available_to="2026-12-31",
+        price_amount=PRICE,
+        price_currency=CURRENCY,
+        charge_amount=PRICE,
+        charge_currency=CURRENCY,
+        retained_records=2,
+    )
+
+    assert catalogue.available_from == date(2026, 10, 1)
+    assert catalogue.available_to == date(2026, 12, 31)

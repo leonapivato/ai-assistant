@@ -67,6 +67,7 @@ from __future__ import annotations
 import asyncio
 import contextlib
 import json
+import re
 import sqlite3
 import stat
 import threading
@@ -160,6 +161,15 @@ _DESCRIBED_AS_SIMULATED: Final = (
 
 #: An ISO-4217 alphabetic code is exactly this long (ADR-0267 §1).
 _CURRENCY_CODE_LENGTH: Final = 3
+
+#: The one string shape a configured day may take — ISO-8601's **extended calendar
+#: date**, which is also the shape :func:`_date_subschema` puts on the ``date``
+#: *argument*. One rule for the configuration and the call, so the provider cannot
+#: accept a spelling at one end that it refuses at the other; and the **same** rule
+#: ``Settings`` states, so "the factory states the same rules at the one place a
+#: provider can be built without going through ``Settings``" is true of the whole
+#: domain rather than of most of it.
+_CALENDAR_DAY: Final = re.compile(r"\d{4}-\d{2}-\d{2}")
 
 #: The weakest record bound ADR-0273 §5 admits: *"a store that retains at least the
 #: booking just made"*. ``0`` would prune the record its own booking had just inserted.
@@ -464,13 +474,22 @@ def _checked_day(value: date | str, *, field: str) -> date:
         raise BookingConfigurationError(msg)
     if isinstance(value, date):
         return value
+    # **The extended form and nothing else** (§5). ``date.fromisoformat`` also reads the
+    # basic form ``20261001`` and ISO week and ordinal dates; ``Settings`` refuses each
+    # of those under the shape it states, so admitting them here would make the factory
+    # and the settings two different configuration domains — which is exactly what this
+    # function's docstring promises they are not.
+    if not isinstance(value, str) or _CALENDAR_DAY.fullmatch(value) is None:
+        msg = (
+            f"{field} must be a calendar date in the form 2026-10-01 (ADR-0273 §5); "
+            f"the basic form and ISO week and ordinal dates are refused here as "
+            f"``Settings`` refuses them"
+        )
+        raise BookingConfigurationError(msg)
     try:
         return date.fromisoformat(value)
-    except (TypeError, ValueError) as exc:
-        # ``TypeError`` is named as well as ``ValueError``: this function's annotation
-        # says ``date | str``, and a caller reaching the factory directly — the one
-        # route that does not go through ``Settings`` — is not type-checked.
-        msg = f"{field} must be an ISO-8601 date (ADR-0273 §5)"
+    except ValueError as exc:  # pragma: no cover — a shaped string with an unreal day
+        msg = f"{field} must be a real calendar date (ADR-0273 §5)"
         raise BookingConfigurationError(msg) from exc
 
 
