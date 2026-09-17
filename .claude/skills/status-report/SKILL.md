@@ -255,18 +255,17 @@ as unmeasured is a fact the owner can act on.
 
 ## 8. Grand scheme
 
-Where this batch sits in its track's open milestone, and how much of that
-milestone's **exit test** is satisfied — quoted from the roadmap, the track's own
-issue, or the ADR that states it, with which parts are met and which are not. Not
-a percentage: an exit test is a set of clauses, and "60% done" hides which 40%.
+Where this batch sits in its native GitHub milestone, and which of the linked
+acceptance issue's scenarios are demonstrated, open or changed by an owner
+ruling. Query the milestone and its issues rather than treating a completion
+percentage, merged component or closed QA run as acceptance.
 
-**Read the plan off the surveyed commit, not off memory.** Scope lives in
-`docs/roadmap.md` and the ADRs (`pre-dispatch-survey` §2), and the plan changes
-by ratification without telling your context — the tracks that replaced arcs and
-legs (#1226 §2) are themselves an instance of it. This is also why no track,
-milestone, or current-plan fact is written into this skill: a living document
-carries rules, never a snapshot of what the plan currently is (ADR-0019), and a
-snapshot here would rot while still reading as authoritative.
+Read direction from the surveyed `docs/roadmap.md` and contracts from the ADRs.
+Read live delivery scope from the native milestone and its linked issues.
+Legacy track checklists and numbers are historical references, not a queue;
+an empty native milestone list does not authorize reviving them. Explicit
+owner-directed maintenance outside a milestone names that instruction instead.
+An issue with no milestone remains unscheduled, not implicitly “next.”
 
 Then two things the owner cannot get anywhere else:
 

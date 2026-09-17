@@ -74,31 +74,31 @@ be invisible to a title scan.
 Open PRs and issues are where work-in-flight lives (ADR-0015). There is no
 ledger file; do not look for one.
 
-## 2. Scope comes from the roadmap, not from this skill
+## 2. Scope comes from native milestones and the owner, not this skill
 
-`docs/roadmap.md` carries the standing **tracks** (#1226 §2): each one's
-purpose, its milestones ordered by **dependency alone** with an exit test on
-each, and what it defers. A track's *live* state — which milestone is open, what
-closed — is not in the file; it is on the track's own issue, which the file
-points at. The gap register maps each `VISION.md` promise to the ADRs and issues
-that hold it.
+`docs/roadmap.md` explains direction and links to native GitHub milestones.
+Their descriptions and linked issues hold agreed outcomes, dependencies,
+acceptance scenarios and live scope. Legacy track checklists are historical
+records; their open boxes and suggested next lanes do not authorize dispatch.
 
-So the scope question is already answered on disk, by the operator. This skill's
-job is to say what state that plan meets, not to re-derive the plan. Two things
-follow:
+Read the surveyed roadmap, then query the native milestone and its issues:
 
-- **Read the surveyed roadmap, then the track issue it points at, and take the
-  open milestone from there.** The issue is newer than the file and wins where
-  they differ. Where any of the three and the survey disagree — a milestone's
-  slice looks already built, or a deferred item has an open PR — **name the
-  discrepancy and stop** rather than resolving it yourself. That is an operator
-  decision.
-- **Do not encode a scope test here.** A previous revision of this skill gated
-  candidates on the roadmap's then-current "first-vertical seven artifacts". The
-  roadmap was reoriented to the accumulation legs and the gate silently admitted
-  nothing. A living document carries rules, never snapshots of what the plan
-  currently is (ADR-0019) — and a scope heuristic in a skill is exactly that
-  snapshot, with the added cost that it looks authoritative while it rots.
+```bash
+gh api --paginate 'repos/{owner}/{repo}/milestones?state=open&per_page=100'
+gh api --paginate 'repos/{owner}/{repo}/issues?state=all&milestone=<number>&per_page=100'
+```
+
+An empty milestone list means there is no milestone to take scope from. Do not
+create provisional replacements or revive a retired plan. Explicit
+owner-directed maintenance can proceed without a milestone; record that
+instruction and its limits in the batch/work issue.
+
+The survey establishes what state the selected scope meets, not what the scope
+should be. Reconcile existing implementation and evidence before proposing new
+lanes. Where a milestone, a ratified ADR and the survey conflict, name the
+discrepancy and ask the owner rather than silently revising scope; architectural
+contracts retain precedence. Track labels categorize work and collision
+ownership, not an alternate queue.
 
 ## 3. Check the batch for collisions
 
@@ -119,8 +119,9 @@ batch:
   `core/types.py`, or neither. A Protocol method can take or return a type that
   does not exist yet, and public data crossing a subsystem boundary must live in
   `core/types.py`.
-- **A track's milestone order is a dependency order** (#1226 §2). Slices from a
-  later milestone are not parallel work just because they touch different files.
+- **Milestone dependencies are explicit**, not inferred from numbering or
+  display order. Dependent slices are not parallel work merely because they
+  touch different files.
   Across tracks there is no order at all — lanes take clones and review quota
   first-come-first-served (`docs/roadmap.md` → "Concurrency") — but two tracks'
   lanes must not hold the same subsystem at once.
@@ -205,8 +206,10 @@ in-flight state belongs in the tracker (ADR-0015), not in a document.
   enrolment surface").
 - **Labels**: `batch`, plus the one `track:*` label the batch sits on
   (`CONTRIBUTING.md` → "The tracker"; at most one track label per issue).
-- **Why**: 2–3 sentences tying the batch to its track's open milestone and the
-  `VISION.md` principle that milestone's exit test serves.
+- **Why**: 2–3 sentences tying the batch to its native milestone URL and
+  acceptance issue (or explicit owner-directed maintenance), and the
+  `VISION.md` principle served. Associate scoped delivery issues with that
+  milestone; do not manufacture a new milestone merely to dispatch a batch.
 - **One checklist section per lane**, each with: what it delivers, a proposed
   `<area>/<slug>` branch name, and whether it touches `core/protocols.py`,
   `core/types.py`, or both.
