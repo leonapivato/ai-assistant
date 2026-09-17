@@ -684,18 +684,21 @@ run before a rebase is not a gate run against `main`.
 The mechanics of the role — clone inventory, brief contents, what to re-check
 before believing a report, merge sequencing — live in the `dispatch-agents`
 skill, alongside `pre-dispatch-survey`, which establishes the state its briefs
-are written against. Neither decides *what* the work is: `docs/roadmap.md` owns
-scope, and each of its tracks orders its own milestones.
+are written against. Neither decides *what* the work is: native GitHub
+milestones and their linked issues hold agreed delivery scope and dependencies;
+`docs/roadmap.md` explains direction and points to them.
 
 ## The tracker
 
-GitHub issues are the whole tracker — ADR-0015 deleted the in-repo coordination
-files and did not replace them. Labels are how work is found, and they are a
-small fixed set (#1226 §6).
+GitHub issues and native GitHub milestones are the delivery tracker. Keep no
+in-repo coordination ledger (ADR-0015). The owner-directed transition and
+retirement of legacy milestone plans are recorded in #2518; the old track
+checklists are historical evidence, not dispatch authority. Labels remain a
+small classification set (#1226 §6).
 
-**Track labels — at most one per issue.** A track is a standing program of work
-with a purpose, ordered milestones and driveable exits. **The live set is the
-tracker's own**, and it is not enumerated here: this file went two tracks stale
+**Track labels — at most one per issue.** A track identifies an area of work,
+not a separate milestone board or an implicit implementation schedule. **The live
+set is the tracker's own**, and it is not enumerated here: this file went two tracks stale
 the last time it was, and a list that decays is worse than a pointer. Read it
 whole with
 
@@ -707,8 +710,26 @@ rather than with `gh label list`, whose `--limit` is a maximum and defaults to
 30 — a listing silently cut at its limit is the failure this pointer exists to
 avoid.
 
-`docs/roadmap.md` carries each track's shape, its own issue carries its live
-state, and the label's own description names that issue.
+**Native milestones own delivery scope and acceptance status.** Each milestone
+states a user-visible outcome, exclusions and dependencies, and links an
+acceptance issue with scenarios agreed before implementation. Issues carry its
+delivery slices and evidence; associate those issues with the native milestone
+rather than maintaining another checklist on a track issue. Keep design
+umbrellas outside a milestone when they span several undecided deliveries.
+
+The milestone's completion percentage is not acceptance. Record the owner's
+exit ruling with the evidence before closing an accepted milestone. A retired
+milestone is explicitly marked retired, not passed; preserve its evidence and
+give remaining requirements an explicit disposition. Closing a QA record or
+merging the components does not itself accept the milestone.
+
+`docs/roadmap.md` carries direction and navigation, not duplicate status.
+Track issues retain historical discussion; native milestones and their linked
+issues hold the live delivery plan. An empty milestone list is not an
+invitation to dispatch from an archived track. Do not create provisional
+milestones or assign numbers before the owner has agreed the replacement
+boundaries. Explicit owner-directed maintenance need not invent a milestone,
+but record that instruction on its work item.
 
 *At most one* `track:*` is the rule with teeth. An issue that would carry two is
 a finding that belongs to a subsystem another track has a lane open in: file it
@@ -730,9 +751,9 @@ there and this section stays a rule rather than a snapshot of one.
 - **`unknown` is "not yet sized"**, the honest default for an issue filed in
   passing, and it is re-sized **lazily, when the issue is next touched**. There
   is no sizing sweep owed, for the same reason there is no labelling sweep.
-- **`backlog:blocker` means it enters the next batch.** A blocker against no
-  program of work is a contradiction, so sizing an issue that way is the act
-  that schedules it — which is what stops the severity being decorative.
+- **`backlog:blocker` makes selection urgent, not implicit.** Surface it for
+  the next work-selection decision. A severity label does not create a batch,
+  revive a retired plan or bypass the owner's milestone/scope decision.
 
 **Kind labels**, orthogonal to the track:
 
@@ -754,33 +775,22 @@ passes through them. `ruling` is the exception above — an issue the owner owes
 decision on is unreachable in the return brief until it carries one, so label it
 immediately.
 
-### Recording a milestone's exit ruling obliges a roadmap sweep
+### Recording a milestone disposition obliges a roadmap sweep
 
-**Whoever writes an exit ruling onto a track's issue — ticking the checkbox —
-reads that track's narrative in `docs/roadmap.md` in the same act, and deletes
-or re-points every sentence the ruling has just falsified.** The sweep is part
-of recording the ruling, not a follow-up someone might file.
+Whoever records acceptance, retirement or a scope change updates the native
+milestone and its linked acceptance issue, then reads the affected roadmap
+narrative in the same act. Delete or re-point any dependency, deferral or scope
+claim the ruling falsified. Do not tick a retired requirement as completed.
 
-The reason is that the ruling is the moment the prose decays and the one moment
-somebody knows exactly which claims changed. The tracker is updated, the
-checkbox is ticked, and nothing until now obliged anyone to look at the roadmap
-sentence the ruling had made false — so the plan's prose rotted precisely when
-the project was most confident it was current (#1568, #1573).
-
-Two rules bound what the sweep may write, and neither is relaxed by it:
-
-- **Delete or re-point; never refresh in place.** A claim the ruling falsified
-  is removed, or replaced by a pointer at whatever now holds the fact — the
-  track's issue, or a ratified ADR. Rewriting it with a newer number just resets
-  the decay clock (`docs/roadmap.md`'s opening rule; "No state claims in living
-  documents" below).
-- **Milestone completion does not go into `docs/roadmap.md`.** The roadmap
-  carries a track's shape and the issue carries its live state (#1226 §2), so
-  "milestone N has closed" is a sentence for the issue and never for the
-  roadmap. The sweep removes falsified claims; it does not add true ones.
+The sweep removes obsolete claims; it does not duplicate milestone status in
+`docs/roadmap.md`. Record results, tested revisions, remaining work and the
+owner's ruling in GitHub. Preserve legacy issues, their original evidence and
+historical identifiers when a plan is retired.
 
 `.claude/skills/qa-milestone` → "Close out" states the same obligation at the
-QA-run end of the same moment.
+QA-run end. Tests and composition evidence accumulate during slice delivery;
+the acceptance record gathers that evidence rather than postponing integration
+until every component has merged.
 
 ## Git & commits
 

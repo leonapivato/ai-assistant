@@ -62,6 +62,16 @@ Request pipeline (owned by `orchestration`): intent → context assembly →
 memory retrieval → planning → tool selection → permission check → execute →
 learn/update memory.
 
+## Delivery planning
+
+Use native GitHub milestones and their linked acceptance/delivery issues for
+agreed scope and dependencies. `docs/roadmap.md` provides direction and
+navigation; legacy track checklists are historical records, not a dispatch
+queue. An empty milestone list does not authorize reviving old plans or
+creating provisional replacements. Explicit owner-directed maintenance can
+proceed without inventing a milestone. See `CONTRIBUTING.md` → "The tracker"
+and the owner's reset record #2518.
+
 ## How to work (make changes reviewable)
 
 - **Branch first, before editing anything.** You are the only agent in this

@@ -1,26 +1,29 @@
 ---
 name: qa-milestone
-description: Run the post-milestone QA pass — drive a finished milestone's ruled behaviors end-to-end through a live hub, before the operator rules its exit test. Use after a milestone's last lane merges, when verifying a milestone's mechanisms compose in the running system, or when opening the issue that records a QA run.
+description: Gather milestone composition evidence — drive agreed behaviors end-to-end through a live hub as vertical slices land, then reconcile acceptance before the operator rules the exit. Use when checking that mechanisms compose or recording a QA run.
 ---
 
 # qa-milestone
 
-Runs after the last lane of a unit of work merges and **before the operator
-rules the exit test**, so the ruling is made on composition evidence and not only
-on per-lane green. This is a dev-process tool for building `ai-assistant` itself,
-not a product feature.
+Composition evidence is gathered as useful vertical slices land and **before
+the operator rules the exit test**. A final pass reconciles the milestone's
+acceptance scenarios; do not wait until every component has merged to discover
+whether its producers are reachable. This is a dev-process tool for building
+`ai-assistant` itself, not a product feature.
 
-**The unit is a milestone.** Work is organised as standing **tracks** whose
-**milestones** close on a QA-driven exit ruling (#1226 §2, `docs/roadmap.md`), and
-that milestone is what a run charters against. The pass is equally the shape for a
-QA run over a surface that is not a live hub. The record issue carries the `qa`
+**The unit is a native GitHub milestone.** Its description and linked acceptance
+issue state the outcome, exclusions and scenarios agreed before implementation.
+A run charters against that scope and the applicable ADRs, not an archived track
+checklist. Retired milestones need no new exit campaign; their findings remain
+inputs to future work. The pass is equally the shape for a QA run over a surface
+that is not a live hub. The record issue carries the `qa`
 label (`CONTRIBUTING.md` → "The tracker").
 
 ## 1. What this pass owns, and what it does not
 
-Everything per-PR has already run by the time a milestone finishes — the gate, the
-adversarial review, the conformance suites. Those own the *slices*. What none
-of them can own is the **composition**: the seams where one lane's producer
+Per-PR gates, adversarial review and conformance suites accompany delivery.
+Those own the *slices*. What none of them can own is the **composition**:
+the seams where one lane's producer
 meets another lane's machinery, in the real resident process, driven the way a
 user or operator will drive it. That is this pass's whole jurisdiction.
 
@@ -140,27 +143,18 @@ two places — fix lanes for defects, and the **operator's exit ruling** for the
 milestone, which is the reason this pass runs before that ruling rather than
 after.
 
-**Then sweep `docs/roadmap.md` for what the ruling falsified.** When the exit
-ruling lands and the milestone's checkbox is ticked on the track issue, read
-that track's narrative in the roadmap in the same act and **delete or re-point
-every sentence the ruling has just made false** — a deferral that was waiting on
-this milestone, a sequencing constraint against it, an open question it settled.
+**Record acceptance on the native milestone's linked acceptance issue.** Link
+the QA record and any deterministic/live evidence accumulated during delivery.
+Closing this run records its completion, not a passed milestone. The owner rules
+acceptance; only then close the accepted milestone. GitHub's completion
+percentage is not evidence of acceptance. Retirement is a separate explicit
+disposition, never a passed exit.
 
-This is an obligation of recording the ruling, not a follow-up to file (#1573).
-The ruling is the moment the prose decays *and* the one moment somebody knows
-exactly which claims changed; before this rule, the tracker was updated and
-nothing sent anyone to the roadmap sentence the update had falsified, so the
-plan rotted precisely when the project was most confident it was current
-(#1568).
+**Sweep `docs/roadmap.md` for what the disposition falsified.** Delete or re-point
+affected dependencies, deferrals and scope claims in the same act. Do not keep a
+second completion checklist in the roadmap or a legacy track issue, and do not
+mark unresolved requirements completed to tidy a retired milestone.
 
-Two bounds, neither relaxed here:
-
-- **Delete or re-point, never refresh in place.** Replace a falsified claim with
-  a pointer at whatever now holds the fact — the track issue, or a ratified ADR
-  — or remove it. A newer number in the same sentence only resets the clock.
-- **Do not write completion into the roadmap.** It carries a track's shape; the
-  issue carries its live state (#1226 §2). "Milestone N closed" belongs on the
-  issue. The sweep removes false claims; it does not add true ones.
-
-`CONTRIBUTING.md` → "Recording a milestone's exit ruling obliges a roadmap
-sweep" states the same rule at the tracker end of the same moment.
+`CONTRIBUTING.md` → "Recording a milestone disposition obliges a roadmap sweep"
+states the same rule at the tracker end. Preserve earlier QA, passing tests and
+open findings when retiring a plan.
