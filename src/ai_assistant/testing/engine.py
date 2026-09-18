@@ -1283,9 +1283,16 @@ class FakeAssistantEngine:
         delivery: SpokenDeliveryReport | None = None,
     ) -> SpokenTurn:
         """Adapt a legacy spoken call through shared channel admission."""
+        selected = (
+            None if conversation_id is None else identifier(conversation_id, name="conversation_id")
+        )
+        if not plays:
+            msg = "plays must name at least one format the caller can render (ADR-0200 §3)"
+            raise ValueError(msg)
+        _refuse_unusable_report(delivery, conversation_id=selected)
         result = await self._receive(
             ChannelInput(
-                target=conversation_target(conversation_id),
+                target=conversation_target(selected),
                 payload=SpeechChannelPayload(audio=utterance),
                 conversation=ConversationInputOptions(delivery=delivery),
             ),
@@ -1455,6 +1462,8 @@ class FakeAssistantEngine:
         # this pass composed a reply, so it carries a statement and never ``None`` —
         # which §7 reserves for a pass that "neither established a contact nor composed
         # a reply" (#2381).
+        if outcome.conversation_id is None:
+            outcome = outcome.model_copy(update={"conversation_id": held})
         outcome = self._stating(outcome)
         return self._checked(outcome, "converse")
 
@@ -1528,6 +1537,8 @@ class FakeAssistantEngine:
         # this pass composed a reply, so it carries a statement and never ``None`` —
         # which §7 reserves for a pass that "neither established a contact nor composed
         # a reply" (#2381).
+        if outcome.conversation_id is None:
+            outcome = outcome.model_copy(update={"conversation_id": held})
         outcome = self._stating(outcome)
         checked = self._checked(outcome, "converse_streaming")
         for piece in _pieces_of(checked.reply):
@@ -1641,6 +1652,8 @@ class FakeAssistantEngine:
         # carries it like any other: §7 makes the spoken surface no rendering surface,
         # which is a fact about that surface and not a reason to leave the member
         # absent on the outcome (#2381).
+        if outcome.conversation_id is None:
+            outcome = outcome.model_copy(update={"conversation_id": held})
         outcome = self._stating(outcome)
         chosen = next((member for member in plays if member in self.spoken_formats), None)
         # ADR-0205 §4: every turn of this operation is stamped `UNKNOWN` at capture,
