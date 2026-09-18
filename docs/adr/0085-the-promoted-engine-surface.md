@@ -1,7 +1,19 @@
 # 85. The promoted engine surface: fifteen methods, twenty-four types, one closed graph
 
-- Status: Partially superseded by ADR-0107 (§4a's "`Belief` is unchanged … its counts stay derived from it", and §4's normative field rows for `Belief` and `BeliefSummary`) and ADR-0173 (§8a's enumeration of `kind` as one of five values, which gains a sixth for a streamed chunk; and §8c's enforcement clause "on results before return", as it reaches a method returning an async iterator) and ADR-0178 (§4's Group A field row for `Confirmation`, which enumerates five fields where there are now six) and ADR-0250 (§3's signature block, in `converse`'s parameter list and in the roster's count alone: `converse` gains one keyword parameter, `reference` (`TurnReference | None`, defaulting to `None`), and the surface gains `goals`, `withdraw_clarification` and `abandon_goal`. That one scope, and nothing else in this ADR: §3's every-annotation-is-spelled-out rule, its docstring obligations and its `DEFAULT_PAGE_SIZE` convention bind entire, §5's closed-graph obligation binds entire and is obeyed because every type that decision adds to the surface is `core`'s and reachable from it, and `converse_streaming` needs no record of its own because the streaming decision recorded above defines it as taking exactly `converse`'s arguments in exactly its order)
+- Status: Partially superseded by ADR-0107 (§4a's "`Belief` is unchanged … its counts stay derived from it", and §4's normative field rows for `Belief` and `BeliefSummary`) and ADR-0173 (§8a's enumeration of `kind` as one of five values, which gains a sixth for a streamed chunk; and §8c's enforcement clause "on results before return", as it reaches a method returning an async iterator) and ADR-0178 (§4's Group A field row for `Confirmation`, which enumerates five fields where there are now six) and ADR-0250 (§3's signature block, in `converse`'s parameter list and in the roster's count alone: `converse` gains one keyword parameter, `reference` (`TurnReference | None`, defaulting to `None`), and the surface gains `goals`, `withdraw_clarification` and `abandon_goal`. That one scope, and nothing else in this ADR: §3's every-annotation-is-spelled-out rule, its docstring obligations and its `DEFAULT_PAGE_SIZE` convention bind entire, §5's closed-graph obligation binds entire and is obeyed because every type that decision adds to the surface is `core`'s and reachable from it, and `converse_streaming` needs no record of its own because the streaming decision recorded above defines it as taking exactly `converse`'s arguments in exactly its order) and ADR-0274 (§1's restriction to its listed request methods "and nothing else", extended with receive and receive_streaming; existing signatures, types, and other rules are unchanged)
 - Date: 2026-07-31
+- Partially superseded: 2026-09-18 by ADR-0274 — **§1's method-inventory
+  restriction alone**, on ratification of ADR-0274. The words "carrying the
+  fifteen request methods below and nothing else" no longer close the inventory:
+  ADR-0274 §4 adds `receive` and `receive_streaming`. Its §3 defines their
+  channel input, reply, and result types, and §8 defines their event errors.
+  Existing method signatures and existing type fields do not change. §5's
+  transitive type-closure rule is used, not replaced: the added public values
+  are declared in `core`. Argument conventions, identifier normalization,
+  canonical payload limits, and all earlier partial supersessions stand.
+  ADR-0274 §8 preserves legacy public payload accounting and measures the new
+  receiver envelopes on their own declared shapes. This record changes no
+  ratified decision text below. Refs ADR-0274 §10.
 - Partially superseded: 2026-08-22 by ADR-0178 — **one row of one table, and
   §5's walk gains an edge without its conclusion moving.** ADR-0178 closes #1366:
   ADR-0148 §8's fourth clause requires a `CONFIRM` on an egress call to name the

@@ -2,6 +2,18 @@
 
 - Status: Accepted
 - Date: 2026-08-21
+- Note (2026-09-18): ADR-0274 §4 adds `receive_streaming`, whose terminal
+  value wraps a conversational outcome in `ChannelResult`. This uses §4's
+  general rule that each streaming method's yielded union is adapted by frame
+  kind from that method's annotation. **No clause here is superseded:**
+  `converse_streaming` still yields `ReplyChunk | TurnOutcome`, and its
+  signatures, public payload room, terminal authority, and disconnect behavior
+  remain intact. The new method yields `ReplyChunk | ChannelResult`; chunk and
+  terminal frames are still discriminated by frame kind, while the wrapper's
+  discriminator describes its result variant, not its frame. ADR-0274 §§6, 8
+  preserve the shared reply and size guarantees on the corresponding public
+  projection. This explanatory record applies on ratification of ADR-0274 and
+  changes no ratified text below. Refs ADR-0274 §10.
 - **This ADR is milestone 18's ruling on `track:conversation` (#1312)**, the
   milestone whose exit test is *a streamed answer over the wire, resumed
   mid-conversation, from the CLI*. ADR-0170 gave the pipeline a stage that speaks
