@@ -1,10 +1,9 @@
-# Draft. Channel inputs share an assistant receiver, and reply delivery is optional
+# 274. Channel inputs share an assistant receiver, and reply delivery is optional
 
 - Status: Proposed
 - Date: 2026-09-17
-- Number: Pending dispatcher assignment; `NNNN` reserves no number.
 - Scope: [Milestone 1](https://github.com/leonapivato/ai-assistant/milestone/1), [#2521](https://github.com/leonapivato/ai-assistant/issues/2521).
-- Review hold: The owner requested this draft and reserved ratification until they have read it.
+- Owner authorization: Reviewed and authorized for ratification on 2026-09-18; the owner assigned ADR-0274.
 
 ## Context
 
@@ -18,7 +17,11 @@ The owner reviewed the working proposal and selected informational-only
 processing for the input-only demonstration. It creates no conversation, goal,
 or episode. The proposed operation is a transient factual summary of supplied
 event material, returned to the submitting adapter without a user-facing reply.
-The owner has not ratified this ADR.
+After reviewing the draft and clarifying the distinction between input channels
+and independently initiated output, the owner authorized ratification. This
+decision keeps channels scoped to incoming input and their optional replies;
+independently initiated output remains with existing tool and notification
+mechanisms.
 
 The inspected baseline is `cc5c6788`. `AssistantEngine.converse`,
 `AssistantEngine.converse_streaming`, and `AssistantEngine.converse_spoken` in
@@ -434,8 +437,9 @@ output's factual accuracy.
 ### 10. Relationship to existing decisions
 
 This is a substantive shared-contract decision under ADR-0015 §5. The
-reconciliation below is part of the proposal, not an amendment already applied
-to an accepted ADR. No existing ADR's status changes in this draft.
+reconciliation below identifies the one replaced inventory clause and the
+existing rules used unchanged. The accompanying earlier-ADR records take effect
+with ratification of this decision.
 
 > **Normative.** The new receiver's conversational combinations are alternate
 > entries to the existing conversational operations, not new audience or work
@@ -447,19 +451,23 @@ to an accepted ADR. No existing ADR's status changes in this draft.
 | Decision | Reconciliation |
 | --- | --- |
 | ADR-0074 §§1–3, §5 | Preserve store-owned allocation, history, and capture for every conversational turn. The §7 informational operation is not a conversational turn and creates no `TurnOutcome`; it does not weaken capture on any existing operation. |
-| ADR-0084/0085 | Extend the promoted surface and its transitive type closure with §3/§4 and the two event errors. Partially supersede the existing method/type inventory only; preserve authentication, size enforcement, canonical transport behavior, and old method signatures. |
+| ADR-0084/0085 | Extend the promoted surface and its transitive type closure with §3/§4 and the two event errors. Partially supersede ADR-0085 §1's restriction to its listed request methods "and nothing else" by adding the two receiver operations; no existing type's fields change. Preserve authentication, size enforcement, canonical transport behavior, and old method signatures. |
 | ADR-0170 §2 | Preserve the engine's lack of a direct model-provider capability by injecting an already-wired orchestration stage. The event summary is not `TurnOutcome.reply`. |
-| ADR-0173 | Extend the streamed surface with a wrapper terminal type under the same chunk/result and disconnect rules; preserve the old streamed operation and its payload room. |
+| ADR-0173 | Apply §4's method-reflected yielded-union rule to the new receiver's wrapper terminal type under the same chunk/result and disconnect rules. Its `converse_streaming` annotation and payload room are unchanged; no clause of ADR-0173 is superseded. |
 | ADR-0199/0200/0203/0205 | Preserve spoken audience, narrowed supply, transient audio, transcription, capture, playback, and synthesis semantics for the mapped spoken combination. No new output audience is declared. |
 | ADR-0221 | Reuse the existing modality values and capture semantics; no event capture is added. |
 | ADR-0228 | Preserve each mapped conversational operation's own planning budget. Events do not enter its planning loop. |
 | ADR-0249/0250 | Preserve goals, attempts, association, and control-reference semantics for conversations; informational events neither engage nor create them. |
 
-> **Normative.** On ratification, the numbered ADR records its limited surface
-> extension on ADR-0085 and the added streaming terminal shape on ADR-0173 using
-> ADR-0070/ADR-0082's append-only supersession form; mapped conversational
-> semantics remain intact, and no older decision is rewritten to broaden event
-> processing or imply that this draft was already accepted.
+> **Normative.** Ratification records the limited replacement of ADR-0085 §1's
+> method-inventory restriction on its status line and in a dated header note,
+> following ADR-0070/ADR-0082; the rest of that ADR and its earlier supersessions
+> remain intact.
+
+> **Normative.** Record an explanatory dated note on ADR-0173 for the additional
+> receiver using its existing general reflection rule, with no status change or
+> replacement of its `converse_streaming` contract; no older decision is rewritten
+> to broaden event processing.
 
 ### 11. Delivery and evidence
 
@@ -545,10 +553,12 @@ the common envelope alone does not settle them.
 - **Move all conversational APIs to the new envelope immediately.** This creates
   unnecessary front-end churn and risks changing legacy size and error behavior.
 
-## Draft evidence and remaining administrative step
+## Authorization and review evidence
 
-The design is grounded in the inspected baseline and the owner's scope choice.
-Implementation acceptance evidence does not yet exist. An assigned ADR number
-is still needed before ratification; the placeholder filename intentionally
-does not claim the next available number. Review results are separate local
-artifacts and do not override the owner's hold on acceptance.
+The owner reviewed the design, authorized ratification, and assigned ADR-0274
+on 2026-09-18. Architecture and adversarial reviews of the original draft both
+returned no findings in one paired round. Numbering and the accompanying
+earlier-ADR records require the same review set on their own tree before the
+one-line ratification commit, following `CONTRIBUTING.md` → "Finishing an ADR PR".
+Review results are separate local artifacts. Implementation acceptance evidence
+does not yet exist; owner approval of this contract is not milestone acceptance.
