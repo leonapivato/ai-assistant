@@ -2381,7 +2381,8 @@ from ai_assistant.wire.errors import (
 #: back-filled or re-decided**: a stored ``PermissionDecision`` decodes with
 #: ``proved_quote`` absent and a stored ``ToolDefinition`` with ``charged_output`` absent,
 #: each defaulting to ``None``.
-PROTOCOL_VERSION: Final[int] = 52
+#: ADR-0274 §9: channel inputs, wrapped streaming terminals, and event errors.
+PROTOCOL_VERSION: Final[int] = 53
 
 #: ADR-0085 §8a: "The correlation id is a UUID string and is at most 36 bytes.
 #: Bounding it is what makes the reserve a constant rather than an aspiration; a

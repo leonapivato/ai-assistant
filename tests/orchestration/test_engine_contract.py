@@ -127,11 +127,12 @@ from ai_assistant.orchestration import (
     StepExecutor,
     StepRunner,
 )
+from ai_assistant.orchestration.engine import _DEFAULT_MAX_OUTSTANDING
 
 # The engine's own default confirmation ceiling, read from where it is declared so
 # this helper cannot drift from it. Every fixture below wires at the default; the
 # one that does not says which value it wants and why (ADR-0198 §4).
-from ai_assistant.orchestration.engine import _DEFAULT_MAX_OUTSTANDING
+from ai_assistant.orchestration.informational_events import InformationalEventStage
 from ai_assistant.testing import (
     AUTHORIZATION_GOAL,
     AUTHORIZATION_NOW,
@@ -601,6 +602,7 @@ def _wire(  # noqa: PLR0913 — one knob per state the shared suite needs a subj
     return Engine(
         associator=FakeGoalAssociator(answer=GoalAssociation(verdict=AssociationVerdict.FRESH)),
         composing=_composing(),
+        informational_events=InformationalEventStage(FakeModelProvider()),
         closers=closers,
         loop=loop,
         runner=runner,

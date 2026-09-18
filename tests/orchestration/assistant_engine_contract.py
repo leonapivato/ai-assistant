@@ -71,6 +71,7 @@ from itertools import count
 from typing import TYPE_CHECKING, ClassVar, Final, get_type_hints
 
 import pytest
+from channel_receiver_contract import ChannelReceiverContract
 from pydantic import SecretStr
 
 from ai_assistant.core import errors as error_module
@@ -1466,7 +1467,7 @@ UNSPEAKABLE_NOTIFICATION: Final = SPEAKABLE_NOTIFICATION.model_copy(
 )
 
 
-class AssistantEngineContract(ABC):
+class AssistantEngineContract(ChannelReceiverContract, ABC):
     """What every ``AssistantEngine`` implementation must do."""
 
     #: What this implementation raises for an argument its declared type refuses.

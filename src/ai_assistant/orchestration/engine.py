@@ -93,6 +93,7 @@ from typing import TYPE_CHECKING, Any, Final, TypeVar, assert_never
 
 import structlog
 
+from ai_assistant.core.channel_validation import snapshot
 from ai_assistant.core.clock import ClockReadingError, checked_clock
 from ai_assistant.core.errors import (
     AuthorizationError,
@@ -126,11 +127,16 @@ from ai_assistant.core.types import (
     AuthorizationView,
     Belief,
     BeliefSummary,
+    ChannelContext,
+    ChannelIdentity,
+    ChannelInput,
+    ChannelResult,
     Clarification,
     ClarificationWithdrawal,
     Confirmation,
     ConfirmationEgress,
     ContinuationToken,
+    ConversationInputOptions,
     ConversationSummary,
     CoverageUnrecordedBinding,
     DeferralAdmissionOutcome,
@@ -160,6 +166,7 @@ from ai_assistant.core.types import (
     MemoryWrite,
     MemoryWriteMode,
     Modality,
+    NewConversation,
     NotificationDelivery,
     OperationConfirmation,
     OriginUnrecordedBinding,
@@ -177,6 +184,7 @@ from ai_assistant.core.types import (
     ReadCancellation,
     ReadKind,
     ReferenceOutcome,
+    ReplyCapability,
     ReplyChunk,
     RoutableOperation,
     RouteApproval,
@@ -184,18 +192,25 @@ from ai_assistant.core.types import (
     RoutedOperationRecord,
     RouteOutcome,
     SearchNotServiced,
+    SpeechChannelPayload,
     SpeechFailure,
     SpokenAudioFormat,
+    SpokenChannelResult,
     SpokenDelivery,
     SpokenDeliveryState,
     SpokenRendering,
+    SpokenReply,
     SpokenTurn,
     StepOutcome,
     StepStatus,
+    StreamingTextReply,
+    TextChannelPayload,
+    TextChannelResult,
     TraceOutcome,
     TurnOutcome,
     TurnReference,
     TurnResult,
+    WholeTextReply,
     band_of,
     describe_untrusted,
     is_live_confirmation_park,
@@ -203,6 +218,13 @@ from ai_assistant.core.types import (
     secret_value,
 )
 from ai_assistant.orchestration.authorization_surface import projection_of
+from ai_assistant.orchestration.channels import (
+    ChannelProjection,
+    ResolvedChannelInput,
+    conversation_target,
+    spoken_result,
+    text_result,
+)
 from ai_assistant.orchestration.composing import ComposedReply
 from ai_assistant.orchestration.disclosure import (
     BoundedAudienceSupply,
@@ -248,7 +270,7 @@ from ai_assistant.orchestration.payloads import (
 )
 from ai_assistant.orchestration.questions import question_state
 from ai_assistant.orchestration.reads import StructuredFacts, outbound_statement
-from ai_assistant.orchestration.reconciling import Reconciled, ReconciliationStage
+from ai_assistant.orchestration.reconciling import Reconciled, ReconciliationStage, TurnRemainder
 from ai_assistant.orchestration.routing import (
     FORGET_LOOKUP_KINDS,
     Resolved,
@@ -345,6 +367,7 @@ if TYPE_CHECKING:
     from ai_assistant.orchestration.delivery import DeliveryOutbox
     from ai_assistant.orchestration.destination_trust import DestinationTrustOperations
     from ai_assistant.orchestration.grants import GrantOperations
+    from ai_assistant.orchestration.informational_events import InformationalEventStage
     from ai_assistant.orchestration.ingestion import IngestionReport, IngestionStage
     from ai_assistant.orchestration.loop import LearningLoop, MintedActions, RecordedGoal
     from ai_assistant.orchestration.observation import ObservationRunReport, ObservationStage
@@ -423,7 +446,7 @@ _ENGAGEMENT_ATTEMPTS: Final = 3
 _ROUTE_ID_ATTEMPTS: Final = 8
 
 
-def _note_failure(turn: asyncio.Task[TurnOutcome]) -> None:
+def _note_failure(turn: asyncio.Task[ChannelResult]) -> None:
     """Observe a finished streaming turn's failure, whether or not anyone read it.
 
     A turn abandoned by its client (ADR-0173 §9) runs on and may still fail, and its
@@ -2512,6 +2535,11 @@ def _query_of(route: RoutedRoute) -> str:
     return route.query
 
 
+_EMPTY_CHANNEL_CONTEXT = ChannelContext()
+_LEGACY_STREAM_PROJECTION = ChannelProjection("converse_streaming")
+_LEGACY_SPOKEN_PROJECTION = ChannelProjection("converse_spoken")
+
+
 class Engine:
     """The concrete façade an interface adapter drives (ADR-0042 §1).
 
@@ -2539,6 +2567,7 @@ class Engine:
         trace_retention: timedelta | None,
         conversations: ConversationLifecycle,
         composing: ComposingStage,
+        informational_events: InformationalEventStage | None = None,
         observation: ObservationStage,
         questions: QuestionStage,
         grant_operations: GrantOperations,
@@ -2735,6 +2764,7 @@ class Engine:
                 Required rather than optional, deliberately — an engine that could
                 be built without it is an engine that can silently record nothing,
                 which is the one failure ADR-0074 §9 item 6 asks to be *reported*.
+            informational_events: Wired transient event processor, when configured.
             composing: The **terminal composing stage** (ADR-0170 §1, §2) — the one
                 that speaks. Given the turn's goal, its assembled context, the
                 memories retrieved for it, its plan and what became of the step the
@@ -3218,6 +3248,7 @@ class Engine:
         # instant and the purge's horizon are read through one seam (ADR-0026 §7).
         self._operation_traces = OperationTraces(sink=trace_sink, now=self._clock)
         self._conversations = conversations
+        self._informational_events = informational_events
         self._composing = composing
         self._observation = observation
         self._questions = questions
@@ -4072,6 +4103,163 @@ class Engine:
             raise ConfigurationError(msg)
         return await self._tracked(self._consolidation.run(), "consolidate", _consolidated)
 
+    async def receive(
+        self,
+        input: ChannelInput,  # noqa: A002 — channel contract parameter
+        *,
+        reply: WholeTextReply | SpokenReply | None,
+        timeout: timedelta,  # noqa: ASYNC109 — caller's operation budget
+    ) -> ChannelResult:
+        """Receive one channel input under its declared policy (ADR-0274 §4)."""
+        return await self._receive(
+            input, reply=reply, timeout=timeout, projection=ChannelProjection("receive")
+        )
+
+    def receive_streaming(
+        self,
+        input: ChannelInput,  # noqa: A002 — channel contract parameter
+        *,
+        reply: StreamingTextReply,
+        timeout: timedelta,
+    ) -> AsyncIterator[ReplyChunk | ChannelResult]:
+        """Receive text and stream on this iterator alone (ADR-0274 §6)."""
+        return self._receive_streaming(
+            input, reply=reply, timeout=timeout, projection=ChannelProjection("receive_streaming")
+        )
+
+    async def _receive(
+        self,
+        input: ChannelInput,  # noqa: A002 — channel contract parameter
+        *,
+        reply: WholeTextReply | SpokenReply | None,
+        timeout: timedelta,  # noqa: ASYNC109 — operation budget
+        projection: ChannelProjection,
+    ) -> ChannelResult:
+        self._reject_if_closing()
+        accepted, capability = snapshot(input, reply, streaming=False)
+        if projection.method == "receive":
+            check_payload(
+                {"input": accepted, "reply": capability, "timeout": timeout},
+                max_bytes=self._max_payload_bytes,
+                subject="the arguments to receive()",
+            )
+        if isinstance(accepted.payload, SpeechChannelPayload):
+            transcriber, _ = self._speech_seams()
+            self._check_recording(accepted.payload.audio, transcriber=transcriber)
+        event = isinstance(accepted.target, ChannelIdentity) and (
+            accepted.target.channel_type == "informational_event"
+        )
+        if event and self._informational_events is None:
+            raise ConfigurationError("informational event processing is not wired")
+        deadline = asyncio.get_running_loop().time() + timeout.total_seconds()
+        return await self._tracked(
+            self._dispatch_channel(
+                accepted, capability, timeout=timeout, projection=projection, deadline=deadline
+            ),
+            projection.method,
+            shielded=not event,
+        )
+
+    async def _dispatch_channel(
+        self,
+        input: ChannelInput,  # noqa: A002 — channel contract parameter
+        reply: ReplyCapability | None,
+        *,
+        timeout: timedelta,  # noqa: ASYNC109 — operation budget
+        projection: ChannelProjection,
+        deadline: float,
+    ) -> ChannelResult:
+        target = input.target
+        selected = None if isinstance(target, NewConversation) else target.instance_id
+        options = input.conversation or ConversationInputOptions()
+        if isinstance(target, ChannelIdentity) and target.channel_type == "informational_event":
+            assert isinstance(input.payload, TextChannelPayload)  # noqa: S101 — narrowed by validated channel dispatch
+            assert self._informational_events is not None  # noqa: S101 — narrowed by validated channel dispatch
+            result = await self._informational_events.process(
+                ResolvedChannelInput(
+                    target, input.payload.text, input.payload.modality, input.context
+                ),
+                deadline=deadline,
+            )
+            return self._checked(result, projection.method)
+        if isinstance(input.payload, SpeechChannelPayload):
+            assert isinstance(reply, SpokenReply)  # noqa: S101 — narrowed by validated channel dispatch
+            transcriber, synthesizer = self._speech_seams()
+            spoken = await self._converse_spoken(
+                input.payload.audio,
+                plays=reply.plays,
+                timeout=timeout,
+                conversation_id=selected,
+                delivery=options.delivery,
+                transcriber=transcriber,
+                synthesizer=synthesizer,
+                context=input.context,
+                projection=projection,
+            )
+            return spoken_result(spoken)
+        outcome = await self._converse(
+            input.payload.text,
+            timeout=timeout,
+            conversation_id=selected,
+            reference=options.reference,
+            context=input.context,
+        )
+        self._checked(projection.text(outcome), projection.method)
+        return text_result(outcome)
+
+    def _receive_streaming(
+        self,
+        input: ChannelInput,  # noqa: A002 — channel contract parameter
+        *,
+        reply: StreamingTextReply,
+        timeout: timedelta,
+        projection: ChannelProjection,
+    ) -> AsyncIterator[ReplyChunk | ChannelResult]:
+        self._reject_if_closing()
+        accepted, capability = snapshot(input, reply, streaming=True)
+        if projection.method == "receive_streaming":
+            check_arguments(
+                "receive_streaming",
+                max_bytes=self._max_payload_bytes,
+                input=accepted,
+                reply=capability,
+                timeout=timeout,
+            )
+        assert isinstance(accepted.payload, TextChannelPayload)  # noqa: S101 — narrowed by validated channel dispatch
+        options = accepted.conversation or ConversationInputOptions()
+        selected = (
+            None if isinstance(accepted.target, NewConversation) else accepted.target.instance_id
+        )
+        return self._streamed(
+            accepted.payload.text,
+            timeout=timeout,
+            conversation_id=selected,
+            reference=options.reference,
+            context=accepted.context,
+            projection=projection,
+        )
+
+    async def _legacy_stream(
+        self,
+        stream: AsyncIterator[ReplyChunk | ChannelResult],
+    ) -> AsyncIterator[ReplyChunk | TurnOutcome]:
+        async with closing_stream(stream) as values:
+            async for value in values:
+                if isinstance(value, ReplyChunk):
+                    yield value
+                else:
+                    assert isinstance(value.result, TextChannelResult)  # noqa: S101 — narrowed by validated channel dispatch
+                    yield value.result.outcome
+
+    async def _channel_stream_result(
+        self,
+        work: Awaitable[TurnOutcome],
+        projection: ChannelProjection,
+    ) -> ChannelResult:
+        outcome = await work
+        self._checked(projection.text(outcome), projection.method)
+        return text_result(outcome)
+
     async def converse(
         self,
         utterance: EncodableText,
@@ -4156,13 +4344,18 @@ class Engine:
             conversation_id=selected,
             reference=reference,
         )
-        return await self._tracked(
-            self._converse(
-                utterance, timeout=timeout, conversation_id=selected, reference=reference
+        result = await self._receive(
+            ChannelInput(
+                target=conversation_target(selected),
+                payload=TextChannelPayload(text=utterance),
+                conversation=ConversationInputOptions(reference=reference),
             ),
-            "converse",
-            checked=True,
+            reply=WholeTextReply(),
+            timeout=timeout,
+            projection=ChannelProjection("converse"),
         )
+        assert isinstance(result.result, TextChannelResult)  # noqa: S101 — narrowed by validated channel dispatch
+        return result.result.outcome
 
     def converse_streaming(
         self,
@@ -4224,18 +4417,28 @@ class Engine:
             conversation_id=selected,
             reference=reference,
         )
-        return self._streamed(
-            utterance, timeout=timeout, conversation_id=selected, reference=reference
+        stream = self._receive_streaming(
+            ChannelInput(
+                target=conversation_target(selected),
+                payload=TextChannelPayload(text=utterance),
+                conversation=ConversationInputOptions(reference=reference),
+            ),
+            reply=StreamingTextReply(),
+            timeout=timeout,
+            projection=ChannelProjection("converse_streaming"),
         )
+        return self._legacy_stream(stream)
 
-    async def _streamed(
+    async def _streamed(  # noqa: PLR0913 — operation data and per-call context/projection
         self,
         utterance: str,
         *,
         timeout: timedelta,  # noqa: ASYNC109 — threaded through to the seam (ADR-0029 §4)
         conversation_id: str | None,
         reference: TurnReference | None = None,
-    ) -> AsyncIterator[ReplyChunk | TurnOutcome]:
+        context: ChannelContext = _EMPTY_CHANNEL_CONTEXT,
+        projection: ChannelProjection = _LEGACY_STREAM_PROJECTION,
+    ) -> AsyncIterator[ReplyChunk | ChannelResult]:
         """Drive the turn in a tracked task and relay what it publishes.
 
         **The turn runs beside this generator rather than inside it**, and that
@@ -4255,17 +4458,19 @@ class Engine:
         """
         chunks: asyncio.Queue[ReplyChunk] = asyncio.Queue()
         turn = self._track(
-            self._checked_result(
+            self._channel_stream_result(
                 self._converse_streaming(
                     utterance,
                     timeout=timeout,
                     conversation_id=conversation_id,
                     chunks=chunks,
                     reference=reference,
+                    context=context,
+                    projection=projection,
                 ),
-                "converse_streaming",
+                projection,
             ),
-            "converse_streaming",
+            projection.method,
         )
         # A turn nobody reads still fails legibly rather than as asyncio's
         # "Task exception was never retrieved" on the next collection: §9 makes an
@@ -4397,7 +4602,7 @@ class Engine:
                 this store holds — and only where a turn actually ran.
         """
         self._reject_if_closing()
-        transcriber, synthesizer = self._speech_seams()
+        transcriber, _ = self._speech_seams()
         selected = (
             None if conversation_id is None else identifier(conversation_id, name="conversation_id")
         )
@@ -4419,19 +4624,18 @@ class Engine:
             delivery=delivery,
         )
         self._check_recording(utterance, transcriber=transcriber)
-        return await self._tracked(
-            self._converse_spoken(
-                utterance,
-                plays=plays,
-                timeout=timeout,
-                conversation_id=selected,
-                transcriber=transcriber,
-                synthesizer=synthesizer,
-                delivery=delivery,
+        result = await self._receive(
+            ChannelInput(
+                target=conversation_target(selected),
+                payload=SpeechChannelPayload(audio=utterance),
+                conversation=ConversationInputOptions(delivery=delivery),
             ),
-            "converse_spoken",
-            checked=True,
+            reply=SpokenReply(plays=plays),
+            timeout=timeout,
+            projection=ChannelProjection("converse_spoken"),
         )
+        assert isinstance(result.result, SpokenChannelResult)  # noqa: S101 — narrowed by validated channel dispatch
+        return result.result.outcome
 
     @staticmethod
     def _check_report(
@@ -4546,6 +4750,8 @@ class Engine:
         transcriber: SpeechTranscriber,
         synthesizer: SpeechSynthesizer,
         delivery: SpokenDeliveryReport | None,
+        context: ChannelContext = _EMPTY_CHANNEL_CONTEXT,
+        projection: ChannelProjection = _LEGACY_SPOKEN_PROJECTION,
     ) -> SpokenTurn:
         """Compose the three stages under one budget (ADR-0200 §3, §4).
 
@@ -4618,7 +4824,7 @@ class Engine:
             # capture, no conversation, and no exception — and ``heard`` is typed
             # ``NonBlankEncodableText | None``, so a blank transcript has nowhere
             # else to go.
-            return SpokenTurn()
+            return self._within_payload_limit(SpokenTurn(), projection=projection)
         # ADR-0203 §1: this operation declares its channel audience unbounded
         # (ADR-0200 §3), so the withholding binds the supply the **whole turn** runs
         # over. One applier is minted per call — as the capacity handle is — and it is
@@ -4635,10 +4841,11 @@ class Engine:
         # fact that this call ran on `converse_spoken` reaches the capture point as
         # data rather than as a flag `_run_turn` would have to read.
         recorded = _SpokenCapture()
-        outcome = await self._run_turn(
+        outcome = await self._begin_channel_turn(
             heard,
             timeout=timedelta(seconds=max(remaining(), 0.0)),
             conversation_id=conversation_id,
+            context=context,
             compose=partial(self._composed_spoken, supply=supply),
             compose_routed=self._composed_routed_spoken,
             supply=supply,
@@ -4663,7 +4870,8 @@ class Engine:
                 spoken=spoken,
                 spoken_degraded=degraded,
                 episode_id=recorded.episode_id,
-            )
+            ),
+            projection=projection,
         )
 
     async def _transcribed(
@@ -4774,7 +4982,9 @@ class Engine:
             return None, True
         return rendering, False
 
-    def _within_payload_limit(self, spoken: SpokenTurn) -> SpokenTurn:
+    def _within_payload_limit(
+        self, spoken: SpokenTurn, *, projection: ChannelProjection = _LEGACY_SPOKEN_PROJECTION
+    ) -> SpokenTurn:
         """Apply ADR-0200 §4's fourth degradation case, and its one re-measure.
 
         **Measured on the whole projected result, not on the rendering alone.**
@@ -4798,6 +5008,7 @@ class Engine:
 
         Args:
             spoken: The result as the stages produced it.
+            projection: Public result shape selected by receiver admission.
 
         Returns:
             It, or the same result with its rendering dropped.
@@ -4806,28 +5017,28 @@ class Engine:
             OversizedValueError: If it is over the limit with no rendering in it.
         """
         if spoken.spoken is None:
-            return self._checked(spoken, "converse_spoken")
+            self._checked(projection.spoken(spoken), projection.method)
+            return spoken
         try:
             check_payload(
-                spoken,
+                projection.spoken(spoken),
                 max_bytes=self._max_payload_bytes,
                 subject="the result of converse_spoken()",
             )
         except OversizedValueError:
             _log.warning("spoken_rendering_degraded", reason="over_payload_limit")
-            return self._checked(
-                SpokenTurn(
-                    heard=spoken.heard,
-                    outcome=spoken.outcome,
-                    spoken_degraded=True,
-                    # Carried through the one degradation that rebuilds the result:
-                    # `episode_id` is bounded and is never what is dropped to make a
-                    # result fit (ADR-0205 §10b), so the ladder still has exactly one
-                    # step.
-                    episode_id=spoken.episode_id,
-                ),
-                "converse_spoken",
+            degraded = SpokenTurn(
+                heard=spoken.heard,
+                outcome=spoken.outcome,
+                spoken_degraded=True,
+                # Carried through the one degradation that rebuilds the result:
+                # `episode_id` is bounded and is never what is dropped to make a
+                # result fit (ADR-0205 §10b), so the ladder still has exactly one
+                # step.
+                episode_id=spoken.episode_id,
             )
+            self._checked(projection.spoken(degraded), projection.method)
+            return degraded
         return spoken
 
     async def _composed_spoken(  # noqa: PLR0913 — the turn, the step, the conversation, the delivery facts, the hop's reach, ADR-0228 §10's stop fact and the supply applier; every one is a distinct fact about the pass
@@ -9230,6 +9441,7 @@ class Engine:
         timeout: timedelta,  # noqa: ASYNC109 — threaded through to the seam (ADR-0029 §4)
         conversation_id: str | None,
         reference: TurnReference | None = None,
+        context: ChannelContext = _EMPTY_CHANNEL_CONTEXT,
     ) -> TurnOutcome:
         """Run one whole turn, composing its answer atomically (ADR-0170 §1).
 
@@ -9239,10 +9451,11 @@ class Engine:
         operation, subtracted from none but a spoken one — so its capture records
         whether content ADR-0199 §3 withholds stood in this turn's warrant (§4).
         """
-        return await self._run_turn(
+        return await self._begin_channel_turn(
             utterance,
             timeout=timeout,
             conversation_id=conversation_id,
+            context=context,
             compose=self._composed_whole,
             compose_routed=self._composed_routed_whole,
             supply=BoundedAudienceSupply(
@@ -9257,7 +9470,7 @@ class Engine:
             reference=reference,
         )
 
-    async def _converse_streaming(
+    async def _converse_streaming(  # noqa: PLR0913 — operation data and per-call context/projection
         self,
         utterance: str,
         *,
@@ -9265,6 +9478,8 @@ class Engine:
         conversation_id: str | None,
         chunks: asyncio.Queue[ReplyChunk],
         reference: TurnReference | None = None,
+        context: ChannelContext = _EMPTY_CHANNEL_CONTEXT,
+        projection: ChannelProjection = _LEGACY_STREAM_PROJECTION,
     ) -> TurnOutcome:
         """Run one whole turn, publishing its answer as it composes (ADR-0173 §4).
 
@@ -9280,6 +9495,8 @@ class Engine:
             utterance: What the user said.
             timeout: The per-attempt budget.
             conversation_id: The conversation to continue, or ``None``.
+            context: Supplied channel-local context, separate from stored history.
+            projection: Public terminal shape used to reserve reply room.
             chunks: Where each composed :class:`~ai_assistant.core.types.ReplyChunk`
                 is put as it is produced. The relaying iterator owns reading it, and
                 a reader that has gone away does not stop this turn (ADR-0173 §9).
@@ -9316,17 +9533,21 @@ class Engine:
                 search_not_serviced,
                 outbound,
                 goal,
+                projection=projection,
             )
 
         async def compose_routed(
             routed: RoutedOperation, conversation: str
         ) -> ComposedReply | None:
-            return await self._compose_routed_streaming(routed, conversation, chunks)
+            return await self._compose_routed_streaming(
+                routed, conversation, chunks, projection=projection
+            )
 
-        return await self._run_turn(
+        return await self._begin_channel_turn(
             utterance,
             timeout=timeout,
             conversation_id=conversation_id,
+            context=context,
             compose=compose,
             compose_routed=compose_routed,
             # A bounded audience, exactly as :meth:`_converse`'s: this operation
@@ -11259,12 +11480,47 @@ class Engine:
         """
         return opened is not None and opened.attempt.state in _PAUSED_ATTEMPT_STATES
 
-    async def _run_turn(  # noqa: C901, PLR0912, PLR0913, PLR0915 — C901/PLR0912: ADR-0250 §3 and §10 add two branches to one sequence, and ADR-0261 §7 adds the third — a claim a user act refused, which ends the walk and composes without acting; like the other two it is a fact about *this* pass, and its composition reads eleven of this pass's own locals, so a helper could only take it back by threading them through a parameter list. The first two are a turn that could not decide which goal it was about, which returns before the loop, and a turn that raised a question, which takes the undriven path whatever its plan proposed. PLR0913: the utterance, the budget, the conversation, the two composers, the supply filter and the spoken capture; every one is a distinct fact about the pass, and collapsing any pair would put a flag where a value belongs. PLR0915: one pass is one sequence — admit, persist, authorise, drive, compose, capture — and the four statements ADR-0249 §12's authorization boundary adds are a closure over this pass's own attempt carrier, which a helper could only take back by putting that carrier in a mutable cell
+    async def _begin_channel_turn(  # noqa: PLR0913 — turn collaborators and per-call channel context
         self,
         utterance: str,
         *,
         timeout: timedelta,  # noqa: ASYNC109 — threaded through to the seam (ADR-0029 §4)
         conversation_id: str | None,
+        compose: _Composer,
+        compose_routed: _RoutedComposer,
+        supply: TurnSupply,
+        operation: ConversationalOperation,
+        spoken: _SpokenCapture | None = None,
+        reference: TurnReference | None = None,
+        context: ChannelContext = _EMPTY_CHANNEL_CONTEXT,
+    ) -> TurnOutcome:
+        """Resolve the store-owned channel once, then pass supplied context separately."""
+        remaining = None if self._reconciliation is None else self._reconciliation.opened(timeout)
+        conversation = await self._conversations.begin(conversation_id)
+        resolved = ResolvedChannelInput(
+            channel=ChannelIdentity(channel_type="conversation", instance_id=conversation.id),
+            text=utterance,
+            modality=Modality.SPEECH if spoken is not None else Modality.TEXT,
+            context=context,
+        )
+        return await self._run_turn(
+            resolved,
+            timeout=timeout,
+            compose=compose,
+            compose_routed=compose_routed,
+            supply=supply,
+            operation=operation,
+            spoken=spoken,
+            reference=reference,
+            remaining=remaining,
+        )
+
+    async def _run_turn(  # noqa: C901, PLR0912, PLR0913, PLR0915 — C901/PLR0912: ADR-0250 §3 and §10 add two branches to one sequence, and ADR-0261 §7 adds the third — a claim a user act refused, which ends the walk and composes without acting; like the other two it is a fact about *this* pass, and its composition reads eleven of this pass's own locals, so a helper could only take it back by threading them through a parameter list. The first two are a turn that could not decide which goal it was about, which returns before the loop, and a turn that raised a question, which takes the undriven path whatever its plan proposed. PLR0913: the utterance, the budget, the conversation, the two composers, the supply filter and the spoken capture; every one is a distinct fact about the pass, and collapsing any pair would put a flag where a value belongs. PLR0915: one pass is one sequence — admit, persist, authorise, drive, compose, capture — and the four statements ADR-0249 §12's authorization boundary adds are a closure over this pass's own attempt carrier, which a helper could only take back by putting that carrier in a mutable cell
+        self,
+        input: ResolvedChannelInput,  # noqa: A002 — resolved channel input
+        *,
+        timeout: timedelta,  # noqa: ASYNC109 — threaded through to the seam (ADR-0029 §4)
+        remaining: TurnRemainder | None,
         compose: _Composer,
         compose_routed: _RoutedComposer,
         supply: TurnSupply,
@@ -11359,27 +11615,17 @@ class Engine:
         supply filter, so a turn whose episode was withheld under ADR-0199 §3 or
         ADR-0204 §3 contributes no delivery fact either.
         """
-        # ADR-0255 §9's remainder, opened **here** — at the turn's entry, before its
-        # first await — and not where it is first read. §9's rule is over "the turn's
-        # remaining budget", so a turn that spends most of its figure resolving its
-        # conversation, its history and its goal reaches ADR-0259 §4's pass with that
-        # much less left; a remainder opened at the pass would hand §3's one call the
-        # whole budget again. Adversarial review, round 1, `blocker`.
-        remaining = None if self._reconciliation is None else self._reconciliation.opened(timeout)
-        # Before the turn's work (ADR-0074 §2), so the id exists whatever the turn
-        # does and a continuation marks the conversation active before a reclaim
-        # could judge it idle.
-        conversation = await self._conversations.begin(conversation_id)
+        utterance = input.text
         route = None if self._routing is None else await self._routing.route(utterance)
         if route is not None:
             return await self._routed_pass(
                 utterance,
                 route,
-                conversation=conversation.id,
+                conversation=input.channel.instance_id,
                 compose=compose_routed,
                 spoken=spoken,
             )
-        history = await self._conversations.history(conversation.id)
+        history = await self._conversations.history(input.channel.instance_id)
         # ADR-0250 §3: **every turn resolves its goal before it plans**, and the
         # association precedes the relevance read, the episodic supplement and the
         # planner call because all three are the goal's. The request is normalised
@@ -11389,7 +11635,7 @@ class Engine:
         request = request_of(utterance)
         association = await self._associate(
             request,
-            conversation_id=conversation.id,
+            conversation_id=input.channel.instance_id,
             reference=reference,
             # §15: a turn on a channel of unbounded audience associates to no stored
             # goal, builds no candidacy and makes no `associate` call. The test is over
@@ -11399,7 +11645,7 @@ class Engine:
         )
         if association.disambiguation is not None:
             return await self._undecided(
-                association, conversation=conversation.id, asked=request, spoken=spoken
+                association, conversation=input.channel.instance_id, asked=request, spoken=spoken
             )
         # ADR-0259 §4, §3, §7: the reconciliation pass and then the investigation
         # phase's check, over the goal this turn engaged and no other, **wholly before
@@ -11467,7 +11713,7 @@ class Engine:
             # does one thing with it: build the footing the servicing site reads. No
             # other stage of this method acquires a conversation identity it did not
             # already hold (ADR-0181 §5's third clause, ADR-0097 §7).
-            conversation_id=conversation.id,
+            conversation_id=input.channel.instance_id,
             # ADR-0250 §3: what the association decided, handed over as data. `None`
             # on both means the turn opens a goal and its first attempt, which is every
             # turn of a fresh conversation and every turn of an unbounded-audience
@@ -11611,7 +11857,7 @@ class Engine:
             # persisted as an auditable record (ADR-0014 §2).
             version = await self._save_goal(goal_record)
             engagement = await self._engagement(
-                goal_record, association, conversation_id=conversation.id, version=version
+                goal_record, association, conversation_id=input.channel.instance_id, version=version
             )
             await self._persist_plans(plans)
             attempt = await self._persist_attempt(
@@ -11673,7 +11919,7 @@ class Engine:
             composed = await compose(
                 turn,
                 None,
-                conversation.id,
+                input.channel.instance_id,
                 deliveries,
                 hop_reached,
                 stopped_while_asking,
@@ -11748,7 +11994,7 @@ class Engine:
                     working=self._worked(attempt, drove_from),
                 )
             return await self._capture(
-                conversation.id,
+                input.channel.instance_id,
                 turn=turn,
                 step=None,
                 resumed=False,
@@ -11802,7 +12048,7 @@ class Engine:
         try:
             version = await self._save_goal(goal_record)
             engagement = await self._engagement(
-                goal_record, association, conversation_id=conversation.id, version=version
+                goal_record, association, conversation_id=input.channel.instance_id, version=version
             )
             # ADR-0228 §5: the **whole** sequence of `save_plan` calls precedes
             # `start_execution`, so a turn whose second `save_plan` raises has driven
@@ -11959,7 +12205,7 @@ class Engine:
                 # undriven step does (ADR-0255 §11). ADR-0261 §7's own clause is that a
                 # driver *skip* gains no carrier here either.
                 None,
-                conversation.id,
+                input.channel.instance_id,
                 deliveries,
                 hop_reached,
                 stopped_while_asking,
@@ -11974,7 +12220,7 @@ class Engine:
                 ),
             )
             return await self._capture(
-                conversation.id,
+                input.channel.instance_id,
                 turn=turn,
                 step=None,
                 resumed=False,
@@ -12067,7 +12313,7 @@ class Engine:
         composed = await compose(
             turn,
             step,
-            conversation.id,
+            input.channel.instance_id,
             deliveries,
             hop_reached,
             stopped_while_asking,
@@ -12128,7 +12374,7 @@ class Engine:
                 working=self._worked(attempt, drove_from),
             )
         return await self._capture(
-            conversation.id,
+            input.channel.instance_id,
             turn=turn,
             step=step,
             resumed=False,
@@ -12823,6 +13069,7 @@ class Engine:
         routed: RoutedOperation,
         conversation: str,
         chunks: asyncio.Queue[ReplyChunk],
+        projection: ChannelProjection = _LEGACY_STREAM_PROJECTION,
     ) -> ComposedReply | None:
         """Stream a routed answer onto ``chunks`` (ADR-0173, ADR-0197 §10).
 
@@ -12842,7 +13089,9 @@ class Engine:
         stream = self._composing.compose_routed_streaming(
             operation=routed.operation,
             outcome=routed.outcome,
-            room=self._routed_reply_room(routed, conversation_id=conversation),
+            room=self._routed_reply_room(
+                routed, conversation_id=conversation, projection=projection
+            ),
         )
         async with closing_stream(stream) as composing:
             async for produced in composing:
@@ -12860,7 +13109,13 @@ class Engine:
             raise RuntimeError(msg)
         return composed
 
-    def _routed_reply_room(self, routed: RoutedOperation, *, conversation_id: str) -> int:
+    def _routed_reply_room(
+        self,
+        routed: RoutedOperation,
+        *,
+        conversation_id: str,
+        projection: ChannelProjection = _LEGACY_STREAM_PROJECTION,
+    ) -> int:
         """How many escaped bytes a routed outcome has left for its reply (ADR-0173 §3).
 
         :meth:`_reply_room`'s routed twin, measured rather than reused because the two
@@ -12894,7 +13149,7 @@ class Engine:
             # on it.
             outbound_statement=_reached_nothing(),
         )
-        fixed = len(canonical_payload(probe)) - encoded_text_bytes(_ROOM_PROBE)
+        fixed = len(canonical_payload(projection.text(probe))) - encoded_text_bytes(_ROOM_PROBE)
         return self._max_payload_bytes - fixed - JSON_STRING_QUOTE_BYTES
 
     def _routed_surface(self) -> _RoutedSurface:
@@ -13039,6 +13294,7 @@ class Engine:
         search_not_serviced: SearchNotServiced | None = None,
         outbound: OutboundStatement | None = None,
         goal: _GoalPass | None = None,
+        projection: ChannelProjection = _LEGACY_STREAM_PROJECTION,
     ) -> ComposedReply | None:
         """Stream this pass's answer onto ``chunks``, and report what it composed.
 
@@ -13080,6 +13336,7 @@ class Engine:
             conversation_id=conversation_id,
             goal=goal,
             outbound=outbound,
+            projection=projection,
         )
         # ADR-0250 §5's sentence is part of the terminal ``reply``, so it is part of
         # what ADR-0173 §3's ceiling bounds: the room the stage is given is the room
@@ -13153,7 +13410,7 @@ class Engine:
             return composed
         return ComposedReply(text=lead + composed.text, degraded=composed.degraded)
 
-    def _reply_room(
+    def _reply_room(  # noqa: PLR0913 — operation data and per-call context/projection
         self,
         *,
         turn: TurnResult,
@@ -13161,6 +13418,7 @@ class Engine:
         conversation_id: str,
         goal: _GoalPass | None = None,
         outbound: OutboundStatement | None = None,
+        projection: ChannelProjection = _LEGACY_STREAM_PROJECTION,
     ) -> int:
         """How many escaped bytes the terminal outcome has left for its reply (§3).
 
@@ -13185,6 +13443,7 @@ class Engine:
         terminal frame would then refuse.
 
         Args:
+            projection: Public terminal shape used to reserve reply room.
             turn: The turn the outcome will carry.
             step: The step it will carry, or ``None``.
             conversation_id: The conversation it will name — the one
@@ -13239,7 +13498,7 @@ class Engine:
                 else AttemptReport(outcome=carried.facts.outcome, continues=carried.facts.continues)
             ),
         )
-        fixed = len(canonical_payload(probe)) - encoded_text_bytes(_ROOM_PROBE)
+        fixed = len(canonical_payload(projection.text(probe))) - encoded_text_bytes(_ROOM_PROBE)
         return self._max_payload_bytes - fixed - JSON_STRING_QUOTE_BYTES
 
     def _check_plan_is_for_goal(self, turn: TurnResult) -> None:

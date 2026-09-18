@@ -282,6 +282,21 @@ _NAMESPACE: Final = {
 #: than as a field of any promoted type, so no walk of these signatures reaches it.
 PROMOTED: Final[frozenset[str]] = frozenset(
     {
+        "ChannelIdentity",
+        "NewConversation",
+        "TextChannelPayload",
+        "SpeechChannelPayload",
+        "ChannelContextItem",
+        "ChannelContext",
+        "ConversationInputOptions",
+        "ChannelInput",
+        "WholeTextReply",
+        "StreamingTextReply",
+        "SpokenReply",
+        "TextChannelResult",
+        "SpokenChannelResult",
+        "InformationalEventResult",
+        "ChannelResult",
         "Clarification",
         "ClarificationWithdrawal",
         "EngagementDisposition",
@@ -724,7 +739,7 @@ def test_the_surface_carries_the_methods_the_adrs_fixed() -> None:
     that is issue #2274's shape one decision later, and the reciprocal header record is
     ADR-0254's to make rather than the implementing lane's.
     """
-    assert len(_method_names()) == 63
+    assert len(_method_names()) == 65
 
 
 def test_a_streaming_method_declares_its_union_chunk_first_terminal_last() -> None:
@@ -744,7 +759,7 @@ def test_a_streaming_method_declares_its_union_chunk_first_terminal_last() -> No
     """
     from ai_assistant.wire.surface import STREAMING_METHODS  # noqa: PLC0415 — asserted about
 
-    assert {"converse_streaming"} == STREAMING_METHODS
+    assert {"converse_streaming", "receive_streaming"} == STREAMING_METHODS
     for name in sorted(STREAMING_METHODS):
         annotation = get_type_hints(getattr(AssistantEngine, name), globalns=_NAMESPACE)["return"]
         assert get_origin(annotation) is AsyncIterator
@@ -752,7 +767,9 @@ def test_a_streaming_method_declares_its_union_chunk_first_terminal_last() -> No
         assert len(members) == 2, f"{name}() yields {len(members)} types; §4's union has two"
         chunk, terminal = members
         assert chunk is core_types.ReplyChunk
-        assert terminal is core_types.TurnOutcome
+        assert terminal is (
+            core_types.ChannelResult if name == "receive_streaming" else core_types.TurnOutcome
+        )
 
 
 def test_the_promoted_surface_and_the_protocol_version_are_both_pinned() -> None:
@@ -1330,7 +1347,7 @@ def test_the_promoted_surface_and_the_protocol_version_are_both_pinned() -> None
     """
     from ai_assistant.wire.envelope import PROTOCOL_VERSION  # noqa: PLC0415 — asserted about
 
-    assert (len(_method_names()), PROTOCOL_VERSION) == (63, 52), (
+    assert (len(_method_names()), PROTOCOL_VERSION) == (65, 53), (
         "the promoted method set and the protocol version are pinned together "
         "(ADR-0124 §9); move either and this pin makes you name the limb you are "
         "under — the method set, or a wire-carried core type"
