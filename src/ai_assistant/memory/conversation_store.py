@@ -59,7 +59,12 @@ from uuid import uuid4
 from pydantic import ValidationError
 
 from ai_assistant.core.clock import ClockReadingError, checked_clock
-from ai_assistant.core.errors import ConversationStoreError, UnknownConversationError
+from ai_assistant.core.errors import (
+    ConversationStoreError,
+    IncompatibleStateError,
+    MemoryStoreError,
+    UnknownConversationError,
+)
 from ai_assistant.core.types import (
     FIRST_TURN_ORDINAL,
     Conversation,
@@ -70,6 +75,7 @@ from ai_assistant.core.types import (
     SpokenDeliveryState,
     describe_untrusted,
 )
+from ai_assistant.memory._episode_format import check_format
 from ai_assistant.memory._transactions import transaction
 
 if TYPE_CHECKING:
@@ -154,6 +160,7 @@ _TURNS_COLUMNS = (
     "conversation_id TEXT NOT NULL REFERENCES conversations(id) ON DELETE CASCADE, "
     "ordinal INTEGER NOT NULL, episode_id TEXT NOT NULL, occurred_at INTEGER NOT NULL, "
     "execution_id TEXT, step_id TEXT, " + _DELIVERY_COLUMNS + ", "
+    "model_eligible INTEGER NOT NULL DEFAULT 1 CHECK(model_eligible IN (0, 1)), "
     "PRIMARY KEY(conversation_id, ordinal)"
 )
 
@@ -166,7 +173,7 @@ _TURNS_COLUMNS = (
 #: fails loudly on a row whose positions have moved.
 _TURN_SELECT = (
     "t.conversation_id, t.ordinal, t.episode_id, t.occurred_at, t.execution_id, t.step_id, "
-    "t.delivery_state, t.delivery_played, t.delivery_rendered"
+    "t.delivery_state, t.delivery_played, t.delivery_rendered, t.model_eligible"
 )
 
 #: ADR-0212 §1's watermark, one nullable column with no default on the *conversation*
@@ -667,7 +674,25 @@ class SqliteConversationStore:
             # interrupted write leaves that journal on disk holding Tier 1 pages
             # (ADR-0004 §4). `connect` creates the file, so there is something to
             # restrict by the time this runs.
+            # Refuse incompatible state before chmod or a write transaction.
+            existing_format = check_format(conn, allow_empty=True)
+            if existing_format:
+                columns = {row[1] for row in conn.execute("PRAGMA table_info(turns)")}
+                if "model_eligible" not in columns:
+                    raise IncompatibleStateError(
+                        "conversation store requires a fresh M36 data directory",
+                        expected="conversation index with activation eligibility",
+                        found="conversation index without activation eligibility",
+                        operator_action=(
+                            "Stop the old hub and configure a new empty development data directory."
+                        ),
+                    )
             self._restrict_permissions()
+            conn.execute("BEGIN IMMEDIATE")
+            existing_format = check_format(conn, allow_empty=True)
+            if not existing_format:
+                conn.execute("CREATE TABLE episode_record_format(version INTEGER NOT NULL)")
+                conn.execute("INSERT INTO episode_record_format VALUES (1)")
             conn.execute(
                 "CREATE TABLE IF NOT EXISTS conversations("
                 "id TEXT PRIMARY KEY, started_at INTEGER NOT NULL, "
@@ -708,8 +733,12 @@ class SqliteConversationStore:
                 "CREATE INDEX IF NOT EXISTS conversations_activity "
                 "ON conversations(last_active_at DESC, id)"
             )
+            conn.execute("COMMIT")
             self._set_foreign_keys(conn, enforced=True)
-        except ConversationStoreError:
+        except MemoryStoreError as exc:
+            conn.close()
+            raise ConversationStoreError("cannot read conversation record format") from exc
+        except ConversationStoreError, IncompatibleStateError:
             conn.close()  # never leak the connection when opening fails
             raise
         except (sqlite3.Error, OSError) as exc:
@@ -1091,6 +1120,7 @@ class SqliteConversationStore:
                 occurred_at=_instant_from(row[3], what="occurred_at"),
                 parked=parked,
                 delivery=_delivery_from(row[6], row[7], row[8]),
+                model_eligible=row[9],
             )
         except (ValidationError, TypeError, OverflowError) as exc:
             msg = f"a stored turn could not be decoded: {exc}"
@@ -1326,6 +1356,7 @@ class SqliteConversationStore:
         occurred_at: datetime,
         parked: ParkedBinding | None = None,
         delivery: SpokenDelivery | None = None,
+        model_eligible: bool = True,
     ) -> ConversationTurn:
         """Allocate the ordinal, derive the episode id, and record the turn.
 
@@ -1333,6 +1364,9 @@ class SqliteConversationStore:
         cannot derive one id for two turns (ADR-0074 §3). A duplicate binding is
         refused before anything is allocated and the transaction is rolled back,
         so no ordinal is consumed and no row is left behind (§9.1).
+
+        ``model_eligible`` (ADR-0275) is immutable, stored atomically with this
+        index row, and preserved by delivery updates and all unfiltered reads.
 
         Raises:
             UnknownConversationError: If the id names nothing or names a stamped
@@ -1343,7 +1377,7 @@ class SqliteConversationStore:
         """
         async with self._lock:
             row = await _run_to_completion(
-                self._append_sync, conversation_id, occurred_at, parked, delivery
+                self._append_sync, conversation_id, occurred_at, parked, delivery, model_eligible
             )
         return self._decode_turn(row)
 
@@ -1353,6 +1387,7 @@ class SqliteConversationStore:
         occurred_at: datetime,
         parked: ParkedBinding | None,
         delivery: SpokenDelivery | None,
+        model_eligible: bool,
     ) -> Sequence[Any]:
         with self._transaction("append a turn") as conn:
             row = self._row_of(conn, conversation_id)
@@ -1412,6 +1447,7 @@ class SqliteConversationStore:
                 occurred_at=occurred_at,
                 parked=parked,
                 delivery=delivery,
+                model_eligible=model_eligible,
             )
             stamp = _to_micros(turn.occurred_at)
             row = (
@@ -1422,11 +1458,13 @@ class SqliteConversationStore:
                 None if parked is None else parked.execution_id,
                 None if parked is None else parked.step_id,
                 *_delivery_row(delivery),
+                int(model_eligible),
             )
             conn.execute(
                 "INSERT INTO turns(conversation_id, ordinal, episode_id, occurred_at, "
-                "execution_id, step_id, delivery_state, delivery_played, delivery_rendered) "
-                "VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)",
+                "execution_id, step_id, delivery_state, delivery_played, "
+                "delivery_rendered, model_eligible) "
+                "VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?)",
                 row,
             )
             conn.execute(
@@ -1491,7 +1529,7 @@ class SqliteConversationStore:
                 conn,
                 "read the stamped turn",
                 "SELECT conversation_id, ordinal, episode_id, occurred_at, execution_id, "
-                "step_id, delivery_state, delivery_played, delivery_rendered "
+                "step_id, delivery_state, delivery_played, delivery_rendered, model_eligible "
                 "FROM turns WHERE conversation_id = ? AND episode_id = ?",
                 (conversation_id, episode_id),
             )
@@ -1564,8 +1602,13 @@ class SqliteConversationStore:
         *,
         limit: int | None = None,
         before_ordinal: int | None = None,
+        model_eligible_only: bool = False,
     ) -> list[ConversationTurn]:
         """Return a page of turns, ordinal ascending, ending below ``before_ordinal``.
+
+        With ``model_eligible_only=True`` (ADR-0275), filter before selecting
+        the tail window. Returned ordinals remain ordered but may contain gaps.
+        Deletion and turns_after remain unfiltered.
 
         Raises:
             ValueError: If ``limit`` or ``before_ordinal`` is out of range.
@@ -1577,10 +1620,14 @@ class SqliteConversationStore:
         if before_ordinal is not None:
             _check_page_bound("before_ordinal", before_ordinal, floor=FIRST_TURN_ORDINAL)
         async with self._lock:
-            rows = await _run_to_completion(self._turns_sync, conversation_id, page, before_ordinal)
+            rows = await _run_to_completion(
+                self._turns_sync, conversation_id, page, before_ordinal, model_eligible_only
+            )
         return [self._decode_turn(row) for row in rows]
 
-    def _turns_sync(self, conversation_id: str, page: int, before_ordinal: int | None) -> list[Any]:
+    def _turns_sync(
+        self, conversation_id: str, page: int, before_ordinal: int | None, model_eligible_only: bool
+    ) -> list[Any]:
         with self._transaction("read a conversation's turns", immediate=False) as conn:
             row = self._row_of(conn, conversation_id)
             if row is None or row[4] is not None:
@@ -1595,9 +1642,11 @@ class SqliteConversationStore:
             # SQLite bind parameter can carry and raises `OverflowError`.
             head = (
                 "SELECT conversation_id, ordinal, episode_id, occurred_at, execution_id, "
-                "step_id, delivery_state, delivery_played, delivery_rendered "
+                "step_id, delivery_state, delivery_played, delivery_rendered, model_eligible "
                 "FROM turns WHERE conversation_id = ?"
             )
+            if model_eligible_only:
+                head += " AND model_eligible = 1"
             if before_ordinal is None:
                 rows = self._fetch(
                     conn,
@@ -1655,7 +1704,7 @@ class SqliteConversationStore:
             # that only replays what it is given.
             head = (
                 "SELECT conversation_id, ordinal, episode_id, occurred_at, execution_id, "
-                "step_id, delivery_state, delivery_played, delivery_rendered "
+                "step_id, delivery_state, delivery_played, delivery_rendered, model_eligible "
                 "FROM turns WHERE conversation_id = ?"
             )
             if after_ordinal is None:

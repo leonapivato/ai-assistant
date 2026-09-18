@@ -2248,6 +2248,66 @@ class ConversationStoreContract:
         with pytest.raises(ConversationStoreError):
             await store.episodes_to_purge(conversation_id)
 
+    async def test_eligibility_filters_before_the_tail_window(
+        self, store: ConversationStore
+    ) -> None:
+        """Inspection-only rows consume ordinals but no model replay slots."""
+        conversation = await store.start()
+        rows = [
+            await store.append(conversation.id, occurred_at=_NOW, model_eligible=eligible)
+            for eligible in (True, False, True, False, False)
+        ]
+
+        assert await store.turns(conversation.id, limit=2, model_eligible_only=True) == [
+            rows[0],
+            rows[2],
+        ]
+        assert await store.turns(conversation.id, limit=2) == rows[-2:]
+        assert await store.turns(
+            conversation.id, limit=2, before_ordinal=rows[2].ordinal, model_eligible_only=True
+        ) == [rows[0]]
+        assert await store.turns_after(conversation.id, limit=10) == rows
+        assert (await store.export()).turns == tuple(rows)
+        assert await store.episodes_to_purge(conversation.id, limit=10) == [
+            row.episode_id for row in rows
+        ]
+
+    async def test_all_ineligible_turns_leave_an_empty_model_window(
+        self, store: ConversationStore
+    ) -> None:
+        """Filtering does not reinterpret a valid conversation as missing."""
+        conversation = await store.start()
+        await store.append(conversation.id, occurred_at=_NOW, model_eligible=False)
+
+        assert await store.turns(conversation.id, model_eligible_only=True) == []
+        assert len(await store.turns(conversation.id)) == 1
+
+    async def test_delivery_preserves_the_immutable_index_eligibility(
+        self, store: ConversationStore
+    ) -> None:
+        """Playback changes delivery only, even for an inspection-only row."""
+        conversation = await store.start()
+        binding = ParkedBinding(execution_id="eligibility-execution", step_id="step")
+        row = await store.append(
+            conversation.id,
+            occurred_at=_NOW,
+            parked=binding,
+            delivery=_UNSTAMPED,
+            model_eligible=False,
+        )
+
+        stamped = await store.record_delivery(
+            conversation.id, episode_id=row.episode_id, delivery=_INTERRUPTED
+        )
+
+        assert stamped is not None
+        assert stamped.model_eligible is False
+        assert stamped.delivery == _INTERRUPTED
+        assert await store.turn_of_episode(row.episode_id) == stamped
+        assert await store.turn_of_binding(binding) == stamped
+        assert await store.turns(conversation.id, model_eligible_only=True) == []
+        assert (await store.export()).turns == (stamped,)
+
     # --- export --------------------------------------------------------------
 
     async def test_export_carries_the_conversations_and_their_turns_in_order(
@@ -2269,7 +2329,7 @@ class ConversationStoreContract:
             (first.id, 1),
             (first.id, 2),
         ]
-        assert exported.schema_version == 2
+        assert exported.schema_version == 3
 
     async def test_export_omits_a_stamped_conversation_and_its_turns(
         self, factory: ConversationStoreFactory

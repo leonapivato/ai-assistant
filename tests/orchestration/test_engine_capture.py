@@ -1062,6 +1062,7 @@ async def test_no_log_on_the_capture_or_observation_path_carries_the_reply() -> 
             occurred_at: datetime,
             parked: ParkedBinding | None = None,
             delivery: SpokenDelivery | None = None,
+            model_eligible: bool = True,
         ) -> ConversationTurn:
             msg = "the index is down"
             raise ConversationStoreError(msg)

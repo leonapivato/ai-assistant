@@ -468,6 +468,7 @@ async def test_the_episode_id_is_absent_exactly_where_no_turn_was_recorded() -> 
             occurred_at: datetime,
             parked: ParkedBinding | None = None,
             delivery: SpokenDelivery | None = None,
+            model_eligible: bool = True,
         ) -> ConversationTurn:
             msg = "the index is unwritable"
             raise ConversationStoreError(msg)
@@ -635,9 +636,15 @@ async def test_the_supply_path_makes_no_second_store_call() -> None:
             *,
             limit: int | None = None,
             before_ordinal: int | None = None,
+            model_eligible_only: bool = False,
         ) -> list[ConversationTurn]:
             self.reads.append("turns")
-            return await super().turns(conversation_id, limit=limit, before_ordinal=before_ordinal)
+            return await super().turns(
+                conversation_id,
+                limit=limit,
+                before_ordinal=before_ordinal,
+                model_eligible_only=model_eligible_only,
+            )
 
         async def turn_of_episode(self, episode_id: str) -> ConversationTurn | None:
             self.reads.append("turn_of_episode")

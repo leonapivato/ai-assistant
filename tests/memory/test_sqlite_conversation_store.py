@@ -27,7 +27,11 @@ from conversation_store_contract import (
     MovableClock,
 )
 
-from ai_assistant.core.errors import ConversationStoreError, UnknownConversationError
+from ai_assistant.core.errors import (
+    ConversationStoreError,
+    IncompatibleStateError,
+    UnknownConversationError,
+)
 from ai_assistant.core.types import (
     ParkedBinding,
     SpokenDelivery,
@@ -172,35 +176,6 @@ def _insert_orphan_turn(database: Path, *, binding: ParkedBinding) -> str:
     finally:
         raw.close()
     return episode_id
-
-
-def _strip_the_foreign_key(database: Path) -> None:
-    """Rewrite ``turns`` back to the unconstrained shape a pre-#452 store wrote.
-
-    The file is produced by the *current* store and then walked backwards, rather
-    than assembled from a hand-written legacy schema: everything but the one column
-    constraint under test is then authentic, and a legacy database in the wild is
-    exactly this file.
-    """
-    raw = sqlite3.connect(database, isolation_level=None)
-    try:
-        raw.execute(
-            "CREATE TABLE turns_legacy(conversation_id TEXT NOT NULL, ordinal INTEGER NOT NULL, "
-            "episode_id TEXT NOT NULL, occurred_at INTEGER NOT NULL, execution_id TEXT, "
-            "step_id TEXT, PRIMARY KEY(conversation_id, ordinal))"
-        )
-        raw.execute(
-            f"INSERT INTO turns_legacy({_TURN_COLUMNS}) SELECT {_TURN_COLUMNS} FROM turns"  # noqa: S608 — literals
-        )
-        raw.execute("DROP TABLE turns")
-        raw.execute("ALTER TABLE turns_legacy RENAME TO turns")
-        raw.execute("CREATE UNIQUE INDEX turns_episode ON turns(episode_id)")
-        raw.execute(
-            "CREATE UNIQUE INDEX turns_binding ON turns(execution_id, step_id) "
-            "WHERE execution_id IS NOT NULL"
-        )
-    finally:
-        raw.close()
 
 
 class TestSqliteConversationStoreContract(ConversationStoreContract):
@@ -431,57 +406,25 @@ async def test_the_database_file_is_owner_only(tmp_path: Path) -> None:
 def test_a_journal_opened_during_setup_is_owner_only(
     tmp_path: Path, monkeypatch: pytest.MonkeyPatch
 ) -> None:
-    """ADR-0004 §4 reaches the sidecars, and reaches them from the first write (#491).
-
-    SQLite copies the database file's mode onto every rollback journal it creates
-    for it, so restricting the file after the schema is built leaves every journal
-    opened in between carrying the process umask — and an interrupted write leaves
-    it on disk holding Tier 1 pages beside a ``0600`` base file.
-
-    Observed **inside** ``_setup`` rather than after it, because that is the only
-    place the difference is visible. The case this replaces provoked a journal
-    through a raw connection *after* the constructor returned, by which point the
-    file is ``0600`` under either ordering — so it passed on the unfixed code and
-    was no evidence for the fix it was named for (#491).
-
-    The file is walked back to the pre-#452 shape so that :meth:`_migrate_turns`
-    runs: it is the one part of setup with an explicit ``BEGIN``, so its journal
-    stays open across statement boundaries where the trace callback can read it —
-    and it is also the write most exposed here, since it copies every turn. The
-    file is left ``0644`` beforehand so the case does not depend on the runner's
-    umask, and because reopening an existing store is the common path anyway.
-    """
+    """Fresh M36 initialization restricts the file before transactional writes."""
     path = tmp_path / "conversations.db"
-    SqliteConversationStore(path=path, now=_fixed_now).close()
-    _strip_the_foreign_key(path)
-    path.chmod(0o644)
+    path.touch(mode=0o644)
 
     observed = _watch_the_journal(monkeypatch, path)
     reopened = SqliteConversationStore(path=path, now=_fixed_now)
     try:
         journals = [mode for mode in observed if mode is not None]
-        assert journals, "the rebuild should have run with a journal open"
+        assert journals, "initialization should have run with a journal open"
         assert set(journals) == {0o600}
     finally:
         reopened.close()
 
 
 @pytest.mark.integration
-def test_a_stale_journal_is_restricted_before_any_statement_reads_it(
+def test_a_stale_journal_is_restricted_before_initialization_writes(
     tmp_path: Path, monkeypatch: pytest.MonkeyPatch
 ) -> None:
-    """ADR-0004 §4 reaches a ``-journal`` this process did not create either (#490).
-
-    A crash leaves one behind, and it keeps its own mode across the reopen: SQLite
-    copies the database file's mode onto a sidecar it *creates*, never onto one that
-    is already there. Asserted from inside ``_setup`` because SQLite discards a
-    non-hot journal during the first statement, so there is nothing left to look at
-    once the constructor returns — the ``-wal``/``-shm`` cases beside this one, which
-    SQLite never touches in the default journal mode, carry the after-the-fact form.
-
-    One store covers the ``-journal`` name for all five: they share the restriction's
-    shape line for line, and each has its own ``-wal``/``-shm`` case.
-    """
+    """ADR-0275 probes compatibility before chmod; writes still require owner-only mode."""
     path = tmp_path / "conversations.db"
     SqliteConversationStore(path=path, now=_fixed_now).close()
     journal = Path(f"{path}-journal")
@@ -492,7 +435,9 @@ def test_a_stale_journal_is_restricted_before_any_statement_reads_it(
     SqliteConversationStore(path=path, now=_fixed_now).close()
 
     assert observed, "setup should have run at least one statement"
-    assert observed[0] == 0o600
+    assert 0o600 in observed
+    first_restricted = observed.index(0o600)
+    assert all(mode in (None, 0o600) for mode in observed[first_restricted:])
 
 
 @pytest.mark.integration
@@ -601,7 +546,9 @@ async def test_what_was_written_survives_a_reopen(tmp_path: Path) -> None:
     try:
         conversation = await store.start()
         first = await store.append(conversation.id, occurred_at=_NOW)
-        parked = await store.append(conversation.id, occurred_at=_NOW, parked=binding)
+        parked = await store.append(
+            conversation.id, occurred_at=_NOW, parked=binding, model_eligible=False
+        )
     finally:
         store.close()
 
@@ -614,6 +561,7 @@ async def test_what_was_written_survives_a_reopen(tmp_path: Path) -> None:
         assert restored.last_turn_at == _NOW
         assert await reopened.turns(conversation.id) == [first, parked]
         assert await reopened.turn_of_binding(binding) == parked
+        assert await reopened.turns(conversation.id, model_eligible_only=True) == [first]
         # The ordinal is read back from the index, not from process state, so a
         # restarted engine cannot re-use one (ADR-0064's invariant across a restart).
         following = await reopened.append(conversation.id, occurred_at=_NOW)
@@ -1080,7 +1028,7 @@ async def test_two_processes_over_one_file_allocate_dense_distinct_ordinals(
         child = _store_holding_its_ordinal_read(path, announce=announce, hold=_HOLD_SECONDS)
         try:
             allocated = [
-                child._append_sync(conversation.id, _NOW, None, None)[1] for _ in range(each)
+                child._append_sync(conversation.id, _NOW, None, None, True)[1] for _ in range(each)
             ]
         finally:
             child.close()
@@ -1090,7 +1038,7 @@ async def test_two_processes_over_one_file_allocate_dense_distinct_ordinals(
         child = SqliteConversationStore(path=path, now=_fixed_now)
         try:
             allocated = [
-                child._append_sync(conversation.id, _NOW, None, None)[1] for _ in range(each)
+                child._append_sync(conversation.id, _NOW, None, None, True)[1] for _ in range(each)
             ]
         finally:
             child.close()
@@ -1145,7 +1093,7 @@ async def test_a_capture_holds_off_a_deletion_in_another_process(tmp_path: Path)
     def _hold_then_append(announce: Callable[[], None]) -> str:
         child = _store_holding_its_ordinal_read(path, announce=announce, hold=_HOLD_SECONDS)
         try:
-            return str(child._append_sync(conversation.id, _NOW, None, None)[1])
+            return str(child._append_sync(conversation.id, _NOW, None, None, True)[1])
         except UnknownConversationError:
             return "REFUSED"
         finally:
@@ -1314,239 +1262,6 @@ async def test_a_turn_naming_no_conversation_is_reported_rather_than_joined_away
         assert await reopened.turn_of_episode(sound[0].episode_id) == sound[0]
         assert await reopened.stamp_deleted(live.id) is True
         assert await reopened.turn_of_episode(sound[0].episode_id) is None
-    finally:
-        reopened.close()
-
-
-@pytest.mark.integration
-async def test_a_legacy_database_without_the_foreign_key_is_rebuilt(tmp_path: Path) -> None:
-    """``CREATE TABLE IF NOT EXISTS`` binds fresh databases only, so a rebuild is owed.
-
-    SQLite has no ``ADD CONSTRAINT``, so the only way an existing file starts
-    carrying the key is the table rebuild ``SqliteMemoryStore._migrate_records``
-    already establishes as this repo's shape. What the case has to prove beyond
-    "the key is there" is that nothing was lost on the way: the rows, their
-    ordinals, and the two unique indexes ``DROP TABLE`` takes with it.
-    """
-    path = tmp_path / "conversations.db"
-    binding = ParkedBinding(execution_id="exec-1", step_id="step-1")
-    store = SqliteConversationStore(path=path, now=_fixed_now)
-    try:
-        conversation = await store.start()
-        first = await store.append(conversation.id, occurred_at=_NOW)
-        parked = await store.append(conversation.id, occurred_at=_NOW, parked=binding)
-    finally:
-        store.close()
-
-    _strip_the_foreign_key(path)
-    assert not _cascading_keys_of(path), "the legacy file must really carry no key"
-
-    reopened = SqliteConversationStore(path=path, now=_fixed_now)
-    try:
-        assert _cascading_keys_of(path), "opening the store should have rebuilt the table"
-        assert await reopened.turns(conversation.id) == [first, parked]
-        assert await reopened.turn_of_binding(binding) == parked
-        # The ordinal is read back from the migrated index, not from process state.
-        following = await reopened.append(conversation.id, occurred_at=_NOW)
-        assert following.ordinal == parked.ordinal + 1
-        # And the uniqueness invariants the schema *proves* came back with it: the
-        # rebuild drops the table, and its indexes go with it (ADR-0074 §9.1).
-        with pytest.raises(ConversationStoreError, match="already parked"):
-            await reopened.append(conversation.id, occurred_at=_NOW, parked=binding)
-    finally:
-        reopened.close()
-
-
-@pytest.mark.integration
-async def test_a_legacy_orphan_migrates_even_where_enforcement_starts_on(
-    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
-) -> None:
-    """Enforcement being off is a *compile-time* default, so the rebuild says ``OFF``.
-
-    A driver built with ``SQLITE_DEFAULT_FOREIGN_KEYS`` hands out connections with
-    enforcement already on. A rebuild that merely ran *before* the store switched it
-    on would, on such a build, refuse the legacy orphan mid-copy and leave the file
-    unopenable — the outcome the migration exists to avoid, unreachable on the
-    machine running this and reachable on somebody else's. Simulated by handing the
-    store the kind of connection such a build produces.
-    """
-    path = tmp_path / "conversations.db"
-    binding = ParkedBinding(execution_id="exec-orphan", step_id="step-orphan")
-    store = SqliteConversationStore(path=path, now=_fixed_now)
-    try:
-        live = await store.start()
-        turn = await store.append(live.id, occurred_at=_NOW)
-    finally:
-        store.close()
-
-    _strip_the_foreign_key(path)
-    episode_id = _insert_orphan_turn(path, binding=binding)
-
-    real_connect = sqlite3.connect
-
-    # Typed to the one call the store makes, rather than to `connect`'s overloads:
-    # the double stands in for a driver default, not for the whole function.
-    def connect_enforcing(
-        database: str, *, check_same_thread: bool, isolation_level: None
-    ) -> sqlite3.Connection:
-        conn = real_connect(
-            database, check_same_thread=check_same_thread, isolation_level=isolation_level
-        )
-        conn.execute("PRAGMA foreign_keys = ON")
-        return conn
-
-    # Scoped to the constructor, which is the only call that has to meet the
-    # simulated driver — the helpers below open their own ordinary connections.
-    with monkeypatch.context() as patched:
-        patched.setattr(sqlite3, "connect", connect_enforcing)
-        reopened = SqliteConversationStore(path=path, now=_fixed_now)
-
-    try:
-        assert _cascading_keys_of(path), "the rebuild should have happened anyway"
-        assert await reopened.turns(live.id) == [turn], "the sound rows are still readable"
-        with pytest.raises(ConversationStoreError, match="names a conversation that is absent"):
-            await reopened.turn_of_episode(episode_id)
-    finally:
-        reopened.close()
-
-
-@pytest.mark.integration
-async def test_a_legacy_orphan_survives_the_rebuild_and_is_reported(tmp_path: Path) -> None:
-    """The copy runs with enforcement switched off, deliberately.
-
-    A legacy file may already hold an orphan. Enforcing during the rebuild would
-    refuse it and make that file *unopenable* — no read could reach the sound rows
-    beside the broken one, and the fault would surface as a failure to construct the
-    store rather than as the report the contract owes. So the row is carried across
-    and named by the reads that would otherwise join it away.
-    """
-    path = tmp_path / "conversations.db"
-    binding = ParkedBinding(execution_id="exec-orphan", step_id="step-orphan")
-    store = SqliteConversationStore(path=path, now=_fixed_now)
-    try:
-        live = await store.start()
-        turn = await store.append(live.id, occurred_at=_NOW)
-    finally:
-        store.close()
-
-    _strip_the_foreign_key(path)
-    episode_id = _insert_orphan_turn(path, binding=binding)
-
-    reopened = SqliteConversationStore(path=path, now=_fixed_now)
-    try:
-        assert _cascading_keys_of(path), "the rebuild should have happened anyway"
-        assert await reopened.turns(live.id) == [turn], "the sound rows are still readable"
-        with pytest.raises(ConversationStoreError, match="names a conversation that is absent"):
-            await reopened.turn_of_episode(episode_id)
-        with pytest.raises(ConversationStoreError, match="names a conversation that is absent"):
-            await reopened.export()
-    finally:
-        reopened.close()
-
-
-class _RebuildFailsPartWay(sqlite3.Connection):
-    """A driver whose row copy fails part way through :meth:`_migrate_turns`' rebuild.
-
-    The failure is injected into the *mechanism* rather than into the data, unlike
-    the memory store's twin (``test_migration_rolls_back_a_rebuild_that_hits_a
-    _corrupt_row``), which corrupts a JSON blob the backfill decodes. This copy
-    decodes nothing, and no legacy row can fail it: the pre-#452 schema
-    ``_strip_the_foreign_key`` restores is the one the store originally wrote, and
-    it already carries every ``NOT NULL`` and the primary key ``turns_migrated``
-    declares — so any row the legacy table can hold, the new table accepts.
-
-    What can still fail is the write itself, which is what a full disk, a revoked
-    file, or a driver-level fault all look like from inside the copy — and which is
-    the case the explicit ``BEGIN`` exists for. Handed to the store the way the
-    enforcing-driver case above hands one over: through ``connect``'s ``factory``,
-    so the store meets an ordinary connection that simply fails.
-    """
-
-    #: How many rows go across before the injected failure. One rather than zero,
-    #: because what has to roll back is a rebuild already *underway*: the new table
-    #: created and holding a row, so there is something for the rollback to undo.
-    rows_before_failure: int = 1
-
-    def execute(self, sql: str, parameters: Any = (), /) -> sqlite3.Cursor:
-        """Pass every statement through, failing the copy once the budget is spent."""
-        if sql.startswith("INSERT INTO turns_migrated"):
-            if self.rows_before_failure <= 0:
-                msg = "disk I/O error"
-                raise sqlite3.OperationalError(msg)
-            self.rows_before_failure -= 1
-        return super().execute(sql, parameters)
-
-
-@pytest.mark.integration
-async def test_a_rebuild_that_fails_part_way_rolls_back_whole(
-    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
-) -> None:
-    """The rewrite is all-or-nothing, so a failure mid-copy leaves the file as it was.
-
-    Without the explicit ``BEGIN`` the rebuild is a run of auto-committed
-    statements — SQLite commits a bare DDL statement in autocommit mode — so a
-    failure during the row copy would leave a half-filled ``turns_migrated`` beside
-    a ``turns`` table already dropped, or the swap done and rows missing. And
-    permanently: the next open would find the foreign key on the renamed table and
-    skip the migration that would have finished the job.
-
-    So what the transaction owes is not "the rows are safe somewhere" but "nothing
-    moved" — the legacy schema unchanged, its rows all present, no half-built table
-    left behind, and the file still migratable by a later, sound open.
-    """
-    path = tmp_path / "conversations.db"
-    store = SqliteConversationStore(path=path, now=_fixed_now)
-    try:
-        conversation = await store.start()
-        first = await store.append(conversation.id, occurred_at=_NOW)
-        second = await store.append(conversation.id, occurred_at=_NOW)
-    finally:
-        store.close()
-
-    _strip_the_foreign_key(path)
-    assert not _cascading_keys_of(path), "the legacy file must really carry no key"
-
-    real_connect = sqlite3.connect
-
-    # Typed to the one call the store makes, as the enforcing-driver case above is.
-    def connect_failing(
-        database: str, *, check_same_thread: bool, isolation_level: None
-    ) -> sqlite3.Connection:
-        return real_connect(
-            database,
-            check_same_thread=check_same_thread,
-            isolation_level=isolation_level,
-            factory=_RebuildFailsPartWay,
-        )
-
-    # Scoped to the constructor, which is the only call that has to meet the
-    # failing driver — the assertions below open their own ordinary connections.
-    with monkeypatch.context() as patched:
-        patched.setattr(sqlite3, "connect", connect_failing)
-        with pytest.raises(ConversationStoreError, match="disk I/O error"):
-            SqliteConversationStore(path=path, now=_fixed_now)
-
-    raw = sqlite3.connect(path)
-    try:
-        assert not list(
-            raw.execute("SELECT name FROM sqlite_master WHERE name = 'turns_migrated'")
-        ), "the half-built table did not survive the rollback"
-        # Every row still there, and still under the legacy schema: the copy that
-        # failed took its own DDL down with it rather than leaving a swap behind.
-        assert [row[0] for row in raw.execute("SELECT ordinal FROM turns ORDER BY ordinal")] == [
-            first.ordinal,
-            second.ordinal,
-        ]
-    finally:
-        raw.close()
-    assert not _cascading_keys_of(path), "the swap did not commit"
-
-    # And the file is a *clean* legacy database rather than a half-swapped one, so
-    # a later open migrates it rather than refusing it or skipping past it.
-    reopened = SqliteConversationStore(path=path, now=_fixed_now)
-    try:
-        assert _cascading_keys_of(path), "a sound open completes the migration later"
-        assert await reopened.turns(conversation.id) == [first, second]
     finally:
         reopened.close()
 
@@ -1884,32 +1599,6 @@ async def test_a_backend_fault_inside_a_transaction_is_the_seams_own_error() -> 
 # --- the observation watermark's column and its discards (ADR-0212 §7) ------
 
 
-def _drop_the_watermark_column(database: Path) -> None:
-    """Rewrite ``conversations`` back to the shape a pre-ADR-0212 store wrote.
-
-    The file is produced by the *current* store and then walked backwards, rather
-    than assembled from a hand-written legacy schema — :func:`_strip_the_foreign_key`'s
-    approach and for its reason: everything but the one column under test is then
-    authentic, and a legacy database in the wild is exactly this file.
-    """
-    raw = sqlite3.connect(database, isolation_level=None)
-    try:
-        raw.execute(
-            "CREATE TABLE conversations_legacy(id TEXT PRIMARY KEY, "
-            "started_at INTEGER NOT NULL, last_active_at INTEGER NOT NULL, "
-            "last_turn_at INTEGER, deleted_at INTEGER)"
-        )
-        raw.execute(
-            "INSERT INTO conversations_legacy(id, started_at, last_active_at, last_turn_at, "
-            "deleted_at) SELECT id, started_at, last_active_at, last_turn_at, deleted_at "
-            "FROM conversations"
-        )
-        raw.execute("DROP TABLE conversations")
-        raw.execute("ALTER TABLE conversations_legacy RENAME TO conversations")
-    finally:
-        raw.close()
-
-
 def _write_watermark(database: Path, conversation_id: str, value: object) -> None:
     """Put an arbitrary value in the watermark column, through a raw connection.
 
@@ -1927,40 +1616,6 @@ def _write_watermark(database: Path, conversation_id: str, value: object) -> Non
         )
     finally:
         raw.close()
-
-
-async def test_a_database_written_before_the_watermark_column_opens_and_serves(
-    tmp_path: Path,
-) -> None:
-    """§7: the migration is what makes "ignores it" true of a *file* and not only a build.
-
-    ``CREATE TABLE IF NOT EXISTS`` is a no-op against a file that already holds
-    ``conversations``, so without the ``ALTER TABLE`` a store opened over a database
-    written by an earlier build would fail its first read on a column that is not
-    there — a resident process that will not start, found after a downgrade rather
-    than in review.
-    """
-    path = tmp_path / "conversations.db"
-    first = SqliteConversationStore(path=path, now=_fixed_now)
-    try:
-        conversation = await first.start()
-        await first.append(conversation.id, occurred_at=_NOW)
-    finally:
-        first.close()
-    _drop_the_watermark_column(path)
-
-    reopened = SqliteConversationStore(path=path, now=_fixed_now)
-    try:
-        read = await reopened.get(conversation.id)
-
-        assert read is not None
-        assert read.observed_through is None, "a conversation written before the column has none"
-        assert [one.id for one in await reopened.conversations_with_unobserved_turns()] == [
-            conversation.id
-        ]
-        assert await reopened.record_observed(conversation.id, through_ordinal=1) is not None
-    finally:
-        reopened.close()
 
 
 async def test_an_insert_naming_only_the_older_columns_still_succeeds(tmp_path: Path) -> None:
@@ -2141,23 +1796,6 @@ async def test_the_watermark_survives_a_reopen(tmp_path: Path) -> None:
 # --- ADR-0247 §5: the two vestigial columns and their migration stay ---------
 
 
-def _drop_the_search_draw_columns(database: Path) -> None:
-    """Rewrite ``conversations`` back to the shape a pre-ADR-0238 store wrote.
-
-    :func:`_drop_the_watermark_column`'s approach and for its reason: the file is
-    produced by the *current* store and then walked backwards, so everything but the
-    two columns under test is authentic and a legacy database in the wild is exactly
-    this file. ``ALTER TABLE … DROP COLUMN`` rather than a rebuild, because that is the
-    minimal walk back and it leaves ``observed_through`` in place.
-    """
-    raw = sqlite3.connect(database, isolation_level=None)
-    try:
-        raw.execute("ALTER TABLE conversations DROP COLUMN search_calls")
-        raw.execute("ALTER TABLE conversations DROP COLUMN all_external_user_chosen")
-    finally:
-        raw.close()
-
-
 def _conversation_columns(database: Path) -> set[str]:
     """The column names ``conversations`` actually holds, read from the file."""
     raw = sqlite3.connect(database, isolation_level=None)
@@ -2165,48 +1803,6 @@ def _conversation_columns(database: Path) -> set[str]:
         return {str(row[1]) for row in raw.execute("PRAGMA table_info(conversations)")}
     finally:
         raw.close()
-
-
-async def test_the_two_vestigial_columns_are_added_to_a_file_written_without_them(
-    tmp_path: Path,
-) -> None:
-    """ADR-0247 §5: the columns and ``_migrate_search_draw`` stay although nothing reads them.
-
-    What the migration buys once the budget is gone is **one shape**: a file written
-    before ADR-0238, one written under it and one written after the removal all hold the
-    same ``conversations`` table, so no read, export or backup has to know which of the
-    three it is looking at. Dropping the pair instead would mean rebuilding the one
-    table holding every conversation, which §13 defers with what fires it.
-
-    The older rung of the same ladder is asserted in the same open — a file lacking the
-    watermark *and* the two columns — because ``CREATE TABLE IF NOT EXISTS`` is a no-op
-    against a file that already holds ``conversations``, so an ordering bug between the
-    migrations would be found after a downgrade rather than in review.
-    """
-    path = tmp_path / "conversations.db"
-    first = SqliteConversationStore(path=path, now=_fixed_now)
-    try:
-        conversation = await first.start()
-        await first.append(conversation.id, occurred_at=_NOW)
-    finally:
-        first.close()
-    _drop_the_search_draw_columns(path)
-    _drop_the_watermark_column(path)
-    assert "search_calls" not in _conversation_columns(path)
-
-    reopened = SqliteConversationStore(path=path, now=_fixed_now)
-    try:
-        assert _conversation_columns(path) >= {
-            "search_calls",
-            "all_external_user_chosen",
-            "observed_through",
-        }
-        # Every presenting read still answers, which is the whole of what the migration
-        # is for: a conversation written before either decision opens and reads.
-        assert (await reopened.get(conversation.id)) is not None
-        assert [turn.ordinal for turn in await reopened.turns(conversation.id)] == [1]
-    finally:
-        reopened.close()
 
 
 async def test_start_writes_neither_vestigial_column_and_both_take_their_default(
@@ -2267,3 +1863,71 @@ async def test_an_insert_naming_only_the_pre_decision_columns_still_succeeds(
         assert await store.get("older-build") is not None
     finally:
         store.close()
+
+
+@pytest.mark.integration
+@pytest.mark.parametrize("shape", ["unmarked", "old_index", "newer", "malformed"])
+def test_incompatible_conversation_state_is_refused_without_mutation(
+    tmp_path: Path, shape: str
+) -> None:
+    """Cutover neither upgrades nor deletes an old or unsupported database."""
+    path = tmp_path / "conversations.db"
+    SqliteConversationStore(path=path, now=_fixed_now).close()
+    with sqlite3.connect(path) as raw:
+        if shape == "unmarked":
+            raw.execute("DROP TABLE episode_record_format")
+        elif shape == "old_index":
+            raw.execute("ALTER TABLE turns DROP COLUMN model_eligible")
+        elif shape == "newer":
+            raw.execute("UPDATE episode_record_format SET version = 2")
+        else:
+            raw.execute("ALTER TABLE episode_record_format RENAME COLUMN version TO invalid")
+    path.chmod(0o644)
+    before = path.read_bytes()
+
+    error = ConversationStoreError if shape == "malformed" else IncompatibleStateError
+    with pytest.raises(error):
+        SqliteConversationStore(path=path, now=_fixed_now)
+
+    assert path.read_bytes() == before
+    assert _mode_of(path) == 0o644
+
+
+class _InitializationFails(sqlite3.Connection):
+    """Fail after the marker and conversation table have been created."""
+
+    def execute(self, sql: str, parameters: Any = (), /) -> sqlite3.Cursor:
+        """Inject a storage failure partway through fresh initialization."""
+        if sql.startswith("CREATE TABLE IF NOT EXISTS turns"):
+            raise sqlite3.OperationalError("injected initialization failure")
+        return super().execute(sql, parameters)
+
+
+@pytest.mark.integration
+def test_fresh_conversation_initialization_rolls_back_and_can_retry(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """A failed initial open leaves no marker advertising a partial schema."""
+    path = tmp_path / "conversations.db"
+    real_connect = sqlite3.connect
+
+    def failing_connect(
+        database: str, *, check_same_thread: bool, isolation_level: None
+    ) -> sqlite3.Connection:
+        return real_connect(
+            database,
+            check_same_thread=check_same_thread,
+            isolation_level=isolation_level,
+            factory=_InitializationFails,
+        )
+
+    with monkeypatch.context() as patched:
+        patched.setattr(sqlite3, "connect", failing_connect)
+        with pytest.raises(ConversationStoreError, match="injected initialization failure"):
+            SqliteConversationStore(path=path, now=_fixed_now)
+
+    with sqlite3.connect(path) as raw:
+        assert raw.execute("SELECT name FROM sqlite_master WHERE type='table'").fetchall() == []
+    SqliteConversationStore(path=path, now=_fixed_now).close()
+    with sqlite3.connect(path) as raw:
+        assert raw.execute("SELECT version FROM episode_record_format").fetchall() == [(1,)]

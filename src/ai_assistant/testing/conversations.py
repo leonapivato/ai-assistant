@@ -479,11 +479,15 @@ class FakeConversationStore:
         occurred_at: datetime,
         parked: ParkedBinding | None = None,
         delivery: SpokenDelivery | None = None,
+        model_eligible: bool = True,
     ) -> ConversationTurn:
         """Allocate the ordinal, derive the episode id, and record the turn.
 
         The duplicate-binding check runs *before* anything is allocated, so a
         refusal consumes no ordinal and leaves no row behind (ADR-0074 §9.1).
+
+        ``model_eligible`` (ADR-0275) is immutable, stored atomically with this
+        index row, and preserved by delivery updates and all unfiltered reads.
 
         Raises:
             UnknownConversationError: If the id names nothing or names a stamped
@@ -509,6 +513,7 @@ class FakeConversationStore:
                 occurred_at=occurred_at,
                 parked=parked,
                 delivery=delivery,
+                model_eligible=model_eligible,
             )
             existing.append(turn)
             self._by_episode[turn.episode_id] = turn
@@ -667,8 +672,13 @@ class FakeConversationStore:
         *,
         limit: int | None = None,
         before_ordinal: int | None = None,
+        model_eligible_only: bool = False,
     ) -> list[ConversationTurn]:
         """Return a page of turns, ordinal ascending, ending below ``before_ordinal``.
+
+        With ``model_eligible_only=True`` (ADR-0275), filter before selecting
+        the tail window. Returned ordinals remain ordered but may contain gaps.
+        Deletion and turns_after remain unfiltered.
 
         Raises:
             ValueError: If ``limit`` or ``before_ordinal`` is out of range.
@@ -682,6 +692,8 @@ class FakeConversationStore:
         async with self._resource.held():  # a locked read on the durable store (#492)
             self._live(conversation_id)
             rows = self._turns[conversation_id]
+            if model_eligible_only:
+                rows = [turn for turn in rows if turn.model_eligible]
             if before_ordinal is not None:
                 rows = [turn for turn in rows if turn.ordinal < before_ordinal]
             return list(rows[-page:]) if page else []
