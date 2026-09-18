@@ -1,6 +1,6 @@
 # 275. An episode records one activation after processing ends
 
-- Status: Proposed
+- Status: Accepted
 - Date: 2026-09-18
 - Scope: [M36](https://github.com/leonapivato/ai-assistant/milestone/2), [#2522](https://github.com/leonapivato/ai-assistant/issues/2522).
 - Dependency: ADR-0274 and [M35](https://github.com/leonapivato/ai-assistant/milestone/1).
