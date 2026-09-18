@@ -1269,3 +1269,14 @@ async def test_reembedding_preserves_processing_record_marker_and_digest(tmp_pat
         assert (await opened.search("coffee", episode_model_eligible=True)).records == ()
     finally:
         opened.close()
+
+
+async def test_reembed_reports_a_corrupt_format_marker_as_a_store_error(tmp_path: Path) -> None:
+    path = tmp_path / "memory.db"
+    await _seed(path, [_record("one", "coffee")])
+    with sqlite3.connect(path) as conn:
+        conn.execute("ALTER TABLE episode_record_format RENAME COLUMN version TO broken")
+    before = path.read_bytes()
+    with pytest.raises(MemoryStoreError, match="cannot read episode record format"):
+        await Reembedder(store=path, embedder=HashingEmbedder(dimensions=_NEW)).run()
+    assert path.read_bytes() == before
