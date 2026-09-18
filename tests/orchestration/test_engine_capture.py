@@ -35,6 +35,7 @@ import json
 from base64 import b64encode
 from typing import TYPE_CHECKING, Final, ForwardRef, TypeAliasType, get_args, get_type_hints
 
+import pytest
 import structlog
 from pydantic import BaseModel, SecretStr
 from test_engine import (
@@ -697,6 +698,9 @@ def _reachable_from_the_composing_stage() -> dict[str, type[BaseModel]]:
         model = queue.pop()
         if model.__name__ in reached:
             continue
+        # Resolve legitimate forward declarations before walking the graph;
+        # this guard must not depend on which model earlier tests instantiated.
+        model.model_rebuild()
         reached[model.__name__] = model
         for field in model.model_fields.values():
             queue.extend(_models_in(field.annotation))
@@ -805,9 +809,30 @@ def test_the_composing_stages_supply_is_enumerated_so_a_new_field_must_be_judged
     (ADR-0267 §11) — the field is in the graph as a shape, and the judgement is made
     now rather than left to the lane that fills it.
     """
+    # ADR-0275: processing metadata joins the in-process record graph. Its
+    # fields are identifiers, closed values, clocks and caller-supplied Tier 1
+    # text; none admits SecretStr or a store. It is excluded from model prompts
+    # by explicit projections, exercised below over planner/composer/observer.
     reachable = _reachable_from_the_composing_stage()
 
     assert set(reachable) == {
+        "ActivationLinks",
+        "ChannelContext",
+        "ChannelContextItem",
+        "ChannelIdentity",
+        "ConversationInputOptions",
+        "EpisodeProcessingRecord",
+        "NewConversation",
+        "ParkedBinding",
+        "RecordedChannelTrigger",
+        "RecordedResumeTrigger",
+        "RecordedSpeechInput",
+        "RecordedTextInput",
+        "SpokenDeliveryReport",
+        "SpokenReply",
+        "StreamingTextReply",
+        "TurnReference",
+        "WholeTextReply",
         "ActionPlan",
         "Attestation",
         "AuthorizationProjection",
@@ -890,7 +915,8 @@ def _assembled(*providers: FakeModelProvider) -> str:
     )
 
 
-async def test_a_captured_reply_reaches_the_tail_and_the_observation_batch() -> None:
+@pytest.mark.parametrize("enriched", [False, True])
+async def test_a_captured_reply_reaches_the_tail_and_the_observation_batch(enriched: bool) -> None:
     """ADR-0222 §8's assertions 1 and 2, driven end to end, where §11's test 4 stood.
 
     §11's test 4 asserted the opposite of this and named itself "the test a reader
@@ -949,6 +975,32 @@ async def test_a_captured_reply_reaches_the_tail_and_the_observation_batch() -> 
     assert episode.outcome is not None
     assert _SPAN in episode.outcome, "the span is in the store, which is the precondition"
     assert episode.disposition is ExchangeDisposition.STEP_EXECUTED
+    private = "raw-activation-material-must-not-reach-a-model"
+    if enriched:
+        channel = core_types.ChannelIdentity(
+            channel_type="conversation",
+            instance_id=first.conversation_id,
+        )
+        processing = core_types.EpisodeProcessingRecord(
+            activation_id=private,
+            started_at=episode.occurred_at,
+            ended_at=episode.occurred_at,
+            trigger=core_types.RecordedChannelTrigger(
+                target=channel,
+                channel=channel,
+                payload=core_types.RecordedTextInput(text=private),
+                context=core_types.ChannelContext(
+                    history=(core_types.ChannelContextItem(text=private),),
+                ),
+                conversation=None,
+                reply=core_types.WholeTextReply(),
+            ),
+            status=core_types.ProcessingStatus.COMPLETED,
+            reason=core_types.ProcessingReason.RETURNED,
+            response_kind=core_types.EpisodeResponseKind.CONVERSATION_REPLY,
+            model_eligible=True,
+        )
+        await harness.memory.add(episode.model_copy(update={"processing_record": processing}))
 
     await harness.engine.converse(
         "and what else?", timeout=PATIENT, conversation_id=first.conversation_id
@@ -957,6 +1009,8 @@ async def test_a_captured_reply_reaches_the_tail_and_the_observation_batch() -> 
 
     tail = _assembled(planning_model, composing_model)
     batch = _assembled(observing_model)
+    assert private not in tail
+    assert private not in batch
     assert f"what the assistant replied: {json.dumps(f'You went hiking, {_SPAN}.')}" in tail, (
         "ADR-0222 §1: a conversation-tail record renders its reply under its own bullet"
     )
