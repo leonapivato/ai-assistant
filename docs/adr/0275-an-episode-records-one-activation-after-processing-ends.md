@@ -27,12 +27,13 @@ conversation index, optional archive entry, and episode, then checks deletion.
 The index allocates the episode address. `Engine._capture` supplies a legacy
 rendering, reply and disposition; speech calls it before synthesis finishes.
 `EpisodicMemory.outcome` in `core/types.py` means reply text, not processing
-status. Old records cannot reliably supply the raw input or attached context.
+status. The owner declared all existing development state disposable and chose a fresh
+data-directory cutover; reconstructing or migrating old records is out of scope.
 
 The episode itself already lives in `MemoryStore`, independent of conversation
 membership. ADR-0074 §3 deliberately makes the index the owner of membership;
 it does not make every episode a conversation turn. Extending that record
-preserves evidence addresses and the existing data lifecycle. The cost is
+preserves the current evidence-address scheme and data lifecycle. The cost is
 explicit compatibility for consumers that previously saw only conversational
 capture: failed/event records must not enter prompts or displace history merely
 because they share the episodic kind.
@@ -162,16 +163,16 @@ decide which policy should have interrupted it.
 | `ProcessingReason` | String values `returned`, `no_content`, `confirmation`, `clarification`, `disambiguation`, `timeout`, `transcription_failed`, `composition_failed`, `output_oversized`, `processing_failed`, `internal_error`, `cancelled` |
 
 > **Normative.** Add `EpisodicMemory.processing_record:
-> EpisodeProcessingRecord | None = None`; absence denotes a legacy or other
-> producer's record, not a record whose unknown fields may be inferred from
-> text. Keep `outcome`, `disposition`, `capture` and all existing field meanings
+> EpisodeProcessingRecord | None = None`; absence denotes an episode from
+> another supported producer, not a historical-migration promise or a record
+> whose missing activation fields may be inferred from text. Keep `outcome`, `disposition`, `capture` and all existing field meanings
 > except the explicitly added informational-summary role below.
 
 > **Normative.** For a processing record, `response_kind=none` requires
 > `EpisodicMemory.outcome=None`; either other kind requires nonblank encodable
 > text in `outcome`. That is the sole stored response text. A conversational
 > reply and an informational adapter summary remain distinguishable; no new
-> nested field stores a second copy. Historical rows retain their own validators.
+> nested field stores a second copy. Episodes without a processing record retain their existing validators.
 
 > **Normative.** A channel trigger preserves exact admitted text and supplied
 > context, separately from normalized planning text and legacy `content`.
@@ -263,7 +264,7 @@ decide which policy should have interrupted it.
 > idempotency key, admission ledger, receipt-replay or exactly-once mechanism.
 
 > **Normative.** Conversation capture retains the episode address allocated by
-> `ConversationStore.append`, including every historical address. Standalone
+> `ConversationStore.append` under its current address scheme. Standalone
 > capture uses `activation:<activation_id>`; reserve that namespace to this
 > capture producer. Consumers treat both addresses as opaque and never derive
 > membership from their spelling. A collision fails capture without overwrite,
@@ -289,7 +290,7 @@ deleted conversation's supplied context escaping its deletion fence.
 > **Normative.** A control activation whose original conversation cannot be
 > resolved retains the existing degraded/no-episode behavior. Do not copy the
 > parked request, response or context into a standalone record to compensate.
-> Missing historical association and a deleted association are both conservative
+> A missing association and a deleted association are both conservative
 > misses here; no new tombstone or origin-reconstruction scheme is introduced.
 
 > **Normative.** Conversation deletion keeps index-first capture, deletion
@@ -303,8 +304,8 @@ deleted conversation's supplied context escaping its deletion fence.
 > existing conversational/resumption capture path that can provide its existing
 > canonical rendering and disposition; set it `False` for newly captured events,
 > pre-result failures, interruptions, and no-words speech. Callers and models
-> cannot choose this flag. Historical records without the new record retain
-> their previous eligibility.
+> cannot choose this flag. Episodes from other supported producers without a
+> processing record retain their existing eligibility.
 
 An existing partial/degraded composition already had a conversational episode;
 it remains eligible even when §5 now describes its processing as failed. The
@@ -353,9 +354,9 @@ of existing conversational evidence.
 > identify the index row by episode address and changes no processing history.
 
 > **Normative.** Change `ConversationExport.schema_version` from literal `2`
-> to literal `3` for the added index flag. Import/migration accepts version 2 by
-> assigning its rows `True`, retains IDs/ordinals, and emits version 3 thereafter.
-> No version-2 export is emitted after this change to hide the added distinction.
+> to literal `3` for the added index flag. Fresh stores export version 3.
+> M36 adds no version-2 import or conversion path; the existing export surface
+> gains no import operation, and no older export hides the added distinction.
 
 ### 8. Capture sequence and result reporting
 
@@ -456,12 +457,12 @@ of existing conversational evidence.
 > bound its complete canonical stored episode encoding to `8 * P + 65536`
 > bytes. Measure before any index/archive/content write; an excess degrades
 > capture without truncation. This is a write bound, not a new admission limit
-> or a read-time reason to hide old records after deployment limits shrink.
+> or a read-time reason to hide committed records after deployment limits shrink.
 
 The multiplier accommodates admitted input/context, existing rendering and
 response copies, speech transcript and metadata without narrowing ordinary
 supported calls. It is a defensive bound, not a guarantee for arbitrary
-unbounded provider output or historical data. Boundary tests must demonstrate
+unbounded provider output or another producer's records. Boundary tests must demonstrate
 the supported near-limit inputs rather than assuming the multiplier proves it.
 
 > **Normative.** Use the existing `episode_retention` horizon at capture for the
@@ -524,7 +525,7 @@ the supported near-limit inputs rather than assuming the multiplier proves it.
 | --- | --- |
 | `EpisodePosition` | `occurred_at: UtcInstant`; `episode_id: EncodableText` |
 | `EpisodeCursor` | `schema_version: Literal[1]`; `after: EpisodePosition`; `channel: ChannelIdentity \| None`; `status: ProcessingStatus \| None` |
-| `EpisodeSummary` | `position: EpisodePosition`; `activation_id: Identifier \| None`; `channel: ChannelIdentity \| None`; `modality: Modality`; `status: ProcessingStatus \| None`; `response_kind: EpisodeResponseKind \| None`; `legacy: bool` |
+| `EpisodeSummary` | `position: EpisodePosition`; `activation_id: Identifier \| None`; `channel: ChannelIdentity \| None`; `modality: Modality`; `status: ProcessingStatus \| None`; `response_kind: EpisodeResponseKind \| None`; `has_processing_record: bool` |
 | `EpisodePage` | `items: tuple[EpisodeSummary, ...]`; `next_cursor: NonBlankEncodableText \| None` |
 | `EpisodeChunk` | `episode_id: EncodableText`; `version: NonBlankEncodableText`; `offset: int` in `[0, 2**63)`; `text: EncodableText`; `next_offset: int \| None` in `[0, 2**63)` when present; `total_bytes: int` in `[0, 2**63)` |
 
@@ -560,8 +561,10 @@ async def episode_chunk(
 
 > **Normative.** Inspection episode addresses preserve exactly the stored
 > `MemoryBase.id`, including empty strings and leading/trailing whitespace.
-> No summary, position, cursor, detail lookup, chunk or CLI adapter strips,
-> rejects as blank, case-folds or otherwise normalizes that address. This is a
+> This follows the current store contract, including other supported producers;
+> it requires no pre-M36 migration. No summary, position, cursor, detail lookup,
+> chunk or CLI adapter strips, rejects as blank, case-folds or otherwise
+> normalizes that address. This is a
 > scoped exception to ADR-0085 §3c for `episode_chunk.episode_id`; other existing
 > engine identifier arguments retain their contracts. New capture still mints
 > canonical addresses under §6.
@@ -576,10 +579,12 @@ async def episode_chunk(
 > at that read. Insertions ahead of the cursor appear on refresh; this is not a
 > snapshot and expiry/deletion can shorten subsequent pages.
 
-> **Normative.** Historical summaries set `legacy=True` with absent activation,
-> channel, status and response kind; modality uses the existing capture field.
-> Do not infer those new facts from an ID namespace, old prose or disposition.
-> A status/channel filter therefore does not match legacy unknowns.
+> **Normative.** Summaries set `has_processing_record` according to whether
+> the episode carries that record. If absent, activation, channel, status and
+> response kind are absent; modality uses the existing capture field. Do not
+> infer activation facts from an ID namespace, prose or disposition. A
+> status/channel filter does not match those unknowns. This supports current
+> non-activation producers, not import of pre-M36 state.
 
 > **Normative.** Detail encoding is the entire validated `EpisodicMemory`
 > serialized from JSON-mode fields with sorted keys, compact separators,
@@ -635,7 +640,7 @@ async def episode_chunk(
 > rendering; a stale/missing continuation discards the incomplete assembly and
 > reports the condition, rather than displaying a complete-looking partial one.
 
-> **Normative.** Human rendering labels historical fields unavailable, makes
+> **Normative.** Human rendering labels absent activation fields unavailable, makes
 > informational summaries distinct from conversational replies, and describes
 > processing completion separately from goal achievement or playback. Provide
 > `--json` for complete canonical detail; no new browser timeline, event endpoint
@@ -646,38 +651,48 @@ async def episode_chunk(
 > operation is added. Existing conversation deletion also retains its archive
 > destruction sequence; dedicated archive-only deletion remains available.
 > The CLI explains the distinction between retention expiry and explicit
-> forgetting and does not present a normalized alias as an exact historical ID.
+> forgetting and does not present a normalized alias as an exact stored ID.
 
-### 12. Migration, wire compatibility, and architecture
+### 12. Fresh-state cutover, wire compatibility, and architecture
 
-> **Normative.** Upgrade serialized episodes additively: an absent
-> `processing_record` remains absent. Backfill any query indexes from explicit
-> stored fields only; preserve memory IDs, occurrence times, row/walk identities,
-> evidence, revisions, embeddings and retention deadlines. Do not re-embed
-> historical records or infer missing activation details.
+> **Normative.** M36 starts in a fresh development data directory. The owner
+> declared all pre-M36 development state disposable. The cutover carries no
+> memory, conversation index, archive, parked continuation, goal/work state,
+> grant or audit record into the new directory; it is not an episode-only purge.
+> Deployment configuration and credentials remain subject to their existing
+> setup rules. No migration, backfill, re-embedding of old data or import of
+> pre-M36 exports/backups is an M36 deliverable.
 
-> **Normative.** Migrate the conversation flag transactionally with default
-> true for historical rows, retaining ordinals, parked bindings, playback and
-> observation state. A crash during either store's migration leaves that
-> store's old or new complete schema, never half a migration. New code accepts
-> either pre-upgrade or upgraded companion stores and completes migration before
-> admitting inputs. Migration performs no cross-store content copy.
+> **Normative.** Stop the old hub and use a new empty data directory for the
+> cutover. An old directory may be retained separately as a rollback copy; never
+> merge it into the new state. Startup neither deletes nor silently upgrades
+> pre-M36 stores. No automatic reset occurs on ordinary restart. Document and
+> verify this cutover during implementation acceptance; this ADR itself performs
+> no data deletion or deployment operation.
 
-> **Normative.** New writers preserve the processing envelope during observer
-> labelling, placement changes and other legitimate record updates; those
-> operations may not drop, rewrite or reinterpret its immutable fields. Add a
-> persisted episode-record format marker in a dedicated metadata table, distinct
-> from embedding identity, and reject unsupported newer versions on open with
-> `IncompatibleStateError`. Re-embedding and restoration retain that marker and
-> the full structured payload.
+> **Normative.** Create the M36 episode/query and conversation-index schemas
+> directly in fresh stores, with atomic per-store initialization. Persist an
+> episode-record format marker in a dedicated metadata table, distinct from
+> embedding identity. Before mutation, reject an existing pre-M36 memory store
+> lacking that marker, an existing conversation schema lacking the eligibility
+> field, or an unsupported newer format with `IncompatibleStateError`. Explain
+> the fresh-directory requirement without erasing the rejected files. Empty
+> newly created databases may initialize; a failed initialization must be safe
+> to retry. No mixed-version upgrade path is required.
 
-> **Normative.** Writable downgrade is unsupported: rollback uses a pre-upgrade
-> backup, not an older binary on the upgraded directory. A new marker cannot
-> make historical binaries check it, so neither documentation nor tests may
-> claim universal mechanical protection against an old writer ignoring new
-> fields. New code refuses unsupported versions and tests preservation on every
-> supported mutation path; it does not mislabel embedding identity as a version
-> guard.
+> **Normative.** After cutover, ordinary restart, retention, deletion, export,
+> backup/restore and re-embedding preserve the current-format records and their
+> references. Supported writers preserve the full processing envelope during
+> observer labelling, placement changes and other legitimate updates; they may
+> not drop, rewrite or reinterpret immutable fields. Re-embedding and restoration
+> retain the format marker and full structured payload. Reject pre-M36 restored
+> stores on open before admitting work; do not add a backup-conversion path.
+
+> **Normative.** Writable downgrade of an M36 directory is unsupported. An old
+> binary may use its separately retained pre-cutover directory, never the M36
+> one; no replay or reconciliation between the two is promised. A marker cannot
+> make an older binary check it, so documentation and tests must not claim that
+> it mechanically prevents every old writer from opening new state.
 
 > **Normative.** `MemoryWriter.ingest` refuses a supplied proposal carrying a
 > non-`None` processing record before any write or policy action. Only the
@@ -714,7 +729,7 @@ async def episode_chunk(
 | ADR-0200 §4 | Replace no-capture for no-words/transcription-failure inputs and move final episode writing after synthesis/output decisions. Preserve no new conversation for no words, transient audio, transcription errors, speech degradation and original processing budgets. |
 | ADR-0205 §1, §4 | Preserve real spoken-turn index addresses and delivery semantics while allowing a later post-processing capture; new no-turn speech episodes do not claim a playback row on the old public result. |
 | ADR-0212 §3–§6, §8 | Permit observer advance past inspection-only index rows using the existing unresolved-row rule and move the conversation export to version 3; no redesign of progress, batch size or scheduling. |
-| ADR-0221 §1, §2, §5, §8, §14 | Add a separately discriminated adapter-summary role for `outcome`, the optional processing record, and explicit model-eligibility filtering. Preserve old disposition strings and historical discrimination; no model gains raw context/summary access. |
+| ADR-0221 §1, §2, §5, §8, §14 | Add a separately discriminated adapter-summary role for `outcome`, the optional processing record, and explicit model-eligibility filtering. Preserve current disposition strings and distinguish other producers; no model gains raw context/summary access. |
 | ADR-0237 §1 | Add the episodic-eligibility axis to search/select before cuts. All existing structured filters and matching rules remain. |
 | ADR-0274 §1, §3, §5–§8 | Permit post-processing persistence of event/context and new speech endings, add required capture reporting and bounded recording cleanup; the informational processor itself still owns no writer and performs the same one completion. Existing input/reply combinations and processing policies remain. |
 
@@ -755,8 +770,8 @@ async def episode_chunk(
 | Consumer isolation | Event/failure-only rows never enter or crowd model retrieval/history; raw context never enters embeddings/prompts; observer advances past ineligible rows without mining them. |
 | Audience-policy preservation | Existing supply-derived restrictions and owner/model precedence survive capture; attached context or standalone/inspection-only status alone adds no restriction; default placement admits no raw field to model/shared-output paths. |
 | Authority-policy preservation | Persist and inspect instruction-like external content and historical approval text without creating authorization; permitted legacy recall retains its external-origin facts; continuation uses existing authorization state. |
-| Historical upgrade | Pre-change database/export/backup keeps IDs, evidence, index bindings, delivery, watermark and archive behavior; missing activation facts stay absent. |
-| Exact historical addresses | Empty ID, `" e"`, `"e"`, and `"e "` remain distinct through listing, equal-time cursor pagination, wire detail and CLI reassembly; no address is normalized. |
+| Fresh-state cutover | Fresh directory creates empty current-format stores; ordinary restart preserves new state; existing pre-M36 and restored old stores are refused without mutation, migration or automatic deletion; no old references enter the new state. |
+| Current store addresses and other producers | Newly captured IDs retain the current index/standalone scheme; other supported producers' exact store-valid IDs, including empty and whitespace-distinct values, survive inspection; absent activation metadata is not invented. |
 | Mutations | Observer labels, placement updates, re-embedding and restore preserve the entire processing record; unsupported future versions fail clearly. |
 | Bounds/inspection | Near-limit old/new input and output, multibyte text, report overhead, page byte cuts, malformed cursors, equal-time ordering, stale detail versions and deletion/expiry between chunks. |
 | Data lifecycle | Retention, individual/conversation deletion, export, backup and whole-owner deletion cover added fields; expiry preserves archive while explicit forgetting destroys archive first, even for an absent episode. |
@@ -781,8 +796,10 @@ operation latency, subject to cooperative dependency cancellation.
 
 No live progress, lossless crash log or automatic event learning follows from
 these records. Episode retention is finite unless the owner configures otherwise;
-restart durability is not indefinite archival retention. Older binaries cannot
-be made safe by a format marker they were never written to read.
+restart durability is not indefinite archival retention. The fresh-state cutover
+drops pre-M36 data-migration work without weakening post-cutover durability or
+current processing compatibility. Older binaries cannot be made safe by a
+format marker they were never written to read.
 
 ## Alternatives considered
 
@@ -790,8 +807,11 @@ be made safe by a format marker they were never written to read.
   conversational content and adds another evidence/retention/deletion sequence.
 - **Give every event a conversation:** contradicts the input-only exit and
   makes conversation ownership an accidental prerequisite.
-- **Replace all episode IDs:** changes historical references and the index
+- **Replace the indexed episode-ID scheme:** changes the current index
   invariant without buying more independence than a separate activation ID.
+- **Migrate disposable development state:** adds old-schema conversion and
+  cross-store compatibility work without retaining data the owner needs. The
+  selected cutover starts the complete development state afresh.
 - **Filter after top-k/history selection:** lets excluded records crowd out
   eligible material and changes conversational behavior despite hiding content.
 - **Persist starts and update a running record:** improves crash accounting but
@@ -808,5 +828,7 @@ flag, bound and inspection signatures, are presented for review here.
 The owner additionally directed that M36 preserve existing audience, permission
 and prompt-injection policies; the blanket owner-only rule for attached context
 and standalone/inspection-only records has been removed. Architecture and
-adversarial review evidence will be recorded separately.
+adversarial review evidence will be recorded separately. The owner also declared
+all existing development state disposable and selected a fresh-directory cutover
+instead of historical-data migration.
 No ratification or implementation acceptance is claimed.

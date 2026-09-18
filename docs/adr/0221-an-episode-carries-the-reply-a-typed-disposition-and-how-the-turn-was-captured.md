@@ -37,8 +37,8 @@
   act/proposition boundary — bind unchanged, as do §1, §2 and the rest of that ADR.
 - Partially superseded: 2026-09-18 by ADR-0275 — Add a separately discriminated
   adapter-summary role for `outcome`, the optional processing record, and explicit
-  model-eligibility filtering. Preserve old disposition strings and historical
-  discrimination; no model gains raw context/summary access. These scoped replacements
+  model-eligibility filtering. Preserve current disposition strings and distinguish
+  other producers; no model gains raw context/summary access. These scoped replacements
   take effect on ratification of ADR-0275, which remains Proposed. This reciprocal
   header record accompanies the numbered draft under ADR-0070 and ADR-0082; prior
   supersessions and the ratified body below are preserved.
