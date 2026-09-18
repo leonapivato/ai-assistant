@@ -40,6 +40,7 @@ from ai_assistant.core.types import (
     TextChannelResult,
     WholeTextReply,
 )
+from ai_assistant.orchestration import informational_events
 from ai_assistant.orchestration.informational_events import InformationalEventStage
 from ai_assistant.orchestration.payloads import canonical_payload
 from ai_assistant.testing import FakeModelProvider, FakeSpeechTranscriber
@@ -347,3 +348,38 @@ async def test_new_spoken_wrapper_degrades_audio_before_refusing_result() -> Non
     assert result.result.outcome.spoken is None
     assert result.result.outcome.spoken_degraded
     assert len(canonical_payload(result)) <= limit
+
+
+async def test_event_expiry_during_prompt_preparation_makes_no_provider_call(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    loop = asyncio.get_running_loop()
+    reading = loop.time()
+    original = informational_events._messages
+
+    def prepare(supplied: ResolvedChannelInput) -> tuple[Message, Message]:
+        nonlocal reading
+        messages = original(supplied)
+        reading += 20
+        return messages
+
+    monkeypatch.setattr(loop, "time", lambda: reading)
+    monkeypatch.setattr(informational_events, "_messages", prepare)
+    model = FakeModelProvider()
+    harness = Harness(informational_events=InformationalEventStage(model))
+    with pytest.raises(ChannelProcessingTimeoutError):
+        await harness.engine.receive(event_input(), reply=None, timeout=_BUDGET)
+    assert model.calls == []
+
+
+@pytest.mark.parametrize(
+    "defect", [ValueError("programming defect"), TimeoutError("provider defect")]
+)
+async def test_event_unexpected_provider_defects_propagate_unchanged(defect: Exception) -> None:
+    model = ControlledModel()
+    model.error = defect
+    model.release.set()
+    harness = Harness(informational_events=InformationalEventStage(model))
+    with pytest.raises(type(defect)) as caught:
+        await harness.engine.receive(event_input(), reply=None, timeout=_BUDGET)
+    assert caught.value is defect
