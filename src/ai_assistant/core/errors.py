@@ -73,6 +73,10 @@ class AssistantError(Exception):
         self.details_elided: bool = False
 
 
+class StaleEpisodeReadError(AssistantError):
+    """The episode changed between two detail chunks (ADR-0275 §10)."""
+
+
 class ConfigurationError(AssistantError):
     """Configuration is missing or invalid (e.g. a required secret is unset)."""
 

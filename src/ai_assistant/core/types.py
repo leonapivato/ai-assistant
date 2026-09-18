@@ -2742,6 +2742,602 @@ class Capture(BaseModel):
     )
 
 
+# Channel envelope dependencies precede episode records (ADR-0275).
+class SpokenDeliveryState(StrEnum):
+    """How much of a spoken answer a device reports having played (ADR-0205 §2).
+
+    **A closed vocabulary of three, and adding a member is a change to what was
+    decided.** §2 fixes it at exactly these, and §8 leaves a fourth — for a
+    rendering that never existed — available additively to a later ADR rather than
+    taking it here.
+
+    **The three partition the durations** (:class:`SpokenDelivery`), so the state
+    is derivable from them and cannot disagree with them. That is the whole reason
+    a state is carried beside two numbers rather than inferred at each reader:
+    inference at the reader is where two readers disagree.
+
+    Attributes:
+        UNKNOWN: Nothing was reported. What capture writes on every turn of
+            ``converse_spoken`` (§4) and **never** a value a caller supplies: a
+            device that does not know reports nothing, and the absence of a report
+            is spelled by omitting the argument (§2).
+        COMPLETE: The device played the rendering out. ``played`` equals
+            ``rendered``, which is what a source that ended of its own accord did
+            (§7).
+        INTERRUPTED: The device stopped short. ``played`` is strictly below
+            ``rendered``.
+    """
+
+    UNKNOWN = "unknown"
+    COMPLETE = "complete"
+    INTERRUPTED = "interrupted"
+
+
+class SpokenDelivery(BaseModel):
+    """What a device played of one spoken answer, in time (ADR-0205 §2, §3).
+
+    **Exactly three members**, and this is the *fact* rather than the report: §3
+    records it on a :class:`ConversationTurn`'s row, and
+    :class:`SpokenDeliveryReport` is what names the turn it is about.
+
+    **Granularity is time.** No lane derives a word, a sentence or a character
+    position from these durations, and no surface promises one — the synthesizer
+    gives no word timestamps and §2 rules that time is enough.
+
+    **It is a device's claim and nothing verifies it** (§2). No component decodes
+    the rendering, measures it, re-times it, or compares a reported duration
+    against anything: the device is the only witness to what a loudspeaker
+    actually emitted, so an unverified claim is not the worse of two available
+    answers, it is the only one. ADR-0200 §9's refusal of a *declared* duration on
+    :class:`SpokenAudio` is not read as forbidding this one — that refusal was
+    about a second answer to a question the payload already answers, and this
+    answers one the payload does not answer at all.
+
+    **It carries no audio and permits none to be reconstructed** (§2), so
+    ADR-0200 §8's retention clause binds this path exactly as it binds every other.
+    No fragment, no transcript, no span of what was heard, no word count, no
+    character offset, no sample position and no format.
+
+    Frozen and ``extra="forbid"``, so the three members are the whole of it.
+
+    Attributes:
+        state: Which of §2's three states this is. Derivable from the two
+            durations, and refused where it disagrees with them.
+        played: How much of the rendering the device says it played, or ``None``
+            beside ``UNKNOWN``.
+        rendered: How long the whole rendering was, by the device's own decoding
+            of it, or ``None`` beside ``UNKNOWN``.
+    """
+
+    model_config = ConfigDict(extra="forbid", frozen=True)
+
+    state: SpokenDeliveryState = Field(
+        description="Whether nothing was reported, the answer played out, or it was cut short."
+    )
+    played: timedelta | None = Field(
+        default=None,
+        description="How much of the rendering the device played; None beside UNKNOWN.",
+    )
+    rendered: timedelta | None = Field(
+        default=None,
+        description="How long the whole rendering was; None beside UNKNOWN.",
+    )
+
+    @model_validator(mode="after")
+    def _the_state_partitions_the_durations(self) -> Self:
+        """Refuse every value outside §2's partition.
+
+        ``DeferredProposal``'s coherence-validator shape, taken for ADR-0130 §2's
+        stated reason: a value that has already contradicted itself is not a
+        report, it is a defect. No value satisfies two of the three states and
+        none satisfies none of them.
+
+        **``COMPLETE`` is equality and not ``played <= rendered``**, which
+        ADR-0205 §2 argues at length: the weaker rule admits ``COMPLETE`` beside a
+        ``played`` of zero — a report saying in one member that nothing was heard
+        and in another that the answer was delivered — and §5 permits a
+        ``COMPLETE`` turn to be rendered as nothing, so that value would make an
+        entirely unheard answer disappear from the prompt as delivered. Equality
+        costs the device nothing: a source that ended of its own accord played the
+        buffer, so the buffer's own duration is both numbers.
+
+        Raises:
+            ValueError: If the three members do not describe one of §2's states.
+        """
+        if self.state is SpokenDeliveryState.UNKNOWN:
+            if self.played is not None or self.rendered is not None:
+                msg = (
+                    "an UNKNOWN delivery carries no durations: nothing was reported, so "
+                    "there is nothing to have measured (ADR-0205 §2)"
+                )
+                raise ValueError(msg)
+            return self
+        if self.played is None or self.rendered is None:
+            msg = (
+                f"a {self.state.value} delivery carries both durations: the state is "
+                f"derivable from them, so a state without them is a claim with nothing "
+                f"behind it (ADR-0205 §2)"
+            )
+            raise ValueError(msg)
+        if self.rendered <= timedelta(0):
+            msg = (
+                f"a rendering that was played has a positive duration, and this one is "
+                f"{self.rendered} (ADR-0205 §2)"
+            )
+            raise ValueError(msg)
+        if self.played < timedelta(0):
+            msg = f"a device cannot have played a negative duration, and this is {self.played}"
+            raise ValueError(msg)
+        if self.state is SpokenDeliveryState.COMPLETE:
+            if self.played != self.rendered:
+                msg = (
+                    "a COMPLETE delivery played the whole rendering, so played equals "
+                    "rendered; anything less is INTERRUPTED (ADR-0205 §2)"
+                )
+                raise ValueError(msg)
+            return self
+        if self.state is SpokenDeliveryState.INTERRUPTED:
+            if self.played >= self.rendered:
+                msg = (
+                    "an INTERRUPTED delivery stopped short, so played is strictly below "
+                    "rendered; the two being equal is COMPLETE (ADR-0205 §2)"
+                )
+                raise ValueError(msg)
+            return self
+        assert_never(self.state)
+
+
+class SpokenDeliveryReport(BaseModel):
+    """One device's report about one turn's spoken answer (ADR-0205 §1, §2).
+
+    **Exactly two members**, and it exists only as ``converse_spoken``'s fifth
+    argument. Two types rather than one because the subject is a property of the
+    *report* and not of the turn: the row §3 stamps already names its own episode,
+    so a stored fact carrying that id a second time would be ADR-0084 §3's
+    redundancy — a second answer to a question the record already answers.
+
+    **A report names the turn it is about, and is applied to that turn and no
+    other** (§1). No report is resolved from position: not from "the
+    conversation's most recent turn", not from an ordinal the caller counted, and
+    not from anything a caller could get wrong without saying so. A report about
+    turn 1 that reaches the hub after turn 2 was captured therefore records
+    delivery of turn 1, which is true, rather than of turn 2, which is a confident
+    falsehood nothing in the value would have exposed.
+
+    **It is not an audience and cannot become one** (§1). It says how much of a
+    rendering a device played, not who was within range of it; ADR-0199 §1's third
+    clause reaches this value as squarely as ADR-0200 §3 says it reaches ``plays``,
+    and no implementation reads it on the disclosure path.
+
+    Attributes:
+        episode_id: The id of the episode recording the turn this report is about
+            — the value ``SpokenTurn.episode_id`` disclosed, handed back
+            unchanged.
+        delivery: What the device played of that turn's rendering. Its ``state``
+            is never ``UNKNOWN``: a device that does not know reports nothing, and
+            the absence of a report is spelled by omitting the argument (§2).
+    """
+
+    model_config = ConfigDict(extra="forbid", frozen=True)
+
+    episode_id: Identifier = Field(
+        description="The episode recording the turn this report is about (ADR-0205 §1)."
+    )
+    delivery: SpokenDelivery = Field(
+        description="What the device played of that turn's rendering (ADR-0205 §2)."
+    )
+
+
+class SpokenAudioFormat(StrEnum):
+    """A container-and-codec one recording or rendering is carried in (ADR-0200 §9).
+
+    **A closed vocabulary of IANA media types a browser can produce with
+    ``MediaRecorder`` without transcoding**, which is what ties the two members
+    to a measurement rather than to taste: between them they cover the browsers
+    milestone 19's exit test can be run on. ADR-0200 §9 permits a lane to add a
+    member "only on a measurement it records"; removing one is a change to what
+    was decided and takes a superseding ADR.
+
+    **It carries no sample rate, no channel count, no bitrate and no duration.**
+    The first three are stated by the container, and a second answer to a
+    question the payload already answers is the redundancy ADR-0084 §3 refuses. A
+    duration would be worse than redundant: the hub cannot verify one without
+    decoding the audio, so a declared duration is an unverified claim — which is
+    why ADR-0200 §6's bound is on bytes, the thing a hub can measure.
+
+    **The string value is the media type itself**, parameters included, so a
+    value that reaches an HTTP header or a ``MediaRecorder`` constructor is the
+    member rather than a mapping of it. ``"audio/webm;codecs=opus"`` carries its
+    codec parameter for the reason ``MediaRecorder`` requires one: ``audio/webm``
+    alone names a container two codecs can fill, and a transcriber that decoded
+    only Opus would be declaring support for recordings it cannot read.
+    """
+
+    WEBM_OPUS = "audio/webm;codecs=opus"
+    MP4 = "audio/mp4"
+
+
+class ParkedBinding(BaseModel):
+    """The ``(execution_id, step_id)`` a parked confirmation is recovered by.
+
+    One value rather than two positional strings, so the pair a recovered resume
+    is keyed on (ADR-0044 §3) cannot be swapped in transit. A turn that parked
+    records the binding it parked on, and the conversation store resolves that
+    binding back to the turn — and so to the conversation the resumption belongs
+    in (ADR-0074 §3).
+    """
+
+    model_config = ConfigDict(extra="forbid", frozen=True)
+
+    execution_id: Identifier
+    step_id: Identifier
+
+
+class TurnReference(BaseModel):
+    """What a turn says it is answering, or which goal it is about (ADR-0250 §11).
+
+    **Never rendered to a model and never accepted from one.** It is resolved by
+    ``orchestration`` against records this system holds, and no prompt built under
+    ADR-0250 prints it or the goal id it resolves to — a :class:`GoalCandidacy`
+    carries neither. ADR-0228 §8's namer rule binds it entire.
+
+    **The handle is a durable record's own id and needs no re-minting**: a
+    :class:`GoalQuestion` and a :class:`Goal` are rows, so a restart changes nothing
+    about either, ADR-0052 §1's enumerate-and-re-mint path is **not** extended here,
+    and ``pending_confirmations`` gains nothing.
+
+    Attributes:
+        question_id: The clarification this turn answers.
+        goal_id: The goal this turn is about, which is how a goal is resumed from
+            another conversation (ADR-0250 §13).
+    """
+
+    model_config = ConfigDict(extra="forbid", frozen=True)
+
+    question_id: Identifier | None = Field(
+        default=None, description="The clarification this turn answers."
+    )
+    goal_id: Identifier | None = Field(default=None, description="The goal this turn is about.")
+
+    @model_validator(mode="after")
+    def _names_exactly_one_record(self) -> TurnReference:
+        """Admit exactly ADR-0250 §11's two shapes.
+
+        A ``question_id`` and no ``goal_id``, or a ``goal_id`` and no ``question_id``.
+        **A shape a caller cannot reach is better refused by the type than
+        documented**, which is ADR-0244 §9's own reason for refusing its two members
+        together.
+
+        Raises:
+            ValueError: If the reference names both records or neither.
+        """
+        named = [
+            name
+            for name, value in (("question_id", self.question_id), ("goal_id", self.goal_id))
+            if value is not None
+        ]
+        if len(named) != 1:
+            msg = (
+                "a reference names one record: a question_id and no goal_id, or a "
+                f"goal_id and no question_id — this one names {', '.join(named) or 'neither'} "
+                "(ADR-0250 §11)"
+            )
+            raise ValueError(msg)
+        return self
+
+
+class ChannelIdentity(BaseModel):
+    """A channel policy and its source-local instance identifier."""
+
+    model_config = ConfigDict(frozen=True, extra="forbid")
+    kind: Literal["channel"] = "channel"
+    channel_type: Identifier
+    instance_id: Identifier
+
+
+class NewConversation(BaseModel):
+    """Request a conversation identifier allocated by the store."""
+
+    model_config = ConfigDict(frozen=True, extra="forbid")
+    kind: Literal["new_conversation"] = "new_conversation"
+
+
+class ChannelContextItem(BaseModel):
+    """Supplied channel-local text or a reference; neither grants authority."""
+
+    model_config = ConfigDict(frozen=True, extra="forbid")
+    text: NonBlankEncodableText | None = None
+    item_id: Identifier | None = None
+    source: NonBlankEncodableText | None = None
+
+    @model_validator(mode="after")
+    def _has_content(self) -> Self:
+        if self.text is None and self.item_id is None:
+            msg = "a channel context item requires text or an item identifier"
+            raise ValueError(msg)
+        return self
+
+
+class ChannelContext(BaseModel):
+    """Optional local history and replied-to material, in supplied order."""
+
+    model_config = ConfigDict(frozen=True, extra="forbid")
+    history: tuple[ChannelContextItem, ...] = ()
+    reply_to: ChannelContextItem | None = None
+
+    @model_validator(mode="after")
+    def _history_has_text(self) -> Self:
+        if any(item.text is None for item in self.history):
+            msg = "each channel history item requires text"
+            raise ValueError(msg)
+        return self
+
+
+class ConversationInputOptions(BaseModel):
+    """Existing conversation control references and playback reports."""
+
+    model_config = ConfigDict(frozen=True, extra="forbid")
+    reference: TurnReference | None = None
+    delivery: SpokenDeliveryReport | None = None
+
+
+class WholeTextReply(BaseModel):
+    """Return a whole textual outcome on the originating request."""
+
+    model_config = ConfigDict(frozen=True, extra="forbid")
+    kind: Literal["whole_text"] = "whole_text"
+
+
+class StreamingTextReply(BaseModel):
+    """Stream textual chunks and the final result on the originating request."""
+
+    model_config = ConfigDict(frozen=True, extra="forbid")
+    kind: Literal["streaming_text"] = "streaming_text"
+
+
+class SpokenReply(BaseModel):
+    """Speak using the caller's nonempty format preference order."""
+
+    model_config = ConfigDict(frozen=True, extra="forbid")
+    kind: Literal["spoken"] = "spoken"
+    plays: tuple[SpokenAudioFormat, ...] = Field(min_length=1)
+
+
+ChannelTarget = Annotated[ChannelIdentity | NewConversation, Field(discriminator="kind")]
+
+
+ReplyCapability = Annotated[
+    WholeTextReply | StreamingTextReply | SpokenReply, Field(discriminator="kind")
+]
+
+
+# --- post-processing activation records (ADR-0275) -------------------------
+
+
+class ProcessingStatus(StrEnum):
+    """How one admitted processing pass ended, independently of goal success."""
+
+    COMPLETED = "completed"
+    WAITING = "waiting"
+    FAILED = "failed"
+    INTERRUPTED = "interrupted"
+
+
+class ProcessingReason(StrEnum):
+    """Code-owned reasons for the terminal processing classification."""
+
+    RETURNED = "returned"
+    NO_CONTENT = "no_content"
+    CONFIRMATION = "confirmation"
+    CLARIFICATION = "clarification"
+    DISAMBIGUATION = "disambiguation"
+    TIMEOUT = "timeout"
+    TRANSCRIPTION_FAILED = "transcription_failed"
+    COMPOSITION_FAILED = "composition_failed"
+    OUTPUT_OVERSIZED = "output_oversized"
+    PROCESSING_FAILED = "processing_failed"
+    INTERNAL_ERROR = "internal_error"
+    CANCELLED = "cancelled"
+
+
+class EpisodeResponseKind(StrEnum):
+    """The role of an episode's sole response-text field, ``outcome``."""
+
+    NONE = "none"
+    CONVERSATION_REPLY = "conversation_reply"
+    INFORMATIONAL_SUMMARY = "informational_summary"
+
+
+class RecordedTextInput(BaseModel):
+    """Exact admitted text, separate from its processing rendering."""
+
+    model_config = ConfigDict(frozen=True, extra="forbid")
+    modality: Literal[Modality.TEXT] = Modality.TEXT
+    text: EncodableText
+
+
+class RecordedSpeechInput(BaseModel):
+    """A recording's format and transcript, with no retained audio."""
+
+    model_config = ConfigDict(frozen=True, extra="forbid")
+    modality: Literal[Modality.SPEECH] = Modality.SPEECH
+    media_type: SpokenAudioFormat
+    transcript: EncodableText | None
+
+
+RecordedChannelPayload = Annotated[
+    RecordedTextInput | RecordedSpeechInput, Field(discriminator="modality")
+]
+
+
+class RecordedChannelTrigger(BaseModel):
+    """One admitted channel envelope after transient audio has been discarded."""
+
+    model_config = ConfigDict(frozen=True, extra="forbid")
+    kind: Literal["channel_input"] = "channel_input"
+    target: ChannelTarget
+    channel: ChannelIdentity | None
+    payload: RecordedChannelPayload
+    context: ChannelContext
+    conversation: ConversationInputOptions | None
+    reply: ReplyCapability | None
+
+    @model_validator(mode="after")
+    def _supported_combination(self) -> Self:
+        kind = (
+            "conversation" if isinstance(self.target, NewConversation) else self.target.channel_type
+        )
+        options = self.conversation or ConversationInputOptions()
+        valid = False
+        if kind == "informational_event":
+            valid = (
+                isinstance(self.payload, RecordedTextInput)
+                and self.reply is None
+                and self.conversation is None
+                and self.channel == self.target
+            )
+        elif kind == "conversation":
+            valid = (
+                isinstance(self.payload, RecordedTextInput)
+                and isinstance(self.reply, WholeTextReply | StreamingTextReply)
+                and options.delivery is None
+            ) or (
+                isinstance(self.payload, RecordedSpeechInput)
+                and isinstance(self.reply, SpokenReply)
+                and options.reference is None
+                and (
+                    options.delivery is None
+                    or (
+                        not isinstance(self.target, NewConversation)
+                        and options.delivery.delivery.state is not SpokenDeliveryState.UNKNOWN
+                    )
+                )
+            )
+            valid = valid and (
+                self.channel is None
+                or (
+                    self.channel.channel_type == "conversation"
+                    and (isinstance(self.target, NewConversation) or self.channel == self.target)
+                )
+            )
+        if not valid:
+            msg = "unsupported recorded channel combination"
+            raise ValueError(msg)
+        return self
+
+
+class RecordedResumeTrigger(BaseModel):
+    """An unsettled control resolution; never retains the continuation token."""
+
+    model_config = ConfigDict(frozen=True, extra="forbid")
+    kind: Literal["resume"] = "resume"
+    channel: ChannelIdentity | None
+    approved: bool
+    remember_recipients_until: UtcInstant | None = None
+
+
+RecordedActivationTrigger = Annotated[
+    RecordedChannelTrigger | RecordedResumeTrigger, Field(discriminator="kind")
+]
+
+
+class ActivationLinks(BaseModel):
+    """Only relationships established by processing, carrying no authority."""
+
+    model_config = ConfigDict(frozen=True, extra="forbid")
+    predecessor_episode_id: Identifier | None = None
+    question_id: Identifier | None = None
+    read_park_id: Identifier | None = None
+    parked: ParkedBinding | None = None
+    goal_id: Identifier | None = None
+    attempt_id: Identifier | None = None
+
+
+class EpisodeProcessingRecord(BaseModel):
+    """Immutable facts about one activation, written after its processing ends."""
+
+    model_config = ConfigDict(frozen=True, extra="forbid")
+    schema_version: Literal[1] = 1
+    activation_id: Identifier
+    started_at: UtcInstant
+    ended_at: UtcInstant
+    trigger: RecordedActivationTrigger
+    status: ProcessingStatus
+    reason: ProcessingReason
+    response_kind: EpisodeResponseKind
+    reply_degraded: bool = False
+    spoken_degraded: bool = False
+    model_eligible: bool
+    links: ActivationLinks = Field(default_factory=ActivationLinks)
+
+
+class EpisodeCaptureReport(BaseModel):
+    """Capture durability, independent of the processing outcome."""
+
+    model_config = ConfigDict(frozen=True, extra="forbid")
+    activation_id: Identifier | None
+    episode_id: Identifier | None
+    state: Literal["recorded", "degraded"]
+
+    @model_validator(mode="after")
+    def _recorded_has_addresses(self) -> Self:
+        if self.state == "recorded" and (self.activation_id is None or self.episode_id is None):
+            msg = "a recorded capture requires both activation and episode identifiers"
+            raise ValueError(msg)
+        return self
+
+
+class EpisodePosition(BaseModel):
+    """A total-order position preserving the exact store address."""
+
+    model_config = ConfigDict(frozen=True, extra="forbid")
+    occurred_at: UtcInstant
+    episode_id: EncodableText
+
+
+class EpisodeCursor(BaseModel):
+    """The validated contents of a filter-bound opaque inspection cursor."""
+
+    model_config = ConfigDict(frozen=True, extra="forbid")
+    schema_version: Literal[1] = 1
+    after: EpisodePosition
+    channel: ChannelIdentity | None
+    status: ProcessingStatus | None
+
+
+class EpisodeSummary(BaseModel):
+    """A bounded inspection row; absent activation facts are never invented."""
+
+    model_config = ConfigDict(frozen=True, extra="forbid")
+    position: EpisodePosition
+    activation_id: Identifier | None
+    channel: ChannelIdentity | None
+    modality: Modality
+    status: ProcessingStatus | None
+    response_kind: EpisodeResponseKind | None
+    has_processing_record: bool
+
+
+class EpisodePage(BaseModel):
+    """A page of episode summaries and its optional continuation."""
+
+    model_config = ConfigDict(frozen=True, extra="forbid")
+    items: tuple[EpisodeSummary, ...]
+    next_cursor: NonBlankEncodableText | None
+
+
+class EpisodeChunk(BaseModel):
+    """An ASCII-safe slice of canonical detail, bound to its content digest."""
+
+    model_config = ConfigDict(frozen=True, extra="forbid")
+    episode_id: EncodableText
+    version: NonBlankEncodableText
+    offset: int = Field(strict=True, ge=0, lt=2**63)
+    text: EncodableText
+    next_offset: int | None = Field(strict=True, ge=0, lt=2**63)
+    total_bytes: int = Field(strict=True, ge=0, lt=2**63)
+
+
 class EpisodicMemory(MemoryBase):
     """Something that happened: an event, with who and how it turned out.
 
@@ -2752,12 +3348,10 @@ class EpisodicMemory(MemoryBase):
     stored nowhere at all; §1 gives ``outcome`` to the reply and §2 puts the fact in
     its own typed field.
 
-    **Both new fields are additive with defaults** and this model does not set
-    ``extra="forbid"``, so every record already in a store deserialises and ADR-0221
-    §8 requires — and permits — no migration, backfill, column or index. The
-    **absence** of ``disposition`` is the discriminator between a record written
-    before that decision and one written after it, and no other discriminator is
-    introduced.
+    ``processing_record`` (ADR-0275) records an activation after processing ends.
+    Its absence supports other current producers. Fresh-state startup does not
+    import historical records. With processing metadata, ``outcome`` is the sole
+    response text and its role is declared by ``response_kind``.
     """
 
     kind: Literal["episodic"] = "episodic"
@@ -2800,7 +3394,22 @@ class EpisodicMemory(MemoryBase):
             "records is filtered on it (§14)."
         ),
     )
+    processing_record: EpisodeProcessingRecord | None = None
     importance: float = Field(default=0.0, ge=0.0, le=1.0)
+
+    @model_validator(mode="after")
+    def _processing_response(self) -> Self:
+        record = self.processing_record
+        if record is None:
+            return self
+        if record.response_kind is EpisodeResponseKind.NONE:
+            if self.outcome is not None:
+                msg = "an episode with no response has no outcome text"
+                raise ValueError(msg)
+        elif self.outcome is None or not self.outcome.strip():
+            msg = "a recorded response requires nonblank outcome text"
+            raise ValueError(msg)
+        return self
 
 
 class SemanticMemory(MemoryBase):
@@ -14442,191 +15051,6 @@ class PlanExport(BaseModel):
 # depend on `TurnOutcome`, and none of these three does.
 
 
-class SpokenDeliveryState(StrEnum):
-    """How much of a spoken answer a device reports having played (ADR-0205 §2).
-
-    **A closed vocabulary of three, and adding a member is a change to what was
-    decided.** §2 fixes it at exactly these, and §8 leaves a fourth — for a
-    rendering that never existed — available additively to a later ADR rather than
-    taking it here.
-
-    **The three partition the durations** (:class:`SpokenDelivery`), so the state
-    is derivable from them and cannot disagree with them. That is the whole reason
-    a state is carried beside two numbers rather than inferred at each reader:
-    inference at the reader is where two readers disagree.
-
-    Attributes:
-        UNKNOWN: Nothing was reported. What capture writes on every turn of
-            ``converse_spoken`` (§4) and **never** a value a caller supplies: a
-            device that does not know reports nothing, and the absence of a report
-            is spelled by omitting the argument (§2).
-        COMPLETE: The device played the rendering out. ``played`` equals
-            ``rendered``, which is what a source that ended of its own accord did
-            (§7).
-        INTERRUPTED: The device stopped short. ``played`` is strictly below
-            ``rendered``.
-    """
-
-    UNKNOWN = "unknown"
-    COMPLETE = "complete"
-    INTERRUPTED = "interrupted"
-
-
-class SpokenDelivery(BaseModel):
-    """What a device played of one spoken answer, in time (ADR-0205 §2, §3).
-
-    **Exactly three members**, and this is the *fact* rather than the report: §3
-    records it on a :class:`ConversationTurn`'s row, and
-    :class:`SpokenDeliveryReport` is what names the turn it is about.
-
-    **Granularity is time.** No lane derives a word, a sentence or a character
-    position from these durations, and no surface promises one — the synthesizer
-    gives no word timestamps and §2 rules that time is enough.
-
-    **It is a device's claim and nothing verifies it** (§2). No component decodes
-    the rendering, measures it, re-times it, or compares a reported duration
-    against anything: the device is the only witness to what a loudspeaker
-    actually emitted, so an unverified claim is not the worse of two available
-    answers, it is the only one. ADR-0200 §9's refusal of a *declared* duration on
-    :class:`SpokenAudio` is not read as forbidding this one — that refusal was
-    about a second answer to a question the payload already answers, and this
-    answers one the payload does not answer at all.
-
-    **It carries no audio and permits none to be reconstructed** (§2), so
-    ADR-0200 §8's retention clause binds this path exactly as it binds every other.
-    No fragment, no transcript, no span of what was heard, no word count, no
-    character offset, no sample position and no format.
-
-    Frozen and ``extra="forbid"``, so the three members are the whole of it.
-
-    Attributes:
-        state: Which of §2's three states this is. Derivable from the two
-            durations, and refused where it disagrees with them.
-        played: How much of the rendering the device says it played, or ``None``
-            beside ``UNKNOWN``.
-        rendered: How long the whole rendering was, by the device's own decoding
-            of it, or ``None`` beside ``UNKNOWN``.
-    """
-
-    model_config = ConfigDict(extra="forbid", frozen=True)
-
-    state: SpokenDeliveryState = Field(
-        description="Whether nothing was reported, the answer played out, or it was cut short."
-    )
-    played: timedelta | None = Field(
-        default=None,
-        description="How much of the rendering the device played; None beside UNKNOWN.",
-    )
-    rendered: timedelta | None = Field(
-        default=None,
-        description="How long the whole rendering was; None beside UNKNOWN.",
-    )
-
-    @model_validator(mode="after")
-    def _the_state_partitions_the_durations(self) -> Self:
-        """Refuse every value outside §2's partition.
-
-        ``DeferredProposal``'s coherence-validator shape, taken for ADR-0130 §2's
-        stated reason: a value that has already contradicted itself is not a
-        report, it is a defect. No value satisfies two of the three states and
-        none satisfies none of them.
-
-        **``COMPLETE`` is equality and not ``played <= rendered``**, which
-        ADR-0205 §2 argues at length: the weaker rule admits ``COMPLETE`` beside a
-        ``played`` of zero — a report saying in one member that nothing was heard
-        and in another that the answer was delivered — and §5 permits a
-        ``COMPLETE`` turn to be rendered as nothing, so that value would make an
-        entirely unheard answer disappear from the prompt as delivered. Equality
-        costs the device nothing: a source that ended of its own accord played the
-        buffer, so the buffer's own duration is both numbers.
-
-        Raises:
-            ValueError: If the three members do not describe one of §2's states.
-        """
-        if self.state is SpokenDeliveryState.UNKNOWN:
-            if self.played is not None or self.rendered is not None:
-                msg = (
-                    "an UNKNOWN delivery carries no durations: nothing was reported, so "
-                    "there is nothing to have measured (ADR-0205 §2)"
-                )
-                raise ValueError(msg)
-            return self
-        if self.played is None or self.rendered is None:
-            msg = (
-                f"a {self.state.value} delivery carries both durations: the state is "
-                f"derivable from them, so a state without them is a claim with nothing "
-                f"behind it (ADR-0205 §2)"
-            )
-            raise ValueError(msg)
-        if self.rendered <= timedelta(0):
-            msg = (
-                f"a rendering that was played has a positive duration, and this one is "
-                f"{self.rendered} (ADR-0205 §2)"
-            )
-            raise ValueError(msg)
-        if self.played < timedelta(0):
-            msg = f"a device cannot have played a negative duration, and this is {self.played}"
-            raise ValueError(msg)
-        if self.state is SpokenDeliveryState.COMPLETE:
-            if self.played != self.rendered:
-                msg = (
-                    "a COMPLETE delivery played the whole rendering, so played equals "
-                    "rendered; anything less is INTERRUPTED (ADR-0205 §2)"
-                )
-                raise ValueError(msg)
-            return self
-        if self.state is SpokenDeliveryState.INTERRUPTED:
-            if self.played >= self.rendered:
-                msg = (
-                    "an INTERRUPTED delivery stopped short, so played is strictly below "
-                    "rendered; the two being equal is COMPLETE (ADR-0205 §2)"
-                )
-                raise ValueError(msg)
-            return self
-        assert_never(self.state)
-
-
-class SpokenDeliveryReport(BaseModel):
-    """One device's report about one turn's spoken answer (ADR-0205 §1, §2).
-
-    **Exactly two members**, and it exists only as ``converse_spoken``'s fifth
-    argument. Two types rather than one because the subject is a property of the
-    *report* and not of the turn: the row §3 stamps already names its own episode,
-    so a stored fact carrying that id a second time would be ADR-0084 §3's
-    redundancy — a second answer to a question the record already answers.
-
-    **A report names the turn it is about, and is applied to that turn and no
-    other** (§1). No report is resolved from position: not from "the
-    conversation's most recent turn", not from an ordinal the caller counted, and
-    not from anything a caller could get wrong without saying so. A report about
-    turn 1 that reaches the hub after turn 2 was captured therefore records
-    delivery of turn 1, which is true, rather than of turn 2, which is a confident
-    falsehood nothing in the value would have exposed.
-
-    **It is not an audience and cannot become one** (§1). It says how much of a
-    rendering a device played, not who was within range of it; ADR-0199 §1's third
-    clause reaches this value as squarely as ADR-0200 §3 says it reaches ``plays``,
-    and no implementation reads it on the disclosure path.
-
-    Attributes:
-        episode_id: The id of the episode recording the turn this report is about
-            — the value ``SpokenTurn.episode_id`` disclosed, handed back
-            unchanged.
-        delivery: What the device played of that turn's rendering. Its ``state``
-            is never ``UNKNOWN``: a device that does not know reports nothing, and
-            the absence of a report is spelled by omitting the argument (§2).
-    """
-
-    model_config = ConfigDict(extra="forbid", frozen=True)
-
-    episode_id: Identifier = Field(
-        description="The episode recording the turn this report is about (ADR-0205 §1)."
-    )
-    delivery: SpokenDelivery = Field(
-        description="What the device played of that turn's rendering (ADR-0205 §2)."
-    )
-
-
 # --- speech: the recording and the rendering (ADR-0200 §9) -------------------
 # The one shape audio takes on a boundary-crossing type, and the one place the
 # base64 convention is written down. Nothing here knows what a codec is:
@@ -14640,35 +15064,6 @@ class SpokenDeliveryReport(BaseModel):
 # ADR-0205's split repeated one block up — these six declarations depend on nothing
 # but `NonBlankEncodableText`, and what stays at the foot stays there because
 # `SpokenTurn` depends on `TurnOutcome` and these do not.
-
-
-class SpokenAudioFormat(StrEnum):
-    """A container-and-codec one recording or rendering is carried in (ADR-0200 §9).
-
-    **A closed vocabulary of IANA media types a browser can produce with
-    ``MediaRecorder`` without transcoding**, which is what ties the two members
-    to a measurement rather than to taste: between them they cover the browsers
-    milestone 19's exit test can be run on. ADR-0200 §9 permits a lane to add a
-    member "only on a measurement it records"; removing one is a change to what
-    was decided and takes a superseding ADR.
-
-    **It carries no sample rate, no channel count, no bitrate and no duration.**
-    The first three are stated by the container, and a second answer to a
-    question the payload already answers is the redundancy ADR-0084 §3 refuses. A
-    duration would be worse than redundant: the hub cannot verify one without
-    decoding the audio, so a declared duration is an unverified claim — which is
-    why ADR-0200 §6's bound is on bytes, the thing a hub can measure.
-
-    **The string value is the media type itself**, parameters included, so a
-    value that reaches an HTTP header or a ``MediaRecorder`` constructor is the
-    member rather than a mapping of it. ``"audio/webm;codecs=opus"`` carries its
-    codec parameter for the reason ``MediaRecorder`` requires one: ``audio/webm``
-    alone names a container two codecs can fill, and a transcriber that decoded
-    only Opus would be declaring support for recordings it cannot read.
-    """
-
-    WEBM_OPUS = "audio/webm;codecs=opus"
-    MP4 = "audio/mp4"
 
 
 #: The base64 alphabet RFC 4648 §4 fixes, without its padding character — which
@@ -14908,22 +15303,6 @@ class Conversation(BaseModel):
             "the turns below it were read."
         ),
     )
-
-
-class ParkedBinding(BaseModel):
-    """The ``(execution_id, step_id)`` a parked confirmation is recovered by.
-
-    One value rather than two positional strings, so the pair a recovered resume
-    is keyed on (ADR-0044 §3) cannot be swapped in transit. A turn that parked
-    records the binding it parked on, and the conversation store resolves that
-    binding back to the turn — and so to the conversation the resumption belongs
-    in (ADR-0074 §3).
-    """
-
-    model_config = ConfigDict(extra="forbid", frozen=True)
-
-    execution_id: Identifier
-    step_id: Identifier
 
 
 class ConversationTurn(BaseModel):
@@ -26427,59 +26806,6 @@ class RoutedOperationRecord(BaseModel):
         return self
 
 
-class TurnReference(BaseModel):
-    """What a turn says it is answering, or which goal it is about (ADR-0250 §11).
-
-    **Never rendered to a model and never accepted from one.** It is resolved by
-    ``orchestration`` against records this system holds, and no prompt built under
-    ADR-0250 prints it or the goal id it resolves to — a :class:`GoalCandidacy`
-    carries neither. ADR-0228 §8's namer rule binds it entire.
-
-    **The handle is a durable record's own id and needs no re-minting**: a
-    :class:`GoalQuestion` and a :class:`Goal` are rows, so a restart changes nothing
-    about either, ADR-0052 §1's enumerate-and-re-mint path is **not** extended here,
-    and ``pending_confirmations`` gains nothing.
-
-    Attributes:
-        question_id: The clarification this turn answers.
-        goal_id: The goal this turn is about, which is how a goal is resumed from
-            another conversation (ADR-0250 §13).
-    """
-
-    model_config = ConfigDict(extra="forbid", frozen=True)
-
-    question_id: Identifier | None = Field(
-        default=None, description="The clarification this turn answers."
-    )
-    goal_id: Identifier | None = Field(default=None, description="The goal this turn is about.")
-
-    @model_validator(mode="after")
-    def _names_exactly_one_record(self) -> TurnReference:
-        """Admit exactly ADR-0250 §11's two shapes.
-
-        A ``question_id`` and no ``goal_id``, or a ``goal_id`` and no ``question_id``.
-        **A shape a caller cannot reach is better refused by the type than
-        documented**, which is ADR-0244 §9's own reason for refusing its two members
-        together.
-
-        Raises:
-            ValueError: If the reference names both records or neither.
-        """
-        named = [
-            name
-            for name, value in (("question_id", self.question_id), ("goal_id", self.goal_id))
-            if value is not None
-        ]
-        if len(named) != 1:
-            msg = (
-                "a reference names one record: a question_id and no goal_id, or a "
-                f"goal_id and no question_id — this one names {', '.join(named) or 'neither'} "
-                "(ADR-0250 §11)"
-            )
-            raise ValueError(msg)
-        return self
-
-
 class Clarification(BaseModel):
     """The question a turn raised, as the user is shown it (ADR-0250 §10).
 
@@ -31312,20 +31638,6 @@ class TranscriptArchiveSize(BaseModel):
 
 
 # ADR-0274 §3: channel identity and modality are independent values.
-class ChannelIdentity(BaseModel):
-    """A channel policy and its source-local instance identifier."""
-
-    model_config = ConfigDict(frozen=True, extra="forbid")
-    kind: Literal["channel"] = "channel"
-    channel_type: Identifier
-    instance_id: Identifier
-
-
-class NewConversation(BaseModel):
-    """Request a conversation identifier allocated by the store."""
-
-    model_config = ConfigDict(frozen=True, extra="forbid")
-    kind: Literal["new_conversation"] = "new_conversation"
 
 
 class TextChannelPayload(BaseModel):
@@ -31344,46 +31656,6 @@ class SpeechChannelPayload(BaseModel):
     audio: SpokenAudio
 
 
-class ChannelContextItem(BaseModel):
-    """Supplied channel-local text or a reference; neither grants authority."""
-
-    model_config = ConfigDict(frozen=True, extra="forbid")
-    text: NonBlankEncodableText | None = None
-    item_id: Identifier | None = None
-    source: NonBlankEncodableText | None = None
-
-    @model_validator(mode="after")
-    def _has_content(self) -> Self:
-        if self.text is None and self.item_id is None:
-            msg = "a channel context item requires text or an item identifier"
-            raise ValueError(msg)
-        return self
-
-
-class ChannelContext(BaseModel):
-    """Optional local history and replied-to material, in supplied order."""
-
-    model_config = ConfigDict(frozen=True, extra="forbid")
-    history: tuple[ChannelContextItem, ...] = ()
-    reply_to: ChannelContextItem | None = None
-
-    @model_validator(mode="after")
-    def _history_has_text(self) -> Self:
-        if any(item.text is None for item in self.history):
-            msg = "each channel history item requires text"
-            raise ValueError(msg)
-        return self
-
-
-class ConversationInputOptions(BaseModel):
-    """Existing conversation control references and playback reports."""
-
-    model_config = ConfigDict(frozen=True, extra="forbid")
-    reference: TurnReference | None = None
-    delivery: SpokenDeliveryReport | None = None
-
-
-ChannelTarget = Annotated[ChannelIdentity | NewConversation, Field(discriminator="kind")]
 ChannelPayload = Annotated[
     TextChannelPayload | SpeechChannelPayload, Field(discriminator="modality")
 ]
@@ -31397,33 +31669,6 @@ class ChannelInput(BaseModel):
     payload: ChannelPayload
     context: ChannelContext = Field(default_factory=ChannelContext)
     conversation: ConversationInputOptions | None = None
-
-
-class WholeTextReply(BaseModel):
-    """Return a whole textual outcome on the originating request."""
-
-    model_config = ConfigDict(frozen=True, extra="forbid")
-    kind: Literal["whole_text"] = "whole_text"
-
-
-class StreamingTextReply(BaseModel):
-    """Stream textual chunks and the final result on the originating request."""
-
-    model_config = ConfigDict(frozen=True, extra="forbid")
-    kind: Literal["streaming_text"] = "streaming_text"
-
-
-class SpokenReply(BaseModel):
-    """Speak using the caller's nonempty format preference order."""
-
-    model_config = ConfigDict(frozen=True, extra="forbid")
-    kind: Literal["spoken"] = "spoken"
-    plays: tuple[SpokenAudioFormat, ...] = Field(min_length=1)
-
-
-ReplyCapability = Annotated[
-    WholeTextReply | StreamingTextReply | SpokenReply, Field(discriminator="kind")
-]
 
 
 class TextChannelResult(BaseModel):

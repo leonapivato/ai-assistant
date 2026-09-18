@@ -131,6 +131,7 @@ if TYPE_CHECKING:
         BoundEgressCall,
         CanonicalDestination,
         CarriedProvenance,
+        ChannelIdentity,
         ChannelInput,
         ChannelResult,
         ClarificationWithdrawal,
@@ -159,6 +160,8 @@ if TYPE_CHECKING:
         EgressBinding,
         Embedding,
         EncodableText,
+        EpisodeChunk,
+        EpisodePage,
         EpisodicMemory,
         EvaluationTrace,
         EvidenceDigest,
@@ -212,6 +215,7 @@ if TYPE_CHECKING:
         Placement,
         PlanExport,
         PlannerOutput,
+        ProcessingStatus,
         QueryOutcome,
         Question,
         ReadAskOutcome,
@@ -1194,6 +1198,7 @@ class MemoryStore(Protocol):
         participants: Sequence[NonBlankEncodableText] | None = None,
         topics: Sequence[TopicLabel] | None = None,
         about_person: Sequence[NonBlankEncodableText] | None = None,
+        episode_model_eligible: bool | None = None,
     ) -> MemorySearchResult:
         """Return the records most relevant to ``query``, best first.
 
@@ -1458,6 +1463,12 @@ class MemoryStore(Protocol):
                 §2), and no value spells "unstated". An **empty sequence selects
                 nothing**; duplicates are set semantics.
 
+            episode_model_eligible: Optional episode eligibility filter (ADR-0275).
+
+        ADR-0275: ``episode_model_eligible`` filters episodes before ranking and
+        limits; non-episodic records are unaffected. An episode without a
+        processing record is eligible. ``None`` applies no eligibility filter.
+
         Returns:
             A :class:`~ai_assistant.core.types.MemorySearchResult`: the matching
             records, most relevant first, each carrying its relevance ``score`` —
@@ -1491,6 +1502,7 @@ class MemoryStore(Protocol):
         participants: Sequence[NonBlankEncodableText] | None = None,
         topics: Sequence[TopicLabel] | None = None,
         about_person: Sequence[NonBlankEncodableText] | None = None,
+        episode_model_eligible: bool | None = None,
     ) -> MemorySearchResult:
         """Return the records the given criteria select, newest write first (ADR-0237 §4).
 
@@ -1677,6 +1689,12 @@ class MemoryStore(Protocol):
         one axis the values compose by **disjunction**: a record is eligible on
         that axis when it matches at least one of the values given.
 
+            episode_model_eligible: Optional episode eligibility filter (ADR-0275).
+
+        ADR-0275: ``episode_model_eligible`` filters episodes before ranking and
+        limits; non-episodic records are unaffected. An episode without a
+        processing record is eligible. ``None`` applies no eligibility filter.
+
         Returns:
             A :class:`~ai_assistant.core.types.MemorySearchResult`: the eligible
             records in the order above, each with ``score`` cleared to ``None``,
@@ -1699,6 +1717,62 @@ class MemoryStore(Protocol):
                 not read as "nothing happened" (§7).
             MemoryStoreError: If the store cannot be read, or a stored record is
                 corrupt.
+        """
+        ...
+
+    async def episodes(
+        self,
+        *,
+        channel: ChannelIdentity | None = None,
+        status: ProcessingStatus | None = None,
+        cursor: NonBlankEncodableText | None = None,
+        limit: int = 50,
+    ) -> EpisodePage:
+        """Inspect live episodic records under ADR-0275 §10.
+
+        Filter by exact channel and status, then order by ``(occurred_at, id)``
+        descending and take ``limit`` (a strict integer in [1, 100]). Unknown
+        activation facts do not match a supplied filter. Addresses retain their
+        exact stored characters, including blank values. Eligibility for model
+        retrieval is not a condition of this owner inspection.
+
+        Cursors are canonical unpadded URL-safe base64 EpisodeCursor values,
+        bound to these filters. Continue strictly below their position. A next
+        cursor exists exactly when another matching row existed at this read;
+        this is not a snapshot across calls. Returned values are detached.
+
+        Raises:
+            ValueError: Invalid bounds, cursor spelling/version or filter mismatch,
+                refused before I/O.
+            MemoryStoreError: Store or record corruption failure.
+        """
+        ...
+
+    async def episode_chunk(
+        self,
+        episode_id: EncodableText,
+        *,
+        version: NonBlankEncodableText | None = None,
+        offset: int = 0,
+        max_bytes: int = 65536,
+    ) -> EpisodeChunk | None:
+        """Read digest-bound detail of a live episode (ADR-0275 §10).
+
+        Each call rereads the exact ID; absent, expired and non-episodic records
+        return None. Serialize the validated entire episode's JSON-mode fields
+        with sorted keys, compact separators, ensure_ascii=True, allow_nan=False.
+        Version is the lowercase SHA-256 digest of those bytes. No cross-call
+        content snapshot survives deletion. Return at most max_bytes bytes;
+        next_offset is None exactly at the end, including an empty final slice.
+
+        Raises:
+            ValueError: Invalid UTF-8 address, malformed digest, strict integer
+                offset outside [0, 2**63), size outside [1, 65536], versionless
+                nonzero offset, or offset beyond current detail. Validate arguments
+                before I/O; the last condition requires reading the record.
+            StaleEpisodeReadError: A valid supplied digest differs from this read,
+                with a fixed content-free message.
+            MemoryStoreError: Store or record corruption failure.
         """
         ...
 

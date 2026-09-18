@@ -49,6 +49,7 @@ from ai_assistant.core.types import (
     BeliefBand,
     ConflictRelation,
     DataTier,
+    EpisodicMemory,
     MemoryDecisionKind,
     MemoryIngestResult,
     MemoryKind,
@@ -400,6 +401,12 @@ class FakeMemoryWriter:
         same reason: ``asyncio.Lock`` is not reentrant, so the covered path cannot
         call the locking entry point per proposal.
         """
+        if (
+            isinstance(observed.proposed, EpisodicMemory)
+            and observed.proposed.processing_record is not None
+        ):
+            msg = "processing records cannot be supplied through MemoryWriter"
+            raise MemoryStoreError(msg)
         self.calls.append(observed.model_copy(deep=True))
         await self._require_resolvable_evidence(observed.proposed)
         conflicts = await self._conflicts_for(observed.proposed)

@@ -2382,7 +2382,8 @@ from ai_assistant.wire.errors import (
 #: ``proved_quote`` absent and a stored ``ToolDefinition`` with ``charged_output`` absent,
 #: each defaulting to ``None``.
 #: ADR-0274 §9: channel inputs, wrapped streaming terminals, and event errors.
-PROTOCOL_VERSION: Final[int] = 53
+#: 54: ADR-0275 adds the wire-carried EpisodicMemory.processing_record shape.
+PROTOCOL_VERSION: Final[int] = 54
 
 #: ADR-0085 §8a: "The correlation id is a UUID string and is at most 36 bytes.
 #: Bounding it is what makes the reserve a constant rather than an aspiration; a

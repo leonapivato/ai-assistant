@@ -159,6 +159,7 @@ from datetime import UTC, datetime, timedelta
 from typing import TYPE_CHECKING, Protocol
 
 import pytest
+from memory_store_contract import _activation_episode
 from pydantic import ValidationError
 
 from ai_assistant.core.errors import (
@@ -1172,6 +1173,16 @@ class MemoryWriterContract:
     def writer(self) -> MemoryWriter:
         """Override in a subclass: one writer, however it likes to be built."""
         raise NotImplementedError
+
+    async def test_processing_proposal_is_refused_before_store_or_policy(
+        self, make_writer: WriterFactory
+    ) -> None:
+        store = FakeMemoryStore(failure="must not read")
+        policy = FakeMemoryPolicy(MemoryDecisionKind.ACCEPT)
+        writer = make_writer(store, policy)
+        with pytest.raises(MemoryStoreError, match="processing records cannot be supplied"):
+            await writer.ingest(_proposal(_activation_episode("supplied", eligible=False)))
+        assert policy.calls == []
 
     def test_conforms_to_protocol(self, writer: MemoryWriter) -> None:
         assert isinstance(writer, MemoryWriter)

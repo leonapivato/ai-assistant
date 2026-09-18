@@ -23,6 +23,7 @@ from typing import TYPE_CHECKING
 
 import pytest
 import sqlite_vec
+from memory_store_contract import _activation_episode
 
 from ai_assistant.core.errors import (
     EmbeddingDeadlineExpiredError,
@@ -255,14 +256,8 @@ async def test_only_the_vectors_change(tmp_path: Path) -> None:
     assert len(widened) == _NEW * 4  # float32 per dimension
 
 
-async def test_a_legacy_store_without_the_later_columns_migrates(tmp_path: Path) -> None:
-    """The four columns ADR-0104 §1 reads are the four that have always existed.
-
-    Built by hand in the pre-``expires_at`` shape, which is what a store old
-    enough to still carry a hashing tag actually looks like — and which the
-    current build cannot open at all, since bringing its schema forward would
-    mean writing to the live store.
-    """
+async def test_pre_m36_reembedding_is_refused_without_modification(tmp_path: Path) -> None:
+    """ADR-0275 requires a fresh directory rather than historical conversion."""
     store = tmp_path / "memory.db"
     conn = sqlite3.connect(str(store))
     try:
@@ -284,21 +279,11 @@ async def test_a_legacy_store_without_the_later_columns_migrates(tmp_path: Path)
     finally:
         conn.close()
 
-    target = HashingEmbedder(dimensions=_NEW)
-    outcome = await Reembedder(store=store, embedder=target).run()
-
-    assert outcome.swapped
-    # The columns the legacy table never had are re-derived from the blob, so the
-    # migrated store is the *current* shape without the source being touched.
-    rows = _read(store, "SELECT expires_at, valid_until, about_person FROM records")
-    assert rows[0][0] is not None
-    assert rows[0][1] is None
-    assert rows[0][2] is None
-    opened = SqliteMemoryStore(traces_sink=FakeTraceSink(), path=store, embedder=target)
-    try:
-        assert [record.id for record in await opened.export()] == ["a"]
-    finally:
-        opened.close()
+    before = store.read_bytes()
+    with pytest.raises(IncompatibleStateError, match="fresh M36"):
+        await Reembedder(store=store, embedder=HashingEmbedder(dimensions=_NEW)).run()
+    assert store.read_bytes() == before
+    assert sorted(path.name for path in tmp_path.iterdir()) == ["memory.db"]  # noqa: ASYNC240 — local test fixture
 
 
 async def test_a_not_yet_live_record_stays_hidden_across_a_re_embed(tmp_path: Path) -> None:
@@ -1260,3 +1245,27 @@ async def test_the_stamps_and_the_issuer_survive_the_swap(tmp_path: Path) -> Non
         )
     finally:
         swapped.close()
+
+
+async def test_reembedding_preserves_processing_record_marker_and_digest(tmp_path: Path) -> None:
+    path = tmp_path / "memory.db"
+    await _seed(path, [_activation_episode("activation", eligible=False)])
+    original = SqliteMemoryStore(
+        traces_sink=FakeTraceSink(), path=path, embedder=HashingEmbedder(dimensions=_OLD)
+    )
+    try:
+        before = await original.episode_chunk("activation")
+    finally:
+        original.close()
+    assert before is not None
+    outcome = await Reembedder(store=path, embedder=HashingEmbedder(dimensions=_NEW)).run()
+    assert outcome.swapped
+    assert _read(path, "SELECT version FROM episode_record_format") == [(1,)]
+    opened = SqliteMemoryStore(
+        traces_sink=FakeTraceSink(), path=path, embedder=HashingEmbedder(dimensions=_NEW)
+    )
+    try:
+        assert await opened.episode_chunk("activation") == before
+        assert (await opened.search("coffee", episode_model_eligible=True)).records == ()
+    finally:
+        opened.close()
