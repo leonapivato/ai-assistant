@@ -36,16 +36,31 @@ from typing import TYPE_CHECKING, Final
 from pydantic import TypeAdapter, ValidationError
 
 from ai_assistant.core.clock import ClockReadingError, checked_clock
+from ai_assistant.core.episode_encoding import (
+    admits_model_eligibility,
+    check_detail,
+    check_eligibility,
+    check_list,
+    detail_of,
+    encode_cursor,
+    position_of,
+    summary_of,
+)
 from ai_assistant.core.errors import (
     MemoryStoreConflictError,
     MemoryStoreError,
     MemoryStoreStaleError,
 )
 from ai_assistant.core.types import (
+    ChannelIdentity,
+    EpisodeChunk,
+    EpisodeCursor,
+    EpisodePage,
     EpisodicMemory,
     MemorySearchResult,
     MemoryWriteMode,
     NonBlankEncodableText,
+    ProcessingStatus,
     RecordChunk,
     TopicLabel,
     WalkPosition,
@@ -609,6 +624,17 @@ class FakeMemoryStore:
                 ``kind``.
         """
         stored = self._records.get(record.id)
+        if (
+            isinstance(stored, EpisodicMemory)
+            and stored.processing_record is not None
+            and (
+                not isinstance(record, EpisodicMemory)
+                or record.processing_record != stored.processing_record
+                or record.outcome != stored.outcome
+            )
+        ):
+            msg = "recorded processing and response are immutable"
+            raise MemoryStoreError(msg)
         if stored is not None and stored.kind != record.kind:
             msg = (
                 f"cannot write {record.id!r} as a {record.kind} record: "
@@ -787,6 +813,7 @@ class FakeMemoryStore:
         participants: Sequence[str] | None = None,
         topics: Sequence[TopicLabel] | None = None,
         about_person: Sequence[str] | None = None,
+        episode_model_eligible: bool | None = None,
     ) -> MemorySearchResult:
         """Return live records matching ``query`` by lexical overlap, best first.
 
@@ -835,6 +862,7 @@ class FakeMemoryStore:
                 terms, a non-positive ``limit``, or an axis selecting nothing is
                 answered without reaching either.
         """
+        check_eligibility(episode_model_eligible)
         wanted = None if kinds is None else frozenset(str(kind) for kind in kinds)
         wanted_bands = None if bands is None else frozenset(bands)
         wanted_people = None if participants is None else _person_keys("participants", participants)
@@ -871,6 +899,8 @@ class FakeMemoryStore:
                     subjects=wanted_subjects,
                 ):
                     continue
+                if not admits_model_eligibility(record, episode_model_eligible):
+                    continue
                 content = record.content.lower()
                 hits = sum(1 for term in query_terms if term in content)
                 if hits:
@@ -890,6 +920,7 @@ class FakeMemoryStore:
         participants: Sequence[str] | None = None,
         topics: Sequence[TopicLabel] | None = None,
         about_person: Sequence[str] | None = None,
+        episode_model_eligible: bool | None = None,
     ) -> MemorySearchResult:
         """Return the records the criteria select, newest write first (ADR-0237 §4).
 
@@ -928,6 +959,12 @@ class FakeMemoryStore:
             about_person: Subject labels compared by the same fold; a record
                 stating no subject is matched by none. ``()`` selects nothing.
 
+            episode_model_eligible: Optional episode eligibility filter (ADR-0275).
+
+        ADR-0275: ``episode_model_eligible`` filters episodes before ranking and
+        limits; non-episodic records are unaffected. An episode without a
+        processing record is eligible. ``None`` applies no eligibility filter.
+
         Returns:
             A :class:`~ai_assistant.core.types.MemorySearchResult` holding the
             eligible records in that order, cut to ``limit``, each with ``score``
@@ -942,6 +979,7 @@ class FakeMemoryStore:
                 ``limit``, or an axis selecting nothing, is answered without
                 reaching either.
         """
+        check_eligibility(episode_model_eligible)
         wanted_kinds = None if kinds is None else frozenset(str(kind) for kind in kinds)
         wanted_bands = None if bands is None else frozenset(bands)
         wanted_people = None if participants is None else _person_keys("participants", participants)
@@ -950,7 +988,15 @@ class FakeMemoryStore:
             None if about_person is None else _person_keys("about_person", about_person)
         )
         _refuse_an_axis_less_select(
-            (kinds, bands, occurred_within, participants, topics, about_person)
+            (
+                kinds,
+                bands,
+                occurred_within,
+                participants,
+                topics,
+                about_person,
+                episode_model_eligible,
+            )
         )
         if limit <= 0 or _selects_nothing(
             wanted_kinds, wanted_bands, wanted_people, wanted_topics, wanted_subjects
@@ -963,7 +1009,8 @@ class FakeMemoryStore:
             matched = [
                 record
                 for record in self._records.values()
-                if self._is_readable(record, now)
+                if admits_model_eligibility(record, episode_model_eligible)
+                and self._is_readable(record, now)
                 and (wanted_kinds is None or record.kind in wanted_kinds)
                 and (wanted_bands is None or band_of(record.provenance.source) in wanted_bands)
                 and _admits(
@@ -980,6 +1027,77 @@ class FakeMemoryStore:
         return MemorySearchResult(
             records=tuple(record.model_copy(update={"score": None}, deep=True) for record in page)
         )
+
+    async def episodes(
+        self,
+        *,
+        channel: ChannelIdentity | None = None,
+        status: ProcessingStatus | None = None,
+        cursor: str | None = None,
+        limit: int = 50,
+    ) -> EpisodePage:
+        """Inspect live episodes, newest capture first, using a filter-bound cursor."""
+        channel, status, after = check_list(channel, status, cursor, limit)
+        async with self._resource.held():
+            self._refuse_read()
+            now = self._now_utc()
+            candidates = [
+                record
+                for record in self._records.values()
+                if isinstance(record, EpisodicMemory) and self._is_readable(record, now)
+            ]
+        records = [
+            record
+            for record in candidates
+            if (
+                channel is None
+                or (
+                    record.processing_record is not None
+                    and record.processing_record.trigger.channel == channel
+                )
+            )
+            and (
+                status is None
+                or (
+                    record.processing_record is not None
+                    and record.processing_record.status == status
+                )
+            )
+            and (
+                after is None
+                or (record.occurred_at, record.id)
+                < (after.after.occurred_at, after.after.episode_id)
+            )
+        ]
+        records.sort(key=lambda record: (record.occurred_at, record.id), reverse=True)
+        page = records[:limit]
+        return EpisodePage(
+            items=tuple(summary_of(record) for record in page),
+            next_cursor=encode_cursor(
+                EpisodeCursor(
+                    after=position_of(page[-1]),
+                    channel=channel,
+                    status=status,
+                )
+            )
+            if len(records) > limit
+            else None,
+        )
+
+    async def episode_chunk(
+        self,
+        episode_id: str,
+        *,
+        version: str | None = None,
+        offset: int = 0,
+        max_bytes: int = 65536,
+    ) -> EpisodeChunk | None:
+        """Reread a live episode and return digest-bound canonical detail bytes."""
+        check_detail(episode_id, version, offset, max_bytes)
+        record = await self.get(episode_id)
+        if not isinstance(record, EpisodicMemory):
+            return None
+        return detail_of(record, version=version, offset=offset, max_bytes=max_bytes)
 
     async def list_beliefs(
         self,

@@ -30,7 +30,7 @@ from aged_store import (
     install,
     plant,
 )
-from memory_store_contract import _BEYOND_MARGIN, MemoryStoreContract
+from memory_store_contract import _BEYOND_MARGIN, MemoryStoreContract, _activation_episode
 from pydantic import ValidationError
 
 from ai_assistant.core.errors import (
@@ -1641,103 +1641,6 @@ def _write_pre_walk_db(path: Path, records: list[MemoryRecord], *, drop_top: boo
     legacy.close()
 
 
-async def test_walk_key_migration_reaches_a_record_added_over_a_gap_at_the_top(
-    tmp_path: Path,
-) -> None:
-    """ADR-0114 §8: the migration clause, over a store that predates the walk surface.
-
-    The sequence that breaks a merely-unique key, run end to end across the
-    migration: a legacy store whose highest-positioned record was deleted before
-    the upgrade, walked to exhaustion, then written to. Without ``AUTOINCREMENT``
-    the new record is issued the freed number, sits below the cursor, and is never
-    returned, never proposed and never mentioned.
-    """
-    db = tmp_path / "pre-walk.db"
-    _write_pre_walk_db(db, [_semantic(str(index), f"legacy {index}") for index in range(1, 4)])
-
-    store = SqliteMemoryStore(
-        traces_sink=FakeTraceSink(), path=db, embedder=HashingEmbedder(dimensions=8), now=_fixed_now
-    )
-    try:
-        first = await store.walk_records("upgrade", limit=10)
-        assert [record.id for record in first.records] == ["1", "2"]
-        assert first.position is not None
-        await store.advance_walk("upgrade", position=first.position)
-        assert (await store.walk_records("upgrade", limit=10)).position is None
-
-        await store.add(_semantic("post", "written after the upgrade"))
-
-        resumed = await store.walk_records("upgrade", limit=10)
-        assert [record.id for record in resumed.records] == ["post"]
-    finally:
-        store.close()
-
-
-async def test_a_walk_yields_a_legacy_record_whose_rowid_is_below_zero(
-    tmp_path: Path,
-) -> None:
-    """ADR-0114 §4: no integer stands in for "no recorded position".
-
-    ``rowid`` is an explicit ``INTEGER PRIMARY KEY``, so a pre-walk database can
-    carry an explicitly inserted negative one and the migration preserves it. §4
-    refuses a sentinel for exactly this reason and names the failure: ``0`` "silently
-    skips every row at or below it". A fresh walk that began at zero would yield the
-    positive record, report exhaustion, and never mention the other — a silent skip
-    on the very first run, before any cursor exists to blame.
-    """
-    db = tmp_path / "pre-walk.db"
-    _write_pre_walk_db(db, [], drop_top=False)
-    legacy = sqlite3.connect(db)
-    for rowid, record_id in ((-9, "below"), (-1, "just-below"), (1, "above")):
-        legacy.execute(
-            "INSERT INTO records(rowid, id, kind, data) VALUES (?, ?, ?, ?)",
-            (rowid, record_id, "semantic", _semantic(record_id, "legacy").model_dump_json()),
-        )
-    legacy.commit()
-    legacy.close()
-
-    store = SqliteMemoryStore(
-        traces_sink=FakeTraceSink(), path=db, embedder=HashingEmbedder(dimensions=8), now=_fixed_now
-    )
-    try:
-        chunk = await store.walk_records("negative", limit=10)
-        assert [record.id for record in chunk.records] == ["below", "just-below", "above"]
-    finally:
-        store.close()
-
-
-async def test_walk_key_migration_leaves_every_existing_rowid_where_it_was(
-    tmp_path: Path,
-) -> None:
-    """ADR-0114 §1: the migration changes how positions are *issued*, not what they are.
-
-    ``records`` and ``vec_records`` are joined by ``rowid`` with no foreign key, so
-    a rebuild that renumbered rows would silently point every stored vector at the
-    wrong record — a defect no read would report and ``search`` would answer
-    wrongly forever.
-    """
-    db = tmp_path / "pre-walk.db"
-    _write_pre_walk_db(
-        db, [_semantic(str(index), f"legacy {index}") for index in range(1, 4)], drop_top=False
-    )
-    before = sqlite3.connect(db)
-    original = dict(before.execute("SELECT id, rowid FROM records").fetchall())
-    before.close()
-
-    store = SqliteMemoryStore(
-        traces_sink=FakeTraceSink(), path=db, embedder=HashingEmbedder(dimensions=8), now=_fixed_now
-    )
-    try:
-        after = dict(store._conn.execute("SELECT id, rowid FROM records").fetchall())
-        assert after == original
-        table_sql = store._conn.execute(
-            "SELECT sql FROM sqlite_master WHERE name = 'records'"
-        ).fetchone()[0]
-        assert "AUTOINCREMENT" in table_sql.upper()
-    finally:
-        store.close()
-
-
 def _epoch_or_none(instant: datetime | None) -> float | None:
     return instant.timestamp() if instant is not None else None
 
@@ -1746,48 +1649,6 @@ def _micros(instant: datetime) -> int:
     """Exact integer microsecond UTC epoch, mirroring the store's representation."""
     delta = instant - datetime(1970, 1, 1, tzinfo=UTC)
     return (delta.days * 86_400 + delta.seconds) * 1_000_000 + delta.microseconds
-
-
-async def test_migration_adds_expires_at_column_and_accepts_writes(tmp_path: Path) -> None:
-    db = tmp_path / "legacy.db"
-    _write_legacy_db(db, [])
-
-    store = SqliteMemoryStore(
-        traces_sink=FakeTraceSink(), path=db, embedder=HashingEmbedder(dimensions=8), now=_fixed_now
-    )
-    try:
-        columns = {row[1] for row in store._conn.execute("PRAGMA table_info(records)")}
-        assert "expires_at" in columns
-        await store.add(_semantic("1", "post-migration write"))
-        assert await store.get("1") is not None
-    finally:
-        store.close()
-
-
-async def test_migration_backfills_expiry_so_legacy_expired_stays_forgotten(
-    tmp_path: Path,
-) -> None:
-    # Pre-ADR-0007 records carry expires_at only inside their JSON. Migration must
-    # backfill it, or an already-expired legacy memory would come back to life.
-    db = tmp_path / "legacy.db"
-    _write_legacy_db(
-        db,
-        [
-            _semantic("expired", "legacy expired", expires_at=datetime(2026, 1, 2, tzinfo=UTC)),
-            _semantic("live", "legacy live"),
-        ],
-    )
-
-    store = SqliteMemoryStore(
-        traces_sink=FakeTraceSink(), path=db, embedder=HashingEmbedder(dimensions=8), now=_fixed_now
-    )
-    try:
-        assert await store.get("expired") is None  # backfilled deadline honoured
-        assert await store.get("live") is not None
-        assert [r.id for r in await store.export()] == ["live"]
-        assert await store.purge_expired() == 1
-    finally:
-        store.close()
 
 
 def _valid_until_column(store: SqliteMemoryStore, record_id: str) -> int | None:
@@ -1804,116 +1665,6 @@ def _valid_until_column(store: SqliteMemoryStore, record_id: str) -> int | None:
     ).fetchone()
     assert row is not None
     return cast("int | None", row[0])
-
-
-async def test_migration_backfills_valid_until_column_from_json(tmp_path: Path) -> None:
-    # A pre-ADR-0045 database carries a record's closed window only in its JSON
-    # blob; search filters valid_until from the column, so migration must backfill
-    # it or a retired legacy belief would resurface in search (ADR-0045 §9). Assert
-    # the column itself, not a read path that reads the window back out of JSON.
-    retired_deadline = datetime(2026, 1, 2, tzinfo=UTC)
-    db = tmp_path / "legacy.db"
-    _write_legacy_db(
-        db,
-        [
-            _semantic(
-                "retired", "legacy coffee retired", validity=Validity(valid_until=retired_deadline)
-            ),
-            _semantic("live", "legacy coffee live"),
-        ],
-    )
-
-    store = SqliteMemoryStore(
-        traces_sink=FakeTraceSink(), path=db, embedder=HashingEmbedder(dimensions=8), now=_fixed_now
-    )
-    try:
-        columns = {row[1] for row in store._conn.execute("PRAGMA table_info(records)")}
-        assert "valid_until" in columns
-        # The backfill populated the column for the retired record and left the
-        # live one NULL (= open) — the property search's column pre-filter relies on.
-        assert _valid_until_column(store, "retired") == _micros(retired_deadline)
-        assert _valid_until_column(store, "live") is None
-        # And the read paths honour it: retired is hidden from get, retained by export.
-        assert await store.get("retired") is None
-        assert await store.get("live") is not None
-        assert {r.id for r in await store.export()} == {"retired", "live"}
-    finally:
-        store.close()
-
-
-async def test_migration_adds_valid_until_to_a_post_expires_at_table(
-    tmp_path: Path,
-) -> None:
-    # The intermediate shape: expires_at already present, valid_until absent. Only
-    # the valid_until migration block should run, and it must backfill the closed
-    # window from JSON just the same.
-    retired_deadline = datetime(2026, 1, 2, tzinfo=UTC)
-    db = tmp_path / "intermediate.db"
-    _write_legacy_db(
-        db,
-        [
-            _semantic(
-                "retired", "legacy coffee retired", validity=Validity(valid_until=retired_deadline)
-            ),
-            _semantic("live", "legacy coffee live"),
-        ],
-        with_expires_at=True,
-    )
-
-    store = SqliteMemoryStore(
-        traces_sink=FakeTraceSink(), path=db, embedder=HashingEmbedder(dimensions=8), now=_fixed_now
-    )
-    try:
-        types = {row[1]: row[2] for row in store._conn.execute("PRAGMA table_info(records)")}
-        assert {"expires_at", "valid_until"} <= types.keys()
-        # Both columns are INTEGER µs epochs: the legacy REAL expires_at was
-        # re-created with INTEGER affinity (issue #289), not left as REAL — the
-        # affinity, not just the value, is what a far-future boundary depends on.
-        assert types["expires_at"] == "INTEGER"
-        assert types["valid_until"] == "INTEGER"
-        # The valid_until block ran on its own and backfilled the column.
-        assert _valid_until_column(store, "retired") == _micros(retired_deadline)
-        assert _valid_until_column(store, "live") is None
-        assert await store.get("retired") is None
-        assert {r.id for r in await store.export()} == {"retired", "live"}
-    finally:
-        store.close()
-
-
-async def test_list_beliefs_orders_and_pages_migration_era_rows(tmp_path: Path) -> None:
-    # Store-specific mechanics the shared suite cannot reach: rows written before
-    # the lifecycle columns existed. ``list_beliefs`` pre-filters expiry and
-    # ``valid_until`` from those columns, so a migrated row is only ordered and
-    # paged correctly if the rebuild backfilled them — and it sorts on
-    # ``last_updated``, which lives in the JSON blob the rebuild copies verbatim.
-    db = tmp_path / "legacy.db"
-    _write_legacy_db(
-        db,
-        [
-            _semantic("newest", "legacy c", last_updated=_WHEN + timedelta(hours=2)),
-            _semantic("middle", "legacy b", last_updated=_WHEN + timedelta(hours=1)),
-            _semantic("oldest", "legacy a", last_updated=_WHEN),
-            _semantic("gone", "legacy expired", expires_at=_WHEN, last_updated=_NOW),
-            _semantic(
-                "retired",
-                "legacy retired",
-                validity=Validity(valid_until=_WHEN),
-                last_updated=_NOW,
-            ),
-        ],
-    )
-
-    store = SqliteMemoryStore(
-        traces_sink=FakeTraceSink(), path=db, embedder=HashingEmbedder(dimensions=8), now=_fixed_now
-    )
-    try:
-        # The two unreadable rows carry the *newest* stamps, so they sort ahead of
-        # the cut: a page of 2 is short unless both axes are applied before it.
-        assert [r.id for r in await store.list_beliefs(limit=2)] == ["newest", "middle"]
-        assert [r.id for r in await store.list_beliefs(limit=2, offset=2)] == ["oldest"]
-        assert {r.id for r in await store.export()} == {"newest", "middle", "oldest", "retired"}
-    finally:
-        store.close()
 
 
 async def test_list_beliefs_orders_instants_of_differing_precision_chronologically(
@@ -1999,70 +1750,6 @@ async def _write_real_schema_db(
         conn.commit()
     finally:
         conn.close()
-
-
-async def test_migration_rebuilds_a_full_real_schema_preserving_vectors(tmp_path: Path) -> None:
-    # issue #289, the actual pre-change installed schema: BOTH lifecycle columns
-    # REAL, with populated vec_records. The rebuild must flip both to INTEGER µs,
-    # backfill exact epochs, and carry each rowid forward so the vector join
-    # survives — a far-future record stays live AND still matches in search, where
-    # the lossy REAL column would have hidden it and a lost vector would drop it.
-    embedder = HashingEmbedder(dimensions=8)
-    far_future = datetime(9999, 1, 1, tzinfo=UTC)
-    just_before = datetime(9998, 12, 31, 23, 59, 59, 999_999, tzinfo=UTC)  # 1 µs earlier
-    records = [
-        _semantic("live", "coffee beans", validity=Validity(valid_until=far_future)),
-        _semantic("plain", "coffee grounds"),
-    ]
-    db = tmp_path / "real.db"
-    await _write_real_schema_db(db, records, embedder)
-
-    store = SqliteMemoryStore(
-        traces_sink=FakeTraceSink(), path=db, embedder=embedder, now=lambda: just_before
-    )
-    try:
-        types = {row[1]: row[2] for row in store._conn.execute("PRAGMA table_info(records)")}
-        assert types["expires_at"] == "INTEGER"  # affinity flipped, not left REAL
-        assert types["valid_until"] == "INTEGER"
-        # The far-future deadline is exact after the rebuild (a REAL column would
-        # have rounded it and hidden the record one µs early).
-        assert _valid_until_column(store, "live") == _micros(far_future)
-        assert await store.get("live") is not None  # still live: now < valid_until
-        # The carried-forward vectors still match — the rowid join survived.
-        assert {r.id for r in (await store.search("coffee")).records} == {"live", "plain"}
-    finally:
-        store.close()
-
-
-async def test_migration_rolls_back_a_rebuild_that_hits_a_corrupt_row(tmp_path: Path) -> None:
-    # A corrupt legacy JSON blob makes the backfill raise mid-rebuild. Because the
-    # rewrite runs in an explicit transaction, the schema swap must roll back whole
-    # — never leave INTEGER columns with un-backfilled NULLs that a reopen would
-    # skip, silently resurrecting expired rows (issue #289 review, blocker 1).
-    embedder = HashingEmbedder(dimensions=8)
-    good = _semantic("good", "coffee", expires_at=datetime(2026, 1, 2, tzinfo=UTC))
-    db = tmp_path / "corrupt.db"
-    await _write_real_schema_db(db, [good], embedder)
-    legacy = sqlite3.connect(db)
-    legacy.execute("UPDATE records SET data = ? WHERE id = ?", ("not-json", "good"))
-    legacy.commit()
-    legacy.close()
-
-    with pytest.raises(MemoryStoreError):
-        SqliteMemoryStore(traces_sink=FakeTraceSink(), path=db, embedder=embedder, now=_fixed_now)
-
-    # The rebuild rolled back: the original REAL schema is intact, so a fixed
-    # process could migrate cleanly later rather than being stuck half-swapped.
-    check = sqlite3.connect(db)
-    try:
-        types = {row[1]: row[2] for row in check.execute("PRAGMA table_info(records)")}
-        assert types["expires_at"] == "REAL"  # unchanged — the swap did not commit
-        assert types["valid_until"] == "REAL"
-        assert not list(
-            check.execute("SELECT name FROM sqlite_master WHERE name='records_migrated'")
-        )
-    finally:
-        check.close()
 
 
 # --- the subject axis: the column and its migration (ADR-0100 §8) ------------
@@ -2187,62 +1874,6 @@ async def test_an_overwrite_rewrites_the_subject_column(
     assert got.about_person is None
 
 
-async def test_migration_adds_the_subject_column_to_a_pre_subject_table(
-    tmp_path: Path,
-) -> None:
-    """A nullable column, backfilled ``NULL``, on a table already on the epochs.
-
-    ``NULL`` is the *right* value rather than a placeholder: a record written
-    before the field states no subject, and ADR-0100 §8 forbids inferring one for
-    it from content, from ``participants`` or by asking a model. The existing rows
-    must survive, because this is an ``ALTER`` on a table the rebuild path
-    deliberately does not touch.
-    """
-    db = tmp_path / "pre-subject.db"
-    _write_pre_subject_db(db, [_semantic("legacy", "written before the field existed")])
-
-    store = SqliteMemoryStore(
-        traces_sink=FakeTraceSink(), path=db, embedder=HashingEmbedder(dimensions=8), now=_fixed_now
-    )
-    try:
-        columns = {row[1] for row in store._conn.execute("PRAGMA table_info(records)")}
-        assert "about_person" in columns
-        assert _subject_column(store, "legacy") is None
-        assert {r.id for r in await store.export()} == {"legacy"}
-        # And the upgraded table takes a write that states one.
-        await store.add(
-            SemanticMemory(
-                id="new", content="c", fact="c", about_person="Marta", provenance=_provenance()
-            )
-        )
-        assert _subject_column(store, "new") == "Marta"
-    finally:
-        store.close()
-
-
-async def test_the_rebuild_path_also_produces_the_subject_column(tmp_path: Path) -> None:
-    """A table old enough to need the rebuild arrives with the column too.
-
-    The two migrations are ordered rather than independent: the rebuild recreates
-    the table, so a column added before it would be dropped. Asserting the oldest
-    shape is what makes the ordering observable — a pre-ADR-0007 table has neither
-    lifecycle column, so it takes the rebuild and must come out with all three.
-    """
-    db = tmp_path / "ancient.db"
-    _write_legacy_db(db, [_semantic("legacy", "written long before the field")])
-
-    store = SqliteMemoryStore(
-        traces_sink=FakeTraceSink(), path=db, embedder=HashingEmbedder(dimensions=8), now=_fixed_now
-    )
-    try:
-        columns = {row[1] for row in store._conn.execute("PRAGMA table_info(records)")}
-        assert {"expires_at", "valid_until", "about_person"} <= columns
-        assert _subject_column(store, "legacy") is None
-        assert {r.id for r in await store.export()} == {"legacy"}
-    finally:
-        store.close()
-
-
 async def _write_pre_window_column_db(
     path: Path, records: list[MemoryRecord], embedder: HashingEmbedder
 ) -> None:
@@ -2292,143 +1923,6 @@ async def _write_pre_window_column_db(
         conn.commit()
     finally:
         conn.close()
-
-
-async def test_the_window_column_backfill_reaches_a_record_at_a_negative_rowid(
-    tmp_path: Path,
-) -> None:
-    """The backfill's cursor must start below every stored ``rowid``, and cannot.
-
-    ``rowid`` is an explicit ``INTEGER PRIMARY KEY`` on every table this store has
-    ever written, so a database predating ADR-0114's ``AUTOINCREMENT`` can carry an
-    explicitly inserted negative one — the shape
-    ``test_a_walk_yields_a_legacy_record_whose_rowid_is_below_zero`` plants and the
-    migrations preserve. ADR-0114 §4 names the failure for the walk's cursor and it
-    is the same failure here: a page starting at ``0`` "silently skips every row at
-    or below it".
-
-    What makes it worse for this cursor than for the walk's is the value a skipped
-    row keeps. An unvisited ``valid_from`` stays ``NULL``, ``NULL`` is an *open*
-    window, and ``search`` binds that column before its ranking cut — so the record
-    the migration skipped is not merely missed, it is **returned**, on a store where
-    ADR-0045 §6 requires it hidden. There is no sentinel below every possible
-    ``rowid``, so the first page takes no bound at all.
-    """
-    db = tmp_path / "pre-walk-window.db"
-    _write_pre_walk_db(db, [], drop_top=False)
-    future = _semantic(
-        "below", "not yet live", validity=Validity(valid_from=_NOW + timedelta(days=1))
-    )
-    live = _semantic("above", "already live")
-    legacy = sqlite3.connect(db)
-    for rowid, record in ((-9, future), (1, live)):
-        legacy.execute(
-            "INSERT INTO records(rowid, id, kind, data) VALUES (?, ?, ?, ?)",
-            (rowid, record.id, record.kind, record.model_dump_json()),
-        )
-    legacy.commit()
-    legacy.close()
-
-    store = SqliteMemoryStore(
-        traces_sink=FakeTraceSink(), path=db, embedder=HashingEmbedder(dimensions=8), now=_fixed_now
-    )
-    try:
-        stored = dict(store._conn.execute("SELECT id, valid_from FROM records"))
-        assert stored["below"] == _micros(_NOW + timedelta(days=1)), (
-            "the record at a negative rowid was skipped by the backfill, so its window "
-            "column reads as open and search would return it (ADR-0045 §6)"
-        )
-        assert stored["above"] is None
-    finally:
-        store.close()
-
-
-async def test_migration_backfills_the_open_window_column_from_json(tmp_path: Path) -> None:
-    """ADR-0128 §1's column, added in place and backfilled — never left ``NULL``.
-
-    ``search`` binds both ends of the validity window before its ranking cut, and
-    the rare end has no column to bind on a store written before this. Adding one
-    is the easy half; the value is the half that bites, because ``NULL`` reads as
-    *open*. An un-backfilled column would make every not-yet-live record on every
-    migrated store eligible for every read — a record ADR-0045 §6 requires the read
-    path to hide, resurrected by a migration.
-
-    So the fixture plants one record on each side of the boundary and asserts
-    through **``search``**, which is the read the column serves: ``get`` decodes the
-    blob and would answer correctly whether or not the migration ran at all.
-    """
-    embedder = HashingEmbedder(dimensions=8)
-    db = tmp_path / "pre-window-column.db"
-    await _write_pre_window_column_db(
-        db,
-        [
-            _semantic("open", "the weekly planning meeting"),
-            _semantic(
-                "future",
-                "the weekly planning meeting",
-                validity=Validity(valid_from=_NOW + timedelta(days=1)),
-            ),
-            _semantic(
-                "already",
-                "the weekly planning meeting",
-                validity=Validity(valid_from=_NOW - timedelta(days=1)),
-            ),
-        ],
-        embedder,
-    )
-
-    store = SqliteMemoryStore(
-        traces_sink=FakeTraceSink(), path=db, embedder=embedder, now=_fixed_now
-    )
-    try:
-        columns = {row[1] for row in store._conn.execute("PRAGMA table_info(records)")}
-        assert "valid_from" in columns
-        found = await store.search("the weekly planning meeting", limit=10)
-        assert {record.id for record in found.records} == {"open", "already"}, (
-            "the not-yet-live record came back from a migrated store, so the added column "
-            "was left NULL and reads as an open window (ADR-0045 §6)"
-        )
-        # And the column agrees with each blob rather than being uniformly NULL,
-        # which is what a bare `ADD COLUMN` would have left.
-        stored = dict(store._conn.execute("SELECT id, valid_from FROM records"))
-        assert stored["open"] is None  # an absent window end is open, and stays open
-        assert stored["already"] == _micros(_NOW - timedelta(days=1))
-        assert stored["future"] == _micros(_NOW + timedelta(days=1))
-    finally:
-        store.close()
-
-
-async def test_the_rebuild_path_also_backfills_the_open_window_column(tmp_path: Path) -> None:
-    """A table old enough to need the rebuild arrives with the column filled too.
-
-    The migrations are ordered rather than independent — the rebuild recreates the
-    table, so a column added before it would be dropped — and a pre-ADR-0007 table
-    has neither lifecycle column, so it takes the rebuild. It must come out with
-    the window column *and* its value, for the reason above: a rebuild that carried
-    the column through as ``NULL`` would revive the record it was added to hide.
-    """
-    db = tmp_path / "ancient-window.db"
-    _write_legacy_db(
-        db,
-        [
-            _semantic(
-                "future",
-                "written long before the column existed",
-                validity=Validity(valid_from=_NOW + timedelta(days=1)),
-            )
-        ],
-    )
-
-    store = SqliteMemoryStore(
-        traces_sink=FakeTraceSink(), path=db, embedder=HashingEmbedder(dimensions=8), now=_fixed_now
-    )
-    try:
-        columns = {row[1] for row in store._conn.execute("PRAGMA table_info(records)")}
-        assert {"expires_at", "valid_until", "valid_from", "about_person"} <= columns
-        assert await store.get("future") is None
-        assert {record.id for record in await store.export()} == {"future"}
-    finally:
-        store.close()
 
 
 async def test_export_wraps_corrupt_stored_record(
@@ -3380,130 +2874,6 @@ async def test_the_revision_issuer_survives_a_reopen(tmp_path: Path) -> None:
         reopened.close()
 
 
-async def test_the_migration_stamps_every_legacy_row_positively(tmp_path: Path) -> None:
-    """ADR-0219 §10's backfill: issued stamps, never ``0`` and never from ``rowid``.
-
-    The rows are planted at ``rowid`` **at or below zero**, which is the case that
-    separates an issued stamp from a derived one: ``rowid`` is a signed 64-bit
-    integer a legacy table can hold negative — ``rowid`` "was only issued by
-    ``AUTOINCREMENT`` from ADR-0114 onwards" — so a rowid-derived stamp would breach
-    both ``ge=0`` and §1's positivity on rows the store is obliged to keep. And a
-    backfilled ``0`` would make a caller-constructed default expectation match a real
-    row, which is the fail-open case §2 closes twice, reintroduced by the migration.
-    """
-    db = tmp_path / "pre-walk.db"
-    _write_pre_walk_db(db, [], drop_top=False)
-    legacy = sqlite3.connect(db)
-    for rowid, record_id in ((-9, "below"), (0, "zero"), (1, "above")):
-        legacy.execute(
-            "INSERT INTO records(rowid, id, kind, data) VALUES (?, ?, ?, ?)",
-            (rowid, record_id, "semantic", _semantic(record_id, "legacy").model_dump_json()),
-        )
-    legacy.commit()
-    legacy.close()
-
-    store = SqliteMemoryStore(
-        traces_sink=FakeTraceSink(), path=db, embedder=HashingEmbedder(dimensions=8), now=_fixed_now
-    )
-    try:
-        chunk = await store.walk_records("migrated", limit=10)
-        stamps = {record.id: record.revision for record in chunk.records}
-        assert set(stamps) == {"below", "zero", "above"}
-        assert all(stamp > 0 for stamp in stamps.values()), stamps
-        assert len(set(stamps.values())) == 3, "two migrated rows share one stamp"
-    finally:
-        store.close()
-
-
-async def test_the_migration_rewrites_no_payload(tmp_path: Path) -> None:
-    """ADR-0219 §7's byte-for-byte arm, asserted over the blobs and not the values.
-
-    §10's clause is about the *bytes*: a migration that decoded each record and
-    re-serialised it — reformatting an instant, dropping a member this version
-    ignores, or writing ``revision`` into the payload §1 keeps out of it — would
-    satisfy every other arm here while breaching the one thing a migration over
-    stored data must not do. A blob with an unknown member is planted deliberately,
-    because that is the member a decode-and-re-serialise pass would silently drop.
-    """
-    db = tmp_path / "pre-walk.db"
-    _write_pre_walk_db(db, [_semantic(str(i), f"legacy {i}") for i in range(1, 4)], drop_top=False)
-    legacy = sqlite3.connect(db)
-    try:
-        payload = json.loads(
-            str(legacy.execute("SELECT data FROM records WHERE id = '1'").fetchone()[0])
-        )
-        payload["a_member_this_build_does_not_know"] = "kept"
-        legacy.execute("UPDATE records SET data = ? WHERE id = '1'", (json.dumps(payload),))
-        legacy.commit()
-        before = {
-            str(row[0]): str(row[1]) for row in legacy.execute("SELECT id, data FROM records")
-        }
-    finally:
-        legacy.close()
-
-    SqliteMemoryStore(
-        traces_sink=FakeTraceSink(), path=db, embedder=HashingEmbedder(dimensions=8), now=_fixed_now
-    ).close()
-
-    raw = sqlite3.connect(db)
-    try:
-        after = {str(row[0]): str(row[1]) for row in raw.execute("SELECT id, data FROM records")}
-    finally:
-        raw.close()
-    assert after == before, "the migration rewrote a stored payload"
-    assert all(stamp > 0 for stamp in _revisions(db).values())
-
-
-async def test_the_migrated_issuer_survives_a_reopen(tmp_path: Path) -> None:
-    """ADR-0219 §7, and a separate arm from the reopen above deliberately.
-
-    That one is taken on a store this code created and never migrated. Without this
-    one a migration that stamps every legacy row correctly and then persists its
-    issuer at ``0`` passes both — the rows do read back positive, and the new-store
-    reopen is untouched by it — while reissuing, on the first write after the
-    reopen, values it had already handed out. That is §1's never-reissued clause
-    breached by the one path that writes a stamp without going through a write.
-    """
-    db = tmp_path / "pre-walk.db"
-    _write_pre_walk_db(db, [_semantic(str(i), f"legacy {i}") for i in range(1, 4)], drop_top=False)
-
-    migrated = SqliteMemoryStore(
-        traces_sink=FakeTraceSink(), path=db, embedder=HashingEmbedder(dimensions=8), now=_fixed_now
-    )
-    try:
-        backfilled = await migrated.get("1")
-        assert backfilled is not None
-        assert backfilled.revision > 0
-        handed_out = set(_revisions(db).values())
-    finally:
-        migrated.close()
-
-    reopened = SqliteMemoryStore(
-        traces_sink=FakeTraceSink(), path=db, embedder=HashingEmbedder(dimensions=8), now=_fixed_now
-    )
-    try:
-        await reopened.add(_semantic("1", "rewritten after the reopen"))
-        rewritten = await reopened.get("1")
-        assert rewritten is not None
-        assert rewritten.revision not in handed_out, (
-            "the first write after a reopen took a stamp the backfill had already "
-            "handed out, so the migrated issuer was not persisted"
-        )
-
-        with pytest.raises(MemoryStoreStaleError):
-            await reopened.write_atomic(
-                [
-                    MemoryWrite(
-                        record=_semantic("1", "computed over the pre-close revision"),
-                        mode=MemoryWriteMode.IF_UNCHANGED,
-                        expected_revision=backfilled.revision,
-                    )
-                ]
-            )
-    finally:
-        reopened.close()
-
-
 @pytest.mark.skipif(sys.platform == "win32", reason="the child's exit assumes POSIX semantics")
 async def test_the_revision_issuer_survives_a_crash_and_not_only_a_close(tmp_path: Path) -> None:
     """ADR-0219 §1's own word, and the trap the reopen arms cannot reach.
@@ -3607,3 +2977,73 @@ async def test_a_conditional_write_is_refused_over_another_processs_commit(
         )
     finally:
         store.close()
+
+
+@pytest.mark.parametrize(
+    "shape", ["empty", "expiry", "subject", "walk", "real", "window", "corrupt"]
+)
+async def test_pre_m36_stores_are_refused_without_modification(tmp_path: Path, shape: str) -> None:
+    db = tmp_path / "old.db"
+    embedder = HashingEmbedder(dimensions=8)
+    records = [_semantic("legacy", "coffee")]
+    if shape == "empty":
+        _write_legacy_db(db, [])
+    elif shape == "expiry":
+        _write_legacy_db(db, records, with_expires_at=True)
+    elif shape == "subject":
+        _write_pre_subject_db(db, records)
+    elif shape == "walk":
+        _write_pre_walk_db(db, records, drop_top=False)
+    elif shape == "window":
+        await _write_pre_window_column_db(db, records, embedder)
+    else:
+        await _write_real_schema_db(db, records, embedder)
+        if shape == "corrupt":
+            with sqlite3.connect(db) as conn:
+                conn.execute("UPDATE records SET data = 'not-json'")
+    before = db.read_bytes()
+    mode = db.stat().st_mode
+    with pytest.raises(IncompatibleStateError, match="fresh M36"):
+        SqliteMemoryStore(traces_sink=FakeTraceSink(), path=db, embedder=embedder)
+    assert db.read_bytes() == before
+    assert db.stat().st_mode == mode
+
+
+@pytest.mark.parametrize("marker", [None, 2, 0])
+def test_current_shape_with_missing_or_unsupported_marker_is_refused(
+    tmp_path: Path, marker: int | None
+) -> None:
+    db = tmp_path / "memory.db"
+    embedder = HashingEmbedder(dimensions=8)
+    SqliteMemoryStore(traces_sink=FakeTraceSink(), path=db, embedder=embedder).close()
+    with sqlite3.connect(db) as conn:
+        if marker is None:
+            conn.execute("DROP TABLE episode_record_format")
+        else:
+            conn.execute("UPDATE episode_record_format SET version = ?", (marker,))
+    before = db.read_bytes()
+    with pytest.raises(IncompatibleStateError, match="fresh M36"):
+        SqliteMemoryStore(traces_sink=FakeTraceSink(), path=db, embedder=embedder)
+    assert db.read_bytes() == before
+
+
+async def test_processing_record_and_inspection_survive_reopen(tmp_path: Path) -> None:
+    db = tmp_path / "memory.db"
+    embedder = HashingEmbedder(dimensions=8)
+    store = SqliteMemoryStore(
+        traces_sink=FakeTraceSink(), path=db, embedder=embedder, now=_fixed_now
+    )
+    try:
+        await store.add(_activation_episode("activation", eligible=False))
+        before = await store.episode_chunk("activation")
+    finally:
+        store.close()
+    reopened = SqliteMemoryStore(
+        traces_sink=FakeTraceSink(), path=db, embedder=embedder, now=_fixed_now
+    )
+    try:
+        assert await reopened.episode_chunk("activation") == before
+        assert len((await reopened.episodes()).items) == 1
+        assert (await reopened.search("coffee", episode_model_eligible=True)).records == ()
+    finally:
+        reopened.close()

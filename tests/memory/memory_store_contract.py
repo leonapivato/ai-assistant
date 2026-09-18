@@ -18,6 +18,8 @@ from __future__ import annotations
 
 import asyncio
 import contextlib
+import hashlib
+import json
 import re
 from datetime import UTC, datetime, timedelta
 from typing import TYPE_CHECKING, Any, Protocol
@@ -29,6 +31,7 @@ from ai_assistant.core.errors import (
     MemoryStoreConflictError,
     MemoryStoreError,
     MemoryStoreStaleError,
+    StaleEpisodeReadError,
 )
 from ai_assistant.core.protocols import MemoryStore
 from ai_assistant.testing.cancellation import held_at_its_first_await, settle
@@ -46,6 +49,10 @@ from ai_assistant.core.types import (
     Attestation,
     BeliefBand,
     Capture,
+    ChannelContext,
+    ChannelIdentity,
+    EpisodeProcessingRecord,
+    EpisodeResponseKind,
     EpisodicMemory,
     ExchangeDisposition,
     MemoryKind,
@@ -59,7 +66,11 @@ from ai_assistant.core.types import (
     PlacementReach,
     PlacementSetter,
     PreferenceMemory,
+    ProcessingReason,
+    ProcessingStatus,
     Provenance,
+    RecordedChannelTrigger,
+    RecordedTextInput,
     SemanticMemory,
     TimeWindow,
     Validity,
@@ -717,6 +728,34 @@ class _GetOp(_ReadOp):
         return store.get("read-b")
 
 
+class _EpisodesOp(_ReadOp):
+    """Episode listing holds the same resource until its cancelled read settles."""
+
+    name = "episodes"
+
+    def first(self, store: MemoryStore) -> Coroutine[Any, Any, object]:
+        """Start the listing that will be cancelled."""
+        return store.episodes()
+
+    def second(self, store: MemoryStore) -> Coroutine[Any, Any, object]:
+        """Start another listing while the first still holds the resource."""
+        return store.episodes()
+
+
+class _EpisodeChunkOp(_ReadOp):
+    """Detail uses an ordinary live read, including its cancellation discipline."""
+
+    name = "episode_chunk"
+
+    def first(self, store: MemoryStore) -> Coroutine[Any, Any, object]:
+        """Read A and cancel while its resource is held."""
+        return store.episode_chunk("read-a")
+
+    def second(self, store: MemoryStore) -> Coroutine[Any, Any, object]:
+        """Read B while A still holds the resource."""
+        return store.episode_chunk("read-b")
+
+
 class _SearchOp(_ReadOp):
     """``search`` — retrieval under the same lock, after the embedding await."""
 
@@ -859,6 +898,8 @@ _CANCELLATION_OPS: tuple[Callable[[], _CancellationOp], ...] = (
     _ClearOp,
     _PurgeExpiredOp,
     _GetOp,
+    _EpisodesOp,
+    _EpisodeChunkOp,
     _SearchOp,
     _SelectOp,
     _ListBeliefsOp,
@@ -866,6 +907,33 @@ _CANCELLATION_OPS: tuple[Callable[[], _CancellationOp], ...] = (
     _WalkRecordsOp,
     _AdvanceWalkOp,
 )
+
+
+def _activation_episode(record_id: str, *, eligible: bool) -> EpisodicMemory:
+    channel = ChannelIdentity(channel_type="informational_event", instance_id="source")
+    return EpisodicMemory(
+        id=record_id,
+        content=_ANY,
+        provenance=_provenance(),
+        occurred_at=_IN_WINDOW,
+        processing_record=EpisodeProcessingRecord(
+            activation_id="activation",
+            started_at=_STORE_NOW,
+            ended_at=_IN_WINDOW,
+            trigger=RecordedChannelTrigger(
+                target=channel,
+                channel=channel,
+                payload=RecordedTextInput(text="exact input"),
+                context=ChannelContext(),
+                conversation=None,
+                reply=None,
+            ),
+            status=ProcessingStatus.COMPLETED if eligible else ProcessingStatus.FAILED,
+            reason=ProcessingReason.RETURNED if eligible else ProcessingReason.PROCESSING_FAILED,
+            response_kind=EpisodeResponseKind.NONE,
+            model_eligible=eligible,
+        ),
+    )
 
 
 class MemoryStoreContract:
@@ -897,6 +965,169 @@ class MemoryStoreContract:
         cannot express.
         """
         raise NotImplementedError
+
+    async def test_episode_inspection_orders_exact_ids_and_binds_cursors(
+        self, store: MemoryStore
+    ) -> None:
+        for record_id in ("", " a ", "z", "é"):
+            await store.add(_episode(record_id))
+        page = await store.episodes(limit=2)
+        assert [item.position.episode_id for item in page.items] == ["é", "z"]
+        assert all(not item.has_processing_record for item in page.items)
+        assert page.next_cursor is not None
+        with pytest.raises(ValueError, match="cursor"):
+            await store.episodes(cursor=page.next_cursor, status=ProcessingStatus.FAILED)
+        with pytest.raises(ValueError, match="cursor"):
+            await store.episodes(cursor=page.next_cursor + "=")
+        await store.delete("z")
+        await store.add(_episode("new", occurred_at=_STORE_NOW))
+        rest = await store.episodes(cursor=page.next_cursor, limit=2)
+        assert [item.position.episode_id for item in rest.items] == [" a ", ""]
+        assert rest.next_cursor is None
+
+    async def test_episode_eligibility_filters_before_limits(self, store: MemoryStore) -> None:
+        for i in range(15):
+            await store.add(_activation_episode(f"hidden-{i}", eligible=False))
+        await store.add(_activation_episode("visible", eligible=True))
+        await store.add(_episode("producer"))
+        await store.add(_preference("belief", _ANY))
+        for read in (
+            store.search(_ANY, limit=3, episode_model_eligible=True),
+            store.select(limit=3, episode_model_eligible=True),
+        ):
+            result = await read
+            assert {record.id for record in result.records} == {"visible", "producer", "belief"}
+        rejected = await store.select(kinds=[MemoryKind.EPISODIC], episode_model_eligible=False)
+        assert all(record.id.startswith("hidden-") for record in rejected.records)
+        inspected = await store.episodes(status=ProcessingStatus.FAILED)
+        assert len(inspected.items) == 15
+        channel = ChannelIdentity(channel_type="informational_event", instance_id="source")
+        assert len((await store.episodes(channel=channel)).items) == 16
+        assert len((await store.episodes()).items) == 17
+
+    async def test_episode_detail_reassembles_and_changes_invalidate_version(
+        self, store: MemoryStore
+    ) -> None:
+        await store.add(
+            _activation_episode("", eligible=True).model_copy(update={"content": 'café 🍵\\"'})
+        )
+        first = await store.episode_chunk("", max_bytes=17)
+        assert first is not None
+        chunks = [first.text]
+        current = first
+        while current.next_offset is not None:
+            chunk = await store.episode_chunk(
+                "", version=first.version, offset=current.next_offset, max_bytes=17
+            )
+            assert chunk is not None
+            assert len(chunk.text.encode()) <= 17
+            chunks.append(chunk.text)
+            current = chunk
+        encoded = "".join(chunks)
+        assert encoded.isascii()
+        assert hashlib.sha256(encoded.encode()).hexdigest() == first.version
+        assert len(encoded) == first.total_bytes
+        stored = await store.get("")
+        assert stored is not None
+        assert json.loads(encoded) == stored.model_dump(mode="json")
+        final = await store.episode_chunk("", version=first.version, offset=first.total_bytes)
+        assert final is not None
+        assert final.text == ""
+        assert final.next_offset is None
+        await store.add(stored.model_copy(update={"topics": ("tea",)}))
+        with pytest.raises(
+            StaleEpisodeReadError, match=r"^episode changed during detail inspection$"
+        ):
+            await store.episode_chunk("", version=first.version)
+        await store.delete("")
+        assert await store.episode_chunk("", version=first.version) is None
+
+    async def test_episode_inspection_respects_liveness_and_kind(self, store: MemoryStore) -> None:
+        await store.add(_episode("expired").model_copy(update={"expires_at": _LONG_AGO}))
+        await store.add(
+            _episode("closed").model_copy(update={"validity": Validity(valid_until=_LONG_AGO)})
+        )
+        await store.add(
+            _episode("future").model_copy(update={"validity": Validity(valid_from=_FAR_FUTURE)})
+        )
+        await store.add(_preference("belief", _ANY))
+        assert (await store.episodes()).items == ()
+        for record_id in ("expired", "closed", "future", "belief", "missing"):
+            assert await store.episode_chunk(record_id) is None
+
+    @pytest.mark.parametrize("limit", [0, 101, True, 1.0])
+    async def test_episode_listing_refuses_invalid_limits(
+        self, store: MemoryStore, limit: Any
+    ) -> None:
+        with pytest.raises(ValueError, match="episode limit"):
+            await store.episodes(limit=limit)
+
+    @pytest.mark.parametrize(
+        "options",
+        [
+            {"offset": 1},
+            {"offset": -1},
+            {"offset": True},
+            {"offset": 2**63},
+            {"max_bytes": 0},
+            {"max_bytes": 65537},
+            {"max_bytes": 1.0},
+            {"version": "A" * 64},
+            {"version": "abc"},
+        ],
+    )
+    async def test_episode_detail_refuses_invalid_arguments(
+        self, store: MemoryStore, options: dict[str, Any]
+    ) -> None:
+        with pytest.raises(ValueError, match="episode"):
+            await store.episode_chunk("missing", **options)
+
+    @pytest.mark.parametrize("change", ["strip", "status", "response"])
+    @pytest.mark.parametrize("method", ["add", "atomic"])
+    async def test_recorded_processing_is_immutable_and_refusal_is_atomic(
+        self, store: MemoryStore, change: str, method: str
+    ) -> None:
+        original = _activation_episode("captured", eligible=True)
+        assert original.processing_record is not None
+        original = original.model_copy(
+            update={
+                "outcome": "original",
+                "processing_record": original.processing_record.model_copy(
+                    update={"response_kind": EpisodeResponseKind.INFORMATIONAL_SUMMARY}
+                ),
+            }
+        )
+        await store.add(original)
+        record = original.processing_record
+        assert record is not None
+        update: dict[str, object] = (
+            {"processing_record": None}
+            if change == "strip"
+            else (
+                {
+                    "processing_record": record.model_copy(
+                        update={"status": ProcessingStatus.INTERRUPTED}
+                    )
+                }
+                if change == "status"
+                else {"outcome": "changed"}
+            )
+        )
+        changed = original.model_copy(update=update)
+        operation = (
+            store.add(changed)
+            if method == "add"
+            else store.write_atomic(
+                (MemoryWrite(record=_episode("companion")), MemoryWrite(record=changed))
+            )
+        )
+        with pytest.raises(MemoryStoreError, match="immutable"):
+            await operation
+        assert await store.get("companion") is None
+        stored = await store.get("captured")
+        assert isinstance(stored, EpisodicMemory)
+        assert stored.processing_record == original.processing_record
+        assert stored.outcome == original.outcome
 
     def test_conforms_to_protocol(self, store: MemoryStore) -> None:
         assert isinstance(store, MemoryStore)

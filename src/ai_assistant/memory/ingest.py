@@ -38,6 +38,7 @@ from ai_assistant.core.types import (
     BeliefBand,
     ConflictRelation,
     DataTier,
+    EpisodicMemory,
     MemoryDecisionKind,
     MemoryIngestResult,
     MemoryKind,
@@ -2559,6 +2560,12 @@ class MemoryIngestor:
             MemoryStoreStaleError: If a second attempt is also refused as stale.
                 Nothing is written by either attempt.
         """
+        if (
+            isinstance(observed.proposed, EpisodicMemory)
+            and observed.proposed.processing_record is not None
+        ):
+            msg = "processing records cannot be supplied through MemoryWriter"
+            raise MemoryStoreError(msg)
         try:
             return await self._ingest_once(observed)
         except MemoryStoreStaleError:

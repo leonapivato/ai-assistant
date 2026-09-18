@@ -60,6 +60,7 @@ from ai_assistant.core.errors import (
     MemoryStoreError,
 )
 from ai_assistant.core.types import EpisodicMemory
+from ai_assistant.memory._episode_format import check_format
 from ai_assistant.memory._transactions import transaction
 from ai_assistant.memory.sqlite_store import (
     _ADAPTER,
@@ -154,7 +155,7 @@ _DESTINATION_FIELDS: Final = frozenset(
     name.strip() for name in _DESTINATION_COLUMNS.split(",") if name.strip() != "rowid"
 )
 _DESTINATION_TABLES: Final = frozenset(
-    {"records", "vec_records", "record_labels", "revision_issuer", "meta"}
+    {"records", "vec_records", "record_labels", "revision_issuer", "meta", "episode_record_format"}
 )
 
 #: Where the stamp sits in a source row read through either of the two above.
@@ -300,11 +301,12 @@ def _schema_is_current(work: sqlite3.Connection) -> bool:
         is the exit every sibling condition takes.
     """
     try:
+        check_format(work)
         columns = {str(row[1]) for row in work.execute("PRAGMA table_info(records)")}
         tables = {
             str(row[0]) for row in work.execute("SELECT name FROM sqlite_master WHERE type='table'")
         }
-    except sqlite3.Error:
+    except sqlite3.Error, IncompatibleStateError:
         return False
     return columns >= _DESTINATION_FIELDS and tables >= _DESTINATION_TABLES
 
@@ -617,6 +619,7 @@ class Reembedder:
         conn = _connect(self._store)
         try:
             _require_rollback_journal(conn, self._store)
+            check_format(conn)
             meta = _read_meta(conn, str(self._store))
             records = _count(conn, "records", str(self._store))
         finally:
@@ -746,6 +749,7 @@ class Reembedder:
         try:
             work = _connect(self._work)
             try:
+                check_format(source)
                 columns = _source_columns(source, self._store)
                 embedded = await self._copy(source, work, cursor, resumed, plan, progress, columns)
                 self._finalise(source, work)
@@ -1298,6 +1302,7 @@ def _verify(
         MemoryStoreError: If anything does not line up. The caller has not
             touched the live store at this point and must not.
     """
+    check_format(work)
     meta = _read_meta(work, str(plan.work))
     if set(meta) != _STORE_META_KEYS:
         _fail(f"its metadata holds {sorted(meta)}, expected exactly {sorted(_STORE_META_KEYS)}")

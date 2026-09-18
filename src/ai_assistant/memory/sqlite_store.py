@@ -38,6 +38,16 @@ import sqlite_vec
 from pydantic import TypeAdapter, ValidationError
 
 from ai_assistant.core.clock import ClockReadingError, checked_clock
+from ai_assistant.core.episode_encoding import (
+    admits_model_eligibility,
+    check_detail,
+    check_eligibility,
+    check_list,
+    detail_of,
+    encode_cursor,
+    position_of,
+    summary_of,
+)
 from ai_assistant.core.errors import (
     EmbeddingDeadlineExpiredError,
     IncompatibleStateError,
@@ -47,13 +57,18 @@ from ai_assistant.core.errors import (
     MemoryStoreStaleError,
 )
 from ai_assistant.core.types import (
+    ChannelIdentity,
     Embedding,
+    EpisodeChunk,
+    EpisodeCursor,
+    EpisodePage,
     EpisodicMemory,
     MemoryRecord,
     MemorySearchResult,
     MemorySource,
     MemoryWriteMode,
     NonBlankEncodableText,
+    ProcessingStatus,
     RecordChunk,
     TopicLabel,
     TraceKind,
@@ -62,6 +77,7 @@ from ai_assistant.core.types import (
     caseless_key,
 )
 from ai_assistant.memory import traces
+from ai_assistant.memory._episode_format import check_format
 from ai_assistant.memory._transactions import transaction
 from ai_assistant.memory._walk import (
     check_walk_limit,
@@ -661,29 +677,19 @@ class SqliteMemoryStore:
             msg = f"failed to open memory store at {self._path!r}: {exc}"
             raise MemoryStoreError(msg) from exc
         try:
-            # Restricted *before* the first statement, not after the schema is
-            # built and migrated. SQLite copies the database file's mode onto every
-            # rollback journal it creates for it, so a journal opened while the
-            # file still carried the process umask is world-readable too — and an
-            # interrupted write leaves it on disk holding Tier 1 pages (ADR-0004
-            # §1, §4). The `BEGIN IMMEDIATE` below is exactly such a write, and
-            # `_migrate_records` inside it can copy every row. `connect`
-            # creates the file, so there is something to restrict by the time this
-            # runs (#451; `SqliteConversationStore._setup` has the same ordering).
-            self._restrict_permissions()
             conn.enable_load_extension(True)
             sqlite_vec.load(conn)
             conn.enable_load_extension(False)
-            # `BEGIN IMMEDIATE` takes the write lock before the schema is
-            # inspected, so the whole of create/migrate/verify is **serialised
-            # against another process opening the same file** — the guard the
-            # mutations below use, applied to setup, as `SqliteAuditTrail._setup`
-            # and `SqlitePlanStore._setup` already do. Without it two processes
-            # opening a fresh file both find `meta` empty and both insert it, and
-            # two upgrading a legacy file both read the pre-migration
-            # `PRAGMA table_info` and rebuild `records` twice; the lock makes the
-            # loser wait and re-read the finished schema instead.
+            # Serialize format inspection with initialization by other openers.
+            # BEGIN acquires the lock without modifying database pages. Refuse
+            # old state before chmod or schema writes, then restrict permissions
+            # before the first write creates a rollback journal (ADR-0004).
             conn.execute("BEGIN IMMEDIATE")
+            existing_format = check_format(conn, allow_empty=True)
+            self._restrict_permissions()
+            if not existing_format:
+                conn.execute("CREATE TABLE episode_record_format(version INTEGER NOT NULL)")
+                conn.execute("INSERT INTO episode_record_format VALUES (1)")
             conn.execute(
                 "CREATE TABLE IF NOT EXISTS meta(key TEXT PRIMARY KEY, value TEXT NOT NULL)"
             )
@@ -1503,13 +1509,28 @@ class SqliteMemoryStore:
         # right value: a record carrying no ``occurred_at`` is reached by no window
         # (§6), and ``NULL`` fails the ``IS NOT NULL`` the restriction leads with.
         occurred_at = _to_micros(record.occurred_at) if isinstance(record, EpisodicMemory) else None
-        row = conn.execute("SELECT rowid, kind FROM records WHERE id = ?", (record.id,)).fetchone()
+        row = conn.execute(
+            "SELECT rowid, kind, data FROM records WHERE id = ?", (record.id,)
+        ).fetchone()
         if row is not None and row[1] != record.kind:
             msg = (
                 f"cannot write {record.id!r} as a {record.kind} record: "
                 f"a {row[1]} record is already stored under that id"
             )
             raise MemoryStoreError(msg)
+        if row is not None:
+            stored = self._decode(str(row[2]))
+            if (
+                isinstance(stored, EpisodicMemory)
+                and stored.processing_record is not None
+                and (
+                    not isinstance(record, EpisodicMemory)
+                    or record.processing_record != stored.processing_record
+                    or record.outcome != stored.outcome
+                )
+            ):
+                msg = "recorded processing and response are immutable"
+                raise MemoryStoreError(msg)
         # One stamp per write that stores a row, taken from the issuer inside the
         # caller's transaction (ADR-0219 §1). Taken on both branches and after the
         # cross-kind refusal, so a refused write burns nothing and an upsert takes a
@@ -1884,6 +1905,7 @@ class SqliteMemoryStore:
         participants: Sequence[str] | None = None,
         topics: Sequence[TopicLabel] | None = None,
         about_person: Sequence[str] | None = None,
+        episode_model_eligible: bool | None = None,
     ) -> MemorySearchResult:
         """Return the records most relevant to ``query`` by vector similarity.
 
@@ -1946,6 +1968,12 @@ class SqliteMemoryStore:
         no failure to record one reaches this method's caller, and a fault path
         still emits, carrying the ``limit`` it was asked for and omitting the
         counts it never reached (§3's observation rule).
+
+            episode_model_eligible: Optional episode eligibility filter (ADR-0275).
+
+        ADR-0275: ``episode_model_eligible`` filters episodes before ranking and
+        limits; non-episodic records are unaffected. An episode without a
+        processing record is eligible. ``None`` applies no eligibility filter.
 
         Returns:
             A :class:`~ai_assistant.core.types.MemorySearchResult`: matching
@@ -2027,6 +2055,7 @@ class SqliteMemoryStore:
                 named_people,
                 named_topics,
                 named_subjects,
+                episode_model_eligible,
             ),
             _retrieval_reading,
             entry=entry,
@@ -2043,6 +2072,7 @@ class SqliteMemoryStore:
         named_people: tuple[str, ...] | None,
         named_topics: tuple[str, ...] | None,
         named_subjects: tuple[str, ...] | None,
+        episode_model_eligible: bool | None,
     ) -> _Retrieved:
         """The read itself, returning its records **and** what only it can count.
 
@@ -2077,6 +2107,7 @@ class SqliteMemoryStore:
                 already copied; ``None`` where not applied.
             named_topics: The ``topics`` restriction as the caller named it,
                 already copied; ``None`` where not applied.
+            episode_model_eligible: Optional episode eligibility filter.
             named_subjects: The ``about_person`` restriction as the caller named
                 it, already copied; ``None`` where not applied.
 
@@ -2093,6 +2124,7 @@ class SqliteMemoryStore:
                 ``TopicLabel``'s canonical form (ADR-0237 §2). Raised inside the
                 traced region on purpose — see above.
         """
+        check_eligibility(episode_model_eligible)
         wanted_people = None if named_people is None else _person_keys("participants", named_people)
         wanted_topics = None if named_topics is None else _topic_keys(named_topics)
         wanted_subjects = (
@@ -2117,6 +2149,7 @@ class SqliteMemoryStore:
                 wanted_people,
                 wanted_topics,
                 wanted_subjects,
+                episode_model_eligible,
                 self._now_micros(),
             )
         return _Retrieved(
@@ -2138,6 +2171,7 @@ class SqliteMemoryStore:
         wanted_people: frozenset[str] | None,
         wanted_topics: frozenset[str] | None,
         wanted_subjects: frozenset[str] | None,
+        episode_model_eligible: bool | None,
         now: int,
     ) -> tuple[list[tuple[str, int, float]], bool, dict[str, int]]:
         """Run the KNN with every eligibility predicate bound into it.
@@ -2255,6 +2289,12 @@ class SqliteMemoryStore:
             topics=wanted_topics,
             subjects=wanted_subjects,
         )
+        if episode_model_eligible is not None:
+            eligible.append(
+                "(kind != 'episodic' OR "
+                "COALESCE(json_extract(data, '$.processing_record.model_eligible'), 1) = ?)"
+            )
+            restriction.append(int(episode_model_eligible))
         sql = (
             "SELECT r.data, r.revision, v.distance FROM vec_records v "  # noqa: S608 — bound above
             "JOIN records r ON r.rowid = v.rowid "
@@ -2357,6 +2397,7 @@ class SqliteMemoryStore:
         participants: Sequence[str] | None = None,
         topics: Sequence[TopicLabel] | None = None,
         about_person: Sequence[str] | None = None,
+        episode_model_eligible: bool | None = None,
     ) -> MemorySearchResult:
         """Return the records the criteria select, newest write first (ADR-0237 §4).
 
@@ -2412,6 +2453,12 @@ class SqliteMemoryStore:
             about_person: Subject labels compared by the same fold; a record
                 stating no subject is matched by none. ``()`` selects nothing.
 
+            episode_model_eligible: Optional episode eligibility filter (ADR-0275).
+
+        ADR-0275: ``episode_model_eligible`` filters episodes before ranking and
+        limits; non-episodic records are unaffected. An episode without a
+        processing record is eligible. ``None`` applies no eligibility filter.
+
         Returns:
             A :class:`~ai_assistant.core.types.MemorySearchResult` holding the
             eligible records ordered by ``provenance.last_updated`` descending,
@@ -2424,6 +2471,7 @@ class SqliteMemoryStore:
             MemoryStoreError: If the store cannot be read, a stored record is
                 corrupt, or the injected clock's reading is not conforming.
         """
+        check_eligibility(episode_model_eligible)
         wanted_kinds = None if kinds is None else frozenset(str(kind) for kind in kinds)
         wanted_bands = None if bands is None else frozenset(bands)
         wanted_people = None if participants is None else _person_keys("participants", participants)
@@ -2433,7 +2481,15 @@ class SqliteMemoryStore:
         )
         window = _window_micros(occurred_within)
         _refuse_an_axis_less_select(
-            (kinds, bands, occurred_within, participants, topics, about_person)
+            (
+                kinds,
+                bands,
+                occurred_within,
+                participants,
+                topics,
+                about_person,
+                episode_model_eligible,
+            )
         )
         if limit <= 0 or _selects_nothing(
             wanted_kinds, wanted_bands, wanted_people, wanted_topics, wanted_subjects
@@ -2454,7 +2510,8 @@ class SqliteMemoryStore:
         matched = [
             record
             for record in (self._decoded_at(data, revision) for data, revision in rows)
-            if record.validity.live_at(now)
+            if admits_model_eligibility(record, episode_model_eligible)
+            and record.validity.live_at(now)
             and (wanted_bands is None or band_of(record.provenance.source) in wanted_bands)
         ]
         page = _newest_revision_first(matched)[:limit]
@@ -2508,6 +2565,101 @@ class SqliteMemoryStore:
             msg = f"failed to select records: {exc}"
             raise MemoryStoreError(msg) from exc
         return [(str(row[0]), int(row[1])) for row in rows]
+
+    async def episodes(
+        self,
+        *,
+        channel: ChannelIdentity | None = None,
+        status: ProcessingStatus | None = None,
+        cursor: str | None = None,
+        limit: int = 50,
+    ) -> EpisodePage:
+        """Inspect a bounded page of live episodes, irrespective of model eligibility."""
+        channel, status, after = check_list(channel, status, cursor, limit)
+        async with self._lock:
+            rows = await _run_to_completion(
+                self._episodes_sync,
+                channel,
+                status,
+                after,
+                limit,
+                self._now_micros(),
+            )
+        records: list[EpisodicMemory] = []
+        for data, revision in rows:
+            record = self._decoded_at(data, revision)
+            if not isinstance(record, EpisodicMemory):
+                msg = "episodic index contains a non-episodic record"
+                raise MemoryStoreError(msg)
+            records.append(record)
+        page = records[:limit]
+        return EpisodePage(
+            items=tuple(summary_of(record) for record in page),
+            next_cursor=encode_cursor(
+                EpisodeCursor(
+                    after=position_of(page[-1]),
+                    channel=channel,
+                    status=status,
+                )
+            )
+            if len(records) > limit
+            else None,
+        )
+
+    def _episodes_sync(
+        self,
+        channel: ChannelIdentity | None,
+        status: ProcessingStatus | None,
+        after: EpisodeCursor | None,
+        limit: int,
+        now: int,
+    ) -> list[tuple[str, int]]:
+        eligible = [
+            "kind = 'episodic'",
+            "(expires_at IS NULL OR expires_at > ?)",
+            "(valid_from IS NULL OR valid_from <= ?)",
+            "(valid_until IS NULL OR valid_until > ?)",
+        ]
+        params: list[object] = [now, now, now]
+        if channel is not None:
+            eligible.extend(
+                [
+                    "json_extract(data, '$.processing_record.trigger.channel.channel_type') = ?",
+                    "json_extract(data, '$.processing_record.trigger.channel.instance_id') = ?",
+                ]
+            )
+            params.extend([channel.channel_type, channel.instance_id])
+        if status is not None:
+            eligible.append("json_extract(data, '$.processing_record.status') = ?")
+            params.append(str(status))
+        if after is not None:
+            eligible.append("(occurred_at, id) < (?, ?)")
+            params.extend([_to_micros(after.after.occurred_at), after.after.episode_id])
+        params.append(limit + 1)
+        sql = (
+            f"SELECT data, revision FROM records WHERE {' AND '.join(eligible)} "  # noqa: S608 — bound values
+            "ORDER BY occurred_at DESC, id COLLATE BINARY DESC LIMIT ?"
+        )
+        try:
+            return [(str(row[0]), int(row[1])) for row in self._conn.execute(sql, params)]
+        except sqlite3.Error as exc:
+            msg = "failed to inspect episodes"
+            raise MemoryStoreError(msg) from exc
+
+    async def episode_chunk(
+        self,
+        episode_id: str,
+        *,
+        version: str | None = None,
+        offset: int = 0,
+        max_bytes: int = 65536,
+    ) -> EpisodeChunk | None:
+        """Reread a live episode and return digest-bound canonical detail bytes."""
+        check_detail(episode_id, version, offset, max_bytes)
+        record = await self.get(episode_id)
+        if not isinstance(record, EpisodicMemory):
+            return None
+        return detail_of(record, version=version, offset=offset, max_bytes=max_bytes)
 
     async def list_beliefs(
         self,
