@@ -333,11 +333,21 @@ class _WatchedConversations(FakeConversationStore):
         return await super().turns_after(conversation_id, after_ordinal=after_ordinal, limit=limit)
 
     async def turns(
-        self, conversation_id: str, *, limit: int | None = None, before_ordinal: int | None = None
+        self,
+        conversation_id: str,
+        *,
+        limit: int | None = None,
+        before_ordinal: int | None = None,
+        model_eligible_only: bool = False,
     ) -> list[ConversationTurn]:
         """Read the tail, recording that the read happened."""
         self.tails_read.append(conversation_id)
-        return await super().turns(conversation_id, limit=limit, before_ordinal=before_ordinal)
+        return await super().turns(
+            conversation_id,
+            limit=limit,
+            before_ordinal=before_ordinal,
+            model_eligible_only=model_eligible_only,
+        )
 
     async def record_observed(
         self, conversation_id: str, *, through_ordinal: int

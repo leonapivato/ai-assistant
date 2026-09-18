@@ -10947,6 +10947,7 @@ class ConversationStore(Protocol):
         occurred_at: datetime,
         parked: ParkedBinding | None = None,
         delivery: SpokenDelivery | None = None,
+        model_eligible: bool = True,
     ) -> ConversationTurn:
         """Record a turn: allocate its ordinal, derive its episode id, return it (§3).
 
@@ -10970,6 +10971,7 @@ class ConversationStore(Protocol):
         would be false for exactly those turns.
 
         Args:
+            model_eligible: Whether this row may enter automatic model replay (ADR-0275).
             conversation_id: The conversation to append to.
             occurred_at: When the exchange happened, from the caller's injected
                 clock (ADR-0026). Passed rather than read here so the turn and the
@@ -10989,6 +10991,9 @@ class ConversationStore(Protocol):
         Returns:
             The recorded turn, naming its conversation, its ordinal and the
             derived episode id.
+
+        ``model_eligible`` (ADR-0275) is immutable, stored atomically with this
+        index row, and preserved by delivery updates and all unfiltered reads.
 
         Raises:
             UnknownConversationError: If ``conversation_id`` names nothing, or
@@ -11152,6 +11157,7 @@ class ConversationStore(Protocol):
         *,
         limit: int | None = None,
         before_ordinal: int | None = None,
+        model_eligible_only: bool = False,
     ) -> list[ConversationTurn]:
         """Read a conversation's turns, oldest first, most recent page (§5, §9).
 
@@ -11167,6 +11173,7 @@ class ConversationStore(Protocol):
         (§5) without re-sorting.
 
         Args:
+            model_eligible_only: Filter inspection-only rows before selecting the tail.
             conversation_id: The conversation to read.
             limit: Page size. ``None`` asks for the store's **configured replay
                 window** — finite, the same value every caller gets by saying
@@ -11179,6 +11186,10 @@ class ConversationStore(Protocol):
         Returns:
             The page, ordinal ascending; empty for a conversation with no turns
             below the bound.
+
+        With ``model_eligible_only=True`` (ADR-0275), filter before selecting
+        the tail window. Returned ordinals remain ordered but may contain gaps.
+        Deletion and turns_after remain unfiltered.
 
         Raises:
             ValueError: If ``limit`` is outside ``[0, 2**63)`` or

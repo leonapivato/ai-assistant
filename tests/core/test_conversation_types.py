@@ -173,7 +173,7 @@ def test_an_export_of_an_empty_conversation_is_well_formed() -> None:
     exported = ConversationExport(exported_at=_NOW, conversations=(_conversation(),))
 
     assert exported.turns == ()
-    assert exported.schema_version == 2
+    assert exported.schema_version == 3
 
 
 def test_a_fresh_conversation_has_no_observation_watermark() -> None:
@@ -209,17 +209,11 @@ def test_the_watermark_is_carried_through_the_export() -> None:
     )
 
     assert exported.conversations[0].observed_through == 3
-    assert exported.schema_version == 2
+    assert exported.schema_version == 3
 
 
-def test_the_export_refuses_a_version_that_is_not_the_shape_it_carries() -> None:
-    """Pinned rather than defaulted, so the label is a fact about the document.
-
-    "An export outlives the code that wrote it … a reader must be able to tell which
-    shape it is holding" (ADR-0014 §5), and a producer's unchecked claim is not that.
-    A document labelled **1** separates itself from a 2 and does *not* separate the
-    pre-``delivery`` shape from the post-``delivery`` one, which is issue #1793 and
-    is why no reader may take a 1 as evidence of either.
-    """
+@pytest.mark.parametrize("version", [1, 2, 4])
+def test_the_export_refuses_a_version_that_is_not_the_shape_it_carries(version: int) -> None:
+    """The export label describes the eligibility-bearing M36 shape exactly."""
     with pytest.raises(ValidationError):
-        ConversationExport.model_validate({"schema_version": 1, "exported_at": _NOW})
+        ConversationExport.model_validate({"schema_version": version, "exported_at": _NOW})

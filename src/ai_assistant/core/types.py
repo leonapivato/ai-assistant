@@ -15356,6 +15356,7 @@ class ConversationTurn(BaseModel):
         description="Id of the episode recording this turn; derived, and may not resolve."
     )
     occurred_at: UtcInstant = Field(description="When the exchange this turn records happened.")
+    model_eligible: bool = True
     parked: ParkedBinding | None = Field(
         default=None,
         description="The binding this turn parked on, where it parked (ADR-0074 §3).",
@@ -15388,29 +15389,17 @@ class ConversationExport(BaseModel):
     asserted by the conformance suite rather than validated here, so that filtering
     an export down — which preserves order — stays a total operation.
 
-    **``schema_version`` is 2 because ``Conversation`` gained
-    ``observed_through``** (ADR-0212 §8): this document carries
-    ``tuple[Conversation, ...]``, so that member changing the shape of the portable
-    document is exactly what the version exists to announce (ADR-0039 §10, ADR-0014
-    §5). **No migration is owed** — ``ConversationStore`` offers ``export`` and no
-    import, restore or load, so nothing in this system ever validates a
-    ``ConversationExport`` it did not just construct.
-
-    **What a document labelled 1 may be relied on for.** It was written by a build
-    before this one, and its turns may or may not carry ``delivery`` (ADR-0205 §3
-    added that member without moving the version). So the label separates 1 from 2
-    and does **not** separate those two shapes from each other: **no reader may take
-    a 1 as evidence of either shape.** Nothing here has to — there is no read path —
-    and the first lane that adds one owes that disambiguation before it may rely on
-    the label. Repairing the label itself is issue #1793.
+    ``schema_version`` is 3 because the index now carries immutable activation
+    eligibility (ADR-0275). Exports have no import operation or historical
+    conversion path. The unfiltered export includes inspection-only rows.
     """
 
     model_config = ConfigDict(extra="forbid", frozen=True)
 
-    schema_version: Literal[2] = Field(
-        default=2,
+    schema_version: Literal[3] = Field(
+        default=3,
         description=(
-            "Shape of this export, pinned to exactly 2 (ADR-0039 §10, ADR-0014 §5): an "
+            "Shape of this export, pinned to exactly 3 (ADR-0039 §10, ADR-0014 §5): an "
             "export outlives the code that wrote it, so the label must be a fact about "
             "the document rather than a producer's unchecked claim."
         ),
