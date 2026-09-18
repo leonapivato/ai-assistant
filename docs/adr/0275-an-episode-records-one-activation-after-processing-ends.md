@@ -1,11 +1,10 @@
-# Draft. An episode records one activation after processing ends
+# 275. An episode records one activation after processing ends
 
 - Status: Proposed
 - Date: 2026-09-18
-- Number: awaiting owner/dispatcher assignment.
 - Scope: [M36](https://github.com/leonapivato/ai-assistant/milestone/2), [#2522](https://github.com/leonapivato/ai-assistant/issues/2522).
 - Dependency: ADR-0274 and [M35](https://github.com/leonapivato/ai-assistant/milestone/1).
-- Authorization: the owner endorsed the proposal's direction and its interruption/parallelism fit, then requested this draft in clone `ai-assistant-2`. That instruction authorizes drafting, not ratification or implementation.
+- Authorization: the owner endorsed the proposal's direction and its interruption/parallelism fit, then requested this draft in clone `ai-assistant-2`. The owner assigned the next available ADR number, 0275. These instructions authorize drafting and numbering, not ratification or implementation.
 
 ## Context
 
@@ -473,14 +472,25 @@ the supported near-limit inputs rather than assuming the multiplier proves it.
 > **Normative.** The transcript archive remains its separate existing product:
 > same conversational addresses, optional writes, retention and deletion rules;
 > no informational, attached-context, silence or failure-only archive extension.
-> Inspection must not claim that deleting an episode also deletes its archive
-> entry or that expired episode details can be reconstructed from that entry.
+> Episode retention expiry leaves its archive entry intact. Explicit
+> `forget(record_id)` discards the archive entry first, even when the episode is
+> absent, and only then deletes the memory record, under ADR-0225 §5; an archive
+> discard failure prevents the later memory deletion. Its return value keeps
+> reporting whether memory was deleted. Inspection distinguishes expiry from
+> explicit forgetting and does not reconstruct expired episode details from
+> the archive.
 
 > **Normative.** Retain existing placement on conversational episodes with
 > empty attached context. Where a channel supplies nonempty attached context,
 > and on all standalone or inspection-only records, narrow reach to `OWNER`
 > with setter `DERIVED` and the capture instant under ADR-0217. Preserve any
 > stricter pre-existing access restriction; this is not an owner grant.
+
+> **Normative.** This is an additional code-owned derivation ground under
+> ADR-0217 §3, beyond ADR-0204's supply evaluation/inheritance, and inherits the
+> existing derived-placement precedence and prohibition on widening in place.
+> An owner act or setting cannot lift it on the captured record; this decision
+> introduces no new widening path. Record this scoped replacement under §13.
 
 > **Normative.** Existing selected-supply external-origin semantics remain
 > unchanged on legacy conversational capture. A standalone event retrieves no
@@ -498,11 +508,11 @@ the supported near-limit inputs rather than assuming the multiplier proves it.
 
 | Model | Fields |
 | --- | --- |
-| `EpisodePosition` | `occurred_at: UtcInstant`; `episode_id: Identifier` |
+| `EpisodePosition` | `occurred_at: UtcInstant`; `episode_id: EncodableText` |
 | `EpisodeCursor` | `schema_version: Literal[1]`; `after: EpisodePosition`; `channel: ChannelIdentity \| None`; `status: ProcessingStatus \| None` |
 | `EpisodeSummary` | `position: EpisodePosition`; `activation_id: Identifier \| None`; `channel: ChannelIdentity \| None`; `modality: Modality`; `status: ProcessingStatus \| None`; `response_kind: EpisodeResponseKind \| None`; `legacy: bool` |
 | `EpisodePage` | `items: tuple[EpisodeSummary, ...]`; `next_cursor: NonBlankEncodableText \| None` |
-| `EpisodeChunk` | `episode_id: Identifier`; `version: NonBlankEncodableText`; `offset: int` in `[0, 2**63)`; `text: EncodableText`; `next_offset: int \| None` in `[0, 2**63)` when present; `total_bytes: int` in `[0, 2**63)` |
+| `EpisodeChunk` | `episode_id: EncodableText`; `version: NonBlankEncodableText`; `offset: int` in `[0, 2**63)`; `text: EncodableText`; `next_offset: int \| None` in `[0, 2**63)` when present; `total_bytes: int` in `[0, 2**63)` |
 
 > **Normative.** Add exactly these two operations to `MemoryStore` and
 > `AssistantEngine` (the same names, arguments and return types at both seams).
@@ -520,7 +530,7 @@ async def episodes(
 
 async def episode_chunk(
     self,
-    episode_id: Identifier,
+    episode_id: EncodableText,
     *,
     version: NonBlankEncodableText | None = None,
     offset: int = 0,
@@ -533,6 +543,14 @@ async def episode_chunk(
 > orders by `(occurred_at, episode_id)` descending. Identifiers break equal-time
 > ties by Unicode code-point order. Capture timestamps need not reflect arrival
 > order. Channel filtering compares both normalized identity fields.
+
+> **Normative.** Inspection episode addresses preserve exactly the stored
+> `MemoryBase.id`, including empty strings and leading/trailing whitespace.
+> No summary, position, cursor, detail lookup, chunk or CLI adapter strips,
+> rejects as blank, case-folds or otherwise normalizes that address. This is a
+> scoped exception to ADR-0085 §3c for `episode_chunk.episode_id`; other existing
+> engine identifier arguments retain their contracts. New capture still mints
+> canonical addresses under §6.
 
 > **Normative.** Its opaque cursor is the unpadded URL-safe base64 of an
 > `EpisodeCursor` encoded using the canonical JSON rule below. It carries the
@@ -609,10 +627,12 @@ async def episode_chunk(
 > `--json` for complete canonical detail; no new browser timeline, event endpoint
 > or model-query operation is introduced.
 
-> **Normative.** Existing `forget(record_id)` deletes the complete enriched
-> episode. No delete-by-channel operation is added. Owners use existing
-> conversation deletion for that membership group and existing archive deletion
-> for the archive; the CLI explains the separate retention where relevant.
+> **Normative.** Existing `forget(record_id)` deletes a newly captured enriched
+> episode through the archive-first sequence in §9. No delete-by-channel
+> operation is added. Existing conversation deletion also retains its archive
+> destruction sequence; dedicated archive-only deletion remains available.
+> The CLI explains the distinction between retention expiry and explicit
+> forgetting and does not present a normalized alias as an exact historical ID.
 
 ### 12. Migration, wire compatibility, and architecture
 
@@ -675,17 +695,18 @@ async def episode_chunk(
 | --- | --- |
 | ADR-0074 §3, §9 | Extend capture from returned conversation outcomes to admitted activation endings; permit failed/interrupted and standalone capture, separate activation identity, and add the eligibility flag/history filter. Preserve existing indexed episode ID derivation, membership authority, index-first ordering, deletion and retention. |
 | ADR-0075 §2 | Extend the direct deterministic-capture exemption to this coordinator's admitted channel/control activations, including event summaries recorded as generated text. Preserve insert-if-absent and at-most-once capture; no belief proposal gains the exemption. |
-| ADR-0085 §1, §8 | Add the two inspection methods/report/error shapes and explicit chunked detail semantics. Preserve canonical transport, authentication and legacy public projection limits. |
+| ADR-0085 §1, §3c, §8 | Add the two inspection methods/report/error shapes and explicit chunked detail semantics; preserve exact `EncodableText` addresses on `episode_chunk` rather than the general identifier normalization. Preserve canonical transport, authentication, other identifier arguments and legacy public projection limits. |
 | ADR-0200 §4 | Replace no-capture for no-words/transcription-failure inputs and move final episode writing after synthesis/output decisions. Preserve no new conversation for no words, transient audio, transcription errors, speech degradation and original processing budgets. |
 | ADR-0205 §1, §4 | Preserve real spoken-turn index addresses and delivery semantics while allowing a later post-processing capture; new no-turn speech episodes do not claim a playback row on the old public result. |
 | ADR-0212 §3–§6, §8 | Permit observer advance past inspection-only index rows using the existing unresolved-row rule and move the conversation export to version 3; no redesign of progress, batch size or scheduling. |
+| ADR-0217 §1, §3 | Add supplied-context and standalone/inspection-only capture as code-owned grounds for `OWNER / DERIVED`. Preserve timestamps, setter precedence, and the prohibition on owner/configuration widening of a derived record in place. |
 | ADR-0221 §1, §2, §5, §8, §14 | Add a separately discriminated adapter-summary role for `outcome`, the optional processing record, and explicit model-eligibility filtering. Preserve old disposition strings and historical discrimination; no model gains raw context/summary access. |
 | ADR-0237 §1 | Add the episodic-eligibility axis to search/select before cuts. All existing structured filters and matching rules remain. |
 | ADR-0274 §1, §3, §5–§8 | Permit post-processing persistence of event/context and new speech endings, add required capture reporting and bounded recording cleanup; the informational processor itself still owns no writer and performs the same one completion. Existing input/reply combinations and processing policies remain. |
 
 > **Normative.** ADR-0173 §9's transport-disconnect completion behavior,
 > ADR-0197 §10's routed-account exclusion, ADR-0198's settled-answer restatement,
-> ADR-0217's placement discipline and ADR-0225's archive semantics remain binding
+> ADR-0217's remaining placement discipline and ADR-0225's archive semantics remain binding
 > except where a replacement is explicitly named above. Recording processing
 > failure grants no authority to retry or undo effects under the planning ADRs.
 
@@ -719,9 +740,10 @@ async def episode_chunk(
 | Deletion race | Pause capture before and after each durable write, delete the conversation, restart recovery, and prove no detached fallback/resurrection; standalone deletion removes all enriched content. |
 | Consumer isolation | Event/failure-only rows never enter or crowd model retrieval/history; raw context never enters embeddings/prompts; observer advances past ineligible rows without mining them. |
 | Historical upgrade | Pre-change database/export/backup keeps IDs, evidence, index bindings, delivery, watermark and archive behavior; missing activation facts stay absent. |
+| Exact historical addresses | Empty ID, `" e"`, `"e"`, and `"e "` remain distinct through listing, equal-time cursor pagination, wire detail and CLI reassembly; no address is normalized. |
 | Mutations | Observer labels, placement updates, re-embedding and restore preserve the entire processing record; unsupported future versions fail clearly. |
 | Bounds/inspection | Near-limit old/new input and output, multibyte text, report overhead, page byte cuts, malformed cursors, equal-time ordering, stale detail versions and deletion/expiry between chunks. |
-| Data lifecycle | Retention, individual/conversation deletion, export, backup and whole-owner deletion cover added context and response fields; archive separation stays explicit. |
+| Data lifecycle | Retention, individual/conversation deletion, export, backup and whole-owner deletion cover added fields; expiry preserves archive while explicit forgetting destroys archive first, even for an absent episode. |
 
 > **Normative.** Record tested revisions, reachable interface evidence,
 > residuals and the owner's exit ruling on #2522. A draft, ratified ADR, merged
