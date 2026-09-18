@@ -1,7 +1,12 @@
 # 237. `search` filters on what the records already carry, and a structured read needs no query
 
-- Status: Accepted
+- Status: Partially superseded by ADR-0275 (§1's search and select predicates, extended with episodic model eligibility before candidate and result cuts)
 - Date: 2026-09-05
+- Partially superseded: 2026-09-18 by ADR-0275 — Add the episodic-eligibility axis to
+  search/select before cuts. All existing structured filters and matching rules remain.
+  These scoped replacements take effect on ratification of ADR-0275, which remains
+  Proposed. This reciprocal header record accompanies the numbered draft under ADR-0070
+  and ADR-0082; prior supersessions and the ratified body below are preserved.
 
 ## Context
 

@@ -1,6 +1,6 @@
 # 200. A spoken turn is one operation on the promoted surface, and speech is two seams beside the model provider
 
-- Status: Partially superseded by ADR-0203 (§4's second-difference clause, only as it reaches an operation whose output channel's audience is unbounded) and ADR-0205 (§3's four-argument count, §4's enumeration of `SpokenTurn`'s members, and §10's enumeration of the browser-owned body members) and ADR-0207 (§4's park clause and the two clauses it controls, only as each reaches a converse_spoken pass whose outcome is a live confirmation park)
+- Status: Partially superseded by ADR-0203 (§4's second-difference clause, only as it reaches an operation whose output channel's audience is unbounded) and ADR-0205 (§3's four-argument count, §4's enumeration of `SpokenTurn`'s members, and §10's enumeration of the browser-owned body members) and ADR-0207 (§4's park clause and the two clauses it controls, only as each reaches a converse_spoken pass whose outcome is a live confirmation park) and ADR-0275 (§4's no-capture speech endings and capture-before-synthesis ordering)
 - Date: 2026-08-27
 - **Partially superseded: 2026-08-28 by ADR-0203 — §4's second-difference clause,
   only as it reaches an operation whose output channel's audience is unbounded, and
@@ -239,6 +239,13 @@
   with `Partially superseded by` in any event, which ADR-0082 §2 excludes an
   amendment qualifier from. Refs #1676, #1657, PR #1677, PR #1685, ADR-0200 §1,
   §9, §13, ADR-0137 §2, ADR-0089 §3.
+- Partially superseded: 2026-09-18 by ADR-0275 — Replace no-capture for
+  no-words/transcription-failure inputs and move final episode writing after
+  synthesis/output decisions. Preserve no new conversation for no words, transient
+  audio, transcription errors, speech degradation and original processing budgets. These
+  scoped replacements take effect on ratification of ADR-0275, which remains Proposed.
+  This reciprocal header record accompanies the numbered draft under ADR-0070 and
+  ADR-0082; prior supersessions and the ratified body below are preserved.
 
 ## Context
 

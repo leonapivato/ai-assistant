@@ -1,9 +1,17 @@
 # 274. Channel inputs share an assistant receiver, and reply delivery is optional
 
-- Status: Accepted
+- Status: Partially superseded by ADR-0275 (§1, §3 and §5–§8's event/context and speech-ending persistence, capture reporting and post-processing cleanup)
 - Date: 2026-09-17
 - Scope: [Milestone 1](https://github.com/leonapivato/ai-assistant/milestone/1), [#2521](https://github.com/leonapivato/ai-assistant/issues/2521).
 - Owner authorization: Reviewed and authorized for ratification on 2026-09-18; the owner assigned ADR-0274.
+- Partially superseded: 2026-09-18 by ADR-0275 — Permit post-processing persistence of
+  event/context and new speech endings, add required capture reporting and bounded
+  recording cleanup; the informational processor itself still owns no writer and
+  performs the same one completion. Existing input/reply combinations and processing
+  policies remain. These scoped replacements take effect on ratification of ADR-0275,
+  which remains Proposed. This reciprocal header record accompanies the numbered draft
+  under ADR-0070 and ADR-0082; prior supersessions and the ratified body below are
+  preserved.
 
 ## Context
 

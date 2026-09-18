@@ -1,6 +1,6 @@
 # 217. A record carries who may receive it, the owner's act is final over a model's, and a model may only narrow
 
-- Status: Accepted
+- Status: Partially superseded by ADR-0275 (§1 and §3's grounds for code-owned OWNER / DERIVED placement)
 - Date: 2026-08-29
 - **Partially supersedes:**
   [ADR-0204](0204-a-record-carries-whether-the-supply-it-was-produced-over-held-withheld-content.md)
@@ -59,6 +59,13 @@
   base, `a35ad5e5`, and not of its text on any later day. Where a later ADR changes
   one of the ADRs cited, this ADR is read against the text quoted here and that ADR's
   own record says what moved. This is ADR-0143's clause, taken for its reason.
+- Partially superseded: 2026-09-18 by ADR-0275 — Add supplied-context and
+  standalone/inspection-only capture as code-owned grounds for `OWNER / DERIVED`.
+  Preserve timestamps, setter precedence, and the prohibition on owner/configuration
+  widening of a derived record in place. These scoped replacements take effect on
+  ratification of ADR-0275, which remains Proposed. This reciprocal header record
+  accompanies the numbered draft under ADR-0070 and ADR-0082; prior supersessions and
+  the ratified body below are preserved.
 
 ## Context
 

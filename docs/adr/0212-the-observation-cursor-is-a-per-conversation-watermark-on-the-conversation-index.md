@@ -1,6 +1,6 @@
 # 212. The observation cursor is a per-conversation watermark on the conversation index, and a pass advances it once
 
-- Status: Partially superseded by ADR-0218 (§6's classification of the deletion race as a failed pass: the raise is caught, is not logged as a job failure, and does not halt a run of many passes)
+- Status: Partially superseded by ADR-0218 (§6's classification of the deletion race as a failed pass: the raise is caught, is not logged as a job failure, and does not halt a run of many passes) and ADR-0275 (§3–§6's observer treatment of inspection-only rows and §8's conversation export version)
 - Date: 2026-08-29
 - **Partially supersedes:**
   [ADR-0077](0077-the-observer-proposes-beliefs-from-episodes.md) — §8's selection
@@ -111,6 +111,12 @@
   note alone, because this `Status` line already carries a leading `Partially superseded
   by` token and ADR-0082 §2 rules that no amendment qualifier is written on such a line.
   Refs #1237, #1829, #1782.
+- Partially superseded: 2026-09-18 by ADR-0275 — Permit observer advance past
+  inspection-only index rows using the existing unresolved-row rule and move the
+  conversation export to version 3; no redesign of progress, batch size or scheduling.
+  These scoped replacements take effect on ratification of ADR-0275, which remains
+  Proposed. This reciprocal header record accompanies the numbered draft under ADR-0070
+  and ADR-0082; prior supersessions and the ratified body below are preserved.
 
 ## Context
 
