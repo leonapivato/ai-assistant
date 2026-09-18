@@ -2270,6 +2270,8 @@ class TestSqliteMemoryStoreContract(MemoryStoreContract):
         suspension = ThreadSuspension()
 
         def arm(operation: str) -> SuspendedCall:
+            # Detail delegates to get; suspend the resource it actually uses.
+            operation = "get" if operation == "episode_chunk" else operation
             original = getattr(store, f"_{operation}_sync")
             armed = threading.Event()
 
