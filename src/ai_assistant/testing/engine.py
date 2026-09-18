@@ -1379,14 +1379,13 @@ class FakeAssistantEngine:
                 timeout=timeout,
                 max_bytes=self._max_payload_bytes,
             )
-        return self._channel_stream(supplied, timeout=timeout, projection=projection)
+        return self._channel_stream(supplied, projection=projection)
 
     async def _channel_stream(
         self,
         supplied: ChannelInput,
         *,
         projection: ChannelProjection,
-        timeout: timedelta,  # noqa: ASYNC109 — contract budget
     ) -> AsyncIterator[ReplyChunk | ChannelResult]:
         assert isinstance(supplied.payload, TextChannelPayload)  # noqa: S101 — validated combination
         selected = (
@@ -1396,21 +1395,54 @@ class FakeAssistantEngine:
         # Measure the actual terminal before yielding any chunk.
         values = [
             value
-            async for value in self._legacy_converse_streaming(
+            async for value in self._streamed(
                 supplied.payload.text,
-                timeout=timeout,
                 conversation_id=selected,
                 reference=options.reference,
+                measure=False,
             )
         ]
         outcome = values[-1]
         assert isinstance(outcome, TurnOutcome)  # noqa: S101 — existing stream invariant
+        if projection.method == "receive_streaming":
+            outcome, values = self._fit_channel_stream(outcome, values, projection)
         result = text_result(outcome)
         self._checked(projection.text(outcome), projection.method)
         for value in values[:-1]:
             assert isinstance(value, ReplyChunk)  # noqa: S101 — existing stream invariant
             yield value
         yield result
+
+    def _fit_channel_stream(
+        self,
+        outcome: TurnOutcome,
+        values: list[ReplyChunk | TurnOutcome],
+        projection: ChannelProjection,
+    ) -> tuple[TurnOutcome, list[ReplyChunk | TurnOutcome]]:
+        """Stop before the first chunk whose wrapped terminal would not fit."""
+        try:
+            self._checked(projection.text(outcome), projection.method)
+        except OversizedValueError:
+            pass
+        else:
+            return outcome, values
+        fitted = outcome.model_copy(update={"reply": None, "reply_degraded": True})
+        self._checked(projection.text(fitted), projection.method)
+        kept: list[ReplyChunk | TurnOutcome] = []
+        prefix = ""
+        for value in values[:-1]:
+            assert isinstance(value, ReplyChunk)  # noqa: S101 — existing stream invariant
+            candidate = outcome.model_copy(
+                update={"reply": prefix + value.text, "reply_degraded": True}
+            )
+            try:
+                self._checked(projection.text(candidate), projection.method)
+            except OversizedValueError:
+                break
+            kept.append(value)
+            prefix += value.text
+            fitted = candidate
+        return fitted, [*kept, fitted]
 
     async def _legacy_converse(
         self,
@@ -1507,6 +1539,7 @@ class FakeAssistantEngine:
         *,
         conversation_id: str | None,
         reference: TurnReference | None = None,
+        measure: bool = True,
     ) -> AsyncIterator[ReplyChunk | TurnOutcome]:
         """Yield the outcome's own reply in pieces, then the outcome.
 
@@ -1540,9 +1573,10 @@ class FakeAssistantEngine:
         if outcome.conversation_id is None:
             outcome = outcome.model_copy(update={"conversation_id": held})
         outcome = self._stating(outcome)
-        checked = self._checked(outcome, "converse_streaming")
+        checked = self._checked(outcome, "converse_streaming") if measure else outcome
         for piece in _pieces_of(checked.reply):
-            yield self._checked(ReplyChunk(text=piece), "converse_streaming")
+            chunk = ReplyChunk(text=piece)
+            yield self._checked(chunk, "converse_streaming") if measure else chunk
         yield checked
 
     async def _legacy_converse_spoken(
