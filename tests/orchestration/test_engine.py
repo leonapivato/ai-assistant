@@ -5795,8 +5795,25 @@ class _TrackedScan(ast.NodeVisitor):
     def visit_Call(self, node: ast.Call) -> None:
         if isinstance(node.func, ast.Attribute) and node.func.attr == "_tracked":
             seam = node.args[1] if len(node.args) > 1 else None
-            literal = seam.value if isinstance(seam, ast.Constant) else None
-            self.found.append((self._scope[-1], literal if isinstance(literal, str) else None))
+            if self._scope[-1] == "_receive":
+                # ADR-0274: compatibility methods delegate one admission. The
+                # private dispatcher uses the projection selected at that entry.
+                assert isinstance(seam, ast.Attribute)
+                assert seam.attr == "method"
+                assert isinstance(seam.value, ast.Name)
+                assert seam.value.id == "projection"
+            else:
+                literal = seam.value if isinstance(seam, ast.Constant) else None
+                self.found.append((self._scope[-1], literal if isinstance(literal, str) else None))
+        if isinstance(node.func, ast.Attribute) and node.func.attr == "_receive":
+            projection = next(item.value for item in node.keywords if item.arg == "projection")
+            assert isinstance(projection, ast.Call)
+            assert isinstance(projection.func, ast.Name)
+            assert projection.func.id == "ChannelProjection"
+            projected_label = projection.args[0]
+            assert isinstance(projected_label, ast.Constant)
+            assert isinstance(projected_label.value, str)
+            self.found.append((self._scope[-1], projected_label.value))
         self.generic_visit(node)
 
 
