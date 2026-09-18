@@ -1,6 +1,6 @@
 # 274. Channel inputs share an assistant receiver, and reply delivery is optional
 
-- Status: Proposed
+- Status: Accepted
 - Date: 2026-09-17
 - Scope: [Milestone 1](https://github.com/leonapivato/ai-assistant/milestone/1), [#2521](https://github.com/leonapivato/ai-assistant/issues/2521).
 - Owner authorization: Reviewed and authorized for ratification on 2026-09-18; the owner assigned ADR-0274.
