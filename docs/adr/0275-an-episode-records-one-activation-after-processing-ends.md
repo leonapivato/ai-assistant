@@ -480,17 +480,31 @@ the supported near-limit inputs rather than assuming the multiplier proves it.
 > explicit forgetting and does not reconstruct expired episode details from
 > the archive.
 
-> **Normative.** Retain existing placement on conversational episodes with
-> empty attached context. Where a channel supplies nonempty attached context,
-> and on all standalone or inspection-only records, narrow reach to `OWNER`
-> with setter `DERIVED` and the capture instant under ADR-0217. Preserve any
-> stricter pre-existing access restriction; this is not an owner grant.
+> **Normative.** Preserve the existing audience/disclosure and placement rules
+> under ADR-0199, ADR-0204, ADR-0210 and ADR-0217. Carry the turn's existing
+> supply evaluation and any applicable inherited restriction into capture.
+> Where no existing placement ground applies, use the existing default
+> `Placement()`. Attached context, standalone identity and inspection-only
+> eligibility are not new grounds for `OWNER / DERIVED`; capture neither adds a
+> setter nor widens an existing restriction. Existing owner acts, model
+> proposals, derivation precedence and disclosure floors retain their rules.
 
-> **Normative.** This is an additional code-owned derivation ground under
-> ADR-0217 §3, beyond ADR-0204's supply evaluation/inheritance, and inherits the
-> existing derived-placement precedence and prohibition on widening in place.
-> An owner act or setting cannot lift it on the captured record; this decision
-> introduces no new widening path. Record this scoped replacement under §13.
+> **Normative.** Preserve existing permission, egress-authorization and
+> prompt-injection defenses under ADR-0098 and the applicable action contracts.
+> Capture, persistence, inspection and later permitted recall grant no authority
+> to record contents and create no consent or authorization. Recorded approvals
+> and work links are historical facts; continuation still resolves against
+> existing work and authorization state. Preserve existing external-origin
+> facts on their defined paths; never treat storage in an episode as evidence
+> that content is an owner instruction or trusted authorization.
+
+> **Normative.** The raw input/context in the processing record and new
+> inspection-only material retain §7's exclusion from automatic model inputs.
+> Owner inspection/export retain their existing access boundaries. Neither a
+> default placement nor an inspection method admits these added fields to
+> shared-output or model-facing paths; existing consumers retain their explicit
+> legacy projections and disclosure checks. Admitting this additional material
+> to those paths requires a separate contract decision.
 
 > **Normative.** Existing selected-supply external-origin semantics remain
 > unchanged on legacy conversational capture. A standalone event retrieves no
@@ -700,14 +714,13 @@ async def episode_chunk(
 | ADR-0200 §4 | Replace no-capture for no-words/transcription-failure inputs and move final episode writing after synthesis/output decisions. Preserve no new conversation for no words, transient audio, transcription errors, speech degradation and original processing budgets. |
 | ADR-0205 §1, §4 | Preserve real spoken-turn index addresses and delivery semantics while allowing a later post-processing capture; new no-turn speech episodes do not claim a playback row on the old public result. |
 | ADR-0212 §3–§6, §8 | Permit observer advance past inspection-only index rows using the existing unresolved-row rule and move the conversation export to version 3; no redesign of progress, batch size or scheduling. |
-| ADR-0217 §1, §3 | Add supplied-context and standalone/inspection-only capture as code-owned grounds for `OWNER / DERIVED`. Preserve timestamps, setter precedence, and the prohibition on owner/configuration widening of a derived record in place. |
 | ADR-0221 §1, §2, §5, §8, §14 | Add a separately discriminated adapter-summary role for `outcome`, the optional processing record, and explicit model-eligibility filtering. Preserve old disposition strings and historical discrimination; no model gains raw context/summary access. |
 | ADR-0237 §1 | Add the episodic-eligibility axis to search/select before cuts. All existing structured filters and matching rules remain. |
 | ADR-0274 §1, §3, §5–§8 | Permit post-processing persistence of event/context and new speech endings, add required capture reporting and bounded recording cleanup; the informational processor itself still owns no writer and performs the same one completion. Existing input/reply combinations and processing policies remain. |
 
 > **Normative.** ADR-0173 §9's transport-disconnect completion behavior,
 > ADR-0197 §10's routed-account exclusion, ADR-0198's settled-answer restatement,
-> ADR-0217's remaining placement discipline and ADR-0225's archive semantics remain binding
+> ADR-0217's placement discipline and ADR-0225's archive semantics remain binding
 > except where a replacement is explicitly named above. Recording processing
 > failure grants no authority to retry or undo effects under the planning ADRs.
 
@@ -740,6 +753,8 @@ async def episode_chunk(
 | Capture faults | Index/archive/memory/verification failure, five-second cleanup expiry, second cancellation and crash preserve honest degraded reports and never retry work or promise a missing episode. |
 | Deletion race | Pause capture before and after each durable write, delete the conversation, restart recovery, and prove no detached fallback/resurrection; standalone deletion removes all enriched content. |
 | Consumer isolation | Event/failure-only rows never enter or crowd model retrieval/history; raw context never enters embeddings/prompts; observer advances past ineligible rows without mining them. |
+| Audience-policy preservation | Existing supply-derived restrictions and owner/model precedence survive capture; attached context or standalone/inspection-only status alone adds no restriction; default placement admits no raw field to model/shared-output paths. |
+| Authority-policy preservation | Persist and inspect instruction-like external content and historical approval text without creating authorization; permitted legacy recall retains its external-origin facts; continuation uses existing authorization state. |
 | Historical upgrade | Pre-change database/export/backup keeps IDs, evidence, index bindings, delivery, watermark and archive behavior; missing activation facts stay absent. |
 | Exact historical addresses | Empty ID, `" e"`, `"e"`, and `"e "` remain distinct through listing, equal-time cursor pagination, wire detail and CLI reassembly; no address is normalized. |
 | Mutations | Observer labels, placement updates, re-embedding and restore preserve the entire processing record; unsupported future versions fail clearly. |
@@ -790,5 +805,8 @@ The owner approved the proposal's direction, including general interruption and
 parallelism fit, and requested this draft. Its exact contract elaborations,
 especially the capture-only check for named no-words speech, model-eligibility
 flag, bound and inspection signatures, are presented for review here.
-Architecture and adversarial review evidence will be recorded separately.
+The owner additionally directed that M36 preserve existing audience, permission
+and prompt-injection policies; the blanket owner-only rule for attached context
+and standalone/inspection-only records has been removed. Architecture and
+adversarial review evidence will be recorded separately.
 No ratification or implementation acceptance is claimed.
