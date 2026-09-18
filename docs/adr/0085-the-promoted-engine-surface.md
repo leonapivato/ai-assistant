@@ -1,6 +1,6 @@
 # 85. The promoted engine surface: fifteen methods, twenty-four types, one closed graph
 
-- Status: Partially superseded by ADR-0107 (§4a's "`Belief` is unchanged … its counts stay derived from it", and §4's normative field rows for `Belief` and `BeliefSummary`) and ADR-0173 (§8a's enumeration of `kind` as one of five values, which gains a sixth for a streamed chunk; and §8c's enforcement clause "on results before return", as it reaches a method returning an async iterator) and ADR-0178 (§4's Group A field row for `Confirmation`, which enumerates five fields where there are now six) and ADR-0250 (§3's signature block, in `converse`'s parameter list and in the roster's count alone: `converse` gains one keyword parameter, `reference` (`TurnReference | None`, defaulting to `None`), and the surface gains `goals`, `withdraw_clarification` and `abandon_goal`. That one scope, and nothing else in this ADR: §3's every-annotation-is-spelled-out rule, its docstring obligations and its `DEFAULT_PAGE_SIZE` convention bind entire, §5's closed-graph obligation binds entire and is obeyed because every type that decision adds to the surface is `core`'s and reachable from it, and `converse_streaming` needs no record of its own because the streaming decision recorded above defines it as taking exactly `converse`'s arguments in exactly its order) and ADR-0274 (§1's restriction to its listed request methods "and nothing else", extended with receive and receive_streaming; existing signatures, types, and other rules are unchanged)
+- Status: Partially superseded by ADR-0107 (§4a's "`Belief` is unchanged … its counts stay derived from it", and §4's normative field rows for `Belief` and `BeliefSummary`) and ADR-0173 (§8a's enumeration of `kind` as one of five values, which gains a sixth for a streamed chunk; and §8c's enforcement clause "on results before return", as it reaches a method returning an async iterator) and ADR-0178 (§4's Group A field row for `Confirmation`, which enumerates five fields where there are now six) and ADR-0250 (§3's signature block, in `converse`'s parameter list and in the roster's count alone: `converse` gains one keyword parameter, `reference` (`TurnReference | None`, defaulting to `None`), and the surface gains `goals`, `withdraw_clarification` and `abandon_goal`. That one scope, and nothing else in this ADR: §3's every-annotation-is-spelled-out rule, its docstring obligations and its `DEFAULT_PAGE_SIZE` convention bind entire, §5's closed-graph obligation binds entire and is obeyed because every type that decision adds to the surface is `core`'s and reachable from it, and `converse_streaming` needs no record of its own because the streaming decision recorded above defines it as taking exactly `converse`'s arguments in exactly its order) and ADR-0274 (§1's restriction to its listed request methods "and nothing else", extended with receive and receive_streaming; existing signatures, types, and other rules are unchanged) and ADR-0275 (§1's method inventory, §3c's identifier normalization only for episode_chunk.episode_id, and §8's inspection result and error shapes)
 - Date: 2026-07-31
 - Partially superseded: 2026-09-18 by ADR-0274 — **§1's method-inventory
   restriction alone**, on ratification of ADR-0274. The words "carrying the
@@ -216,6 +216,14 @@
   reading its own §4 does not support is corrected rather than grandfathered. Appended
   dated note per ADR-0070 §1; no ratified text is rewritten, no decision of this or any
   other ADR moves, and no mark is added (ADR-0089 §5). Refs #2302.
+- Partially superseded: 2026-09-18 by ADR-0275 — Add the two inspection
+  methods/report/error shapes and explicit chunked detail semantics; preserve exact
+  `EncodableText` addresses on `episode_chunk` rather than the general identifier
+  normalization. Preserve canonical transport, authentication, other identifier
+  arguments and legacy public projection limits. These scoped replacements take effect
+  on ratification of ADR-0275, which remains Proposed. This reciprocal header record
+  accompanies the numbered draft under ADR-0070 and ADR-0082; prior supersessions and
+  the ratified body below are preserved.
 
 ## Context
 

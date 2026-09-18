@@ -1,7 +1,13 @@
 # 205. A spoken answer's delivery is a fact the device reports, and an unreported answer is never assumed heard
 
-- Status: Accepted
+- Status: Partially superseded by ADR-0275 (§1 and §4's spoken-turn capture timing and episode-address reporting for newly captured no-turn endings)
 - Date: 2026-08-28
+- Partially superseded: 2026-09-18 by ADR-0275 — Preserve real spoken-turn index
+  addresses and delivery semantics while allowing a later post-processing capture; new
+  no-turn speech episodes do not claim a playback row on the old public result. These
+  scoped replacements take effect on ratification of ADR-0275, which remains Proposed.
+  This reciprocal header record accompanies the numbered draft under ADR-0070 and
+  ADR-0082; prior supersessions and the ratified body below are preserved.
 
 ## Context
 

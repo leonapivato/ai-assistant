@@ -1,6 +1,6 @@
 # 75. Deterministic episodic capture is exempt from the proposal → policy write path
 
-- Status: Partially superseded by ADR-0239 (§2's exclusion of leg 3's observer, and §5's "the path is untouched for every producer except the one §2 names", for one write alone: the label-only write onto an `EpisodicMemory` already in the store)
+- Status: Partially superseded by ADR-0239 (§2's exclusion of leg 3's observer, and §5's "the path is untouched for every producer except the one §2 names", for one write alone: the label-only write onto an `EpisodicMemory` already in the store) and ADR-0275 (§2's deterministic-capture exemption, extended to admitted channel and control activations)
 - Date: 2026-07-28
 - **Partially superseded: 2026-09-05 by
   [ADR-0239](0239-the-observation-pass-labels-the-episodes-it-read-and-a-label-lands-as-a-conditional-write-at-the-episodes-own-id.md),
@@ -43,6 +43,13 @@
   right); ADR-0038 §1a; the roadmap's leg 3 (the observer, which this exemption
   does **not** reach); #442 (the question this ADR answers), #443 (ADR-0074, which
   is held until this merges).
+- Partially superseded: 2026-09-18 by ADR-0275 — Extend the direct deterministic-capture
+  exemption to this coordinator's admitted channel/control activations, including event
+  summaries recorded as generated text. Preserve insert-if-absent and at-most-once
+  capture; no belief proposal gains the exemption. These scoped replacements take effect
+  on ratification of ADR-0275, which remains Proposed. This reciprocal header record
+  accompanies the numbered draft under ADR-0070 and ADR-0082; prior supersessions and
+  the ratified body below are preserved.
 
 ## Context
 

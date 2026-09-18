@@ -686,10 +686,11 @@ async def episode_chunk(
 
 ### 13. Relationship to earlier decisions
 
-> **Normative.** On ratification, record the scoped replacements in this table
-> on each affected ADR's status line and dated header note, preserving earlier
-> supersessions under ADR-0070 and ADR-0082. These records are prepared only once
-> this draft has an assigned number; no earlier decision is rewritten in place.
+> **Normative.** This numbered draft records the scoped replacements in this
+> table on each affected ADR's status line and dated header note, atomically
+> with ADR-0275 under ADR-0070 and ADR-0082. Preserve earlier supersessions and
+> ratified bodies. The replacements take effect on ratification; their reciprocal
+> records are required while this decision remains Proposed.
 
 | Decision | Replaced scope and what remains |
 | --- | --- |
