@@ -31309,3 +31309,182 @@ class TranscriptArchiveSize(BaseModel):
     stored_bytes: int = Field(
         ge=0, description="How many bytes the archive's files occupy on disk, right now."
     )
+
+
+# ADR-0274 §3: channel identity and modality are independent values.
+class ChannelIdentity(BaseModel):
+    """A channel policy and its source-local instance identifier."""
+
+    model_config = ConfigDict(frozen=True, extra="forbid")
+    kind: Literal["channel"] = "channel"
+    channel_type: Identifier
+    instance_id: Identifier
+
+
+class NewConversation(BaseModel):
+    """Request a conversation identifier allocated by the store."""
+
+    model_config = ConfigDict(frozen=True, extra="forbid")
+    kind: Literal["new_conversation"] = "new_conversation"
+
+
+class TextChannelPayload(BaseModel):
+    """Text retained byte for byte at the channel boundary."""
+
+    model_config = ConfigDict(frozen=True, extra="forbid")
+    modality: Literal[Modality.TEXT] = Modality.TEXT
+    text: EncodableText
+
+
+class SpeechChannelPayload(BaseModel):
+    """A transient recording, with its original modality."""
+
+    model_config = ConfigDict(frozen=True, extra="forbid")
+    modality: Literal[Modality.SPEECH] = Modality.SPEECH
+    audio: SpokenAudio
+
+
+class ChannelContextItem(BaseModel):
+    """Supplied channel-local text or a reference; neither grants authority."""
+
+    model_config = ConfigDict(frozen=True, extra="forbid")
+    text: NonBlankEncodableText | None = None
+    item_id: Identifier | None = None
+    source: NonBlankEncodableText | None = None
+
+    @model_validator(mode="after")
+    def _has_content(self) -> Self:
+        if self.text is None and self.item_id is None:
+            msg = "a channel context item requires text or an item identifier"
+            raise ValueError(msg)
+        return self
+
+
+class ChannelContext(BaseModel):
+    """Optional local history and replied-to material, in supplied order."""
+
+    model_config = ConfigDict(frozen=True, extra="forbid")
+    history: tuple[ChannelContextItem, ...] = ()
+    reply_to: ChannelContextItem | None = None
+
+    @model_validator(mode="after")
+    def _history_has_text(self) -> Self:
+        if any(item.text is None for item in self.history):
+            msg = "each channel history item requires text"
+            raise ValueError(msg)
+        return self
+
+
+class ConversationInputOptions(BaseModel):
+    """Existing conversation control references and playback reports."""
+
+    model_config = ConfigDict(frozen=True, extra="forbid")
+    reference: TurnReference | None = None
+    delivery: SpokenDeliveryReport | None = None
+
+
+ChannelTarget = Annotated[ChannelIdentity | NewConversation, Field(discriminator="kind")]
+ChannelPayload = Annotated[
+    TextChannelPayload | SpeechChannelPayload, Field(discriminator="modality")
+]
+
+
+class ChannelInput(BaseModel):
+    """One supplied input with channel identity, modality, and local context."""
+
+    model_config = ConfigDict(frozen=True, extra="forbid")
+    target: ChannelTarget
+    payload: ChannelPayload
+    context: ChannelContext = Field(default_factory=ChannelContext)
+    conversation: ConversationInputOptions | None = None
+
+
+class WholeTextReply(BaseModel):
+    """Return a whole textual outcome on the originating request."""
+
+    model_config = ConfigDict(frozen=True, extra="forbid")
+    kind: Literal["whole_text"] = "whole_text"
+
+
+class StreamingTextReply(BaseModel):
+    """Stream textual chunks and the final result on the originating request."""
+
+    model_config = ConfigDict(frozen=True, extra="forbid")
+    kind: Literal["streaming_text"] = "streaming_text"
+
+
+class SpokenReply(BaseModel):
+    """Speak using the caller's nonempty format preference order."""
+
+    model_config = ConfigDict(frozen=True, extra="forbid")
+    kind: Literal["spoken"] = "spoken"
+    plays: tuple[SpokenAudioFormat, ...] = Field(min_length=1)
+
+
+ReplyCapability = Annotated[
+    WholeTextReply | StreamingTextReply | SpokenReply, Field(discriminator="kind")
+]
+
+
+class TextChannelResult(BaseModel):
+    """The existing textual turn outcome."""
+
+    model_config = ConfigDict(frozen=True, extra="forbid")
+    kind: Literal["text"] = "text"
+    outcome: TurnOutcome
+
+
+class SpokenChannelResult(BaseModel):
+    """The existing spoken turn, including the no-words result."""
+
+    model_config = ConfigDict(frozen=True, extra="forbid")
+    kind: Literal["spoken"] = "spoken"
+    outcome: SpokenTurn
+
+
+class InformationalEventResult(BaseModel):
+    """A transient factual summary; no conversational reply or durable receipt."""
+
+    model_config = ConfigDict(frozen=True, extra="forbid")
+    kind: Literal["informational_event"] = "informational_event"
+    summary: NonBlankEncodableText
+
+
+ChannelOutcome = Annotated[
+    TextChannelResult | SpokenChannelResult | InformationalEventResult,
+    Field(discriminator="kind"),
+]
+
+
+class ChannelResult(BaseModel):
+    """An operation's result and its resolved channel, when one exists."""
+
+    model_config = ConfigDict(frozen=True, extra="forbid")
+    channel: ChannelIdentity | None
+    result: ChannelOutcome
+
+    @model_validator(mode="after")
+    def _consistent_channel(self) -> Self:
+        result = self.result
+        if isinstance(result, InformationalEventResult):
+            if self.channel is None or self.channel.channel_type != "informational_event":
+                msg = "an informational result requires an informational_event channel"
+                raise ValueError(msg)
+            return self
+        outcome = result.outcome
+        if isinstance(outcome, SpokenTurn):
+            if outcome.outcome is None:
+                if self.channel is not None:
+                    msg = "a blank spoken result has no resolved channel"
+                    raise ValueError(msg)
+                return self
+            outcome = outcome.outcome
+        if (
+            self.channel is None
+            or self.channel.channel_type != "conversation"
+            or outcome.conversation_id is None
+            or self.channel.instance_id != outcome.conversation_id
+        ):
+            msg = "a conversational result must name its outcome's conversation"
+            raise ValueError(msg)
+        return self

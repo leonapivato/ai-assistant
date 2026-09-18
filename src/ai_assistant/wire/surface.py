@@ -54,9 +54,9 @@ import typing
 from collections.abc import AsyncIterator, Mapping, Sequence
 from datetime import timedelta
 from functools import cache
-from typing import Any, Final, get_args, get_origin
+from typing import Any, Final, TypeAliasType, get_args, get_origin
 
-from pydantic import TypeAdapter
+from pydantic import BaseModel, TypeAdapter
 
 from ai_assistant.core import types as core_types
 from ai_assistant.core.protocols import AssistantEngine
@@ -247,11 +247,21 @@ def audio_bearing(method: str) -> frozenset[str]:
     return frozenset(name for name in parameters(method) if _reaches_audio(hints.get(name)))
 
 
-def _reaches_audio(annotation: Any) -> bool:
-    """Whether ``annotation`` names :class:`SpokenAudio` anywhere inside it."""
+def _reaches_audio(annotation: Any, seen: set[int] | None = None) -> bool:
+    """Walk aliases and model fields without recursing around type cycles."""
+    visited = set() if seen is None else seen
     if annotation is core_types.SpokenAudio:
         return True
-    return any(_reaches_audio(arm) for arm in get_args(annotation))
+    if id(annotation) in visited:
+        return False
+    visited.add(id(annotation))
+    if isinstance(annotation, TypeAliasType):
+        return _reaches_audio(annotation.__value__, visited)
+    if inspect.isclass(annotation) and issubclass(annotation, BaseModel):
+        return any(
+            _reaches_audio(field.annotation, visited) for field in annotation.model_fields.values()
+        )
+    return any(_reaches_audio(arm, visited) for arm in get_args(annotation))
 
 
 def _yielded(method: str) -> tuple[Any, ...] | None:

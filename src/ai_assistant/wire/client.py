@@ -60,6 +60,7 @@ from typing import TYPE_CHECKING, Any, ClassVar, Final
 
 from pydantic import ValidationError
 
+from ai_assistant.core.channel_validation import snapshot
 from ai_assistant.core.types import DEFAULT_PAGE_SIZE, SpokenDeliveryState, secret_value
 from ai_assistant.wire import envelope as env
 from ai_assistant.wire.codec import (
@@ -100,6 +101,8 @@ if TYPE_CHECKING:
         Belief,
         BeliefBand,
         BeliefSummary,
+        ChannelInput,
+        ChannelResult,
         ClarificationWithdrawal,
         Confirmation,
         ConnectedAccount,
@@ -137,13 +140,16 @@ if TYPE_CHECKING:
         SpokenAudio,
         SpokenAudioFormat,
         SpokenDeliveryReport,
+        SpokenReply,
         SpokenTurn,
+        StreamingTextReply,
         TranscriptArchiveSize,
         TranscriptEntry,
         TranscriptHit,
         TurnOutcome,
         TurnReference,
         UtcInstant,
+        WholeTextReply,
     )
 
 #: The free-form name the connect frame carries, for the hub's logs (ADR-0084 §2).
@@ -257,6 +263,35 @@ class HubClient:
         del reader
 
     # --- the promoted surface's methods ------------------------------------
+
+    async def receive(
+        self,
+        input: ChannelInput,  # noqa: A002 — ADR-0274 §4 names the public parameter
+        *,
+        reply: WholeTextReply | SpokenReply | None,
+        timeout: timedelta,  # noqa: ASYNC109 — relayed operation budget
+    ) -> ChannelResult:
+        """Process a channel input on the authenticated hub (ADR-0274 §9)."""
+        supplied, capability = snapshot(input, reply, streaming=False)
+        return await self._call(  # type: ignore[no-any-return]  # reflected result adapter
+            "receive",
+            input=supplied,
+            reply=capability,
+            timeout=timeout,
+        )
+
+    def receive_streaming(
+        self,
+        input: ChannelInput,  # noqa: A002 — ADR-0274 §4 names the public parameter
+        *,
+        reply: StreamingTextReply,
+        timeout: timedelta,
+    ) -> AsyncIterator[ReplyChunk | ChannelResult]:
+        """Stream chunks and the channel wrapper on their originating call."""
+        supplied, capability = snapshot(input, reply, streaming=True)
+        payload = arguments_object(input=supplied, reply=capability, timeout=timeout)
+        payload = project(payload)
+        return self._stream_call("receive_streaming", payload)
 
     async def converse(
         self,
@@ -1404,6 +1439,10 @@ class HubClient:
             TransportError: If there is no hub, or one that broke the protocol.
         """
         payload = arguments_object(**arguments)
+        if method == "receive":
+            # Required nullable member: null declares an input-only channel.
+            payload["reply"] = arguments["reply"]
+            payload = project(payload)
         # **Projected before the socket is opened**, which is where ADR-0085 §9's
         # "refused locally, before any I/O" bites for a value that has no wire form
         # at all. ``project`` is what raises on a lone surrogate or a non-finite

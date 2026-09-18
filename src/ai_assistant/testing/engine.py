@@ -39,9 +39,11 @@ from datetime import UTC, datetime, timedelta
 from itertools import count
 from typing import TYPE_CHECKING, Final, assert_never, cast
 
+from ai_assistant.core.channel_validation import snapshot
 from ai_assistant.core.clock import ClockReadingError, checked_clock
 from ai_assistant.core.errors import (
     AuditError,
+    ChannelProcessingTimeoutError,
     GrantError,
     InvalidGrantError,
     InvalidRecipientGrantError,
@@ -70,11 +72,15 @@ from ai_assistant.core.types import (
     Belief,
     BeliefBand,
     BeliefSummary,
+    ChannelIdentity,
+    ChannelInput,
+    ChannelResult,
     ClarificationWithdrawal,
     Confirmation,
     ConfirmationEgress,
     ContinuationToken,
     ConversationDigest,
+    ConversationInputOptions,
     ConversationSummary,
     CurrentContext,
     DestinationTrust,
@@ -92,11 +98,13 @@ from ai_assistant.core.types import (
     GrantableSource,
     GrantScope,
     Ground,
+    InformationalEventResult,
     IngestSummary,
     LearnDecision,
     LearnOutcome,
     MemoryKind,
     MemorySource,
+    NewConversation,
     NotificationDelivery,
     ObservationReport,
     OperationConfirmation,
@@ -125,22 +133,29 @@ from ai_assistant.core.types import (
     RouteOutcome,
     SkipReason,
     SourceGrant,
+    SpeechChannelPayload,
     SpendTotal,
     SpokenAudio,
     SpokenAudioFormat,
+    SpokenChannelResult,
     SpokenDelivery,
     SpokenDeliveryReport,
     SpokenDeliveryState,
     SpokenRendering,
+    SpokenReply,
     SpokenTurn,
     StepExecution,
     StepOutcome,
     StepStatus,
+    StreamingTextReply,
+    TextChannelPayload,
+    TextChannelResult,
     TimeOfDay,
     TurnOutcome,
     TurnReference,
     TurnResult,
     Warrant,
+    WholeTextReply,
     describe_untrusted,
     encodable_text,
     is_live_confirmation_park,
@@ -148,6 +163,12 @@ from ai_assistant.core.types import (
     secret_value,
 )
 from ai_assistant.orchestration.authorization_surface import is_live, view_of
+from ai_assistant.orchestration.channels import (
+    ChannelProjection,
+    conversation_target,
+    spoken_result,
+    text_result,
+)
 
 # ADR-0206 §3's placement is **named rather than copied**, exactly as ADR-0207 §5's
 # third arm requires of `SPOKEN_PARK_SENTENCE` below and ADR-0087 §7 requires of the
@@ -1163,7 +1184,228 @@ class FakeAssistantEngine:
         self.activity[conversation_id] = self._tick()
         return conversation_id
 
+    async def receive(
+        self,
+        input: ChannelInput,  # noqa: A002 — contract spelling
+        *,
+        reply: WholeTextReply | SpokenReply | None,
+        timeout: timedelta,  # noqa: ASYNC109 — contract budget
+    ) -> ChannelResult:
+        """Receive a channel input with the fake's scripted collaborators."""
+        return await self._receive(
+            input, reply=reply, timeout=timeout, projection=ChannelProjection("receive")
+        )
+
+    def receive_streaming(
+        self,
+        input: ChannelInput,  # noqa: A002 — contract spelling
+        *,
+        reply: StreamingTextReply,
+        timeout: timedelta,
+    ) -> AsyncIterator[ReplyChunk | ChannelResult]:
+        """Stream a validated channel input."""
+        return self._receive_streaming(
+            input, reply=reply, timeout=timeout, projection=ChannelProjection("receive_streaming")
+        )
+
     async def converse(
+        self,
+        utterance: EncodableText,
+        *,
+        timeout: timedelta,  # noqa: ASYNC109 — contract budget
+        conversation_id: Identifier | None = None,
+        reference: TurnReference | None = None,
+    ) -> TurnOutcome:
+        """Adapt a legacy text call through shared channel admission."""
+        result = await self._receive(
+            ChannelInput(
+                target=conversation_target(conversation_id),
+                payload=TextChannelPayload(text=utterance),
+                conversation=ConversationInputOptions(reference=reference),
+            ),
+            reply=WholeTextReply(),
+            timeout=timeout,
+            projection=ChannelProjection("converse"),
+        )
+        assert isinstance(result.result, TextChannelResult)  # noqa: S101 — validated result
+        return result.result.outcome
+
+    def converse_streaming(
+        self,
+        utterance: EncodableText,
+        *,
+        timeout: timedelta,
+        conversation_id: Identifier | None = None,
+        reference: TurnReference | None = None,
+    ) -> AsyncIterator[ReplyChunk | TurnOutcome]:
+        """Adapt a legacy stream through shared channel admission."""
+        selected = (
+            None if conversation_id is None else identifier(conversation_id, name="conversation_id")
+        )
+        check_arguments(
+            "converse_streaming",
+            max_bytes=self._max_payload_bytes,
+            utterance=utterance,
+            timeout=timeout,
+            conversation_id=selected,
+            reference=reference,
+        )
+        stream = self._receive_streaming(
+            ChannelInput(
+                target=conversation_target(selected),
+                payload=TextChannelPayload(text=utterance),
+                conversation=ConversationInputOptions(reference=reference),
+            ),
+            reply=StreamingTextReply(),
+            timeout=timeout,
+            projection=ChannelProjection("converse_streaming"),
+        )
+        return self._legacy_channel_stream(stream)
+
+    async def _legacy_channel_stream(
+        self,
+        stream: AsyncIterator[ReplyChunk | ChannelResult],
+    ) -> AsyncIterator[ReplyChunk | TurnOutcome]:
+        async for value in stream:
+            if isinstance(value, ReplyChunk):
+                yield value
+            else:
+                assert isinstance(value.result, TextChannelResult)  # noqa: S101 — validated result
+                yield value.result.outcome
+
+    async def converse_spoken(
+        self,
+        utterance: SpokenAudio,
+        *,
+        plays: tuple[SpokenAudioFormat, ...],
+        timeout: timedelta,  # noqa: ASYNC109 — contract budget
+        conversation_id: Identifier | None = None,
+        delivery: SpokenDeliveryReport | None = None,
+    ) -> SpokenTurn:
+        """Adapt a legacy spoken call through shared channel admission."""
+        result = await self._receive(
+            ChannelInput(
+                target=conversation_target(conversation_id),
+                payload=SpeechChannelPayload(audio=utterance),
+                conversation=ConversationInputOptions(delivery=delivery),
+            ),
+            reply=SpokenReply(plays=plays),
+            timeout=timeout,
+            projection=ChannelProjection("converse_spoken"),
+        )
+        assert isinstance(result.result, SpokenChannelResult)  # noqa: S101 — validated result
+        return result.result.outcome
+
+    async def _receive(
+        self,
+        input: ChannelInput,  # noqa: A002 — ADR-0274 names the public parameter
+        *,
+        projection: ChannelProjection,
+        reply: WholeTextReply | SpokenReply | None,
+        timeout: timedelta,  # noqa: ASYNC109 — contract budget
+    ) -> ChannelResult:
+        """Process the channel using the fake's existing scripted outcomes."""
+        supplied, capability = snapshot(input, reply, streaming=False)
+        if projection.method == "receive":
+            check_payload(
+                {"input": supplied, "reply": capability, "timeout": timeout},
+                max_bytes=self._max_payload_bytes,
+                subject="the arguments to receive()",
+            )
+        target = supplied.target
+        selected = None if isinstance(target, NewConversation) else target.instance_id
+        if isinstance(target, ChannelIdentity) and target.channel_type == "informational_event":
+            if timeout.total_seconds() <= 0:
+                raise ChannelProcessingTimeoutError("informational event processing timed out")
+            self.calls.append(("receive", {"input": supplied, "reply": capability}))
+            return self._checked(
+                ChannelResult(
+                    channel=target,
+                    result=InformationalEventResult(
+                        summary="This fake processed an informational event."
+                    ),
+                ),
+                "receive",
+            )
+        options = supplied.conversation or ConversationInputOptions()
+        if isinstance(supplied.payload, SpeechChannelPayload):
+            assert isinstance(capability, SpokenReply)  # noqa: S101 — validated combination
+            spoken = await self._legacy_converse_spoken(
+                supplied.payload.audio,
+                plays=capability.plays,
+                timeout=timeout,
+                conversation_id=selected,
+                delivery=options.delivery,
+            )
+            try:
+                self._checked(projection.spoken(spoken), projection.method)
+            except OversizedValueError:
+                if spoken.spoken is None:
+                    raise
+                spoken = spoken.model_copy(update={"spoken": None, "spoken_degraded": True})
+                self._checked(projection.spoken(spoken), projection.method)
+            return spoken_result(spoken)
+        outcome = await self._legacy_converse(
+            supplied.payload.text,
+            timeout=timeout,
+            conversation_id=selected,
+            reference=options.reference,
+        )
+        self._checked(projection.text(outcome), projection.method)
+        return text_result(outcome)
+
+    def _receive_streaming(
+        self,
+        input: ChannelInput,  # noqa: A002 — ADR-0274 names the public parameter
+        *,
+        projection: ChannelProjection,
+        reply: StreamingTextReply,
+        timeout: timedelta,
+    ) -> AsyncIterator[ReplyChunk | ChannelResult]:
+        """Snapshot at the call and stream a result bound to that snapshot."""
+        supplied, capability = snapshot(input, reply, streaming=True)
+        if projection.method == "receive_streaming":
+            check_arguments(
+                "receive_streaming",
+                input=supplied,
+                reply=capability,
+                timeout=timeout,
+                max_bytes=self._max_payload_bytes,
+            )
+        return self._channel_stream(supplied, timeout=timeout, projection=projection)
+
+    async def _channel_stream(
+        self,
+        supplied: ChannelInput,
+        *,
+        projection: ChannelProjection,
+        timeout: timedelta,  # noqa: ASYNC109 — contract budget
+    ) -> AsyncIterator[ReplyChunk | ChannelResult]:
+        assert isinstance(supplied.payload, TextChannelPayload)  # noqa: S101 — validated combination
+        selected = (
+            None if isinstance(supplied.target, NewConversation) else supplied.target.instance_id
+        )
+        options = supplied.conversation or ConversationInputOptions()
+        # Measure the actual terminal before yielding any chunk.
+        values = [
+            value
+            async for value in self._legacy_converse_streaming(
+                supplied.payload.text,
+                timeout=timeout,
+                conversation_id=selected,
+                reference=options.reference,
+            )
+        ]
+        outcome = values[-1]
+        assert isinstance(outcome, TurnOutcome)  # noqa: S101 — existing stream invariant
+        result = text_result(outcome)
+        self._checked(projection.text(outcome), projection.method)
+        for value in values[:-1]:
+            assert isinstance(value, ReplyChunk)  # noqa: S101 — existing stream invariant
+            yield value
+        yield result
+
+    async def _legacy_converse(
         self,
         utterance: EncodableText,
         *,
@@ -1216,7 +1458,7 @@ class FakeAssistantEngine:
         outcome = self._stating(outcome)
         return self._checked(outcome, "converse")
 
-    def converse_streaming(
+    def _legacy_converse_streaming(
         self,
         utterance: EncodableText,
         *,
@@ -1292,7 +1534,7 @@ class FakeAssistantEngine:
             yield self._checked(ReplyChunk(text=piece), "converse_streaming")
         yield checked
 
-    async def converse_spoken(
+    async def _legacy_converse_spoken(
         self,
         utterance: SpokenAudio,
         *,

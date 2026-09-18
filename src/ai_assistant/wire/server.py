@@ -38,6 +38,7 @@ from typing import TYPE_CHECKING, Any, Final, Protocol
 
 import structlog
 
+from ai_assistant.core.channel_validation import validate_combination
 from ai_assistant.core.errors import AssistantError
 from ai_assistant.core.streams import closing_stream
 from ai_assistant.wire import envelope as env
@@ -1146,7 +1147,18 @@ def _decode_arguments(method: str, payload: object) -> dict[str, Any]:
     if unknown:
         msg = f"a request to {method}() names arguments it does not declare: {unknown}"
         raise UndecodableFrameError(msg)
-    return {name: _decoded_argument(method, name, value) for name, value in payload.items()}
+    arguments = {name: _decoded_argument(method, name, value) for name, value in payload.items()}
+    if method in {"receive", "receive_streaming"}:
+        refused = False
+        try:
+            validate_combination(
+                arguments["input"], arguments["reply"], streaming=method == "receive_streaming"
+            )
+        except ValueError, KeyError:
+            refused = True
+        if refused:
+            raise UndecodableFrameError("unsupported channel input and reply combination") from None
+    return arguments
 
 
 def _decoded_argument(method: str, name: str, value: object) -> Any:

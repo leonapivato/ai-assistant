@@ -131,6 +131,8 @@ if TYPE_CHECKING:
         BoundEgressCall,
         CanonicalDestination,
         CarriedProvenance,
+        ChannelInput,
+        ChannelResult,
         ClarificationWithdrawal,
         Confirmation,
         ConflictRelation,
@@ -235,8 +237,10 @@ if TYPE_CHECKING:
         SpokenAudioFormat,
         SpokenDelivery,
         SpokenDeliveryReport,
+        SpokenReply,
         SpokenTurn,
         StepTransition,
+        StreamingTextReply,
         TimeWindow,
         ToolCall,
         ToolCost,
@@ -257,6 +261,7 @@ if TYPE_CHECKING:
         UtcInstant,
         VisibleIdentifier,
         WalkPosition,
+        WholeTextReply,
     )
 
 
@@ -13369,6 +13374,46 @@ class AssistantEngine(Protocol):
     """
 
     # --- the turn calls (ADR-0042 §3, ADR-0173 §4) ------------------------
+
+    async def receive(
+        self,
+        input: ChannelInput,  # noqa: A002 — ADR-0274 §4 names the public parameter
+        *,
+        reply: WholeTextReply | SpokenReply | None,
+        timeout: timedelta,  # noqa: ASYNC109 — operation budget (ADR-0274 §4)
+    ) -> ChannelResult:
+        """Process a channel input and return its result (ADR-0274 §§3-8).
+
+        Snapshot nested input before admitting work. The supported combinations
+        are conversation/text/whole reply, conversation/speech/spoken reply, and
+        informational_event/text/no reply. Other combinations raise ValueError
+        before collaborator I/O. Conversation policy and errors remain those of
+        the corresponding legacy operation; supplied local context reaches
+        processing separately from stored history and acquires no authority.
+
+        Events make one bounded model call and create no conversation, goal or
+        episode. ChannelProcessingError reports unusable/model-failed completion;
+        ChannelProcessingTimeoutError reports expiry. Cancellation propagates
+        after cleanup. A result returns only on this call; errors are never
+        success receipts. Public wrapper fields count against the payload limit.
+        """
+        ...
+
+    def receive_streaming(
+        self,
+        input: ChannelInput,  # noqa: A002 — ADR-0274 §4 names the public parameter
+        *,
+        reply: StreamingTextReply,
+        timeout: timedelta,
+    ) -> AsyncIterator[ReplyChunk | ChannelResult]:
+        """Stream a conversational text input (ADR-0274 §§4-6, §8).
+
+        Snapshot and refuse invalid combinations locally before iteration. Yield
+        chunks followed by exactly one successful terminal ChannelResult, with
+        the reply-room ceiling measured against that wrapper. Closing the
+        iterator preserves converse_streaming's completion/capture policy.
+        """
+        ...
 
     async def converse(
         self,

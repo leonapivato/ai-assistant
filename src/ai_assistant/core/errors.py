@@ -2390,3 +2390,11 @@ class TransportError(AssistantError):
     refusal may name is the condition — a host, a port, a bound that was
     exceeded, an error type — and never an octet that was written or read.
     """
+
+
+class ChannelProcessingError(AssistantError):
+    """An informational event could not produce a usable summary (ADR-0274 §8)."""
+
+
+class ChannelProcessingTimeoutError(ChannelProcessingError):
+    """The informational event exhausted its admitted wall-clock budget."""

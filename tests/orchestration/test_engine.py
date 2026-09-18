@@ -193,6 +193,7 @@ if TYPE_CHECKING:
         ShownFile,
     )
     from ai_assistant.orchestration.delivery import DeliveryOutbox
+    from ai_assistant.orchestration.informational_events import InformationalEventStage
     from ai_assistant.orchestration.reconciling import ReconciliationStage
     from ai_assistant.testing.invoker import FakeToolImplementation
 
@@ -633,6 +634,7 @@ class Harness:
         associator: FakeGoalAssociator | None = None,
         context: FakeContextProvider | None = None,
         composing: ComposingStage | None = None,
+        informational_events: InformationalEventStage | None = None,
         tools: tuple[ToolDefinition, ...] = (),
         policy: FakeActionPolicy | None = None,
         recipient_grants: RecipientGrantStore | None = None,
@@ -1030,6 +1032,7 @@ class Harness:
             else associator
         )
         self.engine = Engine(
+            informational_events=informational_events,
             associator=self.associator,
             composing=self.composing,
             grant_operations=_grant_operations(),
