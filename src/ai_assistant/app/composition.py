@@ -94,6 +94,7 @@ from ai_assistant.orchestration import (
     StepRunner,
     UpcomingEventStage,
 )
+from ai_assistant.orchestration.informational_events import InformationalEventStage
 from ai_assistant.orchestration.payloads import ENVELOPE_RESERVE_BYTES
 from ai_assistant.orchestration.reconciling import ReconciliationStage
 from ai_assistant.permissions import (
@@ -2301,6 +2302,8 @@ def build_composition(  # noqa: PLR0915 — one statement per resource this root
             # injection §2 obliges — `Engine` receives no `ModelProvider` of its
             # own, so a stage that reached for one would have to go through a
             # concrete subsystem's internals, which golden rule 1 forbids.
+            # ADR-0274 §7: the ordinary wrapped route, with no direct engine model capability.
+            informational_events=InformationalEventStage(model),
             composing=ComposingStage(
                 model=model,
                 # The streaming seam, built here and **not** wrapped (ADR-0173 §5).
