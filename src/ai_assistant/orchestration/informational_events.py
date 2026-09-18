@@ -43,42 +43,67 @@ class InformationalEventStage:
 
     async def process(self, supplied: ResolvedChannelInput, *, deadline: float) -> ChannelResult:
         """Complete once within the admitted monotonic deadline, including validation."""
-        failure: type[ChannelProcessingError] = ChannelProcessingError
-        if deadline <= asyncio.get_running_loop().time():
+        loop = asyncio.get_running_loop()
+        if deadline <= loop.time():
             raise ChannelProcessingTimeoutError("informational event processing timed out")
+        messages = _messages(supplied)
+        # Serialization and Message validation are synchronous. An asyncio timer
+        # cannot interrupt them, so check again before spending a provider call.
+        if deadline <= loop.time():
+            raise ChannelProcessingTimeoutError("informational event processing timed out")
+        failure: type[ChannelProcessingError] = ChannelProcessingError
+        timer = asyncio.timeout_at(deadline)
+        answer: Message | None = None
         try:
-            async with asyncio.timeout_at(deadline):
-                answer = await self._model.complete(
-                    (
-                        Message(role=Role.SYSTEM, content=_INSTRUCTION),
-                        Message(
-                            role=Role.USER,
-                            content=json.dumps(
-                                {
-                                    "event": supplied.text,
-                                    "context": supplied.context.model_dump(mode="json"),
-                                },
-                                ensure_ascii=True,
-                            ),
-                        ),
-                    )
-                )
-                if answer.role is Role.ASSISTANT:
-                    result = ChannelResult(
-                        channel=supplied.channel,
-                        result=InformationalEventResult(summary=answer.content),
-                    )
-                    if asyncio.get_running_loop().time() < deadline:
-                        return result
-                    failure = ChannelProcessingTimeoutError
-        except TimeoutError, ModelTimeoutError:
+            async with timer:
+                answer = await self._model.complete(messages)
+        except TimeoutError:
+            if not timer.expired():
+                raise
             failure = ChannelProcessingTimeoutError
-        except ModelError, ValidationError, ValueError:
+        except ModelTimeoutError:
+            failure = ChannelProcessingTimeoutError
+        except ModelError:
             pass
-        # Outside the handler: even __context__ must not retain supplied content.
+        if answer is not None:
+            # Only validation of the returned value belongs to this translation.
+            # Unexpected provider exceptions propagate unchanged from the call.
+            result = _validated_result(supplied, answer)
+            if loop.time() >= deadline:
+                failure = ChannelProcessingTimeoutError
+            elif result is not None:
+                return result
+        # Outside the handlers: even __context__ must not retain supplied content.
         message = (
             "informational event processing timed out"
             if failure is ChannelProcessingTimeoutError
             else "informational event processing failed"
         )
         raise failure(message) from None
+
+
+def _messages(supplied: ResolvedChannelInput) -> tuple[Message, Message]:
+    """Quote source data completely before checking whether the call can begin."""
+    return (
+        Message(role=Role.SYSTEM, content=_INSTRUCTION),
+        Message(
+            role=Role.USER,
+            content=json.dumps(
+                {"event": supplied.text, "context": supplied.context.model_dump(mode="json")},
+                ensure_ascii=True,
+            ),
+        ),
+    )
+
+
+def _validated_result(supplied: ResolvedChannelInput, answer: Message) -> ChannelResult | None:
+    """Classify an unusable completion without retaining its validation error."""
+    if answer.role is not Role.ASSISTANT:
+        return None
+    try:
+        return ChannelResult(
+            channel=supplied.channel,
+            result=InformationalEventResult(summary=answer.content),
+        )
+    except ValidationError, ValueError:
+        return None
