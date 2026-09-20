@@ -47,9 +47,10 @@ def inspect_existing(path: str, *, conversation: bool = False) -> None:
     if path == ":memory:":
         return
     try:
-        source = Path(path).resolve()
+        source = Path(path)
         if not source.exists():
             return
+        source = source.resolve()
         sidecars = tuple(Path(f"{source}{suffix}") for suffix in ("-journal", "-wal", "-shm"))
         if _wal_header(source) or any(file.exists() or file.is_symlink() for file in sidecars):
             _inspect_copy(source, sidecars, conversation=conversation)
