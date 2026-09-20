@@ -5,6 +5,8 @@ from __future__ import annotations
 from datetime import UTC, datetime
 
 import pytest
+from test_loop_reads import _belief, _bounded, _loop
+from test_loop_structured import _Script, _structured
 
 from ai_assistant.core.types import (
     ChannelContext,
@@ -24,7 +26,8 @@ from ai_assistant.core.types import (
 )
 from ai_assistant.orchestration import MemoryWriteStage, ObservationStage
 from ai_assistant.orchestration.conversations import ConversationLifecycle
-from ai_assistant.orchestration.reads import _hop_records, _Reads
+from ai_assistant.orchestration.loop import ConversationalOperation
+from ai_assistant.orchestration.reads import READ_BUDGET, _hop_records, _Reads
 from ai_assistant.orchestration.retrieval import assemble_by_band
 from ai_assistant.testing import (
     FakeConversationStore,
@@ -104,6 +107,55 @@ async def test_ineligible_episodes_do_not_displace_retrieval_results() -> None:
     records = await assemble_by_band(memory, "matching", limit=1)
 
     assert [record.id for record in records] == ["visible"]
+
+
+async def _crowded_memory() -> FakeMemoryStore:
+    memory = FakeMemoryStore(now=lambda: _AT)
+    await memory.add(_belief("belief", "boiler"))
+    for index in range(READ_BUDGET + 1):
+        await memory.add(
+            _episode(f"hidden-{index}", eligible=False).model_copy(
+                update={"content": "boiler", "topics": ("boiler",)}
+            )
+        )
+    await memory.add(
+        _episode("visible", eligible=True).model_copy(
+            update={"content": "boiler", "topics": ("boiler",)}
+        )
+    )
+    return memory
+
+
+async def test_episodic_supplement_filters_before_its_limit_and_model_supply() -> None:
+    memory = await _crowded_memory()
+    planner = _Script(None)
+    loop = _loop(memory, planner=planner, episodic_limit=1, now=lambda: _AT)
+
+    responded = await loop.respond(
+        "boiler", narrow=_bounded(), operation=ConversationalOperation.CONVERSE
+    )
+
+    assert len(planner.calls) == 1
+    assert [record.id for record in planner.calls[0][0]] == ["belief", "visible"]
+    assert [record.id for record in responded.turn.memories] == ["belief", "visible"]
+
+
+@pytest.mark.parametrize("query", [None, "boiler"])
+async def test_structured_read_filters_before_its_limit_and_model_supply(
+    query: str | None,
+) -> None:
+    memory = await _crowded_memory()
+    planner = _Script(_structured(topics=("boiler",), query=query), None)
+    loop = _loop(memory, planner=planner, now=lambda: _AT)
+
+    responded = await loop.respond(
+        "boiler", narrow=_bounded(), operation=ConversationalOperation.CONVERSE
+    )
+
+    assert len(planner.calls) == 2
+    assert [record.id for record in planner.calls[0][0]] == ["belief"]
+    assert [record.id for record in planner.calls[1][0]] == ["belief", "visible"]
+    assert [record.id for record in responded.turn.memories] == ["belief", "visible"]
 
 
 async def test_citation_hops_exclude_ineligible_evidence_and_named_records() -> None:
