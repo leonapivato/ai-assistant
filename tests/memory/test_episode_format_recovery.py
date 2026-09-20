@@ -139,3 +139,44 @@ def test_rejection_does_not_remove_a_sidecar_symlink(
     assert _snapshot(path) == before
     assert sidecar.is_symlink()
     assert other.read_bytes() == b"unrelated content"
+
+
+@pytest.mark.parametrize("kind", ["conversation", "memory"])
+def test_rejected_closed_wal_database_creates_no_sidecars(tmp_path: Path, kind: str) -> None:
+    path = tmp_path / "closed-wal.db"
+    with contextlib.closing(sqlite3.connect(path, isolation_level=None)) as conn:
+        conn.execute("PRAGMA journal_mode=WAL")
+        conn.execute("CREATE TABLE old_records(content TEXT)")
+        conn.execute("INSERT INTO old_records VALUES ('checkpointed before close')")
+    before = _snapshot(path)
+    assert set(before) == {path.name}
+    with pytest.raises(IncompatibleStateError, match="fresh M36 data directory"):
+        _open(path, kind)
+    assert _snapshot(path) == before
+
+
+@pytest.mark.parametrize("kind", ["conversation", "memory"])
+@pytest.mark.parametrize("current", [False, True])
+def test_hot_database_symlink_uses_the_target_recovery_files(
+    tmp_path: Path, kind: str, current: bool
+) -> None:
+    path = tmp_path / "actual.db"
+    if current:
+        _open(path, kind).close()
+    _seed(path)
+    _crash(path)
+    alias = tmp_path / "alias.db"
+    alias.symlink_to(path)
+    before = _snapshot(path)
+    if current:
+        _open(alias, kind).close()
+        with contextlib.closing(sqlite3.connect(path)) as conn:
+            assert conn.execute("SELECT DISTINCT length(value) FROM crash_probe").fetchall() == [
+                (4096,)
+            ]
+        assert not Path(f"{path}-journal").exists()
+    else:
+        with pytest.raises(IncompatibleStateError, match="fresh M36 data directory"):
+            _open(alias, kind)
+        assert _snapshot(path) == before
+    assert alias.is_symlink()

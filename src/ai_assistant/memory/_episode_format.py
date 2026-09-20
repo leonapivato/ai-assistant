@@ -46,12 +46,12 @@ def inspect_existing(path: str, *, conversation: bool = False) -> None:
     """
     if path == ":memory:":
         return
-    source = Path(path)
     try:
+        source = Path(path).resolve()
         if not source.exists():
             return
         sidecars = tuple(Path(f"{source}{suffix}") for suffix in ("-journal", "-wal", "-shm"))
-        if any(file.exists() or file.is_symlink() for file in sidecars):
+        if _wal_header(source) or any(file.exists() or file.is_symlink() for file in sidecars):
             _inspect_copy(source, sidecars, conversation=conversation)
         else:
             with contextlib.closing(
@@ -62,6 +62,14 @@ def inspect_existing(path: str, *, conversation: bool = False) -> None:
                 _inspect_connection(conn, conversation=conversation)
     except (OSError, sqlite3.Error, ValueError) as exc:
         raise MemoryStoreError("cannot inspect existing episode record format") from exc
+
+
+def _wal_header(path: Path) -> bool:
+    # A closed WAL database can have no sidecars. Even mode=ro may create them
+    # on its next read, so route that header through the private copy as well.
+    with path.open("rb") as stream:
+        header = stream.read(20)
+    return header.startswith(b"SQLite format 3\0") and b"\x02" in header[18:20]
 
 
 def _inspect_connection(conn: sqlite3.Connection, *, conversation: bool) -> None:
