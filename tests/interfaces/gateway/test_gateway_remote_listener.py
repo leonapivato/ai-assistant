@@ -44,7 +44,7 @@ import contextlib
 import json
 import tempfile
 from dataclasses import dataclass, field
-from datetime import timedelta
+from datetime import UTC, datetime, timedelta
 from pathlib import Path
 from typing import TYPE_CHECKING, Any, Final, cast
 
@@ -83,11 +83,10 @@ _STRANGER = "nSTRANGRCNTRL"
 #: never resolved and never dialled; it only ever appears in a `Host` header.
 _NAME = "phone.example.ts.net"
 
-#: What every clock in this module reads unless a case moves it. The certificate a
-#: gateway is built with is issued against *this* rather than against the wall clock,
-#: because ADR-0202 §8 measures validity from the injected clock and the two are years
-#: apart — a pair issued at the wall clock would fail §8's near bound every time.
-_NOW: Final = Clock().reading
+#: Real TLS clients validate against the system clock. Seed the controllable
+#: gateway clocks and certificate from one current instant, then move them only
+#: explicitly inside a test. A fixed calendar date makes these handshakes expire.
+_NOW: Final = datetime.now(UTC).replace(microsecond=0)
 
 #: An address ``Settings`` admits — RFC 5737's TEST-NET-1 is private in
 #: ``ipaddress``'s sense, so it passes all five refusals — and which no machine
@@ -405,7 +404,7 @@ async def _remote(
     """
     with tempfile.TemporaryDirectory() as home:
         settings = _settings(Path(home), gateway_remote_browser_devices=devices, **overrides)
-        clock, timers = Clock(), Timers()
+        clock, timers = Clock(reading=_NOW), Timers()
         the_agent = agent if agent is not None else _FakeAgent()
         behind = engine or FakeAssistantEngine()
         gateway = _gateway(settings, agent=the_agent, engine=behind, clock=clock, timers=timers)
@@ -485,7 +484,7 @@ async def test_a_gateway_with_no_remote_configuration_binds_no_second_listener()
     nothing, because it has none and needs none.
     """
     settings = Settings(gateway_port=free_port())
-    clock, timers = Clock(), Timers()
+    clock, timers = Clock(reading=_NOW), Timers()
     gateway = _gateway(
         settings, agent=None, engine=FakeAssistantEngine(), clock=clock, timers=timers
     )
@@ -597,7 +596,11 @@ async def test_a_gateway_refuses_to_bind_an_address_the_overlay_does_not_place(
     settings = _settings(tmp_path)
     agent = _FakeAgent(bound=None)
     gateway = _gateway(
-        settings, agent=agent, engine=FakeAssistantEngine(), clock=Clock(), timers=Timers()
+        settings,
+        agent=agent,
+        engine=FakeAssistantEngine(),
+        clock=Clock(reading=_NOW),
+        timers=Timers(),
     )
 
     with pytest.raises(ConfigurationError, match="places no node there"):
@@ -625,7 +628,7 @@ async def test_a_gateway_refuses_to_bind_an_overlay_address_that_is_not_its_own(
         elsewhere,
         agent=_FakeAgent(),
         engine=FakeAssistantEngine(),
-        clock=Clock(),
+        clock=Clock(reading=_NOW),
         timers=Timers(),
     )
 
@@ -648,7 +651,7 @@ async def test_a_gateway_refuses_to_bind_when_its_agent_is_not_answering(
         settings,
         agent=_SilentAgent(),
         engine=FakeAssistantEngine(),
-        clock=Clock(),
+        clock=Clock(reading=_NOW),
         timers=Timers(),
     )
 
@@ -667,7 +670,13 @@ def test_a_gateway_configured_on_with_no_agent_does_not_get_built(tmp_path: Path
     settings = _settings(tmp_path)
 
     with pytest.raises(ConfigurationError, match="no agent was supplied"):
-        _gateway(settings, agent=None, engine=FakeAssistantEngine(), clock=Clock(), timers=Timers())
+        _gateway(
+            settings,
+            agent=None,
+            engine=FakeAssistantEngine(),
+            clock=Clock(reading=_NOW),
+            timers=Timers(),
+        )
 
 
 def test_a_listed_device_over_the_byte_bound_is_refused_at_start(tmp_path: Path) -> None:
@@ -687,7 +696,7 @@ def test_a_listed_device_over_the_byte_bound_is_refused_at_start(tmp_path: Path)
             settings,
             agent=_FakeAgent(),
             engine=FakeAssistantEngine(),
-            clock=Clock(),
+            clock=Clock(reading=_NOW),
             timers=Timers(),
         )
 
@@ -700,7 +709,7 @@ def test_an_identity_at_the_byte_bound_is_admitted(tmp_path: Path) -> None:
         _settings(tmp_path, gateway_remote_browser_devices=(listed,)),
         agent=_FakeAgent(),
         engine=FakeAssistantEngine(),
-        clock=Clock(),
+        clock=Clock(reading=_NOW),
         timers=Timers(),
     )
 
@@ -718,7 +727,7 @@ def test_a_loopback_only_gateway_is_not_held_to_any_of_it() -> None:
         Settings(gateway_port=free_port()),
         agent=None,
         engine=FakeAssistantEngine(),
-        clock=Clock(),
+        clock=Clock(reading=_NOW),
         timers=Timers(),
     )
 
@@ -1393,7 +1402,9 @@ async def test_the_bind_discloses_the_scheme_the_name_and_the_expiry() -> None:
             assert len(disclosed) == 1
             assert disclosed[0]["scheme"] == "https"
             assert disclosed[0]["certificate_names"] == [_NAME]
-            assert disclosed[0]["certificate_expires"].startswith("2026-09-20T09:00")
+            assert datetime.fromisoformat(disclosed[0]["certificate_expires"]) == _NOW + timedelta(
+                days=30
+            )
             assert f"https://{one.authority}" in disclosed[0]["origins"]
 
 
@@ -1588,7 +1599,7 @@ async def test_a_certificate_that_expires_before_the_bind_is_refused_at_the_bind
     parsed at start, so §4's "does not re-read them while it runs" is untouched.
     """
     settings = _settings(tmp_path)
-    clock = Clock()
+    clock = Clock(reading=_NOW)
     gateway = _gateway(
         settings, agent=_FakeAgent(), engine=FakeAssistantEngine(), clock=clock, timers=Timers()
     )
