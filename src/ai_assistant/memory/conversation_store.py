@@ -75,7 +75,7 @@ from ai_assistant.core.types import (
     SpokenDeliveryState,
     describe_untrusted,
 )
-from ai_assistant.memory._episode_format import check_format
+from ai_assistant.memory._episode_format import check_format, inspect_existing
 from ai_assistant.memory._transactions import transaction
 
 if TYPE_CHECKING:
@@ -648,6 +648,10 @@ class SqliteConversationStore:
 
     def _setup(self) -> sqlite3.Connection:
         """Open the connection and create the schema, or fail with the seam's error."""
+        try:
+            inspect_existing(self._path, conversation=True)
+        except MemoryStoreError as exc:
+            raise ConversationStoreError("cannot inspect conversation store format") from exc
         try:
             # `isolation_level=None` puts the driver in autocommit mode, so every
             # transaction below is an explicit `BEGIN ... COMMIT` this module
