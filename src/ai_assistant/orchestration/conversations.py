@@ -37,6 +37,7 @@ import structlog
 from pydantic import ValidationError
 
 from ai_assistant.core.clock import ClockReadingError, checked_clock
+from ai_assistant.core.episode_encoding import admits_model_eligibility
 from ai_assistant.core.errors import (
     ConversationStoreError,
     MemoryStoreError,
@@ -370,13 +371,13 @@ class ConversationLifecycle:
             The records and whether reading them failed outright.
         """
         try:
-            turns = await self._conversations.turns(conversation_id)
+            turns = await self._conversations.turns(conversation_id, model_eligible_only=True)
             episodes = await self._memory.get_many([turn.episode_id for turn in turns])
             records: list[MemoryRecord] = []
             deliveries: dict[str, SpokenDelivery] = {}
             for turn in turns:
                 episode = episodes.get(turn.episode_id)
-                if episode is None:
+                if episode is None or not admits_model_eligibility(episode, True):
                     continue
                 records.append(episode)
                 # ADR-0205 §5: paired with the episode it qualifies, off the row

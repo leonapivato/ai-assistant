@@ -102,6 +102,7 @@ import structlog
 
 from ai_assistant.core.clock import checked_clock
 from ai_assistant.core.correlation import current_correlation
+from ai_assistant.core.episode_encoding import admits_model_eligibility
 from ai_assistant.core.errors import AssistantError, MemoryStoreError, ToolBindingError
 from ai_assistant.core.types import (
     ActionRequest,
@@ -5885,6 +5886,7 @@ async def _serviced_structured(  # noqa: PLR0913 — the store, the ask's two ha
             participants=structure.participants,
             topics=structure.topics,
             about_person=structure.about_person,
+            episode_model_eligible=True,
         )
         if query is None
         else await store.search(
@@ -5895,6 +5897,7 @@ async def _serviced_structured(  # noqa: PLR0913 — the store, the ask's two ha
             participants=structure.participants,
             topics=structure.topics,
             about_person=structure.about_person,
+            episode_model_eligible=True,
         )
     )
     found = result.records
@@ -6353,9 +6356,9 @@ async def _hop_records(
     label, the record that label resolves to **together with** that record's own
     stored ``Provenance.evidence`` — where ADR-0226 §3's "follows only … evidence"
     reached the evidence alone, which left the record the planner pointed at in no
-    return value and is the defect #1960 measures. **No class, kind or field test is
-    applied here**: not on ``MemoryKind``, not on ``disposition``, not on
-    ``outcome``, and not on whether the evidence is empty. What a reached record
+    return value and is the defect #1960 measures. ADR-0275 excludes inspection-only
+    episodes from both the named record and its evidence. No rendering decision
+    is made from disposition, outcome, or whether evidence is empty. What a reached record
     *renders* is ADR-0227 §1's question, decided at the render site, and a second
     copy of that test here is the site ADR-0227 §3 divides away from it.
 
@@ -6413,7 +6416,11 @@ async def _hop_records(
             if identifier not in seen:
                 seen.add(identifier)
                 wanted.append(identifier)
-    resolved = await store.get_many(wanted)
+    resolved = {
+        identifier: record
+        for identifier, record in (await store.get_many(wanted)).items()
+        if admits_model_eligibility(record, True)
+    }
     reads.note(len(resolved))
 
     expansion: list[MemoryRecord] = []
