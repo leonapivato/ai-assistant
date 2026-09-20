@@ -89,7 +89,7 @@ from enum import StrEnum
 from functools import partial
 from itertools import count
 from types import MappingProxyType
-from typing import TYPE_CHECKING, Any, Final, TypeVar, assert_never
+from typing import TYPE_CHECKING, Any, Final, TypeVar, assert_never, cast
 
 import structlog
 
@@ -144,6 +144,7 @@ from ai_assistant.core.types import (
     Disposition,
     DriveWithheld,
     EngagementDisposition,
+    EpisodeCaptureReport,
     EpisodeChunk,
     EpisodePage,
     Evidence,
@@ -221,6 +222,9 @@ from ai_assistant.core.types import (
     rests_on_recorded_external_content,
     secret_value,
 )
+from ai_assistant.orchestration.activation_coordinator import ActivationCoordinator
+from ai_assistant.orchestration.activation_state import CURRENT_ACTIVATION, ActivationScope
+from ai_assistant.orchestration.activation_writer import capture_loss
 from ai_assistant.orchestration.authorization_surface import projection_of
 from ai_assistant.orchestration.channels import (
     ChannelProjection,
@@ -3255,6 +3259,12 @@ class Engine:
         # instant and the purge's horizon are read through one seam (ADR-0026 §7).
         self._operation_traces = OperationTraces(sink=trace_sink, now=self._clock)
         self._conversations = conversations
+        self._activation_coordinator = ActivationCoordinator(
+            writer=conversations.activation_writer,
+            register=self._register_capture,
+            now=self._clock,
+            payload_limit=max_payload_bytes,
+        )
         self._informational_events = informational_events
         self._composing = composing
         self._observation = observation
@@ -9156,6 +9166,71 @@ class Engine:
         # `CancelledError` is a *result* here rather than something that aborts the
         # gather and skips its siblings. Every one must complete before a closer runs.
         await asyncio.gather(*pending, return_exceptions=True)
+
+    def _register_capture(self, task: asyncio.Task[None]) -> None:
+        """Keep ordinary and safety cleanup in the same shutdown registry as work."""
+        self._inflight.add(task)
+        task.add_done_callback(self._inflight.discard)
+
+    def _activation_task[T](
+        self,
+        scope: ActivationScope,
+        work: Callable[[], Awaitable[T]],
+        *,
+        seam: str,
+        check_output: Callable[[T], None],
+    ) -> asyncio.Task[tuple[T, EpisodeCaptureReport | None]]:
+        """Enter cleanup before cancellation is possible, register, then release work.
+
+        The deferred callable prevents an un-awaited processing coroutine when
+        cancellation arrives at the admission barrier. A resume's empty scope
+        can be admitted by its validated resolution hook; a restatement stays
+        empty and performs no capture.
+        """
+        self._reject_if_closing()
+        admitted = asyncio.Event()
+
+        async def run() -> tuple[T, EpisodeCaptureReport | None]:
+            token = CURRENT_ACTIVATION.set(scope)
+            value: T | None = None
+            failure: BaseException | None = None
+            report: EpisodeCaptureReport | None = None
+            try:
+                try:
+                    await admitted.wait()
+                    value = await work()
+                except BaseException as exc:
+                    failure = exc
+                state = scope.state
+                if state is not None:
+                    report = state.degraded_report()
+                    try:
+                        completion = await self._activation_coordinator.finish(
+                            state,
+                            failure=failure,
+                            check_output=lambda: check_output(cast("T", value)),
+                        )
+                        report = completion.report
+                        if failure is None:
+                            failure = completion.output_failure
+                    except asyncio.CancelledError:
+                        if failure is None:
+                            raise
+                    except Exception:
+                        capture_loss("terminal", "failed")
+                if failure is not None:
+                    raise failure
+                return cast("T", value), report
+            finally:
+                CURRENT_ACTIVATION.reset(token)
+
+        # Eager start enters run's finally and reaches only the closed barrier.
+        # No processing can run until its lifetime is in the shutdown registry.
+        task = asyncio.create_task(self._operation_traces.observing(seam, run()), eager_start=True)
+        self._inflight.add(task)
+        task.add_done_callback(self._inflight.discard)
+        admitted.set()
+        return task
 
     async def _tracked(  # noqa: PLR0913 — the work, its seam, and one knob per policy a caller sets
         self,

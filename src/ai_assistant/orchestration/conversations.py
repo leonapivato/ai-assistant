@@ -60,6 +60,7 @@ from ai_assistant.core.types import (
     Provenance,
     TranscriptEntry,
 )
+from ai_assistant.orchestration.activation_writer import ActivationWriter
 
 if TYPE_CHECKING:
     from collections.abc import Mapping
@@ -308,6 +309,14 @@ class ConversationLifecycle:
         self._retention = retention
         self._clock = checked_clock(now, owner="ConversationLifecycle")
         self._parked_reads = parked_reads
+        self.activation_writer = ActivationWriter(
+            conversations=conversations,
+            memory=memory,
+            archive=archive,
+            archive_enabled=archive_enabled,
+            retention=retention,
+            now=now,
+        )
 
     # --- resolving the conversation a turn runs under (§2) -------------------
 
