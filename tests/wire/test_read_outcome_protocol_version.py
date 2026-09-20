@@ -176,7 +176,8 @@ def test_the_document_version_moved_and_the_two_store_markers_did_not() -> None:
         "that, and the absolute figure lives in tests/planning/test_sqlite_plan_store.py"
     )
     assert _PARKED_SCHEMA == 3
-    assert ConversationExport.model_fields["schema_version"].default == 2
+    # ADR-0275 later advances the export for activation eligibility.
+    assert ConversationExport.model_fields["schema_version"].default >= 2
 
 
 def _entry_for(version: int) -> str:

@@ -178,7 +178,8 @@ def test_no_stored_record_version_moved_with_this_lane() -> None:
     assert _AUDIT_SCHEMA >= 4, "LA's move, which this lane neither makes nor repeats"
     assert PlanExport.model_fields["schema_version"].default >= 16
     assert _PLAN_SCHEMA >= 8
-    assert ConversationExport.model_fields["schema_version"].default == 2
+    # ADR-0275 later advances the export for activation eligibility.
+    assert ConversationExport.model_fields["schema_version"].default >= 2
 
 
 def test_the_promoted_method_set_did_not_move() -> None:

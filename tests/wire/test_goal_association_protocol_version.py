@@ -165,7 +165,8 @@ def test_the_stored_record_versions_moved_and_the_others_did_not() -> None:
     assert PlanExport.model_fields["schema_version"].default >= 10
     assert _PLAN_SCHEMA >= 3, "this store's second migration (ADR-0250 §9)"
     assert _PARKED_SCHEMA == 3, "ADR-0250 §17 leaves ADR-0244 §3 untouched"
-    assert ConversationExport.model_fields["schema_version"].default == 2
+    # ADR-0275 later advances the export for activation eligibility.
+    assert ConversationExport.model_fields["schema_version"].default >= 2
 
 
 def test_the_records_the_seams_hold_reach_no_promoted_surface() -> None:
