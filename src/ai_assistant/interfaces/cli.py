@@ -265,6 +265,8 @@ from rich.text import Text
 
 from ai_assistant import __version__
 from ai_assistant.core.config import load_settings
+from ai_assistant.core.episode_encoding import check_detail as check_episode_detail
+from ai_assistant.core.episode_encoding import check_list as check_episode_list
 from ai_assistant.core.errors import (
     AssistantError,
     ConfigurationError,
@@ -301,6 +303,7 @@ from ai_assistant.core.types import (
     Belief,
     BeliefBand,
     BoundKind,
+    ChannelIdentity,
     Clarification,
     ClarificationWithdrawal,
     ClassReach,
@@ -334,6 +337,7 @@ from ai_assistant.core.types import (
     OutboundStatement,
     PermissionDecision,
     PermissionOutcome,
+    ProcessingStatus,
     ProvisioningState,
     Question,
     QuestionState,
@@ -366,6 +370,7 @@ from ai_assistant.core.types import (
     routed_listing_arm,
     secret_value,
 )
+from ai_assistant.interfaces import episode_inspection
 from ai_assistant.interfaces.gateway import Disclosure, Note, run_gateway
 from ai_assistant.secret_store import KeyringSecretStore
 from ai_assistant.wire import (
@@ -1995,6 +2000,90 @@ def learn(  # noqa: PLR0913 — the content plus one flag per axis of the event:
         )
     )
     raise typer.Exit(code)
+
+
+_EPISODES_STATUS_OPTION = typer.Option(None, "--status")
+
+
+@app.command()
+def episodes(
+    limit: int = typer.Option(50, "--limit", min=1, max=100),
+    cursor: str | None = typer.Option(None, "--cursor"),
+    channel_type: str | None = typer.Option(None, "--channel-type"),
+    channel_instance: str | None = typer.Option(None, "--channel-instance"),
+    status: ProcessingStatus | None = _EPISODES_STATUS_OPTION,
+) -> None:
+    """List live episodes, newest first; repeat filters when following a cursor."""
+    if (channel_type is None) != (channel_instance is None):
+        raise typer.BadParameter("--channel-type and --channel-instance must be supplied together")
+    try:
+        channel = (
+            None
+            if channel_type is None or channel_instance is None
+            else ChannelIdentity(channel_type=channel_type, instance_id=channel_instance)
+        )
+        selected, selected_status, _ = check_episode_list(channel, status, cursor, limit)
+    except ValueError as exc:
+        raise typer.BadParameter(str(exc)) from exc
+    raise typer.Exit(
+        asyncio.run(
+            _list_episodes(channel=selected, status=selected_status, cursor=cursor, limit=limit)
+        )
+    )
+
+
+@app.command()
+def episode(
+    episode_id: str = typer.Argument(..., help="Exact stored ID; quote whitespace or an empty ID."),
+    as_json: bool = typer.Option(
+        False, "--json", help="Print the complete verified canonical JSON."
+    ),
+) -> None:
+    """Inspect one live episode; never display an incomplete chunk assembly.
+
+    Retention expiry removes live memory; explicit forgetting also destroys its
+    archived transcript. An archive may outlive an expired episode.
+    """
+    try:
+        check_episode_detail(episode_id, None, 0, 65536)
+    except ValueError as exc:
+        raise typer.BadParameter(str(exc)) from exc
+    raise typer.Exit(asyncio.run(_show_episode(episode_id, as_json=as_json)))
+
+
+async def _list_episodes(
+    *,
+    channel: ChannelIdentity | None,
+    status: ProcessingStatus | None,
+    cursor: str | None,
+    limit: int,
+) -> int:
+    try:
+        engine = await _open_engine()
+        page = await engine.episodes(channel=channel, status=status, cursor=cursor, limit=limit)
+    except (AssistantError, TransportError) as exc:
+        _render_error(exc)
+        return _EXIT_ERROR
+    episode_inspection.render_page(console, page)
+    return _EXIT_OK
+
+
+async def _show_episode(episode_id: str, *, as_json: bool) -> int:
+    try:
+        engine = await _open_engine()
+        detail = await episode_inspection.read_detail(engine, episode_id)
+    except (AssistantError, TransportError) as exc:
+        _render_error(exc)
+        return _EXIT_ERROR
+    if detail is None:
+        console.print("Episode unavailable, expired, or deleted; incomplete content discarded.")
+        return _EXIT_ERROR
+    encoded, record = detail
+    if as_json:
+        console.print(encoded, markup=False, highlight=False, soft_wrap=True)
+    else:
+        episode_inspection.render_detail(console, record)
+    return _EXIT_OK
 
 
 @app.command()

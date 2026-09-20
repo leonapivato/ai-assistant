@@ -8256,6 +8256,8 @@ def test_every_id_parameter_on_the_surface_carries_an_id_callback() -> None:
         "ask:answering": True,
         "ask:conversation": True,
         "ask:goal": True,
+        # ADR-0275 preserves exact store-valid episode addresses, including blanks.
+        "episode:episode_id": False,
         "dismiss:notification_id": True,
         "forget:belief_id": True,
         "forget-conversation:conversation_id": True,
