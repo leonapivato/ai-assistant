@@ -18,7 +18,7 @@ from typing import TYPE_CHECKING, Any, Final
 import pytest
 import structlog
 
-from ai_assistant.core.errors import ModelError, ModelUnavailableError
+from ai_assistant.core.errors import ModelError, ModelTimeoutError, ModelUnavailableError
 from ai_assistant.core.types import (
     ActionPlan,
     AttemptOutcome,
@@ -39,6 +39,8 @@ from ai_assistant.core.types import (
     PlanStep,
     Provenance,
     Role,
+    RoutableOperation,
+    RouteOutcome,
     SemanticMemory,
     SkipReason,
     StepExecution,
@@ -57,7 +59,7 @@ from ai_assistant.planning.planner import ModelBackedPlanner
 from ai_assistant.testing import FakeModelProvider, FakeStreamingCompleter, StreamAttempt
 
 if TYPE_CHECKING:
-    from collections.abc import Mapping, Sequence
+    from collections.abc import AsyncIterator, Mapping, Sequence
 
     from ai_assistant.core.types import MemoryRecord
 
@@ -2315,3 +2317,61 @@ def test_the_two_clauses_are_independent_and_a_prevented_attempt_owes_only_one()
     assert both.index(UNVERIFIED_PROMPT) < both.index(CONTINUES_PROMPT), (
         "the offer is what the answer ends with, so it is appended last"
     )
+
+
+class TimeoutStreaming(FakeStreamingCompleter):
+    """A canonical stream that times out after any scripted partial answer."""
+
+    async def stream(
+        self, messages: Sequence[Message], *, model: str | None = None
+    ) -> AsyncIterator[str]:
+        async for delta in super().stream(messages, model=model):
+            yield delta
+        raise ModelTimeoutError("private timeout diagnostic")
+
+
+class TimeoutWhole(FakeModelProvider):
+    """A canonical completion that raises a classified timeout at the seam."""
+
+    async def complete(self, messages: Sequence[Message], *, model: str | None = None) -> Message:
+        await super().complete(messages, model=model)
+        raise ModelTimeoutError("private timeout diagnostic")
+
+
+@pytest.mark.parametrize("routed", [False, True])
+async def test_whole_composition_preserves_timeout_classification(routed: bool) -> None:
+    stage = ComposingStage(model=TimeoutWhole(), streaming=FakeStreamingCompleter())
+    report = (
+        await stage.compose_routed(
+            operation=RoutableOperation.QUESTIONS, outcome=RouteOutcome.PERFORMED
+        )
+        if routed
+        else await stage.compose(turn=_turn(), step=None, undriven=())
+    )
+    assert report.text is None
+    assert report.degraded
+    assert report.timed_out
+
+
+@pytest.mark.parametrize("routed", [False, True])
+@pytest.mark.parametrize("deltas", [(), ("partial reply",)])
+async def test_stream_timeout_preserves_partial_text_and_specific_failure(
+    routed: bool, deltas: tuple[str, ...]
+) -> None:
+    stage = ComposingStage(
+        model=FakeModelProvider(),
+        streaming=TimeoutStreaming(script=(StreamAttempt(deltas=deltas),)),
+    )
+    values = (
+        stage.compose_routed_streaming(
+            operation=RoutableOperation.QUESTIONS, outcome=RouteOutcome.PERFORMED, room=4096
+        )
+        if routed
+        else stage.compose_streaming(turn=_turn(), step=None, undriven=(), room=4096)
+    )
+    received = [value async for value in values]
+    report = received[-1]
+    assert isinstance(report, composing.ComposedReply)
+    assert report.text == ("".join(deltas) or None)
+    assert report.degraded
+    assert report.timed_out
