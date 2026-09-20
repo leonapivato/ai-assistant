@@ -61,7 +61,15 @@ from typing import TYPE_CHECKING, Any, ClassVar, Final
 from pydantic import ValidationError
 
 from ai_assistant.core.channel_validation import snapshot
-from ai_assistant.core.types import DEFAULT_PAGE_SIZE, SpokenDeliveryState, secret_value
+from ai_assistant.core.episode_encoding import check_detail, check_list
+from ai_assistant.core.types import (
+    DEFAULT_PAGE_SIZE,
+    EpisodeChunk,
+    EpisodePage,
+    ProcessingStatus,
+    SpokenDeliveryState,
+    secret_value,
+)
 from ai_assistant.wire import envelope as env
 from ai_assistant.wire.codec import (
     ENVELOPE_RESERVE_BYTES,
@@ -101,6 +109,7 @@ if TYPE_CHECKING:
         Belief,
         BeliefBand,
         BeliefSummary,
+        ChannelIdentity,
         ChannelInput,
         ChannelResult,
         ClarificationWithdrawal,
@@ -495,7 +504,9 @@ class HubClient:
                 max_frame_bytes=limit + ENVELOPE_RESERVE_BYTES,
             )
             while True:
-                reply = await self._read(reader, limit=limit, idle=None, expecting=method)
+                reply = await self._read(
+                    reader, limit=limit + ENVELOPE_RESERVE_BYTES, idle=None, expecting=method
+                )
                 if reply.id != correlation:
                     msg = (
                         f"the hub answered with correlation id {reply.id!r} while "
@@ -657,6 +668,38 @@ class HubClient:
             None if conversation_id is None else identifier(conversation_id, name="conversation_id")
         )
         return await self._call("observe", conversation_id=selected)  # type: ignore[no-any-return]
+
+    async def episodes(
+        self,
+        *,
+        channel: ChannelIdentity | None = None,
+        status: ProcessingStatus | None = None,
+        cursor: NonBlankEncodableText | None = None,
+        limit: int = 50,
+    ) -> EpisodePage:
+        """Read live episode summaries in descending capture order (ADR-0275)."""
+        selected_channel, selected_status, _ = check_list(channel, status, cursor, limit)
+        return await self._call(  # type: ignore[no-any-return]  # Method adapter validates.
+            "episodes", channel=selected_channel, status=selected_status, cursor=cursor, limit=limit
+        )
+
+    async def episode_chunk(
+        self,
+        episode_id: EncodableText,
+        *,
+        version: NonBlankEncodableText | None = None,
+        offset: int = 0,
+        max_bytes: int = 65536,
+    ) -> EpisodeChunk | None:
+        """Read canonical episode bytes, preserving the exact address (ADR-0275)."""
+        check_detail(episode_id, version, offset, max_bytes)
+        return await self._call(  # type: ignore[no-any-return]  # Method adapter validates.
+            "episode_chunk",
+            episode_id=episode_id,
+            version=version,
+            offset=offset,
+            max_bytes=max_bytes,
+        )
 
     async def beliefs(
         self,
@@ -1471,7 +1514,9 @@ class HubClient:
                 ),
                 max_frame_bytes=limit + ENVELOPE_RESERVE_BYTES,
             )
-            reply = await self._read(reader, limit=limit, idle=None, expecting=method)
+            reply = await self._read(
+                reader, limit=limit + ENVELOPE_RESERVE_BYTES, idle=None, expecting=method
+            )
             if reply.id != correlation:
                 msg = (
                     f"the hub answered with correlation id {reply.id!r} while {correlation!r} "

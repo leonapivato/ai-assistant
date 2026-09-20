@@ -2384,7 +2384,8 @@ from ai_assistant.wire.errors import (
 #: ADR-0274 §9: channel inputs, wrapped streaming terminals, and event errors.
 #: 54: ADR-0275 adds the wire-carried EpisodicMemory.processing_record shape.
 #: 55: ADR-0275 adds ConversationTurn.model_eligible and export version 3.
-PROTOCOL_VERSION: Final[int] = 55
+#: 56: ADR-0275 adds owner episode inspection methods.
+PROTOCOL_VERSION: Final[int] = 56
 
 #: ADR-0085 §8a: "The correlation id is a UUID string and is at most 36 bytes.
 #: Bounding it is what makes the reserve a constant rather than an aspiration; a

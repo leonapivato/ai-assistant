@@ -41,6 +41,7 @@ from typing import TYPE_CHECKING, Final, assert_never, cast
 
 from ai_assistant.core.channel_validation import snapshot
 from ai_assistant.core.clock import ClockReadingError, checked_clock
+from ai_assistant.core.episode_encoding import check_detail, check_list
 from ai_assistant.core.errors import (
     AuditError,
     ChannelProcessingTimeoutError,
@@ -88,6 +89,8 @@ from ai_assistant.core.types import (
     Disposition,
     DriveWithheld,
     EgressBinding,
+    EpisodeChunk,
+    EpisodePage,
     ExecutionState,
     ForecastNotRead,
     Goal,
@@ -116,6 +119,7 @@ from ai_assistant.core.types import (
     Placement,
     PlacementReach,
     PlacementSetter,
+    ProcessingStatus,
     Provenance,
     Question,
     QuestionState,
@@ -180,6 +184,7 @@ from ai_assistant.orchestration.channels import (
 # instance of it. `lint-imports` holds the boundary that rule is enforced by, and
 # `ai_assistant.testing` is test-only rather than a runtime subsystem.
 from ai_assistant.orchestration.disclosure import notification_is_speakable
+from ai_assistant.orchestration.episode_reads import fit_chunk, fit_page
 from ai_assistant.orchestration.payloads import (
     DEFAULT_MAX_PAYLOAD_BYTES,
     check_arguments,
@@ -204,6 +209,7 @@ from ai_assistant.testing.goal_authorizations import (
     AUTHORIZATION_NOW,
     FakeGoalAuthorizationStore,
 )
+from ai_assistant.testing.memory import FakeMemoryStore
 from ai_assistant.testing.notifications import (
     FakeNotificationOutbox,
     FakeNotificationPolicy,
@@ -494,6 +500,7 @@ class FakeAssistantEngine:
         self.notification_store = FakeNotificationStore()
         self.notification_policy = FakeNotificationPolicy()
         self.beliefs_held: dict[str, Belief] = {}
+        self.episode_memory = FakeMemoryStore(now=lambda: _AT)
         #: The transcript archive this engine's seven archive operations read and
         #: destroy against (ADR-0225 §10), public so a consumer can seed it —
         #: ``engine.archive.hold(entry)`` — there being no producer on this
@@ -2635,6 +2642,79 @@ class FakeAssistantEngine:
         return self._checked(self.observation, "observe")
 
     # --- the inspection surface -------------------------------------------
+
+    async def episodes(
+        self,
+        *,
+        channel: ChannelIdentity | None = None,
+        status: ProcessingStatus | None = None,
+        cursor: NonBlankEncodableText | None = None,
+        limit: int = 50,
+    ) -> EpisodePage:
+        """Read live episode summaries in descending capture order (ADR-0275)."""
+        selected_channel, selected_status, _ = check_list(channel, status, cursor, limit)
+        check_arguments(
+            "episodes",
+            max_bytes=self._max_payload_bytes,
+            channel=selected_channel,
+            status=selected_status,
+            cursor=cursor,
+            limit=limit,
+        )
+        self.calls.append(
+            (
+                "episodes",
+                {
+                    "channel": selected_channel,
+                    "status": selected_status,
+                    "cursor": cursor,
+                    "limit": limit,
+                },
+            )
+        )
+        page = await self.episode_memory.episodes(
+            channel=selected_channel, status=selected_status, cursor=cursor, limit=limit
+        )
+        return fit_page(
+            page,
+            channel=selected_channel,
+            status=selected_status,
+            max_bytes=self._max_payload_bytes,
+        )
+
+    async def episode_chunk(
+        self,
+        episode_id: EncodableText,
+        *,
+        version: NonBlankEncodableText | None = None,
+        offset: int = 0,
+        max_bytes: int = 65536,
+    ) -> EpisodeChunk | None:
+        """Read canonical episode bytes, preserving the exact address (ADR-0275)."""
+        check_detail(episode_id, version, offset, max_bytes)
+        arguments = {"episode_id": episode_id, "offset": offset, "max_bytes": max_bytes}
+        if version is not None:
+            arguments["version"] = version
+        check_payload(
+            arguments,
+            max_bytes=self._max_payload_bytes,
+            subject="the arguments to episode_chunk()",
+        )
+        self.calls.append(
+            (
+                "episode_chunk",
+                {
+                    "episode_id": episode_id,
+                    "version": version,
+                    "offset": offset,
+                    "max_bytes": max_bytes,
+                },
+            )
+        )
+        chunk = await self.episode_memory.episode_chunk(
+            episode_id, version=version, offset=offset, max_bytes=max_bytes
+        )
+        return fit_chunk(chunk, max_bytes=self._max_payload_bytes)
 
     async def beliefs(
         self,

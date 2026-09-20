@@ -14337,6 +14337,28 @@ class AssistantEngine(Protocol):
 
     # --- the inspection surface (ADR-0073 §7, ADR-0077 §6) ----------------
 
+    async def episodes(
+        self,
+        *,
+        channel: ChannelIdentity | None = None,
+        status: ProcessingStatus | None = None,
+        cursor: NonBlankEncodableText | None = None,
+        limit: int = 50,
+    ) -> EpisodePage:
+        """Read live episode summaries in descending capture order (ADR-0275)."""
+        ...
+
+    async def episode_chunk(
+        self,
+        episode_id: EncodableText,
+        *,
+        version: NonBlankEncodableText | None = None,
+        offset: int = 0,
+        max_bytes: int = 65536,
+    ) -> EpisodeChunk | None:
+        """Read canonical episode bytes, preserving the exact address (ADR-0275)."""
+        ...
+
     async def beliefs(
         self,
         *,
