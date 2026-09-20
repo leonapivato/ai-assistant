@@ -290,7 +290,9 @@ async def assemble_by_band(  # noqa: PLR0913 — the store, the query, the budge
             # never below the number of bands still to read. This is the sub-floor
             # path, where a full budget still ends the composition.
             break
-        found = await store.search(query, limit=request, kinds=wanted_kinds, bands=[band])
+        found = await store.search(
+            query, limit=request, kinds=wanted_kinds, bands=[band], episode_model_eligible=True
+        )
         if on_page is not None:
             on_page(len(found.records))
         # ``found.capped`` is *reported* and nothing more: ADR-0128 §6 still leaves

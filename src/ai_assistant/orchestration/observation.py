@@ -76,6 +76,7 @@ from typing import TYPE_CHECKING, Final
 import structlog
 
 from ai_assistant.core.clock import checked_clock
+from ai_assistant.core.episode_encoding import admits_model_eligibility
 from ai_assistant.core.errors import (
     MemoryStoreError,
     MemoryStoreStaleError,
@@ -1215,11 +1216,15 @@ class ObservationStage:
         Returns:
             The resolved episodes in order, and the ordinal this pass advances to.
         """
+        # ADR-0275: inspection-only rows have the existing unresolved-row
+        # advancement semantics; scheduling and page selection stay unfiltered.
         episodes: list[EpisodicMemory] = []
         resolved_through: int | None = None
         for turn in page:
+            if not turn.model_eligible:
+                continue
             record = await self._memory.get(turn.episode_id)
-            if isinstance(record, EpisodicMemory):
+            if isinstance(record, EpisodicMemory) and admits_model_eligibility(record, True):
                 episodes.append(record)
                 resolved_through = turn.ordinal
         return tuple(episodes), page[-1].ordinal if resolved_through is None else resolved_through

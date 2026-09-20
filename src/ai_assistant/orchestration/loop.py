@@ -3640,7 +3640,10 @@ class LearningLoop:
         # complete set would; whether ``LoopEngine`` should set ``memory_degraded``
         # from the signal is a policy this ADR deliberately does not decide.
         found = await self._memory.search(
-            content, limit=self._resolution_limit, kinds=RESOLUTION_KINDS
+            content,
+            limit=self._resolution_limit,
+            kinds=RESOLUTION_KINDS,
+            episode_model_eligible=True,
         )
         best = next(iter(found.records), None)
         return MemoryKind.SEMANTIC if best is None else MemoryKind(best.kind)
@@ -4204,6 +4207,7 @@ class LearningLoop:
                 limit=self._episodic_limit,
                 kinds=_SUPPLEMENT_KINDS,
                 bands=_SUPPLEMENT_BANDS,
+                episode_model_eligible=True,
             )
         except MemoryStoreError:
             # Warned, not raised, and `memory_degraded` deliberately untouched by
