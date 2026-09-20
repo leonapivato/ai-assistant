@@ -1,5 +1,7 @@
 """M36 automatic reads keep inspection-only episodes outside model evidence."""
 
+from __future__ import annotations
+
 from datetime import UTC, datetime
 
 import pytest
