@@ -110,7 +110,8 @@ def test_neither_the_carrier_nor_the_export_changed_shape_in_a_way_this_move_cov
     """
     assert "closed_loop" in EgressBinding.model_fields
     assert "closed_loop" in CarriedProvenance.model_fields
-    assert ConversationExport.model_fields["schema_version"].default == 2
+    # ADR-0275 later advances the export for activation eligibility.
+    assert ConversationExport.model_fields["schema_version"].default >= 2
 
 
 def _entry_for(version: int) -> str:

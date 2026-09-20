@@ -132,7 +132,8 @@ def test_the_stored_record_versions_moved_and_the_conversation_export_did_not() 
         "absolute figure has its home in tests/planning/test_sqlite_plan_store.py"
     )
     assert _PARKED_SCHEMA == 3
-    assert ConversationExport.model_fields["schema_version"].default == 2
+    # ADR-0275 later advances the export for activation eligibility.
+    assert ConversationExport.model_fields["schema_version"].default >= 2
     assert "goal_id" in ParkedRead.model_fields, "and the record gained its identifier"
 
 

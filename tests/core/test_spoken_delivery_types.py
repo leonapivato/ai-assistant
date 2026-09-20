@@ -182,7 +182,7 @@ def test_every_value_outside_the_partition_is_refused(fields: dict[str, object],
 
 def test_the_turn_carries_the_one_member_adr_0205_adds() -> None:
     # §10 partially supersedes ADR-0074 §9's enumeration in exactly one scope. The
-    # count is what says the addition was `delivery` and nothing beside it.
+    # ADR-0275 subsequently adds the immutable activation eligibility flag.
     assert set(ConversationTurn.model_fields) == {
         "conversation_id",
         "ordinal",
@@ -190,6 +190,7 @@ def test_the_turn_carries_the_one_member_adr_0205_adds() -> None:
         "occurred_at",
         "parked",
         "delivery",
+        "model_eligible",
     }
 
 
