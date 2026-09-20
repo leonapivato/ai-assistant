@@ -84,7 +84,7 @@ from typing import TYPE_CHECKING, Final, NamedTuple, assert_never
 
 import structlog
 
-from ai_assistant.core.errors import ModelError
+from ai_assistant.core.errors import ModelError, ModelTimeoutError
 from ai_assistant.core.streams import closing_stream
 from ai_assistant.core.types import (
     AttemptOutcome,
@@ -508,6 +508,7 @@ class ComposedReply:
 
     text: str | None
     degraded: bool
+    timed_out: bool = False
 
 
 @dataclass(slots=True)
@@ -833,12 +834,14 @@ class ComposingStage:
         )
         try:
             answer = await self._model.complete(conversation)
-        except ModelError:
+        except ModelError as exc:
             # ADR-0011 §1's taxonomy, whole: the model is down, the route is
             # exhausted, the request was refused. An operating condition that will
             # recur whatever we do, which is what degradation is for.
             _log.warning("reply_composition_failed", reason="model_error", exc_info=True)
-            return ComposedReply(text=None, degraded=True)
+            return ComposedReply(
+                text=None, degraded=True, timed_out=isinstance(exc, ModelTimeoutError)
+            )
         # The second member of §8's closed set, and it is reachable on a *conforming*
         # provider: ``Message.content`` is ``EncodableText``, which admits the empty
         # string, so a call that did not fail can still return nothing usable.
@@ -924,9 +927,11 @@ class ComposingStage:
             answer = await self._model.complete(
                 _routed_prompt(operation, outcome, unbounded_audience=unbounded_audience)
             )
-        except ModelError:
+        except ModelError as exc:
             _log.warning("reply_composition_failed", reason="model_error", exc_info=True)
-            return ComposedReply(text=None, degraded=True)
+            return ComposedReply(
+                text=None, degraded=True, timed_out=isinstance(exc, ModelTimeoutError)
+            )
         text = answer.content.strip()
         if not text:
             _log.warning("reply_composition_failed", reason="blank_completion")
@@ -958,6 +963,7 @@ class ComposingStage:
         conversation = _routed_prompt(operation, outcome)
         answer = _Coalescing(room=room)
         stopped = False
+        timed_out = False
         try:
             async with closing_stream(self._streaming.stream(conversation)) as deltas:
                 async for delta in deltas:
@@ -967,17 +973,18 @@ class ComposingStage:
                     if answer.breached:
                         stopped = True
                         break
-        except ModelError:
+        except ModelError as exc:
             _log.warning("reply_composition_failed", reason="model_error", exc_info=True)
             stopped = True
+            timed_out = isinstance(exc, ModelTimeoutError)
         if not answer.published:
             if not stopped:
                 _log.warning("reply_composition_failed", reason="blank_completion")
-            yield ComposedReply(text=None, degraded=True)
+            yield ComposedReply(text=None, degraded=True, timed_out=timed_out)
             return
         if stopped:
             _log.warning("reply_composition_truncated", chunks=len(answer.published))
-        yield ComposedReply(text=answer.text, degraded=stopped)
+        yield ComposedReply(text=answer.text, degraded=stopped, timed_out=timed_out)
 
     async def compose_streaming(  # noqa: PLR0913 — the turn, the step, the undriven steps, the streaming room, the tail's delivery facts, the hop's reach and ADR-0228 §10's stop fact; each is a distinct input this stage is given
         self,
@@ -1120,6 +1127,7 @@ class ComposingStage:
         )
         answer = _Coalescing(room=room)
         stopped = False
+        timed_out = False
         try:
             # **Closed, not merely abandoned** (ADR-0173 §5's seam clause). Python
             # does not close an async iterator at the point of abandonment, so a
@@ -1134,12 +1142,13 @@ class ComposingStage:
                     if answer.breached:
                         stopped = True
                         break
-        except ModelError:
+        except ModelError as exc:
             # ADR-0011 §1's taxonomy, whole, and its dispositions are not acted on:
             # past the first non-blank delta the seam does not re-issue and neither
             # does this stage (ADR-0173 §5, §7).
             _log.warning("reply_composition_failed", reason="model_error", exc_info=True)
             stopped = True
+            timed_out = isinstance(exc, ModelTimeoutError)
         if not answer.published:
             # Nothing was published: either the stream carried no non-blank text at
             # all — ADR-0170 §8's blank-completion case, classified here exactly as
@@ -1148,11 +1157,11 @@ class ComposingStage:
             # of them is a truncation.
             if not stopped:
                 _log.warning("reply_composition_failed", reason="blank_completion")
-            yield ComposedReply(text=None, degraded=True)
+            yield ComposedReply(text=None, degraded=True, timed_out=timed_out)
             return
         if stopped:
             _log.warning("reply_composition_truncated", chunks=len(answer.published))
-        yield ComposedReply(text=answer.text, degraded=stopped)
+        yield ComposedReply(text=answer.text, degraded=stopped, timed_out=timed_out)
 
 
 #: The system turn for a routed pass (ADR-0197 §6, §10). A second prompt rather than a

@@ -2412,7 +2412,9 @@ def _announced(
     lead = _announcement_lead(engagement)
     if composed is None or lead is None or composed.text is None:
         return composed
-    return ComposedReply(text=lead + composed.text, degraded=composed.degraded)
+    return ComposedReply(
+        text=lead + composed.text, degraded=composed.degraded, timed_out=composed.timed_out
+    )
 
 
 def _spoken_text(outcome: TurnOutcome) -> str | None:
@@ -13491,7 +13493,9 @@ class Engine:
         # terminal text gains the lead exactly where the lead was published.
         if lead is None or pending is not None or composed.text is None:
             return composed
-        return ComposedReply(text=lead + composed.text, degraded=composed.degraded)
+        return ComposedReply(
+            text=lead + composed.text, degraded=composed.degraded, timed_out=composed.timed_out
+        )
 
     def _reply_room(  # noqa: PLR0913 — operation data and per-call context/projection
         self,
