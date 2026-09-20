@@ -48,6 +48,13 @@ from pathlib import Path as _Path
 from typing import TYPE_CHECKING, ClassVar
 
 import pytest
+from episode_inspection_contract import (
+    INSPECTION_AT,
+    INSPECTION_LIMIT,
+    EpisodeInspectionSubject,
+)
+
+from ai_assistant.testing import FakeMemoryStore
 
 sys.path.insert(0, str(_Path(__file__).resolve().parent.parent / "orchestration"))
 
@@ -261,6 +268,19 @@ class TestHubEngineClientContract(AssistantEngineContract):
         ValueError,
         HubUnavailableError,
     )
+
+    @pytest.fixture
+    async def episode_inspection(self, tmp_path: Path) -> AsyncIterator[EpisodeInspectionSubject]:
+        """The bounded owner reads over an authenticated local socket."""
+        memory = FakeMemoryStore(now=lambda: INSPECTION_AT)
+        backing = FakeAssistantEngine(max_payload_bytes=INSPECTION_LIMIT)
+        backing.episode_memory = memory
+        async with serving(
+            backing,
+            tmp_path / "hub.sock",
+            max_frame_bytes=INSPECTION_LIMIT + ENVELOPE_RESERVE_BYTES,
+        ) as client:
+            yield EpisodeInspectionSubject(engine=client, memory=memory)
 
     @pytest.fixture
     async def engine(self, tmp_path: Path) -> AsyncIterator[AssistantEngine]:

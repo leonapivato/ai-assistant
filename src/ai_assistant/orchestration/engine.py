@@ -95,6 +95,7 @@ import structlog
 
 from ai_assistant.core.channel_validation import snapshot
 from ai_assistant.core.clock import ClockReadingError, checked_clock
+from ai_assistant.core.episode_encoding import check_detail, check_list
 from ai_assistant.core.errors import (
     AuthorizationError,
     ClaimRefused,
@@ -143,6 +144,8 @@ from ai_assistant.core.types import (
     Disposition,
     DriveWithheld,
     EngagementDisposition,
+    EpisodeChunk,
+    EpisodePage,
     Evidence,
     ExchangeDisposition,
     ForecastNotRead,
@@ -178,6 +181,7 @@ from ai_assistant.core.types import (
     Placement,
     PlacementReach,
     PlacementSetter,
+    ProcessingStatus,
     QueuedQuestion,
     QueueOutcome,
     ReadAnswerOutcome,
@@ -233,6 +237,7 @@ from ai_assistant.orchestration.disclosure import (
     notification_is_speakable,
 )
 from ai_assistant.orchestration.effects import told_once
+from ai_assistant.orchestration.episode_reads import fit_chunk, fit_page
 from ai_assistant.orchestration.evidence import refresh_set
 from ai_assistant.orchestration.goals import (
     GoalFacts,
@@ -6009,6 +6014,84 @@ class Engine:
         """
         self._reject_if_closing()
         return await self._tracked(self._observation.run(), "observe_due", _observed_due)
+
+    async def episodes(
+        self,
+        *,
+        channel: ChannelIdentity | None = None,
+        status: ProcessingStatus | None = None,
+        cursor: NonBlankEncodableText | None = None,
+        limit: int = 50,
+    ) -> EpisodePage:
+        """Read live episode summaries in descending capture order (ADR-0275)."""
+        self._reject_if_closing()
+        selected_channel, selected_status, _ = check_list(channel, status, cursor, limit)
+        check_arguments(
+            "episodes",
+            max_bytes=self._max_payload_bytes,
+            channel=selected_channel,
+            status=selected_status,
+            cursor=cursor,
+            limit=limit,
+        )
+        return await self._tracked(
+            self._episode_page(
+                channel=selected_channel, status=selected_status, cursor=cursor, limit=limit
+            ),
+            "episodes",
+        )
+
+    async def episode_chunk(
+        self,
+        episode_id: EncodableText,
+        *,
+        version: NonBlankEncodableText | None = None,
+        offset: int = 0,
+        max_bytes: int = 65536,
+    ) -> EpisodeChunk | None:
+        """Read canonical episode bytes, preserving the exact address (ADR-0275)."""
+        self._reject_if_closing()
+        check_detail(episode_id, version, offset, max_bytes)
+        arguments = {"episode_id": episode_id, "offset": offset, "max_bytes": max_bytes}
+        if version is not None:
+            arguments["version"] = version
+        check_payload(
+            arguments,
+            max_bytes=self._max_payload_bytes,
+            subject="the arguments to episode_chunk()",
+        )
+        return await self._tracked(
+            self._episode_detail(
+                episode_id=episode_id, version=version, offset=offset, max_bytes=max_bytes
+            ),
+            "episode_chunk",
+        )
+
+    async def _episode_page(
+        self,
+        *,
+        channel: ChannelIdentity | None,
+        status: ProcessingStatus | None,
+        cursor: str | None,
+        limit: int,
+    ) -> EpisodePage:
+        page = await self._memory.episodes(
+            channel=channel, status=status, cursor=cursor, limit=limit
+        )
+        return fit_page(page, channel=channel, status=status, max_bytes=self._max_payload_bytes)
+
+    async def _episode_detail(
+        self,
+        *,
+        episode_id: str,
+        version: str | None,
+        offset: int,
+        max_bytes: int,
+    ) -> EpisodeChunk | None:
+        chunk = await self._memory.episode_chunk(
+            episode_id, version=version, offset=offset, max_bytes=max_bytes
+        )
+        return fit_chunk(chunk, max_bytes=self._max_payload_bytes)
 
     async def beliefs(
         self,

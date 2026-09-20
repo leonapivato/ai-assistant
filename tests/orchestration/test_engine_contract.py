@@ -65,6 +65,11 @@ from assistant_engine_contract import (
     seeded_trail,
     seeded_transcript_archive,
 )
+from episode_inspection_contract import (
+    INSPECTION_AT,
+    INSPECTION_LIMIT,
+    EpisodeInspectionSubject,
+)
 
 from ai_assistant.core.protocols import (
     AuditTrail,
@@ -684,6 +689,17 @@ def _wire(  # noqa: PLR0913 — one knob per state the shared suite needs a subj
 
 class TestEngineContract(AssistantEngineContract):
     """The concrete engine, held to the shared contract."""
+
+    @pytest.fixture
+    async def episode_inspection(self) -> AsyncIterator[EpisodeInspectionSubject]:
+        """The production engine with an injected inspection store and small payload bound."""
+        memory = FakeMemoryStore(now=lambda: INSPECTION_AT)
+        built = _wire(memory=memory, max_payload_bytes=INSPECTION_LIMIT)
+        await built.start()
+        try:
+            yield EpisodeInspectionSubject(engine=built, memory=memory)
+        finally:
+            await built.aclose()
 
     @pytest.fixture
     async def engine(self) -> AsyncIterator[AssistantEngine]:

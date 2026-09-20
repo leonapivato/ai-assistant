@@ -61,6 +61,11 @@ from assistant_engine_contract import (
     spoken_routed_park_outcome,
     spoken_step_park_outcome,
 )
+from episode_inspection_contract import (
+    INSPECTION_AT,
+    INSPECTION_LIMIT,
+    EpisodeInspectionSubject,
+)
 
 from ai_assistant.core.errors import (
     DuplicateDecisionError,
@@ -108,7 +113,12 @@ from ai_assistant.core.types import (
     TurnReference,
     UtcInstant,
 )
-from ai_assistant.testing import AUTHORIZATION_GOAL, FakeAssistantEngine, opening_act
+from ai_assistant.testing import (
+    AUTHORIZATION_GOAL,
+    FakeAssistantEngine,
+    FakeMemoryStore,
+    opening_act,
+)
 
 #: The per-turn budget the two ``converse`` entries take. A fixed figure rather than a
 #: clock reading: nothing in the cases that pass it turns on the duration.
@@ -206,6 +216,14 @@ def _recorded_confirm(binding: EgressBinding | None) -> PermissionDecision:
 
 class TestFakeAssistantEngineContract(AssistantEngineContract):
     """The canonical fake, held to the shared contract."""
+
+    @pytest.fixture
+    def episode_inspection(self) -> EpisodeInspectionSubject:
+        """The canonical fake with the same injected inspection store and bound."""
+        memory = FakeMemoryStore(now=lambda: INSPECTION_AT)
+        built = FakeAssistantEngine(max_payload_bytes=INSPECTION_LIMIT)
+        built.episode_memory = memory
+        return EpisodeInspectionSubject(engine=built, memory=memory)
 
     @pytest.fixture
     def engine(self) -> AssistantEngine:

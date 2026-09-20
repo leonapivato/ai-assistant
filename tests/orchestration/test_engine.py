@@ -4558,12 +4558,14 @@ async def test_forget_leaves_nothing_behind_not_even_in_an_export() -> None:
     assert await harness.memory.export() == []
 
 
-@pytest.mark.parametrize("call", ["beliefs", "belief", "forget"])
+@pytest.mark.parametrize("call", ["beliefs", "belief", "forget", "episodes", "episode_chunk"])
 async def test_the_inspection_surface_is_refused_once_shutdown_has_begun(call: str) -> None:
     """After aclose, no inspection call is accepted either (ADR-0042 §2)."""
     harness = Harness()
     await harness.engine.aclose()
     calls: dict[str, Callable[[], Awaitable[object]]] = {
+        "episodes": harness.engine.episodes,
+        "episode_chunk": lambda: harness.engine.episode_chunk(""),
         "beliefs": harness.engine.beliefs,
         "belief": lambda: harness.engine.belief("rec-1"),
         "forget": lambda: harness.engine.forget("rec-1"),
@@ -6299,3 +6301,31 @@ async def test_the_confirmation_the_user_answers_carries_the_calls_origin() -> N
         == recorded.egress_binding.planned_with_external_content
     )
     assert confirmation.egress.planned_with_external_content is True
+
+
+@pytest.mark.parametrize("method", ["episodes", "episode_chunk"])
+async def test_episode_inspection_is_drained_before_shutdown(method: str) -> None:
+    """The store cannot close while an admitted inspection read still owns it."""
+    memory = FakeMemoryStore(now=lambda: AT)
+    held = memory.suspend_next_operation()
+    closed = asyncio.Event()
+
+    async def close() -> None:
+        closed.set()
+
+    harness = Harness(memory=memory, closers=(close,))
+    read = asyncio.ensure_future(
+        harness.engine.episodes() if method == "episodes" else harness.engine.episode_chunk("")
+    )
+    try:
+        await held.reached()
+        closing = asyncio.ensure_future(harness.engine.aclose())
+        await asyncio.sleep(0)
+        assert not closed.is_set()
+        held.release()
+        await read
+        await closing
+        assert closed.is_set()
+    finally:
+        held.release()
+        await harness.engine.aclose()
