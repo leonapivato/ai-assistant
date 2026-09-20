@@ -153,7 +153,20 @@ class ActivationState:
         )
 
 
-CURRENT_ACTIVATION: ContextVar[ActivationState | None] = ContextVar("activation", default=None)
+@dataclass
+class ActivationScope:
+    """One worker's holder, allowing validated resume admission in a tracked child."""
+
+    state: ActivationState | None = None
+
+
+CURRENT_ACTIVATION: ContextVar[ActivationScope | None] = ContextVar("activation", default=None)
+
+
+def active_state() -> ActivationState | None:
+    """Read only this worker's admission, including one established by its child."""
+    scope = CURRENT_ACTIVATION.get()
+    return None if scope is None else scope.state
 
 
 def admit_channel(

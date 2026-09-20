@@ -30,6 +30,8 @@ from ai_assistant.core.types import (
 )
 from ai_assistant.orchestration.activation_state import (
     CURRENT_ACTIVATION,
+    ActivationScope,
+    active_state,
     admit_channel,
     terminal_status,
 )
@@ -156,7 +158,7 @@ async def test_worker_contexts_keep_isolated_state_under_reversed_completion() -
     second = _admitted()
 
     async def worker(state: ActivationState, *, slow: bool) -> None:
-        token = CURRENT_ACTIVATION.set(state)
+        token = CURRENT_ACTIVATION.set(ActivationScope(state))
         try:
             if slow:
                 entered.set()
@@ -164,9 +166,27 @@ async def test_worker_contexts_keep_isolated_state_under_reversed_completion() -
             else:
                 await entered.wait()
                 second_finished.set()
-            assert CURRENT_ACTIVATION.get() is state
+            assert active_state() is state
         finally:
             CURRENT_ACTIVATION.reset(token)
 
     await asyncio.gather(worker(first, slow=True), worker(second, slow=False))
     assert CURRENT_ACTIVATION.get() is None
+
+
+async def test_resume_admission_in_a_tracked_child_remains_visible_only_to_its_worker() -> None:
+    scope = ActivationScope()
+    state = _admitted()
+    token = CURRENT_ACTIVATION.set(scope)
+    try:
+
+        async def resolve() -> None:
+            assert CURRENT_ACTIVATION.get() is scope
+            scope.state = state
+
+        assert active_state() is None
+        await asyncio.create_task(resolve())
+        assert active_state() is state
+    finally:
+        CURRENT_ACTIVATION.reset(token)
+    assert active_state() is None

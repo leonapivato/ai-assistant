@@ -41,6 +41,7 @@ from ai_assistant.core.types import (
     WholeTextReply,
 )
 from ai_assistant.orchestration import informational_events
+from ai_assistant.orchestration.channels import ResolvedChannelInput
 from ai_assistant.orchestration.informational_events import InformationalEventStage
 from ai_assistant.orchestration.payloads import canonical_payload
 from ai_assistant.testing import FakeModelProvider, FakeSpeechTranscriber
@@ -49,7 +50,6 @@ if TYPE_CHECKING:
     from collections.abc import Sequence
 
     from ai_assistant.core.types import TurnOutcome
-    from ai_assistant.orchestration.channels import ResolvedChannelInput
 
 _BUDGET = timedelta(seconds=10)
 
@@ -383,3 +383,42 @@ async def test_event_unexpected_provider_defects_propagate_unchanged(defect: Exc
     with pytest.raises(type(defect)) as caught:
         await harness.engine.receive(event_input(), reply=None, timeout=_BUDGET)
     assert caught.value is defect
+
+
+@pytest.mark.parametrize("expires", [False, True])
+async def test_event_observes_complete_produced_summary_even_when_final_deadline_expires(
+    monkeypatch: pytest.MonkeyPatch, expires: bool
+) -> None:
+    loop = asyncio.get_running_loop()
+    reading = loop.time()
+    deadline = reading + 10
+    original = informational_events._validated_result
+
+    def validate(supplied: ResolvedChannelInput, answer: Message) -> ChannelResult | None:
+        nonlocal reading
+        result = original(supplied, answer)
+        if expires:
+            reading = deadline
+        return result
+
+    monkeypatch.setattr(loop, "time", lambda: reading)
+    monkeypatch.setattr(informational_events, "_validated_result", validate)
+    text = "  exact café summary\n"
+    model = FakeModelProvider(text)
+    stage = InformationalEventStage(model)
+    summaries: list[str] = []
+    supplied = ResolvedChannelInput(
+        ChannelIdentity(channel_type="informational_event", instance_id="source"),
+        "event",
+        Modality.TEXT,
+        ChannelContext(),
+    )
+    if expires:
+        with pytest.raises(ChannelProcessingTimeoutError):
+            await stage.process(supplied, deadline=deadline, on_summary=summaries.append)
+    else:
+        result = await stage.process(supplied, deadline=deadline, on_summary=summaries.append)
+        assert isinstance(result.result, InformationalEventResult)
+        assert result.result.summary == text
+    assert summaries == [text]
+    assert len(model.calls) == 1

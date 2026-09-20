@@ -22,6 +22,8 @@ from ai_assistant.core.types import (
 )
 
 if TYPE_CHECKING:
+    from collections.abc import Callable
+
     from ai_assistant.core.protocols import ModelProvider
     from ai_assistant.orchestration.channels import ResolvedChannelInput
 
@@ -41,7 +43,13 @@ class InformationalEventStage:
         """Use the application's ordinary, already-wrapped model route."""
         self._model = model
 
-    async def process(self, supplied: ResolvedChannelInput, *, deadline: float) -> ChannelResult:
+    async def process(  # noqa: C901 — deadline, provider-failure and produced-summary branches
+        self,
+        supplied: ResolvedChannelInput,
+        *,
+        deadline: float,
+        on_summary: Callable[[str], None] | None = None,
+    ) -> ChannelResult:
         """Complete once within the admitted monotonic deadline, including validation."""
         loop = asyncio.get_running_loop()
         if deadline <= loop.time():
@@ -69,6 +77,11 @@ class InformationalEventStage:
             # Only validation of the returned value belongs to this translation.
             # Unexpected provider exceptions propagate unchanged from the call.
             result = _validated_result(supplied, answer)
+            if result is not None and on_summary is not None:
+                # A valid summary was produced even if the final deadline check
+                # refuses the pass. The capture coordinator observes text only;
+                # this stage retains no store or recording capability.
+                on_summary(answer.content)
             if loop.time() >= deadline:
                 failure = ChannelProcessingTimeoutError
             elif result is not None:
