@@ -77,7 +77,7 @@ from ai_assistant.core.types import (
     caseless_key,
 )
 from ai_assistant.memory import traces
-from ai_assistant.memory._episode_format import check_format
+from ai_assistant.memory._episode_format import check_format, inspect_existing
 from ai_assistant.memory._transactions import transaction
 from ai_assistant.memory._walk import (
     check_walk_limit,
@@ -657,6 +657,7 @@ class SqliteMemoryStore:
         self._conn = self._setup()
 
     def _setup(self) -> sqlite3.Connection:
+        inspect_existing(self._path)
         try:
             # `isolation_level=None` puts the driver in autocommit mode, so every
             # transaction below is an explicit `BEGIN ... COMMIT` this module
