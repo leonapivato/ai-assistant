@@ -2080,7 +2080,7 @@ async def _show_episode(episode_id: str, *, as_json: bool) -> int:
         return _EXIT_ERROR
     encoded, record = detail
     if as_json:
-        console.print(encoded, markup=False, highlight=False, soft_wrap=True)
+        console.print(encoded, markup=False, emoji=False, highlight=False, soft_wrap=True)
     else:
         episode_inspection.render_detail(console, record)
     return _EXIT_OK

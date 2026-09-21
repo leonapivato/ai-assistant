@@ -37,7 +37,7 @@ if TYPE_CHECKING:
 
 _AT = datetime(2026, 9, 20, tzinfo=UTC)
 _CHANNEL = ChannelIdentity(channel_type="informational_event", instance_id="source")
-_CONTENT = 'exact private material café 🍵\\" '
+_CONTENT = ":smile: " + 'exact private material café 🍵\\" '
 
 
 def _record(record_id: str, *, response: EpisodeResponseKind | None = None) -> EpisodicMemory:
@@ -96,7 +96,7 @@ def _engine(*records: EpisodicMemory) -> FakeAssistantEngine:
     return engine
 
 
-@pytest.mark.parametrize("record_id", ["", " a ", "é"])
+@pytest.mark.parametrize("record_id", ["", " a ", "é", ":smile:"])
 def test_json_detail_reassembles_exact_stored_record_without_wrapping(
     monkeypatch: pytest.MonkeyPatch, output: StringIO, record_id: str
 ) -> None:
@@ -130,10 +130,11 @@ def test_human_detail_names_response_role_and_limits_of_processing_status(
     response: EpisodeResponseKind | None,
     label: str,
 ) -> None:
-    _wire(monkeypatch, _engine(_record("record", response=response)))
-    result = CliRunner().invoke(cli.app, ["episode", "record"])
+    _wire(monkeypatch, _engine(_record(":smile:", response=response)))
+    result = CliRunner().invoke(cli.app, ["episode", ":smile:"])
     assert result.exit_code == 0, result.exception
     rendered = " ".join(output.getvalue().split())
+    assert 'Episode ":smile:"' in rendered
     assert f"Response: {label}" in rendered
     assert "does not report goal achievement or audio playback" in rendered
     assert "Retention expiry" in rendered
@@ -143,7 +144,9 @@ def test_human_detail_names_response_role_and_limits_of_processing_status(
 def test_listing_relays_filters_and_displays_exact_id_and_next_cursor(
     monkeypatch: pytest.MonkeyPatch, output: StringIO
 ) -> None:
-    engine = _engine(*(_record(f" row-{n} ", response=EpisodeResponseKind.NONE) for n in range(10)))
+    engine = _engine(
+        *(_record(f" row-{n}:smile: ", response=EpisodeResponseKind.NONE) for n in range(10))
+    )
     _wire(monkeypatch, engine)
     result = CliRunner().invoke(
         cli.app,
@@ -164,7 +167,7 @@ def test_listing_relays_filters_and_displays_exact_id_and_next_cursor(
         "episodes",
         {"channel": _CHANNEL, "status": ProcessingStatus.COMPLETED, "cursor": None, "limit": 5},
     )
-    assert 'Episode " row-9 "' in output.getvalue()
+    assert 'Episode " row-9:smile: "' in output.getvalue()
     assert "Next cursor:" in output.getvalue()
     assert "exact private material" not in output.getvalue()
 
