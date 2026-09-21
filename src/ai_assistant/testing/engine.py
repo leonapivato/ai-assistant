@@ -549,6 +549,9 @@ class FakeAssistantEngine:
         #: "that question is not open" is what the surface has to say about it.
         self.questions_settled: dict[str, Question] = {}
         self.conversations_held: dict[str, ConversationDigest] = {}
+        self._deleting_conversations: set[str] = set()
+        self._used_conversation_ids: set[str] = set()
+        self._conversation_ids = count(1)
         #: When each conversation was last active — set at creation and refreshed
         #: whenever a turn begins against it (ADR-0074 §2). Held beside the digests
         #: rather than on them because a
@@ -1196,7 +1199,10 @@ class FakeAssistantEngine:
         pass over the exact path the real engine refuses.
         """
         if conversation_id is None:
-            return self.start_conversation(f"c-{len(self.conversations_held) + 1}")
+            candidate = f"c-{next(self._conversation_ids)}"
+            while candidate in self._used_conversation_ids:
+                candidate = f"c-{next(self._conversation_ids)}"
+            return self.start_conversation(candidate)
         if conversation_id not in self.conversations_held:
             msg = f"no conversation {conversation_id!r}"
             raise UnknownConversationError(msg)
@@ -3451,6 +3457,12 @@ class FakeAssistantEngine:
             "forget_conversation", max_bytes=self._max_payload_bytes, conversation_id=named
         )
         self.calls.append(("forget_conversation", {"conversation_id": named}))
+        # Remove live membership before the first await. Capture's existing
+        # before/after-write existence checks now see this deletion immediately.
+        # Keep the tombstone and episode membership until every deletion succeeds
+        # so a failed archive or memory deletion can be retried safely.
+        if self.conversations_held.pop(named, None) is not None:
+            self._deleting_conversations.add(named)
         members = tuple(
             episode
             for episode, conversation in self._episode_conversations.items()
@@ -3458,12 +3470,13 @@ class FakeAssistantEngine:
         )
         for episode in members:
             await self.archive.discard(episode)
-        self.activity.pop(named, None)
-        removed = self.conversations_held.pop(named, None) is not None
         for episode in members:
             await self.episode_memory.delete(episode)
             self._episode_conversations.pop(episode, None)
             self.deliveries.pop(episode, None)
+        self.activity.pop(named, None)
+        removed = named in self._deleting_conversations
+        self._deleting_conversations.discard(named)
         return self._checked(removed, "forget")
 
     # --- the transcript archive (ADR-0225 §5, §6, §7) ----------------------
@@ -4604,6 +4617,9 @@ class FakeAssistantEngine:
         "most recently active first" is a fact the ordering can be tested against
         rather than an accident of a fixed clock.
         """
+        # A fresh automatic channel must not reuse a deleted identity while an
+        # earlier activation is still finishing its deletion verification.
+        self._used_conversation_ids.add(conversation_id)
         started = self._tick()
         self.conversations_held[conversation_id] = ConversationDigest(
             id=conversation_id, started_at=started, last_turn_at=None, recorded_turns=0
