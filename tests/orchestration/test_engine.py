@@ -5795,9 +5795,18 @@ class _TrackedScan(ast.NodeVisitor):
         self._scope.pop()
 
     def visit_Call(self, node: ast.Call) -> None:
-        if isinstance(node.func, ast.Attribute) and node.func.attr == "_tracked":
-            seam = node.args[1] if len(node.args) > 1 else None
-            if self._scope[-1] == "_receive":
+        if isinstance(node.func, ast.Attribute) and node.func.attr in {
+            "_tracked",
+            "_activation_task",
+        }:
+            seam = (
+                next((item.value for item in node.keywords if item.arg == "seam"), None)
+                if node.func.attr == "_activation_task"
+                else node.args[1]
+                if len(node.args) > 1
+                else None
+            )
+            if self._scope[-1] in {"_receive", "_streamed"}:
                 # ADR-0274: compatibility methods delegate one admission. The
                 # private dispatcher uses the projection selected at that entry.
                 assert isinstance(seam, ast.Attribute)

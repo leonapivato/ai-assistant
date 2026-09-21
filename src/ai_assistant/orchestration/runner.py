@@ -99,7 +99,7 @@ from ai_assistant.orchestration.stated_bounds import stated_bound_coverage
 from ai_assistant.orchestration.validating import PhaseFour, evaluate
 
 if TYPE_CHECKING:
-    from collections.abc import Sequence
+    from collections.abc import Awaitable, Callable, Sequence
 
     from ai_assistant.core.clock import Clock
     from ai_assistant.core.protocols import (
@@ -1111,7 +1111,7 @@ class StepRunner:
         # `PENDING → SKIPPED`/`APPROVAL_DENIED`, naming the recorded `DENY`.
         return await self._deny(state, step, decision, tool)
 
-    async def resume(  # noqa: PLR0913 — the execution, the step, the confirmation, the answer, the budget, ADR-0235 §2's one instant, ADR-0249 §12's boundary and ADR-0264 §2's outbound observation; each is a distinct fact about the act
+    async def resume(  # noqa: C901, PLR0913 — C901: the admission observer must follow every validation refusal and precede policy; PLR0913: the execution, the step, the confirmation, the answer, the budget, ADR-0235 §2's one instant, ADR-0249 §12's boundary and ADR-0264 §2's outbound observation; each is a distinct fact about the act
         self,
         state: ExecutionState,
         step_id: str,
@@ -1122,6 +1122,7 @@ class StepRunner:
         timeout: timedelta,  # noqa: ASYNC109 — passed through to the seam, which owns the deadline (ADR-0029 §4)
         remember_recipients_until: datetime | None = None,
         on_ruled: Ruled | None = None,
+        on_resolving: Callable[[], Awaitable[None]] | None = None,
         outbound: DriveObservation | None = None,
     ) -> StepDisposition:
         """Answer a parked ``CONFIRM`` and continue the step (ADR-0037 §4).
@@ -1181,6 +1182,7 @@ class StepRunner:
                 declining answer it establishes nothing and changes nothing else,
                 so the ``DENY`` is recorded exactly as it is today and ADR-0042
                 §4's guarantee is preserved whole.
+            on_resolving: Observe a validated unsettled answer before consulting policy.
             on_ruled: As :meth:`run` (:data:`Ruled`). A resolving ruling is never a
                 ``CONFIRM``, so on this path it is called on **every** answer the policy
                 resolved — the approval and the refusal alike, which is what ADR-0249 §6
@@ -1317,6 +1319,8 @@ class StepRunner:
         request = _requested(confirmed.tool, step, state, bound, goal=planned.goal_id)
         # Its own copy again, for `run`'s reason: `confirmed.id` is read after
         # this returns, and it is what `resolves` will point at.
+        if on_resolving is not None:
+            await on_resolving()
         ruling = await self._policy.resolve(confirmed.model_copy(deep=True), approved=approved)
         # ``proposed`` is always ``None`` here: a `CONFIRM` carrying ``resolves`` is the
         # *resolution* of a question and proposes nothing (:meth:`_propose`).
