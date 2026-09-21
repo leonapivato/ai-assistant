@@ -20,6 +20,7 @@ from ai_assistant.core.types import (
     Message,
     Role,
 )
+from ai_assistant.orchestration.channels import UNCAPTURED
 
 if TYPE_CHECKING:
     from collections.abc import Callable
@@ -116,6 +117,7 @@ def _validated_result(supplied: ResolvedChannelInput, answer: Message) -> Channe
     try:
         return ChannelResult(
             channel=supplied.channel,
+            capture=UNCAPTURED,
             result=InformationalEventResult(summary=answer.content),
         )
     except ValidationError, ValueError:

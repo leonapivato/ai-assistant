@@ -12,6 +12,7 @@ from ai_assistant.core.types import (
     ChannelIdentity,
     ChannelInput,
     ChannelResult,
+    EpisodeCaptureReport,
     InformationalEventResult,
     NewConversation,
     SpeechChannelPayload,
@@ -47,10 +48,17 @@ def test_context_attribution_alone_and_history_without_text_are_invalid() -> Non
 
 def test_blank_speech_and_event_results_require_their_corresponding_identity() -> None:
     conversation = ChannelIdentity(channel_type="conversation", instance_id="one")
+    capture = EpisodeCaptureReport(activation_id=None, episode_id=None, state="degraded")
     with pytest.raises(ValidationError):
-        ChannelResult(channel=conversation, result=SpokenChannelResult(outcome=SpokenTurn()))
+        ChannelResult(
+            channel=conversation, capture=capture, result=SpokenChannelResult(outcome=SpokenTurn())
+        )
     with pytest.raises(ValidationError):
-        ChannelResult(channel=conversation, result=InformationalEventResult(summary="summary"))
+        ChannelResult(
+            channel=conversation,
+            capture=capture,
+            result=InformationalEventResult(summary="summary"),
+        )
 
 
 def test_invalid_nested_audio_snapshot_exposes_no_value_or_exception_chain() -> None:

@@ -31696,6 +31696,7 @@ class ChannelResult(BaseModel):
     model_config = ConfigDict(frozen=True, extra="forbid")
     channel: ChannelIdentity | None
     result: ChannelOutcome
+    capture: EpisodeCaptureReport
 
     @model_validator(mode="after")
     def _consistent_channel(self) -> Self:

@@ -223,12 +223,19 @@ from ai_assistant.core.types import (
     secret_value,
 )
 from ai_assistant.orchestration.activation_coordinator import ActivationCoordinator
-from ai_assistant.orchestration.activation_state import CURRENT_ACTIVATION, ActivationScope
+from ai_assistant.orchestration.activation_state import (
+    CURRENT_ACTIVATION,
+    ActivationScope,
+    CaptureFacts,
+    active_state,
+    admit_channel,
+)
 from ai_assistant.orchestration.activation_writer import capture_loss
 from ai_assistant.orchestration.authorization_surface import projection_of
 from ai_assistant.orchestration.channels import (
     ChannelProjection,
     ResolvedChannelInput,
+    captured_result,
     conversation_target,
     spoken_result,
     text_result,
@@ -455,7 +462,7 @@ _ENGAGEMENT_ATTEMPTS: Final = 3
 _ROUTE_ID_ATTEMPTS: Final = 8
 
 
-def _note_failure(turn: asyncio.Task[ChannelResult]) -> None:
+def _note_failure[T](turn: asyncio.Task[T]) -> None:
     """Observe a finished streaming turn's failure, whether or not anyone read it.
 
     A turn abandoned by its client (ADR-0173 §9) runs on and may still fail, and its
@@ -2607,6 +2614,7 @@ class Engine:
         max_notification_budget: timedelta = _DEFAULT_MAX_NOTIFICATION_BUDGET,
         closers: Sequence[Callable[[], Awaitable[None]]] = (),
         id_factory: Callable[[], str] = _uuid,
+        activation_id_factory: Callable[[], str] = _uuid,
         epoch_factory: Callable[[], str] = _uuid,
         now: Clock = _utcnow,
         max_outstanding_confirmations: int = _DEFAULT_MAX_OUTSTANDING,
@@ -3123,6 +3131,7 @@ class Engine:
                 these over so the façade is the defined owner that releases every
                 connection on shutdown (ADR-0042 §2). Empty when the façade owns
                 nothing (its collaborators are all in-memory).
+            activation_id_factory: Supplies independent UUID4 activation identifiers.
             id_factory: Supplies opaque continuation-token handles; injectable so
                 a test can assert a stable handle.
             epoch_factory: Supplies this engine's handle epoch, read **once** at
@@ -3376,6 +3385,7 @@ class Engine:
         self._goal_question_ttl = goal_question_ttl
         self._closers = tuple(closers)
         self._id_factory = id_factory
+        self._activation_id_factory = activation_id_factory
         self._max_outstanding = max_outstanding_confirmations
         self._max_payload_bytes = max_payload_bytes
         self._drain_timeout = drain_timeout
@@ -4169,13 +4179,25 @@ class Engine:
         if event and self._informational_events is None:
             raise ConfigurationError("informational event processing is not wired")
         deadline = asyncio.get_running_loop().time() + timeout.total_seconds()
-        return await self._tracked(
-            self._dispatch_channel(
+        state = admit_channel(
+            accepted, capability, clock=self._now, id_factory=self._activation_id_factory
+        )
+        projection = replace(projection, capture_report=state.reserved_report)
+        task = self._activation_task(
+            ActivationScope(state),
+            lambda: self._dispatch_channel(
                 accepted, capability, timeout=timeout, projection=projection, deadline=deadline
             ),
-            projection.method,
-            shielded=not event,
+            seam=projection.method,
+            check_output=lambda result: check_payload(
+                projection.terminal(result),
+                max_bytes=self._max_payload_bytes,
+                subject=f"the result of {projection.method}()",
+            ),
         )
+        result, report = await task if event else await asyncio.shield(task)
+        assert report is not None  # noqa: S101 — channel admission always creates state
+        return captured_result(result, report, index_episode_id=state.index_episode_id)
 
     async def _dispatch_channel(
         self,
@@ -4197,8 +4219,10 @@ class Engine:
                     target, input.payload.text, input.payload.modality, input.context
                 ),
                 deadline=deadline,
+                on_summary=None if (state := active_state()) is None else state.summary,
             )
-            return self._checked(result, projection.method)
+            self._checked(projection.terminal(result), projection.method)
+            return result
         if isinstance(input.payload, SpeechChannelPayload):
             assert isinstance(reply, SpokenReply)  # noqa: S101 — narrowed by validated channel dispatch
             transcriber, synthesizer = self._speech_seams()
@@ -4249,6 +4273,8 @@ class Engine:
         )
         return self._streamed(
             accepted.payload.text,
+            admitted_input=accepted,
+            admitted_reply=capability,
             timeout=timeout,
             conversation_id=selected,
             reference=options.reference,
@@ -4450,6 +4476,8 @@ class Engine:
         self,
         utterance: str,
         *,
+        admitted_input: ChannelInput,
+        admitted_reply: ReplyCapability | None,
         timeout: timedelta,  # noqa: ASYNC109 — threaded through to the seam (ADR-0029 §4)
         conversation_id: str | None,
         reference: TurnReference | None = None,
@@ -4474,8 +4502,13 @@ class Engine:
         the turn §9 promises to finish would never finish.
         """
         chunks: asyncio.Queue[ReplyChunk] = asyncio.Queue()
-        turn = self._track(
-            self._channel_stream_result(
+        state = admit_channel(
+            admitted_input, admitted_reply, clock=self._now, id_factory=self._activation_id_factory
+        )
+        projection = replace(projection, capture_report=state.reserved_report)
+        turn = self._activation_task(
+            ActivationScope(state),
+            lambda: self._channel_stream_result(
                 self._converse_streaming(
                     utterance,
                     timeout=timeout,
@@ -4487,7 +4520,12 @@ class Engine:
                 ),
                 projection,
             ),
-            projection.method,
+            seam=projection.method,
+            check_output=lambda result: check_payload(
+                projection.terminal(result),
+                max_bytes=self._max_payload_bytes,
+                subject=f"the result of {projection.method}()",
+            ),
         )
         # A turn nobody reads still fails legibly rather than as asyncio's
         # "Task exception was never retrieved" on the next collection: §9 makes an
@@ -4531,7 +4569,9 @@ class Engine:
                     await waiting
         # ``result()`` re-raises whatever the turn raised, which is the terminal
         # error frame's value one layer down (ADR-0173 §1).
-        yield turn.result()
+        result, report = turn.result()
+        assert report is not None  # noqa: S101 — channel admission always creates state
+        yield captured_result(result, report, index_episode_id=state.index_episode_id)
 
     async def converse_spoken(
         self,
@@ -4822,6 +4862,8 @@ class Engine:
             # before any I/O.
             await self._conversations.record_delivery(str(conversation_id), delivery)
         heard, failed = await self._transcribed(transcriber, utterance, seconds=remaining())
+        if (state := active_state()) is not None:
+            state.transcription(heard if failed is None else None)
         if failed is not None:
             # Raised **outside** the ``except`` block that caught the seam's failure,
             # which is stricter than ``from None`` alone. ``from None`` sets
@@ -5033,6 +5075,9 @@ class Engine:
         Raises:
             OversizedValueError: If it is over the limit with no rendering in it.
         """
+        state = active_state()
+        if state is not None:
+            state.observe_result(spoken)
         if spoken.spoken is None:
             self._checked(projection.spoken(spoken), projection.method)
             return spoken
@@ -5054,6 +5099,8 @@ class Engine:
                 # step.
                 episode_id=spoken.episode_id,
             )
+            if state is not None:
+                state.observe_result(degraded)
             self._checked(projection.spoken(degraded), projection.method)
             return degraded
         return spoken
@@ -11657,6 +11704,8 @@ class Engine:
         """Resolve the store-owned channel once, then pass supplied context separately."""
         remaining = None if self._reconciliation is None else self._reconciliation.opened(timeout)
         conversation = await self._conversations.begin(conversation_id)
+        if (state := active_state()) is not None:
+            state.resolved_conversation(conversation.id)
         resolved = ResolvedChannelInput(
             channel=ChannelIdentity(channel_type="conversation", instance_id=conversation.id),
             text=utterance,
@@ -13261,6 +13310,8 @@ class Engine:
                         max_bytes=self._max_payload_bytes,
                         subject="a chunk of the reply to converse_streaming()",
                     )
+                    if (state := active_state()) is not None:
+                        state.published(produced.text)
                     chunks.put_nowait(produced)
                 else:
                     composed = produced
@@ -13550,6 +13601,8 @@ class Engine:
                             max_bytes=self._max_payload_bytes,
                             subject="a chunk of the reply to converse_streaming()",
                         )
+                        if (state := active_state()) is not None:
+                            state.published(opening.text)
                         chunks.put_nowait(opening)
                         pending = None
                     check_payload(
@@ -13557,6 +13610,8 @@ class Engine:
                         max_bytes=self._max_payload_bytes,
                         subject="a chunk of the reply to converse_streaming()",
                     )
+                    if (state := active_state()) is not None:
+                        state.published(produced.text)
                     chunks.put_nowait(produced)
                 else:
                     composed = produced
@@ -14798,31 +14853,56 @@ class Engine:
         park retained, and :meth:`_compose_and_capture_routed` with ``False``, which
         is true of an episode rendering no turn rather than a fallback.
         """
-        report = await self._conversations.capture(
-            conversation_id,
-            content=(
-                _exchange_of(turn, step, resumed=resumed)
-                if routed is None
-                else _routed_exchange_of(utterance, resumed=resumed)
-            ),
-            asked=asked,
-            outcome=None if composed is None else composed.text,
-            disposition=(
-                _outcome_of(step) if routed is None else _routed_outcome_of(routed.outcome)
-            ),
-            parked=parked,
-            supplied_withheld=supplied_withheld,
-            modality=modality,
-            derived_from_external=derived_from_external,
-            delivery=None if spoken is None else spoken.delivery,
-        )
-        if spoken is not None:
-            spoken.episode_id = report.episode_id
-        return TurnOutcome(
+        state = active_state()
+        if state is None:
+            report = await self._conversations.capture(
+                conversation_id,
+                content=(
+                    _exchange_of(turn, step, resumed=resumed)
+                    if routed is None
+                    else _routed_exchange_of(utterance, resumed=resumed)
+                ),
+                asked=asked,
+                outcome=None if composed is None else composed.text,
+                disposition=(
+                    _outcome_of(step) if routed is None else _routed_outcome_of(routed.outcome)
+                ),
+                parked=parked,
+                supplied_withheld=supplied_withheld,
+                modality=modality,
+                derived_from_external=derived_from_external,
+                delivery=None if spoken is None else spoken.delivery,
+            )
+            if spoken is not None:
+                spoken.episode_id = report.episode_id
+            captured_conversation = report.conversation_id
+            degraded = report.degraded
+        else:
+            state.facts = CaptureFacts(
+                content=(
+                    _exchange_of(turn, step, resumed=resumed)
+                    if routed is None
+                    else _routed_exchange_of(utterance, resumed=resumed)
+                ),
+                asked=asked,
+                response=None if composed is None else composed.text,
+                disposition=(
+                    _outcome_of(step) if routed is None else _routed_outcome_of(routed.outcome)
+                ),
+                parked=parked,
+                supplied_withheld=supplied_withheld,
+                modality=modality,
+                derived_from_external=derived_from_external,
+                delivery=None if spoken is None else spoken.delivery,
+            )
+            state.composition_timed_out = composed is not None and composed.timed_out
+            captured_conversation = conversation_id
+            degraded = False
+        result = TurnOutcome(
             turn=turn,
             step=step,
-            conversation_id=report.conversation_id,
-            capture_degraded=report.degraded,
+            conversation_id=captured_conversation,
+            capture_degraded=degraded,
             reply=None if composed is None else composed.text,
             reply_degraded=composed is not None and composed.degraded,
             routed=routed,
@@ -14904,6 +14984,9 @@ class Engine:
             # set (ADR-0255 §11).
             drive_withheld=drive_withheld,
         )
+        if state is not None:
+            state.observe_result(result)
+        return result
 
     async def _learn(self, event: FeedbackEvent) -> LearnOutcome:
         """Delegate to the loop and translate its write outcomes (ADR-0042 §1)."""

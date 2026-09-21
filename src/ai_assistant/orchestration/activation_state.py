@@ -146,6 +146,28 @@ class ActivationState:
             links=self.links,
         )
 
+    def reserved_report(self) -> EpisodeCaptureReport:
+        """Bound the receipt before append, using SQLite's largest index ordinal."""
+        address = self.index_episode_id
+        if address is None:
+            if self.conversation_id is not None:
+                address = f"conv:{self.conversation_id}:9223372036854775807"
+            elif self.activation_id is not None:
+                address = f"activation:{self.activation_id}"
+        return EpisodeCaptureReport(
+            activation_id=self.activation_id, episode_id=address, state="degraded"
+        )
+
+    def summary(self, text: str) -> None:
+        """Observe a produced summary before the stage's final deadline check."""
+        self.response = text
+        self.response_kind = EpisodeResponseKind.INFORMATIONAL_SUMMARY
+
+    def published(self, text: str) -> None:
+        """Retain exactly the stream chunks actually published by this worker."""
+        self.response = (self.response or "") + text
+        self.response_kind = EpisodeResponseKind.CONVERSATION_REPLY
+
     def degraded_report(self) -> EpisodeCaptureReport:
         """An index address alone never claims that the episode was recorded."""
         return EpisodeCaptureReport(

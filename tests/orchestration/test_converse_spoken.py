@@ -44,8 +44,11 @@ from ai_assistant.core.types import (
     MemoryWrite,
     MemoryWriteMode,
     PlannerOutput,
+    ProcessingReason,
     Provenance,
     ReadAskOutcome,
+    RecordedChannelTrigger,
+    RecordedSpeechInput,
     RoutableOperation,
     SemanticMemory,
     SpeechFailure,
@@ -123,10 +126,8 @@ def _refusing(_messages: Sequence[Message]) -> str:
 async def test_a_blank_transcript_is_four_absences_and_no_turn(blank: str) -> None:
     """§4: "nothing was asked, so nothing was answered".
 
-    No turn ran, no episode was captured and no conversation was created — three
-    separate claims, each checked, because a shape returning the right four members
-    while still capturing an episode would be a recording with no words leaving a
-    record of one.
+    No turn runs and no conversation is created. ADR-0275 now retains the exact
+    blank transcript in an inspection-only activation episode.
     """
     harness = _wired(transcriber=FakeSpeechTranscriber(transcripts=[blank]))
 
@@ -136,7 +137,16 @@ async def test_a_blank_transcript_is_four_absences_and_no_turn(blank: str) -> No
     assert spoken.spoken_degraded is False
     assert isinstance(harness.synthesizer, FakeSpeechSynthesizer)
     assert harness.synthesizer.call_count == 0
-    assert await harness.memory.export() == []
+    (episode,) = await harness.memory.export()
+    assert isinstance(episode, EpisodicMemory)
+    processing = episode.processing_record
+    assert processing is not None
+    assert processing.reason is ProcessingReason.NO_CONTENT
+    assert not processing.model_eligible
+    assert isinstance(processing.trigger, RecordedChannelTrigger)
+    assert isinstance(processing.trigger.payload, RecordedSpeechInput)
+    assert processing.trigger.payload.transcript == blank
+    assert episode.outcome is None
     assert await harness.conversation_store.recent() == []
 
 
