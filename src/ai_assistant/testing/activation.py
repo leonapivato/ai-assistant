@@ -5,7 +5,7 @@ from __future__ import annotations
 import asyncio
 from dataclasses import dataclass, field
 from typing import TYPE_CHECKING
-from uuid import UUID, uuid4
+from uuid import UUID
 
 from ai_assistant.core.episode_encoding import canonical_json
 from ai_assistant.core.errors import (
@@ -63,7 +63,7 @@ class FakeActivation:
     trigger: RecordedActivationTrigger
     at: datetime
     conversation_id: str | None = None
-    activation_id: str | None = field(default_factory=lambda: str(uuid4()))
+    activation_id: str | None = None
     episode_id: str | None = None
     outcome: TurnOutcome | None = None
     response: str | None = None

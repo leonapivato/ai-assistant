@@ -74,6 +74,8 @@ from ai_assistant.core.types import (
     ActionRequest,
     AssociationVerdict,
     CanonicalDestination,
+    ChannelIdentity,
+    ChannelInput,
     CostBasis,
     CurrentContext,
     DestinationProtocol,
@@ -104,6 +106,7 @@ from ai_assistant.core.types import (
     Reversibility,
     RiskLevel,
     SemanticMemory,
+    TextChannelPayload,
     TimeOfDay,
     ToolCall,
     ToolCost,
@@ -146,6 +149,9 @@ from ai_assistant.orchestration import (
     UpcomingEventStage,
 )
 from ai_assistant.orchestration import traces as operation_traces
+from ai_assistant.orchestration.activation_coordinator import ActivationCoordinator
+from ai_assistant.orchestration.activation_state import admit_channel
+from ai_assistant.orchestration.activation_writer import ActivationWriter
 from ai_assistant.orchestration.origin import NOTHING_EXTERNAL
 from ai_assistant.orchestration.reads import _SearchCounts
 from ai_assistant.orchestration.traces import OperationTraces
@@ -218,6 +224,7 @@ from ai_assistant.testing.searching import FAKE_WEB_SEARCH
 from ai_assistant.tools.builtin import CurrentTime
 
 if TYPE_CHECKING:
+    import asyncio
     from collections.abc import Callable, Coroutine
 
     from ai_assistant.core.clock import Clock
@@ -2105,7 +2112,11 @@ def test_the_seam_table_is_the_whole_set() -> None:
         f"them off the seam"
     )
 
-    tabled = {seam.label for seam in SEAMS} | {seam.label for seam in SWALLOWING_SEAMS}
+    tabled = (
+        {seam.label for seam in SEAMS}
+        | {seam.label for seam in SWALLOWING_SEAMS}
+        | set(CAPTURE_SEAMS)
+    )
     derived: set[str] = set()
     for expression, produce in COMPUTED_OWNERS.items():
         labels = produce()
@@ -2123,3 +2134,53 @@ def test_the_seam_table_is_the_whole_set() -> None:
         f"{sorted(roster - tabled - set(UNTABLED))} guards a clock in ``src/`` and is "
         f"is driven by no table here and recorded in ``UNTABLED`` with no reason"
     )
+
+
+CAPTURE_SEAMS = ("ActivationCoordinator", "ActivationWriter")
+
+
+@pytest.mark.parametrize("label", CAPTURE_SEAMS)
+@pytest.mark.parametrize(
+    "now", [_naive_clock, _failing_clock, lambda: _AWARE], ids=["naive", "down", "valid"]
+)
+async def test_capture_clock_fault_degrades_receipt_without_writing_an_invalid_record(
+    label: str, now: Clock
+) -> None:
+    """ADR-0275's clock loss preserves processing and emits only closed telemetry."""
+    memory = FakeMemoryStore(now=lambda: _AWARE)
+    state = admit_channel(
+        ChannelInput(
+            target=ChannelIdentity(channel_type="informational_event", instance_id="event"),
+            payload=TextChannelPayload(text="input"),
+        ),
+        None,
+        clock=lambda: _AWARE,
+        id_factory=lambda: "1bed03e1-3b38-4e67-a2e4-6f6bf9c97eb1",
+    )
+    writer = ActivationWriter(
+        conversations=FakeConversationStore(now=lambda: _AWARE),
+        memory=memory,
+        archive=FakeTranscriptArchiveWriter(),
+        archive_enabled=False,
+        retention=None,
+        now=now if label == "ActivationWriter" else lambda: _AWARE,
+    )
+    children: list[asyncio.Task[None]] = []
+    coordinator = ActivationCoordinator(
+        writer=writer,
+        register=children.append,
+        now=now if label == "ActivationCoordinator" else lambda: _AWARE,
+        payload_limit=10000,
+    )
+    with structlog.testing.capture_logs() as logs:
+        result = await coordinator.finish(state, failure=None, check_output=lambda: None)
+    if now in (_naive_clock, _failing_clock):
+        assert result.report.state == "degraded"
+        assert await memory.export() == []
+        losses = [entry for entry in logs if entry["event"] == "activation_capture_degraded"]
+        assert len(losses) == 1
+        assert set(losses[0]) == {"event", "stage", "reason", "log_level"}
+    else:
+        assert result.report.state == "recorded"
+        assert len(await memory.export()) == 1
+    assert all(child.done() for child in children)
