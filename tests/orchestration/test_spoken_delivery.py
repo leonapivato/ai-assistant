@@ -278,7 +278,8 @@ async def test_the_report_is_recorded_even_where_the_recording_carried_no_words(
     """§1: "recorded **before the turn plans**, so a failure … does not lose it".
 
     ADR-0200 §4's no-words shape is the sharpest form of "later in the call": no turn
-    runs, nothing is captured and no conversation is created — and the report is
+    runs and no conversation is created. ADR-0275 records the admitted silence
+    separately, without a playback state of its own. The report is
     still about a turn that has already happened, so it lands.
     """
     harness = _wired(transcriber=FakeSpeechTranscriber(transcripts=[_ASKED, "   "]))
@@ -294,7 +295,8 @@ async def test_the_report_is_recorded_even_where_the_recording_carried_no_words(
 
     assert second.outcome is None, "the recording carried no words"
     rows = await _rows(harness, conversation)
-    assert [one.delivery for one in rows] == [_INTERRUPTED], "and the report still landed"
+    assert [one.delivery for one in rows] == [_INTERRUPTED, None], "the report still landed"
+    assert [one.model_eligible for one in rows] == [True, False]
 
 
 async def test_the_report_is_recorded_even_where_transcription_failed() -> None:
@@ -317,7 +319,8 @@ async def test_the_report_is_recorded_even_where_transcription_failed() -> None:
         )
 
     rows = await _rows(harness, conversation)
-    assert [one.delivery for one in rows] == [_INTERRUPTED], "the fact about turn 1 survived"
+    assert [one.delivery for one in rows] == [_INTERRUPTED, None], "turn 1 survived"
+    assert [one.model_eligible for one in rows] == [True, False]
 
 
 async def test_a_report_against_an_unknown_conversation_is_refused() -> None:

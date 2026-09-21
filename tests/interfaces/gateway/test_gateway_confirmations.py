@@ -778,15 +778,10 @@ async def test_a_second_answer_on_a_settled_binding_crosses_as_an_outcome() -> N
     unchanged. So the second answer here says ``False`` and the disposition that comes
     back is still ``executed``.
 
-    **The two crossings are indistinguishable, and that is the point rather than a gap.**
-    §2 gives a restatement ADR-0170 §4's second shape exactly — ``turn`` ``None``,
-    ``routed`` ``None``, ``reply`` ``None``, ``reply_degraded`` ``False``, a ``step`` —
-    which is the same shape a resume driven from a **recovered** park produces
-    (ADR-0052 §3, and ``_compose`` declines on a pass with no turn). The bodies are
-    therefore equal, so no front end can tell a restatement from a resolution by reading
-    one; ``app.js`` states its own history instead of guessing, and ``_outcome_view``
-    invents no member to tell them apart, which would be this adapter authoring a fact
-    the engine did not state (ADR-0168 §1).
+    The gateway forwards the same recorded action on a replay. ADR-0275 makes
+    capture loss independent: resolving this fake's recovered, unassociated park
+    degrades capture, while restating its answer admits no activation at all.
+    The adapter carries that flag without inventing its own replay discriminator.
     """
     async with _harness(_holding(_confirmation(_span("body")))) as one:
         first_status, first = await one.whole(
@@ -806,7 +801,9 @@ async def test_a_second_answer_on_a_settled_binding_crosses_as_an_outcome() -> N
         assert second["outcome"]["reply_degraded"] is False
         assert second["outcome"]["routed"] is None
         assert second["outcome"]["steps"] == []
-        assert second["outcome"] == first["outcome"]
+        assert first["outcome"]["capture_degraded"] is True
+        assert second["outcome"]["capture_degraded"] is False
+        assert second["outcome"] == {**first["outcome"], "capture_degraded": False}
         # And it reached the engine: the gateway relayed the second answer rather than
         # holding state of its own about which tokens it had already spent.
         assert one.engine.calls == [
