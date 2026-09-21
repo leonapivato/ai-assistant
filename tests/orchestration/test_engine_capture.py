@@ -1000,6 +1000,9 @@ async def test_a_captured_reply_reaches_the_tail_and_the_observation_batch(enric
             response_kind=core_types.EpisodeResponseKind.CONVERSATION_REPLY,
             model_eligible=True,
         )
+        # Processing is immutable once recorded; replace the synthetic fixture
+        # explicitly instead of mutating a production capture in place.
+        await harness.memory.delete(episode.id)
         await harness.memory.add(episode.model_copy(update={"processing_record": processing}))
 
     await harness.engine.converse(
@@ -1033,7 +1036,7 @@ async def test_no_log_on_the_capture_or_observation_path_carries_the_reply() -> 
     ADR-0222 §5's counter pair — two integers and no text — once per assembly.
 
     The capture path logs only where something failed, so the degraded routes are the
-    ones worth driving: a refused ``append`` writes ``conversation_capture_degraded``
+    ones worth driving: a refused ``append`` writes ``activation_capture_degraded``
     before the episode exists, and a refused episode write logs the same event after
     the reply is in hand. Both are exercised beside the happy path and an observation
     pass, and none of them may carry a word of the reply.
@@ -1049,7 +1052,7 @@ async def test_no_log_on_the_capture_or_observation_path_carries_the_reply() -> 
     class _RefusingIndex(FakeConversationStore):
         """An index whose ``append`` is refused, which is capture's *other* logging branch.
 
-        ``ConversationLifecycle.capture`` logs ``conversation_capture_degraded`` twice
+        ``ActivationWriter`` logs ``activation_capture_degraded`` twice
         over, at two stages and from two except blocks, and the reply is in hand at
         both. Driving only the episode-write branch would leave a future change that
         logged the reply at the append branch undetected.
@@ -1120,9 +1123,7 @@ async def test_no_log_on_the_capture_or_observation_path_carries_the_reply() -> 
         assert unappended.reply == f"Certainly, {_SPAN}."
 
     stages = {
-        event.get("stage")
-        for event in captured
-        if event["event"] == "conversation_capture_degraded"
+        event.get("stage") for event in captured if event["event"] == "activation_capture_degraded"
     }
     assert stages == {"append", "episode"}, (
         "both of capture's logging branches ran, so the assertion below has both subjects"

@@ -24,10 +24,12 @@ from ai_assistant.core.types import (
     ChannelIdentity,
     ChannelInput,
     ChannelResult,
+    EpisodicMemory,
     InformationalEventResult,
     Message,
     Modality,
     NewConversation,
+    ProcessingStatus,
     ReplyChunk,
     Role,
     SpeechChannelPayload,
@@ -78,7 +80,7 @@ class ControlledModel(FakeModelProvider):
             self.cleaned.set()
 
 
-async def test_event_passes_only_quoted_material_to_one_model_and_persists_nothing() -> None:
+async def test_event_quotes_material_and_records_only_an_inspection_episode() -> None:
     model = FakeModelProvider("The thermostat entered eco mode at 18:00.")
     harness = Harness(informational_events=InformationalEventStage(model))
     supplied = event_input().model_copy(
@@ -107,7 +109,14 @@ async def test_event_passes_only_quoted_material_to_one_model_and_persists_nothi
         "context": supplied.context.model_dump(mode="json"),
     }
     assert await harness.conversation_store.recent() == []
-    assert await harness.memory.export() == []
+    (episode,) = await harness.memory.export()
+    assert isinstance(episode, EpisodicMemory)
+    assert episode.id == result.capture.episode_id
+    assert result.capture.state == "recorded"
+    assert episode.outcome == result.result.summary
+    assert episode.processing_record is not None
+    assert episode.processing_record.status is ProcessingStatus.COMPLETED
+    assert not episode.processing_record.model_eligible
     assert await harness.engine.goals() == before_goals
 
 
@@ -303,7 +312,9 @@ async def test_new_stream_reserves_actual_wrapper_room_before_emitting(shortfall
     baseline = initial[-1]
     assert isinstance(baseline, ChannelResult)
     assert isinstance(baseline.result, TextChannelResult)
-    exact = len(canonical_payload(baseline))
+    # Capture reserves the largest ordinal before append; the real first ordinal
+    # is eighteen characters shorter. Include that reservation in the boundary.
+    exact = len(canonical_payload(baseline)) + len(str(2**63 - 1)) - 1
     tight = _harness(planner=NoStepPlanner(), max_payload_bytes=exact - shortfall)
     values = [
         value

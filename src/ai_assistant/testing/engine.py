@@ -168,6 +168,7 @@ from ai_assistant.core.types import (
 )
 from ai_assistant.orchestration.authorization_surface import is_live, view_of
 from ai_assistant.orchestration.channels import (
+    UNCAPTURED,
     ChannelProjection,
     conversation_target,
     spoken_result,
@@ -1335,6 +1336,7 @@ class FakeAssistantEngine:
             return self._checked(
                 ChannelResult(
                     channel=target,
+                    capture=UNCAPTURED,
                     result=InformationalEventResult(
                         summary="This fake processed an informational event."
                     ),
