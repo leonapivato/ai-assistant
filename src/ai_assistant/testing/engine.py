@@ -1348,6 +1348,9 @@ class FakeAssistantEngine:
             result = await self._dispatch_channel(
                 supplied, capability, timeout, projection, activation
             )
+            # Output bounds are processing obligations even when no capture
+            # envelope could be allocated and finalization must return early.
+            self._check_channel_result(result, projection)
         except BaseException as exc:
             failure = exc
         report = await activation.finish(

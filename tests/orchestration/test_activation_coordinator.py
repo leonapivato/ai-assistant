@@ -31,7 +31,11 @@ async def test_finalization_reads_end_once_and_records_original_processing_cance
         return _AT
 
     coordinator = ActivationCoordinator(
-        writer=wiring.writer, register=tasks.append, now=clock, payload_limit=1024
+        writer=wiring.writer,
+        register=tasks.append,
+        register_safety=tasks.append,
+        now=clock,
+        payload_limit=1024,
     )
     result = await coordinator.finish(
         state,
@@ -59,7 +63,11 @@ async def test_output_refusal_uses_actual_index_before_content_and_retains_origi
     state = await wiring.state()
     tasks: list[asyncio.Task[None]] = []
     coordinator = ActivationCoordinator(
-        writer=wiring.writer, register=tasks.append, now=lambda: _AT, payload_limit=1024
+        writer=wiring.writer,
+        register=tasks.append,
+        register_safety=tasks.append,
+        now=lambda: _AT,
+        payload_limit=1024,
     )
     refusal = OversizedValueError("result is too large", limit=1024, size=1025)
 
@@ -88,7 +96,11 @@ async def test_cleanup_budget_cancels_and_waits_for_the_registered_write(
     state = await wiring.state()
     tasks: list[asyncio.Task[None]] = []
     coordinator = ActivationCoordinator(
-        writer=wiring.writer, register=tasks.append, now=lambda: _AT, payload_limit=1024
+        writer=wiring.writer,
+        register=tasks.append,
+        register_safety=tasks.append,
+        now=lambda: _AT,
+        payload_limit=1024,
     )
     loop = asyncio.get_running_loop()
     reading = loop.time()
@@ -120,7 +132,11 @@ async def test_second_cancellation_drains_registered_deletion_compensation() -> 
     state = await wiring.state()
     tasks: list[asyncio.Task[None]] = []
     coordinator = ActivationCoordinator(
-        writer=wiring.writer, register=tasks.append, now=lambda: _AT, payload_limit=1024
+        writer=wiring.writer,
+        register=tasks.append,
+        register_safety=tasks.append,
+        now=lambda: _AT,
+        payload_limit=1024,
     )
     ready = asyncio.Event()
     release = asyncio.Event()

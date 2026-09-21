@@ -36,12 +36,14 @@ class ActivationCoordinator:
         *,
         writer: ActivationWriter,
         register: Callable[[asyncio.Task[None]], None],
+        register_safety: Callable[[asyncio.Task[None]], None],
         now: Clock,
         payload_limit: int,
     ) -> None:
         """Receive the deterministic writer, shutdown registration and capture settings."""
         self._writer = writer
         self._register = register
+        self._register_safety = register_safety
         self._clock = checked_clock(now, owner="ActivationCoordinator")
         self._payload_limit = payload_limit
 
@@ -109,5 +111,5 @@ class ActivationCoordinator:
             await work
 
         task = asyncio.create_task(run())
-        self._register(task)
+        self._register_safety(task)
         await drain_registered(task, cancel_on_interrupt=False)

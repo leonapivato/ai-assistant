@@ -3279,6 +3279,7 @@ class Engine:
         self._activation_coordinator = ActivationCoordinator(
             writer=conversations.activation_writer,
             register=self._register_capture,
+            register_safety=self._register_capture_safety,
             now=self._clock,
             payload_limit=max_payload_bytes,
         )
@@ -3469,6 +3470,7 @@ class Engine:
         #: mint — filed rather than invented here (#2339).
         self._evidence_lock = asyncio.Lock()
         self._inflight: set[asyncio.Task[Any]] = set()
+        self._capture_safety: set[asyncio.Task[None]] = set()
         self._closing = False
         self._shutdown: asyncio.Task[None] | None = None
         self._drain_phase = DrainPhase.NOT_RUN
@@ -9269,8 +9271,11 @@ class Engine:
         # timeout is being spent, so an operator reading the journal after a
         # SIGKILL can see that the drain had reached its budget and was cancelling.
         self._drain_phase = DrainPhase.CANCELLED
-        _log.info("shutdown_drain_budget_exceeded", cancelling=len(pending))
-        for task in pending:
+        # Safety children are awaited with their owners, but direct cancellation
+        # would bypass the owner's shield and abandon deletion compensation.
+        cancellable = pending - self._capture_safety
+        _log.info("shutdown_drain_budget_exceeded", cancelling=len(cancellable))
+        for task in cancellable:
             task.cancel()
         # Unbounded, and `return_exceptions=True` so a cancelled task's
         # `CancelledError` is a *result* here rather than something that aborts the
@@ -9281,6 +9286,12 @@ class Engine:
         """Keep ordinary and safety cleanup in the same shutdown registry as work."""
         self._inflight.add(task)
         task.add_done_callback(self._inflight.discard)
+
+    def _register_capture_safety(self, task: asyncio.Task[None]) -> None:
+        """Track deletion cleanup without letting shutdown cancel it directly."""
+        self._capture_safety.add(task)
+        task.add_done_callback(self._capture_safety.discard)
+        self._register_capture(task)
 
     def _activation_task[T](
         self,
@@ -13071,7 +13082,11 @@ class Engine:
             self._reserved_routes.discard(park.route_id)
 
     async def _answer_routed_park(
-        self, token: ContinuationToken, *, approved: bool
+        self,
+        token: ContinuationToken,
+        *,
+        approved: bool,
+        remember_recipients_until: datetime | None,
     ) -> tuple[_RoutedPark, RoutedOperation] | None:
         """Claim the routed park ``token`` names and resolve it, in one critical section.
 
@@ -13109,6 +13124,7 @@ class Engine:
         Args:
             token: The continuation the adapter relayed back.
             approved: The human's answer.
+            remember_recipients_until: The validated control input, even on a decline.
 
         Returns:
             The park and what became of it, or ``None`` where this token names no routed
@@ -13135,7 +13151,11 @@ class Engine:
                     "rather than resuming this token"
                 )
                 raise UnknownContinuationError(msg)
-            await self._admit_control(approved=approved, conversation_id=park.conversation_id)
+            await self._admit_control(
+                approved=approved,
+                remember_recipients_until=remember_recipients_until,
+                conversation_id=park.conversation_id,
+            )
             return park, await self._resume_routed(park, approved=approved)
 
     async def _resume_routed(self, park: _RoutedPark, *, approved: bool) -> RoutedOperation:
@@ -13912,7 +13932,9 @@ class Engine:
             return await self._resume_read(
                 token, approved=approved, remember_recipients_until=remember_recipients_until
             )
-        answered = await self._answer_routed_park(token, approved=approved)
+        answered = await self._answer_routed_park(
+            token, approved=approved, remember_recipients_until=remember_recipients_until
+        )
         if answered is not None:
             park, routed = answered
             return await self._compose_and_capture_routed(park, routed)

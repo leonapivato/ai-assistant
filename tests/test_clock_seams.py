@@ -2169,6 +2169,7 @@ async def test_capture_clock_fault_degrades_receipt_without_writing_an_invalid_r
     coordinator = ActivationCoordinator(
         writer=writer,
         register=children.append,
+        register_safety=children.append,
         now=now if label == "ActivationCoordinator" else lambda: _AWARE,
         payload_limit=10000,
     )
