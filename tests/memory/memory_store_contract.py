@@ -997,8 +997,18 @@ class MemoryStoreContract:
         ):
             result = await read
             assert {record.id for record in result.records} == {"visible", "producer", "belief"}
-        rejected = await store.select(kinds=[MemoryKind.EPISODIC], episode_model_eligible=False)
-        assert all(record.id.startswith("hidden-") for record in rejected.records)
+        hidden = {f"hidden-{i}" for i in range(15)}
+        for kinds, expected in (
+            (None, hidden | {"belief"}),
+            ([MemoryKind.EPISODIC], hidden),
+            ([MemoryKind.PREFERENCE], {"belief"}),
+        ):
+            for read in (
+                store.search(_ANY, limit=16, kinds=kinds, episode_model_eligible=False),
+                store.select(limit=16, kinds=kinds, episode_model_eligible=False),
+            ):
+                result = await read
+                assert {record.id for record in result.records} == expected
         inspected = await store.episodes(status=ProcessingStatus.FAILED)
         assert len(inspected.items) == 15
         channel = ChannelIdentity(channel_type="informational_event", instance_id="source")
