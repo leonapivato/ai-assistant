@@ -38,6 +38,7 @@ from dataclasses import dataclass
 from datetime import UTC, datetime, timedelta
 from itertools import count
 from typing import TYPE_CHECKING, Final, assert_never, cast
+from uuid import UUID
 
 from ai_assistant.core.channel_validation import snapshot
 from ai_assistant.core.clock import ClockReadingError, checked_clock
@@ -129,7 +130,10 @@ from ai_assistant.core.types import (
     RecipientGrant,
     RecipientGrantNotEstablished,
     RecipientGrantOutcome,
+    RecordedChannelTrigger,
     RecordedInvocation,
+    RecordedResumeTrigger,
+    RecordedSpeechInput,
     ReplyChunk,
     Retirement,
     RoutableOperation,
@@ -170,6 +174,7 @@ from ai_assistant.orchestration.authorization_surface import is_live, view_of
 from ai_assistant.orchestration.channels import (
     UNCAPTURED,
     ChannelProjection,
+    captured_result,
     conversation_target,
     spoken_result,
     text_result,
@@ -203,6 +208,7 @@ from ai_assistant.orchestration.recipient_grants import (
     rides_an_establishing_act,
 )
 from ai_assistant.orchestration.speech import SPOKEN_PARK_SENTENCE
+from ai_assistant.testing.activation import FakeActivation
 from ai_assistant.testing.archive import FakeTranscriptArchive
 from ai_assistant.testing.connections import FakeConnectionProvisioner
 from ai_assistant.testing.destination_trust import FakeDestinationTrustStore
@@ -570,7 +576,12 @@ class FakeAssistantEngine:
         #: that each one's episode id is distinct and in ADR-0074 §3's reserved
         #: ``conv:`` namespace. A counter rather than the length of anything, for
         #: :attr:`_written`'s reason one field over.
-        self._spoken_turns: dict[str, int] = {}
+        self._episode_ordinals: dict[str, int] = {}
+        self._episode_conversations: dict[str, str] = {}
+        activation_ids = count(1)
+        self.activation_id_factory: Callable[[], str] = lambda: str(
+            UUID(int=next(activation_ids), version=4)
+        )
         self._ticks = count(1)
         #: Where :meth:`answer` draws the id of the belief an accepted answer writes.
         #: A **counter rather than the store's size**, because the store shrinks: a
@@ -1327,22 +1338,97 @@ class FakeAssistantEngine:
                 max_bytes=self._max_payload_bytes,
                 subject="the arguments to receive()",
             )
+        self._validate_legacy_channel(supplied, capability, timeout, projection.method)
+        activation = FakeActivation.channel(supplied, capability, _AT)
+        activation.identify(self.activation_id_factory)
+        projection = ChannelProjection(projection.method, activation.report)
+        result: ChannelResult | None = None
+        failure: BaseException | None = None
+        try:
+            result = await self._dispatch_channel(
+                supplied, capability, timeout, projection, activation
+            )
+        except BaseException as exc:
+            failure = exc
+        report = await activation.finish(
+            memory=self.episode_memory,
+            conversations=self.conversations_held,
+            allocate=lambda conversation: self._allocate_episode(conversation, activation),
+            max_bytes=self._max_payload_bytes,
+            failure=failure,
+            check_output=lambda: self._check_channel_result(result, projection),
+        )
+        if failure is not None:
+            raise failure
+        if activation.output_failure is not None:
+            raise activation.output_failure
+        assert result is not None  # noqa: S101 — a successful dispatch returned a value
+        return captured_result(result, report, index_episode_id=activation.episode_id)
+
+    def _validate_legacy_channel(
+        self,
+        supplied: ChannelInput,
+        capability: WholeTextReply | StreamingTextReply | SpokenReply | None,
+        timeout: timedelta,
+        method: str,
+    ) -> None:
+        """Apply legacy local refusals before the fake admits an activation."""
+        if method == "receive":
+            return
+        selected = (
+            None if isinstance(supplied.target, NewConversation) else supplied.target.instance_id
+        )
+        options = supplied.conversation or ConversationInputOptions()
+        if isinstance(supplied.payload, SpeechChannelPayload):
+            assert isinstance(capability, SpokenReply)  # noqa: S101 — validated combination
+            check_arguments(
+                method,
+                max_bytes=self._max_payload_bytes,
+                utterance=supplied.payload.audio,
+                plays=capability.plays,
+                timeout=timeout,
+                conversation_id=selected,
+                delivery=options.delivery,
+            )
+        else:
+            check_arguments(
+                method,
+                max_bytes=self._max_payload_bytes,
+                utterance=supplied.payload.text,
+                timeout=timeout,
+                conversation_id=selected,
+                reference=options.reference,
+            )
+
+    def _check_channel_result(
+        self, result: ChannelResult | None, projection: ChannelProjection
+    ) -> None:
+        if result is not None:
+            self._checked(projection.terminal(result), projection.method)
+
+    async def _dispatch_channel(
+        self,
+        supplied: ChannelInput,
+        capability: WholeTextReply | StreamingTextReply | SpokenReply | None,
+        timeout: timedelta,  # noqa: ASYNC109 — caller processing budget
+        projection: ChannelProjection,
+        activation: FakeActivation,
+    ) -> ChannelResult:
         target = supplied.target
         selected = None if isinstance(target, NewConversation) else target.instance_id
         if isinstance(target, ChannelIdentity) and target.channel_type == "informational_event":
             if timeout.total_seconds() <= 0:
                 raise ChannelProcessingTimeoutError("informational event processing timed out")
             self.calls.append(("receive", {"input": supplied, "reply": capability}))
-            return self._checked(
-                ChannelResult(
-                    channel=target,
-                    capture=UNCAPTURED,
-                    result=InformationalEventResult(
-                        summary="This fake processed an informational event."
-                    ),
+            result = ChannelResult(
+                channel=target,
+                capture=UNCAPTURED,
+                result=InformationalEventResult(
+                    summary="This fake processed an informational event."
                 ),
-                "receive",
             )
+            activation.observe(result)
+            return result
         options = supplied.conversation or ConversationInputOptions()
         if isinstance(supplied.payload, SpeechChannelPayload):
             assert isinstance(capability, SpokenReply)  # noqa: S101 — validated combination
@@ -1352,6 +1438,7 @@ class FakeAssistantEngine:
                 timeout=timeout,
                 conversation_id=selected,
                 delivery=options.delivery,
+                activation=activation,
             )
             try:
                 self._checked(projection.spoken(spoken), projection.method)
@@ -1360,12 +1447,14 @@ class FakeAssistantEngine:
                     raise
                 spoken = spoken.model_copy(update={"spoken": None, "spoken_degraded": True})
                 self._checked(projection.spoken(spoken), projection.method)
+            activation.observe(spoken)
             return spoken_result(spoken)
         outcome = await self._legacy_converse(
             supplied.payload.text,
             timeout=timeout,
             conversation_id=selected,
             reference=options.reference,
+            activation=activation,
         )
         self._checked(projection.text(outcome), projection.method)
         return text_result(outcome)
@@ -1401,26 +1490,47 @@ class FakeAssistantEngine:
             None if isinstance(supplied.target, NewConversation) else supplied.target.instance_id
         )
         options = supplied.conversation or ConversationInputOptions()
-        # Measure the actual terminal before yielding any chunk.
-        values = [
-            value
-            async for value in self._streamed(
-                supplied.payload.text,
-                conversation_id=selected,
-                reference=options.reference,
-                measure=False,
-            )
-        ]
-        outcome = values[-1]
-        assert isinstance(outcome, TurnOutcome)  # noqa: S101 — existing stream invariant
-        if projection.method == "receive_streaming":
+        activation = FakeActivation.channel(supplied, StreamingTextReply(), _AT)
+        activation.identify(self.activation_id_factory)
+        projection = ChannelProjection(projection.method, activation.report)
+        result: ChannelResult | None = None
+        failure: BaseException | None = None
+        values: list[ReplyChunk | TurnOutcome] = []
+        try:
+            values = [
+                value
+                async for value in self._streamed(
+                    supplied.payload.text,
+                    conversation_id=selected,
+                    reference=options.reference,
+                    measure=False,
+                    activation=activation,
+                )
+            ]
+            outcome = values[-1]
+            assert isinstance(outcome, TurnOutcome)  # noqa: S101 — stream terminal
             outcome, values = self._fit_channel_stream(outcome, values, projection)
-        result = text_result(outcome)
-        self._checked(projection.text(outcome), projection.method)
+            activation.observe(outcome)
+            result = text_result(outcome)
+        except BaseException as exc:
+            failure = exc
+        report = await activation.finish(
+            memory=self.episode_memory,
+            conversations=self.conversations_held,
+            allocate=lambda conversation: self._allocate_episode(conversation, activation),
+            max_bytes=self._max_payload_bytes,
+            failure=failure,
+            check_output=lambda: self._check_channel_result(result, projection),
+        )
+        if failure is not None:
+            raise failure
+        if activation.output_failure is not None:
+            raise activation.output_failure
+        assert result is not None  # noqa: S101 — successful stream
         for value in values[:-1]:
-            assert isinstance(value, ReplyChunk)  # noqa: S101 — existing stream invariant
+            assert isinstance(value, ReplyChunk)  # noqa: S101 — stream prefix
             yield value
-        yield result
+        yield captured_result(result, report, index_episode_id=activation.episode_id)
 
     def _fit_channel_stream(
         self,
@@ -1460,6 +1570,7 @@ class FakeAssistantEngine:
         timeout: timedelta,  # noqa: ASYNC109 — the caller's budget, as the Protocol declares it
         conversation_id: Identifier | None = None,
         reference: TurnReference | None = None,
+        activation: FakeActivation | None = None,
     ) -> TurnOutcome:
         """Run one turn against a conversation, minting one if none is named.
 
@@ -1490,6 +1601,8 @@ class FakeAssistantEngine:
             )
         )
         held = self._resolve(selected)
+        if activation is not None:
+            activation.resolved(held)
         # ``reply`` is populated because ADR-0170 §4 obliges an answer on every shape
         # but a park and a recovered resume, and ``TurnOutcome`` refuses an outcome
         # that owes one and carries none. A fake that returned ``None`` here would
@@ -1506,6 +1619,8 @@ class FakeAssistantEngine:
         if outcome.conversation_id is None:
             outcome = outcome.model_copy(update={"conversation_id": held})
         outcome = self._stating(outcome)
+        if activation is not None:
+            activation.observe(outcome)
         return self._checked(outcome, "converse")
 
     def _legacy_converse_streaming(
@@ -1549,6 +1664,7 @@ class FakeAssistantEngine:
         conversation_id: str | None,
         reference: TurnReference | None = None,
         measure: bool = True,
+        activation: FakeActivation | None = None,
     ) -> AsyncIterator[ReplyChunk | TurnOutcome]:
         """Yield the outcome's own reply in pieces, then the outcome.
 
@@ -1570,6 +1686,8 @@ class FakeAssistantEngine:
             )
         )
         held = self._resolve(conversation_id)
+        if activation is not None:
+            activation.resolved(held)
         outcome = self.turn_outcome or TurnOutcome(
             turn=_turn(utterance),
             conversation_id=held,
@@ -1582,13 +1700,15 @@ class FakeAssistantEngine:
         if outcome.conversation_id is None:
             outcome = outcome.model_copy(update={"conversation_id": held})
         outcome = self._stating(outcome)
+        if activation is not None:
+            activation.observe(outcome)
         checked = self._checked(outcome, "converse_streaming") if measure else outcome
         for piece in _pieces_of(checked.reply):
             chunk = ReplyChunk(text=piece)
             yield self._checked(chunk, "converse_streaming") if measure else chunk
         yield checked
 
-    async def _legacy_converse_spoken(
+    async def _legacy_converse_spoken(  # noqa: PLR0913 — legacy speech inputs plus per-call observation
         self,
         utterance: SpokenAudio,
         *,
@@ -1596,6 +1716,7 @@ class FakeAssistantEngine:
         timeout: timedelta,  # noqa: ASYNC109 — the caller's budget, as the Protocol declares it
         conversation_id: Identifier | None = None,
         delivery: SpokenDeliveryReport | None = None,
+        activation: FakeActivation,
     ) -> SpokenTurn:
         """Run one spoken turn, scripted by :attr:`spoken_transcript` (ADR-0200 §3).
 
@@ -1625,6 +1746,7 @@ class FakeAssistantEngine:
         recovered resume — is silent as before (§3).
 
         Args:
+            activation: This admitted call's independent recording state.
             utterance: The recording. Carried no further than this call — nothing
                 here writes it, logs it or keeps it (ADR-0200 §8), and the fake
                 never decodes it, because what it *says* is not something a
@@ -1670,6 +1792,11 @@ class FakeAssistantEngine:
             conversation_id=selected,
             delivery=delivery,
         )
+
+        def observed(value: SpokenTurn, _method: str) -> SpokenTurn:
+            activation.observe(value)
+            return value
+
         self.calls.append(
             (
                 "converse_spoken",
@@ -1683,9 +1810,11 @@ class FakeAssistantEngine:
             # what the refusal above guarantees.
             self._record_delivery(str(selected), delivery)
         heard = self.spoken_transcript
+        activation.transcription(heard)
         if not heard.strip():
-            return self._checked(SpokenTurn(), "converse_spoken")
+            return observed(SpokenTurn(), "converse_spoken")
         held = self._resolve(selected)
+        activation.resolved(held)
         outcome = self.turn_outcome or TurnOutcome(
             turn=_turn(heard),
             conversation_id=held,
@@ -1698,11 +1827,12 @@ class FakeAssistantEngine:
         if outcome.conversation_id is None:
             outcome = outcome.model_copy(update={"conversation_id": held})
         outcome = self._stating(outcome)
+        activation.observe(outcome)
         chosen = next((member for member in plays if member in self.spoken_formats), None)
         # ADR-0205 §4: every turn of this operation is stamped `UNKNOWN` at capture,
         # the park and the degraded synthesis included, so the id is minted before
         # the rendering is decided and reaches every shape below that recorded one.
-        episode = self._spoken_episode(held)
+        episode = None
         # ADR-0207 §1: a live confirmation park speaks §2's sentence rather than
         # falling silent, and the constant is **named** rather than copied (§5's
         # third arm), so this double cannot drift from the engine it stands in for.
@@ -1711,33 +1841,41 @@ class FakeAssistantEngine:
         if text is None and is_live_confirmation_park(outcome):
             text = SPOKEN_PARK_SENTENCE
         if text is None:
-            return self._checked(
+            return observed(
                 SpokenTurn(heard=heard, outcome=outcome, episode_id=episode), "converse_spoken"
             )
         if chosen is None:
-            return self._checked(
+            return observed(
                 SpokenTurn(heard=heard, outcome=outcome, spoken_degraded=True, episode_id=episode),
                 "converse_spoken",
             )
         rendering = SpokenAudio(content=_pseudo_audio(text, chosen), media_type=chosen)
-        return self._checked(
+        return observed(
             SpokenTurn(heard=heard, outcome=outcome, spoken=rendering, episode_id=episode),
             "converse_spoken",
         )
 
-    def _spoken_episode(self, conversation_id: str) -> str:
-        """Mint this turn's episode id, in ADR-0074 §3's reserved namespace.
-
-        Derived from the conversation and a per-conversation counter, exactly as a
-        ``ConversationStore`` derives one from the conversation and the ordinal it
-        allocated — so two turns cannot collide and a consumer can hand the value
-        back on the next call, which is the whole of what ADR-0205 §1 discloses it
-        for. Recorded as ``UNKNOWN`` at once (§4).
-        """
-        ordinal = self._spoken_turns.get(conversation_id, 0) + 1
-        self._spoken_turns[conversation_id] = ordinal
+    def _allocate_episode(
+        self, conversation_id: str, activation: FakeActivation | None = None
+    ) -> str:
+        """Allocate one shared text/speech ordinal and retain explicit membership."""
+        ordinal = self._episode_ordinals.get(conversation_id, 0) + 1
+        self._episode_ordinals[conversation_id] = ordinal
         episode = f"conv:{conversation_id}:{ordinal}"
-        self.deliveries[episode] = SpokenDelivery(state=SpokenDeliveryState.UNKNOWN)
+        self._episode_conversations[episode] = conversation_id
+        digest = self.conversations_held[conversation_id]
+        self.conversations_held[conversation_id] = digest.model_copy(
+            update={
+                "recorded_turns": digest.recorded_turns + 1,
+                "last_turn_at": _AT,
+            }
+        )
+        if activation is None or (
+            isinstance(activation.trigger, RecordedChannelTrigger)
+            and isinstance(activation.trigger.payload, RecordedSpeechInput)
+            and activation.outcome is not None
+        ):
+            self.deliveries[episode] = SpokenDelivery(state=SpokenDeliveryState.UNKNOWN)
         return episode
 
     def _record_delivery(self, conversation_id: str, report: SpokenDeliveryReport) -> None:
@@ -1758,7 +1896,7 @@ class FakeAssistantEngine:
         recorded = self.deliveries.get(report.episode_id)
         if recorded is None or recorded.state is not SpokenDeliveryState.UNKNOWN:
             return
-        if not report.episode_id.startswith(f"conv:{conversation_id}:"):
+        if self._episode_conversations.get(report.episode_id) != conversation_id:
             return
         self.deliveries[report.episode_id] = report.delivery
 
@@ -1809,16 +1947,69 @@ class FakeAssistantEngine:
             timeout=timeout,
             remember_recipients_until=until,
         )
+        activation: FakeActivation | None = None
+
+        def admit() -> None:
+            nonlocal activation
+            if activation is None:
+                # This fake's parks are seeded recovered work with no durable
+                # conversation association. Never infer one from the handle.
+                activation = FakeActivation(
+                    trigger=RecordedResumeTrigger(
+                        channel=None,
+                        approved=approved,
+                        remember_recipients_until=until,
+                    ),
+                    at=_AT,
+                )
+                activation.identify(self.activation_id_factory)
+
+        result: TurnOutcome | None = None
+        failure: BaseException | None = None
+        try:
+            result = await self._resolve_control(token, approved=approved, until=until, admit=admit)
+        except BaseException as exc:
+            failure = exc
+        if activation is not None:
+            if result is not None:
+                activation.observe(result)
+            report = await activation.finish(
+                memory=self.episode_memory,
+                conversations=self.conversations_held,
+                allocate=self._allocate_episode,
+                max_bytes=self._max_payload_bytes,
+                failure=failure,
+                check_output=lambda: self._checked(result, "resume"),
+            )
+            if result is not None:
+                result = result.model_copy(
+                    update={
+                        "capture_degraded": result.capture_degraded or report.state != "recorded"
+                    }
+                )
+        if failure is not None:
+            raise failure
+        assert result is not None  # noqa: S101 — a successful control resolution
+        return self._checked(result, "resume")
+
+    async def _resolve_control(
+        self,
+        token: ContinuationToken,
+        *,
+        approved: bool,
+        until: datetime | None,
+        admit: Callable[[], None],
+    ) -> TurnOutcome:
         self.calls.append(("resume", {"token": token.handle, "approved": approved}))
         if token.handle in self._read_handles:
             # **A parked read is answered through ``resume`` and through no second
             # operation** (ADR-0244 §6), and taken first because every branch below is
             # written about a parked step or a routed park.
             return await self._answer_read(
-                token.handle, approved=approved, remember_recipients_until=until
+                token.handle, approved=approved, remember_recipients_until=until, on_resolving=admit
             )
         if token.handle in self.routed_parked:
-            if remember_recipients_until is not None and approved:
+            if until is not None and approved:
                 # A routed park records no ``PermissionDecision`` and carries no
                 # egress binding, so there is nothing for a grant to be transcribed
                 # from (ADR-0235 §2). Refused **before** the park is claimed, so the
@@ -1829,6 +2020,7 @@ class FakeAssistantEngine:
                     "grant; nothing was claimed (ADR-0235 §2)"
                 )
                 raise UngrantableActError(msg)
+            admit()
             return await self._resume_routed(token.handle, approved=approved)
         if token.handle not in self.parked:
             # **A restatement establishes nothing and consults the argument no more
@@ -1845,10 +2037,13 @@ class FakeAssistantEngine:
         # hub can be in, and the one a consumer's own retry logic is written against.
         collected: _CollectedAct | None = None
         if until is not None:
-            collected = await self._collect_the_act(token.handle, until, approved=approved)
+            collected = await self._collect_the_act(
+                token.handle, until, approved=approved, on_resolving=admit
+            )
         # ``collected`` is ``None`` where no argument was supplied, and on the one
         # further path that collects no act: a declining answer on a park this
         # engine holds no recorded ``CONFIRM`` for, which is the state below.
+        admit()
         confirmation = self.parked.pop(token.handle)
         # **The binding is released with the park it was bound to**, and here rather
         # than at :meth:`hold_confirmation_decision`'s own scope: a handle is a park's
@@ -1999,7 +2194,12 @@ class FakeAssistantEngine:
             raise PlanningError(msg) from exc
 
     async def _collect_the_act(
-        self, handle: str, remember_recipients_until: datetime, *, approved: bool
+        self,
+        handle: str,
+        remember_recipients_until: datetime,
+        *,
+        approved: bool,
+        on_resolving: Callable[[], None],
     ) -> _CollectedAct | None:
         """Refuse the establishing act, or record the answer it rides (ADR-0235 §1, §2).
 
@@ -2044,6 +2244,7 @@ class FakeAssistantEngine:
             handle: The park being answered.
             remember_recipients_until: The instant the user chose.
             approved: What the user said.
+            on_resolving: Admit capture before recording the resolving answer.
 
         Returns:
             The collected act — the bound ``CONFIRM``, the answer just recorded, and
@@ -2072,6 +2273,7 @@ class FakeAssistantEngine:
         if approved:
             self._check_establishable(confirmed)
             establishing_at = self._establishing_instant(remember_recipients_until)
+        on_resolving()
         answer = await self._record_the_answer(
             handle,
             confirmed,
@@ -2161,6 +2363,7 @@ class FakeAssistantEngine:
                 ADR-0235 §1's expiry was already compared against, and on a declining
                 one is this fake's fixed instant — a decline reads no clock at all.
             approved: What the user said.
+            on_resolving: Admit capture before recording the resolving answer.
 
         Returns:
             The recorded resolving decision.
@@ -2318,6 +2521,7 @@ class FakeAssistantEngine:
         *,
         approved: bool,
         remember_recipients_until: datetime | None,
+        on_resolving: Callable[[], None],
     ) -> TurnOutcome:
         """Answer one parked read, or restate that its question is spent (ADR-0244 §6, §9).
 
@@ -2343,6 +2547,7 @@ class FakeAssistantEngine:
         Args:
             handle: The continuation handle naming the park.
             approved: The user's own answer.
+            on_resolving: Admit capture only after the park was claimed for a ruling.
             remember_recipients_until: The instant a standing request names, or ``None``.
 
         Returns:
@@ -2417,6 +2622,8 @@ class FakeAssistantEngine:
             # disposition is kept beside the eviction, which is §3's "a settled park keeps
             # its terminal facts" at the one fact this fake can be asked about again.
             self._settle_read(handle, outcome)
+        if outcome in _READ_OUTCOMES_THAT_RULE:
+            on_resolving()
         grant: RecipientGrantOutcome | None = None
         if outcome in _READ_OUTCOMES_THAT_RULE and confirmed is not None:
             # **Only the outcomes ADR-0244 §9 says carry a ruling record one.**
@@ -3241,8 +3448,20 @@ class FakeAssistantEngine:
             "forget_conversation", max_bytes=self._max_payload_bytes, conversation_id=named
         )
         self.calls.append(("forget_conversation", {"conversation_id": named}))
+        members = tuple(
+            episode
+            for episode, conversation in self._episode_conversations.items()
+            if conversation == named
+        )
+        for episode in members:
+            await self.archive.discard(episode)
         self.activity.pop(named, None)
-        return self._checked(self.conversations_held.pop(named, None) is not None, "forget")
+        removed = self.conversations_held.pop(named, None) is not None
+        for episode in members:
+            await self.episode_memory.delete(episode)
+            self._episode_conversations.pop(episode, None)
+            self.deliveries.pop(episode, None)
+        return self._checked(removed, "forget")
 
     # --- the transcript archive (ADR-0225 §5, §6, §7) ----------------------
 
