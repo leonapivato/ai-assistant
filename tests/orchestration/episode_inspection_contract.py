@@ -318,3 +318,28 @@ class EpisodeInspectionContract:
         assert [item.position.episode_id for item in (await subject.engine.episodes()).items] == [
             "record"
         ]
+
+    @pytest.mark.parametrize("present", [False, True])
+    async def test_episode_original_argument_bound_precedes_continuation_preflight(
+        self, episode_inspection: EpisodeInspectionSubject, present: bool
+    ) -> None:
+        subject = episode_inspection
+        record_id = "z" * 902
+        if present:
+            await subject.memory.add(_episode(record_id, activation=True))
+        arguments = {
+            "episode_id": record_id,
+            "version": "0" * 64,
+            "offset": 1,
+            "max_bytes": 65536,
+        }
+        assert len(canonical_payload(arguments)) == INSPECTION_LIMIT + 1
+        assert len(canonical_payload({**arguments, "offset": 0, "max_bytes": 1})) < INSPECTION_LIMIT
+        before = subject.memory.resource_log.visits
+
+        with pytest.raises(OversizedValueError):
+            await subject.engine.episode_chunk(
+                record_id, version="0" * 64, offset=1, max_bytes=65536
+            )
+
+        assert subject.memory.resource_log.visits == before

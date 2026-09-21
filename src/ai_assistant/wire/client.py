@@ -96,7 +96,7 @@ from ai_assistant.wire.surface import chunk_adapter, return_adapter, terminal_ad
 
 if TYPE_CHECKING:
     import socket
-    from collections.abc import AsyncIterator, Sequence
+    from collections.abc import AsyncIterator, Mapping, Sequence
     from datetime import timedelta
     from pathlib import Path
 
@@ -699,7 +699,14 @@ class HubClient:
             # The wire carries only AssistantError subclasses. No content cache
             # survives this call; the requested chunk still rereads the record.
             first: EpisodeChunk | None = await self._call(
-                "episode_chunk", episode_id=episode_id, version=version, offset=0, max_bytes=1
+                "episode_chunk",
+                _bound_payload=arguments_object(
+                    episode_id=episode_id, version=version, offset=offset, max_bytes=max_bytes
+                ),
+                episode_id=episode_id,
+                version=version,
+                offset=0,
+                max_bytes=1,
             )
             if first is None:
                 return None
@@ -1471,7 +1478,13 @@ class HubClient:
         page_argument(offset, name="offset")
         return await self._call(method, limit=limit, offset=offset)
 
-    async def _call(self, method: str, **arguments: object) -> Any:
+    async def _call(
+        self,
+        method: str,
+        *,
+        _bound_payload: Mapping[str, object] | None = None,
+        **arguments: object,
+    ) -> Any:
         """Run one request against the hub, on a connection of its own.
 
         The order is fixed and each step earns its place: connect and handshake
@@ -1481,6 +1494,9 @@ class HubClient:
 
         Args:
             method: The ``AssistantEngine`` method being called.
+            _bound_payload: The original call's complete arguments when this is
+                a preliminary read. Checked against the negotiated limit before
+                dispatch, including when the preliminary read returns missing.
             **arguments: Its arguments, named as the Python parameters are.
 
         Returns:
@@ -1510,8 +1526,14 @@ class HubClient:
         # the hub's to publish (ADR-0084 §3), so it is measured once the handshake
         # has said what it is — still locally, and still before any request frame.
         project(payload)
+        if _bound_payload is not None:
+            project(_bound_payload)
         reader, writer, limit = await self._connect()
         try:
+            if _bound_payload is not None:
+                check_payload(
+                    _bound_payload, max_bytes=limit, subject=f"the arguments to {method}()"
+                )
             check_payload(payload, max_bytes=limit, subject=f"the arguments to {method}()")
             correlation = str(uuid.uuid4())
             await write_frame(
