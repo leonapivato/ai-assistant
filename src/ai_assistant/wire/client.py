@@ -693,6 +693,18 @@ class HubClient:
     ) -> EpisodeChunk | None:
         """Read canonical episode bytes, preserving the exact address (ADR-0275)."""
         check_detail(episode_id, version, offset, max_bytes)
+        if version is not None and offset > 0:
+            # Length is a live fact, so validate it through a version-checked
+            # read before sending an offset the engine could reject as ValueError.
+            # The wire carries only AssistantError subclasses. No content cache
+            # survives this call; the requested chunk still rereads the record.
+            first: EpisodeChunk | None = await self._call(
+                "episode_chunk", episode_id=episode_id, version=version, offset=0, max_bytes=1
+            )
+            if first is None:
+                return None
+            if offset > first.total_bytes:
+                raise ValueError("episode offset exceeds its current detail length")
         return await self._call(  # type: ignore[no-any-return]  # Method adapter validates.
             "episode_chunk",
             episode_id=episode_id,

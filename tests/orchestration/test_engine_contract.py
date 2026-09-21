@@ -694,10 +694,11 @@ class TestEngineContract(AssistantEngineContract):
     async def episode_inspection(self) -> AsyncIterator[EpisodeInspectionSubject]:
         """The production engine with an injected inspection store and small payload bound."""
         memory = FakeMemoryStore(now=lambda: INSPECTION_AT)
-        built = _wire(memory=memory, max_payload_bytes=INSPECTION_LIMIT)
+        archive = FakeTranscriptArchive()
+        built = _wire(memory=memory, archive=archive, max_payload_bytes=INSPECTION_LIMIT)
         await built.start()
         try:
-            yield EpisodeInspectionSubject(engine=built, memory=memory)
+            yield EpisodeInspectionSubject(engine=built, memory=memory, archive=archive)
         finally:
             await built.aclose()
 

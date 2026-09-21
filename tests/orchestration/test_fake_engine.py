@@ -223,7 +223,7 @@ class TestFakeAssistantEngineContract(AssistantEngineContract):
         memory = FakeMemoryStore(now=lambda: INSPECTION_AT)
         built = FakeAssistantEngine(max_payload_bytes=INSPECTION_LIMIT)
         built.episode_memory = memory
-        return EpisodeInspectionSubject(engine=built, memory=memory)
+        return EpisodeInspectionSubject(engine=built, memory=memory, archive=built.archive)
 
     @pytest.fixture
     def engine(self) -> AssistantEngine:
