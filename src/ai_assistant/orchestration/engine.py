@@ -2401,6 +2401,13 @@ def _announcement_lead(engagement: GoalEngagement | None) -> str | None:
     return None if announcement is None else f"{announcement}\n\n"
 
 
+def _produced[T: ComposedReply | None](composed: T) -> T:
+    """Observe produced text and degradation before any later processing await."""
+    if composed is not None and (state := active_state()) is not None:
+        state.composition(composed.text, degraded=composed.degraded, timed_out=composed.timed_out)
+    return composed
+
+
 def _announced(
     composed: ComposedReply | None, engagement: GoalEngagement | None
 ) -> ComposedReply | None:
@@ -5290,7 +5297,7 @@ class Engine:
         # and the call is made rather than omitted for the reason one clause up: the
         # composers keep one shape, and a later lane cannot make them differ by
         # forgetting one.
-        return _announced(composed, goal.engagement)
+        return _produced(_announced(composed, goal.engagement))
 
     async def resume(
         self,
@@ -10137,8 +10144,12 @@ class Engine:
             )
         if opened.opened:
             await self._plans.open_attempt(opened.attempt)
+            if (capture := active_state()) is not None:
+                capture.relate(goal_id=opened.attempt.goal_id, attempt_id=opened.attempt.id)
             return opened
         row = charged or opened.attempt
+        if (capture := active_state()) is not None:
+            capture.relate(goal_id=row.goal_id, attempt_id=row.id)
         for plan in plans:
             if plan.id in row.plan_ids:
                 continue
@@ -10241,6 +10252,10 @@ class Engine:
             return None
         if not written:
             return None
+        if (capture := active_state()) is not None:
+            capture.relate(
+                question_id=question.id, goal_id=question.goal_id, attempt_id=question.attempt_id
+            )
         return Clarification(
             question_id=question.id, text=raised.text, expires_at=question.expires_at
         )
@@ -10943,6 +10958,8 @@ class Engine:
             # labels already resolved against (§4); what is stripped is this write's
             # argument and nothing else.
             await self._plans.save_goal(record.goal.model_copy(update={"intended_actions": ()}))
+            if (capture := active_state()) is not None:
+                capture.relate(goal_id=record.goal.id)
             return await self._record_actions(record, record.mintings, record.goal.version)
         # §12: the version the loop computed against, then the version each write
         # returns — read from the store's own answer rather than incremented here, so
@@ -11038,6 +11055,8 @@ class Engine:
         if opened is None:  # pragma: no cover — every RespondedTurn carries an attempt
             return
         await self._plans.open_attempt(opened.attempt)
+        if (capture := active_state()) is not None:
+            capture.relate(goal_id=opened.attempt.goal_id, attempt_id=opened.attempt.id)
 
     async def _attempt_of(self, state: ExecutionState) -> OpenedAttempt | None:
         """Find the attempt this execution belongs to, at the store's own version (§12).
@@ -11908,6 +11927,11 @@ class Engine:
             # §15 says makes the rule checkable.
             associates=operation is not ConversationalOperation.CONVERSE_SPOKEN,
         )
+        if association.goal is not None and (capture := active_state()) is not None:
+            capture.relate(
+                goal_id=association.goal.id,
+                attempt_id=None if association.attempt is None else association.attempt.id,
+            )
         if association.disambiguation is not None:
             return await self._undecided(
                 association, conversation=input.channel.instance_id, asked=request, spoken=spoken
@@ -12049,6 +12073,10 @@ class Engine:
         # **The turn that carries it is not parked** (§1). What parked is the *read*:
         # this pass composes, answers and returns, its reply is present, and ADR-0170
         # §4's three ``reply``-``None`` shapes are untouched.
+        if responded.parked_read is not None and (capture := active_state()) is not None:
+            capture.relate(
+                read_park_id=responded.parked_read.id, goal_id=responded.parked_read.goal_id
+            )
         read_confirmation = (
             None
             if responded.parked_read is None
@@ -13172,6 +13200,7 @@ class Engine:
         composed = await self._composing.compose_routed(
             operation=routed.operation, outcome=routed.outcome
         )
+        _produced(composed)
         return await self._capture(
             park.conversation_id,
             turn=None,
@@ -13291,9 +13320,10 @@ class Engine:
         here.
         """
         del conversation
-        return await self._composing.compose_routed(
+        composed = await self._composing.compose_routed(
             operation=routed.operation, outcome=routed.outcome
         )
+        return _produced(composed)
 
     async def _composed_routed_spoken(
         self, routed: RoutedOperation, conversation: str
@@ -13326,9 +13356,10 @@ class Engine:
             What the stage composed.
         """
         del conversation
-        return await self._composing.compose_routed(
+        composed = await self._composing.compose_routed(
             operation=routed.operation, outcome=routed.outcome, unbounded_audience=True
         )
+        return _produced(composed)
 
     async def _compose_routed_streaming(
         self,
@@ -13371,7 +13402,7 @@ class Engine:
                         state.published(produced.text)
                     chunks.put_nowait(produced)
                 else:
-                    composed = produced
+                    composed = _produced(produced)
         if composed is None:  # pragma: no cover — the stage always reports last
             msg = "the composing stage ended without reporting what it composed"
             raise RuntimeError(msg)
@@ -13547,7 +13578,7 @@ class Engine:
         )
         # ADR-0250 §5's announcement, placed in the reply here and at the streaming
         # twin, which are the two seams every composed answer passes through.
-        return _announced(composed, carried.engagement)
+        return _produced(_announced(composed, carried.engagement))
 
     async def _compose_streaming(  # noqa: PLR0913 — the turn, the step, the conversation, the chunk queue, the delivery facts, the hop's reach, ADR-0228 §10's stop fact and ADR-0240 §8's three; each is a distinct input, as on :meth:`_compose`
         self,
@@ -13671,7 +13702,7 @@ class Engine:
                         state.published(produced.text)
                     chunks.put_nowait(produced)
                 else:
-                    composed = produced
+                    composed = _produced(produced)
         if composed is None:  # pragma: no cover — the stage always reports last
             msg = "the composing stage ended without reporting what it composed"
             raise RuntimeError(msg)
@@ -13679,9 +13710,11 @@ class Engine:
         # conveyed, joined in the order they were written" (ADR-0173 §3) — so the
         # terminal text gains the lead exactly where the lead was published.
         if lead is None or pending is not None or composed.text is None:
-            return composed
-        return ComposedReply(
-            text=lead + composed.text, degraded=composed.degraded, timed_out=composed.timed_out
+            return _produced(composed)
+        return _produced(
+            ComposedReply(
+                text=lead + composed.text, degraded=composed.degraded, timed_out=composed.timed_out
+            )
         )
 
     def _reply_room(  # noqa: PLR0913 — operation data and per-call context/projection
@@ -15278,6 +15311,10 @@ class Engine:
         """
         confirmation: Confirmation | None = None
         if disposition.disposition is Disposition.AWAITING_CONFIRMATION:
+            if (capture := active_state()) is not None:
+                capture.relate(
+                    parked=ParkedBinding(execution_id=disposition.state.id, step_id=step_id)
+                )
             if handle is None:  # pragma: no cover — _converse pre-mints before any park
                 # Only a resumption passes None, and a resolving disposition is never
                 # AWAITING_CONFIRMATION, so reaching here would be an internal fault.

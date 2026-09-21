@@ -85,6 +85,7 @@ class ActivationState:
     response_kind: EpisodeResponseKind = EpisodeResponseKind.NONE
     links: ActivationLinks = field(default_factory=ActivationLinks)
     composition_timed_out: bool = False
+    reply_degraded: bool = False
     spoken_degraded: bool = False
     no_words: bool = False
     index_episode_id: str | None = None
@@ -125,6 +126,15 @@ class ActivationState:
                 else EpisodeResponseKind.CONVERSATION_REPLY
             )
 
+    def composition(self, text: str | None, *, degraded: bool, timed_out: bool) -> None:
+        """Retain the completed composition before later bookkeeping can fail."""
+        self.response = text
+        self.response_kind = (
+            EpisodeResponseKind.NONE if text is None else EpisodeResponseKind.CONVERSATION_REPLY
+        )
+        self.reply_degraded = degraded
+        self.composition_timed_out = timed_out
+
     def processing(
         self, ended_at: datetime, failure: BaseException | None
     ) -> EpisodeProcessingRecord:
@@ -140,7 +150,8 @@ class ActivationState:
             status=status,
             reason=reason,
             response_kind=self.response_kind,
-            reply_degraded=self.outcome is not None and self.outcome.reply_degraded,
+            reply_degraded=self.reply_degraded
+            or (self.outcome is not None and self.outcome.reply_degraded),
             spoken_degraded=self.spoken_degraded,
             model_eligible=self.facts is not None,
             links=self.links,
@@ -310,7 +321,7 @@ def terminal_status(  # noqa: C901, PLR0911 — ADR-0275's ordered terminal bran
     if isinstance(failure, OversizedValueError):
         return ProcessingStatus.FAILED, ProcessingReason.OUTPUT_OVERSIZED
     outcome = state.outcome
-    if outcome is not None and outcome.reply_degraded:
+    if state.reply_degraded or (outcome is not None and outcome.reply_degraded):
         return ProcessingStatus.FAILED, ProcessingReason.COMPOSITION_FAILED
     if isinstance(failure, AssistantError) or (
         outcome is not None
