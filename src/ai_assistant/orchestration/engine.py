@@ -229,6 +229,7 @@ from ai_assistant.orchestration.activation_state import (
     CaptureFacts,
     active_state,
     admit_channel,
+    admit_resume,
 )
 from ai_assistant.orchestration.activation_writer import capture_loss
 from ai_assistant.orchestration.authorization_surface import projection_of
@@ -5405,13 +5406,68 @@ class Engine:
             timeout=timeout,
             remember_recipients_until=until,
         )
-        return await self._tracked(
-            self._resume(
+        scope = ActivationScope()
+
+        async def resolve() -> TurnOutcome:
+            result = await self._resume(
                 token, approved=approved, timeout=timeout, remember_recipients_until=until
+            )
+            if scope.state is not None:
+                scope.state.observe_result(result)
+            return self._checked(result, "resume")
+
+        task = self._activation_task(
+            scope,
+            resolve,
+            seam="resume",
+            check_output=lambda result: check_payload(
+                result.model_copy(update={"capture_degraded": False}),
+                max_bytes=self._max_payload_bytes,
+                subject="the result of resume()",
             ),
-            "resume",
-            checked=True,
         )
+        result, report = await asyncio.shield(task)
+        if report is not None and report.state != "recorded":
+            result = result.model_copy(update={"capture_degraded": True})
+        return result
+
+    async def _admit_control(  # noqa: PLR0913 — existing resolution facts, never authority
+        self,
+        *,
+        approved: bool,
+        remember_recipients_until: datetime | None = None,
+        conversation_id: str | None = None,
+        binding: ParkedBinding | None = None,
+        read_park: ParkedRead | None = None,
+        goal_id: str | None = None,
+        attempt_id: str | None = None,
+    ) -> None:
+        """Observe only a validated unsettled resolution, before its processing awaits."""
+        scope = CURRENT_ACTIVATION.get()
+        if scope is None or scope.state is not None:
+            return
+        state = admit_resume(
+            approved=approved,
+            remember_recipients_until=remember_recipients_until,
+            clock=self._now,
+            id_factory=self._activation_id_factory,
+        )
+        scope.state = state
+        state.relate(parked=binding, goal_id=goal_id, attempt_id=attempt_id)
+        if read_park is not None:
+            conversation_id = read_park.conversation_id
+            state.relate(read_park_id=read_park.id, goal_id=read_park.goal_id)
+        if conversation_id is not None:
+            state.resolved_conversation(conversation_id)
+        if binding is not None:
+            try:
+                origin = await self._conversations.conversation_of_binding(binding)
+            except Exception:
+                capture_loss("association", "failed")
+            else:
+                if origin is not None:
+                    state.resolved_conversation(origin.conversation_id)
+                    state.relate(predecessor_episode_id=origin.episode_id)
 
     async def cancel_read(self, token: ContinuationToken, /) -> ReadCancellation:
         """Withdraw a parked read's question, or interrupt the read it dispatched.
@@ -13051,6 +13107,7 @@ class Engine:
                     "rather than resuming this token"
                 )
                 raise UnknownContinuationError(msg)
+            await self._admit_control(approved=approved, conversation_id=park.conversation_id)
             return park, await self._resume_routed(park, approved=approved)
 
     async def _resume_routed(self, park: _RoutedPark, *, approved: bool) -> RoutedOperation:
@@ -14046,9 +14103,18 @@ class Engine:
                 "(ADR-0244 §5)"
             )
             raise UnknownContinuationError(msg)
+
+        async def resolving(park: ParkedRead) -> None:
+            await self._admit_control(
+                approved=approved,
+                remember_recipients_until=remember_recipients_until,
+                read_park=park,
+            )
+
         answered = await operations.answer(
             park_id,
             approved=approved,
+            on_resolving=resolving,
             # ADR-0244 §5, ADR-0235 §2: the act rides this answer exactly as it rides a
             # step's, and its two refusals fire **before** the gate — so a refused act
             # leaves the park open and answerable without the standing request, rather
@@ -14375,6 +14441,15 @@ class Engine:
                 allowed_by = decision.id
                 await self._authorized_attempt(resumed, decision.id)
 
+            async def resolving() -> None:
+                await self._admit_control(
+                    approved=approved,
+                    remember_recipients_until=remember_recipients_until,
+                    binding=ParkedBinding(execution_id=parked.execution_id, step_id=parked.step_id),
+                    goal_id=owner.goal_id,
+                    attempt_id=owner.id,
+                )
+
             observed = DriveObservation()
             try:
                 disposition = await self._runner.resume(
@@ -14386,6 +14461,7 @@ class Engine:
                     timeout=timeout,
                     remember_recipients_until=remember_recipients_until,
                     on_ruled=ruled,
+                    on_resolving=resolving,
                     outbound=observed,
                 )
             except ClaimRefused:
@@ -14620,7 +14696,7 @@ class Engine:
         try:
             origin = await self._conversations.conversation_of_binding(binding)
         except ConversationStoreError:
-            _log.warning("conversation_binding_unresolved", exc_info=True)
+            capture_loss("association", "failed")
             origin = None
         if origin is None:
             return TurnOutcome(
@@ -14854,30 +14930,7 @@ class Engine:
         is true of an episode rendering no turn rather than a fallback.
         """
         state = active_state()
-        if state is None:
-            report = await self._conversations.capture(
-                conversation_id,
-                content=(
-                    _exchange_of(turn, step, resumed=resumed)
-                    if routed is None
-                    else _routed_exchange_of(utterance, resumed=resumed)
-                ),
-                asked=asked,
-                outcome=None if composed is None else composed.text,
-                disposition=(
-                    _outcome_of(step) if routed is None else _routed_outcome_of(routed.outcome)
-                ),
-                parked=parked,
-                supplied_withheld=supplied_withheld,
-                modality=modality,
-                derived_from_external=derived_from_external,
-                delivery=None if spoken is None else spoken.delivery,
-            )
-            if spoken is not None:
-                spoken.episode_id = report.episode_id
-            captured_conversation = report.conversation_id
-            degraded = report.degraded
-        else:
+        if state is not None:
             state.facts = CaptureFacts(
                 content=(
                     _exchange_of(turn, step, resumed=resumed)
@@ -14896,13 +14949,11 @@ class Engine:
                 delivery=None if spoken is None else spoken.delivery,
             )
             state.composition_timed_out = composed is not None and composed.timed_out
-            captured_conversation = conversation_id
-            degraded = False
         result = TurnOutcome(
             turn=turn,
             step=step,
-            conversation_id=captured_conversation,
-            capture_degraded=degraded,
+            conversation_id=conversation_id,
+            capture_degraded=False,
             reply=None if composed is None else composed.text,
             reply_degraded=composed is not None and composed.degraded,
             routed=routed,

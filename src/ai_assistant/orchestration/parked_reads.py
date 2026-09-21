@@ -46,7 +46,7 @@ from ai_assistant.orchestration.reads import SEARCH_DISPOSITIONS, contact_of, no
 from ai_assistant.orchestration.runner import EstablishingAnswer
 
 if TYPE_CHECKING:
-    from collections.abc import Callable
+    from collections.abc import Awaitable, Callable
     from datetime import datetime
 
     from ai_assistant.core.protocols import ConversationStore, ParkedReads
@@ -372,6 +372,7 @@ class ParkedReadOperations:
         *,
         approved: bool,
         remember_recipients_until: datetime | None = None,
+        on_resolving: Callable[[ParkedRead], Awaitable[None]] | None = None,
     ) -> AnsweredRead:
         """Take ADR-0244 §6's six establishments and dispatch where every one holds.
 
@@ -420,6 +421,7 @@ class ParkedReadOperations:
 
         Args:
             park_id: The park the presented token names.
+            on_resolving: Observe the accepted answer after settlement and before policy.
             approved: The user's own answer, relayed unchanged.
             remember_recipients_until: The instant the user asked this call's recipients
                 be remembered until, supplied **in the same act** as the answer, or
@@ -585,6 +587,8 @@ class ParkedReadOperations:
             # answer, at most one dispatch" a property of one atomic write rather than
             # of an agreement between several readers.
             return AnsweredRead(ReadAnswerOutcome.ALREADY_SETTLED, park)
+        if on_resolving is not None:
+            await on_resolving(park)
         # **Clause 6 — the ruling, recorded whatever it is.**
         answer = await search.ruled_on_answer(confirmed, approved=approved, at=now)
         if answer is None:
@@ -744,6 +748,7 @@ class ParkedReadOperations:
 
         Args:
             park_id: The park the presented token names.
+            on_resolving: Observe the accepted answer after settlement and before policy.
 
         Returns:
             Which of ADR-0244 §11's three states this call reached.

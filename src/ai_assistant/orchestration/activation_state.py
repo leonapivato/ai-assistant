@@ -146,6 +146,29 @@ class ActivationState:
             links=self.links,
         )
 
+    def relate(  # noqa: PLR0913 — each independently established relationship
+        self,
+        *,
+        predecessor_episode_id: str | None = None,
+        question_id: str | None = None,
+        read_park_id: str | None = None,
+        parked: ParkedBinding | None = None,
+        goal_id: str | None = None,
+        attempt_id: str | None = None,
+    ) -> None:
+        """Retain established relationships without manufacturing absent ones."""
+        known = {
+            "predecessor_episode_id": predecessor_episode_id,
+            "question_id": question_id,
+            "read_park_id": read_park_id,
+            "parked": parked,
+            "goal_id": goal_id,
+            "attempt_id": attempt_id,
+        }
+        self.links = self.links.model_copy(
+            update={name: value for name, value in known.items() if value is not None}
+        )
+
     def reserved_report(self) -> EpisodeCaptureReport:
         """Bound the receipt before append, using SQLite's largest index ordinal."""
         address = self.index_episode_id
