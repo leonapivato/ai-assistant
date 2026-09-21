@@ -77,11 +77,12 @@ def render_page(console: Console, page: EpisodePage) -> None:
             f"  Processing: {item.status.value if item.status else 'unavailable'}\n"
             f"  Response: {_response_label(item.response_kind)}",
             markup=False,
+            emoji=False,
             highlight=False,
             soft_wrap=True,
         )
     if page.next_cursor is not None:
-        console.print(f"Next cursor: {page.next_cursor}", markup=False, soft_wrap=True)
+        console.print(f"Next cursor: {page.next_cursor}", markup=False, emoji=False, soft_wrap=True)
         console.print("Use --cursor with the same channel and status filters.")
     _retention_notice(console)
 
@@ -112,6 +113,7 @@ def render_detail(console: Console, record: EpisodicMemory) -> None:
         f"Reason: {processing.reason.value if processing else 'unavailable'}\n"
         f"Response: {_response_label(processing.response_kind if processing else None)}",
         markup=False,
+        emoji=False,
         highlight=False,
         soft_wrap=True,
     )
@@ -120,6 +122,7 @@ def render_detail(console: Console, record: EpisodicMemory) -> None:
     console.print(
         json.dumps(record.model_dump(mode="json"), ensure_ascii=False, indent=2),
         markup=False,
+        emoji=False,
         highlight=False,
         soft_wrap=True,
     )
