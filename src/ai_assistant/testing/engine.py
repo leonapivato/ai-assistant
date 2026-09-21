@@ -2759,15 +2759,18 @@ class FakeAssistantEngine:
         return self._checked(self.beliefs_held.get(named), "belief")
 
     async def forget(self, record_id: Identifier) -> bool:
-        """Destroy one belief, reporting whether there was one to destroy."""
+        """Destroy the archive first, then the named belief or inspected episode."""
         named = identifier(record_id, name="record_id")
         check_arguments("forget", max_bytes=self._max_payload_bytes, record_id=named)
         self.calls.append(("forget", {"record_id": named}))
+        await self.archive.discard(named)
+        removed_episode = await self.episode_memory.delete(named)
         # The placement goes with the record: `forget` destroys rather than retires,
         # so leaving the entry would let a later belief minted at a recycled id
         # inherit a placement nobody set on it.
         self.placements.pop(named, None)
-        return self._checked(self.beliefs_held.pop(named, None) is not None, "forget")
+        removed_belief = self.beliefs_held.pop(named, None) is not None
+        return self._checked(removed_episode or removed_belief, "forget")
 
     # --- the owner's placement acts (ADR-0217 §7) --------------------------
 

@@ -10,25 +10,31 @@ from typing import TYPE_CHECKING
 
 import pytest
 
-from ai_assistant.core.errors import OversizedValueError, StaleEpisodeReadError
+from ai_assistant.core.errors import (
+    OversizedValueError,
+    StaleEpisodeReadError,
+    TranscriptArchiveError,
+)
 from ai_assistant.core.types import (
     ChannelContext,
     ChannelIdentity,
     EpisodeProcessingRecord,
     EpisodeResponseKind,
     EpisodicMemory,
+    ExchangeDisposition,
     MemorySource,
     ProcessingReason,
     ProcessingStatus,
     Provenance,
     RecordedChannelTrigger,
     RecordedTextInput,
+    TranscriptEntry,
 )
 from ai_assistant.orchestration.payloads import canonical_payload
 
 if TYPE_CHECKING:
     from ai_assistant.core.protocols import AssistantEngine
-    from ai_assistant.testing import FakeMemoryStore
+    from ai_assistant.testing import FakeMemoryStore, FakeTranscriptArchive
 
 INSPECTION_LIMIT = 1024
 INSPECTION_AT = datetime(2026, 9, 20, tzinfo=UTC)
@@ -41,6 +47,7 @@ class EpisodeInspectionSubject:
 
     engine: AssistantEngine
     memory: FakeMemoryStore
+    archive: FakeTranscriptArchive
 
 
 def _episode(record_id: str, *, activation: bool = False) -> EpisodicMemory:
@@ -248,3 +255,66 @@ class EpisodeInspectionContract:
         with pytest.raises(ValueError, match="episode"):
             await episode_inspection.engine.episode_chunk("", version=version)
         assert episode_inspection.memory.resource_log.visits == before
+
+    async def test_episode_offset_past_live_encoding_is_a_value_error(
+        self, episode_inspection: EpisodeInspectionSubject
+    ) -> None:
+        subject = episode_inspection
+        await subject.memory.add(_episode("record", activation=True))
+        first = await subject.engine.episode_chunk("record", max_bytes=1)
+        assert first is not None
+        with pytest.raises(ValueError, match="offset"):
+            await subject.engine.episode_chunk(
+                "record", version=first.version, offset=first.total_bytes + 1
+            )
+        # Missing wins before the length check, as it does for every live read.
+        await subject.memory.delete("record")
+        assert (
+            await subject.engine.episode_chunk(
+                "record", version=first.version, offset=first.total_bytes + 1
+            )
+            is None
+        )
+
+    @pytest.mark.parametrize("present", [False, True])
+    async def test_engine_forget_destroys_archive_and_removes_live_inspection(
+        self, episode_inspection: EpisodeInspectionSubject, present: bool
+    ) -> None:
+        subject = episode_inspection
+        await subject.memory.add(_episode("record", activation=True))
+        first = await subject.engine.episode_chunk("record", max_bytes=1)
+        assert first is not None
+        if not present:
+            await subject.memory.delete("record")
+        subject.archive.hold(
+            TranscriptEntry(
+                address="record",
+                conversation_id="conversation",
+                ordinal=1,
+                occurred_at=INSPECTION_AT,
+                asked="archived request",
+                replied="archived reply",
+                disposition=ExchangeDisposition.NO_ACTION_NEEDED,
+            )
+        )
+
+        assert await subject.engine.forget("record") is present
+
+        assert await subject.archive.entry("record") is None
+        assert (await subject.engine.episodes()).items == ()
+        assert await subject.engine.episode_chunk("record", version=first.version, offset=1) is None
+
+    async def test_engine_forget_keeps_episode_when_archive_destruction_fails(
+        self, episode_inspection: EpisodeInspectionSubject
+    ) -> None:
+        subject = episode_inspection
+        await subject.memory.add(_episode("record", activation=True))
+        subject.archive.fail()
+
+        with pytest.raises(TranscriptArchiveError):
+            await subject.engine.forget("record")
+
+        assert await subject.engine.episode_chunk("record") is not None
+        assert [item.position.episode_id for item in (await subject.engine.episodes()).items] == [
+            "record"
+        ]
