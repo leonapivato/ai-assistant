@@ -1,6 +1,6 @@
 # 274. Channel inputs share an assistant receiver, and reply delivery is optional
 
-- Status: Partially superseded by ADR-0275 (§1, §3 and §5–§8's event/context and speech-ending persistence, capture reporting and post-processing cleanup)
+- Status: Partially superseded by ADR-0275 (§1, §3 and §5–§8's event/context and speech-ending persistence, capture reporting and post-processing cleanup) and ADR-0276 (§5's third clause, in its prompt and reference-resolution halves alone: the understanding stage renders supplied context into its own prompt as quoted data and resolves the input's references against it)
 - Date: 2026-09-17
 - Scope: [Milestone 1](https://github.com/leonapivato/ai-assistant/milestone/1), [#2521](https://github.com/leonapivato/ai-assistant/issues/2521).
 - Owner authorization: Reviewed and authorized for ratification on 2026-09-18; the owner assigned ADR-0274.
@@ -12,6 +12,15 @@
   which remains Proposed. This reciprocal header record accompanies the numbered draft
   under ADR-0070 and ADR-0082; prior supersessions and the ratified body below are
   preserved.
+- Partially superseded: 2026-09-22 by ADR-0276 — §5's third clause, *"does not insert
+  supplied context into prompts … not a new interpretation or reference-resolution
+  behavior"*, in its prompt and reference-resolution halves alone: the understanding
+  stage renders supplied context into its own prompt as quoted source data and resolves
+  the input's references against it. Supplied context still reaches no memory, no
+  conversation history and no authority record; §5's other three clauses stand entire.
+  These scoped replacements take effect on ratification of ADR-0276, which remains
+  Proposed. This reciprocal header record accompanies the numbered draft under ADR-0070
+  and ADR-0082; prior supersessions and the ratified body below are preserved.
 
 ## Context
 
