@@ -1,9 +1,23 @@
 # 275. An episode records one activation after processing ends
 
-- Status: Accepted
+- Status: Partially superseded by ADR-0276 (§1's "automatic cross-channel continuity" exclusion; §4's `EpisodeProcessingRecord` field set and `ProcessingReason` values, in the additions alone; §7's eligibility-`True` rule on automatic model-facing reads, for the understanding stage's episode window alone; §9's exclusion of the trigger's raw input text from automatic model inputs, for that window alone)
 - Date: 2026-09-18
 - Scope: [M36](https://github.com/leonapivato/ai-assistant/milestone/2), [#2522](https://github.com/leonapivato/ai-assistant/issues/2522).
 - Dependency: ADR-0274 and [M35](https://github.com/leonapivato/ai-assistant/milestone/1).
+- Partially superseded: 2026-09-22 by ADR-0276 — four narrow scopes. §1's exclusion list
+  loses one item, "automatic cross-channel continuity", for a bounded window of recent
+  episodes read into one understanding call; §4's `EpisodeProcessingRecord` gains
+  `schema_version` `2`, `understanding`, `understanding_omitted` and `understanding_elided`,
+  and `ProcessingReason` gains `understanding_failed`, every existing field, value and
+  validator standing; §7's rule that all automatic model-facing episodic reads request
+  eligibility `True` does not bind that window, every other read keeping it; and §9's
+  exclusion of the trigger's raw input from automatic model inputs is lifted for that
+  window and for the exact input text or transcript alone — attached context and every
+  other raw or inspection-only field stay excluded. §8's capture-once rule, §10 and §11's
+  inspection reads and every other section stand entire. These scoped replacements take
+  effect on ratification of ADR-0276, which remains Proposed. This reciprocal header
+  record accompanies the numbered draft under ADR-0070 and ADR-0082; the ratified body
+  below is preserved.
 - Authorization: the owner endorsed the proposal's direction and its interruption/parallelism fit, then requested this draft in clone `ai-assistant-2`. The owner assigned the next available ADR number, 0275. These instructions authorize drafting and numbering, not ratification or implementation.
 
 ## Context
