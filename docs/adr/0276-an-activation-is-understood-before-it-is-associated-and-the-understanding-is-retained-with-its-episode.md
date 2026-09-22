@@ -20,8 +20,8 @@ window of the assistant's own recent episodes across channels — and nothing
 else. It sets no objective, retrieves no long-term memory, chooses no
 clarification and authorizes nothing. It is provisional, and its versions are
 retained with the episode. The owner intends to redesign everything that runs
-after it, so this decision shapes the stage as a self-contained thing whose
-downstream consumers are transitional.
+after it, so this decision shapes the stage as a self-contained thing and
+wires no consumer of what it produces.
 
 The baseline inspected for this draft is `484f5f2c`, the tree on which the owner
 ruled M35 and M36 accepted. At that tree no understanding step exists before
@@ -165,7 +165,7 @@ contract paid for before it is needed.
 > `UnderstandingReferent` (§3), and copies `meaning`, `meaning_ground`,
 > `unresolved` and each element's texts and ground unchanged. It carries no
 > goal id, no attempt id, no plan id and no label. **It crosses no model-facing
-> seam under this decision**: no consumer is wired (§5), and a later decision
+> seam under this decision**: no consumer is wired (§8), and a later decision
 > that hands it to a model owes it a projection carrying no identifier, on
 > ADR-0226 §3's namer rule — *"No record identifier is rendered to a model, and
 > none is accepted from one"* — and on ADR-0249 §9's ground that such
