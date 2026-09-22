@@ -1,7 +1,17 @@
 # 217. A record carries who may receive it, the owner's act is final over a model's, and a model may only narrow
 
-- Status: Accepted
+- Status: Partially superseded by ADR-0276 (§2's application clause, in its *no new site* half alone: the record-level predicate is applied at one further site, over the stored records of the understanding stage's two windows, ahead of that stage)
 - Date: 2026-08-29
+- Partially superseded: 2026-09-22 by ADR-0276 — §2's clause *"The rule is applied at the
+  sites the channel's audience is read today, and at no new site"*, in its *no new site*
+  half alone: the same record-level predicate is applied at one further site, over the
+  stored records of the understanding stage's channel and episode windows, before that
+  stage renders them; it adds no predicate, seam, store call or second pass. §2's set
+  rule, its conjunct with ADR-0199 §3, its two audiences, its withholding-at-supply rule
+  and its composition with ADR-0210 §1 stand entire, as does every other section. These
+  scoped replacements take effect on ratification of ADR-0276, which remains Proposed.
+  This reciprocal header record accompanies the numbered draft under ADR-0070 and
+  ADR-0082; the ratified body below is preserved.
 - **Partially supersedes:**
   [ADR-0204](0204-a-record-carries-whether-the-supply-it-was-produced-over-held-withheld-content.md)
   — **the instrument, not the rule.** §1's first, second, third and fourth clauses,
