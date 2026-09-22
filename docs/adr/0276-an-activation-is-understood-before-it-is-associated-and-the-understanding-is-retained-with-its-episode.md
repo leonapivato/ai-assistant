@@ -5,7 +5,7 @@
 - Scope: [M37](https://github.com/leonapivato/ai-assistant/milestone/4), [#2544](https://github.com/leonapivato/ai-assistant/issues/2544).
 - Dependency: ADR-0274, ADR-0275 and their milestones M35 and M36.
 - Authorization: the owner directed this draft on 2026-09-22 from the implementation proposal recorded on #2544, after ruling its tradeoffs and exit demonstrations there on 2026-09-21. The dispatcher assigned the next available number, 0276. That authorizes drafting and numbering, not ratification or implementation.
-- **Partially supersedes** [ADR-0274](0274-channel-input-and-reply-contract.md) — **one scope.** §5's third clause, *"The first conversational conversion does not insert supplied context into prompts, memory, conversation history, or authority records; its acceptance obligation is intact delivery to processing, not a new interpretation or reference-resolution behavior"*, in its **prompt** and **reference-resolution** halves alone: the understanding stage of §5 below renders supplied context into its own prompt as quoted data and resolves the input's references against it. Supplied context still reaches no memory, no conversation history and no authority record; §5's other three clauses — the orchestration-local resolved carrier, the separation from `ConversationLifecycle.history`, and *"a source label, claimed speaker, or replied-to item does not establish an assistant-authored message, an owner instruction, or permission"* — bind entire and are the floor §5 below is built on.
+- **Partially supersedes** [ADR-0274](0274-channel-input-and-reply-contract.md) — **two scopes.** **§5's third clause**, *"The first conversational conversion does not insert supplied context into prompts, memory, conversation history, or authority records; its acceptance obligation is intact delivery to processing, not a new interpretation or reference-resolution behavior"*, in its **prompt** and **reference-resolution** halves alone: the understanding stage of §5 below renders supplied context into its own prompt as quoted data and resolves the input's references against it. Supplied context still reaches no memory, no conversation history and no authority record; §5's other three clauses — the orchestration-local resolved carrier, the separation from `ConversationLifecycle.history`, and *"a source label, claimed speaker, or replied-to item does not establish an assistant-authored message, an owner instruction, or permission"* — bind entire and are the floor §5 below is built on. **§7's input clause**, *"The event model input consists only of a fixed summarization instruction and the supplied event text and context encoded as quoted source data; … and retrieves no assistant memory, context-provider state, archive data, or conversation history"*, in two halves: the event model input gains the understanding brief §7 below passes it, and the informational-event pass reads §4 below's episode window — assistant memory — through the understanding stage before that stage is invoked. §7's other clauses — the orchestration-local stage holding one `ModelProvider`, the ordinary model route, **exactly one completion originated by the stage with no orchestration retry or repair loop**, no planner, associator, tool, synthesizer, notifier or writer, the usable-completion rule, the summary's standing as interpretation, the budget, the tracking, the no-logging and the no-idempotency clauses — bind entire.
 - **Partially supersedes** [ADR-0275](0275-an-episode-records-one-activation-after-processing-ends.md) — **four scopes, each narrow.** **§1's exclusion list, in one item**: *"automatic cross-channel continuity"* is no longer excluded, because §4 below reads a bounded window of recent episodes across channels into one model call; §1's other exclusions (live activation log, phase/tool history, scheduler, production channel, goal association policy, observer scheduling, archive retrieval by a model) stand entire. **§4's `EpisodeProcessingRecord` field set and its `ProcessingReason` value list, in the additions alone**: the record gains §8 below's four members and `schema_version` admits `2`; the reason list gains `understanding_failed`; every existing field, value and validator stands. **§7's rule *"All automatic model-facing episodic reads request eligibility `True`"*, for one consumer**: the window read of §4 below requests no eligibility, because the flag exists so that pre-M36 model reads keep seeing what they saw, and a window that hid newly captured events could not do what §4 exists to do; every other automatic model-facing read still requests `True`, and §7's flag, its history filter and its legacy projections stand entire. **§9's last-but-one clause, for one consumer and one field**: *"The raw input/context in the processing record and new inspection-only material retain §7's exclusion from automatic model inputs … Admitting this additional material to those paths requires a separate contract decision"* — this is that decision, and it admits the trigger's **exact input text or transcript** to the window of §4 below and nothing else: the attached context recorded on an episode's trigger stays excluded from every model input, as do the record's other fields. §10 and §11 are read, not amended: `episodes` and `get_many` are the reads §4 below composes, and they still invoke no model themselves.
 
 ## Context
@@ -129,7 +129,7 @@ contract paid for before it is needed.
 | Enum | Complete values |
 | --- | --- |
 | `UnderstandingGround` | `stated` — the input says it; `supplied` — a supplied item the reading names says it; `inferred` — neither: the stage judged it |
-| `UnderstandingOmission` | `routed` — a taken route ended the pass before the stage (§5); `no_text` — speech yielded no words or transcription failed; `no_input` — the activation carries no input to understand (a `RecordedResumeTrigger`); `failed` — the stage raised (§6) |
+| `UnderstandingOmission` | `routed` — a taken route ended the pass before the stage (§5); `no_text` — speech yielded no words or transcription failed; `no_input` — the activation carries no input to understand (a `RecordedResumeTrigger`); `failed` — the stage raised (§6); `not_reached` — the pass ended before the stage was entered for any other reason: cancellation, deadline expiry, or a failure ahead of it (§5) |
 | `UnderstandingProducer` | `interpretation` — the understanding stage of this decision |
 
 | Model | Fields |
@@ -137,14 +137,14 @@ contract paid for before it is needed.
 | `ProposedReference` | `phrase: NonBlankEncodableText`; `labels: tuple[str, ...] = ()` |
 | `ProposedRelationship` | `statement: NonBlankEncodableText`; `labels: tuple[str, ...] = ()`; `ground: UnderstandingGround` |
 | `UnresolvedMatter` | `matter: NonBlankEncodableText`; `why_it_matters: NonBlankEncodableText` |
-| `ProposedActivationUnderstanding` | `meaning: NonBlankEncodableText`; `meaning_ground: UnderstandingGround`; `references: tuple[ProposedReference, ...] = ()`; `relationships: tuple[ProposedRelationship, ...] = ()`; `unresolved: tuple[UnresolvedMatter, ...] = ()` |
-| `UnderstandingReferent` | `kind: Literal["input", "channel_item", "episode"]`; `id: Identifier \| None = None`; `source: NonBlankEncodableText \| None = None`; `excerpt: EncodableText` |
+| `ProposedActivationUnderstanding` | `meaning: NonBlankEncodableText`; `meaning_ground: UnderstandingGround`; `meaning_labels: tuple[str, ...] = ()`; `references: tuple[ProposedReference, ...] = ()`; `relationships: tuple[ProposedRelationship, ...] = ()`; `unresolved: tuple[UnresolvedMatter, ...] = ()` |
+| `UnderstandingReferent` | `kind: Literal["input", "channel_item", "episode"]`; `id: EncodableText \| None = None`; `source: NonBlankEncodableText \| None = None`; `excerpt: EncodableText` |
 | `UnderstandingReference` | `phrase: NonBlankEncodableText`; `referents: tuple[UnderstandingReferent, ...] = ()` |
 | `UnderstandingRelationship` | `statement: NonBlankEncodableText`; `referents: tuple[UnderstandingReferent, ...] = ()`; `ground: UnderstandingGround` |
-| `ActivationUnderstanding` | `version: int` in `[1, 2**31)`; `recorded_at: UtcInstant`; `producer: UnderstandingProducer`; `meaning: NonBlankEncodableText`; `meaning_ground: UnderstandingGround`; `references: tuple[UnderstandingReference, ...] = ()`; `relationships: tuple[UnderstandingRelationship, ...] = ()`; `unresolved: tuple[UnresolvedMatter, ...] = ()`; `grounding_dropped: int = 0` in `[0, 2**31)` |
+| `ActivationUnderstanding` | `version: int` in `[1, 2**31)`; `recorded_at: UtcInstant`; `producer: UnderstandingProducer`; `meaning: NonBlankEncodableText`; `meaning_ground: UnderstandingGround`; `meaning_referents: tuple[UnderstandingReferent, ...] = ()`; `references: tuple[UnderstandingReference, ...] = ()`; `relationships: tuple[UnderstandingRelationship, ...] = ()`; `unresolved: tuple[UnresolvedMatter, ...] = ()`; `grounding_dropped: int = 0` in `[0, 2**31)` |
 | `ReferenceBrief` | `phrase: NonBlankEncodableText`; `referents: tuple[EncodableText, ...] = ()` |
 | `RelationshipBrief` | `statement: NonBlankEncodableText`; `ground: UnderstandingGround` |
-| `UnderstandingBrief` | `meaning: NonBlankEncodableText`; `meaning_ground: UnderstandingGround`; `references: tuple[ReferenceBrief, ...] = ()`; `relationships: tuple[RelationshipBrief, ...] = ()`; `unresolved: tuple[UnresolvedMatter, ...] = ()` |
+| `UnderstandingBrief` | `meaning: NonBlankEncodableText`; `meaning_ground: UnderstandingGround`; `meaning_referents: tuple[EncodableText, ...] = ()`; `references: tuple[ReferenceBrief, ...] = ()`; `relationships: tuple[RelationshipBrief, ...] = ()`; `unresolved: tuple[UnresolvedMatter, ...] = ()` |
 
 > **Normative.** The three enums are closed and are **added to and never
 > renamed**, on `Ground`'s own rule (ADR-0249 §1 as `core/types.py` records it):
@@ -169,7 +169,10 @@ contract paid for before it is needed.
 > `kind="input"` with `id=None` for the activation's own input; `kind="channel_item"`
 > with `id` the item's `item_id` (which may be `None` where the item carries
 > none) and `source` the item's `source`; `kind="episode"` with `id` the
-> episode's stored `MemoryBase.id` and `source` the rendering of its channel.
+> episode's stored `MemoryBase.id` **exactly as stored** — a blank or
+> whitespace-distinct address included, on ADR-0275 §10's rule — which is why
+> `id` is an `EncodableText` and not an `Identifier`; and `source` the rendering
+> of its channel.
 > `excerpt` is a bounded prefix of the referent's rendered text, at most 240
 > characters, taken by `orchestration` from the material it rendered and never
 > from model output. A referent is intelligible after restart from these fields
@@ -185,6 +188,15 @@ contract paid for before it is needed.
 > rule a planner is trusted to keep"* (ADR-0230 §4, as ADR-0249 §9 applies it)
 > — and on ADR-0226 §3's namer rule, *"No record identifier is rendered to a
 > model, and none is accepted from one"*.
+
+> **Normative.** A `supplied` ground names its source. `ActivationUnderstanding`
+> and `UnderstandingBrief` each validate that `meaning_ground=supplied` implies a
+> non-empty `meaning_referents` and that a relationship with `ground=supplied`
+> carries a non-empty `referents`; a record or brief that says `supplied` and
+> names nothing is refused by its type. `ProposedActivationUnderstanding`
+> validates **neither**: a proposal's `supplied` with no label is a grounding
+> defect of §6's, repaired once and then recorded as `inferred`, and never a
+> parse failure that fails the activation.
 
 **Why the recorded and the proposed forms are two types.** A model output that
 carried a version would author what orchestration owns, and a record that
@@ -311,6 +323,29 @@ rather than superseded.
 > An episode of an event channel is rendered as a **report received**, never as
 > something the user said or the assistant did.
 
+> **Normative — both windows pass through the pass's supply predicate before
+> the stage renders them.** The stage hands the channel window's records and
+> the episode window's records to the pass's own `TurnSupply` — the
+> `UnboundedAudienceSupply` or `BoundedAudienceSupply` the pass already holds
+> for its `memories` — with the pass's context untouched and `retrieved_ids`
+> empty, and renders only what comes back. On a channel of unbounded audience
+> that subtraction withholds every `OWNER`-placed record from the stage, tail
+> record included, and — `retrieved_ids` being empty — fires no deflection on
+> the stage's account, which is ADR-0217 §2's own composition with ADR-0210 §1:
+> *"one the supply holds only because it stands in the conversation's own recent
+> turns is withheld and fires nothing"*. On a channel of bounded audience the
+> evaluation withholds nothing. The stage introduces no predicate, seam, store
+> call or second pass of its own: the object the pass holds is the one site the
+> audience is read at, applied to one further sequence. A withheld record
+> reaches no rendering, no label, no referent and no version.
+
+> **Normative.** An informational-event pass is a pass of **bounded** audience
+> for this purpose: its result returns to the authenticated caller of `receive`
+> and, on ADR-0274 §7, *"the submitting test adapter inspects it as an
+> operational result and sends no message back to the source or to a user
+> interface"*. The engine holds a `BoundedAudienceSupply` for such a pass and
+> applies it exactly as above; nothing is withheld, and the evaluation is made.
+
 > **Normative — a turn on a channel of unbounded audience takes no episode
 > window.** On the operation ADR-0250 §15 names (`converse_spoken`, as ADR-0200
 > §3 declares it) the stage receives the channel window alone, and that window
@@ -344,9 +379,13 @@ episode window alone — needs exactly the events that fence hides.
 > informational-event pass, **after** the routing stage has declined and the
 > conversation is resolved, and **before** `Engine._associate` and before any
 > relevance read, episodic supplement or `Planner.plan` call of the pass. On an
-> informational-event pass it runs at the start of `InformationalEventStage.process`,
-> before that stage's completion. It runs inside the pass's existing deadline
-> and adds no budget, no setting and no second deadline.
+> informational-event pass it runs in `Engine._dispatch_channel`, after the
+> event input is resolved and **before** `InformationalEventStage.process` is
+> invoked, and the brief it produced is passed to that call; the event stage
+> itself still originates exactly one completion and holds no retry or repair
+> loop, on ADR-0274 §7's clauses that stand. On every pass the stage runs inside
+> the pass's existing deadline and adds no budget, no setting and no second
+> deadline.
 
 > **Normative.** A route that is taken ends the pipeline where ADR-0197 §1 ends
 > it, and the understanding stage does not run. The pass's processing record
@@ -360,6 +399,15 @@ episode window alone — needs exactly the events that fence hides.
 > that has no text. `AssistantEngine.resume` and every other activation carrying
 > a `RecordedResumeTrigger` record `understanding_omitted=no_input`.
 
+> **Normative.** A pass that ends before the stage is entered for any reason
+> the three values above do not name — a cancellation acknowledged before or
+> during routing, a deadline that expired ahead of the stage, a failure in
+> conversation resolution or any other step ahead of it — records
+> `understanding_omitted=not_reached`. The classification is by where the pass
+> ended and never by inference from its text: `routed`, `no_text` and `no_input`
+> each name a branch the pass took, `failed` names the stage's own raise, and
+> `not_reached` is everything that ended ahead of the stage's entry. A pass that
+> recorded version 1 records no omission whatever ended it.
 > **Normative.** The stage is entered exactly once per activation, makes at most
 > two completions (§6), and records exactly one `ActivationUnderstanding` at
 > version 1 with `producer=interpretation` on the activation's state before
@@ -407,8 +455,11 @@ construction rather than by a rule its prompt is trusted to keep.
 
 > **Normative.** The stage validates the completion in this order: the output
 > parses as one `ProposedActivationUnderstanding`; every label resolves under
-> §3. Where the output fails to parse, or where any label resolves to nothing,
-> the stage makes **exactly one** further completion carrying the first output
+> §3; every element proposing `supplied` — the meaning through
+> `meaning_labels`, a relationship through `labels` — names at least one
+> label. Where the output fails to parse, where any label resolves to nothing,
+> or where a `supplied` element names no label, the stage makes **exactly one**
+> further completion carrying the first output
 > and a code-owned statement of what was wrong — the parse failure, or the
 > labels that resolved to nothing and the sequences that were rendered — and
 > validates that second output the same way. There is no third completion.
@@ -424,13 +475,16 @@ construction rather than by a rule its prompt is trusted to keep.
 > it could not obtain.
 
 > **Normative.** A second output whose labels still include one that resolves to
-> nothing is **recorded**, not refused: each unresolvable label is dropped, the
-> drop is counted in `grounding_dropped`, and a relationship whose labels all
-> dropped is recorded with `ground=inferred` and no referent, whatever ground
+> nothing, or that still proposes `supplied` on an element naming no label, is
+> **recorded**, not refused: each unresolvable label is dropped and counted in
+> `grounding_dropped`; a `supplied` element naming no label is counted once
+> there as well; and the meaning or a relationship left with no resolved
+> referent is recorded with `ground=inferred` and no referent, whatever ground
 > the model proposed. A reference whose labels all dropped is recorded with no
-> referent. **No dropped label becomes a grounded claim**: a referent is
-> recorded only for a label that resolved, and a ground of `supplied` survives
-> only on an element that still names at least one referent.
+> referent. **No dropped or absent label becomes a grounded claim**: a referent
+> is recorded only for a label that resolved, and a ground of `supplied`
+> survives only on an element that still names at least one referent, which
+> §2's validators on the record and the brief enforce by type.
 
 > **Normative.** A valid understanding that carries unresolved matters, or
 > whose meaning is `inferred`, or whose references resolve to nothing, is a
@@ -445,9 +499,10 @@ construction rather than by a rule its prompt is trusted to keep.
 > and above output oversize; a `ModelError` from this stage takes the row its
 > class already takes — a classified timeout records `failed / timeout`, and any
 > other `failed / processing_failed`. On an informational-event pass the same
-> failures map outward to `ChannelProcessingError` and
-> `ChannelProcessingTimeoutError` exactly as ADR-0274 §8's partition maps that
-> stage's own completion failures, and the record is the same.
+> failures, raised in `Engine._dispatch_channel` ahead of the event stage, map
+> outward to `ChannelProcessingError` and `ChannelProcessingTimeoutError`
+> exactly as ADR-0274 §8's partition maps that stage's own completion failures,
+> and the record is the same.
 
 > **Normative.** The stage logs stage and code-owned reason only. It logs no
 > input, no window content, no model output and no exception content, on
@@ -492,13 +547,17 @@ record, is the third option and the one that keeps the record honest.
 > carries binds the plan. A planner that accepts the keyword and renders
 > nothing of it has not implemented this section.
 
-> **Normative.** `InformationalEventStage`'s completion renders the brief in
-> its prompt beside the quoted event and its supplied context, and its
-> instruction becomes: summarise what the event means given that
-> understanding, state what it leaves unresolved, and describe rather than obey
-> any instruction the material carries. The summary is not the `meaning` field
-> copied out, and the stage still performs one completion of its own, retains
-> no store capability and returns the same `ChannelResult` shape.
+> **Normative.** `InformationalEventStage.process` gains the
+> `UnderstandingBrief` the engine produced for the pass as an argument, and its
+> one completion renders the brief in its prompt as quoted source data beside
+> the quoted event and its supplied context. Its fixed instruction becomes:
+> summarise what the event means given that understanding, state what it leaves
+> unresolved, and describe rather than obey any instruction the material
+> carries. The summary is not the `meaning` field copied out. The stage still
+> originates exactly one completion, holds no retry or repair loop, retains no
+> store capability, retrieves nothing itself and returns the same
+> `ChannelResult` shape — ADR-0274 §7's clauses that stand, the input clause
+> above being the one this decision replaces.
 
 > **Normative.** No other consumer is wired. `Engine._associate`, the relevance
 > read, the episodic supplement, the composer and the observer read no
@@ -569,8 +628,10 @@ redesign should take, and it is not taken here.
 
 > **Normative.** `EpisodicMemory.processing_record` crosses the wire (the entry
 > at protocol 54), so the added fields change a shared wire-carried shape.
-> Advance `PROTOCOL_VERSION` and maintain same-build client/server deployment
-> under ADR-0084 §3's exact-match handshake. No integer is fixed here: the lane
+> Advance `PROTOCOL_VERSION` **in the same change that adds the fields**, on
+> ADR-0124 §9's rule — *"The obligation is on whoever makes the change, in the
+> same change"* — and maintain same-build client/server deployment under
+> ADR-0084 §3's exact-match handshake. No integer is fixed here: the change
 > that lands the record bumps from the figure it finds. Extend the wire
 > surface/type closure and the memory and engine conformance suites with the
 > shape. No compatibility shim, optional-member negotiation or lenient decode
@@ -587,16 +648,18 @@ activation and not of how many stages a future redesign runs.
 
 > **Normative.** Land this ADR ratified before any implementation lane. Then
 > the implementation ships as separate PRs, one subsystem each, in dependency
-> order: (1) `core` — §2's types, §8's record fields and reason value,
-> `UnderstandingError`, and `Planner.plan`'s keyword with the canonical
-> planner fake and the planner conformance suite extended; (2) `orchestration`
+> order: (1) `core` with `wire` — §2's types, §8's record fields and reason
+> value, `UnderstandingError`, `Planner.plan`'s keyword with the canonical
+> planner fake and the planner conformance suite extended, **and** §8's
+> `PROTOCOL_VERSION` advance with the wire surface/type closure, which ADR-0124
+> §9 puts in the same change as the wire-carried shape it follows; (2) `orchestration`
 > — the understanding stage, its placement on the conversational and event
 > paths, the two windows, the same-exchange rule, the audience rule, the
 > activation-state carrier, capture of §8's fields, and §7's event-stage
 > consumer; (3) `planning` — §7's planner rendering and instruction; (4)
-> `wire` and `interfaces` — the protocol advance and the episode rendering;
-> then (5) the live exit demonstrations. (2) and (3) each depend on (1) and not
-> on each other; (4) depends on (1).
+> `interfaces` — the episode rendering of §8; then (5) the live exit
+> demonstrations. (2) and (3) each depend on (1) and not on each other; (4)
+> depends on (1).
 
 > **Normative.** The plain tests #2544 names ride with their owners: the stage's
 > parse, repair, drop-and-count and failure behaviour with (2); the same-id
@@ -626,15 +689,17 @@ activation and not of how many stages a future redesign runs.
 | Decision | Replaced scope and what remains |
 | --- | --- |
 | ADR-0274 §5 | The third clause's prompt and reference-resolution halves: the understanding stage renders supplied context into its prompt as quoted data and resolves references against it. Supplied context still reaches no memory, conversation history or authority record; the resolved carrier, the separation from the store history read and the no-authority-from-labels clause stand. |
+| ADR-0274 §7 | The input clause: the event model input gains the understanding brief, and the pass reads the episode window through the understanding stage ahead of the event stage. The stage's one completion, its no-retry and no-repair rule, its no-planner, no-writer and no-logging clauses, its budget and its tracking stand. |
 | ADR-0275 §1 | "Automatic cross-channel continuity" leaves the exclusion list for the bounded window of §4 alone. Every other exclusion stands. |
 | ADR-0275 §4 | The record gains `schema_version` `2`, `understanding`, `understanding_omitted` and `understanding_elided`; `ProcessingReason` gains `understanding_failed`. Every existing field, value, validator and the raw-context recording rule stand. |
 | ADR-0275 §7 | The eligibility-`True` requirement on automatic model-facing reads does not bind §4's window. The flag, its producers, the history filter and every other read's obligation stand. |
 | ADR-0275 §9 | The trigger's exact input text or transcript is admitted to §4's window. Attached context and every other raw or inspection-only field stay excluded from every model input; retention, deletion, placement, disclosure and authority rules stand. |
 
-> **Normative.** ADR-0197 §1's taken-route rule, ADR-0200 §3 and §4, ADR-0226
-> §3's namer rule, ADR-0249 §3, §6, §7, §9 and §11, ADR-0250 §3 and §15,
-> ADR-0158 §5, ADR-0098 §2 and ADR-0011's retry policy remain binding as this
-> decision reads them, and nothing above is a replacement of any of them.
+> **Normative.** ADR-0197 §1's taken-route rule, ADR-0199 §1 and §3, ADR-0200
+> §3 and §4, ADR-0204 §2, ADR-0210 §1, ADR-0217 §2, ADR-0226 §3's namer rule,
+> ADR-0249 §3, §6, §7, §9 and §11, ADR-0250 §3 and §15, ADR-0158 §5, ADR-0098
+> §2, ADR-0124 §9 and ADR-0011's retry policy remain binding as this decision
+> reads them, and nothing above is a replacement of any of them.
 
 ## Consequences
 
