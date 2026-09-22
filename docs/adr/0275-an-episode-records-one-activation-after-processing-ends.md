@@ -6,8 +6,8 @@
 - Dependency: ADR-0274 and [M35](https://github.com/leonapivato/ai-assistant/milestone/1).
 - Partially superseded: 2026-09-22 by ADR-0276 — four narrow scopes. §1's exclusion list
   loses one item, "automatic cross-channel continuity", for a bounded window of recent
-  episodes read into one understanding call; §4's `EpisodeProcessingRecord` gains
-  `schema_version` `2`, `understanding`, `understanding_omitted` and `understanding_elided`,
+  episodes read into one understanding call; §4's `EpisodeProcessingRecord` moves to
+  `schema_version` `2` and gains `understanding`, `understanding_omitted` and `understanding_elided`,
   and `ProcessingReason` gains `understanding_failed`, every existing field, value and
   validator standing; §7's rule that all automatic model-facing episodic reads request
   eligibility `True` does not bind that window, every other read keeping it; and §9's
