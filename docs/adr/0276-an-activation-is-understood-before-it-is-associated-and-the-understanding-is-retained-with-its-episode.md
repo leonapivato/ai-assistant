@@ -625,12 +625,12 @@ record, is the third option and the one that keeps the record honest.
 > it to a later call only as that.
 
 > **Normative.** `EpisodicMemory.processing_record` crosses the wire (the entry
-> at protocol 54), so the added fields change a shared wire-carried shape.
-> Advance `PROTOCOL_VERSION` **in the same change that adds the fields**, on
-> ADR-0124 §9's rule — *"The obligation is on whoever makes the change, in the
+> at protocol 54), so the added fields and the `schema_version` change each
+> change a shared wire-carried shape. Advance `PROTOCOL_VERSION` **in each
+> change that makes one**, on ADR-0124 §9's rule — *"The obligation is on whoever makes the change, in the
 > same change"* — and maintain same-build client/server deployment under
-> ADR-0084 §3's exact-match handshake. No integer is fixed here: the change
-> that lands the record bumps from the figure it finds. Extend the wire
+> ADR-0084 §3's exact-match handshake. No integer is fixed here: each such
+> change bumps from the figure it finds. Extend the wire
 > surface/type closure and the memory and engine conformance suites with the
 > shape. No compatibility shim, optional-member negotiation or lenient decode
 > is added.
@@ -654,10 +654,14 @@ activation and not of how many stages a future redesign runs.
 >    exactly-one validator, so every existing writer still validates; and
 >    §7's `PROTOCOL_VERSION` advance with the wire surface/type closure, which
 >    ADR-0124 §9 puts in the same change as the wire-carried shape it follows.
-> 2. **The cutover — one change spanning `core`, `orchestration` and
->    `memory`, permitted expressly here as one mechanical unit** and as the one
->    exception this decision makes to one-subsystem-per-change: `schema_version`
->    becomes `Literal[2]` with §7's exactly-one validator; `ActivationState.processing`
+> 2. **The cutover — one change spanning `core`, `orchestration`, `memory`
+>    and `wire`, permitted expressly here as one mechanical unit** and as the
+>    one exception this decision makes to one-subsystem-per-change:
+>    `schema_version` becomes `Literal[2]` with §7's exactly-one validator,
+>    **with a second `PROTOCOL_VERSION` advance in this same change**, because
+>    a peer emitting the version-2 record is refused by a peer holding step 1's
+>    type and ADR-0124 §9 puts the bump in the change that makes it so;
+>    `ActivationState.processing`
 >    writes `understanding_omitted=not_reached` on every capture, which is
 >    true of every pass until the stage exists; and the episode-record format
 >    marker in `memory` advances with its startup check and fresh-store
