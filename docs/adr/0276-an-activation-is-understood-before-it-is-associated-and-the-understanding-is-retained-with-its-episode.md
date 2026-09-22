@@ -279,20 +279,39 @@ rather than superseded.
 
 ### 4. The episode window
 
-> **Normative.** The **episode window** of an activation is the most recent
-> episodes across all channels within a bound on count and a horizon on age,
-> read from the `MemoryStore` the engine holds through `episodes` (ADR-0275
-> §10) with no channel and no status filter, in that read's own
-> `(occurred_at, episode_id)` descending order, then fetched by `get_many`, and
-> then cut in `orchestration` to those whose `occurred_at` is within the
-> horizon of the activation's `started_at`. `core/protocols.py` gains no member
-> for it and `MemoryStore` gains no signature.
+> **Normative.** The **episode window** of an activation is a bounded set of
+> the assistant's recent episodes across all channels, produced by one
+> orchestration-local **episode selector** that the composition root wires
+> into the stage as it wires the model provider. The stage reads no store
+> itself: it receives the selector's records, in the selector's order, and that
+> order is the rendering order and the `P` label order. `core/protocols.py`
+> gains no member for the selector and `MemoryStore` gains no signature.
 
-> **Normative.** The count bound and the horizon are composition-root constants
-> beside `ai_assistant.app.composition.RETRIEVAL_LIMIT`, on ADR-0158 §5's rule,
-> named `UNDERSTANDING_EPISODE_LIMIT` and `UNDERSTANDING_EPISODE_HORIZON`, and
-> injected into the stage. Their initial values are **10** and **24 hours**.
-> `ai_assistant.core.config.Settings` gains no field for either.
+> **Normative — what every selector must satisfy.** A selector returns a set
+> bounded by a composition-root constant `UNDERSTANDING_EPISODE_LIMIT`, beside
+> `ai_assistant.app.composition.RETRIEVAL_LIMIT` on ADR-0158 §5's rule, with
+> initial value **10**; reads across all channels with no channel filter;
+> requests no eligibility; reads episodic records and nothing else; invokes no
+> model; and ranks nothing by relevance to a goal, a request or an
+> understanding. Its records pass through the disclosure predicate below
+> before the stage renders any of them. `ai_assistant.core.config.Settings`
+> gains no field for it.
+
+> **Normative.** The initial selector is **recency by occurrence**: the
+> `UNDERSTANDING_EPISODE_LIMIT` most recent episodes by `(occurred_at,
+> episode_id)` descending, taken from `MemoryStore.episodes` (ADR-0275 §10)
+> with no channel and no status filter and fetched by `MemoryStore.get_many`.
+> No horizon on age is applied: each episode renders with its `occurred_at`,
+> and how much weight a day-old episode carries is the stage's instruction and
+> the model's reading, not a cut.
+
+> **Normative.** Within the walls above, the selection method is the
+> composition root's choice, changed on evidence from live runs — a different
+> bound, a per-channel mix, a size budget, a different order — by wiring a
+> different selector, and such a change amends no clause of this decision and
+> owes it no supersession. A selector that leaves those walls — one that filters
+> by eligibility, ranks by relevance, invokes a model or reads beyond episodes —
+> is a new decision.
 
 > **Normative.** The window requests no eligibility. Episodes ADR-0275 §7
 > marks ineligible — newly captured events, pre-result failures, interruptions
@@ -375,9 +394,25 @@ rather than superseded.
 read for the episodic supplement because its consumer's questions are topical.
 This consumer's question is recency, and ADR-0275 §10 has since put a
 recency-ordered cross-channel enumeration on the contract for inspection. The
-window is that enumeration and the batch read that already exists, composed in
-`orchestration`; a third member would be a second spelling of an ordering the
-contract already has.
+initial selector is that enumeration and the batch read that already exists,
+composed in `orchestration`; a third member would be a second spelling of an
+ordering the contract already has.
+
+**Why the method is a selector and not a clause.** The owner directed that the
+window's rule be easy to adjust in method and not only in value. Ten by recency
+is a first guess with no measurement behind it, and the exit run is the first
+evidence. Fixing the method here would make every adjustment a supersession;
+fixing the walls instead — bounded, cross-channel, eligibility-blind,
+disclosure-filtered, model-free, relevance-free — makes an adjustment a wiring
+change and keeps what this decision actually cares about binding. A selector is
+one function with one consumer in one subsystem, which is why it is not a
+Protocol.
+
+**Why no horizon.** A cut by age empties the window exactly when it matters: a
+trip discussed on Monday and a closure reported on Wednesday are two days apart
+and still the two most recent things that happened. The timestamp is rendered,
+so the model has what a horizon would have used and loses nothing a horizon
+would have hidden.
 
 **Why the eligibility flag does not apply.** ADR-0275 §7's own words: the flag is
 set false for *"newly captured events, pre-result failures, interruptions, and
@@ -734,8 +769,8 @@ rather than through a second reading of the sentence.
 
 **What it costs.** A conversational text pass now makes four completions in
 sequence — routing, understanding, planning, composition — under one deadline,
-and an informational-event pass makes two. The stage's prompt carries up to ten
-episodes and the channel window, each bounded. The exit run is where the
+and an informational-event pass makes two. The stage's prompt carries the selector's
+episodes, ten under the initial selector, and the channel window, each bounded. The exit run is where the
 deadline is observed; §5 moves no budget, and a lane that finds it binding
 opens an issue rather than widening it in place.
 
@@ -750,7 +785,7 @@ be discovered as an omission.
 their own identifiers, which needs the one-field M35 amendment #2544 defers so
 that an episode remembers its item id. A phase redesign that gives another stage
 a reason to revise the understanding, which takes §8's carrier and adds a
-producer. Evidence from the exit run that ten episodes or twenty-four hours is
-the wrong bound, which moves a constant and not a clause. And a decision to let
+producer. Evidence from the exit run that ten by recency is the wrong selection,
+which wires a different selector and moves no clause. And a decision to let
 a spoken turn on the owner's own device see the episode window, which is an
 audience ruling ADR-0250 §15 owns.
