@@ -645,22 +645,38 @@ activation and not of how many stages a future redesign runs.
 ### 8. Delivery
 
 > **Normative.** Land this ADR ratified before any implementation lane. Then
-> the implementation ships as separate PRs, one subsystem each, in dependency
-> order: (1) `core` with `wire` — §2's types, §7's record fields and reason
-> value, `UnderstandingError`, **and** §7's `PROTOCOL_VERSION` advance with the
-> wire surface/type closure, which ADR-0124 §9 puts in the same change as the
-> wire-carried shape it follows; (2) `orchestration` — the understanding
-> stage, its placement on the conversational and event paths, the two windows
-> and the episode selector, the same-exchange rule, the disclosure filtering,
-> the audience rule, the activation-state carrier, capture of §7's fields and
-> the format-marker advance; (3) `interfaces` — the episode rendering of §7;
-> then (4) the live exit demonstrations. (2) and (3) each depend on (1) and not
-> on each other.
+> the implementation ships as separate PRs in this order, and **every
+> intermediate tree keeps capture working and refuses an incompatible store**:
+>
+> 1. **`core` with `wire` — additive only.** §2's types, `UnderstandingError`,
+>    the `understanding_failed` reason, and §7's three record fields with
+>    their defaults, with `schema_version` still `Literal[1]` and **no**
+>    exactly-one validator, so every existing writer still validates; and
+>    §7's `PROTOCOL_VERSION` advance with the wire surface/type closure, which
+>    ADR-0124 §9 puts in the same change as the wire-carried shape it follows.
+> 2. **The cutover — one change spanning `core`, `orchestration` and
+>    `memory`, permitted expressly here as one mechanical unit** and as the one
+>    exception this decision makes to one-subsystem-per-change: `schema_version`
+>    becomes `Literal[2]` with §7's exactly-one validator; `ActivationState.processing`
+>    writes `understanding_omitted=not_reached` on every capture, which is
+>    true of every pass until the stage exists; and the episode-record format
+>    marker in `memory` advances with its startup check and fresh-store
+>    initializer, so a store written before this tree is refused before
+>    mutation under ADR-0275 §12. No stage behaviour lands here.
+> 3. **`orchestration`** — the understanding stage, its placement on the
+>    conversational and event paths, the two windows and the episode selector,
+>    the same-exchange rule, the disclosure filtering, the audience rule, the
+>    activation-state carrier and capture of §7's versions and the real
+>    omission values.
+> 4. **`interfaces`** — the episode rendering of §7.
+> 5. The live exit demonstrations.
+>
+> (3) and (4) each depend on (2) and not on each other.
 
 > **Normative.** The plain tests #2544 names ride with their owners: the stage's
 > parse, repair, drop-and-count and failure behaviour, the same-id rendering,
 > the routed, no-text and not-reached omissions and the multi-version carrier
-> with (2); the record's exactly-one validator with (1). The exit demonstrations
+> with (3); the record's exactly-one validator and the store refusal with (2). The exit demonstrations
 > are the three recorded on #2544 on 2026-09-21, driven end to end against a hub
 > deployed from a tree carrying M35, M36 and this decision's implementation,
 > with the third read as the owner amended it on 2026-09-22: both the
