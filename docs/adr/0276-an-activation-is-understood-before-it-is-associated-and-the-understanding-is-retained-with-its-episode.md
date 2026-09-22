@@ -1,6 +1,6 @@
 # 276. An activation is understood before it is associated, and the understanding is retained with its episode
 
-- Status: Proposed
+- Status: Accepted
 - Date: 2026-09-22
 - Scope: [M37](https://github.com/leonapivato/ai-assistant/milestone/4), [#2544](https://github.com/leonapivato/ai-assistant/issues/2544).
 - Dependency: ADR-0274, ADR-0275 and their milestones M35 and M36.
