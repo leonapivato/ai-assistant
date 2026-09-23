@@ -288,6 +288,19 @@ async def test_a_stage_that_crosses_the_deadline_without_yielding_is_still_timed
     assert record.understanding_omitted is UnderstandingOmission.FAILED
 
 
+async def test_a_late_unparseable_output_is_the_timeout_and_earns_no_repair() -> None:
+    model = _Blocking("not json")
+    harness = _harness(model)
+    with pytest.raises(ModelTimeoutError):
+        await harness.engine.receive(
+            _text(), reply=WholeTextReply(), timeout=timedelta(milliseconds=50)
+        )
+    assert len(model.calls) == 1
+    record = await _record(harness)
+    assert record.reason is ProcessingReason.TIMEOUT
+    assert record.understanding_omitted is UnderstandingOmission.FAILED
+
+
 async def test_a_deadline_that_expired_ahead_of_the_stage_is_not_reached() -> None:
     """§5: routing spent the budget, so the stage is never entered."""
     model = FakeModelProvider(STATED_PROPOSAL)

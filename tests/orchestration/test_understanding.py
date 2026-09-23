@@ -2,7 +2,10 @@
 
 from __future__ import annotations
 
+import asyncio
 import json
+import math
+import time
 from datetime import UTC, datetime, timedelta
 from typing import TYPE_CHECKING, Any, Final
 
@@ -139,6 +142,7 @@ async def _understand(  # noqa: PLR0913 — the stage's own inputs, each default
     window: SuppliedWindow | ConversationWindow | None = None,
     audience: TurnSupply = BOUNDED,
     episodes: bool = True,
+    deadline: float = math.inf,
 ) -> ActivationUnderstanding:
     return await stage.understand(
         text,
@@ -148,6 +152,7 @@ async def _understand(  # noqa: PLR0913 — the stage's own inputs, each default
         episodes=episodes,
         version=1,
         now=lambda: AT,
+        deadline=deadline,
     )
 
 
@@ -217,6 +222,32 @@ async def test_one_enclosing_code_fence_is_not_a_parse_failure() -> None:
     understood = await _understand(_stage(model, await _store()))
     assert len(model.calls) == 1
     assert understood.meaning == "They want to go camping."
+
+
+async def test_no_completion_starts_once_the_deadline_has_passed() -> None:
+    """§5: the stage runs inside the pass's deadline — a spent one buys no call."""
+    model = FakeModelProvider.scripted(_proposal())
+    with pytest.raises(TimeoutError):
+        await _understand(_stage(model, await _store()), deadline=asyncio.get_running_loop().time())
+    assert model.calls == []
+
+
+class _Unyielding(FakeModelProvider):
+    """A provider that answers without yielding to the loop, twenty milliseconds on."""
+
+    async def complete(self, messages: Sequence[Message], *, model: str | None = None) -> Message:
+        time.sleep(0.02)  # noqa: ASYNC251 — the point: no timer can fire while it runs
+        return await super().complete(messages, model=model)
+
+
+async def test_a_first_output_that_arrives_after_the_deadline_earns_no_repair() -> None:
+    """The repair is a completion too, and the deadline is checked before it."""
+    model = _Unyielding("not json")
+    with pytest.raises(TimeoutError):
+        await _understand(
+            _stage(model, await _store()), deadline=asyncio.get_running_loop().time() + 0.01
+        )
+    assert len(model.calls) == 1
 
 
 # --- labels: resolve, repair, drop and count --------------------------------------------

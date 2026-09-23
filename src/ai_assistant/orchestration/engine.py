@@ -11883,7 +11883,9 @@ class Engine:
         and a deadline that expires is a classified timeout — ``ModelTimeoutError``,
         the row a timed-out completion of this stage already takes (§6). A deadline
         that had already expired is raised **before** the stage is entered, so the
-        record says ``not_reached`` rather than ``failed``.
+        record says ``not_reached`` rather than ``failed``. The stage itself starts no
+        completion past it, and a stage that crossed it without the timer firing —
+        work that never yielded — is judged by the deadline, not by what it returned.
 
         Args:
             input: The resolved activation input.
@@ -11901,9 +11903,8 @@ class Engine:
         loop = asyncio.get_running_loop()
         if deadline <= loop.time():
             raise ModelTimeoutError(_UNDERSTANDING_EXPIRED)
-        timer = asyncio.timeout_at(deadline)
         try:
-            async with timer:
+            async with asyncio.timeout_at(deadline):
                 understood = await self._understanding.understand(
                     input.text,
                     channel=input.channel,
@@ -11912,18 +11913,24 @@ class Engine:
                     episodes=episodes,
                     version=1 if state is None else state.next_understanding_version(),
                     now=self._clock,
+                    deadline=deadline,
                 )
         except BaseException as exc:
+            # A timer fires only when the loop gets control, so a stage can cross the
+            # deadline without it firing — and then end in whatever the late work
+            # raised. Past the deadline, a timeout, a model failure and an
+            # unparseable output are all the expiry; anything else is not, and
+            # propagates as itself.
+            expired = deadline <= loop.time() and isinstance(
+                exc, TimeoutError | ModelError | UnderstandingError
+            )
             if state is not None:
-                state.understanding_failed(exc)
-            if not (isinstance(exc, TimeoutError) and timer.expired()):
+                state.understanding_failed(TimeoutError() if expired else exc)
+            if not expired:
                 raise
-            expired = True
         else:
-            # A timer fires only when the loop gets control, so a stage that crossed
-            # the deadline without yielding — a completion answered just before it,
-            # validation just after — returns as if in time. It is not: what it
-            # produced is not recorded, and the pass ends as any expiry inside does.
+            # The same, for a stage that crossed it and returned: what it produced is
+            # not recorded, and the pass ends as any expiry inside does.
             expired = deadline <= loop.time()
             if expired and state is not None:
                 state.understanding_failed(TimeoutError())

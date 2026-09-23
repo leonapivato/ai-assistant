@@ -41,6 +41,7 @@ output and no exception content (ADR-0275 §8).
 
 from __future__ import annotations
 
+import asyncio
 import json
 
 # At runtime, not under TYPE_CHECKING: `EpisodeSelector` is a PEP 695 alias, whose
@@ -329,6 +330,7 @@ class UnderstandingStage:
         episodes: bool,
         version: int,
         now: Callable[[], datetime],
+        deadline: float,
     ) -> ActivationUnderstanding:
         """Read one input against its windows, and record what it was understood to mean.
 
@@ -343,6 +345,9 @@ class UnderstandingStage:
                 ``converse_spoken`` (§4, ADR-0250 §15).
             version: The version orchestration mints for this record.
             now: The clock ``recorded_at`` is read from.
+            deadline: The pass's deadline on the running loop's clock (§5). No
+                completion is started once it has passed — the one repair included —
+                however the time was spent.
 
         Returns:
             The recorded understanding.
@@ -350,13 +355,16 @@ class UnderstandingStage:
         Raises:
             UnderstandingError: If the one repair's output still does not parse.
             ModelError: Propagated unchanged from the provider stack.
+            TimeoutError: If ``deadline`` had passed when a completion was due.
         """
         brief = await self._brief(
             text, channel=channel, window=window, audience=audience, episodes=episodes
         )
+        _within(deadline)
         first = await self._model.complete(brief.messages)
         proposal, problem = self._validated(first.content, brief)
         if problem is not None:
+            _within(deadline)
             _log.info("understanding_repair", stage="understanding", reason=problem.reason)
             second = await self._model.complete(
                 (
@@ -771,6 +779,18 @@ def _resolved(
 
 
 # --- rendering helpers -------------------------------------------------------------
+
+
+def _within(deadline: float) -> None:
+    """Refuse to start a completion once the pass's deadline has passed (ADR-0276 §5).
+
+    The engine's timer bounds every await, but fires only when the loop gets control;
+    this is the check at the two points a completion is about to be spent, so time
+    crossed without yielding — rendering, validation — cannot buy one.
+    """
+    if deadline <= asyncio.get_running_loop().time():
+        msg = "the pass's deadline passed before the understanding completion"
+        raise TimeoutError(msg)
 
 
 def _input_rendering(text: str, channel: ChannelIdentity) -> dict[str, object]:
