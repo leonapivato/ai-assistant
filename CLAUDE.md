@@ -104,6 +104,10 @@ and the owner's reset record #2518.
 - **Park what isn't this change.** Anything you notice but shouldn't fix here —
   a deferred review finding, a debt, a follow-up — becomes a **GitHub issue**.
   There is no tracked TODO file; a file would just conflict (ADR-0015).
+- **A design not yet decided is a proposal**, not an issue comment and not a
+  wiki page: one file under `docs/proposals/` in a draft PR, converted into its
+  ADR on acceptance (`CONTRIBUTING.md` → "A proposal is a draft PR that becomes
+  its ADR").
 - **Tests are the guardrail.** Add tests under `tests/` mirroring the package
   path. Test implementations against their Protocol. Use fakes/mocks for other
   subsystems — never reach into their internals.

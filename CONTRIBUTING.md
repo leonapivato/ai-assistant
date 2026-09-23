@@ -1061,6 +1061,43 @@ before you know the contract.
 - Do **not** repeat types in docstrings — they live in annotations.
 - Comments explain **why**, not what. No commented-out code.
 - Record every non-obvious decision as an ADR (`docs/adr/`, see the template).
+- A design that is not yet decided is a **proposal**: a draft PR carrying one
+  file under `docs/proposals/`, which becomes its ADR on acceptance (below).
+
+### A proposal is a draft PR that becomes its ADR
+
+A **proposal** is a design under discussion before the owner has decided it. It
+is one Markdown file under `docs/proposals/` on a `proposal/<slug>` branch,
+opened as a **draft pull request**, and it never merges as a proposal.
+`docs/proposals/README.md` is the working guide — what the file carries, how
+it is discussed, and the three ways it ends.
+
+- **The wiki is the baseline, not the venue.** The wiki describes the system as
+  the code on `main` implements it. A proposal is a change against that
+  baseline: it cites the wiki pages and ADR clauses it would alter and does not
+  live among them. Nothing under `docs/proposals/` on `main` is a proposal.
+- **The pull request is the medium.** The file is rewritten in place and
+  pushed; the PR's history is the record, and review threads on the diff are
+  the discussion. An issue, where one exists, holds the ruling and the link.
+- **An open proposal authorizes nothing.** It claims no scope, blocks no lane,
+  amends no ADR, and no implementation cites it.
+- **Accepted means converted, on the same branch.** The file moves to
+  `docs/adr/NNNN-<title>.md` and is rewritten into the ADR form with `- Status:
+  Proposed`; the number is assigned at conversion (`CLAUDE.md` → golden rule
+  5). From that commit the branch is an ADR PR and "Finishing an ADR PR"
+  applies unchanged. The proposal file does not survive the conversion.
+- **Declined or parked means closed unmerged**, with the ruling in the closing
+  comment and, for a parked one, the issue that holds it.
+- **Neither ADR-0136 anchor arrives while it is a draft proposal.** No review
+  is invoked on it and it is never flipped out of draft as a proposal, so no
+  review round and no full-gate run is owed until conversion — not as an
+  exemption, but because the events that oblige them have not happened.
+
+The reasoning is in the README: proposals kept as wiki pages drifted from the
+issues recording the same design, and an issue thread cannot show a rendered,
+versioned text with a diff. The ADR template already carries the second half of
+the lifecycle — `Proposed`, then `Accepted` or `Withdrawn` — so this rule only
+adds the stage before an ADR exists and the act that turns one into the other.
 
 ### Cite in form, and mark what binds
 
