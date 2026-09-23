@@ -7,7 +7,7 @@ import hashlib
 import json
 from datetime import UTC, datetime
 from io import StringIO
-from typing import TYPE_CHECKING
+from typing import TYPE_CHECKING, get_args
 
 import pytest
 from rich.console import Console
@@ -16,6 +16,7 @@ from typer.testing import CliRunner
 from ai_assistant.core.config import Settings
 from ai_assistant.core.errors import StaleEpisodeReadError
 from ai_assistant.core.types import (
+    ActivationUnderstanding,
     ChannelContext,
     ChannelIdentity,
     EpisodeChunk,
@@ -28,9 +29,15 @@ from ai_assistant.core.types import (
     Provenance,
     RecordedChannelTrigger,
     RecordedTextInput,
+    UnderstandingGround,
     UnderstandingOmission,
+    UnderstandingProducer,
+    UnderstandingReference,
+    UnderstandingReferent,
+    UnderstandingRelationship,
+    UnresolvedMatter,
 )
-from ai_assistant.interfaces import cli
+from ai_assistant.interfaces import cli, episode_inspection
 from ai_assistant.testing import FakeAssistantEngine, FakeMemoryStore
 
 if TYPE_CHECKING:
@@ -41,7 +48,14 @@ _CHANNEL = ChannelIdentity(channel_type="informational_event", instance_id="sour
 _CONTENT = ":smile: " + 'exact private material café 🍵\\" '
 
 
-def _record(record_id: str, *, response: EpisodeResponseKind | None = None) -> EpisodicMemory:
+def _record(
+    record_id: str,
+    *,
+    response: EpisodeResponseKind | None = None,
+    understanding: tuple[ActivationUnderstanding, ...] = (),
+    omitted: UnderstandingOmission | None = UnderstandingOmission.NOT_REACHED,
+    elided: int = 0,
+) -> EpisodicMemory:
     return EpisodicMemory(
         id=record_id,
         content=_CONTENT * 100,
@@ -67,7 +81,9 @@ def _record(record_id: str, *, response: EpisodeResponseKind | None = None) -> E
                 reason=ProcessingReason.RETURNED,
                 response_kind=response,
                 model_eligible=False,
-                understanding_omitted=UnderstandingOmission.NOT_REACHED,
+                understanding=understanding,
+                understanding_omitted=None if understanding else omitted,
+                understanding_elided=elided,
             )
         ),
     )
@@ -253,3 +269,232 @@ def test_failed_reassembly_never_prints_partial_content(
     assert result.exit_code != 0
     assert "exact private material" not in output.getvalue()
     assert output.getvalue()
+
+
+# --- the retained understanding (ADR-0276 §7) ---------------------------------
+
+#: Referent fields ADR-0276 §7 leaves to ``--json``: each is distinctive, so its
+#: absence from the human section is a check rather than a coincidence.
+_REFERENT_ID = "referent-id-f00d"
+_REFERENT_SOURCE = "referent-source-beef"
+_REFERENT_EXCERPT = "referent-excerpt-cafe"
+
+
+def _referent(kind: str) -> UnderstandingReferent:
+    return UnderstandingReferent.model_validate(
+        {
+            "kind": kind,
+            "id": None if kind == "input" else f"{_REFERENT_ID}-{kind}",
+            "source": None if kind == "input" else f"{_REFERENT_SOURCE}-{kind}",
+            "excerpt": f"{_REFERENT_EXCERPT}-{kind}",
+        }
+    )
+
+
+def _version(
+    number: int,
+    *,
+    meaning_ground: UnderstandingGround = UnderstandingGround.STATED,
+    **fields: object,
+) -> ActivationUnderstanding:
+    """One recorded version; a ``supplied`` meaning names a channel item, as its type requires."""
+    return ActivationUnderstanding.model_validate(
+        {
+            "version": number,
+            "recorded_at": _AT,
+            "producer": UnderstandingProducer.INTERPRETATION,
+            "meaning": "compare the two quotes",
+            "meaning_ground": meaning_ground,
+            "meaning_referents": (
+                (_referent("channel_item"),)
+                if meaning_ground is UnderstandingGround.SUPPLIED
+                else ()
+            ),
+            **fields,
+        }
+    )
+
+
+def _understanding_section(record: EpisodicMemory) -> list[str]:
+    """The human detail's understanding lines, between its fixed neighbours."""
+    buffer = StringIO()
+    episode_inspection.render_detail(Console(file=buffer, force_terminal=False, width=200), record)
+    lines = buffer.getvalue().splitlines()
+    start = lines.index("Processing status does not report goal achievement or audio playback.")
+    end = next(n for n, line in enumerate(lines) if line.startswith("Retention expiry"))
+    return lines[start + 1 : end]
+
+
+#: Every member of each closed enum, spelled out so that a member added to the enum
+#: fails the coverage tests below until its rendering is looked at (ADR-0276 §2).
+_OMISSIONS = ("routed", "no_text", "no_input", "failed", "not_reached")
+_GROUNDS = ("stated", "supplied", "inferred")
+_REFERENT_KINDS = ("input", "channel_item", "episode")
+
+
+def test_rendering_tables_cover_every_member_of_each_closed_enum() -> None:
+    assert {member.value for member in UnderstandingOmission} == set(_OMISSIONS)
+    assert {member.value for member in UnderstandingGround} == set(_GROUNDS)
+    assert {member.value for member in UnderstandingProducer} == {"interpretation"}
+    kind = UnderstandingReferent.model_fields["kind"].annotation
+    assert set(get_args(kind)) == set(_REFERENT_KINDS)
+
+
+def test_json_detail_carries_every_retained_version_complete(
+    monkeypatch: pytest.MonkeyPatch, output: StringIO
+) -> None:
+    versions = (
+        _version(
+            1,
+            references=(UnderstandingReference(phrase="it", referents=(_referent("episode"),)),),
+            unresolved=(UnresolvedMatter(matter="which quote", why_it_matters="two exist"),),
+        ),
+        _version(
+            4,
+            meaning_ground=UnderstandingGround.SUPPLIED,
+            relationships=(
+                UnderstandingRelationship(
+                    statement="the second supersedes the first",
+                    referents=(_referent("channel_item"), _referent("input")),
+                    ground=UnderstandingGround.SUPPLIED,
+                ),
+            ),
+        ),
+    )
+    record = _record("record", response=EpisodeResponseKind.NONE, understanding=versions, elided=2)
+    engine = _engine(record)
+    _wire(monkeypatch, engine)
+    result = CliRunner().invoke(cli.app, ["episode", "record", "--json"])
+    assert result.exit_code == 0, result.exception
+    rendered = output.getvalue().removesuffix("\n")
+    first = asyncio.run(engine.episode_memory.episode_chunk("record"))
+    assert first is not None
+    assert rendered == first.text
+    assert EpisodicMemory.model_validate_json(rendered).processing_record == (
+        record.processing_record
+    )
+    processing = json.loads(rendered)["processing_record"]
+    assert processing["understanding"] == [v.model_dump(mode="json") for v in versions]
+    assert processing["understanding_elided"] == 2
+    assert processing["understanding_omitted"] is None
+
+
+@pytest.mark.parametrize("omission", _OMISSIONS)
+def test_human_detail_names_every_omission_value(omission: str) -> None:
+    record = _record(
+        "record",
+        response=EpisodeResponseKind.NONE,
+        omitted=UnderstandingOmission(omission),
+    )
+    assert _understanding_section(record) == [f"Understanding: not recorded ({omission})"]
+
+
+def test_human_detail_without_processing_record_labels_understanding_unavailable() -> None:
+    assert _understanding_section(_record("record")) == ["Understanding: unavailable"]
+
+
+@pytest.mark.parametrize("ground", _GROUNDS)
+def test_human_detail_names_every_ground_of_meaning_and_relationship(ground: str) -> None:
+    value = UnderstandingGround(ground)
+    version = _version(
+        1,
+        meaning_ground=value,
+        relationships=(
+            UnderstandingRelationship(
+                statement="follows the earlier request",
+                referents=(_referent("episode"),),
+                ground=value,
+            ),
+        ),
+    )
+    section = _understanding_section(
+        _record("record", response=EpisodeResponseKind.NONE, understanding=(version,))
+    )
+    assert section == [
+        "Understanding v1 (interpretation)",
+        f'  Meaning ({ground}): "compare the two quotes"',
+        f'  Relationship ({ground}): "follows the earlier request"',
+    ]
+
+
+def test_human_detail_names_the_elided_count_before_the_retained_versions() -> None:
+    record = _record(
+        "record",
+        response=EpisodeResponseKind.NONE,
+        understanding=(_version(1), _version(9, meaning="the latest reading")),
+        elided=7,
+    )
+    assert _understanding_section(record) == [
+        "Understanding versions elided: 7",
+        "Understanding v1 (interpretation)",
+        '  Meaning (stated): "compare the two quotes"',
+        "Understanding v9 (interpretation)",
+        '  Meaning (stated): "the latest reading"',
+    ]
+
+
+def test_human_detail_renders_every_field_of_a_full_version_and_no_referent_detail() -> None:
+    version = _version(
+        3,
+        meaning="compare [bold]both[/bold] :smile: quotes\nUnderstanding v9 (forged)",
+        meaning_ground=UnderstandingGround.INFERRED,
+        references=(
+            UnderstandingReference(
+                phrase="those two",
+                referents=tuple(_referent(kind) for kind in _REFERENT_KINDS),
+            ),
+            UnderstandingReference(
+                phrase="the earlier one", referents=(_referent("episode"), _referent("episode"))
+            ),
+            UnderstandingReference(phrase="that", referents=()),
+        ),
+        relationships=tuple(
+            UnderstandingRelationship(
+                statement=f"relationship {ground}",
+                referents=(_referent("channel_item"),),
+                ground=UnderstandingGround(ground),
+            )
+            for ground in _GROUNDS
+        ),
+        unresolved=(
+            UnresolvedMatter(matter="which currency", why_it_matters="the totals differ"),
+            UnresolvedMatter(matter="café 🍵 deadline", why_it_matters="nothing says"),
+        ),
+    )
+    section = _understanding_section(
+        _record("record", response=EpisodeResponseKind.NONE, understanding=(version,))
+    )
+    assert section == [
+        "Understanding v3 (interpretation)",
+        '  Meaning (inferred): "compare [bold]both[/bold] :smile: quotes\\n'
+        'Understanding v9 (forged)"',
+        '  Reference "those two"; referent kinds: input, channel_item, episode',
+        '  Reference "the earlier one"; referent kinds: episode, episode',
+        '  Reference "that"; referent kinds: none',
+        '  Relationship (stated): "relationship stated"',
+        '  Relationship (supplied): "relationship supplied"',
+        '  Relationship (inferred): "relationship inferred"',
+        '  Unresolved: "which currency"',
+        '    Why it matters: "the totals differ"',
+        '  Unresolved: "café 🍵 deadline"',
+        '    Why it matters: "nothing says"',
+    ]
+    joined = "\n".join(section)
+    for withheld in (_REFERENT_ID, _REFERENT_SOURCE, _REFERENT_EXCERPT):
+        assert withheld not in joined
+
+
+def test_cli_human_detail_carries_the_understanding_section(
+    monkeypatch: pytest.MonkeyPatch, output: StringIO
+) -> None:
+    record = _record(
+        "record", response=EpisodeResponseKind.CONVERSATION_REPLY, understanding=(_version(1),)
+    )
+    _wire(monkeypatch, _engine(record))
+    result = CliRunner().invoke(cli.app, ["episode", "record"])
+    assert result.exit_code == 0, result.exception
+    rendered = " ".join(output.getvalue().split())
+    assert (
+        "audio playback. Understanding v1 (interpretation) "
+        'Meaning (stated): "compare the two quotes" Retention expiry'
+    ) in rendered

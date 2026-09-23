@@ -15,7 +15,11 @@ if TYPE_CHECKING:
     from rich.console import Console
 
     from ai_assistant.core.protocols import AssistantEngine
-    from ai_assistant.core.types import EpisodePage
+    from ai_assistant.core.types import (
+        ActivationUnderstanding,
+        EpisodePage,
+        EpisodeProcessingRecord,
+    )
 
 
 async def read_detail(
@@ -118,6 +122,13 @@ def render_detail(console: Console, record: EpisodicMemory) -> None:
         soft_wrap=True,
     )
     console.print("Processing status does not report goal achievement or audio playback.")
+    console.print(
+        "\n".join(_understanding_lines(processing)),
+        markup=False,
+        emoji=False,
+        highlight=False,
+        soft_wrap=True,
+    )
     _retention_notice(console)
     console.print(
         json.dumps(record.model_dump(mode="json"), ensure_ascii=False, indent=2),
@@ -126,3 +137,47 @@ def render_detail(console: Console, record: EpisodicMemory) -> None:
         highlight=False,
         soft_wrap=True,
     )
+
+
+def _quoted(text: str) -> str:
+    """Show record text exactly, so a line break in it cannot pose as a rendered line."""
+    return json.dumps(text, ensure_ascii=False)
+
+
+def _understanding_lines(processing: EpisodeProcessingRecord | None) -> list[str]:
+    """Render the retained understanding the record carries (ADR-0276 §7), deriving none.
+
+    Per retained version, in the record's order: its number, producer, meaning and
+    ground, each reference's phrase and referent kinds, each relationship's statement
+    and ground, and each unresolved matter; and the omission value or elided count
+    where the record carries one. Referent ids, sources and excerpts stay in the
+    ``--json`` detail.
+    """
+    if processing is None:
+        return ["Understanding: unavailable"]
+    if processing.understanding_omitted is not None:
+        return [f"Understanding: not recorded ({processing.understanding_omitted.value})"]
+    lines: list[str] = []
+    if processing.understanding_elided:
+        lines.append(f"Understanding versions elided: {processing.understanding_elided}")
+    for version in processing.understanding:
+        lines.extend(_version_lines(version))
+    return lines
+
+
+def _version_lines(version: ActivationUnderstanding) -> list[str]:
+    lines = [
+        f"Understanding v{version.version} ({version.producer.value})",
+        f"  Meaning ({version.meaning_ground.value}): {_quoted(version.meaning)}",
+    ]
+    for reference in version.references:
+        kinds = ", ".join(referent.kind for referent in reference.referents) or "none"
+        lines.append(f"  Reference {_quoted(reference.phrase)}; referent kinds: {kinds}")
+    lines.extend(
+        f"  Relationship ({relationship.ground.value}): {_quoted(relationship.statement)}"
+        for relationship in version.relationships
+    )
+    for matter in version.unresolved:
+        lines.append(f"  Unresolved: {_quoted(matter.matter)}")
+        lines.append(f"    Why it matters: {_quoted(matter.why_it_matters)}")
+    return lines
