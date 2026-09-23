@@ -38,6 +38,7 @@ from ai_assistant.core.types import (
     StreamingTextReply,
     TextChannelPayload,
     TextChannelResult,
+    UnderstandingOmission,
     WholeTextReply,
 )
 
@@ -64,6 +65,10 @@ async def captured_episode(engine: AssistantEngine, result: ChannelResult) -> Ep
     episode = await read_episode(engine, receipt.episode_id)
     assert episode.processing_record is not None
     assert episode.processing_record.activation_id == receipt.activation_id
+    # ADR-0276 §8 step 2: every capture records that the understanding stage was not
+    # reached, which is true of every pass until step 3 lands the stage.
+    assert episode.processing_record.understanding == ()
+    assert episode.processing_record.understanding_omitted is UnderstandingOmission.NOT_REACHED
     return episode
 
 

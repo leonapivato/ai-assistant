@@ -3005,13 +3005,13 @@ async def test_pre_m36_stores_are_refused_without_modification(tmp_path: Path, s
                 conn.execute("UPDATE records SET data = 'not-json'")
     before = db.read_bytes()
     mode = db.stat().st_mode
-    with pytest.raises(IncompatibleStateError, match="fresh M36"):
+    with pytest.raises(IncompatibleStateError, match="fresh M37"):
         SqliteMemoryStore(traces_sink=FakeTraceSink(), path=db, embedder=embedder)
     assert db.read_bytes() == before
     assert db.stat().st_mode == mode
 
 
-@pytest.mark.parametrize("marker", [None, 2, 0])
+@pytest.mark.parametrize("marker", [None, 1, 3, 0])
 def test_current_shape_with_missing_or_unsupported_marker_is_refused(
     tmp_path: Path, marker: int | None
 ) -> None:
@@ -3024,7 +3024,7 @@ def test_current_shape_with_missing_or_unsupported_marker_is_refused(
         else:
             conn.execute("UPDATE episode_record_format SET version = ?", (marker,))
     before = db.read_bytes()
-    with pytest.raises(IncompatibleStateError, match="fresh M36"):
+    with pytest.raises(IncompatibleStateError, match="fresh M37"):
         SqliteMemoryStore(traces_sink=FakeTraceSink(), path=db, embedder=embedder)
     assert db.read_bytes() == before
 

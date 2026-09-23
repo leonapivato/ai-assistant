@@ -1,4 +1,4 @@
-"""Fresh-state memory format boundary for ADR-0275."""
+"""Fresh-state memory format boundary for ADR-0275 §12, advanced by ADR-0276 §7."""
 
 from __future__ import annotations
 
@@ -8,12 +8,19 @@ import shutil
 import sqlite3
 import tempfile
 from pathlib import Path
+from typing import Final
 
 from ai_assistant.core.errors import IncompatibleStateError, MemoryStoreError
 
+#: The episode-record format this build writes and the only one it serves. ADR-0275
+#: §12 minted the marker at 1 for the M36 record; ADR-0276 §7 advances it to 2 for the
+#: schema_version-2 record, so a store written before that tree is refused before
+#: mutation exactly as a pre-M36 store is, its files neither erased nor upgraded.
+EPISODE_RECORD_FORMAT: Final[int] = 2
+
 
 def check_format(conn: sqlite3.Connection, *, allow_empty: bool = False) -> bool:
-    """Refuse pre-M36 state before mutation; return whether a marker exists."""
+    """Refuse pre-M37 state before mutation; return whether the current marker exists."""
     try:
         tables = {
             row[0] for row in conn.execute("SELECT name FROM sqlite_master WHERE type='table'")
@@ -22,14 +29,14 @@ def check_format(conn: sqlite3.Connection, *, allow_empty: bool = False) -> bool
             return False
         if "episode_record_format" in tables:
             rows = conn.execute("SELECT version FROM episode_record_format").fetchall()
-            if rows == [(1,)]:
+            if rows == [(EPISODE_RECORD_FORMAT,)]:
                 return True
     except sqlite3.Error as exc:
         msg = "cannot read episode record format"
         raise MemoryStoreError(msg) from exc
     raise IncompatibleStateError(
-        "memory store requires a fresh M36 data directory",
-        expected="episode record format 1",
+        "memory store requires a fresh M37 data directory",
+        expected=f"episode record format {EPISODE_RECORD_FORMAT}",
         found="missing or unsupported episode record format",
         operator_action=("Stop the old hub and configure a new empty development data directory."),
     )
@@ -79,7 +86,7 @@ def _inspect_connection(conn: sqlite3.Connection, *, conversation: bool) -> None
         columns = {row[1] for row in conn.execute("PRAGMA table_info(turns)")}
         if "model_eligible" not in columns:
             raise IncompatibleStateError(
-                "conversation store requires a fresh M36 data directory",
+                "conversation store requires a fresh M37 data directory",
                 expected="conversation index with activation eligibility",
                 found="conversation index without activation eligibility",
                 operator_action=(

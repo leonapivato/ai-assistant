@@ -68,6 +68,7 @@ def _record(**overrides: object) -> EpisodeProcessingRecord:
         "reason": ProcessingReason.RETURNED,
         "response_kind": EpisodeResponseKind.NONE,
         "model_eligible": True,
+        "understanding_omitted": UnderstandingOmission.NOT_REACHED,
     }
     fields.update(overrides)
     return EpisodeProcessingRecord.model_validate(fields)
@@ -278,34 +279,41 @@ def test_recorded_understanding_round_trips_through_its_dump() -> None:
     assert recorded.model_config.get("frozen") is True
 
 
-# --- §7 as §8 step 1 lands it: three fields, defaults, no exactly-one rule ----
+# --- §7: schema_version 2, three fields, exactly one of history and omission ----
 
 
-def test_the_record_gains_three_defaulted_understanding_fields() -> None:
-    """§8 step 1: additive only, so every existing writer still validates unchanged."""
+def test_the_record_is_schema_version_two_with_three_understanding_fields() -> None:
+    """§7: ``schema_version`` becomes ``Literal[2]``; no reader for a version-1 record exists."""
     record = _record()
-    assert record.schema_version == 1
+    assert record.schema_version == 2
     assert record.understanding == ()
-    assert record.understanding_omitted is None
+    assert record.understanding_omitted is UnderstandingOmission.NOT_REACHED
     assert record.understanding_elided == 0
-    assert set(EpisodeProcessingRecord.model_fields) >= {
-        "understanding",
-        "understanding_omitted",
-        "understanding_elided",
-    }
+    with pytest.raises(ValidationError):
+        _record(schema_version=1)
+    with pytest.raises(ValidationError):
+        EpisodeProcessingRecord.model_validate({**record.model_dump(), "schema_version": 1})
 
 
-def test_the_record_carries_versions_or_an_omission_and_for_now_either_or_neither() -> None:
-    """§8 step 1 lands the fields with **no** exactly-one validator; step 2 adds it."""
+def test_a_record_carries_exactly_one_of_its_understanding_and_an_omission() -> None:
+    """§7: exactly one of a non-empty ``understanding`` and a non-``None`` omission value."""
     versions = (_understanding(), _understanding(version=2, meaning="revised"))
-    with_versions = _record(understanding=versions, understanding_elided=3)
+    with_versions = _record(understanding=versions, understanding_omitted=None)
     assert with_versions.understanding == versions
-    assert with_versions.understanding_elided == 3
-    omitted = _record(understanding_omitted=UnderstandingOmission.NOT_REACHED)
-    assert omitted.understanding_omitted is UnderstandingOmission.NOT_REACHED
-    assert _record().understanding == ()
-    both = _record(understanding=versions, understanding_omitted=UnderstandingOmission.FAILED)
-    assert both.understanding_omitted is UnderstandingOmission.FAILED
+    with pytest.raises(ValidationError, match="either its understanding or why it has none"):
+        _record(understanding=(), understanding_omitted=None)
+    with pytest.raises(ValidationError, match="either its understanding or why it has none"):
+        _record(understanding=versions, understanding_omitted=UnderstandingOmission.FAILED)
+    for omission in UnderstandingOmission:
+        assert _record(understanding_omitted=omission).understanding_omitted is omission
+
+
+def test_the_elided_count_rides_a_non_empty_history() -> None:
+    """§7: ``understanding_elided`` counts dropped versions; the type ties it to nothing."""
+    record = _record(
+        understanding=(_understanding(),), understanding_omitted=None, understanding_elided=3
+    )
+    assert record.understanding_elided == 3
 
 
 @pytest.mark.parametrize("elided", [-1, 2**31])
@@ -316,9 +324,10 @@ def test_the_elided_count_is_bounded(elided: int) -> None:
 
 
 def test_a_record_with_understanding_round_trips_through_its_dump() -> None:
-    """The record crosses the wire inside ``EpisodicMemory.processing_record`` (protocol 54, 58)."""
+    """The record crosses the wire inside ``EpisodicMemory.processing_record`` (protocol 54, 59)."""
     record = _record(
         understanding=(_understanding(meaning_referents=(_INPUT,)),),
+        understanding_omitted=None,
         understanding_elided=1,
     )
     assert EpisodeProcessingRecord.model_validate(record.model_dump(mode="json")) == record
