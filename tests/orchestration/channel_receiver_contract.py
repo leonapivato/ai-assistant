@@ -39,6 +39,7 @@ from ai_assistant.core.types import (
     TextChannelPayload,
     TextChannelResult,
     UnderstandingOmission,
+    UnderstandingProducer,
     WholeTextReply,
 )
 
@@ -65,10 +66,14 @@ async def captured_episode(engine: AssistantEngine, result: ChannelResult) -> Ep
     episode = await read_episode(engine, receipt.episode_id)
     assert episode.processing_record is not None
     assert episode.processing_record.activation_id == receipt.activation_id
-    # ADR-0276 §8 step 2: every capture records that the understanding stage was not
-    # reached, which is true of every pass until step 3 lands the stage.
-    assert episode.processing_record.understanding == ()
-    assert episode.processing_record.understanding_omitted is UnderstandingOmission.NOT_REACHED
+    # ADR-0276 §5, §7: every pass this suite captures through here reaches the
+    # understanding stage, which is entered once and records exactly one version — 1,
+    # by the one producer — carried to capture with no omission beside it.
+    processing = episode.processing_record
+    assert processing.understanding_omitted is None
+    assert [version.version for version in processing.understanding] == [1]
+    assert processing.understanding[0].producer is UnderstandingProducer.INTERPRETATION
+    assert processing.understanding_elided == 0
     return episode
 
 
@@ -246,6 +251,10 @@ class ChannelReceiverContract:
         assert episode.processing_record is not None
         assert episode.processing_record.status is ProcessingStatus.FAILED
         assert episode.processing_record.reason is ProcessingReason.TIMEOUT
+        # ADR-0276 §5: a deadline that expired ahead of the stage is `not_reached`,
+        # which is neither a failed understanding nor a branch the pass took.
+        assert episode.processing_record.understanding == ()
+        assert episode.processing_record.understanding_omitted is UnderstandingOmission.NOT_REACHED
         assert episode.outcome is None
 
     @pytest.mark.parametrize("kind", ["unknown", "conversation", "informational_event"])

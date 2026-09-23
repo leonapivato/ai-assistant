@@ -17,6 +17,7 @@ from ai_assistant.core.errors import (
     OversizedValueError,
     SpeechTimeoutError,
     TranscriptionFailedError,
+    UnderstandingError,
 )
 from ai_assistant.core.types import (
     ActivationLinks,
@@ -45,6 +46,7 @@ if TYPE_CHECKING:
 
     from ai_assistant.core.clock import Clock
     from ai_assistant.core.types import (
+        ActivationUnderstanding,
         ChannelInput,
         ExchangeDisposition,
         Modality,
@@ -90,6 +92,11 @@ class ActivationState:
     spoken_degraded: bool = False
     no_words: bool = False
     index_episode_id: str | None = None
+    understanding: tuple[ActivationUnderstanding, ...] = ()
+    understanding_elided: int = 0
+    understanding_omitted: UnderstandingOmission | None = None
+    understanding_unparseable: bool = False
+    _last_understanding_version: int = field(default=0, init=False, repr=False)
 
     def transcription(self, transcript: str | None) -> None:
         """Keep exact text, including an empty transcript, without audio bytes."""
@@ -101,6 +108,59 @@ class ActivationState:
                 update={"payload": trigger.payload.model_copy(update={"transcript": transcript})}
             )
             self.no_words = transcript is not None and not transcript.strip()
+            if transcript is None or not transcript.strip():
+                # ADR-0276 §5: speech that yielded no words, or whose transcription
+                # failed, is a branch the pass took — the stage is never entered.
+                self.omit(UnderstandingOmission.NO_TEXT)
+
+    def omit(self, omission: UnderstandingOmission) -> None:
+        """Record the branch that ended the pass without an understanding (ADR-0276 §5).
+
+        The first branch taken is the one recorded: each value names where the pass
+        ended, and a later step of a pass that already ended there cannot move it.
+        A version recorded on this state outranks every omission at capture.
+        """
+        if self.understanding_omitted is None:
+            self.understanding_omitted = omission
+
+    def understanding_failed(self, failure: BaseException) -> None:
+        """The stage was entered and raised: ``failed``, whatever the class (ADR-0276 §5).
+
+        ``understanding_unparseable`` keeps ADR-0276 §6's reason when the event path
+        maps the raise outward, so the record is the same on both paths.
+        """
+        self.omit(UnderstandingOmission.FAILED)
+        if isinstance(failure, UnderstandingError):
+            self.understanding_unparseable = True
+
+    def next_understanding_version(self) -> int:
+        """The version the next recorded understanding takes: one greater than the last."""
+        return self._last_understanding_version + 1
+
+    def understood(self, understanding: ActivationUnderstanding, *, limit: int) -> None:
+        """Accumulate one version on the carrier, bounded at ``limit`` (ADR-0276 §7).
+
+        Where more than ``limit`` versions have been recorded, the history keeps
+        version 1 and the latest ``limit - 1``, in version order, and
+        ``understanding_elided`` counts the versions dropped. The latest is never
+        elided.
+
+        Raises:
+            ValueError: If ``understanding`` is not the next version, or ``limit`` is
+                below 2 — a bound that keeps version 1 and the latest needs both.
+        """
+        if limit < 2:  # noqa: PLR2004 — version 1 and the latest
+            msg = "the understanding history keeps version 1 and the latest (ADR-0276 §7)"
+            raise ValueError(msg)
+        if understanding.version != self.next_understanding_version():
+            msg = "an understanding version is one greater than the last recorded"
+            raise ValueError(msg)
+        self._last_understanding_version = understanding.version
+        history = (*self.understanding, understanding)
+        if len(history) > limit:
+            self.understanding_elided += len(history) - limit
+            history = (history[0], *history[len(history) - (limit - 1) :])
+        self.understanding = history
 
     def resolved_conversation(self, conversation_id: str) -> None:
         """Use only the lifecycle's validated association, never a guessed neighbor."""
@@ -156,9 +216,27 @@ class ActivationState:
             spoken_degraded=self.spoken_degraded,
             model_eligible=self.facts is not None,
             links=self.links,
-            # ADR-0276 §8 step 2: true of every pass until the understanding stage exists.
-            understanding_omitted=UnderstandingOmission.NOT_REACHED,
+            understanding=self.understanding,
+            understanding_omitted=self._omission(),
+            understanding_elided=self.understanding_elided,
         )
+
+    def _omission(self) -> UnderstandingOmission | None:
+        """ADR-0276 §5's classification, by where the pass ended and never by its text.
+
+        A pass that recorded a version records no omission, whatever ended it. A
+        resume carries no input. Otherwise the branch the pass took — ``routed``,
+        ``no_text``, ``failed`` — or ``not_reached`` for everything that ended ahead
+        of the stage's entry: a cancellation, an expired deadline, a failure in any
+        step before it.
+        """
+        if self.understanding:
+            return None
+        if isinstance(self.trigger, RecordedResumeTrigger):
+            return UnderstandingOmission.NO_INPUT
+        if self.understanding_omitted is not None:
+            return self.understanding_omitted
+        return UnderstandingOmission.NOT_REACHED
 
     def relate(  # noqa: PLR0913 — each independently established relationship
         self,
@@ -302,7 +380,7 @@ def _metadata(clock: Clock, id_factory: Callable[[], str]) -> tuple[str | None, 
     return activation_id, started_at
 
 
-def terminal_status(  # noqa: C901, PLR0911 — ADR-0275's ordered terminal branches
+def terminal_status(  # noqa: C901, PLR0911, PLR0912 — ADR-0275's ordered terminal branches, and ADR-0276 §6's row among them
     state: ActivationState, failure: BaseException | None
 ) -> tuple[ProcessingStatus, ProcessingReason]:
     """Apply ADR-0275's ordered terminal conditions without interpreting response prose."""
@@ -321,6 +399,12 @@ def terminal_status(  # noqa: C901, PLR0911 — ADR-0275's ordered terminal bran
         return ProcessingStatus.FAILED, ProcessingReason.TIMEOUT
     if isinstance(failure, TranscriptionFailedError):
         return ProcessingStatus.FAILED, ProcessingReason.TRANSCRIPTION_FAILED
+    # ADR-0276 §6: immediately below transcription failure and above output oversize.
+    # The flag carries the reason through the event path's outward mapping.
+    if isinstance(failure, UnderstandingError) or (
+        failure is not None and state.understanding_unparseable
+    ):
+        return ProcessingStatus.FAILED, ProcessingReason.UNDERSTANDING_FAILED
     if isinstance(failure, OversizedValueError):
         return ProcessingStatus.FAILED, ProcessingReason.OUTPUT_OVERSIZED
     outcome = state.outcome

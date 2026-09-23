@@ -133,12 +133,15 @@ from ai_assistant.core.types import (
 from ai_assistant.orchestration.upcoming import NOTIFICATION_CLASS, PRODUCER
 
 if TYPE_CHECKING:
+    from collections.abc import Sequence
+
     from ai_assistant.core.types import CurrentContext, MemoryRecord, NotificationCandidate
 
 __all__ = [
     "BoundedAudienceSupply",
     "TurnSupply",
     "UnboundedAudienceSupply",
+    "admitted_to_understanding",
     "notification_is_speakable",
     "placed_facet_kinds",
     "speakable_notification_triple",
@@ -437,6 +440,48 @@ class BoundedAudienceSupply:
 #: (:data:`~ai_assistant.orchestration.loop.SupplyFilter`), and its capture reads the
 #: recorded fact off the same object afterwards.
 type TurnSupply = UnboundedAudienceSupply | BoundedAudienceSupply
+
+
+def admitted_to_understanding[R: MemoryRecord](
+    supply: TurnSupply, records: Sequence[R]
+) -> tuple[R, ...]:
+    """The stored records of the understanding stage's two windows this audience admits.
+
+    ADR-0276 §4's one further site of ADR-0217 §2's predicate, superseding that
+    clause's *no new site* half and nothing else: the same :func:`_speakable`, over
+    one further sequence of records, with no second predicate, no seam, no store
+    call and no second pass. It is invoked over the records alone — no
+    ``CurrentContext`` is assembled for it, and context assembly stays where it is,
+    inside the loop after association.
+
+    **On a channel of unbounded audience it withholds every record the predicate
+    does not place**, an ``OWNER``-placed conversation tail record included, and the
+    withholding is **silent**: it fires no deflection and latches no ``withheld``
+    fact on ``supply``, on ADR-0217 §2's own composition with ADR-0210 §1 — a
+    record held "only because it stands in the conversation's own recent turns is
+    withheld and fires nothing". The windows are not the turn's supply, so nothing
+    here moves what capture stamps.
+
+    **On a channel of bounded audience it withholds nothing**, which is ADR-0204
+    §4's posture: the posture is read off the object, so the evaluation is made on
+    every pass and only the subtraction varies. A withheld record reaches no
+    rendering, no label, no referent and no version, because the stage renders only
+    what this returns.
+
+    Args:
+        supply: The pass's audience posture — the same object the turn's supply
+            filter is, minted by the operation that declares the audience.
+        records: The stored records of one window, in window order.
+
+    Returns:
+        The admitted records, in the order they had.
+    """
+    if isinstance(supply, BoundedAudienceSupply):
+        return tuple(records)
+    sources = supply.speakable_attested_sources
+    return tuple(
+        record for record in records if _speakable(record, speakable_attested_sources=sources)
+    )
 
 
 def _speakable(record: MemoryRecord, *, speakable_attested_sources: frozenset[str]) -> bool:
