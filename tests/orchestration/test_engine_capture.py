@@ -808,6 +808,22 @@ def test_the_composing_stages_supply_is_enumerated_so_a_new_field_must_be_judged
     every projection this tree renders**, its producer being ADR-0254 §20's Lane 2
     (ADR-0267 §11) — the field is in the graph as a shape, and the judgement is made
     now rather than left to the lane that fills it.
+
+    **``ActivationUnderstanding``, ``UnderstandingReferent``, ``UnderstandingReference``,
+    ``UnderstandingRelationship`` and ``UnresolvedMatter`` joined it with ADR-0276 §7**,
+    because ``EpisodeProcessingRecord`` — in this graph since ADR-0275 — gained
+    ``understanding``. The judgement §7 asks of the lane that grows the graph, made
+    rather than assumed: ADR-0276 §2 closes each of the five at its stated fields with
+    ``extra="forbid"`` and states what the record carries — *"no goal id, no attempt id,
+    no plan id and no label"*. What is left is a version number, one instant, two members
+    of closed enumerations, prose ``orchestration`` copied from this system's own
+    understanding stage, and per referent a kind from a closed literal, an episode's
+    stored address or an item's id, a source rendering, and an excerpt of at most 240
+    characters that ``orchestration`` cut from material already in front of this stage
+    — a channel item or a record this same graph carries. None of those fields admits a
+    ``SecretStr``. **Every ``understanding`` is empty on every record this tree
+    captures**, its producer being ADR-0276 §8's step 3 — the field is in the graph as
+    a shape, and the judgement is made now rather than left to the lane that fills it.
     """
     # ADR-0275: processing metadata joins the in-process record graph. Its
     # fields are identifiers, closed values, clocks and caller-supplied Tier 1
@@ -817,6 +833,7 @@ def test_the_composing_stages_supply_is_enumerated_so_a_new_field_must_be_judged
 
     assert set(reachable) == {
         "ActivationLinks",
+        "ActivationUnderstanding",
         "ChannelContext",
         "ChannelContextItem",
         "ChannelIdentity",
@@ -875,6 +892,10 @@ def test_the_composing_stages_supply_is_enumerated_so_a_new_field_must_be_judged
         "StructuredAsk",
         "TimeWindow",
         "TurnResult",
+        "UnderstandingReference",
+        "UnderstandingReferent",
+        "UnderstandingRelationship",
+        "UnresolvedMatter",
         "Validity",
     }, (
         "the whole graph the composing stage is supplied on a turn — the records, the "

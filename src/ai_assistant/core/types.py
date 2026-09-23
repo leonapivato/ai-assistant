@@ -3133,6 +3133,7 @@ class ProcessingReason(StrEnum):
     DISAMBIGUATION = "disambiguation"
     TIMEOUT = "timeout"
     TRANSCRIPTION_FAILED = "transcription_failed"
+    UNDERSTANDING_FAILED = "understanding_failed"
     COMPOSITION_FAILED = "composition_failed"
     OUTPUT_OVERSIZED = "output_oversized"
     PROCESSING_FAILED = "processing_failed"
@@ -3253,6 +3254,184 @@ class ActivationLinks(BaseModel):
     attempt_id: Identifier | None = None
 
 
+# --- activation understanding (ADR-0276) -------------------------------------
+
+
+class UnderstandingGround(StrEnum):
+    """How an element of an activation's understanding came to be known (ADR-0276 §2).
+
+    A **closed** enumeration, **added to and never renamed** on :class:`Ground`'s
+    own rule (ADR-0249 §1): no later ADR removes a member, renames one, gives one a
+    second spelling, or replaces this enum with a differently named one for the
+    same question.
+    """
+
+    STATED = "stated"
+    """The input says it."""
+
+    SUPPLIED = "supplied"
+    """A supplied item the reading names says it."""
+
+    INFERRED = "inferred"
+    """Neither: the understanding stage judged it."""
+
+
+class UnderstandingOmission(StrEnum):
+    """Why a processing record carries no understanding (ADR-0276 §2, §5, §6).
+
+    Closed and never renamed, on :class:`UnderstandingGround`'s rule.
+    """
+
+    ROUTED = "routed"
+    """A taken route ended the pass before the understanding stage."""
+
+    NO_TEXT = "no_text"
+    """Speech yielded no words, or transcription failed."""
+
+    NO_INPUT = "no_input"
+    """The activation carries no input to understand (a resume trigger)."""
+
+    FAILED = "failed"
+    """The understanding stage raised."""
+
+    NOT_REACHED = "not_reached"
+    """The pass ended before the stage was entered for any other reason."""
+
+
+class UnderstandingProducer(StrEnum):
+    """Which stage recorded a version of an understanding (ADR-0276 §2).
+
+    One member because ADR-0276 ships one producer; a later decision adds members
+    rather than reusing this one. Closed and never renamed, on
+    :class:`UnderstandingGround`'s rule.
+    """
+
+    INTERPRETATION = "interpretation"
+    """The understanding stage of ADR-0276."""
+
+
+class ProposedReference(BaseModel):
+    """A phrase in the input and the labels the model says it refers to."""
+
+    model_config = ConfigDict(frozen=True, extra="forbid")
+    phrase: NonBlankEncodableText
+    labels: tuple[EncodableText, ...] = ()
+
+
+class ProposedRelationship(BaseModel):
+    """A relationship the model states, with the labels it rests on and its ground."""
+
+    model_config = ConfigDict(frozen=True, extra="forbid")
+    statement: NonBlankEncodableText
+    labels: tuple[EncodableText, ...] = ()
+    ground: UnderstandingGround
+
+
+class UnresolvedMatter(BaseModel):
+    """Something the understanding could not settle and why that matters."""
+
+    model_config = ConfigDict(frozen=True, extra="forbid")
+    matter: NonBlankEncodableText
+    why_it_matters: NonBlankEncodableText
+
+
+class ProposedActivationUnderstanding(BaseModel):
+    """What the model produces, and the whole of what it produces (ADR-0276 §2).
+
+    It carries **no identifier, no timestamp, no version and no producer**: a label
+    is a string of ADR-0276 §3's scheme, meaningful only within the call that
+    rendered it. A ``supplied`` ground with no label is a grounding defect the
+    stage repairs and then records as ``inferred`` (§6), never a parse failure —
+    so this type validates nothing about it.
+    """
+
+    model_config = ConfigDict(frozen=True, extra="forbid")
+    meaning: NonBlankEncodableText
+    meaning_ground: UnderstandingGround
+    meaning_labels: tuple[EncodableText, ...] = ()
+    references: tuple[ProposedReference, ...] = ()
+    relationships: tuple[ProposedRelationship, ...] = ()
+    unresolved: tuple[UnresolvedMatter, ...] = ()
+
+
+#: ADR-0276 §2: an excerpt is a bounded prefix of the referent's rendered text.
+UNDERSTANDING_REFERENT_EXCERPT_CHARS: Final[int] = 240
+
+
+class UnderstandingReferent(BaseModel):
+    """What a label resolved to, intelligible after restart from these fields alone.
+
+    ``id`` is an :data:`EncodableText` and not an :data:`Identifier` because an
+    episode's ``id`` is carried **exactly as stored** (ADR-0275 §10), a blank or
+    whitespace-distinct address included; nothing resolves it on read, and a
+    dangling ``id`` is an ordinary state (ADR-0276 §2).
+    """
+
+    model_config = ConfigDict(frozen=True, extra="forbid")
+    kind: Literal["input", "channel_item", "episode"]
+    id: EncodableText | None = None
+    source: NonBlankEncodableText | None = None
+    excerpt: EncodableText = Field(max_length=UNDERSTANDING_REFERENT_EXCERPT_CHARS)
+
+
+class UnderstandingReference(BaseModel):
+    """A phrase and the referents its labels resolved to."""
+
+    model_config = ConfigDict(frozen=True, extra="forbid")
+    phrase: NonBlankEncodableText
+    referents: tuple[UnderstandingReferent, ...] = ()
+
+
+class UnderstandingRelationship(BaseModel):
+    """A stated relationship, the referents it rests on and its ground.
+
+    ``supplied`` names its source: the enclosing :class:`ActivationUnderstanding`
+    refuses a ``supplied`` relationship whose ``referents`` are empty.
+    """
+
+    model_config = ConfigDict(frozen=True, extra="forbid")
+    statement: NonBlankEncodableText
+    referents: tuple[UnderstandingReferent, ...] = ()
+    ground: UnderstandingGround
+
+
+class ActivationUnderstanding(BaseModel):
+    """One recorded version of what the assistant understood an activation to mean.
+
+    The recorded form of :class:`ProposedActivationUnderstanding` (ADR-0276 §2):
+    ``orchestration`` assigns ``version``, ``recorded_at`` and ``producer``,
+    resolves every label into an :class:`UnderstandingReferent`, and copies the
+    texts and grounds unchanged. It carries no goal id, no attempt id, no plan id
+    and no label, and it crosses no model-facing seam under ADR-0276. It grants no
+    authority and establishes no fact; it is what the assistant understood.
+    """
+
+    model_config = ConfigDict(frozen=True, extra="forbid")
+    version: int = Field(strict=True, ge=1, lt=2**31)
+    recorded_at: UtcInstant
+    producer: UnderstandingProducer
+    meaning: NonBlankEncodableText
+    meaning_ground: UnderstandingGround
+    meaning_referents: tuple[UnderstandingReferent, ...] = ()
+    references: tuple[UnderstandingReference, ...] = ()
+    relationships: tuple[UnderstandingRelationship, ...] = ()
+    unresolved: tuple[UnresolvedMatter, ...] = ()
+    grounding_dropped: int = Field(default=0, strict=True, ge=0, lt=2**31)
+
+    @model_validator(mode="after")
+    def _supplied_names_its_source(self) -> Self:
+        if self.meaning_ground is UnderstandingGround.SUPPLIED and not self.meaning_referents:
+            msg = "a supplied meaning names at least one referent"
+            raise ValueError(msg)
+        if any(
+            relationship.ground is UnderstandingGround.SUPPLIED and not relationship.referents
+            for relationship in self.relationships
+        ):
+            msg = "a supplied relationship names at least one referent"
+            raise ValueError(msg)
+        return self
+
+
 class EpisodeProcessingRecord(BaseModel):
     """Immutable facts about one activation, written after its processing ends."""
 
@@ -3269,6 +3448,9 @@ class EpisodeProcessingRecord(BaseModel):
     spoken_degraded: bool = False
     model_eligible: bool
     links: ActivationLinks = Field(default_factory=ActivationLinks)
+    understanding: tuple[ActivationUnderstanding, ...] = ()
+    understanding_omitted: UnderstandingOmission | None = None
+    understanding_elided: int = Field(default=0, strict=True, ge=0, lt=2**31)
 
 
 class EpisodeCaptureReport(BaseModel):
