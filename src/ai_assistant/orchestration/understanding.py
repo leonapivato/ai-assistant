@@ -251,22 +251,23 @@ class RecentEpisodes:
             page = await self._memory.episodes(cursor=cursor, limit=size)
             addresses = [row.position.episode_id for row in page.items]
             found = await self._memory.get_many(addresses)
-            progressed = False
             for address in addresses:
                 record = found.get(address)
                 if not isinstance(record, EpisodicMemory):
-                    # Expired or deleted between the two reads: a gap, never an error.
+                    # Expired or deleted between the two reads: a gap, never an error,
+                    # and never the end of the walk — a page whose every row vanished
+                    # still hands on its cursor.
                     continue
                 if address in shared:
                     selected.append(record)
-                    progressed = True
                     continue
                 if counted == self._limit:
                     break
                 selected.append(record)
                 counted += 1
-                progressed = True
-            if page.next_cursor is None or not progressed:
+            # Progress is the cursor's, not the page's: a store that hands back the
+            # cursor it was given would otherwise be walked forever.
+            if page.next_cursor is None or page.next_cursor == cursor:
                 break
             cursor = page.next_cursor
         return tuple(selected)

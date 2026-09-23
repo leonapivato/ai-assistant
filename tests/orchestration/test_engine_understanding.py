@@ -12,6 +12,7 @@ the event stage's own.
 
 from __future__ import annotations
 
+import asyncio
 import json
 from datetime import timedelta
 from typing import TYPE_CHECKING, Any, Final
@@ -236,6 +237,46 @@ async def test_a_model_error_takes_the_row_its_class_already_takes(
     assert str(error) not in record.model_dump_json()
 
 
+class _Stalled(FakeModelProvider):
+    """A provider that answers only after ``seconds`` — longer than any budget here."""
+
+    def __init__(self, reply: str, *, seconds: float = 10.0) -> None:
+        super().__init__(reply)
+        self._seconds = seconds
+
+    async def complete(self, messages: Sequence[Message], *, model: str | None = None) -> Message:
+        await asyncio.sleep(self._seconds)
+        return await super().complete(messages, model=model)
+
+
+async def test_a_deadline_expiring_inside_the_stage_is_a_classified_timeout() -> None:
+    """§5: the stage runs inside the pass's existing deadline; §6: `failed / timeout`."""
+    harness = _harness(_Stalled(STATED_PROPOSAL))
+    with pytest.raises(ModelTimeoutError):
+        await harness.engine.receive(
+            _text(), reply=WholeTextReply(), timeout=timedelta(milliseconds=50)
+        )
+    assert harness.associator.call_count == 0
+    record = await _record(harness)
+    assert (record.status, record.reason) == (ProcessingStatus.FAILED, ProcessingReason.TIMEOUT)
+    assert record.understanding_omitted is UnderstandingOmission.FAILED
+
+
+async def test_a_deadline_that_expired_ahead_of_the_stage_is_not_reached() -> None:
+    """§5: routing spent the budget, so the stage is never entered."""
+    model = FakeModelProvider(STATED_PROPOSAL)
+    router = _Stalled(json.dumps({"operation": "none"}), seconds=0.1)
+    harness = _harness(model, routing=RoutingStage(model=router, recorder=FakeRoutingRecorder()))
+    with pytest.raises(ModelTimeoutError):
+        await harness.engine.receive(
+            _text(), reply=WholeTextReply(), timeout=timedelta(milliseconds=20)
+        )
+    assert model.calls == []
+    record = await _record(harness)
+    assert record.reason is ProcessingReason.TIMEOUT
+    assert record.understanding_omitted is UnderstandingOmission.NOT_REACHED
+
+
 # --- the spoken path --------------------------------------------------------------------
 
 
@@ -327,6 +368,19 @@ async def test_an_event_passes_failure_is_mapped_as_the_event_stages_own(
     assert events_model.calls == []
     record = await _record(harness)
     assert record.reason is reason
+    assert record.understanding_omitted is UnderstandingOmission.FAILED
+
+
+async def test_an_event_deadline_expiring_inside_the_stage_maps_to_the_timeout_error() -> None:
+    events_model = FakeModelProvider("Eco mode.")
+    harness = _harness(
+        _Stalled(STATED_PROPOSAL), informational_events=InformationalEventStage(events_model)
+    )
+    with pytest.raises(ChannelProcessingTimeoutError):
+        await harness.engine.receive(event_input(), reply=None, timeout=timedelta(milliseconds=50))
+    assert events_model.calls == []
+    record = await _record(harness)
+    assert record.reason is ProcessingReason.TIMEOUT
     assert record.understanding_omitted is UnderstandingOmission.FAILED
 
 
