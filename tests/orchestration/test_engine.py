@@ -195,6 +195,7 @@ if TYPE_CHECKING:
     from ai_assistant.orchestration.delivery import DeliveryOutbox
     from ai_assistant.orchestration.informational_events import InformationalEventStage
     from ai_assistant.orchestration.reconciling import ReconciliationStage
+    from ai_assistant.orchestration.understanding import UnderstandingStage
     from ai_assistant.testing.invoker import FakeToolImplementation
 
 
@@ -718,6 +719,11 @@ class Harness:
         trail: ConsumingTrail | None = None,
         reads: SourceReadTrail | None = None,
         routing: RoutingStage | None = None,
+        # ADR-0276's understanding stage, wired as the composition root wires it with
+        # §7's version bound beside it. `None` is every other case's deployment: no
+        # stage, so every capture records `not_reached` exactly as before step 3.
+        understanding: UnderstandingStage | None = None,
+        understanding_version_limit: int | None = 8,
         # ADR-0259 §4's turn-start pass and §3's check, wired **together or not at
         # all** — one object holds both. `None` is the default and is every other
         # case's deployment: no stage wired, so no goal's residual is repaired and the
@@ -1098,6 +1104,8 @@ class Harness:
             # Defaulted per harness instance, so two harnesses are two engines.
             epoch_factory=(lambda: "epoch") if epoch_factory is None else epoch_factory,
             routing=self.routing,
+            understanding=understanding,
+            understanding_version_limit=understanding_version_limit,
             # ADR-0244 §5, §6, §11: the enumeration, the answer and the cancellation,
             # over the store above. Wired unconditionally, exactly as the composition
             # root wires the operations object — what varies by deployment is the

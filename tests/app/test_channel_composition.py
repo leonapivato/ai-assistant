@@ -71,6 +71,16 @@ if TYPE_CHECKING:
 pytestmark = pytest.mark.integration
 _BUDGET = timedelta(seconds=10)
 _AT = datetime(2026, 9, 18, tzinfo=UTC)
+_SUMMARY = "The thermostat entered eco mode at 18:00."
+#: A phrase of ADR-0276's understanding stage's own system prompt, so the one model
+#: seam this root wires answers that stage by what it asked rather than by call order.
+_UNDERSTANDING_PROMPT = "You read one incoming input and state what it means."
+_UNDERSTOOD = json.dumps({"meaning": "The input means what it says.", "meaning_ground": "stated"})
+
+
+def _reply(messages: Sequence[Message]) -> str:
+    """Answer the understanding stage with a stated reading, and every other stage alike."""
+    return _UNDERSTOOD if _UNDERSTANDING_PROMPT in messages[0].content else _SUMMARY
 
 
 @dataclass
@@ -91,7 +101,7 @@ async def running_channels(
 ) -> AsyncIterator[RunningChannels]:
     """Wire production stores and receiver, then substitute only test collaborators."""
     settings = Settings(data_dir=tmp_path, embedder=EmbedderKind.HASHING)
-    model = FakeModelProvider("The thermostat entered eco mode at 18:00.")
+    model = FakeModelProvider(_reply)
 
     async def complete(
         _self: PydanticAIProvider, messages: Sequence[Message], *, model: str | None = None
@@ -248,9 +258,12 @@ async def test_input_only_adapter_reaches_real_stage_without_durable_work(
     )
     assert result.channel == identity
     assert isinstance(result.result, InformationalEventResult)
-    assert result.result.summary == "The thermostat entered eco mode at 18:00."
-    assert len(running_channels.model.calls) == 1
-    sent = json.loads(running_channels.model.calls[0].messages[1].content)
+    assert result.result.summary == _SUMMARY
+    # ADR-0276 §5: through the real composition, the understanding stage completes
+    # once ahead of the event stage, which is unchanged and completes once after it.
+    understanding, event = running_channels.model.calls
+    assert _UNDERSTANDING_PROMPT in understanding.messages[0].content
+    sent = json.loads(event.messages[1].content)
     assert sent["context"] == context.model_dump(mode="json")
     assert await client.recent_conversations() == before
     assert await client.goals() == goals

@@ -161,6 +161,13 @@ class _ScriptedProvider:
         """
         system = messages[0].content
         self.prompts.append(system)
+        if "state what it means" in system:
+            # ADR-0276's understanding stage, which runs after routing declines and
+            # before association: a reading grounded in the input alone.
+            return Message(
+                role=Role.ASSISTANT,
+                content='{"meaning": "The user asked.", "meaning_ground": "stated"}',
+            )
         if "operation-routing stage" in system:
             # ADR-0197's decline, so the turn takes its usual route and reaches the
             # reconciliation at all.
