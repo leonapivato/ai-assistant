@@ -14,6 +14,7 @@ from __future__ import annotations
 
 import asyncio
 import json
+import time
 from datetime import timedelta
 from typing import TYPE_CHECKING, Any, Final
 
@@ -259,6 +260,31 @@ async def test_a_deadline_expiring_inside_the_stage_is_a_classified_timeout() ->
     assert harness.associator.call_count == 0
     record = await _record(harness)
     assert (record.status, record.reason) == (ProcessingStatus.FAILED, ProcessingReason.TIMEOUT)
+    assert record.understanding_omitted is UnderstandingOmission.FAILED
+
+
+class _Blocking(FakeModelProvider):
+    """A provider that answers without yielding, after the budget is spent.
+
+    The loop never gets control while it runs, so no timer can fire inside the stage:
+    only a check of the deadline after the stage returns can see it was crossed.
+    """
+
+    async def complete(self, messages: Sequence[Message], *, model: str | None = None) -> Message:
+        time.sleep(0.06)  # noqa: ASYNC251 — the point: a completion that never yields
+        return await super().complete(messages, model=model)
+
+
+async def test_a_stage_that_crosses_the_deadline_without_yielding_is_still_timed_out() -> None:
+    harness = _harness(_Blocking(STATED_PROPOSAL))
+    with pytest.raises(ModelTimeoutError):
+        await harness.engine.receive(
+            _text(), reply=WholeTextReply(), timeout=timedelta(milliseconds=50)
+        )
+    assert harness.associator.call_count == 0
+    record = await _record(harness)
+    assert record.reason is ProcessingReason.TIMEOUT
+    assert record.understanding == ()
     assert record.understanding_omitted is UnderstandingOmission.FAILED
 
 

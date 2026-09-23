@@ -11898,7 +11898,8 @@ class Engine:
         if self._understanding is None:
             return
         state = active_state()
-        if deadline <= asyncio.get_running_loop().time():
+        loop = asyncio.get_running_loop()
+        if deadline <= loop.time():
             raise ModelTimeoutError(_UNDERSTANDING_EXPIRED)
         timer = asyncio.timeout_at(deadline)
         try:
@@ -11919,7 +11920,13 @@ class Engine:
                 raise
             expired = True
         else:
-            expired = False
+            # A timer fires only when the loop gets control, so a stage that crossed
+            # the deadline without yielding — a completion answered just before it,
+            # validation just after — returns as if in time. It is not: what it
+            # produced is not recorded, and the pass ends as any expiry inside does.
+            expired = deadline <= loop.time()
+            if expired and state is not None:
+                state.understanding_failed(TimeoutError())
         if expired:
             # Outside the handler: the timer's own exception rides along as nothing.
             raise ModelTimeoutError(_UNDERSTANDING_EXPIRED) from None
