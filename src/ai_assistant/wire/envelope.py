@@ -2386,7 +2386,8 @@ from ai_assistant.wire.errors import (
 #: 55: ADR-0275 adds ConversationTurn.model_eligible and export version 3.
 #: 56: ADR-0275 adds owner episode inspection methods.
 #: 57: ADR-0275 adds the required channel activation capture receipt.
-PROTOCOL_VERSION: Final[int] = 57
+#: 58: ADR-0276 adds the understanding fields to the wire-carried EpisodeProcessingRecord.
+PROTOCOL_VERSION: Final[int] = 58
 
 #: ADR-0085 §8a: "The correlation id is a UUID string and is at most 36 bytes.
 #: Bounding it is what makes the reserve a constant rather than an aspiration; a

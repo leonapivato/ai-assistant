@@ -77,6 +77,16 @@ class StaleEpisodeReadError(AssistantError):
     """The episode changed between two detail chunks (ADR-0275 §10)."""
 
 
+class UnderstandingError(AssistantError):
+    """The understanding stage obtained no parseable understanding (ADR-0276 §6).
+
+    Raised after the one repair completion ADR-0276 §6 allows, and carrying only the
+    standard message constructor: no content-bearing field, because the message is
+    logged and the model's output is not. It ends the activation as a failure
+    recorded ``failed / understanding_failed``.
+    """
+
+
 class ConfigurationError(AssistantError):
     """Configuration is missing or invalid (e.g. a required secret is unset)."""
 
