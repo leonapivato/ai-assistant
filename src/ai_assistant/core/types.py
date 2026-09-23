@@ -3436,7 +3436,7 @@ class EpisodeProcessingRecord(BaseModel):
     """Immutable facts about one activation, written after its processing ends."""
 
     model_config = ConfigDict(frozen=True, extra="forbid")
-    schema_version: Literal[1] = 1
+    schema_version: Literal[2] = 2
     activation_id: Identifier
     started_at: UtcInstant
     ended_at: UtcInstant
@@ -3451,6 +3451,14 @@ class EpisodeProcessingRecord(BaseModel):
     understanding: tuple[ActivationUnderstanding, ...] = ()
     understanding_omitted: UnderstandingOmission | None = None
     understanding_elided: int = Field(default=0, strict=True, ge=0, lt=2**31)
+
+    @model_validator(mode="after")
+    def _understood_or_omitted(self) -> Self:
+        # ADR-0276 §7: exactly one of a non-empty history and an omission value.
+        if bool(self.understanding) == (self.understanding_omitted is not None):
+            msg = "a processing record carries either its understanding or why it has none"
+            raise ValueError(msg)
+        return self
 
 
 class EpisodeCaptureReport(BaseModel):

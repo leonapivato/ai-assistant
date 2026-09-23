@@ -280,7 +280,7 @@ async def test_pre_m36_reembedding_is_refused_without_modification(tmp_path: Pat
         conn.close()
 
     before = store.read_bytes()
-    with pytest.raises(IncompatibleStateError, match="fresh M36"):
+    with pytest.raises(IncompatibleStateError, match="fresh M37"):
         await Reembedder(store=store, embedder=HashingEmbedder(dimensions=_NEW)).run()
     assert store.read_bytes() == before
     assert sorted(path.name for path in tmp_path.iterdir()) == ["memory.db"]  # noqa: ASYNC240 — local test fixture
@@ -1260,7 +1260,7 @@ async def test_reembedding_preserves_processing_record_marker_and_digest(tmp_pat
     assert before is not None
     outcome = await Reembedder(store=path, embedder=HashingEmbedder(dimensions=_NEW)).run()
     assert outcome.swapped
-    assert _read(path, "SELECT version FROM episode_record_format") == [(1,)]
+    assert _read(path, "SELECT version FROM episode_record_format") == [(2,)]
     opened = SqliteMemoryStore(
         traces_sink=FakeTraceSink(), path=path, embedder=HashingEmbedder(dimensions=_NEW)
     )

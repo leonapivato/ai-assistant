@@ -66,7 +66,7 @@ def test_incompatible_hot_journal_is_rejected_without_recovery(
     _crash(path)
     path.chmod(0o644)
     before = _snapshot(path)
-    with pytest.raises(IncompatibleStateError, match="fresh M36 data directory"):
+    with pytest.raises(IncompatibleStateError, match="fresh M37 data directory"):
         _open(path, kind)
     assert _snapshot(path) == before
     # Negative control: this is a hot journal, not inert sidecar bytes. A normal
@@ -88,7 +88,7 @@ def test_hot_conversation_schema_without_eligibility_is_not_recovered(tmp_path: 
         conn.execute("CREATE TABLE turns(episode_id TEXT)")
     _crash(path)
     before = _snapshot(path)
-    with pytest.raises(IncompatibleStateError, match="fresh M36 data directory"):
+    with pytest.raises(IncompatibleStateError, match="fresh M37 data directory"):
         _open(path, "conversation")
     assert _snapshot(path) == before
 
@@ -117,7 +117,7 @@ def test_rejected_wal_database_and_shared_memory_are_unchanged(tmp_path: Path, k
         conn.execute("CREATE TABLE old_records(content TEXT)")
         conn.execute("INSERT INTO old_records VALUES ('committed in WAL')")
         before = _snapshot(path)
-        with pytest.raises(IncompatibleStateError, match="fresh M36 data directory"):
+        with pytest.raises(IncompatibleStateError, match="fresh M37 data directory"):
             _open(path, kind)
         assert _snapshot(path) == before
 
@@ -134,7 +134,7 @@ def test_rejection_does_not_remove_a_sidecar_symlink(
     sidecar = Path(f"{path}{suffix}")
     sidecar.symlink_to(other)
     before = _snapshot(path)
-    with pytest.raises(IncompatibleStateError, match="fresh M36 data directory"):
+    with pytest.raises(IncompatibleStateError, match="fresh M37 data directory"):
         _open(path, kind)
     assert _snapshot(path) == before
     assert sidecar.is_symlink()
@@ -150,7 +150,7 @@ def test_rejected_closed_wal_database_creates_no_sidecars(tmp_path: Path, kind: 
         conn.execute("INSERT INTO old_records VALUES ('checkpointed before close')")
     before = _snapshot(path)
     assert set(before) == {path.name}
-    with pytest.raises(IncompatibleStateError, match="fresh M36 data directory"):
+    with pytest.raises(IncompatibleStateError, match="fresh M37 data directory"):
         _open(path, kind)
     assert _snapshot(path) == before
 
@@ -176,7 +176,7 @@ def test_hot_database_symlink_uses_the_target_recovery_files(
             ]
         assert not Path(f"{path}-journal").exists()
     else:
-        with pytest.raises(IncompatibleStateError, match="fresh M36 data directory"):
+        with pytest.raises(IncompatibleStateError, match="fresh M37 data directory"):
             _open(alias, kind)
         assert _snapshot(path) == before
     assert alias.is_symlink()

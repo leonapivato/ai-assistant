@@ -29,6 +29,7 @@ from ai_assistant.core.types import (
     RecordedChannelTrigger,
     RecordedTextInput,
     TranscriptEntry,
+    UnderstandingOmission,
 )
 from ai_assistant.orchestration.payloads import canonical_payload
 
@@ -74,6 +75,7 @@ def _episode(record_id: str, *, activation: bool = False) -> EpisodicMemory:
             reason=ProcessingReason.PROCESSING_FAILED,
             response_kind=EpisodeResponseKind.NONE,
             model_eligible=False,
+            understanding_omitted=UnderstandingOmission.NOT_REACHED,
         )
         if activation
         else None,

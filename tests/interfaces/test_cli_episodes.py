@@ -28,6 +28,7 @@ from ai_assistant.core.types import (
     Provenance,
     RecordedChannelTrigger,
     RecordedTextInput,
+    UnderstandingOmission,
 )
 from ai_assistant.interfaces import cli
 from ai_assistant.testing import FakeAssistantEngine, FakeMemoryStore
@@ -66,6 +67,7 @@ def _record(record_id: str, *, response: EpisodeResponseKind | None = None) -> E
                 reason=ProcessingReason.RETURNED,
                 response_kind=response,
                 model_eligible=False,
+                understanding_omitted=UnderstandingOmission.NOT_REACHED,
             )
         ),
     )

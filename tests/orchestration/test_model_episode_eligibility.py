@@ -23,6 +23,7 @@ from ai_assistant.core.types import (
     RecordedChannelTrigger,
     RecordedTextInput,
     SemanticMemory,
+    UnderstandingOmission,
 )
 from ai_assistant.orchestration import MemoryWriteStage, ObservationStage
 from ai_assistant.orchestration.conversations import ConversationLifecycle
@@ -65,6 +66,7 @@ def _episode(identifier: str, *, eligible: bool) -> EpisodicMemory:
             reason=ProcessingReason.RETURNED,
             response_kind=EpisodeResponseKind.NONE,
             model_eligible=eligible,
+            understanding_omitted=UnderstandingOmission.NOT_REACHED,
         ),
     )
 

@@ -27,6 +27,7 @@ from ai_assistant.core.types import (
     RecordedTextInput,
     SpokenAudioFormat,
     SpokenReply,
+    UnderstandingOmission,
 )
 
 _NOW = datetime(2026, 1, 1, tzinfo=UTC)
@@ -49,6 +50,7 @@ def _processing(kind: EpisodeResponseKind) -> EpisodeProcessingRecord:
         reason=ProcessingReason.TRANSCRIPTION_FAILED,
         response_kind=kind,
         model_eligible=False,
+        understanding_omitted=UnderstandingOmission.NOT_REACHED,
     )
 
 

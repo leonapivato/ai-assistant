@@ -46,6 +46,7 @@ if TYPE_CHECKING:
 from ai_assistant.core.types import (
     MAX_EVIDENCE_CITATIONS,
     MAX_TOPICS_PER_RECORD,
+    ActivationUnderstanding,
     Attestation,
     BeliefBand,
     Capture,
@@ -73,6 +74,11 @@ from ai_assistant.core.types import (
     RecordedTextInput,
     SemanticMemory,
     TimeWindow,
+    UnderstandingGround,
+    UnderstandingOmission,
+    UnderstandingProducer,
+    UnderstandingReferent,
+    UnresolvedMatter,
     Validity,
     WalkPosition,
     band_of,
@@ -932,6 +938,7 @@ def _activation_episode(record_id: str, *, eligible: bool) -> EpisodicMemory:
             reason=ProcessingReason.RETURNED if eligible else ProcessingReason.PROCESSING_FAILED,
             response_kind=EpisodeResponseKind.NONE,
             model_eligible=eligible,
+            understanding_omitted=UnderstandingOmission.NOT_REACHED,
         ),
     )
 
@@ -1214,6 +1221,57 @@ class MemoryStoreContract:
         plain = await store.get("unlabelled")
         assert plain is not None
         assert plain.topics == ()
+
+    async def test_a_processing_records_understanding_survives_the_round_trip(
+        self, store: MemoryStore
+    ) -> None:
+        """ADR-0276 §7: the record carries its understanding as it carries every other field.
+
+        Pinned in both states the exactly-one rule admits — a history of one version
+        with the omission ``None``, and no history with an omission value — because an
+        implementation that dropped either would not fail: the record's own validator
+        would refuse the half it kept, so the loss would surface as a read error on a
+        record that was written whole. The referent's ``id`` is pinned blank because
+        §2 carries an episode address **exactly as stored**, and a store that
+        normalised it would rewrite what the understanding pointed at.
+        """
+        understood = _activation_episode("understood", eligible=True)
+        assert understood.processing_record is not None
+        version = ActivationUnderstanding(
+            version=1,
+            recorded_at=_IN_WINDOW,
+            producer=UnderstandingProducer.INTERPRETATION,
+            meaning="the user asked for the exact input again",
+            meaning_ground=UnderstandingGround.SUPPLIED,
+            meaning_referents=(
+                UnderstandingReferent(kind="episode", id=" ", source="event", excerpt="exact"),
+            ),
+            unresolved=(UnresolvedMatter(matter="which one", why_it_matters="two match"),),
+            grounding_dropped=1,
+        )
+        record = understood.processing_record.model_copy(
+            update={
+                "understanding": (version,),
+                "understanding_omitted": None,
+                "understanding_elided": 2,
+            }
+        )
+        await store.add(understood.model_copy(update={"processing_record": record}))
+        await store.add(_activation_episode("omitted", eligible=True))
+
+        got = await store.get("understood")
+        assert isinstance(got, EpisodicMemory)
+        assert got.processing_record is not None
+        assert got.processing_record.schema_version == 2
+        assert got.processing_record.understanding == (version,)
+        assert got.processing_record.understanding[0].meaning_referents[0].id == " "
+        assert got.processing_record.understanding_omitted is None
+        assert got.processing_record.understanding_elided == 2
+        omitted = await store.get("omitted")
+        assert isinstance(omitted, EpisodicMemory)
+        assert omitted.processing_record is not None
+        assert omitted.processing_record.understanding == ()
+        assert omitted.processing_record.understanding_omitted is UnderstandingOmission.NOT_REACHED
 
     async def test_an_episodes_disposition_and_capture_survive_the_round_trip(
         self, store: MemoryStore

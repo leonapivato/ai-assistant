@@ -35,6 +35,7 @@ from ai_assistant.core.types import (
     SpeechFailure,
     SpokenTurn,
     TurnOutcome,
+    UnderstandingOmission,
     is_live_confirmation_park,
 )
 
@@ -155,6 +156,8 @@ class ActivationState:
             spoken_degraded=self.spoken_degraded,
             model_eligible=self.facts is not None,
             links=self.links,
+            # ADR-0276 §8 step 2: true of every pass until the understanding stage exists.
+            understanding_omitted=UnderstandingOmission.NOT_REACHED,
         )
 
     def relate(  # noqa: PLR0913 — each independently established relationship

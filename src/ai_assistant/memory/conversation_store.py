@@ -75,7 +75,11 @@ from ai_assistant.core.types import (
     SpokenDeliveryState,
     describe_untrusted,
 )
-from ai_assistant.memory._episode_format import check_format, inspect_existing
+from ai_assistant.memory._episode_format import (
+    EPISODE_RECORD_FORMAT,
+    check_format,
+    inspect_existing,
+)
 from ai_assistant.memory._transactions import transaction
 
 if TYPE_CHECKING:
@@ -684,7 +688,7 @@ class SqliteConversationStore:
                 columns = {row[1] for row in conn.execute("PRAGMA table_info(turns)")}
                 if "model_eligible" not in columns:
                     raise IncompatibleStateError(
-                        "conversation store requires a fresh M36 data directory",
+                        "conversation store requires a fresh M37 data directory",
                         expected="conversation index with activation eligibility",
                         found="conversation index without activation eligibility",
                         operator_action=(
@@ -696,7 +700,9 @@ class SqliteConversationStore:
             existing_format = check_format(conn, allow_empty=True)
             if not existing_format:
                 conn.execute("CREATE TABLE episode_record_format(version INTEGER NOT NULL)")
-                conn.execute("INSERT INTO episode_record_format VALUES (1)")
+                conn.execute(
+                    "INSERT INTO episode_record_format VALUES (?)", (EPISODE_RECORD_FORMAT,)
+                )
             conn.execute(
                 "CREATE TABLE IF NOT EXISTS conversations("
                 "id TEXT PRIMARY KEY, started_at INTEGER NOT NULL, "

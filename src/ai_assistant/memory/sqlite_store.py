@@ -77,7 +77,11 @@ from ai_assistant.core.types import (
     caseless_key,
 )
 from ai_assistant.memory import traces
-from ai_assistant.memory._episode_format import check_format, inspect_existing
+from ai_assistant.memory._episode_format import (
+    EPISODE_RECORD_FORMAT,
+    check_format,
+    inspect_existing,
+)
 from ai_assistant.memory._transactions import transaction
 from ai_assistant.memory._walk import (
     check_walk_limit,
@@ -690,7 +694,9 @@ class SqliteMemoryStore:
             self._restrict_permissions()
             if not existing_format:
                 conn.execute("CREATE TABLE episode_record_format(version INTEGER NOT NULL)")
-                conn.execute("INSERT INTO episode_record_format VALUES (1)")
+                conn.execute(
+                    "INSERT INTO episode_record_format VALUES (?)", (EPISODE_RECORD_FORMAT,)
+                )
             conn.execute(
                 "CREATE TABLE IF NOT EXISTS meta(key TEXT PRIMARY KEY, value TEXT NOT NULL)"
             )

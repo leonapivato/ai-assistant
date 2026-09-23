@@ -40,6 +40,7 @@ from ai_assistant.core.types import (
     SpeechChannelPayload,
     SpokenTurn,
     TurnOutcome,
+    UnderstandingOmission,
     is_live_confirmation_park,
 )
 
@@ -237,6 +238,7 @@ class FakeActivation:
                 reply_degraded=self.outcome is not None and self.outcome.reply_degraded,
                 spoken_degraded=self.spoken_degraded,
                 links=self.links,
+                understanding_omitted=UnderstandingOmission.NOT_REACHED,
             ),
         )
 
