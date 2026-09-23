@@ -550,6 +550,34 @@ async def test_recent_episodes_pages_past_shared_exchanges_to_fill_its_bound() -
     assert [record.id for record in selected] == ["e-0", "e-1", "e-2", "e-3", "e-4"]
 
 
+class _Vanishing(FakeMemoryStore):
+    """A store from which the named records vanish between enumeration and fetch."""
+
+    def __init__(self, gone: frozenset[str]) -> None:
+        super().__init__(now=lambda: AT)
+        self._gone = gone
+
+    async def get_many(self, ids: Sequence[str]) -> dict[str, MemoryRecord]:
+        found = await super().get_many(ids)
+        return {key: record for key, record in found.items() if key not in self._gone}
+
+
+async def test_recent_episodes_walks_past_a_page_whose_every_row_vanished() -> None:
+    """A gap between the two reads is not the end of the store."""
+    memory = _Vanishing(frozenset({"e-0"}))
+    await memory.write_atomic(
+        [
+            MemoryWrite(
+                record=_episode(f"e-{n}", at=AT - timedelta(minutes=n)),
+                mode=MemoryWriteMode.INSERT_IF_ABSENT,
+            )
+            for n in range(2)
+        ]
+    )
+    selected = await RecentEpisodes(memory=memory, limit=1)(frozenset())
+    assert [record.id for record in selected] == ["e-1"]
+
+
 def test_recent_episodes_and_the_stage_refuse_a_bound_below_one() -> None:
     memory = FakeMemoryStore(now=lambda: AT)
     with pytest.raises(ValueError, match="at least 1"):

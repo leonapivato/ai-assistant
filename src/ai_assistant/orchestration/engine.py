@@ -474,6 +474,10 @@ _ENGAGEMENT_ATTEMPTS: Final = 3
 #: minted and the operation never called.
 _ROUTE_ID_ATTEMPTS: Final = 8
 
+#: What a pass whose deadline expired before or inside the understanding stage says
+#: (ADR-0276 §5, §6): code-owned, so no provider content reaches the caller.
+_UNDERSTANDING_EXPIRED: Final = "the pass's deadline expired during understanding"
+
 
 def _note_failure[T](turn: asyncio.Task[T]) -> None:
     """Observe a finished streaming turn's failure, whether or not anyone read it.
@@ -11829,6 +11833,9 @@ class Engine:
     ) -> TurnOutcome:
         """Resolve the store-owned channel once, then pass supplied context separately."""
         remaining = None if self._reconciliation is None else self._reconciliation.opened(timeout)
+        # ADR-0276 §5: the pass's existing deadline, read at the turn's entry as the
+        # remainder above is — the budget this call was handed, and no second one.
+        deadline = asyncio.get_running_loop().time() + timeout.total_seconds()
         conversation = await self._conversations.begin(conversation_id)
         if (state := active_state()) is not None:
             state.resolved_conversation(conversation.id)
@@ -11848,6 +11855,7 @@ class Engine:
             spoken=spoken,
             reference=reference,
             remaining=remaining,
+            deadline=deadline,
         )
 
     async def _understand(
@@ -11857,6 +11865,7 @@ class Engine:
         window: ChannelWindow,
         audience: TurnSupply,
         episodes: bool,
+        deadline: float,
     ) -> None:
         """Enter the understanding stage once, and carry what it records (ADR-0276 §5, §7).
 
@@ -11867,32 +11876,53 @@ class Engine:
         ``not_reached`` — and propagates unchanged: an ``UnderstandingError`` fails
         the activation as ``understanding_failed`` and a ``ModelError`` takes the row
         its class already takes (§6). Nothing is substituted for an understanding the
-        stage could not obtain. It runs inside the pass's existing deadline and adds
-        no budget (§5).
+        stage could not obtain.
+
+        **It runs inside the pass's existing deadline** (§5): the selector and both
+        completions are bounded by what is left of the budget the call was handed,
+        and a deadline that expires is a classified timeout — ``ModelTimeoutError``,
+        the row a timed-out completion of this stage already takes (§6). A deadline
+        that had already expired is raised **before** the stage is entered, so the
+        record says ``not_reached`` rather than ``failed``.
 
         Args:
             input: The resolved activation input.
             window: Its channel window, stored records not yet filtered (§3).
             audience: The pass's audience posture, which filters them (§4).
             episodes: Whether the pass takes an episode window (§4).
+            deadline: The pass's deadline, on the running loop's clock.
+
+        Raises:
+            ModelTimeoutError: If the deadline expired before the stage or inside it.
         """
         if self._understanding is None:
             return
         state = active_state()
+        if deadline <= asyncio.get_running_loop().time():
+            raise ModelTimeoutError(_UNDERSTANDING_EXPIRED)
+        timer = asyncio.timeout_at(deadline)
         try:
-            understood = await self._understanding.understand(
-                input.text,
-                channel=input.channel,
-                window=window,
-                audience=audience,
-                episodes=episodes,
-                version=1 if state is None else state.next_understanding_version(),
-                now=self._clock,
-            )
+            async with timer:
+                understood = await self._understanding.understand(
+                    input.text,
+                    channel=input.channel,
+                    window=window,
+                    audience=audience,
+                    episodes=episodes,
+                    version=1 if state is None else state.next_understanding_version(),
+                    now=self._clock,
+                )
         except BaseException as exc:
             if state is not None:
                 state.understanding_failed(exc)
-            raise
+            if not (isinstance(exc, TimeoutError) and timer.expired()):
+                raise
+            expired = True
+        else:
+            expired = False
+        if expired:
+            # Outside the handler: the timer's own exception rides along as nothing.
+            raise ModelTimeoutError(_UNDERSTANDING_EXPIRED) from None
         if state is not None:
             state.understood(understood, limit=self._understanding_version_limit)
 
@@ -11916,27 +11946,17 @@ class Engine:
                 the provider classified a timeout.
             ChannelProcessingError: If the stage failed any other way it classifies.
         """
-        if self._understanding is None:
-            return
-        loop = asyncio.get_running_loop()
-        if deadline <= loop.time():
-            raise ChannelProcessingTimeoutError("informational event processing timed out")
         failure: type[ChannelProcessingError] | None = None
-        timer = asyncio.timeout_at(deadline)
         try:
-            async with timer:
-                await self._understand(
-                    input,
-                    window=SuppliedWindow(input.context),
-                    audience=BoundedAudienceSupply(
-                        speakable_attested_sources=self._speakable_attested_sources
-                    ),
-                    episodes=True,
-                )
-        except TimeoutError:
-            if not timer.expired():
-                raise
-            failure = ChannelProcessingTimeoutError
+            await self._understand(
+                input,
+                window=SuppliedWindow(input.context),
+                audience=BoundedAudienceSupply(
+                    speakable_attested_sources=self._speakable_attested_sources
+                ),
+                episodes=True,
+                deadline=deadline,
+            )
         except ModelTimeoutError:
             failure = ChannelProcessingTimeoutError
         except ModelError, UnderstandingError:
@@ -11958,6 +11978,7 @@ class Engine:
         *,
         timeout: timedelta,  # noqa: ASYNC109 — threaded through to the seam (ADR-0029 §4)
         remaining: TurnRemainder | None,
+        deadline: float,
         compose: _Composer,
         compose_routed: _RoutedComposer,
         supply: TurnSupply,
@@ -12078,6 +12099,7 @@ class Engine:
             window=ConversationWindow(input.channel, history.records),
             audience=supply,
             episodes=operation is not ConversationalOperation.CONVERSE_SPOKEN,
+            deadline=deadline,
         )
         # ADR-0250 §3: **every turn resolves its goal before it plans**, and the
         # association precedes the relevance read, the episodic supplement and the
