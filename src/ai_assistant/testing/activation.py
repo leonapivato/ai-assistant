@@ -16,6 +16,7 @@ from ai_assistant.core.errors import (
 )
 from ai_assistant.core.types import (
     ActivationLinks,
+    ActivationUnderstanding,
     Capture,
     ChannelIdentity,
     ChannelResult,
@@ -40,7 +41,9 @@ from ai_assistant.core.types import (
     SpeechChannelPayload,
     SpokenTurn,
     TurnOutcome,
+    UnderstandingGround,
     UnderstandingOmission,
+    UnderstandingProducer,
     is_live_confirmation_park,
 )
 
@@ -73,6 +76,7 @@ class FakeActivation:
     no_words: bool = False
     links: ActivationLinks = field(default_factory=ActivationLinks)
     output_failure: OversizedValueError | None = None
+    understood: bool = False
 
     @classmethod
     def channel(
@@ -136,6 +140,17 @@ class FakeActivation:
                 update={"payload": self.trigger.payload.model_copy(update={"transcript": text})}
             )
             self.no_words = not text.strip()
+
+    def understand(self) -> None:
+        """Mark that this fake pass reached the point the engine's stage runs (ADR-0276 §5).
+
+        Called where the concrete engine enters its understanding stage — after the
+        conversation resolves, or the event input does, and before anything is
+        produced — so that the shared channel contract reads the same record from this
+        double as from the engine: version 1 where the stage ran, and the omission
+        value naming where the pass ended where it did not.
+        """
+        self.understood = True
 
     def observe(self, result: TurnOutcome | SpokenTurn | ChannelResult) -> None:
         """Observe the fake's produced result before a size check can refuse it."""
@@ -238,9 +253,34 @@ class FakeActivation:
                 reply_degraded=self.outcome is not None and self.outcome.reply_degraded,
                 spoken_degraded=self.spoken_degraded,
                 links=self.links,
-                understanding_omitted=UnderstandingOmission.NOT_REACHED,
+                understanding=self.understanding(),
+                understanding_omitted=self.omission(),
             ),
         )
+
+    def understanding(self) -> tuple[ActivationUnderstanding, ...]:
+        """The one version a pass that reached the stage records, and none otherwise."""
+        if self.omission() is not None:
+            return ()
+        return (
+            ActivationUnderstanding(
+                version=1,
+                recorded_at=self.at,
+                producer=UnderstandingProducer.INTERPRETATION,
+                meaning="This fake engine understood the input as stated.",
+                meaning_ground=UnderstandingGround.STATED,
+            ),
+        )
+
+    def omission(self) -> UnderstandingOmission | None:
+        """ADR-0276 §5's classification, mirrored over the facts this fake holds."""
+        if isinstance(self.trigger, RecordedResumeTrigger):
+            return UnderstandingOmission.NO_INPUT
+        if self.no_words:
+            return UnderstandingOmission.NO_TEXT
+        if self.outcome is not None and self.outcome.routed is not None:
+            return UnderstandingOmission.ROUTED
+        return None if self.understood else UnderstandingOmission.NOT_REACHED
 
     def content(self) -> str:
         """Render the fake's established conversational facts outside the raw snapshot."""

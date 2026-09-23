@@ -97,6 +97,7 @@ from ai_assistant.orchestration import (
 from ai_assistant.orchestration.informational_events import InformationalEventStage
 from ai_assistant.orchestration.payloads import ENVELOPE_RESERVE_BYTES
 from ai_assistant.orchestration.reconciling import ReconciliationStage
+from ai_assistant.orchestration.understanding import RecentEpisodes, UnderstandingStage
 from ai_assistant.permissions import (
     ConfiguredForecastDestination,
     ConfiguredSearchDestination,
@@ -260,6 +261,33 @@ EPISODIC_SUPPLEMENT_LIMIT: Final = 30
 #: What this layer tunes :class:`MemoryIngestor`'s conflict ceiling to, passed
 #: explicitly for :data:`RETRIEVAL_LIMIT`'s reason.
 CONFLICT_LIMIT: Final = 100
+
+#: How many episodes the understanding stage's **episode window** holds (ADR-0276 §4),
+#: beside :data:`RETRIEVAL_LIMIT` on ADR-0158 §5's rule: a cardinality control whose
+#: authority is measurement, so a composition-root constant and never a
+#: :class:`~ai_assistant.core.config.Settings` field. Ten by recency is the owner's
+#: first guess with no measurement behind it (#2544, 2026-09-22), and the exit run is
+#: the first evidence. It bounds the selector wired below; episodes of the channel
+#: window are rendered there once and are not counted toward it (§3).
+#:
+#: **The method is the selector's, not this number's.** A different bound, a
+#: per-channel mix, a size budget or a different order is a different selector wired
+#: in :func:`build_composition`, which amends no clause of ADR-0276 so long as it
+#: keeps §4's walls — bounded, cross-channel, eligibility-blind, disclosure-filtered,
+#: model-free and relevance-free.
+UNDERSTANDING_EPISODE_LIMIT: Final = 10
+
+#: How many characters of each episode's input and response the episode window renders
+#: (ADR-0276 §4). The cut is disclosed in the rendering; the channel window has no
+#: ceiling of that decision's own (§3) and is not cut by it.
+UNDERSTANDING_EXCERPT_CHARS: Final = 2000
+
+#: How many understanding versions one processing record retains (ADR-0276 §7):
+#: version 1 and the latest ``UNDERSTANDING_VERSION_LIMIT - 1``, with the rest counted
+#: in ``understanding_elided``. One producer ships, so no record reaches it yet; the
+#: bound is what keeps a record's size a function of the activation rather than of how
+#: many stages a later redesign runs.
+UNDERSTANDING_VERSION_LIMIT: Final = 8
 
 #: How far the conflict probe over-asks its ceiling (ADR-0079 §1, ``memory/
 #: ingest.py``'s ``limit=self._conflict_limit + 2``).
@@ -2190,6 +2218,18 @@ def build_composition(  # noqa: PLR0915 — one statement per resource this root
             # a `mypy --strict` failure rather than a review note. The façade is handed
             # no trail seam of any width, so this is the one position that names either.
             routing=RoutingStage(model=model, recorder=routing_trail),
+            # ADR-0276's understanding stage, over the **same** model seam routing and
+            # the planner reach through — the routing-over-retrying provider built
+            # above, which carries ADR-0011's retry policy — and the initial episode
+            # selector over the one memory store. The selector is the method §4 makes
+            # a wiring choice: swapping it is a change on this line and nowhere else.
+            # The stage receives no goal, plan, memory retrieval or context state.
+            understanding=UnderstandingStage(
+                model=model,
+                episodes=RecentEpisodes(memory=memory, limit=UNDERSTANDING_EPISODE_LIMIT),
+                excerpt_chars=UNDERSTANDING_EXCERPT_CHARS,
+            ),
+            understanding_version_limit=UNDERSTANDING_VERSION_LIMIT,
             # ADR-0244's parked-read operations, built above: the **same object** the
             # recipient-grant operations below are handed, which is §18's "wired as one
             # instance" and is asserted in `tests/app/test_composition_parked_reads.py`

@@ -98,11 +98,15 @@ from ai_assistant.core.clock import ClockReadingError, checked_clock
 from ai_assistant.core.episode_encoding import check_detail, check_list
 from ai_assistant.core.errors import (
     AuthorizationError,
+    ChannelProcessingError,
+    ChannelProcessingTimeoutError,
     ClaimRefused,
     ConfigurationError,
     ConversationStoreError,
     MemoryStoreError,
     MemoryStoreStaleError,
+    ModelError,
+    ModelTimeoutError,
     NotificationBudgetError,
     OversizedValueError,
     PlanningError,
@@ -110,6 +114,7 @@ from ai_assistant.core.errors import (
     StaleExecutionError,
     TraceStoreError,
     TranscriptionFailedError,
+    UnderstandingError,
     UngrantableActError,
     UnknownContinuationError,
 )
@@ -215,6 +220,7 @@ from ai_assistant.core.types import (
     TurnOutcome,
     TurnReference,
     TurnResult,
+    UnderstandingOmission,
     WholeTextReply,
     band_of,
     describe_untrusted,
@@ -308,6 +314,11 @@ from ai_assistant.orchestration.speech import (
     transcribe_within,
 )
 from ai_assistant.orchestration.traces import Observation, OperationTraces
+from ai_assistant.orchestration.understanding import (
+    ChannelWindow,
+    ConversationWindow,
+    SuppliedWindow,
+)
 from ai_assistant.orchestration.verification import Comparison, compare
 
 if TYPE_CHECKING:
@@ -398,6 +409,7 @@ if TYPE_CHECKING:
         StepDisposition,
         StepRunner,
     )
+    from ai_assistant.orchestration.understanding import UnderstandingStage
     from ai_assistant.orchestration.upcoming import UpcomingEventStage
     from ai_assistant.orchestration.writes import WriteOutcome
 
@@ -2609,6 +2621,8 @@ class Engine:
         notification_outbox: DeliveryOutbox | None = None,
         recovery: RecoveryScan | None = None,
         routing: RoutingStage | None = None,
+        understanding: UnderstandingStage | None = None,
+        understanding_version_limit: int | None = None,
         reconciliation: ReconciliationStage | None = None,
         parked_reads: ParkedReadOperations | None = None,
         authorization_operations: AuthorizationOperations | None = None,
@@ -3031,6 +3045,14 @@ class Engine:
                 ADR-0197 §9 puts the write-only ``RoutingRecorder`` on the *stage*, so the
                 façade never holds a trail seam of any width and cannot be wired into the
                 half-configured state where a stage could route without recording.
+            understanding: ADR-0276's understanding stage, holding the model seam and
+                the composition root's episode selector, or ``None`` on a deployment
+                that wires none — where no pass enters a stage, and every capture that
+                reaches the point it would have run records ``not_reached``. The
+                composition root always wires it.
+            understanding_version_limit: ``UNDERSTANDING_VERSION_LIMIT``, ADR-0276 §7's
+                bound on the versions one processing record retains. Required, and at
+                least 2, wherever ``understanding`` is wired.
             reconciliation: ADR-0259 §4's turn-start pass and §3's check, or ``None``
                 where this deployment wired neither — where the pipeline is exactly
                 what it was before that decision, and a goal's residual is repaired by
@@ -3373,6 +3395,20 @@ class Engine:
             )
             raise ConfigurationError(msg)
         self._routing = routing
+        # ADR-0276's understanding stage and §7's version bound, both from the
+        # composition root. The bound is required wherever the stage is wired, and a
+        # bound that cannot keep version 1 beside the latest is refused here rather
+        # than at the first capture that would need it.
+        if understanding is not None and (
+            understanding_version_limit is None or understanding_version_limit < 2  # noqa: PLR2004 — version 1 and the latest
+        ):
+            msg = (
+                "an understanding stage needs a version bound of at least 2, so that "
+                "version 1 and the latest are both kept (ADR-0276 §7)"
+            )
+            raise ConfigurationError(msg)
+        self._understanding = understanding
+        self._understanding_version_limit = understanding_version_limit or 2
         self._reconciliation = reconciliation
         self._parked_reads = parked_reads
         # ADR-0254 §11's read side. **Optional, and its absence is fail-closed**:
@@ -4224,10 +4260,14 @@ class Engine:
         if isinstance(target, ChannelIdentity) and target.channel_type == "informational_event":
             assert isinstance(input.payload, TextChannelPayload)  # noqa: S101 — narrowed by validated channel dispatch
             assert self._informational_events is not None  # noqa: S101 — narrowed by validated channel dispatch
+            resolved = ResolvedChannelInput(
+                target, input.payload.text, input.payload.modality, input.context
+            )
+            # ADR-0276 §5: after the event input is resolved and before the event
+            # stage, which is unchanged and reads no understanding.
+            await self._understand_event(resolved, deadline=deadline)
             result = await self._informational_events.process(
-                ResolvedChannelInput(
-                    target, input.payload.text, input.payload.modality, input.context
-                ),
+                resolved,
                 deadline=deadline,
                 on_summary=None if (state := active_state()) is None else state.summary,
             )
@@ -11810,6 +11850,108 @@ class Engine:
             remaining=remaining,
         )
 
+    async def _understand(
+        self,
+        input: ResolvedChannelInput,  # noqa: A002 — resolved channel input
+        *,
+        window: ChannelWindow,
+        audience: TurnSupply,
+        episodes: bool,
+    ) -> None:
+        """Enter the understanding stage once, and carry what it records (ADR-0276 §5, §7).
+
+        The version is minted one greater than the last on the activation's state and
+        ``recorded_at`` read from this engine's clock; the record is carried on the
+        state and written once, at capture. **Any raise out of the stage is
+        ``failed``** — the stage was entered, which is what separates it from
+        ``not_reached`` — and propagates unchanged: an ``UnderstandingError`` fails
+        the activation as ``understanding_failed`` and a ``ModelError`` takes the row
+        its class already takes (§6). Nothing is substituted for an understanding the
+        stage could not obtain. It runs inside the pass's existing deadline and adds
+        no budget (§5).
+
+        Args:
+            input: The resolved activation input.
+            window: Its channel window, stored records not yet filtered (§3).
+            audience: The pass's audience posture, which filters them (§4).
+            episodes: Whether the pass takes an episode window (§4).
+        """
+        if self._understanding is None:
+            return
+        state = active_state()
+        try:
+            understood = await self._understanding.understand(
+                input.text,
+                channel=input.channel,
+                window=window,
+                audience=audience,
+                episodes=episodes,
+                version=1 if state is None else state.next_understanding_version(),
+                now=self._clock,
+            )
+        except BaseException as exc:
+            if state is not None:
+                state.understanding_failed(exc)
+            raise
+        if state is not None:
+            state.understood(understood, limit=self._understanding_version_limit)
+
+    async def _understand_event(self, input: ResolvedChannelInput, *, deadline: float) -> None:  # noqa: A002 — resolved channel input
+        """The event path's understanding, mapped outward as the event stage maps its own.
+
+        ADR-0276 §6: raised in ``_dispatch_channel`` ahead of the event stage, the
+        stage's failures map to ``ChannelProcessingError`` and
+        ``ChannelProcessingTimeoutError`` exactly as ADR-0274 §8's partition maps that
+        stage's own completion failures — a classified model timeout and the admitted
+        deadline's expiry to the second, every other ``ModelError`` and an
+        ``UnderstandingError`` to the first — and anything else propagates unchanged.
+        The record is the same as on the conversational path, because the state keeps
+        the reason. An informational-event pass is a pass of **bounded** audience
+        (§4): the engine holds a ``BoundedAudienceSupply`` for it, and nothing is
+        withheld.
+
+        Raises:
+            ChannelProcessingTimeoutError: If the deadline had already expired before
+                the stage — which then was never entered — or expired inside it, or
+                the provider classified a timeout.
+            ChannelProcessingError: If the stage failed any other way it classifies.
+        """
+        if self._understanding is None:
+            return
+        loop = asyncio.get_running_loop()
+        if deadline <= loop.time():
+            raise ChannelProcessingTimeoutError("informational event processing timed out")
+        failure: type[ChannelProcessingError] | None = None
+        timer = asyncio.timeout_at(deadline)
+        try:
+            async with timer:
+                await self._understand(
+                    input,
+                    window=SuppliedWindow(input.context),
+                    audience=BoundedAudienceSupply(
+                        speakable_attested_sources=self._speakable_attested_sources
+                    ),
+                    episodes=True,
+                )
+        except TimeoutError:
+            if not timer.expired():
+                raise
+            failure = ChannelProcessingTimeoutError
+        except ModelTimeoutError:
+            failure = ChannelProcessingTimeoutError
+        except ModelError, UnderstandingError:
+            failure = ChannelProcessingError
+        if failure is None:
+            return
+        # Outside the handlers, as the event stage raises: no provider content rides
+        # along as `__context__`.
+        message = (
+            "informational event processing timed out"
+            if failure is ChannelProcessingTimeoutError
+            else "informational event processing failed"
+        )
+        raise failure(message) from None
+
     async def _run_turn(  # noqa: C901, PLR0912, PLR0913, PLR0915 — C901/PLR0912: ADR-0250 §3 and §10 add two branches to one sequence, and ADR-0261 §7 adds the third — a claim a user act refused, which ends the walk and composes without acting; like the other two it is a fact about *this* pass, and its composition reads eleven of this pass's own locals, so a helper could only take it back by threading them through a parameter list. The first two are a turn that could not decide which goal it was about, which returns before the loop, and a turn that raised a question, which takes the undriven path whatever its plan proposed. PLR0913: the utterance, the budget, the conversation, the two composers, the supply filter and the spoken capture; every one is a distinct fact about the pass, and collapsing any pair would put a flag where a value belongs. PLR0915: one pass is one sequence — admit, persist, authorise, drive, compose, capture — and the four statements ADR-0249 §12's authorization boundary adds are a closure over this pass's own attempt carrier, which a helper could only take back by putting that carrier in a mutable cell
         self,
         input: ResolvedChannelInput,  # noqa: A002 — resolved channel input
@@ -11913,6 +12055,10 @@ class Engine:
         utterance = input.text
         route = None if self._routing is None else await self._routing.route(utterance)
         if route is not None:
+            # ADR-0276 §5: a taken route ends the pipeline before the understanding
+            # stage, and the record says so rather than that the stage was not reached.
+            if (activation := active_state()) is not None:
+                activation.omit(UnderstandingOmission.ROUTED)
             return await self._routed_pass(
                 utterance,
                 route,
@@ -11921,6 +12067,18 @@ class Engine:
                 spoken=spoken,
             )
         history = await self._conversations.history(input.channel.instance_id)
+        # ADR-0276 §5: the understanding stage runs after routing declined and the
+        # conversation resolved, and **before** `_associate` and every read that is the
+        # goal's. Its window is the tail just read, filtered by this pass's audience
+        # (§3, §4), and a spoken turn takes no episode window — the test is over which
+        # operation is running, as §15's association rule's is. What it records is
+        # carried on the activation's state; no stage below reads it (§8).
+        await self._understand(
+            input,
+            window=ConversationWindow(input.channel, history.records),
+            audience=supply,
+            episodes=operation is not ConversationalOperation.CONVERSE_SPOKEN,
+        )
         # ADR-0250 §3: **every turn resolves its goal before it plans**, and the
         # association precedes the relevance read, the episodic supplement and the
         # planner call because all three are the goal's. The request is normalised

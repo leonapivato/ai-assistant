@@ -1428,6 +1428,7 @@ class FakeAssistantEngine:
         if isinstance(target, ChannelIdentity) and target.channel_type == "informational_event":
             if timeout.total_seconds() <= 0:
                 raise ChannelProcessingTimeoutError("informational event processing timed out")
+            activation.understand()
             self.calls.append(("receive", {"input": supplied, "reply": capability}))
             result = ChannelResult(
                 channel=target,
@@ -1612,6 +1613,7 @@ class FakeAssistantEngine:
         held = self._resolve(selected)
         if activation is not None:
             activation.resolved(held)
+            activation.understand()
         # ``reply`` is populated because ADR-0170 §4 obliges an answer on every shape
         # but a park and a recovered resume, and ``TurnOutcome`` refuses an outcome
         # that owes one and carries none. A fake that returned ``None`` here would
@@ -1697,6 +1699,7 @@ class FakeAssistantEngine:
         held = self._resolve(conversation_id)
         if activation is not None:
             activation.resolved(held)
+            activation.understand()
         outcome = self.turn_outcome or TurnOutcome(
             turn=_turn(utterance),
             conversation_id=held,
@@ -1824,6 +1827,7 @@ class FakeAssistantEngine:
             return observed(SpokenTurn(), "converse_spoken")
         held = self._resolve(selected)
         activation.resolved(held)
+        activation.understand()
         outcome = self.turn_outcome or TurnOutcome(
             turn=_turn(heard),
             conversation_id=held,
