@@ -343,8 +343,6 @@ def test_an_absurdly_long_ordinal_resolves_to_nothing_without_crashing(
     [
         pytest.param("> > ```python\n> > x = 1\n> > ```", id="nested-quote"),
         pytest.param("> >~~~\n> >x\n> >~~~", id="nested-quote-unspaced"),
-        pytest.param("> - ```python\n>   x = 1\n>   ```", id="list-item"),
-        pytest.param("> 1. ```\n>    x\n>    ```", id="ordered-list-item"),
     ],
 )
 def test_a_fence_nested_inside_the_quote_still_disqualifies_the_run(fence: str) -> None:
@@ -389,7 +387,6 @@ def test_leading_zeros_do_not_change_an_ordinal(written: str, resolves: bool) ->
     [
         pytest.param(">     ```python\n>     x = 1\n>     ```", id="indented-code"),
         pytest.param("> \t\t```python", id="two-tabs"),
-        pytest.param("> -      ```python", id="list-item-indented-code"),
     ],
 )
 def test_fence_text_inside_indented_code_is_clause_text(literal: str) -> None:
@@ -406,7 +403,8 @@ def test_fence_text_inside_indented_code_is_clause_text(literal: str) -> None:
     "fence",
     [
         pytest.param(">    ```python", id="three-spaces-after-the-marker-space"),
-        pytest.param("> - item\n>   ```python", id="list-continuation"),
+        pytest.param("> - item\n>   ```python", id="two-spaces-into-the-quote"),
+        pytest.param("> - ```python\n>   x = 1\n>   ```", id="bullet-with-shallow-closer"),
         pytest.param(">  >  ```python", id="spaced-nested-quote"),
         pytest.param("> \t```python", id="a-tab-reaches-the-next-stop"),
     ],
@@ -418,3 +416,24 @@ def test_a_fence_up_to_three_spaces_into_its_container_disqualifies(fence: str) 
         "> **Normative.** The next clause.\n"
     )
     assert [c.identifier(1) for c in clauses(text)] == ["ADR-0001 §1:1"]
+
+
+@pytest.mark.parametrize(
+    "listed",
+    [
+        pytest.param("> 10. item\n>     ```python\n>     x = 1\n>     ```", id="at-content-column"),
+        pytest.param("> -      ```python", id="after-a-bullet-at-code-depth"),
+    ],
+)
+def test_no_list_structure_is_read(listed: str) -> None:
+    """ADR-0089 §2's scan infers "not a list": a fence is found only within three
+    spaces of a ``>``, so one CommonMark would nest at a list item's content column
+    is clause text. (A bulleted fence whose own lines sit within three spaces of
+    the ``>`` is still found, by those lines — see the test above.)
+    """
+    text = (
+        "## Decision\n\n### 1. One\n\n"
+        f"> **Normative.** Example:\n>\n{listed}\n\n"
+        "> **Normative.** The next clause.\n"
+    )
+    assert [c.identifier(1) for c in clauses(text)] == ["ADR-0001 §1:1", "ADR-0001 §1:2"]
