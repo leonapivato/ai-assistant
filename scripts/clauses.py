@@ -24,6 +24,10 @@ What it reads, in the order the rules are stated:
   or, where no numbered heading precedes it within its level-2 section, the first
   word of that level-2 heading (``Context``, ``Consequences``). An unnumbered
   heading below level 2 starts no section.
+- **The level-2 section** a clause stands in is the nearest level-2 heading above
+  it, read whole. It is what ADR-0278 §1 selects a repeated clause by, and the
+  numbered heading *S* is read from does not replace it: a clause under
+  ``### 5.`` inside ``## Decision`` stands in the Decision section.
 - **The identifier** is ADR-0277 §1's third clause: ``ADR-NNNN §S:k``, or
   ``§S:j-k`` for a range, with several sharing one ADR prefix separated by commas.
 
@@ -86,6 +90,11 @@ _QUOTED_FENCE_RE = re.compile(r"^>[ ]?(?:[ ]{0,3}>[ ]?)*[ ]{0,3}(?:`{3,}[^`]*|~{
 #: end of the line.
 _HEADING_RE = re.compile(r"^ {0,3}(?P<hashes>#{1,6})(?:[ \t]+(?P<text>.*?))?[ \t]*$")
 
+#: An ATX heading's optional closing sequence: whitespace, then ``#`` characters
+#: to the end of the line (CommonMark). A heading whose text is only hashes is
+#: empty.
+_CLOSING_HASHES_RE = re.compile(r"(?:^|[ \t]+)#+[ \t]*$")
+
 #: A numbered heading's label: digits, an optional lower-case letter, a full stop.
 _NUMBERED_RE = re.compile(r"^(?P<label>\d+[a-z]?)\.(?:\s|$)")
 
@@ -139,6 +148,10 @@ class Clause:
         heading: The heading line *S* was read from, verbatim, or ``None``.
         lineno: The 1-based line the clause starts on.
         lines: The clause's physical lines, verbatim.
+        top: The text of the level-2 heading the clause stands under
+            (``Decision``, ``Context``), a closing ``#`` sequence removed, or
+            ``None`` where it stands above every level-2 heading. ADR-0278 §1
+            selects a repeated clause by this alone.
     """
 
     section: str | None
@@ -146,6 +159,17 @@ class Clause:
     heading: str | None
     lineno: int
     lines: tuple[str, ...]
+    top: str | None = None
+
+    def in_decision(self) -> bool:
+        """Whether the clause stands inside its ADR's ``## Decision`` section.
+
+        ADR-0278 §1's one test. The heading is compared whole and without regard
+        to case, so ``## Decision`` and ``## DECISION`` are the section and
+        ``## Decision drivers`` is not: ADR-0278 §1 names the section
+        ``## Decision``, the heading ``docs/adr/template.md`` writes.
+        """
+        return self.top is not None and self.top.casefold() == "decision"
 
     def identifier(self, number: int) -> str | None:
         """Return ``ADR-NNNN §S:k`` for this clause of ADR ``number``, if it has one."""
@@ -285,17 +309,19 @@ class _Sections:
     def __init__(self) -> None:
         self._top: tuple[str, str] | None = None  # (first word, heading line)
         self._numbered: tuple[str, str] | None = None  # (label, heading line)
+        self._top_text: str | None = None  # the level-2 heading's text, whole
 
     def see(self, level: int, heading_text: str, line: str) -> None:
         """Account for one heading line."""
         label = _NUMBERED_RE.match(heading_text)
         if level < _TOP_LEVEL:
-            self._top, self._numbered = None, None
+            self._top, self._numbered, self._top_text = None, None, None
             return
         if level == _TOP_LEVEL:
             word = _WORD_RE.search(heading_text)
             self._top = (word.group(0), line) if word else None
             self._numbered = None
+            self._top_text = _CLOSING_HASHES_RE.sub("", heading_text).strip()
         if label is not None:
             self._numbered = (label.group("label"), line)
 
@@ -306,6 +332,10 @@ class _Sections:
         if self._top is not None:
             return self._top
         return None, None
+
+    def top(self) -> str | None:
+        """Return the text of the level-2 heading in force, or ``None``."""
+        return self._top_text
 
 
 def _run_end(lines: Sequence[str], fenced: Sequence[bool], start: int) -> int:
@@ -355,7 +385,9 @@ def clauses(text: str) -> list[Clause]:
             if section is not None:
                 key = section.casefold()
                 ordinal = counts[key] = counts.get(key, 0) + 1
-            found.append(Clause(section, ordinal, heading_line, index + 1, tuple(run)))
+            found.append(
+                Clause(section, ordinal, heading_line, index + 1, tuple(run), sections.top())
+            )
         index = end
     return found
 

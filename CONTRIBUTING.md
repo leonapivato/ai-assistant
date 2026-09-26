@@ -1181,11 +1181,26 @@ gate: a clause identifier naming a clause that does not exist — for a range, a
 member of it, and a range whose first member is 0 or exceeds its last fails
 outright; an ADR numbered above 0277, not `Withdrawn`, that marks no clause; and
 a marked clause, in an ADR numbered above 0277, whose text equals another ADR's
-once whitespace and block-quote markers are normalised. **Tier 2**, reported: the
-same duplicate in an older ADR, and a header note saying an ADR "remains
-Proposed" when that ADR's own `Status` no longer is. `scripts/brief_check.py`
-resolves a clause identifier in a dispatch brief the same way, and reports one
-that does not resolve as absent.
+once whitespace and block-quote markers are normalised **and which stands
+outside its own ADR's `## Decision` section**, where a repeated ruling reads as
+a quotation (ADR-0278 §1). **Tier 2**, reported: the same repeated clause in an
+older ADR, and a header note saying an ADR "remains Proposed" when that ADR's
+own `Status` no longer is. `scripts/brief_check.py` resolves a clause identifier
+in a dispatch brief the same way, and reports one that does not resolve as
+absent.
+
+Two narrowings keep that report readable (ADR-0278). **An equal clause inside a
+`## Decision` section is no finding at any tier**, so a sentence the corpus
+states on purpose in ADR after ADR — "`PROTOCOL_VERSION` does not move for this
+change." — can be ruled again word for word; the report counts those clauses and
+lists none. **A stale note is corrected, and not reported, by a later list item
+of the same header** that carries a `YYYY-MM-DD` date on its first line and
+writes `ADR-NNNN was ratified` for the number the stale note names, the words
+directly after the number. That dated note is how a stale header sentence is
+recorded, since a ratified one is never rewritten (ADR-0001, ADR-0070 §1); the
+report counts the notes it passed this way. The check is narrower than the rule
+by design: a marked quotation inside a Decision section passes it, and the
+second authoring rule below still forbids it (ADR-0278 §3).
 
 **Two authoring rules keep the record from drifting** (ADR-0277 §3):
 

@@ -97,9 +97,10 @@ def test_the_record_has_no_tier_1_finding(kind: str) -> None:
     clause identifier naming a clause that does not exist (every member of a
     range, and never a zero or reversed one); an ADR numbered above 0277, not
     ``Withdrawn``, that marks nothing; and a marked clause, in an ADR numbered
-    above 0277, equal to another ADR's. The last two reach no ratified text —
-    §2's split at 0277 is what lets this stay green over an append-only corpus
-    — and their Tier 2 halves are reported by ``just citations``, not asserted.
+    above 0277, equal to another ADR's and standing outside its own ``## Decision``
+    section (ADR-0278 §1). The last two reach no ratified text — §2's split at
+    0277 is what lets this stay green over an append-only corpus — and their
+    Tier 2 halves are reported by ``just citations``, not asserted.
     """
     report = _report("--no-tracker")
 
@@ -131,6 +132,22 @@ def test_the_corpus_is_actually_being_read() -> None:
     assert counts["dotted-symbol"] > 100
     # ADR-0277's Context cites `ADR-0094 §5:2`, and the corpus is append-only.
     assert counts["clause"] >= 1
+
+
+def test_the_record_checks_state_what_they_passed() -> None:
+    """ADR-0278 §1 and §2: each narrowed check states a count of what it passed.
+
+    Floors, not pins. ADR-0278's Context names equal clauses standing in Decision
+    sections and dated notes correcting a stale one, and an append-only corpus
+    keeps both, so neither count can fall to zero — while the stale notes still
+    *reported* are asserted nowhere, because a correcting note moves that number
+    with no change to this checker.
+    """
+    passed = _report("--no-tracker")["passed"]
+
+    assert isinstance(passed, dict)
+    assert passed["duplicate-clause"] >= 1
+    assert passed["stale-note"] >= 1
 
 
 @pytest.mark.integration

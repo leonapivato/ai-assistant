@@ -25,7 +25,9 @@ A header note this ADR writes onto an earlier ADR does not state this ADR's
 status: it may say the change takes effect on this ADR's ratification, and says
 nothing further about whether that has happened. A note saying this ADR "remains
 Proposed" goes stale the day it is ratified, where ADR-0165's one-line flip
-cannot reach it (ADR-0277 §3). -->
+cannot reach it (ADR-0277 §3). The citation check reports such a note until a
+later list item of the same header, dated YYYY-MM-DD on its first line, writes
+"ADR-NNNN was ratified" for the ADR the note names (ADR-0278 §2). -->
 
 
 ## Context
@@ -51,8 +53,11 @@ To *show* a mark rather than make one — quoting another ADR's ruling, exhibiti
 the form — put it inside a fenced block: a `**Normative.**` line inside a fence
 is display, not a mark (§2). A quotation of another ADR's marked clause carries
 no `**Normative.**` token: fence it, or block-quote it without the token
-(ADR-0277 §3). A quoted mark is a second clause this ADR never ruled, and the
-citation check fails one whose text equals another ADR's marked clause.
+(ADR-0277 §3). A quoted mark is a second clause this ADR never ruled. The
+citation check fails one whose text equals another ADR's marked clause where it
+stands outside this ADR's `## Decision` section; inside that section an equal
+clause passes the check, so a sentence each ADR rules for itself may repeat word
+for word, and a marked quotation there still breaks the rule (ADR-0278 §1, §3).
 
 Name one ruling by its clause identifier, `ADR-NNNN §S:k`: the k-th marked clause
 of ADR-NNNN within section S, where S is the nearest numbered heading's label
