@@ -11,8 +11,8 @@
   §6 below classifies every other ADR this touches.
 - Partially superseded: 2026-09-26 by ADR-0278 — §2's sixth clause (ADR-0277 §2:6) makes
   a finding of a repeated clause only where it stands outside its ADR's Decision section
-  or its lead-in names the ADR it equals, reports that clause and not the one it
-  equals, and passes every other equal clause with a count; §2's fourth clause
+  or a colon-ended lead-in names the ADR it equals, reports that clause and not the
+  one it equals, and passes every other equal clause with a count; §2's fourth clause
   (ADR-0277 §2:4) no longer reports a stale note that a later dated header note in the
   same ADR records as ratified, and counts it instead. The tier split at this ADR,
   §2's other four clauses and every other section stand entire. The change takes
