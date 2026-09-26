@@ -66,18 +66,21 @@ _RUN_LINE_RE = re.compile(r"^>(?: .*|\s*)$")
 #: A fence opened inside a block quote — which a clause may not contain. The
 #: same two openers as :data:`_FENCE_RE`, with the same backtick condition, so a
 #: continuation line that merely starts with an inline code span is clause text.
-#: Containers the clause nests inside its quote are read through by CommonMark's
-#: own offsets, because a fence inside them is still a fenced block inside the
-#: clause: each ``>`` takes one optional space after it, a list marker takes one
-#: to four, and the opener itself sits at most three spaces into whatever holds
-#: it. Four or more is an indented code block, whose ```` ``` ```` lines are
-#: literal text — so indentation is counted, never skipped wholesale, and a tab
-#: is expanded to CommonMark's four-column stop before it is counted.
-_QUOTED_FENCE_RE = re.compile(
-    r"^>[ ]?(?:[ ]{0,3}>[ ]?)*"
-    r"(?:[ ]{0,3}(?:(?:[-*+]|\d{1,9}[.)])[ ]{1,4})+|[ ]{0,3})"
-    r"(?:`{3,}[^`]*|~{3,}.*)$"
-)
+#: The line is read through its own ``>`` markers — the grammar's shape, nested
+#: or not — each taking one optional space, and the opener sits at most three
+#: spaces past the last of them: four is an indented code block, whose
+#: ```` ``` ```` lines are literal text. Tabs are expanded to CommonMark's
+#: four-column stops before anything is counted.
+#:
+#: **No list structure is read**, and that is ADR-0089 §2's own boundary rather
+#: than an omission: its scan is the grammar "with nothing added to it" —
+#: "Nothing is inferred: not a section, not a heading, not a list, not a
+#: paragraph". So a fence CommonMark would place inside a list item nested in the
+#: quote is found only where it also sits within three spaces of a ``>``; one
+#: indented to a list item's content column further in is not, and its run stays
+#: a clause. Modelling list containers is a Markdown block parser, which this
+#: scan deliberately is not.
+_QUOTED_FENCE_RE = re.compile(r"^>[ ]?(?:[ ]{0,3}>[ ]?)*[ ]{0,3}(?:`{3,}[^`]*|~{3,}.*)$")
 
 #: An ATX heading: up to three spaces, one to six ``#``, then whitespace or the
 #: end of the line.
