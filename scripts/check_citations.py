@@ -1520,10 +1520,11 @@ _REMAINS_PROPOSED_RE = re.compile(
     r"\bADR-(?P<adr>\d{4}),?\s+(?:which\s+)?remains\s+`?Proposed\b`?", re.IGNORECASE
 )
 
-#: A list item's opening line, at any indent: a bullet marker and whitespace.
-_LIST_ITEM_RE = re.compile(r"^[ \t]*[-*+](?P<gap>[ \t]+)\S")
+#: A list item's opening line, at any indent: a bullet or ordinal marker, then
+#: whitespace (CommonMark's two list markers).
+_LIST_ITEM_RE = re.compile(r"^[ \t]*(?:[-*+]|\d{1,9}[.)])[ \t]+\S")
 
-#: CommonMark's tab stop, for measuring a list item's content column.
+#: CommonMark's tab stop, for measuring how deep a list item is indented.
 _TAB_WIDTH = 4
 
 #: The ``YYYY-MM-DD`` date a correcting note carries on its first line
@@ -1580,15 +1581,18 @@ def _clause_citation_findings(
 def _header_items(top: str) -> list[tuple[int, str, str]]:
     """Return the list items of an ADR's header, in document order.
 
-    An item opens on a line whose first non-space character is a bullet marker
-    (``-``, ``*`` or ``+``) followed by whitespace, at any indent, and ends at the
-    next such line or the end of the header. A blank line ends it only where the
-    next non-blank line is indented less than the item's content column — the
-    column its text starts at past the marker — because a line indented that far
-    is a further paragraph of the same item, as markdown reads it. A nested
-    bullet is an item of its own, which is the reading ADR-0278 §2 needs: a note
-    is corrected by *a later list item*, and nothing in the rule asks at what
-    depth that item was written.
+    An item opens on a line whose first non-space character is a list marker — a
+    bullet (``-``, ``*``, ``+``) or an ordinal (``1.``, ``1)``) — followed by
+    whitespace, at any indent. Its text runs to the next opener indented no
+    deeper than its own, or to the end of the header, so a nested item is both an
+    item of its own and part of its parent's text, and a blank line ends nothing.
+
+    That is wider than markdown's own extent, which also ends an item at a blank
+    line followed by a shallower paragraph, and it is wider on purpose. The one
+    use of an item here is to find the correction ADR-0278 §2 describes, so a
+    reading that is too wide can only pass a note that should have been
+    reported. That is a miss, which ADR-0088 §6 prefers to a false report. A
+    narrower reading would report a note its author had already corrected.
 
     Args:
         top: The header, as :func:`header` returns it.
@@ -1596,32 +1600,18 @@ def _header_items(top: str) -> list[tuple[int, str, str]]:
     Returns:
         ``(0-based line index, first line, whole text)`` per item.
     """
+    lines = top.split("\n")
+    openers = [
+        (index, len(line.expandtabs(_TAB_WIDTH)) - len(line.expandtabs(_TAB_WIDTH).lstrip()))
+        for index, line in enumerate(lines)
+        if _LIST_ITEM_RE.match(line)
+    ]
     items: list[tuple[int, str, str]] = []
-    current: list[str] = []
-    opened = column = 0
-    blanks: list[str] = []
-    for index, line in enumerate(top.split("\n")):
-        opener = _LIST_ITEM_RE.match(line)
-        if opener is not None:
-            if current:
-                items.append((opened, current[0], "\n".join(current)))
-            current, opened, blanks = [line], index, []
-            column = len(line[: opener.end("gap")].expandtabs(_TAB_WIDTH))
-            continue
-        if not current:
-            continue
-        if not line.strip():
-            blanks.append(line)
-            continue
-        expanded = line.expandtabs(_TAB_WIDTH)
-        if blanks and len(expanded) - len(expanded.lstrip()) < column:
-            items.append((opened, current[0], "\n".join(current)))
-            current, blanks = [], []
-            continue
-        current.extend([*blanks, line])
-        blanks = []
-    if current:
-        items.append((opened, current[0], "\n".join(current)))
+    for position, (opened, indent) in enumerate(openers):
+        end = next(
+            (later for later, depth in openers[position + 1 :] if depth <= indent), len(lines)
+        )
+        items.append((opened, lines[opened], "\n".join(lines[opened:end])))
     return items
 
 
