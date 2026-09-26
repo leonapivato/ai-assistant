@@ -234,6 +234,21 @@ def test_a_correction_may_stand_several_items_below(tmp_path: Path) -> None:
     assert _stale(tmp_path, _NOTE + between + _CORRECTION) == ([], 1)
 
 
+def test_a_correction_in_a_later_paragraph_of_the_dated_item_corrects(tmp_path: Path) -> None:
+    """An item's indented paragraph after a blank line is still that item."""
+    dated = "- Note (2026-09-26): Ratification update.\n\n  ADR-0002 was ratified on 2026-09-18.\n"
+    assert _stale(tmp_path, _NOTE + dated) == ([], 1)
+
+
+def test_an_unindented_paragraph_after_a_blank_line_is_not_the_item(tmp_path: Path) -> None:
+    """Below the item's content column after a blank line, the item has ended."""
+    dated = "- Note (2026-09-26): Ratification update.\n\nADR-0002 was ratified on 2026-09-18.\n"
+    assert _stale(tmp_path, _NOTE + dated) == (
+        [(2, "0001", "ADR-0002 remains Proposed")],
+        0,
+    )
+
+
 def test_a_correction_above_the_stale_note_corrects_nothing(tmp_path: Path) -> None:
     """ADR-0278 §2: the correcting item stands *below* the note."""
     assert _stale(tmp_path, _CORRECTION + _NOTE) == (
