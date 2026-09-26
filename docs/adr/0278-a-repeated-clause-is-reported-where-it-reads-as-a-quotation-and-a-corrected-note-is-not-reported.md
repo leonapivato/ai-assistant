@@ -57,10 +57,11 @@ ADR-0275 note above took effect then". ADRs are append-only (ADR-0001), so the s
 note stays in the file, and a check that ignores the correction reports it forever.
 It is permanent noise.
 
-The three uncorrected notes are real. ADR-0212's and ADR-0237's ADR-0275 notes wrap
-the phrase across a line, which is why #2555's line search missed them (#2562).
-ADR-0274 carries two stale notes, one naming ADR-0275 and one naming ADR-0276, and
-its correcting note names ADR-0275 alone.
+The three uncorrected notes at `d2c25133` were real. ADR-0212's and ADR-0237's
+ADR-0275 notes wrap the phrase across a line, which is why #2555's line search
+missed them, and `ce760137` has since appended the same correcting note to both
+(#2562). ADR-0274 carries two stale notes, one naming ADR-0275 and one naming
+ADR-0276, and its correcting note names ADR-0275 alone (#2569).
 
 ### What was measured
 
@@ -87,9 +88,10 @@ neighbouring mark that happens to cite the ADR it equals. Excluding a block-quot
 paragraph removes both. The union selects every quotation and nothing else.
 
 On the stale notes, "a later header list item that carries a date and says the
-same ADR `was ratified`" passes the nine #2560 corrected. It still reports the
-three it did not correct, including ADR-0274's ADR-0276 note, whose neighbour
-corrects only ADR-0275.
+same ADR `was ratified`" passes the nine #2560 corrected. At `d2c25133` it still
+reports the three it did not correct, including ADR-0274's ADR-0276 note, whose
+neighbour corrects only ADR-0275. At `ce760137` it also passes #2562's two notes
+and reports ADR-0274's alone. The repeated-clause figures are the same at both.
 
 ## Decision
 
@@ -195,7 +197,8 @@ All of it is one implementing lane, dispatched after this ADR merges.
 ## Consequences
 
 - The repeated-clause report falls from 117 clauses to 24, every one a quotation.
-  The stale-note report falls from 12 notes to 3, every one unrecorded.
+  The stale-note report falls from 12 notes to 1 at `ce760137`: ADR-0274's
+  ADR-0276 note, which has no correcting note (#2569).
 - A new ADR can state "`PROTOCOL_VERSION` does not move for this change." or any
   other sentence the corpus repeats on purpose, word for word, in its Decision
   section.
