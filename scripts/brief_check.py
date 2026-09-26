@@ -16,6 +16,12 @@ its silence is not an endorsement.
 What it extracts, from the brief with fenced code blocks removed:
 
 - every ``ADR-NNNN`` → a ``docs/adr/NNNN-*.md`` must exist;
+- every clause identifier (``ADR-0277 §2:3``, a ``§2:1-3`` range, several sharing
+  one prefix after commas) → every clause it names must exist, resolved by
+  ``scripts/clauses.py`` exactly as ``scripts/check_citations.py`` resolves one in
+  an ADR (ADR-0277 §5), and one that does not resolve is reported absent, as a
+  missing ADR file is. Its ``§S`` is read as part of the identifier and not again
+  as a section reference;
 - every section reference (``§9``, ``§8a``, a ``§§3-5`` range, ``section 9``) written
   directly against an ``ADR-NNNN`` → that ADR must carry the section. ADRs
   number their Decision sections in
@@ -54,6 +60,7 @@ import sys
 from dataclasses import dataclass
 from pathlib import Path
 
+import clauses
 from citations import ADR_RE, BACKTICK_RE, classify
 
 _FENCE_OPEN_RE = re.compile(r"`{3,}|~{3,}")
@@ -88,6 +95,9 @@ _LARGEST_RANGE = 20
 # else: a standalone label is matched as a string and needs no bound.
 _LARGEST_LABEL = 9
 
+#: How much of a resolved clause's first line the report shows.
+_OPENING_WIDTH = 72
+
 ABSENT = "absent"
 PRESENT = "present"
 UNCHECKED = "not checked"
@@ -114,7 +124,7 @@ class Finding:
     """One name the brief made, and what the tree says about it.
 
     Attributes:
-        kind: ``ADR``, ``section``, ``symbol``, ``path`` or ``file``.
+        kind: ``ADR``, ``clause``, ``section``, ``symbol``, ``path`` or ``file``.
         cited: The name as the brief wrote it, which is what a dispatcher
             searches the brief for when fixing it.
         status: :data:`ABSENT`, :data:`PRESENT` or :data:`UNCHECKED`.
@@ -372,6 +382,42 @@ def _adr_findings(root: Path, text: str) -> tuple[list[Finding], dict[str, Path]
     return findings, files
 
 
+def _clause_findings(text: str, files: dict[str, Path]) -> list[Finding]:
+    """Resolve every clause identifier the brief writes (ADR-0277 §5).
+
+    An identifier naming an ADR with no file is absent too, not unchecked: the
+    clause it names does not exist, which is the whole of ADR-0277 §2's test.
+    """
+    findings: list[Finding] = []
+    marked: dict[int, list[clauses.Clause]] = {}
+    for reference in clauses.references(text):
+        cited = reference.text()
+        path = files.get(f"{reference.adr:04d}")
+        if path is None:
+            detail = f"no docs/adr/{reference.adr:04d}-*.md"
+            findings.append(Finding("clause", cited, ABSENT, detail))
+            continue
+        found = marked.setdefault(reference.adr, clauses.clauses(path.read_text(encoding="utf-8")))
+        problem = clauses.resolve(reference, found)
+        if problem is not None:
+            findings.append(Finding("clause", cited, ABSENT, problem))
+            continue
+        key = reference.section.casefold()
+        named = [c for c in found if c.section and c.section.casefold() == key]
+        first = named[reference.first - 1]
+        last = named[(reference.last or reference.first) - 1]
+        where = (
+            f"line {first.lineno}"
+            if first is last
+            else f"lines {first.lineno}-{last.lineno + len(last.lines) - 1}"
+        )
+        opening = first.lines[0]
+        if len(opening) > _OPENING_WIDTH:
+            opening = opening[: _OPENING_WIDTH - 1] + "…"
+        findings.append(Finding("clause", cited, PRESENT, f"{where}: {opening}"))
+    return findings
+
+
 def _cited_as(reference: _Reference) -> str:
     """Render a reference the way the brief wrote it.
 
@@ -453,7 +499,12 @@ def check(brief: str, root: Path) -> list[Finding]:
     """
     text = strip_code_blocks(brief)
     adrs, files = _adr_findings(root, text)
-    findings = adrs + _section_findings(text, files) + _token_findings(root, text)
+    findings = (
+        adrs
+        + _clause_findings(text, files)
+        + _section_findings(clauses.mask(text), files)
+        + _token_findings(root, text)
+    )
     seen: dict[tuple[str, str], Finding] = {}
     for finding in findings:
         seen.setdefault((finding.kind, finding.cited), finding)

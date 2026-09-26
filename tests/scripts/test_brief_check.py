@@ -459,3 +459,116 @@ def test_a_range_too_wide_to_expand_is_reported_rather_than_dropped(tmp_path: Pa
         "present"
     )
     assert _section_of(result.stdout, _row(result.stdout, "§1 to 40")).startswith("not checked")
+
+
+# --- clause identifiers (ADR-0277 §5) -----------------------------------------
+
+_MARKED_ADR = """# 3. A marked decision
+
+- Status: Accepted
+
+## Context
+
+> **Normative.** A clause in Context.
+
+## Decision
+
+### 1. One
+
+> **Normative.** One-one.
+
+> **Normative.** One-two.
+
+### 2. Two
+
+> **Normative.** Two-one.
+"""
+
+
+def _make_marked_repo(root: Path) -> None:
+    _make_repo(root)
+    (root / "docs" / "adr" / "0003-marked.md").write_text(_MARKED_ADR)
+
+
+def test_a_clause_identifier_that_resolves_is_present(tmp_path: Path) -> None:
+    _make_marked_repo(tmp_path)
+
+    result = _run(tmp_path, "Implement ADR-0003 §1:2 and ADR-0003 §Context:1.")
+
+    row = _row(result.stdout, "ADR-0003 §1:2")
+    assert _section_of(result.stdout, row).startswith("present")
+    assert "One-two." in row
+    assert _section_of(result.stdout, _row(result.stdout, "§Context:1")).startswith("present")
+    assert result.returncode == 0
+
+
+def test_a_missing_clause_is_absent_as_a_missing_adr_is(tmp_path: Path) -> None:
+    """ADR-0277 §5: one that does not resolve is reported as a missing ADR file is."""
+    _make_marked_repo(tmp_path)
+
+    result = _run(tmp_path, "Implement ADR-0003 §1:3.")
+
+    row = _row(result.stdout, "ADR-0003 §1:3")
+    assert _section_of(result.stdout, row).startswith("absent")
+    assert "has 2 marked clause(s)" in row
+    assert result.returncode == 1
+
+
+def test_a_range_resolves_only_in_full(tmp_path: Path) -> None:
+    _make_marked_repo(tmp_path)
+
+    result = _run(tmp_path, "ADR-0003 §1:1-2 is fine; ADR-0003 §1:1-3 is not.")
+
+    assert _section_of(result.stdout, _row(result.stdout, "§1:1-2 ")).startswith("present")
+    assert _section_of(result.stdout, _row(result.stdout, "§1:1-3")).startswith("absent")
+
+
+def test_a_zero_endpoint_and_a_reversed_range_are_absent(tmp_path: Path) -> None:
+    _make_marked_repo(tmp_path)
+
+    result = _run(tmp_path, "ADR-0003 §1:0-1, §1:2-1.")
+
+    zero = _row(result.stdout, "§1:0-1")
+    assert _section_of(result.stdout, zero).startswith("absent")
+    assert "first member is 0" in zero
+    reversed_ = _row(result.stdout, "§1:2-1")
+    assert _section_of(result.stdout, reversed_).startswith("absent")
+    assert "reversed" in reversed_
+
+
+def test_identifiers_sharing_a_prefix_are_each_resolved(tmp_path: Path) -> None:
+    """A comma-joined `§2:1` belongs to the ADR before it, and is not an unbound section."""
+    _make_marked_repo(tmp_path)
+
+    result = _run(tmp_path, "See ADR-0003 §1:1, §2:1, §2:2.")
+
+    assert _section_of(result.stdout, _row(result.stdout, "§2:1")).startswith("present")
+    assert _section_of(result.stdout, _row(result.stdout, "§2:2")).startswith("absent")
+    assert "not checked" not in result.stdout
+
+
+def test_an_identifier_into_a_missing_adr_is_absent(tmp_path: Path) -> None:
+    _make_marked_repo(tmp_path)
+
+    result = _run(tmp_path, "See ADR-0009 §1:1.")
+
+    assert _section_of(result.stdout, _row(result.stdout, "ADR-0009 §1:1")).startswith("absent")
+
+
+def test_a_clause_identifier_is_not_also_read_as_a_section(tmp_path: Path) -> None:
+    """The `§1` inside `ADR-0003 §1:1` is the identifier's; no section row is added."""
+    _make_marked_repo(tmp_path)
+
+    result = _run(tmp_path, "See ADR-0003 §1:1.")
+
+    rows = [line for line in result.stdout.splitlines() if "§1" in line]
+    assert len(rows) == 1
+    assert "§1:1" in rows[0]
+
+
+def test_a_fenced_clause_identifier_is_not_extracted(tmp_path: Path) -> None:
+    _make_marked_repo(tmp_path)
+
+    result = _run(tmp_path, "```\nADR-0003 §9:9\n```\n")
+
+    assert "§9:9" not in result.stdout
