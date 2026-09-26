@@ -186,6 +186,13 @@
   is owed (ADR-0082 §1); this ADR's `Status` line leads with `Partially superseded
   by` in any event, which ADR-0082 §2 excludes an amendment qualifier from. Refs
   #1669, #2038, PR #1634, ADR-0089 §2, §3, §5, §7.
+- Note (2026-09-26): ADR-0279 §2 restates the run the note above describes as eight
+  marked clauses of its own, `ADR-0279 §2:1-8`. They cover the split, both Protocols'
+  signatures, `RoutingTrail`'s four members and no others, `record`'s semantics,
+  `recent`'s order and refused limit, `export`'s order and bound, and `clear`. The
+  above note's "nothing outside this ADR closes that either" stops being true when
+  those clauses take effect, on ADR-0279's ratification. No clause of this ADR changes,
+  the run below is not re-marked, and the `Status` line is unchanged (ADR-0082 §2).
 - **This is `track:conversation` (#1312) milestone 26's ruling**, and it decides the
   line both #1312 and #1230 have carried as deferred since ADR-0170 §9 named it:
   *`ask` → typed operation, one-directional — a typed operation is never re-read —
