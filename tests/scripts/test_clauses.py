@@ -1,0 +1,264 @@
+"""Tests for the one clause-identifier extractor (scripts/clauses.py, ADR-0277 §§1-2).
+
+The module is imported directly: it reads no filesystem and runs no process, so
+each rule is pinned against a constructed ADR text. The callers —
+``check_citations.py``, ``brief_check.py`` and ``adr_rules.py`` — are driven as
+subprocesses in their own test modules, which is where the claim that they share
+this extractor is exercised end to end.
+"""
+
+from __future__ import annotations
+
+import sys
+from pathlib import Path
+
+import pytest
+
+sys.path.insert(0, str(Path(__file__).parents[2] / "scripts"))
+from clauses import Clause, Reference, clauses, mask, references, resolve
+
+_ADR = """\
+# 300. A decision
+
+- Status: Accepted
+
+## Context
+
+> **Normative.** A clause in Context.
+
+Prose.
+
+> **Normative.** A second clause in Context.
+
+## Decision
+
+> **Normative.** Before any numbered heading.
+
+### 1. First
+
+> **Normative.** One-one, first line
+> continues here.
+>
+> and a second paragraph of the same clause.
+
+Prose between.
+
+> **Normative — a label.** One-two, labelled with a dash.
+
+### Why this is so
+
+> **Normative. A full-stop label.** One-three, under an unnumbered heading.
+
+#### 1a. Lettered
+
+> **Normative.** One-a-one.
+
+### 2. Second
+
+```text
+> **Normative.** Fenced: display, not a mark.
+```
+
+> **Normative.** Two-one.
+Not a run line, so the clause ended above.
+
+## Consequences
+
+> **Normative.** A clause in Consequences.
+"""
+
+
+def _ids(text: str, number: int = 300) -> list[str | None]:
+    return [clause.identifier(number) for clause in clauses(text)]
+
+
+def test_every_clause_gets_the_section_and_ordinal_adr_0277_assigns() -> None:
+    """§1's section rule, end to end over one document."""
+    assert _ids(_ADR) == [
+        "ADR-0300 §Context:1",
+        "ADR-0300 §Context:2",
+        "ADR-0300 §Decision:1",
+        "ADR-0300 §1:1",
+        "ADR-0300 §1:2",
+        "ADR-0300 §1:3",
+        "ADR-0300 §1a:1",
+        "ADR-0300 §2:1",
+        "ADR-0300 §Consequences:1",
+    ]
+
+
+def test_a_run_ends_at_the_first_line_of_neither_shape() -> None:
+    """ADR-0089 §2: `> ` text or a bare `>` continue the run; nothing else does."""
+    found = {clause.identifier(300): clause for clause in clauses(_ADR)}
+    assert found["ADR-0300 §1:1"].lines == (
+        "> **Normative.** One-one, first line",
+        "> continues here.",
+        ">",
+        "> and a second paragraph of the same clause.",
+    )
+    assert found["ADR-0300 §2:1"].lines == ("> **Normative.** Two-one.",)
+
+
+def test_the_heading_a_clause_sits_under_is_carried_for_display() -> None:
+    """The unnumbered `### Why` starts no section, so §1:3 sits under `### 1.`."""
+    found = {clause.identifier(300): clause for clause in clauses(_ADR)}
+    assert found["ADR-0300 §1:3"].heading == "### 1. First"
+    assert found["ADR-0300 §1a:1"].heading == "#### 1a. Lettered"
+    assert found["ADR-0300 §Context:1"].heading == "## Context"
+
+
+@pytest.mark.parametrize(
+    "near_mark",
+    [
+        pytest.param("Prose.\n> **Normative.** Not blank-preceded.\n", id="not-blank-preceded"),
+        pytest.param("\n  > **Normative.** Indented.\n", id="indented"),
+        pytest.param("\n> **Normative —** No label.\n", id="dash-without-label"),
+        pytest.param("\n> **Normative—x** No spaces.\n", id="dash-without-spaces"),
+        pytest.param("\n> **Normatively** so.\n", id="normatively"),
+        pytest.param("\n```\n> **Normative.** Fenced.\n```\n", id="fenced"),
+        pytest.param("\n~~~~\n\n> **Normative.** Unterminated fence.\n", id="unterminated-fence"),
+    ],
+)
+def test_a_near_mark_fails_closed(near_mark: str) -> None:
+    """ADR-0089 §2 and ADR-0257 §1: a line failing any part of the grammar is no mark."""
+    assert clauses("## Decision\n" + near_mark) == []
+
+
+def test_a_run_holding_a_fenced_block_is_no_clause_and_takes_no_ordinal() -> None:
+    """ "A clause contains no fenced block" — so the run is not a mark at all.
+
+    The ordinal of the next clause is what that decides: were the fenced run a
+    clause, the one after it would be §1:2.
+    """
+    text = (
+        "## Decision\n\n### 1. One\n\n"
+        "> **Normative.** Shows a sample:\n>\n> ```python\n> x = 1\n> ```\n\n"
+        "> **Normative.** The next clause.\n"
+    )
+    found = clauses(text)
+    assert [c.identifier(1) for c in found] == ["ADR-0001 §1:1"]
+    assert found[0].lines == ("> **Normative.** The next clause.",)
+
+
+def test_a_mark_at_the_start_of_the_file_is_a_mark_without_a_section() -> None:
+    """Blank-line precedence admits the start of the file; no level-2 heading is above it."""
+    found = clauses("> **Normative.** First line of the file.\n")
+    assert len(found) == 1
+    assert found[0].section is None
+    assert found[0].identifier(5) is None
+
+
+def test_a_level_2_heading_ends_the_numbered_section_above_it() -> None:
+    """§1: a numbered heading reaches no further than its own top-level section."""
+    text = "## Decision\n\n### 4. Four\n\n## Alternatives considered\n\n> **Normative.** No.\n"
+    assert _ids(text) == ["ADR-0300 §Alternatives:1"]
+
+
+def test_a_numbered_heading_is_a_label_and_a_full_stop() -> None:
+    """`### §4 …` and `### #829 …` name someone else's section and number none."""
+    text = (
+        "## Context\n\n### §4 says three things\n\n> **Normative.** A.\n\n"
+        "### #829 fixes the order\n\n> **Normative.** B.\n\n"
+        "### 2026 was a year\n\n> **Normative.** C.\n"
+    )
+    assert _ids(text) == ["ADR-0300 §Context:1", "ADR-0300 §Context:2", "ADR-0300 §Context:3"]
+
+
+def test_normalised_text_drops_quote_markers_and_folds_whitespace() -> None:
+    """§2's duplicate test compares clauses after this normalisation."""
+    clause = Clause("1", 1, None, 1, ("> **Normative.** A  rule", ">", ">   that   wraps."))
+    assert clause.normalised() == "**Normative.** A rule that wraps."
+
+
+# --- references --------------------------------------------------------------
+
+
+def _refs(text: str) -> list[str]:
+    return [reference.text() for reference in references(text)]
+
+
+def test_references_read_single_ranges_and_comma_lists() -> None:
+    """§1's third clause: a range, and several identifiers sharing one prefix."""
+    text = "See ADR-0094 §5:2, §6:1-3 and §Context:1; also ADR-0277 §2:3."
+    assert _refs(text) == [
+        "ADR-0094 §5:2",
+        "ADR-0094 §6:1-3",
+        "ADR-0277 §2:3",
+    ]
+
+
+def test_a_reference_is_read_whole_and_never_as_a_prefix() -> None:
+    """`§5:12` is clause 12, not clause 1 followed by a stray digit."""
+    assert _refs("ADR-0094 §5:12") == ["ADR-0094 §5:12"]
+    assert _refs("ADR-0094 §10a:3") == ["ADR-0094 §10a:3"]
+    assert _refs("ADR-0094 §5:2 \u2013 see below") == ["ADR-0094 §5:2"]
+    assert _refs("ADR-0094 §5:1\u20133") == ["ADR-0094 §5:1-3"]
+
+
+@pytest.mark.parametrize(
+    "not_an_identifier",
+    ["ADR-0094 §5", "ADR-094 §5:2", "§5:2 alone", "ADR-0094 §5.2", "ADR-NNNN §S:k"],
+)
+def test_other_shapes_are_not_identifiers(not_an_identifier: str) -> None:
+    """Only the §1 form is selected; a bare section stays unchecked (ADR-0088 §6)."""
+    assert references(not_an_identifier) == []
+
+
+def test_a_reference_carries_its_line() -> None:
+    assert [r.lineno for r in references("one\ntwo ADR-0001 §1:1\nthree")] == [2]
+
+
+def test_mask_blanks_the_section_part_and_keeps_offsets() -> None:
+    """brief_check reads section references over this, so `§5` is read once."""
+    text = "ADR-0094 §5:2, §6:1 and ADR-0094 §7."
+    masked = mask(text)
+    assert len(masked) == len(text)
+    assert "§5" not in masked
+    assert "§6" not in masked
+    assert masked.startswith("ADR-0094 ")
+    assert masked.endswith("and ADR-0094 §7.")
+
+
+# --- resolve -----------------------------------------------------------------
+
+
+def _ref(section: str, first: int, last: int | None = None) -> Reference:
+    return Reference(adr=300, section=section, first=first, last=last, lineno=1)
+
+
+def test_an_identifier_resolves_when_its_clause_exists() -> None:
+    marked = clauses(_ADR)
+    assert resolve(_ref("1", 3), marked) is None
+    assert resolve(_ref("1", 1, 3), marked) is None
+    assert resolve(_ref("context", 2), marked) is None  # a word compares case-insensitively
+
+
+def test_a_missing_clause_does_not_resolve() -> None:
+    problem = resolve(_ref("1", 4), clauses(_ADR))
+    assert problem == "ADR-0300 §1 has 3 marked clause(s); :4 does not exist"
+
+
+def test_a_range_with_a_missing_member_does_not_resolve() -> None:
+    """§2: a range resolves only when *every* member exists, not on its first."""
+    problem = resolve(_ref("1", 2, 999), clauses(_ADR))
+    assert problem == "ADR-0300 §1 has 3 marked clause(s); :4-999 does not exist"
+
+
+def test_a_range_with_a_zero_endpoint_does_not_resolve() -> None:
+    assert resolve(_ref("1", 0, 2), clauses(_ADR)) == (
+        "a range whose first member is 0 names no clause"
+    )
+
+
+def test_a_reversed_range_does_not_resolve() -> None:
+    assert resolve(_ref("1", 3, 1), clauses(_ADR)) == (
+        "a reversed range: its first member exceeds its last"
+    )
+
+
+def test_clause_zero_does_not_resolve() -> None:
+    assert resolve(_ref("1", 0), clauses(_ADR)) is not None
+
+
+def test_a_section_with_no_clause_does_not_resolve() -> None:
+    assert resolve(_ref("9", 1), clauses(_ADR)) == "ADR-0300 §9 has no marked clause"
