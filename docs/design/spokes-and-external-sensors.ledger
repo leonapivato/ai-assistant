@@ -1,2 +1,685 @@
 # Clause ledger for spokes-and-external-sensors.md (pilot; see scripts/design_coverage.py)
+# One line per marked clause the design doc does not cite: other (area) / spent / superseded (successor).
 adrs: 0093 0094 0095 0124 0125 0131 0163 0168 0174 0199 0200 0205 0274 0275 0276
+
+# ADR-0093
+ADR-0093 §1:1  other  readers
+ADR-0093 §1:2  other  readers
+ADR-0093 §1:3  other  readers
+ADR-0093 §2:1  superseded  ADR-0095 §2:1
+ADR-0093 §3:1  other  readers
+ADR-0093 §3:2  other  readers
+ADR-0093 §3:3  other  readers
+ADR-0093 §3:4  other  readers
+ADR-0093 §4:1  other  readers
+ADR-0093 §4:2  other  readers (second sentence superseded by ADR-0110)
+ADR-0093 §4:3  other  readers
+ADR-0093 §5:1  other  readers
+ADR-0093 §5:2  other  readers
+ADR-0093 §5:3  other  readers
+ADR-0093 §5:4  other  readers
+ADR-0093 §5:5  other  readers
+ADR-0093 §6:1  other  readers
+ADR-0093 §6:2  other  readers
+ADR-0093 §6:3  other  readers
+ADR-0093 §6:4  other  readers
+ADR-0093 §7:1  other  readers
+ADR-0093 §7:2  other  readers
+ADR-0093 §7:3  other  readers
+ADR-0093 §7:4  other  readers
+ADR-0093 §7:5  other  readers
+ADR-0093 §7:6  other  readers
+ADR-0093 §7:7  other  readers
+ADR-0093 §7:8  other  readers
+ADR-0093 §7:9  other  readers
+ADR-0093 §7:10  other  readers
+ADR-0093 §7:11  other  readers
+ADR-0093 §7:12  other  readers (identity clause superseded by ADR-0190)
+ADR-0093 §7:13  other  readers
+ADR-0093 §7:14  other  readers
+ADR-0093 §7a:1  other  readers
+ADR-0093 §7a:2  other  readers
+ADR-0093 §7b:1  other  readers
+ADR-0093 §7b:2  other  readers
+ADR-0093 §7b:3  other  readers
+ADR-0093 §7b:4  other  readers
+ADR-0093 §7b:5  other  readers
+ADR-0093 §7b:6  other  readers
+ADR-0093 §7b:7  other  readers
+ADR-0093 §7b:8  other  readers
+ADR-0093 §7b:9  other  readers
+ADR-0093 §7b:10  other  readers
+ADR-0093 §7b:11  other  readers
+ADR-0093 §7b:12  other  readers
+ADR-0093 §7b:13  other  readers
+ADR-0093 §7b:14  other  readers
+ADR-0093 §8:1  other  readers
+ADR-0093 §8:2  other  readers
+ADR-0093 §8:3  other  readers
+ADR-0093 §8:4  other  readers
+ADR-0093 §8:5  other  readers
+ADR-0093 §9:1  other  readers
+ADR-0093 §9:2  other  readers
+ADR-0093 §9:3  other  readers
+ADR-0093 §9:4  other  readers
+
+# ADR-0094
+
+# ADR-0095
+ADR-0095 §1:1  other  readers
+ADR-0095 §1:2  other  readers
+ADR-0095 §2:1  other  readers
+ADR-0095 §3:1  other  readers
+ADR-0095 §4:1  other  readers
+ADR-0095 §5:1  other  readers
+
+# ADR-0124
+ADR-0124 §1:1  superseded  ADR-0174 §1:1
+ADR-0124 §1:3  other  egress
+ADR-0124 §6:10  superseded  ADR-0125 §8:3
+ADR-0124 §9:1  spent  one-time: the remote listener needed no protocol bump
+ADR-0124 §9:2  other  wire protocol
+ADR-0124 §9:3  other  wire protocol
+ADR-0124 §9:4  other  wire protocol
+ADR-0124 §10:2  spent  work order: no core surface
+ADR-0124 §11:1  spent  one-time validation
+
+# ADR-0125
+ADR-0125 §1:1  other  secret store
+ADR-0125 §1:2  other  secret store
+ADR-0125 §1:3  other  secret store
+ADR-0125 §1:4  other  secret store
+ADR-0125 §2:1  other  secret store
+ADR-0125 §2:3  other  secret store
+ADR-0125 §2:4  other  secret store
+ADR-0125 §2:5  other  secret store
+ADR-0125 §2:6  other  secret store
+ADR-0125 §3:1  other  secret store
+ADR-0125 §3:2  other  secret store
+ADR-0125 §3:3  other  secret store
+ADR-0125 §3:4  other  secret store
+ADR-0125 §4:1  other  secret store
+ADR-0125 §4:2  other  secret store
+ADR-0125 §4:3  other  secret store
+ADR-0125 §4:4  other  secret store
+ADR-0125 §4:5  other  secret store
+ADR-0125 §4:6  other  secret store
+ADR-0125 §4:7  other  secret store
+ADR-0125 §5:1  other  secret store
+ADR-0125 §5:2  other  secret store
+ADR-0125 §5:4  other  secret store
+ADR-0125 §6:1  other  secret store
+ADR-0125 §6:2  other  secret store
+ADR-0125 §6:3  other  secret store
+ADR-0125 §7:1  other  secret store
+ADR-0125 §7:2  other  secret store
+ADR-0125 §7:3  other  secret store
+ADR-0125 §7:4  other  secret store
+ADR-0125 §7:5  other  secret store
+ADR-0125 §8:1  other  secret store
+ADR-0125 §8:2  other  secret store
+ADR-0125 §8:4  other  secret store
+ADR-0125 §8:5  other  secret store
+ADR-0125 §8:6  other  secret store
+ADR-0125 §8:7  other  secret store
+ADR-0125 §8:8  other  secret store
+ADR-0125 §9:1  other  secret store
+ADR-0125 §9:2  other  secret store
+ADR-0125 §10:1  other  secret store
+ADR-0125 §11:1  other  secret store
+ADR-0125 §11:2  other  secret store
+ADR-0125 §11:3  other  secret store
+ADR-0125 §11:4  other  secret store
+ADR-0125 §11:5  other  secret store
+ADR-0125 §11:6  other  secret store
+ADR-0125 §11:7  other  secret store
+ADR-0125 §11:8  other  secret store
+ADR-0125 §11:9  other  secret store
+ADR-0125 §11:10  other  secret store
+ADR-0125 §11:11  other  secret store
+ADR-0125 §11:12  other  secret store
+ADR-0125 §11:13  other  secret store
+ADR-0125 §11:14  other  secret store
+ADR-0125 §11:15  other  secret store
+ADR-0125 §11:16  other  secret store
+
+# ADR-0131
+ADR-0131 §1:2  other  notification delivery
+ADR-0131 §2:4  other  notification delivery
+ADR-0131 §2a:1  other  notification delivery
+ADR-0131 §2a:2  other  notification delivery
+ADR-0131 §2a:3  other  notification delivery
+ADR-0131 §2a:4  other  notification delivery
+ADR-0131 §2a:5  other  notification delivery
+ADR-0131 §2a:6  other  notification delivery
+ADR-0131 §3:1  other  notification delivery
+ADR-0131 §3:2  other  notification delivery
+ADR-0131 §3:3  other  notification delivery
+ADR-0131 §3:4  other  notification delivery
+ADR-0131 §3:5  other  notification delivery
+ADR-0131 §3:6  other  notification delivery
+ADR-0131 §3:7  other  notification delivery
+ADR-0131 §3:8  other  notification delivery
+ADR-0131 §3:9  other  notification delivery
+ADR-0131 §3:10  other  notification delivery
+ADR-0131 §3:11  other  notification delivery
+ADR-0131 §3:12  other  notification delivery
+ADR-0131 §3:13  other  notification delivery
+ADR-0131 §3:14  other  notification delivery
+ADR-0131 §3:15  other  notification delivery
+ADR-0131 §3:16  other  notification delivery
+ADR-0131 §3:17  other  notification delivery
+ADR-0131 §3:18  other  notification delivery
+ADR-0131 §3:19  other  notification delivery
+ADR-0131 §3:20  other  notification delivery
+ADR-0131 §3:21  other  notification delivery
+ADR-0131 §3:22  other  notification delivery
+ADR-0131 §3:23  other  notification delivery
+ADR-0131 §3a:1  other  notification delivery
+ADR-0131 §3a:2  other  notification delivery
+ADR-0131 §3a:3  other  notification delivery
+ADR-0131 §3a:4  other  notification delivery
+ADR-0131 §3a:5  other  notification delivery
+ADR-0131 §3b:1  other  notification delivery
+ADR-0131 §3b:2  other  notification delivery
+ADR-0131 §3b:3  other  notification delivery
+ADR-0131 §3b:4  other  notification delivery
+ADR-0131 §3b:5  other  notification delivery
+ADR-0131 §3b:6  other  notification delivery
+ADR-0131 §3b:7  other  notification delivery
+ADR-0131 §3b:8  other  notification delivery
+ADR-0131 §3b:9  other  notification delivery
+ADR-0131 §3b:10  spent  work order: triad landed
+ADR-0131 §3b:11  other  notification delivery
+ADR-0131 §3b:12  other  notification delivery
+ADR-0131 §3b:13  other  notification delivery
+ADR-0131 §3b:14  other  notification delivery
+ADR-0131 §4:1  superseded  ADR-0206
+ADR-0131 §4:2  superseded  ADR-0206
+ADR-0131 §4:3  other  notification delivery
+ADR-0131 §4:4  other  notification delivery
+ADR-0131 §4:5  other  notification delivery
+ADR-0131 §4:6  other  notification delivery
+ADR-0131 §4:7  other  notification delivery
+ADR-0131 §4:8  spent  prerequisite ADR-0130 merged
+ADR-0131 §4:9  other  notification delivery
+ADR-0131 §4:10  other  notification delivery
+ADR-0131 §4:11  other  notification delivery
+ADR-0131 §4:14  other  notification delivery
+ADR-0131 §4:15  other  notification delivery
+ADR-0131 §4:16  other  notification delivery
+ADR-0131 §4:17  other  notification delivery
+ADR-0131 §4:18  spent  one-time protocol bump
+ADR-0131 §5:1  other  notification delivery
+ADR-0131 §5:2  other  notification delivery
+ADR-0131 §5:3  other  notification delivery
+ADR-0131 §5a:1  other  notification delivery
+ADR-0131 §5a:2  other  notification delivery
+
+# ADR-0163
+ADR-0163 §1:1  other  memory
+ADR-0163 §1:2  other  memory
+ADR-0163 §1:3  other  memory
+ADR-0163 §2:3  other  memory
+ADR-0163 §2:4  other  memory
+ADR-0163 §3:2  other  memory
+ADR-0163 §3:3  other  memory
+ADR-0163 §3:4  other  memory
+ADR-0163 §4:1  other  memory
+ADR-0163 §4:2  other  memory
+ADR-0163 §4:3  other  memory
+ADR-0163 §4:4  other  memory
+ADR-0163 §5:1  other  memory
+ADR-0163 §5:2  other  memory
+ADR-0163 §5:3  other  memory
+ADR-0163 §5:4  other  memory
+ADR-0163 §5:5  other  memory
+ADR-0163 §5:6  other  memory
+ADR-0163 §6:1  other  memory
+ADR-0163 §6:2  other  memory
+ADR-0163 §6:4  other  memory
+ADR-0163 §7:1  spent  work order: implementation sequencing
+ADR-0163 §7:2  spent  work order: implementation sequencing
+ADR-0163 §7:3  spent  work order: implementation sequencing
+
+# ADR-0168
+ADR-0168 §1:5  other  browser gateway
+ADR-0168 §3:1  other  browser gateway
+ADR-0168 §3:2  other  browser gateway
+ADR-0168 §4:2  other  browser gateway
+ADR-0168 §4:5  other  browser gateway
+ADR-0168 §4:6  other  browser gateway
+ADR-0168 §5:1  other  browser gateway
+ADR-0168 §5:2  superseded  ADR-0182
+ADR-0168 §5:3  other  browser gateway
+ADR-0168 §5:4  other  browser gateway
+ADR-0168 §6:1  other  browser gateway
+ADR-0168 §6:2  other  browser gateway
+ADR-0168 §6:3  other  browser gateway
+ADR-0168 §6:4  other  browser gateway
+ADR-0168 §6:5  other  browser gateway
+ADR-0168 §6:6  other  browser gateway
+ADR-0168 §6:7  other  browser gateway
+ADR-0168 §6:8  spent  prerequisite ADR-0172 merged
+ADR-0168 §6:9  other  browser gateway
+ADR-0168 §6:10  other  browser gateway
+ADR-0168 §6:11  other  browser gateway
+ADR-0168 §6:12  other  browser gateway
+ADR-0168 §6:13  other  browser gateway
+ADR-0168 §6:14  other  browser gateway
+ADR-0168 §6:15  other  browser gateway
+ADR-0168 §6:16  other  browser gateway
+ADR-0168 §7:1  other  browser gateway
+ADR-0168 §7:2  other  browser gateway
+ADR-0168 §8:1  other  browser gateway
+ADR-0168 §8:2  other  browser gateway
+ADR-0168 §8:3  other  browser gateway
+ADR-0168 §8:4  other  browser gateway
+ADR-0168 §8:5  other  browser gateway
+ADR-0168 §8:6  other  browser gateway
+ADR-0168 §8:8  other  browser gateway
+ADR-0168 §10:1  other  browser gateway
+ADR-0168 §10:2  other  browser gateway
+ADR-0168 §12:1  spent  work order: no core surface, no protocol bump
+ADR-0168 §12:2  spent  work order: no core surface, no protocol bump
+
+# ADR-0174
+ADR-0174 §1:2  other  browser gateway
+ADR-0174 §2:1  other  browser gateway
+ADR-0174 §2:2  other  browser gateway
+ADR-0174 §2:3  other  browser gateway
+ADR-0174 §2:4  other  browser gateway
+ADR-0174 §2:5  other  browser gateway
+ADR-0174 §2:6  other  browser gateway
+ADR-0174 §3:1  other  browser gateway
+ADR-0174 §3:2  other  browser gateway
+ADR-0174 §3:3  other  browser gateway
+ADR-0174 §4:1  other  browser gateway
+ADR-0174 §4:2  other  browser gateway
+ADR-0174 §4:3  other  browser gateway
+ADR-0174 §5:1  other  browser gateway
+ADR-0174 §5:2  other  browser gateway
+ADR-0174 §6:1  other  browser gateway
+ADR-0174 §6:2  other  browser gateway
+ADR-0174 §6:3  other  browser gateway
+ADR-0174 §7:1  superseded  ADR-0202
+ADR-0174 §7:2  superseded  ADR-0202
+ADR-0174 §8:1  other  browser gateway
+ADR-0174 §8:2  other  browser gateway
+ADR-0174 §8:3  other  browser gateway
+ADR-0174 §8:4  other  browser gateway
+ADR-0174 §8:5  superseded  ADR-0202
+ADR-0174 §8:6  other  browser gateway
+ADR-0174 §8:7  other  browser gateway
+ADR-0174 §8:8  other  browser gateway
+ADR-0174 §8:9  other  browser gateway
+ADR-0174 §8:10  other  browser gateway
+ADR-0174 §8:11  other  browser gateway
+ADR-0174 §8:12  other  browser gateway
+ADR-0174 §8:13  other  browser gateway
+ADR-0174 §9:1  other  browser gateway
+ADR-0174 §9:2  other  browser gateway
+ADR-0174 §9:3  other  browser gateway
+ADR-0174 §11:1  spent  work order: no core surface, no protocol bump, no reopening
+ADR-0174 §11:2  spent  work order: no core surface, no protocol bump, no reopening
+ADR-0174 §11:3  spent  work order: no core surface, no protocol bump, no reopening
+
+# ADR-0199
+ADR-0199 §1:1  other  disclosure
+ADR-0199 §1:3  other  disclosure
+ADR-0199 §2:1  other  disclosure
+ADR-0199 §2:2  other  disclosure
+ADR-0199 §2:3  other  disclosure
+ADR-0199 §3:1  other  disclosure
+ADR-0199 §3:2  other  disclosure
+ADR-0199 §3:3  other  disclosure
+ADR-0199 §3:4  other  disclosure
+ADR-0199 §3:5  other  disclosure
+ADR-0199 §3:6  other  disclosure
+ADR-0199 §3:7  other  disclosure
+ADR-0199 §3:8  other  disclosure
+ADR-0199 §5:1  other  disclosure
+ADR-0199 §5:2  other  disclosure
+ADR-0199 §5:3  other  disclosure
+ADR-0199 §5:4  other  disclosure
+ADR-0199 §5:5  other  disclosure
+ADR-0199 §5:6  other  disclosure
+ADR-0199 §5:7  other  disclosure
+ADR-0199 §5:8  other  disclosure
+ADR-0199 §5:9  other  disclosure
+ADR-0199 §6:1  other  disclosure
+ADR-0199 §6:2  other  disclosure
+ADR-0199 §6:3  other  disclosure
+ADR-0199 §6:4  other  disclosure
+ADR-0199 §6:5  other  disclosure
+ADR-0199 §6:6  other  disclosure
+ADR-0199 §6:7  other  disclosure
+ADR-0199 §6:8  other  disclosure
+ADR-0199 §7:1  other  disclosure
+ADR-0199 §7:2  other  disclosure
+ADR-0199 §8:1  other  disclosure
+ADR-0199 §8:2  spent  gate discharged by ADR-0200 §3:9
+ADR-0199 §8:4  other  disclosure
+
+# ADR-0200
+ADR-0200 §1:1  other  speech
+ADR-0200 §1:2  other  speech
+ADR-0200 §1:3  other  speech
+ADR-0200 §1:4  other  speech
+ADR-0200 §1:5  other  speech
+ADR-0200 §1:6  other  speech
+ADR-0200 §1:7  other  speech
+ADR-0200 §1:8  other  speech
+ADR-0200 §1:9  other  speech
+ADR-0200 §1:10  other  speech
+ADR-0200 §1:11  other  speech
+ADR-0200 §3:1  superseded  ADR-0205 §10:1
+ADR-0200 §3:2  other  speech
+ADR-0200 §3:3  other  speech
+ADR-0200 §3:4  other  speech
+ADR-0200 §3:5  other  speech
+ADR-0200 §3:9  other  speech
+ADR-0200 §3:10  other  speech
+ADR-0200 §3:11  spent  one-time protocol bump
+ADR-0200 §4:1  superseded  ADR-0205 §10:1
+ADR-0200 §4:2  superseded  ADR-0275 §2:3
+ADR-0200 §4:3  other  speech
+ADR-0200 §4:4  other  speech
+ADR-0200 §4:5  other  speech
+ADR-0200 §4:6  other  speech
+ADR-0200 §4:7  other  speech
+ADR-0200 §4:8  other  speech
+ADR-0200 §4:9  other  speech
+ADR-0200 §4:10  other  speech
+ADR-0200 §4:11  other  speech
+ADR-0200 §4:12  other  speech
+ADR-0200 §4:13  other  speech
+ADR-0200 §4:14  other  speech
+ADR-0200 §4:15  other  speech
+ADR-0200 §4:16  other  speech
+ADR-0200 §4:17  other  speech
+ADR-0200 §4:18  other  speech
+ADR-0200 §4:19  other  speech
+ADR-0200 §4:20  other  speech
+ADR-0200 §4:21  other  speech
+ADR-0200 §4:22  other  speech
+ADR-0200 §4:23  other  speech
+ADR-0200 §4:24  other  speech
+ADR-0200 §4:25  other  speech
+ADR-0200 §4:26  other  speech
+ADR-0200 §4:27  other  speech
+ADR-0200 §4:28  other  speech
+ADR-0200 §4:29  other  speech
+ADR-0200 §5:1  other  speech
+ADR-0200 §5:2  other  speech
+ADR-0200 §6:3  other  speech
+ADR-0200 §7:1  other  speech
+ADR-0200 §7:2  other  speech
+ADR-0200 §7:3  other  speech
+ADR-0200 §7:4  other  speech
+ADR-0200 §7:5  other  speech
+ADR-0200 §7:6  other  speech
+ADR-0200 §8:2  superseded  ADR-0275 §8:2
+ADR-0200 §8:3  other  speech
+ADR-0200 §9:1  other  speech
+ADR-0200 §9:2  other  speech
+ADR-0200 §9:3  other  speech
+ADR-0200 §9:4  other  speech
+ADR-0200 §9:5  other  speech
+ADR-0200 §9:6  other  speech
+ADR-0200 §10:1  superseded  ADR-0205 §7:1
+ADR-0200 §10:7  spent  gate discharged: ADR-0202 decided the scheme
+ADR-0200 §10:8  spent  sequencing note, loopback built
+ADR-0200 §12:1  spent  supersession record made
+ADR-0200 §12:2  spent  supersession record made
+ADR-0200 §13:1  spent  work order: lanes landed
+ADR-0200 §13:2  spent  work order: lanes landed
+ADR-0200 §13:3  spent  work order: lanes landed
+ADR-0200 §13:4  spent  work order: lanes landed
+ADR-0200 §13:5  spent  work order: lanes landed
+ADR-0200 §13:6  spent  work order: lanes landed
+
+# ADR-0205
+ADR-0205 §1:1  other  speech
+ADR-0205 §1:3  other  speech (no-turn endings superseded by ADR-0275)
+ADR-0205 §1:4  other  speech
+ADR-0205 §1:5  other  speech
+ADR-0205 §1:6  other  speech
+ADR-0205 §1:7  other  speech
+ADR-0205 §1:8  other  speech
+ADR-0205 §1:9  other  speech
+ADR-0205 §1:10  spent  one-time protocol bump
+ADR-0205 §2:1  other  speech
+ADR-0205 §2:2  other  speech
+ADR-0205 §2:3  other  speech
+ADR-0205 §2:4  other  speech
+ADR-0205 §2:7  other  speech
+ADR-0205 §3:1  other  conversations
+ADR-0205 §3:2  other  conversations
+ADR-0205 §3:3  other  conversations
+ADR-0205 §3:4  other  conversations
+ADR-0205 §3:5  other  conversations
+ADR-0205 §3:6  other  conversations
+ADR-0205 §3:7  other  conversations
+ADR-0205 §3:8  other  conversations
+ADR-0205 §3:9  other  conversations
+ADR-0205 §3:10  other  conversations
+ADR-0205 §3:11  other  conversations
+ADR-0205 §3:12  other  conversations
+ADR-0205 §4:1  other  speech (capture timing superseded by ADR-0275)
+ADR-0205 §4:2  other  speech
+ADR-0205 §4:3  other  speech
+ADR-0205 §4:4  other  speech
+ADR-0205 §4:5  other  speech
+ADR-0205 §5:1  other  speech
+ADR-0205 §5:2  other  speech
+ADR-0205 §5:3  other  speech
+ADR-0205 §5:4  other  speech
+ADR-0205 §5:5  other  speech
+ADR-0205 §5:6  other  speech
+ADR-0205 §5:7  other  speech
+ADR-0205 §5:8  other  speech
+ADR-0205 §5:9  other  speech
+ADR-0205 §6:1  other  speech
+ADR-0205 §6:2  other  speech
+ADR-0205 §6:3  other  speech
+ADR-0205 §9:1  spent  work order: lanes landed
+ADR-0205 §9:2  spent  work order: lanes landed
+ADR-0205 §9:3  spent  work order: lanes landed
+ADR-0205 §9:4  spent  work order: lanes landed
+ADR-0205 §9:5  spent  work order: lanes landed
+ADR-0205 §10:1  spent  supersession records made
+ADR-0205 §10:2  spent  supersession records made
+ADR-0205 §10:3  spent  supersession records made
+
+# ADR-0274
+ADR-0274 §1:1  spent  ratification gate passed
+ADR-0274 §1:2  spent  ratification gate passed
+ADR-0274 §1:3  spent  scope statement for M35
+ADR-0274 §2:5  other  conversations
+ADR-0274 §2:6  other  conversations
+ADR-0274 §3:1  other  channel receiver
+ADR-0274 §3:2  other  channel receiver
+ADR-0274 §3:5  other  channel receiver
+ADR-0274 §3:6  other  channel receiver
+ADR-0274 §4:1  other  channel receiver
+ADR-0274 §4:4  other  channel receiver
+ADR-0274 §4:6  other  channel receiver
+ADR-0274 §5:1  other  channel receiver
+ADR-0274 §5:2  other  channel receiver
+ADR-0274 §5:3  other  channel receiver (superseded in part by ADR-0275 and ADR-0276 §3)
+ADR-0274 §6:1  other  channel receiver
+ADR-0274 §6:2  other  channel receiver
+ADR-0274 §6:3  other  channel receiver
+ADR-0274 §6:6  other  channel receiver
+ADR-0274 §6:7  other  channel receiver
+ADR-0274 §6:8  other  channel receiver
+ADR-0274 §6:9  other  channel receiver
+ADR-0274 §7:1  other  channel receiver
+ADR-0274 §7:2  other  channel receiver
+ADR-0274 §7:3  other  channel receiver
+ADR-0274 §7:4  other  channel receiver
+ADR-0274 §7:6  other  channel receiver
+ADR-0274 §7:8  other  channel receiver
+ADR-0274 §8:2  other  channel receiver
+ADR-0274 §8:3  other  channel receiver
+ADR-0274 §8:4  other  channel receiver
+ADR-0274 §8:5  other  channel receiver
+ADR-0274 §8:6  other  channel receiver
+ADR-0274 §8:7  other  channel receiver
+ADR-0274 §8:8  other  channel receiver
+ADR-0274 §8:9  other  channel receiver
+ADR-0274 §9:1  other  wire protocol
+ADR-0274 §9:3  spent  one-time protocol bump
+ADR-0274 §9:4  other  architecture
+ADR-0274 §10:1  other  channel receiver
+ADR-0274 §10:2  spent  supersession records made
+ADR-0274 §10:3  spent  supersession records made
+ADR-0274 §11:1  spent  work order: M35 delivered
+ADR-0274 §11:2  spent  work order: M35 delivered
+ADR-0274 §11:3  spent  work order: M35 delivered
+ADR-0274 §11:4  spent  work order: M35 delivered
+ADR-0274 §11:5  spent  work order: M35 delivered
+ADR-0274 §11:6  spent  work order: M35 delivered
+
+# ADR-0275
+ADR-0275 §1:1  spent  ratification gate passed
+ADR-0275 §1:2  spent  ratification gate passed
+ADR-0275 §1:3  other  episodes
+ADR-0275 §1:4  other  episodes
+ADR-0275 §2:1  other  episodes
+ADR-0275 §2:2  other  episodes
+ADR-0275 §2:3  other  episodes
+ADR-0275 §2:4  other  episodes
+ADR-0275 §2:5  other  episodes
+ADR-0275 §2:6  other  episodes
+ADR-0275 §3:1  other  episodes
+ADR-0275 §3:2  other  episodes
+ADR-0275 §3:3  other  episodes
+ADR-0275 §3:4  other  episodes
+ADR-0275 §3:5  other  episodes
+ADR-0275 §4:1  other  episodes
+ADR-0275 §4:2  other  episodes
+ADR-0275 §4:3  other  episodes
+ADR-0275 §4:5  other  episodes
+ADR-0275 §4:6  other  episodes
+ADR-0275 §4:7  other  episodes
+ADR-0275 §4:8  other  episodes
+ADR-0275 §4:9  other  episodes
+ADR-0275 §5:1  other  episodes
+ADR-0275 §5:2  other  episodes
+ADR-0275 §5:3  other  episodes
+ADR-0275 §5:4  other  episodes
+ADR-0275 §5:5  other  episodes
+ADR-0275 §5:6  other  episodes
+ADR-0275 §6:2  other  episodes
+ADR-0275 §6:3  other  episodes
+ADR-0275 §6:5  other  episodes
+ADR-0275 §6:6  other  episodes
+ADR-0275 §7:2  other  episodes
+ADR-0275 §7:3  other  episodes
+ADR-0275 §7:4  other  episodes
+ADR-0275 §7:5  other  episodes
+ADR-0275 §7:6  other  episodes
+ADR-0275 §7:7  other  episodes
+ADR-0275 §7:8  other  episodes
+ADR-0275 §7:9  other  episodes
+ADR-0275 §8:1  other  episodes
+ADR-0275 §8:2  other  episodes
+ADR-0275 §8:3  other  episodes
+ADR-0275 §8:4  other  episodes
+ADR-0275 §8:5  other  episodes
+ADR-0275 §8:6  other  episodes
+ADR-0275 §8:8  other  episodes
+ADR-0275 §8:9  other  episodes
+ADR-0275 §8:10  other  episodes
+ADR-0275 §8:11  other  episodes
+ADR-0275 §8:12  other  episodes
+ADR-0275 §9:1  other  episodes
+ADR-0275 §9:2  other  episodes
+ADR-0275 §9:3  other  episodes
+ADR-0275 §9:4  other  episodes
+ADR-0275 §9:5  other  episodes
+ADR-0275 §9:6  other  episodes
+ADR-0275 §10:1  other  episodes
+ADR-0275 §10:2  other  episodes
+ADR-0275 §10:3  other  episodes
+ADR-0275 §10:4  other  episodes
+ADR-0275 §10:5  other  episodes
+ADR-0275 §10:6  other  episodes
+ADR-0275 §10:7  other  episodes
+ADR-0275 §10:8  other  episodes
+ADR-0275 §10:9  other  episodes
+ADR-0275 §10:10  other  episodes
+ADR-0275 §11:1  other  episodes
+ADR-0275 §11:2  other  episodes
+ADR-0275 §11:3  other  episodes
+ADR-0275 §11:4  other  episodes
+ADR-0275 §11:5  other  episodes
+ADR-0275 §11:6  other  episodes
+ADR-0275 §12:1  spent  one-time cutover
+ADR-0275 §12:2  spent  one-time cutover
+ADR-0275 §12:3  other  episodes
+ADR-0275 §12:4  other  episodes
+ADR-0275 §12:5  other  episodes
+ADR-0275 §12:6  other  episodes
+ADR-0275 §12:7  other  episodes
+ADR-0275 §12:8  other  architecture
+ADR-0275 §13:1  spent  supersession records made
+ADR-0275 §13:2  other  episodes
+ADR-0275 §14:1  spent  work order: M36 delivered
+ADR-0275 §14:2  spent  work order: M36 delivered
+ADR-0275 §14:3  spent  work order: M36 delivered
+
+# ADR-0276
+ADR-0276 §1:1  spent  ratification gate passed
+ADR-0276 §1:2  spent  ratification gate passed
+ADR-0276 §1:3  other  understanding stage
+ADR-0276 §1:4  other  understanding stage
+ADR-0276 §1:5  other  understanding stage
+ADR-0276 §2:1  other  understanding stage
+ADR-0276 §2:2  other  understanding stage
+ADR-0276 §2:3  other  understanding stage
+ADR-0276 §2:4  other  understanding stage
+ADR-0276 §2:5  other  understanding stage
+ADR-0276 §2:6  other  understanding stage
+ADR-0276 §3:1  other  understanding stage
+ADR-0276 §3:3  other  understanding stage
+ADR-0276 §3:4  other  understanding stage
+ADR-0276 §3:5  other  understanding stage
+ADR-0276 §3:7  other  understanding stage
+ADR-0276 §4:1  other  understanding stage
+ADR-0276 §4:2  other  understanding stage
+ADR-0276 §4:3  other  understanding stage
+ADR-0276 §4:4  other  understanding stage
+ADR-0276 §4:5  other  understanding stage
+ADR-0276 §4:6  other  understanding stage
+ADR-0276 §4:7  other  understanding stage
+ADR-0276 §4:9  other  understanding stage
+ADR-0276 §4:11  other  understanding stage
+ADR-0276 §4:13  other  understanding stage
+ADR-0276 §5:1  other  understanding stage
+ADR-0276 §5:2  other  understanding stage
+ADR-0276 §5:3  other  understanding stage
+ADR-0276 §5:4  other  understanding stage
+ADR-0276 §5:5  other  understanding stage
+ADR-0276 §6:1  other  understanding stage
+ADR-0276 §6:2  other  understanding stage
+ADR-0276 §6:3  other  understanding stage
+ADR-0276 §6:4  other  understanding stage
+ADR-0276 §6:5  other  understanding stage
+ADR-0276 §6:6  other  understanding stage
+ADR-0276 §6:7  other  understanding stage
+ADR-0276 §7:1  other  understanding stage
+ADR-0276 §7:2  other  understanding stage
+ADR-0276 §7:3  other  understanding stage
+ADR-0276 §7:4  other  understanding stage
+ADR-0276 §7:5  other  understanding stage
+ADR-0276 §7:6  other  understanding stage
+ADR-0276 §7:7  other  understanding stage
+ADR-0276 §7:8  other  understanding stage
+ADR-0276 §8:1  spent  work order: M37 delivered
+ADR-0276 §8:2  spent  work order: M37 delivered
+ADR-0276 §8:3  other  understanding stage
+ADR-0276 §9:1  spent  supersession records made
+ADR-0276 §9:2  other  understanding stage
