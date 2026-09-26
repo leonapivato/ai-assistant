@@ -49,7 +49,10 @@ if TYPE_CHECKING:
 #: A fence line: up to three spaces, then three or more backticks or tildes. The
 #: one fence rule the citation checker and the clause scan share, so the two can
 #: never disagree about whether a line is display (ADR-0088 §1, ADR-0089 §2).
-FENCE_RE = re.compile(r"^(?P<indent> {0,3})(?P<ticks>`{3,}|~{3,})(?P<info>.*)$")
+#: CommonMark's one further condition is applied in :func:`_fence`: a backtick
+#: fence's info string carries no backtick, so a line opening with an inline
+#: span such as ````x``` y`` is prose and opens nothing.
+_FENCE_RE = re.compile(r"^(?P<indent> {0,3})(?P<ticks>`{3,}|~{3,})(?P<info>.*)$")
 
 #: A clause's first line (ADR-0089 §2 as ADR-0257 §1 widens it): the token closed
 #: by ``.**``, or followed by a label separator and a non-space character.
@@ -60,8 +63,10 @@ _MARK_OPEN_RE = re.compile(r"^> \*\*Normative(?:\.\*\*|(?:\. | — )\S)")
 #: invisible and ending the run on one would silently truncate a clause.
 _RUN_LINE_RE = re.compile(r"^>(?: .*|\s*)$")
 
-#: A fence opened inside a block quote — which a clause may not contain.
-_QUOTED_FENCE_RE = re.compile(r"^>\s{0,4}(?:`{3,}|~{3,})")
+#: A fence opened inside a block quote — which a clause may not contain. The same
+#: two openers as :data:`_FENCE_RE`, with the same backtick condition, so a
+#: continuation line that merely starts with an inline code span is clause text.
+_QUOTED_FENCE_RE = re.compile(r"^>[ \t]{0,4}(?:`{3,}[^`]*|~{3,}.*)$")
 
 #: An ATX heading: up to three spaces, one to six ``#``, then whitespace or the
 #: end of the line.
@@ -86,13 +91,26 @@ _SECTION = r"(?:\d+[a-z]?|[^\W\d_]\w*)"
 _DASH = "[-\u2013\u2014]"
 _ONE_ID = rf"§(?P<section>{_SECTION}):(?P<first>\d+)(?:{_DASH}(?P<last>\d+))?(?![\w:])"
 
+#: Where an identifier may wrap: spaces and tabs, and at most one line break
+#: followed by the block-quote markers and indent of the next line. ADRs are
+#: hard-wrapped and a marked clause is a block quote, so a comma list — or the
+#: prefix and its first ``§`` — broken across ``> `` lines is still one citation.
+_BREAK = r"[ \t]*(?:\n(?:[ \t]*>)*[ \t]*)?"
+
 #: A clause identifier with its ADR prefix, and any further ``§S:k`` sharing it.
 #: The ADR number is ADR-0088 §1(a)'s four digits, the decision citation's form.
 IDENTIFIER_RE = re.compile(
-    rf"\bADR-(?P<adr>\d{{4}})[ \t]+(?P<ids>§{_SECTION}:\d+(?:{_DASH}\d+)?(?![\w:])"
-    rf"(?:,[ \t]*§{_SECTION}:\d+(?:{_DASH}\d+)?(?![\w:]))*)"
+    rf"\bADR-(?P<adr>\d{{4}})(?:[ \t]+|[ \t]*\n(?:[ \t]*>)*[ \t]*)"
+    rf"(?P<ids>§{_SECTION}:\d+(?:{_DASH}\d+)?(?![\w:])"
+    rf"(?:,{_BREAK}§{_SECTION}:\d+(?:{_DASH}\d+)?(?![\w:]))*)"
 )
 _ONE_ID_RE = re.compile(_ONE_ID)
+
+#: The longest ordinal converted as written. A longer one names no clause any ADR
+#: could carry, and converting it unbounded would let a citation crash the tool
+#: reading it — CPython refuses an integer literal of a few thousand digits.
+_LARGEST_ORDINAL_DIGITS = 9
+_BEYOND_EVERY_ORDINAL: int = 10**_LARGEST_ORDINAL_DIGITS
 
 
 @dataclass(frozen=True)
@@ -137,9 +155,12 @@ class Reference:
     Attributes:
         adr: The ADR number.
         section: *S* as written.
-        first: *j* (or *k* for a single clause).
+        first: *j* (or *k* for a single clause). An ordinal longer than
+            :data:`_LARGEST_ORDINAL_DIGITS` digits is held as a value no clause
+            reaches, so it resolves to nothing without being converted whole.
         last: *k* for a range, ``None`` for a single clause.
         lineno: The 1-based line of the text the reference sits on.
+        span: The ordinals as written, a range's dash normalised to a hyphen.
     """
 
     adr: int
@@ -147,11 +168,29 @@ class Reference:
     first: int
     last: int | None
     lineno: int
+    span: str = ""
 
     def text(self) -> str:
         """Render the reference in its canonical form, ADR prefix included."""
-        span = f"{self.first}" if self.last is None else f"{self.first}-{self.last}"
+        span = self.span or (f"{self.first}" if self.last is None else f"{self.first}-{self.last}")
         return f"ADR-{self.adr:04d} §{self.section}:{span}"
+
+
+def _ordinal(digits: str) -> int:
+    """Return an ordinal's value, or one beyond every clause for an absurd length."""
+    if len(digits) > _LARGEST_ORDINAL_DIGITS:
+        return _BEYOND_EVERY_ORDINAL
+    return int(digits)
+
+
+def _fence(line: str) -> re.Match[str] | None:
+    """Return the fence match for ``line``, or ``None`` where it opens no fence."""
+    match = _FENCE_RE.match(line)
+    if match is None:
+        return None
+    if match.group("ticks")[0] == "`" and "`" in match.group("info"):
+        return None
+    return match
 
 
 def fenced_flags(lines: Sequence[str]) -> list[bool]:
@@ -170,7 +209,7 @@ def fenced_flags(lines: Sequence[str]) -> list[bool]:
     flags: list[bool] = []
     open_fence: tuple[str, int] | None = None
     for line in lines:
-        match = FENCE_RE.match(line)
+        match = _fence(line)
         if open_fence is None:
             if match is not None:
                 ticks = match.group("ticks")
@@ -318,16 +357,17 @@ def references(text: str) -> list[Reference]:
     found: list[Reference] = []
     for match in IDENTIFIER_RE.finditer(text):
         number = int(match.group("adr"))
-        lineno = text.count("\n", 0, match.start()) + 1
+        offset = match.start("ids")
         for one in _ONE_ID_RE.finditer(match.group("ids")):
-            last = one.group("last")
+            first, last = one.group("first"), one.group("last")
             found.append(
                 Reference(
                     adr=number,
                     section=one.group("section"),
-                    first=int(one.group("first")),
-                    last=None if last is None else int(last),
-                    lineno=lineno,
+                    first=_ordinal(first),
+                    last=None if last is None else _ordinal(last),
+                    lineno=text.count("\n", 0, offset + one.start()) + 1,
+                    span=first if last is None else f"{first}-{last}",
                 )
             )
     return found
@@ -362,11 +402,16 @@ def resolve(reference: Reference, marked: Sequence[Clause]) -> str | None:
     where = f"ADR-{reference.adr:04d} §{reference.section}"
     if available == 0:
         return f"{where} has no marked clause"
-    if reference.last is None or reference.first == 0:
-        shown = f":{reference.first}"
+    written = reference.span or (
+        f"{reference.first}" if reference.last is None else f"{reference.first}-{reference.last}"
+    )
+    if reference.last is None or reference.first > available:
+        shown = f":{written}"
     else:
-        start = max(reference.first, available + 1)
-        shown = f":{start}" if start == reference.last else f":{start}-{reference.last}"
+        last = written.rsplit("-", 1)[-1]
+        shown = (
+            f":{available + 1}" if available + 1 == reference.last else f":{available + 1}-{last}"
+        )
     return f"{where} has {available} marked clause(s); {shown} does not exist"
 
 

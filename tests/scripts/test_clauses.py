@@ -262,3 +262,74 @@ def test_clause_zero_does_not_resolve() -> None:
 
 def test_a_section_with_no_clause_does_not_resolve() -> None:
     assert resolve(_ref("9", 1), clauses(_ADR)) == "ADR-0300 §9 has no marked clause"
+
+
+# --- round-1 regressions -------------------------------------------------------
+
+
+def test_an_inline_code_span_opening_a_continuation_line_is_clause_text() -> None:
+    """A backtick fence's info string carries no backtick, so this opens no fence."""
+    text = (
+        "## Decision\n\n### 1. One\n\n"
+        "> **Normative.** A rule using\n> ```inline code``` in its continuation.\n\n"
+        "> **Normative.** The next clause.\n"
+    )
+    found = clauses(text)
+    assert [c.identifier(1) for c in found] == ["ADR-0001 §1:1", "ADR-0001 §1:2"]
+    assert found[0].lines[1] == "> ```inline code``` in its continuation."
+
+
+def test_a_prose_line_opening_with_an_inline_span_opens_no_fence() -> None:
+    """The same condition at column 0, where a phantom fence would swallow the clauses below."""
+    text = "## Decision\n\n```x``` is inline.\n\n> **Normative.** Still a clause.\n"
+    assert _ids(text) == ["ADR-0300 §Decision:1"]
+
+
+def test_an_identifier_list_wrapped_across_lines_is_read_whole() -> None:
+    """ADRs are hard-wrapped: a soft break after a comma, or after the prefix, is whitespace."""
+    text = "See ADR-0094 §5:2,\n§5:999 and ADR-0094\n§6:1."
+    found = references(text)
+    assert [(r.text(), r.lineno) for r in found] == [
+        ("ADR-0094 §5:2", 1),
+        ("ADR-0094 §5:999", 2),
+        ("ADR-0094 §6:1", 3),
+    ]
+
+
+def test_an_identifier_list_wrapped_inside_a_block_quote_is_read_whole() -> None:
+    text = "> **Normative.** Under ADR-0094 §5:2,\n> §5:3 and ADR-0094\n> §6:1, nothing moves."
+    assert _refs(text) == ["ADR-0094 §5:2", "ADR-0094 §5:3", "ADR-0094 §6:1"]
+
+
+def test_a_blank_line_ends_an_identifier_list() -> None:
+    """One line break is a wrap; a blank line is a paragraph, and `§5:3` there is unbound."""
+    assert _refs("ADR-0094 §5:2,\n\n§5:3") == ["ADR-0094 §5:2"]
+
+
+def test_mask_blanks_a_wrapped_list_and_keeps_its_line_breaks() -> None:
+    text = "ADR-0094 §5:2,\n> §6:1 and ADR-0094 §7."
+    masked = mask(text)
+    assert masked.count("\n") == 1
+    assert "§5" not in masked
+    assert "§6" not in masked
+
+
+@pytest.mark.parametrize(
+    ("written", "shown"),
+    [
+        pytest.param(f"§5:{'9' * 5000}", f":{'9' * 5000}", id="single"),
+        pytest.param(f"§5:1-{'9' * 5000}", f":3-{'9' * 5000}", id="range-last"),
+        pytest.param(f"§5:{'9' * 5000}-1", None, id="range-first"),
+    ],
+)
+def test_an_absurdly_long_ordinal_resolves_to_nothing_without_crashing(
+    written: str, shown: str | None
+) -> None:
+    """CPython refuses to convert a few thousand digits; the tool must report, not raise."""
+    (reference,) = references(f"ADR-0300 {written}")
+    assert reference.text() == f"ADR-0300 {written}"
+    marked = [Clause("5", k, None, k, ("> **Normative.** x",)) for k in (1, 2)]
+    problem = resolve(reference, marked)
+    assert problem is not None
+    if shown is not None:
+        assert problem.endswith(f"{shown} does not exist")
