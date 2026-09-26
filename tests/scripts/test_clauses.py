@@ -437,3 +437,60 @@ def test_no_list_structure_is_read(listed: str) -> None:
         "> **Normative.** The next clause.\n"
     )
     assert [c.identifier(1) for c in clauses(text)] == ["ADR-0001 §1:1", "ADR-0001 §1:2"]
+
+
+# --- the level-2 section a clause stands in (ADR-0278 §1) ---------------------
+
+
+def test_each_clause_carries_the_level_2_heading_it_stands_under() -> None:
+    """A numbered heading sets *S*, and leaves the level-2 section as it was."""
+    found = {clause.identifier(300): clause for clause in clauses(_ADR)}
+    assert found["ADR-0300 §Context:1"].top == "Context"
+    assert found["ADR-0300 §Decision:1"].top == "Decision"
+    assert found["ADR-0300 §1:3"].top == "Decision"
+    assert found["ADR-0300 §1a:1"].top == "Decision"
+    assert found["ADR-0300 §Consequences:1"].top == "Consequences"
+
+
+def test_only_a_clause_under_the_decision_heading_is_in_decision() -> None:
+    found = {clause.identifier(300): clause for clause in clauses(_ADR)}
+    assert [c.identifier(300) for c in found.values() if c.in_decision()] == [
+        "ADR-0300 §Decision:1",
+        "ADR-0300 §1:1",
+        "ADR-0300 §1:2",
+        "ADR-0300 §1:3",
+        "ADR-0300 §1a:1",
+        "ADR-0300 §2:1",
+    ]
+
+
+@pytest.mark.parametrize(
+    ("heading", "in_decision"),
+    [
+        pytest.param("## Decision", True, id="plain"),
+        pytest.param("## Decision ##", True, id="closing-sequence"),
+        pytest.param("## DECISION", True, id="case"),
+        pytest.param("##\tDecision  ", True, id="tab-and-trailing-space"),
+        pytest.param("## Decision drivers", False, id="longer-heading"),
+        pytest.param("## Decisions", False, id="plural"),
+        pytest.param("## Context", False, id="context"),
+    ],
+)
+def test_the_decision_heading_is_read_whole(heading: str, in_decision: bool) -> None:
+    """ADR-0278 §1 names the ``## Decision`` section, not a heading that opens with the word."""
+    (found,) = clauses(f"{heading}\n\n> **Normative.** A rule.\n")
+    assert found.in_decision() is in_decision
+
+
+def test_a_clause_above_every_level_2_heading_stands_in_no_section() -> None:
+    """The title resets it: a clause in the header is outside ``## Decision``."""
+    text = "# 300. Title\n\n> **Normative.** In the header.\n\n## Decision\n\nProse.\n"
+    (found,) = clauses(text)
+    assert found.top is None
+    assert not found.in_decision()
+
+
+def test_a_heading_inside_a_fence_moves_no_section() -> None:
+    text = "## Decision\n\n```md\n## Context\n```\n\n> **Normative.** Still a ruling.\n"
+    (found,) = clauses(text)
+    assert found.in_decision()

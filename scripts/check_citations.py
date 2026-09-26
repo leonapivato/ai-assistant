@@ -54,12 +54,25 @@ checks, each read through ``scripts/clauses.py``, the one extractor §2 allows:
   range, any member; a range whose first member is 0 or exceeds its last fails
   outright. An ADR numbered above 0277, not ``Withdrawn``, that marks no clause.
   A marked clause, in an ADR numbered above 0277, whose text equals another
-  ADR's marked clause once whitespace and block-quote markers are normalised.
-- **Tier 2**: that same duplicate in any older ADR, whose text no edit may
+  ADR's marked clause once whitespace and block-quote markers are normalised,
+  **and which stands outside its own ADR's ``## Decision`` section** — where a
+  repeated ruling reads as a quotation (ADR-0278 §1).
+- **Tier 2**: that same repeated clause in any older ADR, whose text no edit may
   change (ADR-0001, ADR-0089 §5); and a header note saying an ADR "remains
   Proposed" when that ADR's own ``Status`` is not ``Proposed``, in any ADR,
   because the note was true when written and ADR-0165's one-line flip cannot
-  reach it.
+  reach it — **unless a later list item of the same header, dated on its first
+  line, writes ``ADR-NNNN was ratified`` for the ADR the note names**, which is
+  how the corpus records that a ratified header note went stale (ADR-0278 §2).
+
+**ADR-0278 narrows two of those checks, and passes rather than reports what it
+removes.** An equal clause standing inside its ADR's ``## Decision`` section is
+no finding at any tier, whether it is boilerplate each ADR rules for itself or
+the ruling a quotation elsewhere repeats; a stale note already corrected is no
+finding either. The report states how many of each it passed and lists none.
+The check stays narrower than ADR-0277 §3's rule by design: a marked quotation
+inside a Decision section passes here and is still forbidden there, which is
+ADR-0088 §6's benign miss (ADR-0278 §3).
 
 One thing outside the two tiers can stop the run, because it is not a citation:
 **two files under ``docs/adr/`` carrying the same four digits**. The number is
@@ -321,7 +334,8 @@ class Finding:
         tier: 1 if this may fail a change, 2 if it is reported and never fails.
         kind: Which rule produced it — ``decision``, ``tracker``, ``module-path``,
             ``dotted-symbol`` or ``liveness`` (ADR-0088), or ``clause``,
-            ``stale-note``, ``unmarked`` or ``duplicate-clause`` (ADR-0277 §2).
+            ``stale-note``, ``unmarked`` or ``duplicate-clause`` (ADR-0277 §2,
+            the last two as ADR-0278 narrows them).
         path: The ADR the citation was written in, relative to the repo root.
         line: 1-based line number of the citation.
         citation: The citation exactly as written.
@@ -385,6 +399,12 @@ class Report:
         tracker_checked: Whether tracker citations could be resolved at all. When
             GitHub is unreachable they are unevaluable and pass silently (§6).
         notes: Anything the run could not do, for the reader.
+        passed: How many a record check selected and then passed without a
+            finding, by finding kind — ``duplicate-clause``, the equal clauses
+            standing inside their ADR's ``## Decision`` section (ADR-0278 §1),
+            and ``stale-note``, the stale notes a later dated header note has
+            corrected (ADR-0278 §2). Each is stated as a count and never listed,
+            as both clauses require.
     """
 
     findings: tuple[Finding, ...]
@@ -392,6 +412,7 @@ class Report:
     gaps: tuple[int, ...]
     tracker_checked: bool
     notes: tuple[str, ...]
+    passed: dict[str, int]
 
     @property
     def tier1(self) -> tuple[Finding, ...]:
@@ -411,6 +432,7 @@ class Report:
             "gaps": list(self.gaps),
             "tracker_checked": self.tracker_checked,
             "notes": list(self.notes),
+            "passed": dict(self.passed),
         }
 
 
@@ -1498,6 +1520,13 @@ _REMAINS_PROPOSED_RE = re.compile(
     r"\bADR-(?P<adr>\d{4}),?\s+(?:which\s+)?remains\s+`?Proposed\b`?", re.IGNORECASE
 )
 
+#: A list item's opening line, at any indent: a bullet marker and whitespace.
+_LIST_ITEM_RE = re.compile(r"^[ \t]*[-*+][ \t]+\S")
+
+#: The ``YYYY-MM-DD`` date a correcting note carries on its first line
+#: (ADR-0278 §2), the form ADR-0070 §1's dated note takes.
+_DATE_RE = re.compile(r"(?<!\d)\d{4}-\d{2}-\d{2}(?!\d)")
+
 
 def _first_status_word(status: str | None) -> str:
     """Return a Status field's leading word, lower-cased and unpunctuated."""
@@ -1545,16 +1574,78 @@ def _clause_citation_findings(
     return findings, selected
 
 
-def _stale_note_findings(adrs: dict[int, tuple[str, str]]) -> Iterator[Finding]:
-    """Tier 2: a header note saying an ADR "remains Proposed" when it does not (§2).
+def _header_items(top: str) -> list[tuple[int, str, str]]:
+    """Return the list items of an ADR's header, in document order.
+
+    An item opens on a line whose first non-space character is a bullet marker
+    (``-``, ``*`` or ``+``) followed by whitespace, at any indent, and runs until
+    the next such line, a blank line or the end of the header. A nested bullet is
+    therefore an item of its own, which is the reading ADR-0278 §2 needs: a note
+    is corrected by *a later list item*, and nothing in the rule asks at what
+    depth that item was written.
+
+    Args:
+        top: The header, as :func:`header` returns it.
+
+    Returns:
+        ``(0-based line index, first line, whole text)`` per item.
+    """
+    items: list[tuple[int, str, str]] = []
+    current: list[str] = []
+    opened = 0
+    for index, line in enumerate(top.split("\n")):
+        if _LIST_ITEM_RE.match(line):
+            if current:
+                items.append((opened, current[0], "\n".join(current)))
+            current, opened = [line], index
+        elif not line.strip():
+            if current:
+                items.append((opened, current[0], "\n".join(current)))
+            current = []
+        elif current:
+            current.append(line)
+    if current:
+        items.append((opened, current[0], "\n".join(current)))
+    return items
+
+
+def _is_corrected(named: int, stale_line: int, items: list[tuple[int, str, str]]) -> bool:
+    """Whether a later dated item of the same header says ADR ``named`` was ratified.
+
+    ADR-0278 §2: the item stands below the stale note, carries a ``YYYY-MM-DD``
+    date on its first line, and writes ``ADR-NNNN was ratified`` for the number
+    the stale note names, the words directly after the number. An item opening on
+    the stale note's own line or above it is not *later*, so a note cannot
+    correct itself.
+    """
+    ratified = re.compile(rf"\bADR-{named:04d}\s+was\s+ratified\b", re.IGNORECASE)
+    return any(
+        opened > stale_line and _DATE_RE.search(first) and ratified.search(text)
+        for opened, first, text in items
+    )
+
+
+def _stale_note_findings(adrs: dict[int, tuple[str, str]]) -> tuple[list[Finding], int]:
+    """Tier 2: a header note saying an ADR "remains Proposed" when it does not.
+
+    ADR-0277 §2's fourth clause, as ADR-0278 §2 narrows it: a note a later dated
+    item of the same header has already corrected is passed and counted, never
+    listed. ADRs are append-only (ADR-0001), so the stale sentence stays in the
+    file beside its correction, and reporting it would be permanent noise.
 
     Reported and never failed, in every ADR: the note is true until the ADR it
     names is ratified, and ADR-0165's one-line flip cannot touch it, so failing
     it would turn ``main`` red on the day that flip lands.
+
+    Returns:
+        The findings, and how many stale notes were passed as corrected.
     """
+    findings: list[Finding] = []
+    corrected = 0
     for number in sorted(adrs):
         path, text = adrs[number]
         top = header(text)
+        items = _header_items(top)
         for match in _REMAINS_PROPOSED_RE.finditer(top):
             named = int(match.group("adr"))
             if named not in adrs:
@@ -1562,18 +1653,26 @@ def _stale_note_findings(adrs: dict[int, tuple[str, str]]) -> Iterator[Finding]:
             status = status_field(adrs[named][1])
             if _first_status_word(status) == "proposed":
                 continue
-            yield Finding(
-                tier=_TIER_REPORTED,
-                kind="stale-note",
-                path=path,
-                line=top.count("\n", 0, match.start("adr")) + 1,
-                citation=f"ADR-{named:04d} remains Proposed",
-                detail=(
-                    f"ADR-{named:04d}'s own Status opens "
-                    f"{(status or '(none)').split()[0]!r}, not Proposed — the note "
-                    "went stale when that ADR was ratified"
-                ),
+            line = top.count("\n", 0, match.start("adr"))
+            if _is_corrected(named, line, items):
+                corrected += 1
+                continue
+            findings.append(
+                Finding(
+                    tier=_TIER_REPORTED,
+                    kind="stale-note",
+                    path=path,
+                    line=line + 1,
+                    citation=f"ADR-{named:04d} remains Proposed",
+                    detail=(
+                        f"ADR-{named:04d}'s own Status opens "
+                        f"{(status or '(none)').split()[0]!r}, not Proposed — the note "
+                        "went stale when that ADR was ratified, and no later dated "
+                        f"header note says ADR-{named:04d} was ratified (ADR-0278 §2)"
+                    ),
+                )
             )
+    return findings, corrected
 
 
 def _unmarked_findings(
@@ -1598,39 +1697,63 @@ def _unmarked_findings(
 
 def _duplicate_clause_findings(
     adrs: dict[int, tuple[str, str]], marked: dict[int, list[clauses.Clause]]
-) -> Iterator[Finding]:
-    """One finding per marked clause whose text equals another ADR's (§2).
+) -> tuple[list[Finding], int]:
+    """One finding per repeated clause standing outside its ``## Decision`` section.
 
-    Tier 1 in an ADR numbered above 0277, Tier 2 in any other. Every clause of a
-    matching set is reported, each in its own ADR and at its own ADR's tier,
-    because each is "a marked clause whose text … equals a marked clause of
-    another ADR"; the detail names the others. Two equal clauses in one ADR are
-    not a finding — the rule is about another ADR.
+    ADR-0277 §2's sixth clause, as ADR-0278 §1 replaces its selection. A marked
+    clause whose normalised text equals a marked clause of another ADR is a
+    finding only when it stands outside its own ADR's ``## Decision`` section,
+    because there a repeated ruling reads as a quotation. Each such clause is
+    reported in its own ADR, at its own ADR's tier — Tier 1 above 0277, Tier 2
+    in any other — naming the clauses it equals and the level-2 section it
+    stands in. An equal clause inside a Decision section is no finding at any
+    tier, whether it is boilerplate each ADR rules for itself or the ruling a
+    reported clause quotes; it is counted and not listed. Two equal clauses in
+    one ADR are not a finding — the rule is about another ADR.
+
+    Returns:
+        The findings, and how many equal clauses were passed for standing inside
+        their ADR's Decision section.
     """
     by_text: dict[str, list[tuple[int, clauses.Clause]]] = {}
     for number in sorted(marked):
         for clause in marked[number]:
             by_text.setdefault(clause.normalised(), []).append((number, clause))
+    findings: list[Finding] = []
+    passed = 0
     for group in by_text.values():
         if len({number for number, _ in group}) < _QUALIFIED_PAIR:
             continue
         for number, clause in group:
+            if clause.in_decision():
+                passed += 1
+                continue
             others = ", ".join(
                 other.identifier(other_number) or f"ADR-{other_number:04d} line {other.lineno}"
                 for other_number, other in group
                 if other_number != number
             )
-            yield Finding(
-                tier=_TIER_FAILING if number > _RECORD_CHECKS_FROM else _TIER_REPORTED,
-                kind="duplicate-clause",
-                path=adrs[number][0],
-                line=clause.lineno,
-                citation=clause.identifier(number) or f"ADR-{number:04d}",
-                detail=(
-                    f"its text equals {others} — a quotation of another ADR's clause "
-                    "carries no **Normative.** token (ADR-0277 §3)"
-                ),
+            where = (
+                f"stands in `## {clause.top}`"
+                if clause.top is not None
+                else "stands above every level-2 heading"
             )
+            findings.append(
+                Finding(
+                    tier=_TIER_FAILING if number > _RECORD_CHECKS_FROM else _TIER_REPORTED,
+                    kind="duplicate-clause",
+                    path=adrs[number][0],
+                    line=clause.lineno,
+                    citation=clause.identifier(number) or f"ADR-{number:04d}",
+                    detail=(
+                        f"{where}, outside its ADR's `## Decision` section, and its text "
+                        f"equals {others} — there it reads as a quotation, and a quotation "
+                        "of another ADR's clause carries no **Normative.** token "
+                        "(ADR-0277 §3, ADR-0278 §1)"
+                    ),
+                )
+            )
+    return findings, passed
 
 
 def check(root: Path, *, tracker_numbers: Iterable[int] | None) -> Report:
@@ -1683,9 +1806,11 @@ def check(root: Path, *, tracker_numbers: Iterable[int] | None) -> Report:
     marked = {number: clauses.clauses(text) for number, (_, text) in adrs.items()}
     clause_findings, counts["clause"] = _clause_citation_findings(documents, marked)
     findings.extend(clause_findings)
-    findings.extend(_stale_note_findings(adrs))
+    stale_findings, corrected = _stale_note_findings(adrs)
+    findings.extend(stale_findings)
     findings.extend(_unmarked_findings(adrs, marked))
-    findings.extend(_duplicate_clause_findings(adrs, marked))
+    duplicate_findings, in_decision = _duplicate_clause_findings(adrs, marked)
+    findings.extend(duplicate_findings)
 
     notes: list[str] = []
     if known_trackers is None:
@@ -1701,6 +1826,7 @@ def check(root: Path, *, tracker_numbers: Iterable[int] | None) -> Report:
         gaps=tuple(sorted(targets.gaps)),
         tracker_checked=known_trackers is not None,
         notes=tuple(notes),
+        passed={"duplicate-clause": in_decision, "stale-note": corrected},
     )
 
 
@@ -1803,9 +1929,32 @@ _TIER2_HEADINGS = {
     "module-path": "Module paths that do not resolve (b1)",
     "dotted-symbol": "Dotted symbols that do not resolve (b2)",
     "liveness": "Liveness disagreements",
-    "stale-note": "Header notes saying a ratified ADR remains Proposed (ADR-0277 §2)",
-    "duplicate-clause": "Marked clauses equal to another ADR's (ADR-0277 §2)",
+    "stale-note": (
+        "Header notes saying a ratified ADR remains Proposed, not yet corrected "
+        "(ADR-0277 §2, ADR-0278 §2)"
+    ),
+    "duplicate-clause": (
+        "Marked clauses equal to another ADR's, outside their Decision section "
+        "(ADR-0277 §2, ADR-0278 §1)"
+    ),
 }
+
+
+def _passed_sentence(report: Report) -> str:
+    """Return the one sentence stating what the record checks passed, as counts.
+
+    ADR-0278 §1 and §2 each require the number and forbid the list. It stands
+    beside the selection counts rather than under a tier's heading, because the
+    equal clauses a Decision section passes are passed at every tier.
+    """
+    in_decision = report.passed.get("duplicate-clause", 0)
+    corrected = report.passed.get("stale-note", 0)
+    return (
+        f"Passed without a finding: {in_decision} marked clause(s) equal to another "
+        "ADR's that stand inside their own ADR's Decision section, at any tier "
+        f"(ADR-0278 §1), and {corrected} stale header note(s) a later dated header "
+        "note corrects (ADR-0278 §2). Neither is listed."
+    )
 
 
 def _gap_numbers(gaps: tuple[int, ...], *, quote: str = "") -> str:
@@ -1850,6 +1999,7 @@ def format_text(report: Report) -> str:
         "(ADR-0090 §1) — revisit that ADR if this set stops being a handful of "
         "numbers."
     )
+    lines.append(_passed_sentence(report))
     for note in report.notes:
         lines.append(f"note: {note}")
 
@@ -1897,6 +2047,7 @@ def format_markdown(report: Report) -> str:
             "if this set stops being a handful of numbers.",
         ]
     )
+    lines.extend(["", _passed_sentence(report)])
     for note in report.notes:
         lines.extend(["", f"> {note}"])
 
