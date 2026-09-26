@@ -1,6 +1,6 @@
 # 277. A ruling has an address, and the record is checked for drift
 
-- Status: Proposed
+- Status: Accepted
 - Date: 2026-09-26
 - Authorization: the owner accepted proposal #2558 on 2026-09-26, after the
   design-doc pilot #2553 was dropped.
