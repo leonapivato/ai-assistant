@@ -15,9 +15,11 @@ nothing notices**:
 
 - ADR-0163 §3 still says it admits "exactly two producers of episodes"; ADR-0275
   §6 added a third, and neither ADR records it (#2557).
-- Header notes in ADR-0274 and ADR-0275 still call ADR-0275 and ADR-0276
-  "Proposed" after both were ratified (#2555). The pilot's answer key singled this
-  out as a trap.
+- Header notes in **nine** ADRs still say ADR-0275 or ADR-0276 "remains Proposed"
+  after both were ratified (#2555). The pilot's answer key singled this out as a
+  trap. The cause is structural: a superseding ADR writes its reciprocal notes while
+  it is `Proposed`, and ADR-0165's one-line ratification commit cannot touch them,
+  so every such note goes stale on the day it becomes true.
 - ADR-0092 is the one ADR after ADR-0089 with no marked rulings, which ADR-0089
   requires of every later ADR.
 - ADR-0131 marks quotations of ADR-0124 and ADR-0094 as its own rulings (#2556), a
@@ -40,8 +42,10 @@ collision.
 - **ADR-0089** — §2 the mark's grammar; §3 marked clauses are the whole
   obligation; §5 forward-only.
 - **ADR-0257** — labelled marks.
-- **ADR-0070** §4 (the status vocabulary) and **ADR-0082** §1 (reciprocal records),
-  which the checks read but do not change.
+- **ADR-0070** §4 (the status vocabulary, and its refusal to impose a
+  stable-identifier scheme) and **ADR-0082** §1 (reciprocal records).
+- **ADR-0165**: the one-line ratification commit, which is why reciprocal notes
+  cannot be corrected at ratification.
 - `scripts/check_citations.py`, `scripts/adr_status.py`,
   `tests/scripts/test_adr_citations_corpus.py`, `scripts/brief_check.py`.
 
@@ -62,6 +66,11 @@ labelled forms) under section *S* of ADR-NNNN, counted from 1 in file order.
   Header notes sit above the first section and do not shift them. A `Proposed`
   ADR's ordinals can still move; citing one is at the citer's risk until it is
   ratified.
+- **It is optional and forward-only.** ADR-0070 §4 declined to impose "a
+  stable-identifier scheme" on scopes, because retrofitting anchors onto unsectioned
+  ADRs is impossible. This imposes nothing: no existing text is rewritten, an
+  unmarked ADR simply has no clause identifiers, and a scope may keep naming a
+  clause in words. The identifier is available where a writer wants precision.
 - **It is mechanically distinct.** ADR-0088 §6 passes section numbers silently
   because "ADR-0076 §9's obligation set" may name the *citing* ADR's §9. The `:k`
   suffix removes that ambiguity: it only means "the k-th ruling of the ADR just
@@ -79,7 +88,7 @@ precedent).
 | Check | Finds | Today |
 | --- | --- | --- |
 | **Clause citation resolves** | `ADR-NNNN §S:k` naming a clause that does not exist | new form, 0 uses |
-| **No stale pending note** | a header note saying ADR-X "remains Proposed" when ADR-X's Status is not `Proposed` | 2 ADRs (#2555) |
+| **No stale pending note** | a header note saying ADR-X "remains Proposed" when ADR-X's Status is not `Proposed` | 9 ADRs (#2555) |
 | **A marked ADR has marks** | an ADR numbered 0089 or later, not `Withdrawn`, with no marked clause | 1 ADR (0092) |
 | **A quotation is not a mark** | a marked clause whose text repeats another ADR's marked clause verbatim (after whitespace and `>` normalisation) | 1 ADR (0131, #2556) |
 
@@ -110,15 +119,19 @@ The misses that matter are the ones no ADR states — #2557, where ADR-0275 chan
 ADR-0163 without saying so. No check on the text can find those; a reader does,
 which is how the pilot's fold found it.
 
-### 3. One authoring rule
+### 3. Two authoring rules
 
-A quotation of another ADR's ruling is written as a plain blockquote, **without**
-the `**Normative.**` token. The quoting ADR owns only what it rules itself.
+- **A reciprocal note does not state the other ADR's status.** It says the change
+  "takes effect on ratification of ADR-X" and stops; the reader reads ADR-X's own
+  Status line. This removes the cause of #2555 rather than cleaning up after it.
+- **A quotation is not a mark.** A quotation of another ADR's ruling is written as
+  a plain blockquote, **without** the `**Normative.**` token. The quoting ADR owns
+  only what it rules itself (#2556).
 
 ### 4. The backlog
 
 One lane clears the Tier 2 findings with header-only records (ADR-0070 / ADR-0082
-forms): #2555, ADR-0092 (a note that it rules
+forms): #2555's nine notes, ADR-0092 (a note that it rules
 nothing, or which of its sentences a later ADR marks), and #2556. Clause
 identifiers are **not** back-filled into old records; they are used from now on,
 and an old record is converted only when something next touches it.
@@ -163,7 +176,7 @@ annotated view stays open below.
   (`ADR-0094 #17`) moves whenever a section gains a clause during drafting and hides
   where the clause is. `§S:k` keeps the section, which is what readers navigate by.
 - **Fail immediately vs. report first.** Failing at once turns the gate red on
-  four findings nobody introduced. Report-first matches ADR-0088's regression-guard
+  eleven findings nobody introduced. Report-first matches ADR-0088's regression-guard
   stance: Tier 1 stays a guard against new defects.
 - **A separate script** instead of `check_citations.py`. Rejected: the parser,
   the ADR loader and the CI reporting already exist there, and #588's reasoning
