@@ -1,6 +1,6 @@
 # 277. A ruling has an address, and the record is checked for drift
 
-- Status: Accepted
+- Status: Partially superseded by ADR-0278 (§2's sixth clause, in which equal marked clauses are findings and which member of an equal set is reported; §2's fourth clause, as it reaches a stale note that a later dated header note in the same ADR has corrected)
 - Date: 2026-09-26
 - Authorization: the owner accepted proposal #2558 on 2026-09-26, after the
   design-doc pilot #2553 was dropped.
@@ -9,6 +9,13 @@
   checked", as they reach the clause identifier and the record checks of §2 below;
   and §1(a)'s list of decision-citation forms, which gains the clause identifier.
   §6 below classifies every other ADR this touches.
+- Partially superseded: 2026-09-26 by ADR-0278 — §2's sixth clause (ADR-0277 §2:6) makes
+  a finding of a repeated clause only where it stands outside its ADR's Decision
+  section, reports that clause and not the one it equals, and passes every other equal clause with a count; §2's fourth clause
+  (ADR-0277 §2:4) no longer reports a stale note that a later dated header note in the
+  same ADR records as ratified, and counts it instead. The tier split at this ADR,
+  §2's other four clauses and every other section stand entire. The change takes
+  effect on ratification of ADR-0278.
 
 ## Context
 
