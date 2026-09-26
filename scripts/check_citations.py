@@ -1521,7 +1521,10 @@ _REMAINS_PROPOSED_RE = re.compile(
 )
 
 #: A list item's opening line, at any indent: a bullet marker and whitespace.
-_LIST_ITEM_RE = re.compile(r"^[ \t]*[-*+][ \t]+\S")
+_LIST_ITEM_RE = re.compile(r"^[ \t]*[-*+](?P<gap>[ \t]+)\S")
+
+#: CommonMark's tab stop, for measuring a list item's content column.
+_TAB_WIDTH = 4
 
 #: The ``YYYY-MM-DD`` date a correcting note carries on its first line
 #: (ADR-0278 §2), the form ADR-0070 §1's dated note takes.
@@ -1578,9 +1581,12 @@ def _header_items(top: str) -> list[tuple[int, str, str]]:
     """Return the list items of an ADR's header, in document order.
 
     An item opens on a line whose first non-space character is a bullet marker
-    (``-``, ``*`` or ``+``) followed by whitespace, at any indent, and runs until
-    the next such line, a blank line or the end of the header. A nested bullet is
-    therefore an item of its own, which is the reading ADR-0278 §2 needs: a note
+    (``-``, ``*`` or ``+``) followed by whitespace, at any indent, and ends at the
+    next such line or the end of the header. A blank line ends it only where the
+    next non-blank line is indented less than the item's content column — the
+    column its text starts at past the marker — because a line indented that far
+    is a further paragraph of the same item, as markdown reads it. A nested
+    bullet is an item of its own, which is the reading ADR-0278 §2 needs: a note
     is corrected by *a later list item*, and nothing in the rule asks at what
     depth that item was written.
 
@@ -1592,18 +1598,28 @@ def _header_items(top: str) -> list[tuple[int, str, str]]:
     """
     items: list[tuple[int, str, str]] = []
     current: list[str] = []
-    opened = 0
+    opened = column = 0
+    blanks: list[str] = []
     for index, line in enumerate(top.split("\n")):
-        if _LIST_ITEM_RE.match(line):
+        opener = _LIST_ITEM_RE.match(line)
+        if opener is not None:
             if current:
                 items.append((opened, current[0], "\n".join(current)))
-            current, opened = [line], index
-        elif not line.strip():
-            if current:
-                items.append((opened, current[0], "\n".join(current)))
-            current = []
-        elif current:
-            current.append(line)
+            current, opened, blanks = [line], index, []
+            column = len(line[: opener.end("gap")].expandtabs(_TAB_WIDTH))
+            continue
+        if not current:
+            continue
+        if not line.strip():
+            blanks.append(line)
+            continue
+        expanded = line.expandtabs(_TAB_WIDTH)
+        if blanks and len(expanded) - len(expanded.lstrip()) < column:
+            items.append((opened, current[0], "\n".join(current)))
+            current, blanks = [], []
+            continue
+        current.extend([*blanks, line])
+        blanks = []
     if current:
         items.append((opened, current[0], "\n".join(current)))
     return items
