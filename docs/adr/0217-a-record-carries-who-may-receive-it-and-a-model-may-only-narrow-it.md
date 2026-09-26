@@ -69,6 +69,10 @@
   base, `a35ad5e5`, and not of its text on any later day. Where a later ADR changes
   one of the ADRs cited, this ADR is read against the text quoted here and that ADR's
   own record says what moved. This is ADR-0143's clause, taken for its reason.
+- Note (2026-09-26): ADR-0276 was ratified on 2026-09-22 (`2e20ab11`), so the scoped
+  replacements recorded by the ADR-0276 note above took effect then; that note's
+  "which remains Proposed" was true when written and is stale. The Status line above
+  is unchanged (#2555).
 
 ## Context
 

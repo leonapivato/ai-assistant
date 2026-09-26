@@ -140,6 +140,13 @@
   enrolment and speaker identification, untouched — §8),
   [#1029](https://github.com/leonapivato/ai-assistant/issues/1029) (the pilot
   measurements §Context reads).
+- Note (2026-09-26): ADR-0275 §6 admits a further producer of episodes, standalone
+  activation capture (a `NewConversation` speech input that fails or produces no
+  words before allocation, and an informational event). §3's "This ADR admits
+  exactly two producers" stays true of this ADR: the addition is ADR-0275's, a
+  stacked addition under ADR-0082 §1, so no Status change is owed. That producer
+  delivers no episode with several distinguishable speakers, so §3's deferred
+  eligibility ruling is still open (#2557).
 
 ## Context
 
