@@ -1819,7 +1819,11 @@ def test_the_text_report_names_what_is_not_checked(tmp_path: Path) -> None:
 
     assert "Tier 1 — fails the change (0)" in result.stdout
     assert "Tier 2 — reported, never fails (1)" in result.stdout
-    assert "bare backticked tokens (b3), section numbers, issue state" in result.stdout
+    assert (
+        "bare backticked tokens (b3), section numbers without a clause, issue state"
+        in result.stdout
+    )
+    assert "0 clause identifier (ADR-0277 §1)" in result.stdout
 
 
 # --------------------------------------------------------------------------- #
