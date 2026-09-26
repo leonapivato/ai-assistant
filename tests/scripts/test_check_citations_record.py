@@ -20,6 +20,8 @@ import sys
 from pathlib import Path
 from typing import Any
 
+import pytest
+
 _SCRIPT = Path(__file__).parents[2] / "scripts" / "check_citations.py"
 
 
@@ -240,13 +242,26 @@ def test_a_correction_in_a_later_paragraph_of_the_dated_item_corrects(tmp_path: 
     assert _stale(tmp_path, _NOTE + dated) == ([], 1)
 
 
-def test_an_unindented_paragraph_after_a_blank_line_is_not_the_item(tmp_path: Path) -> None:
-    """Below the item's content column after a blank line, the item has ended."""
-    dated = "- Note (2026-09-26): Ratification update.\n\nADR-0002 was ratified on 2026-09-18.\n"
-    assert _stale(tmp_path, _NOTE + dated) == (
-        [(2, "0001", "ADR-0002 remains Proposed")],
-        0,
+def test_a_nested_list_inside_the_dated_item_does_not_end_it(tmp_path: Path) -> None:
+    """A nested item is part of its parent, so the parent's resumed paragraph still counts."""
+    dated = (
+        "- Note (2026-09-26): Ratification update.\n\n  - Supporting detail.\n\n"
+        "  ADR-0002 was ratified.\n"
     )
+    assert _stale(tmp_path, _NOTE + dated) == ([], 1)
+
+
+@pytest.mark.parametrize("marker", ["1.", "1)", "*", "+"])
+def test_any_list_marker_opens_a_correcting_item(tmp_path: Path, marker: str) -> None:
+    """ADR-0278 §2 says *a later list item*, whatever marker it was written with."""
+    dated = f"\n{marker} Note (2026-09-26): ADR-0002 was ratified.\n"
+    assert _stale(tmp_path, _NOTE + dated) == ([], 1)
+
+
+def test_a_nested_dated_item_corrects(tmp_path: Path) -> None:
+    """The item may be written at any depth."""
+    dated = "- Records:\n  - 2026-09-26: ADR-0002 was ratified.\n"
+    assert _stale(tmp_path, _NOTE + dated) == ([], 1)
 
 
 def test_a_correction_above_the_stale_note_corrects_nothing(tmp_path: Path) -> None:
