@@ -66,7 +66,12 @@ _RUN_LINE_RE = re.compile(r"^>(?: .*|\s*)$")
 #: A fence opened inside a block quote — which a clause may not contain. The same
 #: two openers as :data:`_FENCE_RE`, with the same backtick condition, so a
 #: continuation line that merely starts with an inline code span is clause text.
-_QUOTED_FENCE_RE = re.compile(r"^>[ \t]{0,4}(?:`{3,}[^`]*|~{3,}.*)$")
+#: Whatever containers the clause nests inside its quote — a further ``>``, a list
+#: item — are read through, because a fence inside them is still a fenced block
+#: inside the clause.
+_QUOTED_FENCE_RE = re.compile(
+    r"^(?:>[ \t]*)+(?:(?:[-*+]|\d{1,9}[.)])[ \t]+)*(?:`{3,}[^`]*|~{3,}.*)$"
+)
 
 #: An ATX heading: up to three spaces, one to six ``#``, then whitespace or the
 #: end of the line.
@@ -177,10 +182,15 @@ class Reference:
 
 
 def _ordinal(digits: str) -> int:
-    """Return an ordinal's value, or one beyond every clause for an absurd length."""
-    if len(digits) > _LARGEST_ORDINAL_DIGITS:
+    """Return an ordinal's value, or one beyond every clause for an absurd magnitude.
+
+    Leading zeros are dropped before the length is judged: ``0000000002`` is the
+    second clause, and only the significant digits say how large a number is.
+    """
+    significant = digits.lstrip("0") or "0"
+    if len(significant) > _LARGEST_ORDINAL_DIGITS:
         return _BEYOND_EVERY_ORDINAL
-    return int(digits)
+    return int(significant)
 
 
 def _fence(line: str) -> re.Match[str] | None:

@@ -333,3 +333,49 @@ def test_an_absurdly_long_ordinal_resolves_to_nothing_without_crashing(
     assert problem is not None
     if shown is not None:
         assert problem.endswith(f"{shown} does not exist")
+
+
+# --- round-2 regressions -------------------------------------------------------
+
+
+@pytest.mark.parametrize(
+    "fence",
+    [
+        pytest.param("> > ```python\n> > x = 1\n> > ```", id="nested-quote"),
+        pytest.param("> >~~~\n> >x\n> >~~~", id="nested-quote-unspaced"),
+        pytest.param("> - ```python\n>   x = 1\n>   ```", id="list-item"),
+        pytest.param("> 1. ```\n>    x\n>    ```", id="ordered-list-item"),
+    ],
+)
+def test_a_fence_nested_inside_the_quote_still_disqualifies_the_run(fence: str) -> None:
+    """ADR-0089 §2: a clause contains no fenced block, whatever container holds it."""
+    text = (
+        "## Decision\n\n### 1. One\n\n"
+        f"> **Normative.** Example:\n>\n{fence}\n\n"
+        "> **Normative.** The next clause.\n"
+    )
+    found = clauses(text)
+    assert [c.identifier(1) for c in found] == ["ADR-0001 §1:1"]
+    assert found[0].lines == ("> **Normative.** The next clause.",)
+
+
+def test_a_nested_quote_or_list_without_a_fence_is_clause_text() -> None:
+    text = "## Decision\n\n> **Normative.** A rule:\n> > quoted ``x`` text\n> - an item\n"
+    assert len(clauses(text)[0].lines) == 3
+
+
+@pytest.mark.parametrize(
+    ("written", "resolves"),
+    [
+        ("§1:0000000002", True),
+        ("§1:0000000000000000000002", True),
+        ("§1:001-0003", True),
+        ("§1:0000000004", False),
+        ("§1:0-02", False),
+    ],
+)
+def test_leading_zeros_do_not_change_an_ordinal(written: str, resolves: bool) -> None:
+    """Only significant digits bound the conversion; the spelling is kept for the report."""
+    (reference,) = references(f"ADR-0300 {written}")
+    assert reference.text() == f"ADR-0300 {written}"
+    assert (resolve(reference, clauses(_ADR)) is None) is resolves
