@@ -56,8 +56,8 @@ on the work item.
 Issues carry the implementation slices, defects and acceptance evidence.
 Batch issues can coordinate several slices but are not a second milestone board.
 Track labels classify the area of work; they neither allocate capacity nor
-authorize dispatch. The wiki explains current/proposed designs, and ADRs govern
-the contracts that implementation must obey.
+authorize dispatch. The wiki explains the design and the owner's direction,
+and ADRs govern the contracts that implementation must obey.
 
 ## Design stances
 
@@ -143,8 +143,7 @@ accepted exits; their unchecked items and “next lane” prose do not schedule 
 | Identity | Person identity, audiences, sessions and placement | [#1718](https://github.com/leonapivato/ai-assistant/issues/1718) |
 
 The [Phase 1 design discussion (#2517)](https://github.com/leonapivato/ai-assistant/issues/2517)
-and [proposed wiki explanation](https://github.com/leonapivato/ai-assistant/wiki/Understanding-the-request-proposed-design)
-are design inputs, not milestone assignments. Discussion of later phases,
+is a design input, not a milestone assignment. Discussion of later phases,
 external events, recursive supporting work and standing interests must not be
 mistaken for an implementation dispatch.
 

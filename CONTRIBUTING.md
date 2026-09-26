@@ -1072,10 +1072,12 @@ opened as a **draft pull request**, and it never merges as a proposal.
 `docs/proposals/README.md` is the working guide — what the file carries, how
 it is discussed, and the three ways it ends.
 
-- **The wiki is the baseline, not the venue.** The wiki describes the system as
-  the code on `main` implements it. A proposal is a change against that
-  baseline: it cites the wiki pages and ADR clauses it would alter and does not
-  live among them. Nothing under `docs/proposals/` on `main` is a proposal.
+- **The wiki is the baseline, not the venue.** The wiki describes the system's
+  design at a high level — the ratified decisions, and the owner's direction
+  where it goes further — and is not wired into dispatch; ADRs bind the code,
+  and a page never amends one. A proposal is a change against that baseline:
+  it cites the wiki pages and ADR clauses it would alter and does not live
+  among them. Nothing under `docs/proposals/` on `main` is a proposal.
 - **The pull request is the medium.** The file is rewritten in place and
   pushed; the PR's history is the record, and review threads on the diff are
   the discussion. An issue, where one exists, holds the ruling and the link.
