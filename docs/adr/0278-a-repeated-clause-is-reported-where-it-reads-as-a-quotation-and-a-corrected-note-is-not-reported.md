@@ -79,24 +79,30 @@ everything else it selected.
 | The same, where that paragraph also ends in a colon | 16 | 16 | 0 | 8 |
 | Outside `## Decision`, or a colon-ended prose paragraph above names it | 24 | 24 | 0 | 0 |
 
+The zeros in "Other" on the last three rows hold for the corpus as it stands and
+do not carry to the next ADR. The paragraphs below say why, and why §1 takes the
+third row alone.
+
 The clause text never names its source, because a verbatim quotation repeats a
 ruling that did not name itself. The section is the strongest single signal. Every
 one of the corpus's 34 marks outside a Decision section stands in Context or
-Consequences, and every repeated one is a quotation. The paragraph above catches
-the two Decision-section quotations. Read over any paragraph, it also selects
-ADR-0242 §2:9 and ADR-0246 §10:5, because the paragraph above each is a
-neighbouring mark that happens to cite the ADR it equals. Excluding a block-quote
-paragraph removes both.
+Consequences, and every repeated one is a quotation. It misses the two
+Decision-section quotations.
 
-A paragraph can also name an ADR in passing. "ADR-0211 changes planning; this
-change only adjusts local log formatting." above a new ADR's
-"`PROTOCOL_VERSION` does not move for this change." names an ADR whose clause
-that sentence equals, and quotes nothing. What marks an introduction is the colon
-it ends on: both Decision-section quotations end their paragraph with one ("…where
-the envelope lives:", "The clause reads:"), and so do 19 of the 22 Context
-quotations. Requiring the colon costs one Context quotation that the section test
-already selects. The union of the section test and the colon-ended paragraph
-selects every quotation and nothing else.
+The paragraph above can catch those two, but no form of it measured here is safe
+for the next ADR. Read over any paragraph, it also selects ADR-0242 §2:9 and
+ADR-0246 §10:5, because the paragraph above each is a neighbouring mark that
+happens to cite the ADR it equals. Excluding a block-quote paragraph removes both.
+It does not remove the case a new ADR can write, because a paragraph can name an
+ADR in passing: "ADR-0211 changes planning; this change only adjusts local log
+formatting." above a new ADR's "`PROTOCOL_VERSION` does not move for this change."
+names an ADR whose clause that sentence equals, and quotes nothing. Requiring the
+paragraph to end in a colon, as both Decision-section quotations do, does not
+close it either: "ADR-0211 changes planning. For this change to local logging we
+decide:" ends in a colon and introduces the new ADR's own ruling. Each tighter
+form admits a new ordinary sentence that fails it, because whether a paragraph
+attributes the clause that follows to another ADR is a reading, and ADR-0088 §6
+has the checker adjudicate no reading.
 
 On the stale notes, "a later header list item that carries a date and says the
 same ADR `was ratified`" passes the nine #2560 corrected. At `d2c25133` it still
@@ -109,37 +115,32 @@ and reports ADR-0274's alone. The repeated-clause figures are the same at both.
 ### 1. A repeated clause is a finding where it reads as a quotation
 
 > **Normative.** A marked clause whose text, normalised as ADR-0277 §2:6 normalises
-> it, equals a marked clause of another ADR is a finding only when one of two tests
-> selects it: it stands outside its own ADR's `## Decision` section, or its lead-in
-> ends in a colon and names, as `ADR-NNNN`, an ADR whose marked clause it equals.
+> it, equals a marked clause of another ADR is a finding only when it stands outside
+> its own ADR's `## Decision` section.
 
-> **Normative.** A marked clause's **lead-in** is the paragraph directly above it:
-> after any blank lines between them are skipped, the unbroken run of non-blank
-> lines that ends on the line nearest the clause and stops below the next blank
-> line or heading above. A paragraph whose first line opens with the block-quote
-> marker `>` gives the clause no lead-in. The lead-in **ends in a colon** when the
-> last non-blank character of its last line is `:`.
+> **Normative.** The clause that stands outside its `## Decision` section is the
+> finding. The clause it equals is not reported for that equality unless it too
+> stands outside its own ADR's `## Decision` section.
 
-> **Normative.** The selected clause alone is the finding. The clause it equals is
-> not reported for that equality unless one of the two tests selects it too.
+> **Normative.** A repeated clause selected by this section is a Tier 1 finding
+> when it stands in an ADR numbered above 0277 and a Tier 2 finding in any other
+> ADR.
 
-> **Normative.** A selected clause is a Tier 1 finding when it stands in an ADR
-> numbered above 0277 and a Tier 2 finding in any other ADR.
+> **Normative.** An equal clause standing inside its ADR's `## Decision` section is
+> not a finding at any tier. The report states how many such clauses it passed, and
+> lists none of them.
 
-> **Normative.** An equal clause that neither test selects is not a finding at any
-> tier. The report states how many such clauses it passed, and lists none of them.
+> **Normative.** Each repeated-clause finding names the clauses it equals and the
+> level-2 section it stands in.
 
-> **Normative.** Each repeated-clause finding names the clauses it equals and which
-> of the two tests selected it.
-
-**Why these two tests.** A quotation has a reader who needs to know where it came
-from, so an author introduces it. In Context that introduction is the whole
-purpose of the passage. In a Decision section it is a paragraph that names the
-source and hands over to it with a colon. Boilerplate has no source to name: each
-ADR states it as its own ruling, under its own numbered section, and a paragraph
-that mentions another ADR in passing does not introduce it. The measured union separates the two with no
-false report, which ADR-0088 §6 ranks above a miss ("A miss is benign; a false
-report is not").
+**Why the section and nothing else.** A ruling an ADR makes belongs in its Decision
+section, and boilerplate is a ruling each ADR makes for itself. A mark in Context or
+Consequences is either a quotation or a ruling out of place, and one that repeats
+another ADR's ruling word for word is a quotation in every case the corpus holds.
+Inside a Decision section the check cannot tell a quotation from a restatement
+without reading the prose around it, so it passes both. That misses two quotations
+the corpus has and fails no sentence an ADR states as its own, which is the
+direction ADR-0088 §6 chooses ("A miss is benign; a false report is not").
 
 ### 2. A corrected stale note is recorded and not reported
 
@@ -161,12 +162,12 @@ what nobody has recorded yet.
 ### 3. What this leaves as it was
 
 > **Normative.** No lane reads §1's narrower selection as permitting a marked
-> quotation that neither test selects. ADR-0277 §3's second clause binds every
+> quotation that §1 does not select. ADR-0277 §3's second clause binds every
 > quotation of another ADR's marked clause, wherever it stands.
 
-The check is narrower than the rule, by design. A quotation in a Decision section
-whose lead-in does not name its source, or does not end in a colon, still passes the
-check, and ADR-0277 §3 still forbids it. That is ADR-0088 §6's benign miss.
+The check is narrower than the rule, by design. A marked quotation in a Decision
+section passes the check, as ADR-0211 §5:3 and ADR-0214 §7:1 would, and ADR-0277 §3
+still forbids it. That is ADR-0088 §6's benign miss.
 
 Also unchanged: ADR-0277 §2's normalisation; its split at ADR-0277 between failing
 and reported; the stale-note check's Tier 2 in every ADR; the marks check; and §3's
@@ -177,13 +178,11 @@ ADR's status.
 
 > **Normative.** `scripts/check_citations.py` implements §1 and §2, and tests
 > under `tests/scripts/` cover at least: a quotation in Context of an ADR above
-> 0277 (Tier 1); a Decision-section quotation whose colon-ended prose lead-in
-> names its source (Tier 1); the same sentence in the Decision sections of two ADRs
-> above 0277 (no finding); a prose lead-in that names the equal ADR and ends in a
-> full stop (no finding); a block-quote lead-in naming the equal ADR (no finding); a
-> corrected
-> note (counted, not listed); and a correcting note naming a different ADR (the
-> stale note still reported).
+> 0277 (Tier 1, and the clause it equals not reported); the same sentence in the
+> Decision sections of two ADRs above 0277 (no finding, and counted as passed); a
+> Decision-section clause equal to another ADR's, under a colon-ended paragraph
+> naming that ADR (no finding); a corrected note (counted, not listed); and a
+> correcting note naming a different ADR (the stale note still reported).
 
 > **Normative.** `CONTRIBUTING.md` → "Cite in form, and mark what binds" and the
 > guidance comment in `docs/adr/template.md` describe the repeated-clause check and
@@ -211,35 +210,40 @@ All of it is one implementing lane, dispatched after this ADR merges.
 
 ## Consequences
 
-- The repeated-clause report falls from 117 clauses to 24, every one a quotation.
+- The repeated-clause report falls from 117 clauses to 22, every one a quotation.
   The stale-note report falls from 12 notes to 1 at `ce760137`: ADR-0274's
   ADR-0276 note, which has no correcting note (#2569).
 - A new ADR can state "`PROTOCOL_VERSION` does not move for this change." or any
   other sentence the corpus repeats on purpose, word for word, in its Decision
   section.
-- A new ADR that marks a quotation in its Context, or introduces a marked
-  quotation by naming its source, still fails the gate.
+- A new ADR that marks a quotation in its Context still fails the gate. One that
+  marks a quotation in its Decision section passes the check and breaks ADR-0277
+  §3's rule, which review enforces there as it did before ADR-0277.
 - A restatement that a superseding ADR marks as its own, as ADR-0246 §2 does, is
   not selected. Whether such a restatement is a quotation under ADR-0277 §3 is not
   decided here.
-- Revisit if a quotation is found that neither test selects, or if a test selects
-  a sentence that quotes nobody.
+- Revisit if marked quotations in Decision sections recur in new ADRs, which would
+  make the miss worth a mechanically explicit quotation form, or if a clause outside
+  a Decision section is found repeating another ADR's ruling without quoting it.
 
 ## Alternatives considered
 
 - **Tier 2 for every ADR.** This was the fallback if no test separated quotations
-  from boilerplate. One does, with no false report measured, and a 117-line report
-  goes unread.
+  from boilerplate. The section test does, with no false report measured, and a
+  117-line report goes unread.
 - **A list of permitted boilerplate sentences.** Each new house phrase would fail
   first and be listed second, and the list would be a second statement of the
   corpus's wording to maintain.
-- **The section test alone.** It is simpler, but it misses both Decision-section
-  quotations the corpus has, and the lead-in arm costs one paragraph read per
-  repeated clause.
-- **A lead-in that names the source, without the colon.** It selects every
-  quotation the corpus has, but it also fails boilerplate under a paragraph that
-  mentions an ADR carrying the same sentence for an unrelated reason, which is the
-  false report this ADR exists to remove.
+- **A lead-in arm beside the section test**, in any of the three forms measured
+  above: the paragraph above names the equal ADR, the same excluding block quotes,
+  or the same ending in a colon. Each catches the two Decision-section quotations,
+  and each fails an ordinary sentence a new ADR may write above its own
+  boilerplate, as the Context shows. That is the false report this ADR exists to
+  remove.
+- **A required attribution form for quotations**, such as a fixed phrase before
+  each one. It would make the Decision-section miss checkable, but it is a new
+  authoring rule for a miss the corpus shows twice. It is left to the
+  revisit condition in Consequences.
 - **Requiring a stale note to be rewritten.** A ratified header note may not be
   edited in place (ADR-0001), so the correcting note is the only record available.
 - **Dropping the stale-note check.** It found three stale notes that nobody had
