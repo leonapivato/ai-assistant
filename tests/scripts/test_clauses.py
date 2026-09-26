@@ -379,3 +379,42 @@ def test_leading_zeros_do_not_change_an_ordinal(written: str, resolves: bool) ->
     (reference,) = references(f"ADR-0300 {written}")
     assert reference.text() == f"ADR-0300 {written}"
     assert (resolve(reference, clauses(_ADR)) is None) is resolves
+
+
+# --- round-3 regressions -------------------------------------------------------
+
+
+@pytest.mark.parametrize(
+    "literal",
+    [
+        pytest.param(">     ```python\n>     x = 1\n>     ```", id="indented-code"),
+        pytest.param("> \t\t```python", id="two-tabs"),
+        pytest.param("> -      ```python", id="list-item-indented-code"),
+    ],
+)
+def test_fence_text_inside_indented_code_is_clause_text(literal: str) -> None:
+    """Four spaces into its container is an indented code block, not a fenced block."""
+    text = (
+        "## Decision\n\n### 1. One\n\n"
+        f"> **Normative.** Preserve this literal example:\n>\n{literal}\n\n"
+        "> **Normative.** The next clause.\n"
+    )
+    assert [c.identifier(1) for c in clauses(text)] == ["ADR-0001 §1:1", "ADR-0001 §1:2"]
+
+
+@pytest.mark.parametrize(
+    "fence",
+    [
+        pytest.param(">    ```python", id="three-spaces-after-the-marker-space"),
+        pytest.param("> - item\n>   ```python", id="list-continuation"),
+        pytest.param(">  >  ```python", id="spaced-nested-quote"),
+        pytest.param("> \t```python", id="a-tab-reaches-the-next-stop"),
+    ],
+)
+def test_a_fence_up_to_three_spaces_into_its_container_disqualifies(fence: str) -> None:
+    text = (
+        "## Decision\n\n### 1. One\n\n"
+        f"> **Normative.** Example:\n>\n{fence}\n\n"
+        "> **Normative.** The next clause.\n"
+    )
+    assert [c.identifier(1) for c in clauses(text)] == ["ADR-0001 §1:1"]

@@ -63,14 +63,20 @@ _MARK_OPEN_RE = re.compile(r"^> \*\*Normative(?:\.\*\*|(?:\. | — )\S)")
 #: invisible and ending the run on one would silently truncate a clause.
 _RUN_LINE_RE = re.compile(r"^>(?: .*|\s*)$")
 
-#: A fence opened inside a block quote — which a clause may not contain. The same
-#: two openers as :data:`_FENCE_RE`, with the same backtick condition, so a
+#: A fence opened inside a block quote — which a clause may not contain. The
+#: same two openers as :data:`_FENCE_RE`, with the same backtick condition, so a
 #: continuation line that merely starts with an inline code span is clause text.
-#: Whatever containers the clause nests inside its quote — a further ``>``, a list
-#: item — are read through, because a fence inside them is still a fenced block
-#: inside the clause.
+#: Containers the clause nests inside its quote are read through by CommonMark's
+#: own offsets, because a fence inside them is still a fenced block inside the
+#: clause: each ``>`` takes one optional space after it, a list marker takes one
+#: to four, and the opener itself sits at most three spaces into whatever holds
+#: it. Four or more is an indented code block, whose ```` ``` ```` lines are
+#: literal text — so indentation is counted, never skipped wholesale, and a tab
+#: is expanded to CommonMark's four-column stop before it is counted.
 _QUOTED_FENCE_RE = re.compile(
-    r"^(?:>[ \t]*)+(?:(?:[-*+]|\d{1,9}[.)])[ \t]+)*(?:`{3,}[^`]*|~{3,}.*)$"
+    r"^>[ ]?(?:[ ]{0,3}>[ ]?)*"
+    r"(?:[ ]{0,3}(?:(?:[-*+]|\d{1,9}[.)])[ ]{1,4})+|[ ]{0,3})"
+    r"(?:`{3,}[^`]*|~{3,}.*)$"
 )
 
 #: An ATX heading: up to three spaces, one to six ``#``, then whitespace or the
@@ -340,7 +346,7 @@ def clauses(text: str) -> list[Clause]:
             continue
         end = _run_end(lines, fenced, index)
         run = lines[index:end]
-        if not any(_QUOTED_FENCE_RE.match(member) for member in run):
+        if not any(_QUOTED_FENCE_RE.match(member.expandtabs(4)) for member in run):
             section, heading_line = sections.current()
             ordinal = 1
             if section is not None:
