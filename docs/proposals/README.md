@@ -13,8 +13,9 @@ guide like this one, or a mistake.
 ## Why here, and not the wiki or an issue
 
 The [wiki](https://github.com/leonapivato/ai-assistant/wiki) describes the
-system as the code on `main` implements it, and nothing else. A proposal is a
-change *against* that baseline, so it cites wiki pages and never lives among
+system's design at a high level: what the ratified decisions describe, and the
+owner's direction where it goes further. A proposal works a design out in
+detail against that baseline, so it cites wiki pages and never lives among
 them; the one time proposals were kept as wiki pages, the page and the issue
 recording the same design disagreed within a week.
 
@@ -99,6 +100,7 @@ proposal.
 
 ## After the ADR merges
 
-The wiki still says what the code did. It is updated when the implementation
-lands, from the code, not from the proposal or the ADR. Until then a wiki
+Nothing here owes a wiki edit. The wiki is the owner's medium, not a step of
+this process: a page is updated when the owner brings it up or someone next
+edits it, and its sources then record the decision's status. Until then a
 page's inspected revision is the reader's warning that it predates the change.
