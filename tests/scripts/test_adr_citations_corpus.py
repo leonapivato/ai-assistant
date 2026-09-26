@@ -89,6 +89,26 @@ def test_no_adr_cites_a_decision_that_does_not_exist() -> None:
     )
 
 
+@pytest.mark.parametrize("kind", ["clause", "unmarked", "duplicate-clause"])
+def test_the_record_has_no_tier_1_finding(kind: str) -> None:
+    """ADR-0277 §2: its Tier 1 findings fail this test, and no gate step is added.
+
+    Three checks, one assertion each, so a failure names which rule tripped: a
+    clause identifier naming a clause that does not exist (every member of a
+    range, and never a zero or reversed one); an ADR numbered above 0277, not
+    ``Withdrawn``, that marks nothing; and a marked clause, in an ADR numbered
+    above 0277, equal to another ADR's. The last two reach no ratified text —
+    §2's split at 0277 is what lets this stay green over an append-only corpus
+    — and their Tier 2 halves are reported by ``just citations``, not asserted.
+    """
+    report = _report("--no-tracker")
+
+    assert _tier_1(report, kind) == [], (
+        f"ADR-0277 §2 Tier 1 ({kind}). Run `just citations --no-tracker` for the detail; "
+        "`just adr-rules NNNN` shows an ADR's clauses under their identifiers."
+    )
+
+
 def test_the_corpus_is_actually_being_read() -> None:
     """A check that selected nothing would pass this module silently.
 
@@ -109,6 +129,8 @@ def test_the_corpus_is_actually_being_read() -> None:
     assert counts["tracker"] > 1000
     assert counts["module-path"] > 100
     assert counts["dotted-symbol"] > 100
+    # ADR-0277's Context cites `ADR-0094 §5:2`, and the corpus is append-only.
+    assert counts["clause"] >= 1
 
 
 @pytest.mark.integration

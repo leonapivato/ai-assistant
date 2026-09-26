@@ -16,7 +16,11 @@ prohibitions:
 - **The checker does not infer document structure.** Section references (``§K``)
   are extracted by nobody and checked by nothing. The natural implementation —
   read ``###`` headings — is wrong on 92 citations, because three ADRs number
-  their sections in bold and twelve number none at all.
+  their sections in bold and twelve number none at all. The one exception is
+  ADR-0277's **clause identifier**, ``ADR-NNNN §S:k``: it is "the mechanically
+  distinct scope-reference form" §6 waited for, and it reads structure only
+  inside ``scripts/clauses.py``, by the rule ADR-0277 §1 states — never a bare
+  ``§K``.
 - **A miss is benign; a false report is not.** Every unevaluable citation passes
   silently, and every judgement call in this file resolves toward *not*
   reporting. That is why symbol resolution indexes dotted suffixes generously
@@ -25,7 +29,8 @@ prohibitions:
 
 Two tiers, per §6:
 
-- **Tier 1 may fail** — and holds exactly two things, a decision citation naming
+- **Tier 1 may fail** — and, of citations in ADR-0088 §1's own forms, holds two
+  things, a decision citation naming
   an ADR file that does not exist and a tracker citation naming an issue number
   that does not exist. §6 put both there on the ground that neither has a
   legitimate non-resolving case; ADR-0090 §1 found the one the first half has and
@@ -40,6 +45,21 @@ Two tiers, per §6:
 - **Tier 2 is reported and never fails** — unresolved b1/b2 code citations (§3:
   an append-only corpus correctly cites what the tree does not contain) and
   liveness disagreements (§4).
+
+**ADR-0277 §2 widens both tiers, and partially supersedes §6 to do it** — its
+"two things, and only two" and its closing "Nothing else is checked". The record
+checks, each read through ``scripts/clauses.py``, the one extractor §2 allows:
+
+- **Tier 1**: a clause identifier naming a clause that does not exist — for a
+  range, any member; a range whose first member is 0 or exceeds its last fails
+  outright. An ADR numbered above 0277, not ``Withdrawn``, that marks no clause.
+  A marked clause, in an ADR numbered above 0277, whose text equals another
+  ADR's marked clause once whitespace and block-quote markers are normalised.
+- **Tier 2**: that same duplicate in any older ADR, whose text no edit may
+  change (ADR-0001, ADR-0089 §5); and a header note saying an ADR "remains
+  Proposed" when that ADR's own ``Status`` is not ``Proposed``, in any ADR,
+  because the note was true when written and ADR-0165's one-line flip cannot
+  reach it.
 
 One thing outside the two tiers can stop the run, because it is not a citation:
 **two files under ``docs/adr/`` carrying the same four digits**. The number is
@@ -67,6 +87,7 @@ from dataclasses import dataclass
 from pathlib import Path
 from typing import TYPE_CHECKING
 
+import clauses
 from adr_status import field_records, status_value
 
 if TYPE_CHECKING:
@@ -201,10 +222,6 @@ _HTML_ATTRIBUTE_RE = re.compile(r"""[\w:.-]+\s*=\s*("[^"\n]*"|'[^'\n]*'|[^\s"'>`
 #: multi-line span is dropped, which is a miss and therefore benign (§6).
 _CODE_SPAN_RE = re.compile(r"(?P<ticks>`+)(?P<content>[^\n]+?)(?P=ticks)")
 
-#: A fence line. ADR-0088 §1: everything inside a fence is display, not citation
-#: — which is what lets an ADR exhibit a form it forbids, including a reference
-#: to an ADR that does not exist (§4 fences ``ADR-0090`` for exactly this).
-_FENCE_RE = re.compile(r"^(?P<indent> {0,3})(?P<ticks>`{3,}|~{3,})(?P<info>.*)$")
 
 #: A trailing line number on a legacy citation (ADR-0088 §5): the rule is
 #: forward-only, and "a legacy citation is handled by stripping the line number
@@ -303,7 +320,8 @@ class Finding:
     Attributes:
         tier: 1 if this may fail a change, 2 if it is reported and never fails.
         kind: Which rule produced it — ``decision``, ``tracker``, ``module-path``,
-            ``dotted-symbol`` or ``liveness``.
+            ``dotted-symbol`` or ``liveness`` (ADR-0088), or ``clause``,
+            ``stale-note``, ``unmarked`` or ``duplicate-clause`` (ADR-0277 §2).
         path: The ADR the citation was written in, relative to the repo root.
         line: 1-based line number of the citation.
         citation: The citation exactly as written.
@@ -415,24 +433,13 @@ def iter_prose_lines(text: str) -> Iterator[tuple[int, str]]:
     Yields:
         One ``(1-based lineno, line)`` pair per line outside any fence.
     """
-    open_fence: tuple[str, int, int] | None = None
-    for lineno, line in enumerate(text.splitlines(), start=1):
-        match = _FENCE_RE.match(line)
-        if open_fence is None:
-            if match is not None:
-                ticks = match.group("ticks")
-                open_fence = (ticks[0], len(ticks), len(match.group("indent")))
-                continue
-            yield lineno, line
-            continue
-        char, length, _indent = open_fence
-        if match is not None and match.group("ticks")[0] == char:
-            closes = len(match.group("ticks")) >= length and not match.group("info").strip()
-            if closes:
-                open_fence = None
-    # An unterminated fence swallows the rest of the file. That is the
-    # conservative direction: excluding too much costs misses, which §6 calls
-    # benign, where including display text costs false reports, which it does not.
+    # The fence rule itself lives in `scripts/clauses.py`, because the clause
+    # scan ADR-0277 §2 adds to this checker reads the same fences and one rule
+    # for "is this line display" is what keeps the two from disagreeing. An
+    # unterminated fence still swallows the rest of the file: excluding too much
+    # costs misses, which §6 calls benign, where including display text costs
+    # false reports, which it does not.
+    yield from clauses.iter_prose_lines(text)
 
 
 def _iter_code_spans(line: str) -> Iterator[str]:
@@ -1470,6 +1477,162 @@ def _adr_documents(root: Path) -> list[tuple[str, str]]:
     ]
 
 
+# --------------------------------------------------------------------------- #
+# The record (ADR-0277 §2)
+# --------------------------------------------------------------------------- #
+
+#: The ADR whose §2 splits the record checks: a finding in an ADR numbered above
+#: it may fail, one in any other is in ratified text no edit may change
+#: (ADR-0001, ADR-0089 §5) and is reported.
+_RECORD_CHECKS_FROM = 277
+
+#: ``ADR-0275, which remains Proposed`` — a header note saying an ADR is still
+#: ``Proposed`` (ADR-0277 §2). The ADR is the one written **directly against**
+#: the phrase, optionally through ``, which``: that is the shape all nine notes
+#: #2555 found were written in, and adjacency is what keeps a later note that
+#: *quotes* the phrase — "that note's "which remains Proposed" … is stale" — from
+#: being read as the claim it corrects. A note worded any other way is missed,
+#: which ADR-0088 §6 ranks below a false report. The whitespace runs cross line
+#: breaks, because the notes wrap.
+_REMAINS_PROPOSED_RE = re.compile(
+    r"\bADR-(?P<adr>\d{4}),?\s+(?:which\s+)?remains\s+`?Proposed\b`?", re.IGNORECASE
+)
+
+
+def _first_status_word(status: str | None) -> str:
+    """Return a Status field's leading word, lower-cased and unpunctuated."""
+    if not status:
+        return ""
+    return status.split()[0].strip(",.;:").lower()
+
+
+def _clause_citation_findings(
+    documents: list[tuple[str, str]], marked: dict[int, list[clauses.Clause]]
+) -> tuple[list[Finding], int]:
+    """Judge every clause identifier the ADRs write — Tier 1 (ADR-0277 §2).
+
+    Read over prose only: a fenced identifier is display, as a fenced decision
+    citation is (ADR-0088 §1). An identifier naming an ADR that does not exist is
+    a finding here as well as a decision finding, because the clause it names
+    does not exist either — and where the number is a gap, ADR-0090 §1 silences
+    the decision half, which must not silence this one.
+
+    Returns:
+        The findings, and how many identifiers were selected.
+    """
+    findings: list[Finding] = []
+    selected = 0
+    for path, text in documents:
+        prose = dict(iter_prose_lines(text))
+        blanked = "\n".join(prose.get(n, "") for n in range(1, len(text.splitlines()) + 1))
+        for reference in clauses.references(blanked):
+            selected += 1
+            if reference.adr in marked:
+                problem = clauses.resolve(reference, marked[reference.adr])
+            else:
+                problem = f"no docs/adr/{reference.adr:04d}-*.md exists"
+            if problem is not None:
+                findings.append(
+                    Finding(
+                        tier=_TIER_FAILING,
+                        kind="clause",
+                        path=path,
+                        line=reference.lineno,
+                        citation=reference.text(),
+                        detail=problem,
+                    )
+                )
+    return findings, selected
+
+
+def _stale_note_findings(adrs: dict[int, tuple[str, str]]) -> Iterator[Finding]:
+    """Tier 2: a header note saying an ADR "remains Proposed" when it does not (§2).
+
+    Reported and never failed, in every ADR: the note is true until the ADR it
+    names is ratified, and ADR-0165's one-line flip cannot touch it, so failing
+    it would turn ``main`` red on the day that flip lands.
+    """
+    for number in sorted(adrs):
+        path, text = adrs[number]
+        top = header(text)
+        for match in _REMAINS_PROPOSED_RE.finditer(top):
+            named = int(match.group("adr"))
+            if named not in adrs:
+                continue  # Tier 1 already has the dangling file; say it once.
+            status = status_field(adrs[named][1])
+            if _first_status_word(status) == "proposed":
+                continue
+            yield Finding(
+                tier=_TIER_REPORTED,
+                kind="stale-note",
+                path=path,
+                line=top.count("\n", 0, match.start("adr")) + 1,
+                citation=f"ADR-{named:04d} remains Proposed",
+                detail=(
+                    f"ADR-{named:04d}'s own Status opens "
+                    f"{(status or '(none)').split()[0]!r}, not Proposed — the note "
+                    "went stale when that ADR was ratified"
+                ),
+            )
+
+
+def _unmarked_findings(
+    adrs: dict[int, tuple[str, str]], marked: dict[int, list[clauses.Clause]]
+) -> Iterator[Finding]:
+    """Tier 1: an ADR numbered above 0277, not ``Withdrawn``, that marks nothing (§2)."""
+    for number in sorted(adrs):
+        if number <= _RECORD_CHECKS_FROM or marked[number]:
+            continue
+        path, text = adrs[number]
+        if _first_status_word(status_field(text)) == "withdrawn":
+            continue
+        yield Finding(
+            tier=_TIER_FAILING,
+            kind="unmarked",
+            path=path,
+            line=1,
+            citation=f"ADR-{number:04d}",
+            detail="marks no clause, and every ADR numbered above 0277 must (ADR-0277 §2)",
+        )
+
+
+def _duplicate_clause_findings(
+    adrs: dict[int, tuple[str, str]], marked: dict[int, list[clauses.Clause]]
+) -> Iterator[Finding]:
+    """One finding per marked clause whose text equals another ADR's (§2).
+
+    Tier 1 in an ADR numbered above 0277, Tier 2 in any other. Every clause of a
+    matching set is reported, each in its own ADR and at its own ADR's tier,
+    because each is "a marked clause whose text … equals a marked clause of
+    another ADR"; the detail names the others. Two equal clauses in one ADR are
+    not a finding — the rule is about another ADR.
+    """
+    by_text: dict[str, list[tuple[int, clauses.Clause]]] = {}
+    for number in sorted(marked):
+        for clause in marked[number]:
+            by_text.setdefault(clause.normalised(), []).append((number, clause))
+    for group in by_text.values():
+        if len({number for number, _ in group}) < _QUALIFIED_PAIR:
+            continue
+        for number, clause in group:
+            others = ", ".join(
+                other.identifier(other_number) or f"ADR-{other_number:04d} line {other.lineno}"
+                for other_number, other in group
+                if other_number != number
+            )
+            yield Finding(
+                tier=_TIER_FAILING if number > _RECORD_CHECKS_FROM else _TIER_REPORTED,
+                kind="duplicate-clause",
+                path=adrs[number][0],
+                line=clause.lineno,
+                citation=clause.identifier(number) or f"ADR-{number:04d}",
+                detail=(
+                    f"its text equals {others} — a quotation of another ADR's clause "
+                    "carries no **Normative.** token (ADR-0277 §3)"
+                ),
+            )
+
+
 def check(root: Path, *, tracker_numbers: Iterable[int] | None) -> Report:
     """Run every check ADR-0088 §6 permits over one checkout.
 
@@ -1505,7 +1668,8 @@ def check(root: Path, *, tracker_numbers: Iterable[int] | None) -> Report:
     findings: list[Finding] = []
     counts = {"decision": 0, "tracker": 0, "module-path": 0, "dotted-symbol": 0}
 
-    for path, text in _adr_documents(root):
+    documents = _adr_documents(root)
+    for path, text in documents:
         for citation in extract_citations(path, text, top_names):
             counts[citation.kind] = counts.get(citation.kind, 0) + 1
             finding = _judge(citation, targets, known_trackers, definitions, root)
@@ -1513,6 +1677,15 @@ def check(root: Path, *, tracker_numbers: Iterable[int] | None) -> Report:
                 findings.append(finding)
 
     findings.extend(_liveness_findings(adrs))
+
+    # ADR-0277 §2: the record. The marked clauses are read once, from the same
+    # mapping the decision citations resolve against.
+    marked = {number: clauses.clauses(text) for number, (_, text) in adrs.items()}
+    clause_findings, counts["clause"] = _clause_citation_findings(documents, marked)
+    findings.extend(clause_findings)
+    findings.extend(_stale_note_findings(adrs))
+    findings.extend(_unmarked_findings(adrs, marked))
+    findings.extend(_duplicate_clause_findings(adrs, marked))
 
     notes: list[str] = []
     if known_trackers is None:
@@ -1630,6 +1803,8 @@ _TIER2_HEADINGS = {
     "module-path": "Module paths that do not resolve (b1)",
     "dotted-symbol": "Dotted symbols that do not resolve (b2)",
     "liveness": "Liveness disagreements",
+    "stale-note": "Header notes saying a ratified ADR remains Proposed (ADR-0277 §2)",
+    "duplicate-clause": "Marked clauses equal to another ADR's (ADR-0277 §2)",
 }
 
 
@@ -1662,11 +1837,12 @@ def format_text(report: Report) -> str:
         f"{counts.get('decision', 0)} decision, "
         f"{counts.get('tracker', 0)} tracker, "
         f"{counts.get('module-path', 0)} module path (b1), "
-        f"{counts.get('dotted-symbol', 0)} dotted symbol (b2)."
+        f"{counts.get('dotted-symbol', 0)} dotted symbol (b2), "
+        f"{counts.get('clause', 0)} clause identifier (ADR-0277 §1)."
     )
     lines.append(
         "Not checked, by ADR-0088 §6: bare backticked tokens (b3), section "
-        "numbers, issue state, anything inside a fence."
+        "numbers without a clause, issue state, anything inside a fence."
     )
     lines.append(
         f"Gaps in the issued ADR set ({len(report.gaps)}): {_gap_numbers(report.gaps)}. "
@@ -1688,7 +1864,8 @@ def format_text(report: Report) -> str:
     lines.append(
         f"Tier 2 — reported, never fails ({len(report.tier2)}). "
         "A non-empty list is expected: ADR-0088 §3 records three classes an "
-        "append-only corpus cites correctly and the tree does not hold."
+        "append-only corpus cites correctly and the tree does not hold, and "
+        "ADR-0277 §2 reports record drift in ratified text no edit may change."
     )
     for kind, heading in _TIER2_HEADINGS.items():
         group = [f for f in report.tier2 if f.kind == kind]
@@ -1700,15 +1877,16 @@ def format_text(report: Report) -> str:
 
 def format_markdown(report: Report) -> str:
     """Render the report as markdown, for a CI job summary."""
-    lines = ["## ADR citation check (ADR-0088 §6)", ""]
+    lines = ["## ADR citation check (ADR-0088 §6, ADR-0277 §2)", ""]
     counts = report.counts
     lines.append(
         f"Selected **{counts.get('decision', 0)}** decision, "
         f"**{counts.get('tracker', 0)}** tracker, "
-        f"**{counts.get('module-path', 0)}** module-path (b1) and "
-        f"**{counts.get('dotted-symbol', 0)}** dotted-symbol (b2) citations. "
-        "Bare tokens (b3), section numbers, issue state and fenced content are "
-        "not checked."
+        f"**{counts.get('module-path', 0)}** module-path (b1), "
+        f"**{counts.get('dotted-symbol', 0)}** dotted-symbol (b2) and "
+        f"**{counts.get('clause', 0)}** clause-identifier (ADR-0277 §1) citations. "
+        "Bare tokens (b3), section numbers without a clause, issue state and "
+        "fenced content are not checked."
     )
     lines.extend(
         [
@@ -1733,7 +1911,8 @@ def format_markdown(report: Report) -> str:
     lines.append(
         "A non-empty list is expected. ADR-0088 §3 names three classes an "
         "append-only corpus cites correctly and the tree does not hold: not yet "
-        "built, deliberately removed, and considered and declined."
+        "built, deliberately removed, and considered and declined. ADR-0277 §2 "
+        "reports record drift in ratified text no edit may change."
     )
     for kind, heading in _TIER2_HEADINGS.items():
         group = [f for f in report.tier2 if f.kind == kind]
