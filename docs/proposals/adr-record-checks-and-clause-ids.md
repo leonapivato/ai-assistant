@@ -1,8 +1,8 @@
 # Checking the ADR record, and naming one ruling
 
-**The question.** How do we catch an ADR record that has drifted — two notes
-disagreeing, a ratified ADR still called pending, an ADR with no rulings — and how
-does a reader cite one ruling rather than a whole section?
+**The question.** How do we catch an ADR record that has drifted — a ratified ADR
+still called pending, an ADR with no rulings, a quotation marked as a ruling — and
+how does a reader cite, or read, one ADR's rulings without the whole ADR?
 
 ## Why now
 
@@ -123,6 +123,39 @@ nothing, or which of its sentences a later ADR marks), and #2556. Clause
 identifiers are **not** back-filled into old records; they are used from now on,
 and an old record is converted only when something next touches it.
 
+### 5. A rules view
+
+Under ADR-0089 §3 an ADR's marked clauses are the whole of what it obligates; the
+rest is argument, history and records. The rulings are already separable, only
+scattered through the argument. A recipe prints them on their own:
+
+```text
+$ just adr-rules 0094
+ADR-0094 — Client, sensor and actuator are capability profiles of one spoke: …
+Status: Accepted
+
+§1 One kind of attachment, and it is bounded by the process boundary
+  §1:1  A spoke is an attachment that reaches the hub across a …
+  …
+§2 The edge dials out; the hub never dials the edge
+  §2:1  Every connection between the hub and a spoke is established by the spoke. …
+```
+
+- It prints the ADR's title and **full Status line** first, so a reader sees that
+  a ruling may have been superseded before reading any ruling.
+- Each ruling appears under its section heading, with its clause identifier, and
+  in full: nothing is summarised, so the view cannot drift from the text.
+- ADR-0094 is 1,133 lines; its 34 rulings are 109. Across the corpus, rulings are
+  about a fifth of all ADR lines (8,917 clauses in 184 ADRs).
+- For an ADR before ADR-0089, which has no marks, it says so and prints nothing:
+  every sentence of an unmarked ADR can bind, so there is no shorter faithful view.
+
+It uses the same extraction as the checks in §2, so it is a thin addition to the
+same lane. It does **not** annotate each ruling as in force or replaced: supersession
+scopes are still prose ("only as it reaches…"), and guessing them would put a
+second, possibly wrong, statement of the law in front of the reader. That
+annotated view stays open below.
+
 ## Options considered
 
 - **Clause form.** `§5.2` reads naturally but looks like a subsection number, a
@@ -140,12 +173,15 @@ and an old record is converted only when something next touches it.
 
 ## What it leaves open
 
-- **A generated "current state" view** of an ADR (each ruling annotated in force,
-  replaced, or partly replaced), which becomes possible once supersession records
-  name clauses. A follow-up, once there are enough clause-level records to render.
+- **An annotated rules view**, marking each ruling in force, replaced or partly
+  replaced. It extends §5 once supersession records name clauses, which they do
+  only from now on.
 - **Making #597's fifth-amender trigger fire mechanically** (21 ADRs are past it)
   and consolidating by wholesale supersession.
-- **An ADR length budget.** The median ADR is now 869 lines.
+- **The ADR form itself**: collecting rulings into one Decision section, separating
+  the rationale, and a length budget (the median ADR is now 869 lines). That changes
+  how ADRs are written and is a separate proposal; §5 gives readers the rulings
+  without it.
 - **Partial supersession of a single clause** ("only as it reaches…") is still
   prose; the identifier names the clause, not the part of it.
 - **A structured supersession record** naming clause identifiers
