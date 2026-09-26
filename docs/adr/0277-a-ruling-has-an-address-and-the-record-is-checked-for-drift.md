@@ -100,12 +100,19 @@ move while it is drafted; a citation of one is checked for existence only.
 
 ### 2. The checker reads the record
 
-All checks run inside `scripts/check_citations.py` and the pytest corpus test that
-already runs it, so the gate keeps five steps (ADR-0088 §6's precedent).
+> **Normative.** Every check this section decides runs inside
+> `scripts/check_citations.py`, and its Tier 1 findings fail the pytest corpus test
+> that already runs that script. No gate step is added.
 
-> **Normative.** A clause identifier that names no marked clause of its ADR is a
-> Tier 1 finding: it fails the gate. ADR-0088 §6's Tier 1 set is two items and this
-> one.
+> **Normative.** Clause identifiers are extracted by one implementation, shared by
+> `scripts/check_citations.py`, `scripts/brief_check.py` and `just adr-rules`. No
+> second extractor is written.
+
+> **Normative.** A clause identifier is a Tier 1 finding, failing the gate, unless
+> every clause it names exists: for `§S:k`, the *k*-th marked clause of section *S*;
+> for `§S:j-k`, every clause from *j* to *k*. A range whose *j* is 0, or whose *j*
+> exceeds its *k*, is itself a Tier 1 finding. ADR-0088 §6's Tier 1 set is its two
+> items and these.
 
 > **Normative.** A header note that says an ADR "remains Proposed" (or "remains
 > `Proposed`") while that ADR's own Status is not `Proposed` is a Tier 2 finding.
@@ -159,15 +166,19 @@ possibly wrong statement of the law in front of the reader.
 
 ### 5. The work order
 
-One implementing lane, after this ADR merges:
+> **Normative.** `scripts/brief_check.py` resolves every clause identifier in a
+> dispatch brief as §2 resolves one in an ADR, and reports one that does not resolve
+> as it reports a missing ADR file.
 
-1. `scripts/check_citations.py`: clause-identifier extraction and resolution, and
-   the checks of §2, each with tests under `tests/scripts/`.
-2. `scripts/brief_check.py`: resolve clause identifiers in a dispatch brief, using
-   the same extraction.
-3. `just adr-rules`, with tests.
-4. `CONTRIBUTING.md` → "Cite in form, and mark what binds" and `docs/adr/template.md`:
-   the clause identifier and §3's two rules.
+> **Normative.** Each check of §2, the resolution in `scripts/brief_check.py`, and
+> `just adr-rules` is covered by tests under `tests/scripts/`, including a range with
+> a missing member, a zero endpoint and a reversed range.
+
+> **Normative.** `CONTRIBUTING.md` → "Cite in form, and mark what binds" and
+> `docs/adr/template.md` state the clause identifier and §3's two rules, citing this
+> ADR for them.
+
+All of it is one implementing lane, dispatched after this ADR merges.
 
 ### 6. This ADR classified under ADR-0070 §1 and ADR-0082 §1
 

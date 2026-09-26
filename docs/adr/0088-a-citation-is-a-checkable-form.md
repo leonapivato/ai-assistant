@@ -55,8 +55,8 @@
   about what it measured. Refs #603, ADR-0090 §4.
 - Partially superseded: 2026-09-26 by ADR-0277 — §1(a) gains a further written form
   of the decision citation, the clause identifier `ADR-NNNN §S:k`, naming one marked
-  clause; §6's Tier 1 set gains the failure of a clause identifier that names no
-  marked clause, and new ADRs gain two Tier 1 checks (an ADR that marks nothing; a
+  clause; §6's Tier 1 set gains the failure of a clause identifier that does not
+  resolve in full, and new ADRs gain two Tier 1 checks (an ADR that marks nothing; a
   marked clause that repeats another ADR's); two further findings are reported in
   Tier 2. §6's refusal to check a bare `§K` stands: ADR-0277 is the mechanically
   distinct scope-reference form §6 waited for, and it checks only that form.
