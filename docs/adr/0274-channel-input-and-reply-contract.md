@@ -25,6 +25,10 @@
   replacements recorded by the ADR-0275 note above took effect then; that note's
   "which remains Proposed" was true when written and is stale. The Status line above
   is unchanged (#2555).
+- Note (2026-09-26): ADR-0276 was ratified on 2026-09-22 (`2e20ab11`), so the scoped
+  replacement recorded by the ADR-0276 note above took effect then; that note's
+  "which remains Proposed" was true when written and is stale. The Status line above
+  is unchanged (#2569).
 
 ## Context
 
