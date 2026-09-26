@@ -267,12 +267,13 @@ test-fast *args:
 
 # Tier 1 — an ADR file or an issue number that does not exist, a clause
 # identifier naming a clause that does not, and for an ADR numbered above 0277 no
-# marked clause or one equal to another ADR's — exits non-zero; Tier 2 —
-# unresolved code citations, liveness disagreements, stale "remains Proposed"
-# notes and duplicate clauses in older ADRs — is reported and never fails, and a
-# non-empty Tier 2 list is expected (ADR-0088 §3, ADR-0277 §2). Tier 1 also runs
-# inside `just test`, so this recipe is the *report*, not the gate. Extra args
-# pass through, e.g. `just citations --no-tracker`.
+# marked clause or one equal to another ADR's outside its Decision section — exits
+# non-zero; Tier 2 — unresolved code citations, liveness disagreements, stale
+# "remains Proposed" notes no later dated note corrects, and older ADRs' clauses
+# equal to another's outside their Decision section — is reported and never fails,
+# and a non-empty Tier 2 list is expected (ADR-0088 §3, ADR-0277 §2, ADR-0278 §1,
+# §2). Tier 1 also runs inside `just test`, so this recipe is the *report*, not the
+# gate. Extra args pass through, e.g. `just citations --no-tracker`.
 #
 # Last line, because `just --list` shows only that one: what this recipe reports.
 # What the ADRs cite, checked against the repository (ADR-0088 §6)
