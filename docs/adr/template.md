@@ -19,7 +19,13 @@ note giving the date, the authority and the ground; a bare "Withdrawn" with no
 such note is not a withdrawal. The document, its number and its text stay in the
 corpus and stay citable for what they say. Withdrawing an ADR that is already
 "Accepted" is not permitted — that is a change to what was decided, so it takes a
-superseding ADR. See ADR-0127. -->
+superseding ADR. See ADR-0127.
+
+A header note this ADR writes onto an earlier ADR does not state this ADR's
+status: it may say the change takes effect on this ADR's ratification, and says
+nothing further about whether that has happened. A note saying this ADR "remains
+Proposed" goes stale the day it is ratified, where ADR-0165's one-line flip
+cannot reach it (ADR-0277 §3). -->
 
 
 ## Context
@@ -43,14 +49,26 @@ obligation — a passage stating two separable obligations is two clauses (§2):
 
 To *show* a mark rather than make one — quoting another ADR's ruling, exhibiting
 the form — put it inside a fenced block: a `**Normative.**` line inside a fence
-is display, not a mark (§2).
+is display, not a mark (§2). A quotation of another ADR's marked clause carries
+no `**Normative.**` token: fence it, or block-quote it without the token
+(ADR-0277 §3). A quoted mark is a second clause this ADR never ruled, and the
+citation check fails one whose text equals another ADR's marked clause.
+
+Name one ruling by its clause identifier, `ADR-NNNN §S:k`: the k-th marked clause
+of ADR-NNNN within section S, where S is the nearest numbered heading's label
+(`5`, `10a`) or, with none in its level-2 section, that heading's first word
+(`Context`); `§S:j-k` names a range, and several may share one prefix after
+commas (ADR-0277 §1). The citation check fails one naming a clause that does not
+exist, and `just adr-rules NNNN` prints an ADR's clauses under their
+identifiers.
 
 Mark every obligation you mean to impose, because the marks are the whole of
 them: in a marked ADR, unmarked text is read to determine what a marked clause
 *means* and never supplies an obligation, so a rule stated only in the prose
 beside a mark binds nothing (§3). An ADR that marks nothing is unmarked and
 binds as prose, exactly as the ratified corpus does — marking is forward-only,
-and nothing already ratified is marked (§5).
+and nothing already ratified is marked (§5). An ADR numbered above 0277 that
+marks nothing fails the citation check unless it is Withdrawn (ADR-0277 §2).
 
 Cite in ADR-0088 §1's three forms, never with a line number (ADR-0088 §5):
 name the symbol, and quote the line where the position matters.

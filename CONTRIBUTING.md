@@ -1159,6 +1159,46 @@ the status quo rather than to a defect, which moves the risk onto review.
 inside a mark.** Nothing mechanical finds an under-marked ADR, and under §3
 whatever was left outside the marks is simply discarded.
 
+**Name one ruling by its clause identifier**, `ADR-NNNN §S:k` — the *k*-th
+marked clause of ADR-NNNN within section *S*, counted from 1 in file order
+(ADR-0277 §1). *S* is the label of the nearest numbered heading above the clause
+(`5`, `10a`), or, where no numbered heading precedes it within its level-2
+section, that level-2 heading's first word (`Context`, `Consequences`); an
+unnumbered heading below level 2 starts no section. `§S:j-k` names clauses *j*
+to *k* inclusive, and several identifiers may share one prefix after commas
+(`ADR-NNNN §5:2, §6:1-3`). It is an additional form of the decision citation and
+replaces none: `ADR-NNNN`, `ADR-NNNN §K` and a scope in words stay valid, and no
+lane rewrites an existing citation into it. **Do not count by hand** —
+`just adr-rules NNNN` prints an ADR's title, its whole `Status` line and every
+marked clause under its identifier, and nothing else of the body. It says
+nothing about whether a clause is still in force; that reading stays with the
+`Status` line and the ADRs it names (§4). An identifier is stable once its ADR
+is `Accepted`, because the marks and their order are then fixed; one into a
+`Proposed` ADR can still move, and is checked for existence only.
+
+The same corpus check reads the record (ADR-0277 §2). **Tier 1**, failing the
+gate: a clause identifier naming a clause that does not exist — for a range, any
+member of it, and a range whose first member is 0 or exceeds its last fails
+outright; an ADR numbered above 0277, not `Withdrawn`, that marks no clause; and
+a marked clause, in an ADR numbered above 0277, whose text equals another ADR's
+once whitespace and block-quote markers are normalised. **Tier 2**, reported: the
+same duplicate in an older ADR, and a header note saying an ADR "remains
+Proposed" when that ADR's own `Status` no longer is. `scripts/brief_check.py`
+resolves a clause identifier in a dispatch brief the same way, and reports one
+that does not resolve as absent.
+
+**Two authoring rules keep the record from drifting** (ADR-0277 §3):
+
+- **A header note written onto an earlier ADR does not state the writing ADR's
+  status.** It may say the change takes effect on that ADR's ratification, and
+  says nothing further about whether that has happened. A note saying the
+  writing ADR "remains Proposed" goes stale on the day it is ratified, and
+  ADR-0165's one-line flip cannot reach it.
+- **A quotation of another ADR's marked clause carries no `**Normative.**`
+  token.** Show it in a fenced block (ADR-0089 §2) or as a block quote without
+  the token. A quoted mark is a second marked clause — a ruling the quoting ADR
+  never made.
+
 ### No state claims in living documents
 
 Ratified in ADR-0019, which holds the evidence and the rejected alternative.
