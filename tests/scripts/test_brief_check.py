@@ -572,3 +572,24 @@ def test_a_fenced_clause_identifier_is_not_extracted(tmp_path: Path) -> None:
     result = _run(tmp_path, "```\nADR-0003 §9:9\n```\n")
 
     assert "§9:9" not in result.stdout
+
+
+def test_a_wrapped_identifier_list_is_resolved_in_full(tmp_path: Path) -> None:
+    """The member after a line break is the identifier's, not an unbound `§1`."""
+    _make_marked_repo(tmp_path)
+
+    result = _run(tmp_path, "See ADR-0003 §1:2,\n§1:9 today.")
+
+    assert _section_of(result.stdout, _row(result.stdout, "§1:9")).startswith("absent")
+    assert "not checked" not in result.stdout
+
+
+def test_an_absurdly_long_ordinal_is_reported_rather_than_crashing(tmp_path: Path) -> None:
+    _make_marked_repo(tmp_path)
+    digits = "9" * 5000
+
+    result = _run(tmp_path, f"See ADR-0003 §1:{digits}.")
+
+    assert result.returncode == 1, result.stderr
+    assert "Traceback" not in result.stderr
+    assert _section_of(result.stdout, _row(result.stdout, f"§1:{digits}")).startswith("absent")

@@ -116,6 +116,25 @@ def test_identifiers_are_counted(tmp_path: Path) -> None:
     assert json.loads(result.stdout)["counts"]["clause"] == 2
 
 
+def test_a_wrapped_identifier_list_is_checked_in_full(tmp_path: Path) -> None:
+    """A soft line break inside a comma list does not hide its later members."""
+    cites = _adr(2, body="See ADR-0001 §1:2,\n§1:9 and ADR-0001\n§2:5.")
+    assert _findings(tmp_path, {1: _adr(1, body=_MARKED), 2: cites}, "clause") == [
+        (1, "0002", "ADR-0001 §1:9"),
+        (1, "0002", "ADR-0001 §2:5"),
+    ]
+
+
+def test_an_absurdly_long_ordinal_is_a_finding_not_a_crash(tmp_path: Path) -> None:
+    digits = "9" * 5000
+    cites = _adr(2, body=f"See ADR-0001 §1:{digits} and ADR-0001 §1:1-{digits}.")
+    found = _findings(tmp_path, {1: _adr(1, body=_MARKED), 2: cites}, "clause")
+    assert found == [
+        (1, "0002", f"ADR-0001 §1:1-{digits}"),
+        (1, "0002", f"ADR-0001 §1:{digits}"),
+    ]
+
+
 # --- stale "remains Proposed" notes: Tier 2 ----------------------------------
 
 _NOTE = (
