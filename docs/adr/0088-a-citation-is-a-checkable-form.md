@@ -1,6 +1,6 @@
 # 88. A citation is a checkable form: what an ADR may cite, and what "resolves" means
 
-- Status: Partially superseded by ADR-0090 (§6's Tier 1 rule that a decision citation naming an absent ADR file always fails, as it applies to a number lying in a gap enclosed by the issued set)
+- Status: Partially superseded by ADR-0090 (§6's Tier 1 rule that a decision citation naming an absent ADR file always fails, as it applies to a number lying in a gap enclosed by the issued set) and ADR-0277 (§6's "Two things, and only two" Tier 1 set and its closing "Nothing else is checked", as they reach the clause identifier and the record checks; §1(a)'s list of decision-citation forms, which gains the clause identifier)
 - Date: 2026-08-01
 - **This ADR supersedes nothing.** It supplies the rule ADR-0070 §4 reserved for
   "any liveness-classifying consumer added later", and it constrains the
@@ -53,6 +53,14 @@
   **not** among the errors: the citation that fails is written bare, with no
   `§K`, so it is outside that sentence's population. The measurement was right
   about what it measured. Refs #603, ADR-0090 §4.
+- Partially superseded: 2026-09-26 by ADR-0277 — §1(a) gains a further written form
+  of the decision citation, the clause identifier `ADR-NNNN §S:k`, naming one marked
+  clause; §6's Tier 1 set gains the failure of a clause identifier that names no
+  marked clause, and new ADRs gain two Tier 1 checks (an ADR that marks nothing; a
+  marked clause that repeats another ADR's); two further findings are reported in
+  Tier 2. §6's refusal to check a bare `§K` stands: ADR-0277 is the mechanically
+  distinct scope-reference form §6 waited for, and it checks only that form.
+  Everything else here stands. The change takes effect on ratification of ADR-0277.
 
 ## Context
 
