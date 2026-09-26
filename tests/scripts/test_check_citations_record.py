@@ -235,3 +235,12 @@ def test_a_quotation_without_the_token_is_no_duplicate(tmp_path: Path) -> None:
 def test_one_adr_repeating_itself_is_not_a_duplicate(tmp_path: Path) -> None:
     body = _MARKED + "\n\n### 3. Three\n\n> **Normative.** Rule one-one."
     assert _findings(tmp_path, {278: _adr(278, body=body)}, "duplicate-clause") == []
+
+
+def test_an_adr_above_0277_whose_only_run_holds_a_nested_fence_is_unmarked(
+    tmp_path: Path,
+) -> None:
+    """The run is no clause (ADR-0089 §2), so the ADR marks nothing (ADR-0277 §2)."""
+    body = "> **Normative.** Example:\n>\n> > ```python\n> > x = 1\n> > ```"
+    adrs = {277: _adr(277, body=_MARKED), 278: _adr(278, body=body)}
+    assert _findings(tmp_path, adrs, "unmarked") == [(1, "0278", "ADR-0278")]
