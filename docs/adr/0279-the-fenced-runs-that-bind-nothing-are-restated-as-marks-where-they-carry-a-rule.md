@@ -1,6 +1,6 @@
 # 279. The fenced runs that bind nothing are restated as marks where they carry a rule
 
-- Status: Proposed
+- Status: Accepted
 - Date: 2026-09-26
 - Authorization: on 2026-09-26 the owner answered "do your recommendations" to the
   dispatcher's recommendation on #2563, which was to write a new ADR restating the
