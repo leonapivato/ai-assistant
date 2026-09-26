@@ -1,6 +1,6 @@
 # 278. A repeated clause is reported where it reads as a quotation, and a corrected note is not reported
 
-- Status: Proposed
+- Status: Accepted
 - Date: 2026-09-26
 - Authorization: on 2026-09-26 the owner answered the coordinator's recommendation on
   #2564 — that the repeated-clause check stop failing on wording the corpus restates on
