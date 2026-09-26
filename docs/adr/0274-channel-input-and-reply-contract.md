@@ -21,6 +21,10 @@
   These scoped replacements take effect on ratification of ADR-0276, which remains
   Proposed. This reciprocal header record accompanies the numbered draft under ADR-0070
   and ADR-0082; prior supersessions and the ratified body below are preserved.
+- Note (2026-09-26): ADR-0275 was ratified on 2026-09-18 (`fb072c9a`), so the scoped
+  replacements recorded by the ADR-0275 note above took effect then; that note's
+  "which remains Proposed" was true when written and is stale. The Status line above
+  is unchanged (#2555).
 
 ## Context
 

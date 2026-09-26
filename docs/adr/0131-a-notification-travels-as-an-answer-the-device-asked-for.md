@@ -123,6 +123,10 @@
   the consequence from — "a lane whose fence admits both files may make it
   atomically" — and which this ADR's own header already applied to ADR-0134. Not one
   word of §4 is edited. Refs #1709.
+- Note (2026-09-26): the three `**Normative.**` blockquotes in Context restate
+  other ADRs' rulings verbatim: the first two are ADR-0124 §10's (so their "this
+  ADR" means ADR-0124), and the third is ADR-0094 §2's. They add no obligation
+  beyond those rulings, and a reader should cite the originals (#2556).
 
 ## Context
 

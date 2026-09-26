@@ -19,6 +19,10 @@
   record accompanies the numbered draft under ADR-0070 and ADR-0082; the ratified body
   below is preserved.
 - Authorization: the owner endorsed the proposal's direction and its interruption/parallelism fit, then requested this draft in clone `ai-assistant-2`. The owner assigned the next available ADR number, 0275. These instructions authorize drafting and numbering, not ratification or implementation.
+- Note (2026-09-26): ADR-0276 was ratified on 2026-09-22 (`2e20ab11`), so the scoped
+  replacements recorded by the ADR-0276 note above took effect then; that note's
+  "which remains Proposed" was true when written and is stale. The Status line above
+  is unchanged (#2555).
 
 ## Context
 

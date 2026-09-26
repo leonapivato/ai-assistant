@@ -172,6 +172,11 @@
   reading its own §4 does not support is corrected rather than grandfathered. Appended
   dated note per ADR-0070 §1; no ratified text is rewritten, no decision of this or any
   other ADR moves, and no mark is added (ADR-0089 §5). Refs #2302.
+- Note (2026-09-26): §8's sentence "the gateway is that second spoke (ADR-0168 §1)"
+  is argument, not a ruling, and ADR-0168 §12's marked clause rules the opposite:
+  ADR-0094 §10's trigger for spoke surface "is examined here and does not fire".
+  ADR-0124 §5 and ADR-0174 agree. Under ADR-0089 §3 only the marked clause binds, so
+  the trigger has not fired. No ruling of this ADR changes (#2554).
 
 ## Context
 
