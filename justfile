@@ -265,16 +265,31 @@ test-fast *args:
         exit "$status"
     fi
 
-# Tier 1 — an ADR file or an issue number that does not exist — exits non-zero;
-# Tier 2 — unresolved code citations and liveness disagreements — is reported and
-# never fails, and a non-empty Tier 2 list is expected (ADR-0088 §3). Tier 1 also
-# runs inside `just test`, so this recipe is the *report*, not the gate. Extra
-# args pass through, e.g. `just citations --no-tracker`.
+# Tier 1 — an ADR file or an issue number that does not exist, a clause
+# identifier naming a clause that does not, and for an ADR numbered above 0277 no
+# marked clause or one equal to another ADR's — exits non-zero; Tier 2 —
+# unresolved code citations, liveness disagreements, stale "remains Proposed"
+# notes and duplicate clauses in older ADRs — is reported and never fails, and a
+# non-empty Tier 2 list is expected (ADR-0088 §3, ADR-0277 §2). Tier 1 also runs
+# inside `just test`, so this recipe is the *report*, not the gate. Extra args
+# pass through, e.g. `just citations --no-tracker`.
 #
 # Last line, because `just --list` shows only that one: what this recipe reports.
 # What the ADRs cite, checked against the repository (ADR-0088 §6)
 citations *args:
     uv run python scripts/check_citations.py "$@"
+
+# An ADR's title, its whole Status line, and every marked clause verbatim under
+# its section heading, prefixed by its clause identifier (`ADR-NNNN §S:k`) — and
+# nothing else of the body. It states nothing about whether a clause is in
+# force: the Status line is shown whole, and that reading stays with the reader
+# and the ADRs it names. An unmarked ADR prints that it binds as prose. Takes
+# `94`, `0094` or `ADR-0094`.
+#
+# Last line, because `just --list` shows only that one: what this recipe prints.
+# One ADR's rulings under their clause identifiers (ADR-0277 §4)
+adr-rules adr:
+    @uv run python scripts/adr_rules.py "$1"
 
 # The one mechanical commit that ends an ADR lane (ADR-0165 §2). Once the
 # required review set is green on one tree, this flips the header's single
