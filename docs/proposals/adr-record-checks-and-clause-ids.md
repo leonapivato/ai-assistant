@@ -34,7 +34,6 @@ collision.
 
 ## The baseline
 
-- No wiki page describes the ADR process; nothing on the wiki changes.
 - **ADR-0088** — §1(a) the decision-citation form; §6 the two tiers, and its
   refusal to check section numbers "until a mechanically distinct scope-reference
   form exists"; §9's declines.
