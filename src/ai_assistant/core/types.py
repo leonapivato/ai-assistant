@@ -3432,6 +3432,111 @@ class ActivationUnderstanding(BaseModel):
         return self
 
 
+class ControllerStage(StrEnum):
+    """A unit of processing the activation controller runs (ADR-0280 §4).
+
+    Closed, **added to and never renamed**. A stage is not a phase: the two do
+    not map one to one (ADR-0280 §1). :attr:`END` names the record's final entry,
+    which ran nothing.
+    """
+
+    BEGIN_CONVERSATION = "begin_conversation"
+    ROUTING = "routing"
+    UNDERSTANDING = "understanding"
+    EVENT_SUMMARY = "event_summary"
+    ASSOCIATE_GOAL = "associate_goal"
+    ASK_DISAMBIGUATION = "ask_disambiguation"
+    RECONCILE = "reconcile"
+    TURN_LOOP = "turn_loop"
+    DRIVE = "drive"
+    COMPOSE = "compose"
+    END = "end"
+
+
+class ControllerRule(StrEnum):
+    """Why a stage was due, or why the pass ended (ADR-0280 §2, §4, §5).
+
+    Closed, **added to and never renamed**. The members in
+    :data:`ENDING_CONTROLLER_RULES` end a pass; every other member makes a stage
+    due.
+    """
+
+    CONVERSATION_UNRESOLVED = "conversation_unresolved"
+    ROUTE_UNCHECKED = "route_unchecked"
+    ROUTE_TAKEN = "route_taken"
+    NOT_UNDERSTOOD = "not_understood"
+    EVENT_UNSUMMARIZED = "event_unsummarized"
+    ASSOCIATION_DUE = "association_due"
+    DISAMBIGUATION_RAISED = "disambiguation_raised"
+    CONTINUING_UNRECONCILED = "continuing_unreconciled"
+    UNPLANNED = "unplanned"
+    PLAN_HAS_STEPS = "plan_has_steps"
+    REPLY_OWED = "reply_owed"
+    NOTHING_DUE = "nothing_due"
+    STAGE_REPEATED = "stage_repeated"
+    NO_TEXT_INPUT = "no_text_input"
+    STAGE_FAILED = "stage_failed"
+    STAGE_TIMED_OUT = "stage_timed_out"
+    INTERRUPTED = "interrupted"
+    ENDED_BEFORE_CONTROLLER = "ended_before_controller"
+
+
+#: The rules that end a pass rather than make a stage due (ADR-0280 §4, §5).
+ENDING_CONTROLLER_RULES: Final[frozenset[ControllerRule]] = frozenset(
+    {
+        ControllerRule.ROUTE_TAKEN,
+        ControllerRule.NOTHING_DUE,
+        ControllerRule.STAGE_REPEATED,
+        ControllerRule.NO_TEXT_INPUT,
+        ControllerRule.STAGE_FAILED,
+        ControllerRule.STAGE_TIMED_OUT,
+        ControllerRule.INTERRUPTED,
+        ControllerRule.ENDED_BEFORE_CONTROLLER,
+    }
+)
+
+
+class StageOutcome(StrEnum):
+    """How a stage the controller ran ended (ADR-0280 §5).
+
+    A serializable classification only: the error a failed stage raised never
+    enters a :class:`StageEntry`.
+    """
+
+    DONE = "done"
+    FAILED = "failed"
+    TIMED_OUT = "timed_out"
+
+
+class StageEntry(BaseModel):
+    """One choice the activation controller made (ADR-0280 §6).
+
+    It names which stage ran, the rule that made it due and how it ended, or, for
+    the final :attr:`ControllerStage.END` entry, the rule that ended the pass. It
+    carries no stage result: those stay where the episode already keeps them.
+    """
+
+    model_config = ConfigDict(frozen=True, extra="forbid")
+    stage: ControllerStage
+    due: ControllerRule
+    started_at: UtcInstant
+    ended_at: UtcInstant
+    outcome: StageOutcome
+
+    @model_validator(mode="after")
+    def _end_entry_is_an_ending(self) -> Self:
+        ending = self.due in ENDING_CONTROLLER_RULES
+        if (self.stage is ControllerStage.END) != ending:
+            msg = "the end entry, and only it, is due to a rule that ends the pass"
+            raise ValueError(msg)
+        if self.stage is ControllerStage.END and (
+            self.outcome is not StageOutcome.DONE or self.started_at != self.ended_at
+        ):
+            msg = "an end entry records outcome done at one instant"
+            raise ValueError(msg)
+        return self
+
+
 class EpisodeProcessingRecord(BaseModel):
     """Immutable facts about one activation, written after its processing ends."""
 
@@ -3451,6 +3556,8 @@ class EpisodeProcessingRecord(BaseModel):
     understanding: tuple[ActivationUnderstanding, ...] = ()
     understanding_omitted: UnderstandingOmission | None = None
     understanding_elided: int = Field(default=0, strict=True, ge=0, lt=2**31)
+    stages: tuple[StageEntry, ...] = ()
+    stages_elided: int = Field(default=0, strict=True, ge=0, lt=2**31)
 
     @model_validator(mode="after")
     def _understood_or_omitted(self) -> Self:

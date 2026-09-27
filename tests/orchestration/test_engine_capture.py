@@ -824,6 +824,14 @@ def test_the_composing_stages_supply_is_enumerated_so_a_new_field_must_be_judged
     ``SecretStr``. **Every ``understanding`` is empty on every record this tree
     captures**, its producer being ADR-0276 §8's step 3 — the field is in the graph as
     a shape, and the judgement is made now rather than left to the lane that fills it.
+
+    **``StageEntry`` joined it with ADR-0280 §7**, because ``EpisodeProcessingRecord``
+    gained ``stages``. The judgement, made rather than assumed: ADR-0280 §6 closes the
+    entry at five fields with ``extra="forbid"`` — three members of closed enumerations
+    and two clock readings — and states that an entry carries no stage result and never
+    the error a failed stage raised. None of those fields admits a ``SecretStr`` or any
+    text. **Every ``stages`` is empty on every record this tree captures**, its producer
+    being ADR-0280 §8's step 2.
     """
     # ADR-0275: processing metadata joins the in-process record graph. Its
     # fields are identifiers, closed values, clocks and caller-supplied Tier 1
@@ -883,6 +891,7 @@ def test_the_composing_stages_supply_is_enumerated_so_a_new_field_must_be_judged
         "OutboundStatement",
         "SemanticMemory",
         "SpokenDelivery",
+        "StageEntry",
         "StepCondition",
         "StepExecution",
         "StepFailure",

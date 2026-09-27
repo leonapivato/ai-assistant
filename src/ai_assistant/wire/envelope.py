@@ -2388,7 +2388,8 @@ from ai_assistant.wire.errors import (
 #: 57: ADR-0275 adds the required channel activation capture receipt.
 #: 58: ADR-0276 adds the understanding fields to the wire-carried EpisodeProcessingRecord.
 #: 59: ADR-0276 moves EpisodeProcessingRecord to schema_version 2 with its exactly-one rule.
-PROTOCOL_VERSION: Final[int] = 59
+#: 60: ADR-0280 adds the stage record fields to the wire-carried EpisodeProcessingRecord.
+PROTOCOL_VERSION: Final[int] = 60
 
 #: ADR-0085 §8a: "The correlation id is a UUID string and is at most 36 bytes.
 #: Bounding it is what makes the reserve a constant rather than an aspiration; a
