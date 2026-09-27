@@ -109,7 +109,7 @@ built yet.
 
 > **Normative.** A pass whose input yielded no text — speech with no words, or
 > speech whose transcription failed — does not run the controller's rules, and
-> records the single end entry `ControllerRule.no_text_input` (§6). The rule is
+> records the single end entry `ControllerRule.no_text_input` under §5. The rule is
 > named for the input, not for speech, so a later sensor that yields no text
 > ends the same way.
 
@@ -126,8 +126,10 @@ the record's shape or the stage interface.
 > the stage interface.
 
 > **Normative.** A stage, as the controller runs it, has a `ControllerStage`
-> name and one method, `async run(state) -> StageOutcome`. A stage adds its
-> results to the pass's state and never chooses what runs next.
+> name and one method, `async run(state) -> StageResult`. `StageResult` is
+> orchestration-local and carries a `StageOutcome` (§5) and, for `failed` or
+> `timed_out`, the error. A stage adds its results to the pass's state and
+> never chooses what runs next.
 
 > **Normative.** The controller repeats one step until the pass ends: evaluate
 > §4's rules in their fixed order against the pass's state and the last
@@ -143,7 +145,7 @@ the record's shape or the stage interface.
 > in-flight results the rules read — whether the conversation is resolved,
 > whether routing ran and took the route, whether understanding was entered,
 > the association, whether reconciliation ran, the turn `LearningLoop.respond`
-> returned, the drive's disposition and whether a reply was composed. The
+> returned, the drive's disposition and whether the `compose` stage ran. The
 > working set is never persisted.
 
 > **Normative.** Beginning the conversation, understanding, the event summary,
@@ -188,11 +190,17 @@ orchestration sees.
 | 8 | `continuing_unreconciled` | The association continues a goal, reconciliation is wired and has not run | `reconcile` |
 | 9 | `unplanned` | A conversation turn associated without a disambiguation, whose turn loop has not run | `turn_loop` |
 | 10 | `plan_has_steps` | The turn raised no question, its plan has steps, and no step was driven | `drive` |
-| 11 | `reply_owed` | The turn loop ran, no step parked for confirmation, and nothing was composed | `compose` |
+| 11 | `reply_owed` | The turn loop ran, no step parked for confirmation, and the `compose` stage has not run | `compose` |
 | 12 | `nothing_due` | Always | the end of the pass |
 
 > **Normative.** `nothing_due` is last and always answers, so every pass the
 > controller runs ends by a rule.
+
+> **Normative.** Each rule that makes a stage due answers only while that stage
+> has not run on the pass, whatever the stage produced. In particular a
+> composition that returns a degraded reply without raising (ADR-0170 §8)
+> consumes `reply_owed`: the composer is called exactly once and the pass
+> reaches `nothing_due`.
 
 > **Normative.** The attempt's bookkeeping stays inside the stages that do it
 > today: persistence order, the reservation, the `ruled` callback,
@@ -217,11 +225,13 @@ it gains entries.
 
 ### 5. Outcomes and fixed defaults
 
-> **Normative.** `StageOutcome` is `done`, `failed` or `timed_out`. A stage
-> that raises returns `failed` carrying the error; a stage whose deadline
-> expired before or during it returns `timed_out` carrying the error; a stage
-> whose deadline had already passed when it was due is not run and returns
-> `timed_out`.
+> **Normative.** `StageOutcome` is a closed, serializable classification in
+> `core/types.py`: `done`, `failed` or `timed_out`. A stage that raises yields a
+> `StageResult` of `failed` carrying the error; a stage whose deadline expired
+> before or during it yields `timed_out` carrying the error; a stage whose
+> deadline had already passed when it was due is not run and yields
+> `timed_out` carrying the deadline error. Only the `StageOutcome` enters a
+> `StageEntry`; the error never does.
 
 > **Normative.** The controller's fixed default for `failed` is to end the
 > pass with `ControllerRule.stage_failed`, and for `timed_out` to end it with
@@ -233,6 +243,16 @@ it gains entries.
 > ends with the end entry `ControllerRule.interrupted`, appended in the
 > controller's `finally` before the cancellation propagates and before
 > finalization reads the state.
+
+> **Normative.** A channel activation that ends before the controller is
+> entered — cancelled at the admission barrier, or ended at the speech edge
+> of §2 — receives its end entry from `ActivationState` at finalization,
+> which appends it exactly when the state holds no end entry: `interrupted`
+> for a cancellation; `no_text_input` for speech with no words or whose
+> transcription failed; `ended_before_controller` for any other failure ahead
+> of the controller, such as a delivery report that could not be applied.
+> Appending it changes no exception, status or reason the pass already
+> carries.
 
 A later decision can give a stage a different default — planning without an
 understanding, for example — by changing one rule, not by catching errors in
@@ -247,7 +267,8 @@ the engine.
 > `StageOutcome` are added to `core/types.py` beside it.
 
 > **Normative.** Every channel activation records one entry per stage run and
-> **exactly one end entry**, last, whose `stage` is `end`, whose `due` is the
+> **exactly one end entry**, last — appended by the controller when it ends the
+> pass, and otherwise by `ActivationState` at finalization under §5 — whose `stage` is `end`, whose `due` is the
 > rule that ended the pass, and whose `outcome` is `done`. No meaning is
 > carried by the absence of an entry.
 
@@ -334,9 +355,13 @@ also the only statement of why a resume episode carries no understanding
 > entries its record carries, end entry included: a typed turn that drives a
 > step; a typed turn that raises a question; a turn that ends in a
 > disambiguation; a turn whose step parks for confirmation; a routed turn; a
-> spoken turn; a spoken turn with no words; an informational event; a pass
-> whose understanding fails; a pass whose understanding times out; and a
-> cancelled pass. The rules and the controller are tested over constructed
+> spoken turn; a spoken turn with no words; a spoken turn whose
+> transcription fails; an informational event; a pass whose understanding
+> fails; a pass whose understanding times out; a composition that returns a
+> degraded reply without raising, which records one `compose` entry and then
+> `nothing_due`; a pass cancelled while the controller runs; a pass cancelled
+> at the admission barrier before the controller is entered; and a pass
+> cancelled during the speech edge's delivery-report or transcription work. The rules and the controller are tested over constructed
 > states and fake stages, including elision that keeps the end entry.
 
 > **Normative.** Each implementation PR lists every existing behaviour it
