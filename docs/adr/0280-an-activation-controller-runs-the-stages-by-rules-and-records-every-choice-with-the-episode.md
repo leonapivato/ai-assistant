@@ -86,8 +86,8 @@ built yet.
 ### 2. What will be replaced is quarantined
 
 > **Normative.** Intent routing runs as one stage, `routing`, which wraps
-> `RoutingStage` and the routed pass together: it either declines, adding
-> nothing, or takes the route and performs, composes and prepares capture for
+> `RoutingStage` and the routed pass together: it either declines, recording
+> the decision `declined`, or takes the route and performs, composes and prepares capture for
 > the routed pass exactly as ADR-0197 and its amenders decide. The controller
 > knows only which of the two happened. No other rule, stage or record field
 > refers to routing.
@@ -142,11 +142,19 @@ the record's shape or the stage interface.
 > text produced inside the activation is read by a rule.
 
 > **Normative.** `ActivationState` carries the pass's **working set**: the
-> in-flight results the rules read — whether the conversation is resolved,
-> whether routing ran and took the route, whether understanding was entered,
-> the association, whether reconciliation ran, the turn `LearningLoop.respond`
-> returned, the drive's disposition and whether the `compose` stage ran. The
-> working set is never persisted.
+> decisions the stages have made on the pass, which the rules read — the
+> resolved conversation, the routing decision (`declined` or `taken`), the
+> understanding outcome (a recorded version or an omission), the association,
+> the disambiguation question asked, the reconciliation result, the turn
+> `LearningLoop.respond` returned, the drive's disposition and the composed
+> reply. The working set is never persisted.
+
+> **Normative.** A decision is present in the working set once a stage has made
+> it, **including a decision that nothing came of**: a declined route, an
+> association that found no goal, a composed reply that is degraded. An absent
+> value means only that the decision has not been made, and a stage that
+> produces nothing records that as its decision rather than leaving it
+> absent.
 
 > **Normative.** Beginning the conversation, understanding, the event summary,
 > association, reconciliation, the turn loop, driving and composing each run as
@@ -173,34 +181,45 @@ orchestration sees.
 > `reconcile`, `turn_loop`, `drive`, `compose` and `end`.
 
 > **Normative.** `ControllerRule` is a closed `StrEnum`, **added to and never
-> renamed**, with exactly the members the table below, §2 and §5 name.
+> renamed**, with exactly the members the table below, the loop guard, §2 and §5
+> name.
 
 > **Normative.** The rules are evaluated in the order of this table, and the
 > first that answers decides:
 
 | # | Rule | Answers when | Makes due |
 | --- | --- | --- | --- |
-| 1 | `conversation_unresolved` | A conversation turn whose conversation is not yet resolved | `begin_conversation` |
-| 2 | `route_unchecked` | A conversation turn, routing is wired, and the `routing` stage has not run | `routing` |
-| 3 | `route_taken` | The `routing` stage took the route | the end of the pass |
-| 4 | `not_understood` | The understanding stage is wired and was not yet entered | `understanding` |
-| 5 | `event_understood` | An informational event whose summary has not run | `event_summary` |
-| 6 | `association_due` | A conversation turn not yet associated | `associate_goal` |
-| 7 | `disambiguation_raised` | The association asks which goal is meant, and the question was not yet asked | `ask_disambiguation` |
-| 8 | `continuing_unreconciled` | The association continues a goal, reconciliation is wired and has not run | `reconcile` |
-| 9 | `unplanned` | A conversation turn associated without a disambiguation, whose turn loop has not run | `turn_loop` |
-| 10 | `plan_has_steps` | The turn raised no question, its plan has steps, and no step was driven | `drive` |
-| 11 | `reply_owed` | The turn loop ran, no step parked for confirmation, and the `compose` stage has not run | `compose` |
+| 1 | `conversation_unresolved` | A conversation turn with no resolved conversation | `begin_conversation` |
+| 2 | `route_unchecked` | A conversation turn, routing is wired, and there is no routing decision | `routing` |
+| 3 | `route_taken` | The routing decision is `taken` | the end of the pass |
+| 4 | `not_understood` | The understanding stage is wired and there is no understanding outcome for the input | `understanding` |
+| 5 | `event_understood` | An informational event with an understanding outcome and no event summary | `event_summary` |
+| 6 | `association_due` | A conversation turn with no association | `associate_goal` |
+| 7 | `disambiguation_raised` | The association asks which goal is meant, and no disambiguation question has been asked | `ask_disambiguation` |
+| 8 | `continuing_unreconciled` | The association continues a goal, reconciliation is wired, and there is no reconciliation result | `reconcile` |
+| 9 | `unplanned` | A conversation turn whose association asks nothing, and no turn | `turn_loop` |
+| 10 | `plan_has_steps` | A turn that raised no question, whose plan has steps, and no drive disposition | `drive` |
+| 11 | `reply_owed` | A turn whose step did not park for confirmation, and no composed reply | `compose` |
 | 12 | `nothing_due` | Always | the end of the pass |
 
 > **Normative.** `nothing_due` is last and always answers, so every pass the
 > controller runs ends by a rule.
 
-> **Normative.** Each rule that makes a stage due answers only while that stage
-> has not run on the pass, whatever the stage produced. In particular a
-> composition that returns a degraded reply without raising (ADR-0170 §8)
-> consumes `reply_owed`: the composer is called exactly once and the pass
-> reaches `nothing_due`.
+> **Normative.** Every rule reads decisions in the working set and never
+> whether a stage has run. A composition that returns a degraded reply
+> without raising (ADR-0170 §8) is a composed reply, so it answers
+> `reply_owed`: the composer is called exactly once and the pass reaches
+> `nothing_due`.
+
+> **Normative — the M38 loop guard.** The controller runs a stage at most once
+> per pass. When the first rule that answers names a stage already run on the
+> pass, the controller does not run it: it ends the pass with the end entry
+> `ControllerRule.stage_repeated`. No path of this decision reaches the guard,
+> and a test asserts that none does. The guard is separate from the rules:
+> the decision that lets a stage run again — planning after a new
+> understanding version, understanding after a contest from the recall hook —
+> replaces the guard with the no-progress limit the wiki's Controller page
+> names, and changes no rule.
 
 > **Normative.** The attempt's bookkeeping stays inside the stages that do it
 > today: persistence order, the reservation, the `ruled` callback,
@@ -361,7 +380,10 @@ also the only statement of why a resume episode carries no understanding
 > degraded reply without raising, which records one `compose` entry and then
 > `nothing_due`; a pass cancelled while the controller runs; a pass cancelled
 > at the admission barrier before the controller is entered; and a pass
-> cancelled during the speech edge's delivery-report or transcription work. The rules and the controller are tested over constructed
+> cancelled during the speech edge's delivery-report or transcription work.
+> A test over fake stages drives a rule that names an already-run stage and
+> asserts the `stage_repeated` end entry, and each activation-kind test
+> asserts that no entry is `stage_repeated`. The rules and the controller are tested over constructed
 > states and fake stages, including elision that keeps the end entry.
 
 > **Normative.** Each implementation PR lists every existing behaviour it
@@ -422,6 +444,10 @@ restart, which moves the record to a durable write-ahead store.
 ## Alternatives considered
 
 - **A transition table** instead of readiness rules. Rejected in §3.
+- **Rules keyed on whether a stage has run.** Simpler to state for one pass
+  that never reruns, but it is a transition table spelled as flags: every later
+  rerun would have to rewrite each rule. Rejected for rules over decisions and
+  one separate loop guard (§4).
 - **Naming the stages after the wiki's phases.** Rejected in §1: the mapping
   does not exist yet.
 - **Folding the record into `AttemptPhase`.** Ruled out by the owner.
