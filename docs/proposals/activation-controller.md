@@ -14,7 +14,7 @@ builds on).
 
 | Word | Where it comes from | What it names |
 | --- | --- | --- |
-| **Stage** | The code | A unit of processing the controller runs, such as routing, associating a goal, the turn loop or composing. |
+| **Stage** | The code | A unit of processing the controller runs, such as associating a goal, the turn loop or composing. |
 | **Phase** | The wiki's [Controller](https://github.com/leonapivato/ai-assistant/wiki/Controller) page | A job in the target design: recall, understanding, planning, authorizing, acting, digesting and closing. |
 
 In this milestone the controller runs **stages**, and its record is a record of
@@ -23,8 +23,8 @@ the understanding phase's job. The rest fall into three groups:
 
 - **Stages that span several phases.** The turn loop does planning and some
   acting (reads). Driving a step does authorizing and acting.
-- **Stages that are no phase.** Beginning the conversation, routing,
-  associating a goal and reconciling.
+- **Stages that are no phase.** Beginning the conversation, associating a
+  goal and reconciling.
 - **Stages that are part of a phase's job.** Composing is part of what planning
   or closing will do.
 
@@ -51,7 +51,9 @@ phase it only partly performs.
   - ADR-0275 §8 says one coordinator finalizes each activation. That is
     unchanged; the controller runs before it.
   - ADR-0276 §5 places understanding after routing and before association.
-    The same order becomes rules.
+    Routing is removed (below), so understanding comes first and association
+    follows it.
+  - ADR-0197/0198's intent routing is removed from the turn path.
   - ADR-0274 §4's dispatch table loses its speech combination for now: spoken
     input is refused (below). The voice decisions (ADR-0199 §3, ADR-0200,
     ADR-0203 §1, ADR-0205) stay on record, inactive until channel work brings
@@ -64,11 +66,14 @@ phase it only partly performs.
 - The controller is built to the target shape. **Existing behaviour may break
   temporarily** until the later phases land, typed turns included, as long as
   each break is listed deliberately.
-- The controller covers **channel activations only**: typed turns (a routed
-  pass included) and informational events. `resume` stays on its
+- The controller covers **channel activations only**: typed turns and
+  informational events. `resume` stays on its
   legacy path. The entry points that are not activations (`answer`,
   `withdraw_clarification`, `abandon_goal`, `cancel_read`) are out of scope.
 - `AttemptPhase` and the controller's record stay separate.
+- **Routing is removed for now.** Its fixed actions will become tool calls
+  that planning plans and acting runs. It deserves a rewrite anyway, so it is
+  fine for it to break until then.
 - **Channels are text only for now, and spoken input is refused.** Today's
   conversation channel is to become a sensor for input and an actuator for
   output, with the conversation as the standard channel. That is separate
@@ -166,9 +171,6 @@ The skeleton's rules, sorted from the inventory on #2576:
 | Rule | Makes due | Today's source |
 | --- | --- | --- |
 | `conversation_unresolved` | Beginning the conversation | `_begin_channel_turn` (ADR-0074 §2) |
-| `route_unchecked` | Routing (when wired, not yet tried) | `_run_turn` (ADR-0197 §1) |
-| `route_taken` | The routed act | `_routed_pass` |
-| `routed_act_done` | End | `_routed_pass` returns |
 | `not_understood` | Understanding | `_run_turn`, `_dispatch_channel` (ADR-0276 §5) |
 | `event_understood` | Summarizing the event | `_dispatch_channel` |
 | `event_summarized` | End | `_dispatch_channel` returns |
@@ -191,18 +193,15 @@ composer checks `step.confirmation` and returns nothing. The check belongs in
 bookkeeping and stay inside the driving and composing stages. So do
 persistence order, the reservation and the `ruled` callback.
 
-**The routed act and the turn loop are opaque.** Each runs its internal
-branches unchanged:
+**The turn loop is opaque.** It runs its planning rounds, read servicing and
+investigation unchanged. Its future cut points are already visible:
 
-- The routed act handles reservation, confirmation and recording.
-- The turn loop handles planning rounds, read servicing and investigation. Its
-  future cut points are already visible:
-  - the first planner call (`loop.py:2531`);
-  - the read-servicing loop (`loop.py:2647`);
-  - the investigation stop rule (`loop.py:1228`).
+- the first planner call (`loop.py:2531`);
+- the read-servicing loop (`loop.py:2647`);
+- the investigation stop rule (`loop.py:1228`).
 
-  When the planning-and-acting milestone splits it, each of those becomes a
-  stage the controller runs and records. The record's shape does not change;
+When the planning-and-acting milestone splits it, each of those becomes a
+stage the controller runs and records. The record's shape does not change;
   it gains entries.
 
 ### Outcomes and fixed defaults
@@ -245,7 +244,7 @@ The end entry's `due` is always one of these:
 
 | Kind of end | `due` |
 | --- | --- |
-| An end a rule chose | `routed_act_done`, `event_summarized`, `disambiguation_raised` |
+| An end a rule chose | `event_summarized`, `disambiguation_raised` |
 | Nothing left to run | `nothing_due` |
 | A fixed default applied to a failed stage | `stage_failed`, `stage_timed_out` |
 
@@ -292,6 +291,10 @@ No break is needed for the skeleton itself. The allowance is used where
 preserving the old behaviour would bend the design, and the implementation PR
 lists each use with its reason. The candidates known now:
 
+- **Routing is removed** (owner ruling, 2026-09-27). The routing stage, the
+  routed act and its parks leave the turn path, so the fixed routed actions
+  stop working until they return as tool calls planned by planning and run in
+  acting. A routed park's resume path goes with them.
 - **Spoken input is refused** (owner ruling, 2026-09-27). `converse_spoken`
   and a speech payload on `receive` fail with a clear "spoken input is not
   supported" error at admission. The spoken path's code (transcription,
@@ -316,7 +319,6 @@ lists each use with its reason. The candidates known now:
 - **The recorded path for each activation kind:** a test per kind asserting
   the exact entries, end entry included:
   - typed turn, driven and undriven;
-  - routed pass;
   - disambiguation;
   - informational event;
   - a failure in understanding.
@@ -360,13 +362,11 @@ lists each use with its reason. The candidates known now:
 
 ## What it leaves open
 
-- **`understanding_omitted`** (ADR-0276 §5) overlaps the record. Each of
-  `routed`, `no_text`, `failed` and `not_reached` can be read off the entries.
-  I'd keep it in this milestone so as not to churn ADR-0276's inspection, and
-  retire it when the record has proven itself.
-- **Routing's future.** It has no place in the wiki's phases. Whether the
-  routed act's fixed actions move into planning or stay as a cheap path is
-  later work.
+- **`understanding_omitted`** (ADR-0276 §5) overlaps the record for the
+  activations the controller runs: `failed` and `not_reached` can be read off
+  the entries, and `routed` and `no_text` can no longer happen. It still
+  carries `no_input` for resume episodes, which have no stage record, so I'd
+  keep it until resume goes through the controller.
 - **Channels** (#2578): sensors and actuators, audience, and bringing voice
   back. The controller's assumptions about channels change with it.
 - **The exact bound** (64) and the enum values' final spelling are settled in
