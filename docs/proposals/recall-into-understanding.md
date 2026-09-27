@@ -4,6 +4,11 @@
 on it to understanding, what does the episode record of that, and how does
 understanding cite a memory?
 
+**Recall belongs to the activation, not to a conversation.** Every activation
+gets it the same way, whatever channel it arrived on: a typed message, an
+email, a calendar change or any later sensor. A conversation is one channel
+among them. Nothing in this design reads the channel type.
+
 Milestone: [M39 — Recall into understanding](https://github.com/leonapivato/ai-assistant/milestone/6).
 It builds on the M38 controller proposal (#2577, read at `6d09e914`). This
 proposal can be discussed now, and it is ratified after M38's ADR merges.
@@ -29,8 +34,8 @@ proposal can be discussed now, and it is ratified after M38's ADR merges.
     **Superseded** for recalled memory.
   - ADR-0276 §2: a referent's `kind` is `input`, `channel_item` or `episode`.
     It gains a kind for a memory.
-  - ADR-0276 §5 (as #2577 changes it): understanding is the first stage after
-    the conversation is resolved. Recall now comes between them.
+  - ADR-0276 §5 (as #2577 changes it): understanding is the first stage that
+    reads an activation's input. Recall now comes before it.
   - ADR-0275 §4: `EpisodeProcessingRecord` gains a field for what recall
     found, with a schema version bump.
   - ADR-0237: unchanged. Recall is one more caller of `MemoryStore.search`.
@@ -54,7 +59,7 @@ proposal can be discussed now, and it is ratified after M38's ADR merges.
 
 ```mermaid
 flowchart LR
-    B["Beginning the<br/>conversation"] --> R["Recall<br/>(new, no model)"]
+    A["An activation<br/>on any channel"] --> R["Recall<br/>(new, no model)"]
     R -->|"found, nothing found<br/>or failed"| P["The pass's state"]
     P --> U["Understanding<br/>sees M1, M2, …"]
     U -->|"cites a memory"| P
@@ -65,9 +70,16 @@ flowchart LR
 ### Recall is a stage the controller runs
 
 Recall is a new stage in the controller #2577 proposes. It is due by one new
-readiness rule, **`not_recalled`**, placed after `conversation_unresolved` and
-before `not_understood`. It needs the conversation resolved first, because one
-of its cues is the channel window.
+readiness rule, **`not_recalled`**: the activation has no recall result yet,
+and its channel window is available. The rule sits before `not_understood`,
+so recall runs before understanding on every activation.
+
+The rule reads the pass's state, not the channel type. Its one prerequisite is
+the activation's channel window, because that is one of its cues. On most
+channels the window arrives with the activation. On a channel whose window is
+built from stored history, as a conversation's is today, recall waits until
+that history is resolved (#2577's `conversation_unresolved`). That is a detail
+of how that channel builds its window, not a step recall owes.
 
 Recall is the second stage, after understanding, that does exactly one phase's
 job and nothing else, so under #2577's naming rule it takes the phase's name:
@@ -85,9 +97,11 @@ There is no Protocol: it is one of orchestration's own stages.
 | Cue | The query |
 | --- | --- |
 | **The activation's words** | The input text, as the pass holds it |
-| **The channel window** | The text of the window's most recent items, joined and cut to a fixed bound |
+| **The channel window** | The text of the most recent items on the channel the activation came on, joined and cut to a fixed bound |
 
-The second search is skipped when the window holds no text.
+The second search is skipped when the window holds no text. The cues are the
+same for every activation. For a message they are the words and the exchange
+before it; for an email, its text and the recent mail on that channel.
 
 **Each search** asks `MemoryStore.search` for episodic and semantic records,
 with `episode_model_eligible=True` (the same eligibility the loop's own reads
@@ -205,17 +219,14 @@ searched shouldn't stop the assistant from reading its input.
 Recall runs under a short budget of its own, inside the pass deadline, so a
 slow embedder can't eat understanding's time. The value is an ADR detail.
 
-### Informational events
+### Outside content as a cue
 
-**Recall runs for events too.** The wiki's rule is "it always runs", and an
-event such as an email is exactly where an older memory helps: who the sender
-is, and what the matter was.
-
-Using an event's text as a search cue doesn't break the two-readers rule.
-Recall calls no model, so nothing reads the outside content except
-understanding, which is already allowed to. The cost is that outside content
-chooses which memories understanding is shown. That is acceptable, because
-understanding only describes and grants nothing.
+When an activation's input is outside content, such as an email, it is still a
+cue. That doesn't break the two-readers rule: recall calls no model, so nothing
+reads the outside content except understanding, which is already allowed to.
+The cost is that outside content chooses which memories understanding is
+shown. That is acceptable, because understanding only describes and grants
+nothing.
 
 ### What is expected to break
 
@@ -250,7 +261,8 @@ reshapes planning.
   - a cited recalled episode resolves to `episode`, and a cited semantic
     record to `memory`;
   - the missing and failed sections render.
-- **The recorded path** for typed turns and events, recall included.
+- **The recorded path** for each activation kind #2577 tests, each gaining
+  the same `recall` entry.
 - **The gate,** as always.
 
 ## Options considered
@@ -259,9 +271,10 @@ reshapes planning.
   rendering. That is fewer moving parts, but the record would no longer show
   that recall ran or failed separately from understanding. The recall hook
   also needs recall to be its own stage the controller can run again. Rejected.
-- **One cue, the input only.** Simpler, but a short input ("what about her?")
-  finds nothing, and the channel window is what it refers to. Rejected; two
-  searches still cost milliseconds.
+- **One cue, the input only.** Simpler, but a short input finds nothing on
+  its own: a reply of a few words, or an email that says only "see below". The
+  channel window is what it refers to. Rejected; two searches still cost
+  milliseconds.
 - **One referent kind `memory` for everything recalled, episodes included.**
   It would tell a reader the item came through recall, but the recall record
   already says that. A recalled episode and a window episode would then be the
@@ -272,9 +285,11 @@ reshapes planning.
 - **Letting a failed recall end the pass**, #2577's default. Rejected: the
   input can be understood without memories, and a broken store would then stop
   every activation.
-- **Skipping recall for events.** Cheaper for a busy inbox, but events are
-  where remembering the sender and the matter helps most. Rejected, for now.
-  If event volume makes the cost matter, a rule can skip it later.
+- **Recall only for some channels**, such as skipping it for a busy inbox.
+  Cheaper, but it makes recall depend on the channel type, and outside content
+  is where remembering the sender and the matter helps most. Rejected. If
+  volume on some channel makes the cost matter, that is a readiness rule
+  added later, not a different shape.
 
 ## What it leaves open
 
