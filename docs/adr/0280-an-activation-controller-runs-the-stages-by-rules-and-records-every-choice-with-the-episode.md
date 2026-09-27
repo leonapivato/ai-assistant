@@ -1,6 +1,6 @@
 # 280. An activation controller runs the stages by rules and records every choice with the episode
 
-- Status: Proposed
+- Status: Accepted
 - Date: 2026-09-27
 - Scope: [M38](https://github.com/leonapivato/ai-assistant/milestone/5), [#2576](https://github.com/leonapivato/ai-assistant/issues/2576).
 - Dependency: ADR-0275, ADR-0276 and their milestones M36 and M37.
