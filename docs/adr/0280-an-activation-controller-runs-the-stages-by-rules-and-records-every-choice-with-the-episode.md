@@ -193,7 +193,7 @@ orchestration sees.
 | 2 | `route_unchecked` | A conversation turn, routing is wired, and there is no routing decision | `routing` |
 | 3 | `route_taken` | The routing decision is `taken` | the end of the pass |
 | 4 | `not_understood` | The understanding stage is wired and there is no understanding outcome for the input | `understanding` |
-| 5 | `event_understood` | An informational event with an understanding outcome and no event summary | `event_summary` |
+| 5 | `event_unsummarized` | An informational event with no event summary, and either an understanding outcome or the understanding stage unwired | `event_summary` |
 | 6 | `association_due` | A conversation turn with no association | `associate_goal` |
 | 7 | `disambiguation_raised` | The association asks which goal is meant, and no disambiguation question has been asked | `ask_disambiguation` |
 | 8 | `continuing_unreconciled` | The association continues a goal, reconciliation is wired, and there is no reconciliation result | `reconcile` |
@@ -372,7 +372,8 @@ also the only statement of why a resume episode carries no understanding
 
 > **Normative.** Step 2's tests assert, for each activation kind, the exact
 > entries its record carries, end entry included: a typed turn that drives a
-> step; a typed turn that raises a question; a turn that ends in a
+> step; a typed turn that raises a question; an informational event with the
+> understanding stage unwired, which still records `event_summary`; a turn that ends in a
 > disambiguation; a turn whose step parks for confirmation; a routed turn; a
 > spoken turn; a spoken turn with no words; a spoken turn whose
 > transcription fails; an informational event; a pass whose understanding
