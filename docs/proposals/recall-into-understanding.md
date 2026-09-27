@@ -38,6 +38,12 @@ proposal can be discussed now, and it is ratified after M38's ADR merges.
     reads an activation's input. Recall now comes before it.
   - ADR-0275 §4: `EpisodeProcessingRecord` gains a field for what recall
     found, with a schema version bump.
+  - ADR-0275 §7: "all automatic model-facing episodic reads request
+    eligibility `True`". **Superseded for recall**, as ADR-0276 §4 already did
+    for the episode window (below).
+  - ADR-0275 §9: the trigger's raw input text stays out of automatic model
+    inputs. ADR-0276 admitted it to the episode window alone. Recall's
+    rendering of a recalled episode needs the same admission.
   - ADR-0237: unchanged. Recall is one more caller of `MemoryStore.search`.
 
 ## What the owner has already settled
@@ -104,8 +110,16 @@ same for every activation. For a message they are the words and the exchange
 before it; for an email, its text and the recent mail on that channel.
 
 **Each search** asks `MemoryStore.search` for episodic and semantic records,
-with `episode_model_eligible=True` (the same eligibility the loop's own reads
-use), up to a fixed per-search limit.
+up to a fixed per-search limit, and **requests no eligibility**.
+
+`model_eligible` (ADR-0275 §7) is not an audience or relevance filter. It is a
+compatibility flag: it exists so that the model reads from before M36 keep
+seeing what they saw (ADR-0276 §4's own reading). It marks newly captured
+events, pre-result failures and interruptions as ineligible. Requesting `True`
+would hide every episode that arrived on a channel other than the
+conversation, which is the channel-centric bias this design avoids. So recall
+ignores the flag, as the episode window already does. The data directory is
+fresh since M37, so there is no older material the flag still protects.
 
 **The results are merged:**
 
@@ -292,6 +306,11 @@ reshapes planning.
   added later, not a different shape.
 
 ## What it leaves open
+
+- **Retiring `model_eligible`.** Once recall and the episode window both
+  ignore it, only the loop's own reads and the conversation history still
+  request it. Removing the flag altogether is its own small change, outside
+  this milestone.
 
 - **The recall hook**: searches during processing, contests, and "planning
   waits for a pending run". The controller #2577 proposes runs one stage at a
