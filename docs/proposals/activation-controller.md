@@ -14,7 +14,7 @@ builds on).
 
 | Word | Where it comes from | What it names |
 | --- | --- | --- |
-| **Stage** | The code | A unit of processing the controller runs, such as transcribing, routing, associating a goal, the turn loop or composing. |
+| **Stage** | The code | A unit of processing the controller runs, such as routing, associating a goal, the turn loop or composing. |
 | **Phase** | The wiki's [Controller](https://github.com/leonapivato/ai-assistant/wiki/Controller) page | A job in the target design: recall, understanding, planning, authorizing, acting, digesting and closing. |
 
 In this milestone the controller runs **stages**, and its record is a record of
@@ -23,8 +23,8 @@ the understanding phase's job. The rest fall into three groups:
 
 - **Stages that span several phases.** The turn loop does planning and some
   acting (reads). Driving a step does authorizing and acting.
-- **Stages that are no phase.** Transcribing, beginning the conversation,
-  routing, associating a goal, reconciling and synthesizing.
+- **Stages that are no phase.** Beginning the conversation, routing,
+  associating a goal and reconciling.
 - **Stages that are part of a phase's job.** Composing is part of what planning
   or closing will do.
 
@@ -38,9 +38,7 @@ phase it only partly performs.
   read at wiki revision `f18ccf6`. It is owner direction, not ratified. This
   proposal builds only its skeleton: the controller, its rules and its record.
   None of the new phases it describes (recall, digesting, closing, the recall
-  hook) are part of this change. The page's Channels section, where each
-  channel declares what processing owes and its limits, is the baseline for the
-  audience declaration below.
+  hook) are part of this change.
 - **Code:** `main` at `8265b204`. `ActivationEngine._run_turn`
   (`orchestration/engine.py`) runs the stages of a conversation turn in a fixed
   order, and `_dispatch_channel` sends an informational event down a separate
@@ -54,25 +52,27 @@ phase it only partly performs.
     unchanged; the controller runs before it.
   - ADR-0276 §5 places understanding after routing and before association.
     The same order becomes rules.
-  - ADR-0274 §2 says a channel's identity carries no audience, and it resolves
-    the processing policy from the validated combination through code-owned
-    mappings. The declared audience below belongs to that mapping, never to
-    the identity.
+  - ADR-0274 §4's dispatch table loses its speech combination for now: spoken
+    input is refused (below). The voice decisions (ADR-0199 §3, ADR-0200,
+    ADR-0203 §1, ADR-0205) stay on record, inactive until channel work brings
+    voice back.
   - ADR-0249 §6's `AttemptPhase` is **not touched**. Its stamping stays inside
     the stages (owner ruling, 2026-09-27).
-  - ADR-0250 §15, ADR-0203 §1 and ADR-0199 §3 are the audience rules that today
-    appear as "is this a spoken turn?".
 
 ## Rulings already made (on #2576)
 
 - The controller is built to the target shape. **Existing behaviour may break
   temporarily** until the later phases land, typed turns included, as long as
   each break is listed deliberately.
-- The controller covers **channel activations only**: typed and spoken turns
-  (a routed pass included) and informational events. `resume` stays on its
+- The controller covers **channel activations only**: typed turns (a routed
+  pass included) and informational events. `resume` stays on its
   legacy path. The entry points that are not activations (`answer`,
   `withdraw_clarification`, `abandon_goal`, `cancel_read`) are out of scope.
 - `AttemptPhase` and the controller's record stay separate.
+- **Channels are text only for now, and spoken input is refused.** Today's
+  conversation channel is to become a sensor for input and an actuator for
+  output, with the conversation as the standard channel. That is separate
+  work (#2578), and until it brings voice back, spoken input is refused.
 
 ## This does not unblock observation
 
@@ -119,10 +119,9 @@ flowchart LR
   one wraps an existing stage or engine method; nothing is rewritten inside
   them.
 - **The pass's state** is `ActivationState`, which already carries one
-  activation's facts until finalization writes the episode. It gains three
+  activation's facts until finalization writes the episode. It gains two
   things:
   - the stage record;
-  - the channel's **declaration** (below);
   - a typed **working set**: the in-flight results the rules read, such as the
     turn the loop returned, the association and the drive's disposition. Today
     these are local variables of `_run_turn`. The working set is never
@@ -134,43 +133,22 @@ controller runs is one of orchestration's own, and no other subsystem
 implements or calls one. So there is no Protocol change (golden rule 5), and
 the interface can change freely as later milestones reshape the stages.
 
-### The channel declares its audience
+### Assumptions about channels
 
-Today association and the episode window are skipped when
-`operation is CONVERSE_SPOKEN`, and the supply is narrowed by choosing
-`UnboundedAudienceSupply` in `_converse_spoken`. The real rule is about the
-audience: a reply spoken aloud may be heard by people other than the owner
-(ADR-0199 §3, ADR-0203 §1, ADR-0250 §15). Renaming the check to "unbounded
-audience" while still working it out from "is this spoken?" would be the old
-check under a new name.
+How channels work is separate work (#2578). The controller assumes only this:
 
-So the audience becomes something the channel **declares**, alongside what
-processing owes and its limits, as the wiki's Channels section describes:
+- **Every activation is text.** It is either a typed turn or an informational
+  event. Spoken input is refused at admission, before an activation exists, so
+  it never reaches the controller.
+- **A reply, when one is owed, is text on the same request.** An event owes
+  none.
+- **Every reply's audience is the owner.** So there are no audience rules in
+  this milestone: association always runs, and understanding always gets the
+  episode window.
 
-| Declared for | What processing owes | Audience |
-| --- | --- | --- |
-| A conversation, typed | A reply on the same request | Bounded (the owner) |
-| A conversation, spoken | A spoken reply | Unbounded |
-| An informational event | Nothing; a transient summary | Bounded (no reply goes out) |
-
-- **The declaration is resolved once, at admission,** from ADR-0274 §2's
-  code-owned mapping of the validated combination (channel type plus payload
-  modality). It is a property of that mapping, never of the channel identity,
-  so ADR-0274 §2's "identity conveys no audience" holds, and no caller can
-  supply one.
-- **Typed and spoken input still share one conversation channel identity.**
-  The declaration is per combination, which is how the wiki's "Spoken" row
-  sits beside "Conversation" without being a separate channel.
-- **Everything reads the declaration:** the rule that makes association due,
-  context assembly deciding whether understanding gets the episode window, and
-  the choice of supply. None of them looks at the operation or the payload
-  again.
-- **A new channel declares its own audience.** A shared room display, for
-  example, would declare "unbounded" and inherit every rule without a new
-  check anywhere.
-
-In this milestone the declarations give the same answers as today's checks.
-What changes is that there is one place that says it.
+When the channel work changes these, it changes the assumptions here, and the
+rules that read them are added then. No rule in this milestone looks at the
+payload modality, the operation or the reply form.
 
 ### The rules
 
@@ -187,8 +165,6 @@ The skeleton's rules, sorted from the inventory on #2576:
 
 | Rule | Makes due | Today's source |
 | --- | --- | --- |
-| `speech_untranscribed` | Transcribing | `_converse_spoken` |
-| `no_words` | End: no content | `_converse_spoken` returns an empty turn |
 | `conversation_unresolved` | Beginning the conversation | `_begin_channel_turn` (ADR-0074 §2) |
 | `route_unchecked` | Routing (when wired, not yet tried) | `_run_turn` (ADR-0197 §1) |
 | `route_taken` | The routed act | `_routed_pass` |
@@ -196,13 +172,12 @@ The skeleton's rules, sorted from the inventory on #2576:
 | `not_understood` | Understanding | `_run_turn`, `_dispatch_channel` (ADR-0276 §5) |
 | `event_understood` | Summarizing the event | `_dispatch_channel` |
 | `event_summarized` | End | `_dispatch_channel` returns |
-| `association_due` | Associating a goal (declared audience bounded) | `_associate(associates=…)` (ADR-0250 §15) |
+| `association_due` | Associating a goal | `_associate` |
 | `disambiguation_raised` | End with the fixed question | `_undecided` (ADR-0250 §3) |
 | `continuing_unreconciled` | Reconciling | `_run_turn` (ADR-0259 §3) |
 | `unplanned` | The turn loop | `loop.respond` |
 | `plan_has_steps` | Driving the first step | `_run_turn`: no question raised and steps exist |
 | `reply_owed` | Composing | `_run_turn`; the park check now lives in the composer |
-| `speech_reply_owed` | Synthesizing | `_spoken_rendering` |
 | `nothing_due` | End | The pass has nothing left to run |
 
 `nothing_due` is the last rule and always answers, so every pass ends by a rule.
@@ -270,7 +245,7 @@ The end entry's `due` is always one of these:
 
 | Kind of end | `due` |
 | --- | --- |
-| An end a rule chose | `no_words`, `routed_act_done`, `event_summarized`, `disambiguation_raised` |
+| An end a rule chose | `routed_act_done`, `event_summarized`, `disambiguation_raised` |
 | Nothing left to run | `nothing_due` |
 | A fixed default applied to a failed stage | `stage_failed`, `stage_timed_out` |
 
@@ -317,6 +292,12 @@ No break is needed for the skeleton itself. The allowance is used where
 preserving the old behaviour would bend the design, and the implementation PR
 lists each use with its reason. The candidates known now:
 
+- **Spoken input is refused** (owner ruling, 2026-09-27). `converse_spoken`
+  and a speech payload on `receive` fail with a clear "spoken input is not
+  supported" error at admission. The spoken path's code (transcription,
+  synthesis, delivery reports, the unbounded-audience supply) is removed from
+  the turn path rather than kept alongside it. The voice clients stop working
+  until the channel work (#2578) brings voice back.
 - **Engine tests that assert the internal call order of `_run_turn`**, not an
   outcome. They are rewritten against the controller's rules and the recorded
   path, or removed.
@@ -331,14 +312,10 @@ lists each use with its reason. The candidates known now:
 - **The rules:** unit tests of each rule over constructed pass states, and of
   the controller over fake stages: order, ending, fixed defaults, the
   interrupted end entry, and elision keeping the end entry.
-- **The declarations:** each combination resolves to its declared audience,
-  and no rule or context decision reads the operation or payload modality
-  directly.
+- **Spoken input is refused** on every entry point, before admission.
 - **The recorded path for each activation kind:** a test per kind asserting
   the exact entries, end entry included:
   - typed turn, driven and undriven;
-  - spoken turn;
-  - a spoken turn with no words;
   - routed pass;
   - disambiguation;
   - informational event;
@@ -360,9 +337,13 @@ lists each use with its reason. The candidates known now:
   the turn loop and driving each span several phases, and most stages are no
   phase, so the names would claim a mapping that does not exist yet. Rejected;
   stages get phase names only when they do a phase's job and nothing else.
-- **Audience worked out from "is this spoken?".** It gives the same answers
-  today, but it is the old check under a new name, and every new channel would
-  need a new check. Rejected for a declaration.
+- **Keeping voice on a legacy copy of the turn path.** Voice keeps working,
+  but two turn pipelines would be maintained side by side through several
+  milestones, which is the tangle the controller exists to remove. Rejected;
+  spoken input is refused until the channel work.
+- **Designing channel audience here.** An earlier draft had each channel
+  declare its audience. That is channel work, and the code showed the audience
+  rests on choices the spoke makes. Moved to #2578.
 - **The record in its own store**, written as each stage ends. It gives crash
   visibility now. It contradicts ADR-0275 §1's "no live activation log", and
   it arrives better with the durable-effects milestone, which needs a
@@ -386,10 +367,8 @@ lists each use with its reason. The candidates known now:
 - **Routing's future.** It has no place in the wiki's phases. Whether the
   routed act's fixed actions move into planning or stay as a cheap path is
   later work.
-- **The declaration's other fields.** This milestone declares audience,
-  because rules read it today. The wiki's "what processing owes" and "limits"
-  belong in the same declaration. They are added when the rules that read them
-  arrive: closing reads what a channel owes, and the limits come with authority.
+- **Channels** (#2578): sensors and actuators, audience, and bringing voice
+  back. The controller's assumptions about channels change with it.
 - **The exact bound** (64) and the enum values' final spelling are settled in
   the ADR.
 - **How rules read stories.** When the stories milestone lands, some rules
