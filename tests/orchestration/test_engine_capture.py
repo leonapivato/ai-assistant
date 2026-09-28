@@ -833,6 +833,17 @@ def test_the_composing_stages_supply_is_enumerated_so_a_new_field_must_be_judged
     the error a failed stage raised. None of those fields admits a ``SecretStr`` or any
     text. **Every ``stages`` is empty on every record this tree captures**, its producer
     being ADR-0280 §8's step 2.
+
+    **``ActivationRecall`` and ``RecalledItem`` joined it with ADR-0281 §6**, because
+    ``EpisodeProcessingRecord`` gained ``recall``. The judgement, made rather than
+    assumed: both close their fields with ``extra="forbid"``. They hold members of closed
+    enumerations, a stored memory id, a bounded excerpt taken from a stored memory
+    record's own text (never an outside episode's raw input, ADR-0281 §6), two
+    structured-origin values and an ``Attestation``, which is already in this graph.
+    None admits a ``SecretStr``, and the excerpt is the same Tier 1 memory text the
+    graph already reaches through ``SemanticMemory`` and ``EpisodicMemory``. **Every
+    ``recall`` is ``None`` on every record this tree captures**, its producer being
+    ADR-0281 §8's step 3.
     """
     # ADR-0275: processing metadata joins the in-process record graph. Its
     # fields are identifiers, closed values, clocks and caller-supplied Tier 1
@@ -842,7 +853,9 @@ def test_the_composing_stages_supply_is_enumerated_so_a_new_field_must_be_judged
 
     assert set(reachable) == {
         "ActivationLinks",
+        "ActivationRecall",
         "ActivationUnderstanding",
+        "RecalledItem",
         "ChannelContext",
         "ChannelContextItem",
         "ChannelIdentity",

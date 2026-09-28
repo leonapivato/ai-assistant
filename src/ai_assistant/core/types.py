@@ -3368,7 +3368,7 @@ class UnderstandingReferent(BaseModel):
     """
 
     model_config = ConfigDict(frozen=True, extra="forbid")
-    kind: Literal["input", "channel_item", "episode"]
+    kind: Literal["input", "channel_item", "episode", "memory"]
     id: EncodableText | None = None
     source: NonBlankEncodableText | None = None
     excerpt: EncodableText = Field(max_length=UNDERSTANDING_REFERENT_EXCERPT_CHARS)
@@ -3451,6 +3451,7 @@ class ControllerStage(StrEnum):
     DRIVE = "drive"
     COMPOSE = "compose"
     END = "end"
+    RECALL = "recall"
 
 
 class ControllerRule(StrEnum):
@@ -3479,6 +3480,7 @@ class ControllerRule(StrEnum):
     STAGE_TIMED_OUT = "stage_timed_out"
     INTERRUPTED = "interrupted"
     ENDED_BEFORE_CONTROLLER = "ended_before_controller"
+    NOT_RECALLED = "not_recalled"
 
 
 #: The rules that end a pass rather than make a stage due (ADR-0280 §4, §5).
@@ -3537,6 +3539,103 @@ class StageEntry(BaseModel):
         return self
 
 
+class RecallOutcome(StrEnum):
+    """What recall's decision was (ADR-0281 §6).
+
+    Closed, **added to and never renamed**. A recall that kept nothing, failed or
+    ran out of its own budget is still a decision, distinct from one never made.
+    """
+
+    FOUND = "found"
+    NOTHING_FOUND = "nothing_found"
+    FAILED = "failed"
+    TIMED_OUT = "timed_out"
+
+
+class RecallCue(StrEnum):
+    """What recall searched with (ADR-0281 §3, §6).
+
+    Closed, **added to and never renamed**. One member today; later sources, such
+    as recall cued by understanding and candidate stories, add members rather than
+    reshape the record.
+    """
+
+    ACTIVATION_INPUT = "activation_input"
+
+
+class RecallProvenance(StrEnum):
+    """Recall's basic provenance label for a kept record (ADR-0281 §4).
+
+    Closed, **added to and never renamed**. It is not the record's structured
+    origin, which :class:`RecalledItem` carries separately as stored: an
+    informational event's episode is ``outside`` while its
+    ``derived_from_external`` is ``False`` (ADR-0275 §9).
+    """
+
+    USER = "user"
+    OUTSIDE = "outside"
+
+
+#: ADR-0281 §6: the type's ceiling on a recall result's items. It sits above the
+#: composition root's ``RECALL_ITEM_LIMIT`` so that later sources add to the same
+#: record without a change to this type.
+RECALLED_ITEMS_MAX: Final[int] = 16
+
+_RECALLABLE_KINDS: Final[frozenset[MemoryKind]] = frozenset(
+    {MemoryKind.EPISODIC, MemoryKind.SEMANTIC}
+)
+
+
+class RecalledItem(BaseModel):
+    """One long-term memory recall kept for an activation (ADR-0281 §6).
+
+    Readable after restart, and after the memory itself is deleted, from these
+    fields alone. ``id`` is the record's stored ``MemoryBase.id`` exactly as
+    stored, an :data:`EncodableText` for the reason :class:`UnderstandingReferent`
+    gives. ``standing``, ``rests_on_recorded_external_content`` and
+    ``attestation`` are the record's structured origin as it holds them, which
+    ADR-0189 §1 requires of a projection shown to the owner.
+    """
+
+    model_config = ConfigDict(frozen=True, extra="forbid")
+    kind: MemoryKind
+    id: EncodableText
+    excerpt: EncodableText = Field(max_length=UNDERSTANDING_REFERENT_EXCERPT_CHARS)
+    provenance: RecallProvenance
+    standing: BeliefBand
+    rests_on_recorded_external_content: bool
+    attestation: Attestation | None = None
+    found_by: tuple[RecallCue, ...] = Field(min_length=1)
+
+    @model_validator(mode="after")
+    def _recallable_kind(self) -> Self:
+        if self.kind not in _RECALLABLE_KINDS:
+            msg = "recall keeps episodic and semantic records only"
+            raise ValueError(msg)
+        return self
+
+
+class ActivationRecall(BaseModel):
+    """What recall found for one activation, or why it found nothing (ADR-0281 §6).
+
+    ``items`` is non-empty exactly when ``outcome`` is ``found``: a recall that
+    kept nothing says ``nothing_found``, and one that failed or timed out says so
+    rather than reporting an empty success.
+    """
+
+    model_config = ConfigDict(frozen=True, extra="forbid")
+    outcome: RecallOutcome
+    cues: tuple[RecallCue, ...] = Field(min_length=1)
+    items: tuple[RecalledItem, ...] = Field(default=(), max_length=RECALLED_ITEMS_MAX)
+
+    @model_validator(mode="after")
+    def _items_exactly_when_found(self) -> Self:
+        if bool(self.items) != (self.outcome is RecallOutcome.FOUND):
+            msg = "a recall result carries items exactly when its outcome is found"
+            raise ValueError(msg)
+        return self
+
+
 class EpisodeProcessingRecord(BaseModel):
     """Immutable facts about one activation, written after its processing ends."""
 
@@ -3558,6 +3657,7 @@ class EpisodeProcessingRecord(BaseModel):
     understanding_elided: int = Field(default=0, strict=True, ge=0, lt=2**31)
     stages: tuple[StageEntry, ...] = ()
     stages_elided: int = Field(default=0, strict=True, ge=0, lt=2**31)
+    recall: ActivationRecall | None = None
 
     @model_validator(mode="after")
     def _understood_or_omitted(self) -> Self:

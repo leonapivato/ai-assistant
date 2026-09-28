@@ -2390,7 +2390,8 @@ from ai_assistant.wire.errors import (
 #: 59: ADR-0276 moves EpisodeProcessingRecord to schema_version 2 with its exactly-one rule.
 #: 60: ADR-0280 adds the stage record fields to the wire-carried EpisodeProcessingRecord.
 #: 61: ADR-0280 moves EpisodeProcessingRecord to schema_version 3 with its stage-record rule.
-PROTOCOL_VERSION: Final[int] = 61
+#: 62: ADR-0281 adds the recall result, the recall stage and rule, and the memory referent.
+PROTOCOL_VERSION: Final[int] = 62
 
 #: ADR-0085 §8a: "The correlation id is a UUID string and is at most 36 bytes.
 #: Bounding it is what makes the reserve a constant rather than an aspiration; a
