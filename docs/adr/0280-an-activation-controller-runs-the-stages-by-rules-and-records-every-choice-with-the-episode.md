@@ -1,10 +1,19 @@
 # 280. An activation controller runs the stages by rules and records every choice with the episode
 
-- Status: Accepted
+- Status: Partially superseded by ADR-0281 (§3:5's working set and §4:1–§4:3's enums and table, in the additions alone; §5:2's fixed default, for a failure-tolerant stage alone; §7:1's `schema_version` literal alone)
 - Date: 2026-09-27
 - Scope: [M38](https://github.com/leonapivato/ai-assistant/milestone/5), [#2576](https://github.com/leonapivato/ai-assistant/issues/2576).
 - Dependency: ADR-0275, ADR-0276 and their milestones M36 and M37.
 - Authorization: the owner accepted the proposal on #2577 on 2026-09-27, after ruling its scope on #2576 the same day, and directed its conversion into this ADR. The dispatcher assigned the next available number, 0280. That authorizes drafting and numbering, not ratification or implementation.
+- Partially superseded: 2026-09-27 by ADR-0281 — four narrow scopes. §3:5's
+  working set gains the recall decision, and §4:1–§4:3 gain the stage `recall`, the rule
+  `not_recalled` and its row between `route_taken` and `not_understood`; no other member,
+  row or order changes. §5:2's fixed default does not apply to a failed or timed-out
+  result a failure-tolerant stage returns while the pass's deadline stands, and applies
+  in every other case. §7:1's `schema_version` becomes `Literal[4]`; `stages`,
+  `stages_elided` and their validators stand. These scoped replacements
+  take effect on ratification of ADR-0281. This reciprocal header record accompanies the
+  numbered draft under ADR-0070 and ADR-0082; the ratified body below is preserved.
 - **Partially supersedes** [ADR-0275](0275-an-episode-records-one-activation-after-processing-ends.md) — **two scopes.** **§1's exclusion list, in one item**: *"phase/tool history"* is no longer excluded for the record of stages §6 below defines; a tool history, a live activation log and §1's other exclusions stand entire. **§4's `EpisodeProcessingRecord` field set, in the additions alone**: the record gains §7 below's two members; every existing field, value and validator stands.
 - **Partially supersedes** [ADR-0276](0276-an-activation-is-understood-before-it-is-associated-and-the-understanding-is-retained-with-its-episode.md) — **one scope.** §7's first clause, *"`EpisodeProcessingRecord.schema_version` becomes `Literal[2]`"*, in the literal alone: it becomes `Literal[3]` under §7 below. The three understanding fields, the exactly-one validator and every other clause of ADR-0276 stand entire.
 
