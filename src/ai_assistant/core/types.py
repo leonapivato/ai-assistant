@@ -3640,7 +3640,7 @@ class EpisodeProcessingRecord(BaseModel):
     """Immutable facts about one activation, written after its processing ends."""
 
     model_config = ConfigDict(frozen=True, extra="forbid")
-    schema_version: Literal[3] = 3
+    schema_version: Literal[4] = 4
     activation_id: Identifier
     started_at: UtcInstant
     ended_at: UtcInstant
@@ -3679,6 +3679,14 @@ class EpisodeProcessingRecord(BaseModel):
         ends = [entry.stage is ControllerStage.END for entry in self.stages]
         if not ends or not ends[-1] or any(ends[:-1]):
             msg = "a channel activation's stage record ends in exactly one end entry, last"
+            raise ValueError(msg)
+        return self
+
+    @model_validator(mode="after")
+    def _no_recall_on_a_resume(self) -> Self:
+        # ADR-0281 §6: a resume keeps its legacy path, and recall makes no decision on it.
+        if isinstance(self.trigger, RecordedResumeTrigger) and self.recall is not None:
+            msg = "a resume's processing record carries no recall result"
             raise ValueError(msg)
         return self
 

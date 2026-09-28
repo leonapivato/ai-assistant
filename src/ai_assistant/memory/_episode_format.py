@@ -1,4 +1,4 @@
-"""Fresh-state memory format boundary for ADR-0275 §12, advanced by ADR-0276 §7 and ADR-0280 §7."""
+"""Fresh-state memory format boundary for ADR-0275 §12, advanced by ADRs 0276, 0280 and 0281."""
 
 from __future__ import annotations
 
@@ -16,12 +16,13 @@ from ai_assistant.core.errors import IncompatibleStateError, MemoryStoreError
 #: §12 minted the marker at 1 for the M36 record; ADR-0276 §7 advances it to 2 for the
 #: schema_version-2 record, so a store written before that tree is refused before
 #: mutation exactly as a pre-M36 store is, its files neither erased nor upgraded; ADR-0280
-#: §7 advances it to 3 for the schema_version-3 record, on the same terms.
-EPISODE_RECORD_FORMAT: Final[int] = 3
+#: §7 advances it to 3 for the schema_version-3 record, and ADR-0281 §6 to 4 for the
+#: schema_version-4 record, on the same terms.
+EPISODE_RECORD_FORMAT: Final[int] = 4
 
 
 def check_format(conn: sqlite3.Connection, *, allow_empty: bool = False) -> bool:
-    """Refuse pre-M38 state before mutation; return whether the current marker exists."""
+    """Refuse pre-M39 state before mutation; return whether the current marker exists."""
     try:
         tables = {
             row[0] for row in conn.execute("SELECT name FROM sqlite_master WHERE type='table'")
@@ -36,7 +37,7 @@ def check_format(conn: sqlite3.Connection, *, allow_empty: bool = False) -> bool
         msg = "cannot read episode record format"
         raise MemoryStoreError(msg) from exc
     raise IncompatibleStateError(
-        "memory store requires a fresh M38 data directory",
+        "memory store requires a fresh M39 data directory",
         expected=f"episode record format {EPISODE_RECORD_FORMAT}",
         found="missing or unsupported episode record format",
         operator_action=("Stop the old hub and configure a new empty development data directory."),
@@ -87,7 +88,7 @@ def _inspect_connection(conn: sqlite3.Connection, *, conversation: bool) -> None
         columns = {row[1] for row in conn.execute("PRAGMA table_info(turns)")}
         if "model_eligible" not in columns:
             raise IncompatibleStateError(
-                "conversation store requires a fresh M38 data directory",
+                "conversation store requires a fresh M39 data directory",
                 expected="conversation index with activation eligibility",
                 found="conversation index without activation eligibility",
                 operator_action=(

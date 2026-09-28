@@ -287,7 +287,7 @@ def test_recorded_understanding_round_trips_through_its_dump() -> None:
 def test_the_record_carries_three_understanding_fields_at_the_current_schema_version() -> None:
     """§7's three fields; the literal is ADR-0280 §7's ``3``, which superseded §7's ``2``."""
     record = _record()
-    assert record.schema_version == 3
+    assert record.schema_version == 4
     assert record.understanding == ()
     assert record.understanding_omitted is UnderstandingOmission.NOT_REACHED
     assert record.understanding_elided == 0
