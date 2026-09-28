@@ -370,8 +370,12 @@ describes and grants nothing.
 > Step 2 depends on step 1, step 3 on step 2, and steps 4 and 5 on step 3.
 
 > **Normative.** Step 3's tests assert, for each activation kind ADR-0280 §8:2
-> names, the exact entries its record carries with the `recall` entry
-> included, and over fake stages: a tolerated `failed` and a tolerated
+> names, the exact entries its record carries: a `recall` entry exactly where
+> `not_recalled` makes recall due, immediately before `understanding`, and **no**
+> `recall` entry on a path that ends or bypasses before it — a routed turn, an
+> input that yielded no text, a pass cancelled before the controller is
+> entered, and an informational event with the understanding stage unwired.
+> Over fake stages they assert: a tolerated `failed` and a tolerated
 > `timed_out` each followed by `understanding`; an error escaping a tolerant
 > stage ending the pass with `stage_failed`; an expired pass deadline ending the
 > pass with `stage_timed_out` from a tolerant stage; and no path reaching
