@@ -2684,6 +2684,24 @@ def _resolved_turn(working: _TurnPass) -> ResolvedChannelInput:
     return working.input
 
 
+def _turn_expired(working: _TurnPass) -> Exception | None:
+    """ADR-0280 §5: the understanding stage is not entered past the pass's deadline.
+
+    Checked before the stage reads the conversation's history, so an expired pass does
+    no I/O for it. The error is the one the stage's own pre-check raised (ADR-0276 §6).
+    """
+    if working.deadline <= asyncio.get_running_loop().time():
+        return ModelTimeoutError(_UNDERSTANDING_EXPIRED)
+    return None
+
+
+def _event_expired(event: _EventPass) -> Exception | None:
+    """The event path's twin, mapped outward as ``_understand_event`` maps its expiry."""
+    if event.deadline <= asyncio.get_running_loop().time():
+        return ChannelProcessingTimeoutError("informational event processing timed out")
+    return None
+
+
 def _associated(working: _TurnPass) -> _Association:
     """The turn's association, which every stage after it reads.
 
@@ -4600,7 +4618,11 @@ class Engine:
             await self._controlled(
                 event,
                 (
-                    Stage(ControllerStage.UNDERSTANDING, self._event_understanding_stage),
+                    Stage(
+                        ControllerStage.UNDERSTANDING,
+                        self._event_understanding_stage,
+                        expired=_event_expired,
+                    ),
                     Stage(ControllerStage.EVENT_SUMMARY, self._event_summary_stage),
                 ),
             )
@@ -12445,7 +12467,9 @@ class Engine:
             (
                 Stage(ControllerStage.BEGIN_CONVERSATION, self._begin_conversation_stage),
                 Stage(ControllerStage.ROUTING, self._routing_stage),
-                Stage(ControllerStage.UNDERSTANDING, self._understanding_stage),
+                Stage(
+                    ControllerStage.UNDERSTANDING, self._understanding_stage, expired=_turn_expired
+                ),
                 Stage(ControllerStage.ASSOCIATE_GOAL, self._associate_stage),
                 Stage(ControllerStage.ASK_DISAMBIGUATION, self._disambiguation_stage),
                 Stage(ControllerStage.RECONCILE, self._reconcile_stage),
