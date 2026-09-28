@@ -322,6 +322,25 @@ async def test_an_understanding_stage_due_past_the_deadline_is_not_entered() -> 
     ]
 
 
+async def test_a_history_read_outlasting_the_deadline_times_the_stage_out() -> None:
+    """§5: expiry during the stage, before the understanding model is called."""
+    model = FakeModelProvider(STATED_PROPOSAL)
+    harness = _harness(planner=NoStepPlanner(), understanding_model=model)
+
+    async def hangs(conversation_id: str) -> Any:
+        await asyncio.sleep(10)
+
+    harness.engine._conversations.history = hangs  # type: ignore[method-assign]  # a read that never returns in time
+    with pytest.raises(ModelTimeoutError):
+        await harness.engine.converse("book the campsite", timeout=timedelta(milliseconds=50))
+    assert model.calls == []
+    assert await _entries(harness) == [
+        (_S.BEGIN_CONVERSATION, _R.CONVERSATION_UNRESOLVED, _DONE),
+        (_S.UNDERSTANDING, _R.NOT_UNDERSTOOD, StageOutcome.TIMED_OUT),
+        (_S.END, _R.STAGE_TIMED_OUT, _DONE),
+    ]
+
+
 # --- spoken turns ---------------------------------------------------------------------
 
 

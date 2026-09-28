@@ -12545,9 +12545,23 @@ class Engine:
         turn takes no episode window — the test is over which operation is running, as
         ADR-0250 §15's association rule's is. What it records is carried on the
         activation's state; no stage below reads it (§8).
+
+        **The window's history read is inside the pass's deadline too** (§5): the
+        read is now part of this stage, so a read that outlasts the deadline ends the
+        stage ``timed_out`` with the stage's own classified error rather than holding
+        the pass open.
+
+        Raises:
+            ModelTimeoutError: If the deadline expired during the history read.
         """
         input = _resolved_turn(working)  # noqa: A001 — the resolved channel input
-        history = await self._turn_history(working)
+        try:
+            async with asyncio.timeout_at(working.deadline):
+                history = await self._turn_history(working)
+        except TimeoutError:
+            if working.deadline > asyncio.get_running_loop().time():
+                raise
+            raise ModelTimeoutError(_UNDERSTANDING_EXPIRED) from None
         await self._understand(
             input,
             window=ConversationWindow(input.channel, history.records),
