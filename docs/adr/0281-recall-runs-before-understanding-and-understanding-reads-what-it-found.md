@@ -179,8 +179,9 @@ interruptions. Recall is meant to reach those.
 > **Normative.** Each kept record carries one of two provenance values:
 > **`outside`**, for a semantic record `rests_on_recorded_external_content`
 > places there, or for an episode whose trigger arrived on the informational
-> event channel; and **`user`**, for every other record. Nothing finer (band,
-> attestation source, the connection) is recorded by this decision.
+> event channel; and **`user`**, for every other record. This two-value label is
+> the only provenance judgment recall makes; the record's structured origin is
+> copied as stored under §6, and recall derives nothing finer from it.
 
 On a bounded-audience channel the predicate withholds nothing. On the spoken
 operation's unbounded audience, which ADR-0280 §2 keeps, recall reaches no
