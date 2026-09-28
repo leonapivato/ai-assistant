@@ -110,18 +110,23 @@ both stages wired.
 
 ### 3. What it searches
 
-> **Normative.** Recall makes **one** search: `MemoryStore.search` with the
-> activation's input text, exactly as the pass holds it, as the query;
-> `kinds` episodic and semantic, or semantic alone under §4:2; no other filter;
-> and **no eligibility**
-> (`episode_model_eligible` unset). It searches with nothing else: not the
-> channel window, not the episode window, not a goal.
+> **Normative.** Recall searches with **one cue**, the activation's input text
+> exactly as the pass holds it, and with nothing else: not the channel window,
+> not the episode window, not a goal.
 
-> **Normative.** Recall keeps a record only when its `score` is at or above the
-> **recall threshold** and it passes §4's audience predicate, and it keeps at
-> most `RECALL_ITEM_LIMIT` of them, in the store's order. A record returned with
-> no `score` is not kept. `capped` is not acted on, as the loop's own reads
-> leave it.
+> **Normative.** Recall reads **per band**, on ADR-0072 §5's consumer-side
+> precedence: one `MemoryStore.search` for each of `ASSERTED`, `ATTESTED` and
+> `DERIVED`, in that order, each with the cue as its query, `bands` that one
+> band, `kinds` episodic and semantic (or semantic alone under §4:2),
+> `limit` `RECALL_ITEM_LIMIT`, no other filter and **no eligibility**
+> (`episode_model_eligible` unset).
+
+> **Normative.** Recall fills `RECALL_ITEM_LIMIT` in band order: from each
+> band's results, in the store's order, it keeps a record only when its `score`
+> is at or above the **recall threshold** and it passes §4's audience
+> predicate, and it stops once the limit is filled. A record returned with no
+> `score` is not kept. `capped` is not acted on, as the loop's own reads leave
+> it.
 
 > **Normative.** The recall threshold is a constructor argument of
 > `RecallStage`, not a constant: the composition root sets it for the embedder
@@ -141,10 +146,16 @@ both stages wired.
 > answers anything, is out of date, is relevant or settles a reference, and it
 > resolves no reference.
 
-**Why one search on the words alone.** Understanding already reads the channel
-window as short-term memory, so a second search with it mostly repeats that
+**Why one cue, the words alone.** Understanding already reads the channel
+window as short-term memory, so searching with it too mostly repeats that
 context and adds loosely related items. What connects a short input to the
 past is structure, the story it continues, not similarity.
+
+**Why per band.** With a limit of three, one band-neutral search would let
+three inferences that score higher displace an assertion below the cut, where
+no later ordering recovers it. ADR-0072 §5 rules that out for every consumer
+assembling context. Three band-scoped searches still cost milliseconds and no
+model call.
 
 **Why no eligibility.** Requesting eligibility `True` would hide every episode
 captured from a channel other than the conversation, as well as failures and
@@ -154,12 +165,12 @@ interruptions. Recall is meant to reach those.
 
 > **Normative.** Recall applies `admitted_to_understanding`, the predicate the
 > understanding stage's two windows already use (ADR-0276 §4), to the records
-> the search returned, before the threshold and the cap are applied. No
-> controller rule reads the audience.
+> searches returned, before any is kept. No controller rule reads the
+> audience.
 
 > **Normative — a turn on a channel of unbounded audience recalls no episode.**
 > On the operation ADR-0250 §15 names (`converse_spoken`, as ADR-0200 §3
-> declares it), recall's search asks for semantic records alone, so no episode,
+> declares it), recall's searches ask for semantic records alone, so no episode,
 > and no earlier understanding, reaches the turn through recall. This is
 > ADR-0276 §4:13's rule read over the one new carrier this decision adds; the
 > stage applies it from the pass's audience posture, as the understanding stage
@@ -229,6 +240,10 @@ the pass with `stage_repeated` rather than loop.
 >   and `semantic`; `id: EncodableText`, the record's stored `MemoryBase.id`
 >   exactly as stored; `excerpt: EncodableText` of at most
 >   `UNDERSTANDING_REFERENT_EXCERPT_CHARS`; `provenance: RecallProvenance`;
+>   `standing: BeliefBand`, `band_of` the record's provenance source;
+>   `rests_on_recorded_external_content: bool`, that function over the record's
+>   provenance; `attestation: Attestation | None`, the record's
+>   `Provenance.attestation` as stored, projected whole;
 >   `found_by: tuple[RecallCue, ...]`, non-empty;
 > - `ActivationRecall`: `outcome: RecallOutcome`; `cues: tuple[RecallCue, ...]`,
 >   non-empty, the cues recall searched with; `items: tuple[RecalledItem, ...]`,
@@ -273,6 +288,13 @@ the pass with `stage_repeated` rather than loop.
 > shows its outcome and each item's kind, provenance and excerpt. Each change
 > that alters the processing record's shape advances `PROTOCOL_VERSION` in that
 > change, on ADR-0280 §7:4's rule.
+
+`RecalledItem` is shown to the owner in episode inspection, so it is a
+user-facing projection under ADR-0189 §1: `standing`,
+`rests_on_recorded_external_content` and `attestation` are its structured
+origin, as the record holds them. `provenance` is the basic `user` or `outside`
+label §4 derives, which is not the same fact: an informational event's episode
+is `outside` while its `derived_from_external` is `False` (ADR-0275 §9:7).
 
 `found_by` and `cues` have one member now. They exist so that later sources add
 to the same record: recall cued by understanding, and candidate stories.
@@ -349,8 +371,9 @@ describes and grants nothing.
 > `stage_repeated`.
 
 > **Normative.** Step 2's tests assert, against the canonical `MemoryStore`
-> fake: the one search on the input; the threshold, the cap and a record with no
-> score; the audience predicate; no episode searched for or kept on the
+> fake: the three band-scoped searches on the input, in precedence order; an
+> assertion kept ahead of higher-scoring inferences; the threshold, the cap and
+> a record with no score; the audience predicate; no episode searched for or kept on the
 > unbounded-audience operation, including an episode the predicate would admit;
 > each provenance value; that an outside episode's excerpt never carries its
 > raw input; the excerpt of a resumed episode and of an episode whose speech
@@ -428,6 +451,9 @@ describes and grants nothing.
 - **Recall inside the understanding stage.** Fewer moving parts, but the record
   could not tell a failed recall from a failed understanding, and the hook
   needs recall as its own stage. Rejected.
+- **One band-neutral search**, which the proposal had. Rejected under ADR-0072
+  §5: higher-scoring inferences could fill the three slots and displace an
+  assertion.
 - **A second search cued by the channel window.** Rejected: understanding
   already reads the window, and the search mostly adds loosely related items.
 - **A thick first recall**, around 8 items and no threshold. Rejected: on a
