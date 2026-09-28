@@ -39,6 +39,7 @@ from ai_assistant.core.types import (
 )
 from ai_assistant.interfaces import cli, episode_inspection
 from ai_assistant.testing import FakeAssistantEngine, FakeMemoryStore
+from ai_assistant.testing.activation import ended_pass
 
 if TYPE_CHECKING:
     from ai_assistant.core.protocols import AssistantEngine
@@ -84,6 +85,7 @@ def _record(
                 understanding=understanding,
                 understanding_omitted=None if understanding else omitted,
                 understanding_elided=elided,
+                stages=ended_pass(_AT),
             )
         ),
     )

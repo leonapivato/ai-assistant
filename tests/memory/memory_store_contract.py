@@ -34,6 +34,7 @@ from ai_assistant.core.errors import (
     StaleEpisodeReadError,
 )
 from ai_assistant.core.protocols import MemoryStore
+from ai_assistant.testing.activation import ended_pass
 from ai_assistant.testing.cancellation import held_at_its_first_await, settle
 
 if TYPE_CHECKING:
@@ -52,6 +53,8 @@ from ai_assistant.core.types import (
     Capture,
     ChannelContext,
     ChannelIdentity,
+    ControllerRule,
+    ControllerStage,
     EpisodeProcessingRecord,
     EpisodeResponseKind,
     EpisodicMemory,
@@ -71,8 +74,11 @@ from ai_assistant.core.types import (
     ProcessingStatus,
     Provenance,
     RecordedChannelTrigger,
+    RecordedResumeTrigger,
     RecordedTextInput,
     SemanticMemory,
+    StageEntry,
+    StageOutcome,
     TimeWindow,
     UnderstandingGround,
     UnderstandingOmission,
@@ -939,6 +945,7 @@ def _activation_episode(record_id: str, *, eligible: bool) -> EpisodicMemory:
             response_kind=EpisodeResponseKind.NONE,
             model_eligible=eligible,
             understanding_omitted=UnderstandingOmission.NOT_REACHED,
+            stages=ended_pass(_IN_WINDOW),
         ),
     )
 
@@ -1262,7 +1269,7 @@ class MemoryStoreContract:
         got = await store.get("understood")
         assert isinstance(got, EpisodicMemory)
         assert got.processing_record is not None
-        assert got.processing_record.schema_version == 2
+        assert got.processing_record.schema_version == 3
         assert got.processing_record.understanding == (version,)
         assert got.processing_record.understanding[0].meaning_referents[0].id == " "
         assert got.processing_record.understanding_omitted is None
@@ -1272,6 +1279,55 @@ class MemoryStoreContract:
         assert omitted.processing_record is not None
         assert omitted.processing_record.understanding == ()
         assert omitted.processing_record.understanding_omitted is UnderstandingOmission.NOT_REACHED
+
+    async def test_a_processing_records_stage_record_survives_the_round_trip(
+        self, store: MemoryStore
+    ) -> None:
+        """ADR-0280 §7: the schema-3 record carries its stage record whole.
+
+        Pinned in both shapes §7 admits — a channel activation whose entries end in
+        exactly one ``end`` entry, with an elided count, and a resume with no stage
+        record — because a store that dropped or reordered entries would not fail on
+        write: the record's own validator would refuse what it read back, so the loss
+        would surface as a read error on a record that was written whole.
+        """
+        channel = _activation_episode("channel", eligible=True)
+        assert channel.processing_record is not None
+        entries = (
+            StageEntry(
+                stage=ControllerStage.UNDERSTANDING,
+                due=ControllerRule.NOT_UNDERSTOOD,
+                started_at=_STORE_NOW,
+                ended_at=_IN_WINDOW,
+                outcome=StageOutcome.TIMED_OUT,
+            ),
+            *ended_pass(_IN_WINDOW, ControllerRule.STAGE_FAILED),
+        )
+        channel_record = channel.processing_record.model_copy(
+            update={"stages": entries, "stages_elided": 2}
+        )
+        resume_record = channel.processing_record.model_copy(
+            update={
+                "trigger": RecordedResumeTrigger(channel=None, approved=True),
+                "stages": (),
+            }
+        )
+        await store.add(channel.model_copy(update={"processing_record": channel_record}))
+        await store.add(
+            channel.model_copy(update={"id": "resume", "processing_record": resume_record})
+        )
+
+        got = await store.get("channel")
+        assert isinstance(got, EpisodicMemory)
+        assert got.processing_record is not None
+        assert (got.processing_record.stages, got.processing_record.stages_elided) == (entries, 2)
+        resumed = await store.get("resume")
+        assert isinstance(resumed, EpisodicMemory)
+        assert resumed.processing_record is not None
+        assert (resumed.processing_record.stages, resumed.processing_record.stages_elided) == (
+            (),
+            0,
+        )
 
     async def test_an_episodes_disposition_and_capture_survive_the_round_trip(
         self, store: MemoryStore

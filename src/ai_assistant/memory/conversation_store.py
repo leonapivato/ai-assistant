@@ -688,7 +688,7 @@ class SqliteConversationStore:
                 columns = {row[1] for row in conn.execute("PRAGMA table_info(turns)")}
                 if "model_eligible" not in columns:
                     raise IncompatibleStateError(
-                        "conversation store requires a fresh M37 data directory",
+                        "conversation store requires a fresh M38 data directory",
                         expected="conversation index with activation eligibility",
                         found="conversation index without activation eligibility",
                         operator_action=(

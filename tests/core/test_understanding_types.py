@@ -31,6 +31,7 @@ from ai_assistant.core.types import (
     UnresolvedMatter,
     WholeTextReply,
 )
+from ai_assistant.testing.activation import ended_pass
 
 _NOW = datetime(2026, 1, 1, tzinfo=UTC)
 _INPUT = UnderstandingReferent(kind="input", excerpt="book the dentist")
@@ -69,6 +70,7 @@ def _record(**overrides: object) -> EpisodeProcessingRecord:
         "response_kind": EpisodeResponseKind.NONE,
         "model_eligible": True,
         "understanding_omitted": UnderstandingOmission.NOT_REACHED,
+        "stages": ended_pass(_NOW),
     }
     fields.update(overrides)
     return EpisodeProcessingRecord.model_validate(fields)
@@ -282,10 +284,10 @@ def test_recorded_understanding_round_trips_through_its_dump() -> None:
 # --- §7: schema_version 2, three fields, exactly one of history and omission ----
 
 
-def test_the_record_is_schema_version_two_with_three_understanding_fields() -> None:
-    """§7: ``schema_version`` becomes ``Literal[2]``; no reader for a version-1 record exists."""
+def test_the_record_carries_three_understanding_fields_at_the_current_schema_version() -> None:
+    """§7's three fields; the literal is ADR-0280 §7's ``3``, which superseded §7's ``2``."""
     record = _record()
-    assert record.schema_version == 2
+    assert record.schema_version == 3
     assert record.understanding == ()
     assert record.understanding_omitted is UnderstandingOmission.NOT_REACHED
     assert record.understanding_elided == 0

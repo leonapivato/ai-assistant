@@ -20,6 +20,8 @@ from ai_assistant.core.types import (
     Capture,
     ChannelIdentity,
     ChannelResult,
+    ControllerRule,
+    ControllerStage,
     EpisodeCaptureReport,
     EpisodeProcessingRecord,
     EpisodeResponseKind,
@@ -40,6 +42,8 @@ from ai_assistant.core.types import (
     RouteOutcome,
     SpeechChannelPayload,
     SpokenTurn,
+    StageEntry,
+    StageOutcome,
     TurnOutcome,
     UnderstandingGround,
     UnderstandingOmission,
@@ -57,6 +61,33 @@ if TYPE_CHECKING:
         ConversationDigest,
         RecordedActivationTrigger,
         ReplyCapability,
+    )
+
+
+def ended_pass(
+    at: datetime, rule: ControllerRule = ControllerRule.NOTHING_DUE
+) -> tuple[StageEntry, ...]:
+    """The smallest stage record a channel activation's processing record admits.
+
+    ADR-0280 §7 requires a channel activation's record to end in exactly one end
+    entry, last. A test that builds a record by hand and is about something else
+    passes this rather than spelling the entry out.
+
+    Args:
+        at: The instant of the end entry's one reading.
+        rule: The rule that ended the pass.
+
+    Returns:
+        The one end entry, as a stage record.
+    """
+    return (
+        StageEntry(
+            stage=ControllerStage.END,
+            due=rule,
+            started_at=at,
+            ended_at=at,
+            outcome=StageOutcome.DONE,
+        ),
     )
 
 
@@ -255,8 +286,33 @@ class FakeActivation:
                 links=self.links,
                 understanding=self.understanding(),
                 understanding_omitted=self.omission(),
+                stages=self.stages(failure),
             ),
         )
+
+    def stages(self, failure: BaseException | None) -> tuple[StageEntry, ...]:
+        """ADR-0280 §7's record shape, over the facts this fake holds.
+
+        The fake runs no controller, so it records no stage entries and only the
+        pass's one end entry, choosing the rule from what it knows: none on a resume,
+        which keeps its legacy path; ``interrupted`` on a cancellation;
+        ``no_text_input`` for speech with no words or a failed transcription;
+        ``stage_failed`` on any other failure; ``route_taken`` for a routed turn; and
+        ``nothing_due`` otherwise.
+        """
+        if isinstance(self.trigger, RecordedResumeTrigger):
+            return ()
+        if isinstance(failure, asyncio.CancelledError):
+            rule = ControllerRule.INTERRUPTED
+        elif self.no_words or isinstance(failure, TranscriptionFailedError):
+            rule = ControllerRule.NO_TEXT_INPUT
+        elif failure is not None:
+            rule = ControllerRule.STAGE_FAILED
+        elif self.outcome is not None and self.outcome.routed is not None:
+            rule = ControllerRule.ROUTE_TAKEN
+        else:
+            rule = ControllerRule.NOTHING_DUE
+        return ended_pass(self.at, rule)
 
     def understanding(self) -> tuple[ActivationUnderstanding, ...]:
         """The one version a pass that reached the stage records, and none otherwise."""

@@ -11,6 +11,7 @@ from ai_assistant.core.episode_encoding import check_list, encode_cursor
 from ai_assistant.core.types import (
     ChannelContext,
     ChannelIdentity,
+    ControllerRule,
     EpisodeCaptureReport,
     EpisodeCursor,
     EpisodePosition,
@@ -29,6 +30,7 @@ from ai_assistant.core.types import (
     SpokenReply,
     UnderstandingOmission,
 )
+from ai_assistant.testing.activation import ended_pass
 
 _NOW = datetime(2026, 1, 1, tzinfo=UTC)
 
@@ -51,6 +53,7 @@ def _processing(kind: EpisodeResponseKind) -> EpisodeProcessingRecord:
         response_kind=kind,
         model_eligible=False,
         understanding_omitted=UnderstandingOmission.NOT_REACHED,
+        stages=ended_pass(_NOW, ControllerRule.NO_TEXT_INPUT),
     )
 
 

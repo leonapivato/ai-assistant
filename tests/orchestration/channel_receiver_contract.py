@@ -19,6 +19,7 @@ from ai_assistant.core.types import (
     ChannelIdentity,
     ChannelInput,
     ChannelResult,
+    ControllerStage,
     ConversationInputOptions,
     EpisodeResponseKind,
     EpisodicMemory,
@@ -74,7 +75,18 @@ async def captured_episode(engine: AssistantEngine, result: ChannelResult) -> Ep
     assert [version.version for version in processing.understanding] == [1]
     assert processing.understanding[0].producer is UnderstandingProducer.INTERPRETATION
     assert processing.understanding_elided == 0
+    assert_a_channel_stage_record(episode)
     return episode
+
+
+def assert_a_channel_stage_record(episode: EpisodicMemory) -> None:
+    """ADR-0280 §7: a channel pass's record ends in exactly one ``end`` entry, last."""
+    assert episode.processing_record is not None
+    assert episode.processing_record.schema_version == 3
+    stages = [entry.stage for entry in episode.processing_record.stages]
+    assert stages
+    assert stages[-1] is ControllerStage.END
+    assert ControllerStage.END not in stages[:-1]
 
 
 async def read_episode(engine: AssistantEngine, address: str) -> EpisodicMemory:
@@ -255,6 +267,7 @@ class ChannelReceiverContract:
         # which is neither a failed understanding nor a branch the pass took.
         assert episode.processing_record.understanding == ()
         assert episode.processing_record.understanding_omitted is UnderstandingOmission.NOT_REACHED
+        assert_a_channel_stage_record(episode)
         assert episode.outcome is None
 
     @pytest.mark.parametrize("kind", ["unknown", "conversation", "informational_event"])
