@@ -10,8 +10,8 @@ email, a calendar change or any later sensor. A conversation is one channel
 among them. Nothing in this design reads the channel type.
 
 Milestone: [M39 — Recall into understanding](https://github.com/leonapivato/ai-assistant/milestone/6).
-It builds on the M38 controller proposal (#2577, read at `6d09e914`). This
-proposal can be discussed now, and it is ratified after M38's ADR merges.
+It builds on ADR-0280 (the activation controller, merged `Accepted` from
+#2577), and is written against it as it now stands.
 
 ## Baseline
 
@@ -21,7 +21,7 @@ proposal can be discussed now, and it is ratified after M38's ADR merges.
   read at wiki revision `f18ccf6`. Recall there is owner direction, not
   ratified. This proposal builds the first cut of it: the recall stage without
   the recall hook.
-- **Code:** `main` at `8265b204`, plus the controller #2577 proposes.
+- **Code:** `main` at `8265b204`, plus the controller ADR-0280 decides.
   - `UnderstandingStage` (`orchestration/understanding.py`) renders the input,
     the channel window (labels `H1…`) and the episode window (labels `P1…`),
     and nothing else.
@@ -34,8 +34,13 @@ proposal can be discussed now, and it is ratified after M38's ADR merges.
     **Superseded** for recalled memory.
   - ADR-0276 §2: a referent's `kind` is `input`, `channel_item` or `episode`.
     It gains a kind for a memory.
-  - ADR-0276 §5 (as #2577 changes it): understanding is the first stage that
-    reads an activation's input. Recall now comes before it.
+  - ADR-0280 §4: `ControllerStage` gains `recall`, `ControllerRule` gains
+    `not_recalled`, and the table gains one row. No other row moves.
+  - ADR-0280 §5: the fixed defaults gain a failure-tolerant stage (below).
+  - ADR-0280 §7: `schema_version` becomes `Literal[4]`, with the format
+    marker's advance on the same fresh-state mechanism.
+  - ADR-0276 §5: understanding is no longer the first stage to read the input.
+    Recall runs before it.
   - ADR-0275 §4: `EpisodeProcessingRecord` gains a field for what recall
     found, with a schema version bump.
   - ADR-0275 §7: "all automatic model-facing episodic reads request
@@ -75,15 +80,20 @@ flowchart LR
 
 ### Recall is a stage the controller runs
 
-Recall is a new stage in the controller #2577 proposes. It is due by one new
-readiness rule, **`not_recalled`**: the activation has no recall result yet.
-The rule sits before `not_understood`, so recall runs before understanding on
-every activation. It reads the pass's state, never the channel type.
+Recall is a new stage in ADR-0280's controller. It is due by one new readiness
+rule, **`not_recalled`**: *the recall stage is wired and there is no recall
+decision*. The row goes after `route_taken` (3) and before `not_understood`
+(4). Rows 1–3 only answer for conversation turns and are there to be retired
+(ADR-0280 §2), so on every activation recall is the first stage to read the
+input. The rule reads the working set, never the channel type.
+
+Like every ADR-0280 decision, **a recall that found nothing, or failed, is
+still a decision**, so the rule never answers twice (ADR-0280 §3). The stage
+always records one before it returns.
 
 Recall is the second stage, after understanding, that does exactly one phase's
-job and nothing else, so under #2577's naming rule it takes the phase's name:
-the stage is `recall`, and its record entry reads `recall` due
-`not_recalled`.
+job and nothing else, so under ADR-0280 §1 it takes the phase's name: the stage
+is `recall`, and its entry reads `recall` due `not_recalled`.
 
 It lives in a new module `orchestration/recall.py` as `RecallStage`, holding
 an injected `MemoryStore`, the same way the loop holds one. It calls no model.
@@ -138,10 +148,16 @@ fresh since M37, so there is no older material the flag still protects.
   item, because understanding already sees them;
 - at most a **small cap**, best first.
 
-The threshold and the cap are constants beside `UNDERSTANDING_EPISODE_LIMIT`
-at the composition root. The values are an ADR detail. A cap around 3 keeps
-recall thin. The threshold should be set so that a short input normally
-clears nothing.
+A record the store returns without a score does not clear the threshold.
+
+**The threshold depends on the embedder.** Scores are cosine similarities, and
+they are not comparable between `FastEmbedEmbedder` and `HashingEmbedder`. So
+the threshold is not one constant: `RecallStage` takes it as a constructor
+argument, and the composition root sets it **for the embedder it wires**,
+beside that embedder. The production value is tuned for FastEmbed, and tests
+set their own, against the embedder or fake they use. The cap (around 3) is an
+ordinary constant beside `UNDERSTANDING_EPISODE_LIMIT`. The threshold should
+be set so that a short input normally clears nothing.
 
 **Recall interprets nothing.** It doesn't decide that a memory answers
 anything, is out of date or settles a reference. `capped` is unwrapped and not
@@ -151,9 +167,11 @@ acted on, as the loop's reads leave it.
 
 - **Audience.** The found records pass through the same disclosure predicate
   the two windows already use (`admitted_to_understanding`), before anything
-  is kept. Under #2577's assumption that every reply's audience is the owner,
-  this withholds nothing today. It is there so the audience milestone changes a
-  predicate, not the stage.
+  is kept. On a bounded-audience channel it withholds nothing. On the spoken
+  operation's unbounded audience, which ADR-0280 §2 keeps, it withholds every
+  record it does not place, silently, as it does for the windows. No rule
+  reads the audience. The audience milestone changes the predicate, not the
+  stage.
 - **Provenance.** Each found item records one of two sources:
   - **the user**;
   - **outside content**: a semantic record that
@@ -166,13 +184,17 @@ acted on, as the loop's reads leave it.
 ### What recall adds to the episode
 
 Recall's result is episode content, like understanding versions, so it cannot
-live in #2577's working set, which is never persisted. And #2577's record
-points rather than copies. So it gets its own place:
+live only in ADR-0280's working set, which is never persisted. And ADR-0280
+§6's stage entries carry no results. So it is kept the way understanding
+versions are:
 
-- **`ActivationState`** holds the recall result once the stage ends, so
-  understanding can read it in the same pass.
-- **Finalization** copies it into a new field,
-  `EpisodeProcessingRecord.recall`, and bumps `schema_version` again.
+- **The working set** holds the recall decision, which is what
+  `not_recalled` reads.
+- **`ActivationState`** holds the recall result, so understanding can read it
+  in the same pass.
+- **Finalization** copies the result into a new field,
+  `EpisodeProcessingRecord.recall`, with `schema_version` at 4 and the format
+  marker advanced (ADR-0280 §7's mechanism).
 
 The result is one of three outcomes, and **nothing found is distinct from
 failed**:
@@ -203,7 +225,8 @@ through it.
 Rendering and choosing are not repeated in the record: the excerpt is enough
 to read it after the memory is deleted, which is what the wiki asks for.
 
-A field that is absent on an older episode means "recorded before recall".
+A record whose trigger is a `RecordedResumeTrigger` carries no recall result,
+as it carries no stage record, because resume keeps its own path.
 
 ### Understanding reads what was found
 
@@ -236,14 +259,44 @@ memory from any other read.
 
 ### Failure and the deadline
 
-#2577's fixed default ends the pass on any failed stage. **Recall is the first
-stage with a different default:** a `failed` or `timed_out` recall is recorded
-(the stage entry's outcome, and a `failed` recall result), and understanding
-runs anyway with the section marked as failed. A memory store that can't be
-searched shouldn't stop the assistant from reading its input.
+ADR-0280 §5's fixed default ends the pass on any `failed` or `timed_out`
+stage, and re-raises. **Recall is the first stage that should not end the
+pass:** a memory store that can't be searched shouldn't stop the assistant from
+reading its input.
 
-Recall runs under a short budget of its own, inside the pass deadline, so a
-slow embedder can't eat understanding's time. The value is an ADR detail.
+**The mechanism: amend §5 so a stage can declare that it tolerates failure.**
+A **failure-tolerant** stage owes two things:
+
+1. **It catches its own failure.** It records its decision (a `failed` recall
+   result) before it returns.
+2. **It returns the failure rather than raising it.** It returns a
+   `StageResult` of `failed` or `timed_out` carrying the error.
+
+For such a result, the controller appends the stage's entry with that outcome
+and **carries on evaluating the rules** instead of ending the pass. Because
+the decision is present, `not_recalled` doesn't answer again, and understanding
+is due next. It is shown the recall section marked as failed.
+
+The alternative is for the stage to catch its error and return `done`. It
+needs no amendment, but the stage entry would then read `done` for a recall
+that failed, and the record would only be right in the recall field. The
+amendment keeps the stage record honest, which is ADR-0280's point.
+
+An error that escapes the stage anyway, such as a bug raising outside its
+catch, is an ordinary `failed`: the fixed default applies and the pass ends.
+Tolerance covers the failures the stage chose to handle, not everything.
+
+**Two deadlines, kept apart:**
+
+| What ran out | What happens |
+| --- | --- |
+| **Recall's own budget**, a short timeout inside the stage | Recall records `failed` (timed out), returns `timed_out`, and the pass continues to understanding |
+| **The activation's deadline** | The activation ends, as ADR-0280 §5 decides for every stage: the end entry `stage_timed_out`, and the error re-raised |
+
+The controller tells them apart itself: once the pass's deadline has passed,
+tolerance does not apply, whatever the stage returned. Recall's budget is the
+smaller of its own value and the time the pass has left, so recall can't use
+up understanding's time. The budget's value is an ADR detail.
 
 ### Outside content as a cue
 
@@ -258,10 +311,12 @@ nothing.
 
 - **Understanding's prompt changes**, so tests asserting its exact rendering
   are rewritten.
-- **The recorded path per activation kind** (#2577's baseline tests) gains a
-  `recall` entry before `understanding` on every path.
+- **The recorded path per activation kind** (ADR-0280 §8's baseline tests)
+  gains a `recall` entry wherever `understanding` appears.
 - **Episode inspection** shows the new field. On the wire that is a protocol
-  version bump.
+  version bump (ADR-0280 §7's rule).
+- **A store written before this change** is refused at startup, by the format
+  marker's advance, as ADR-0280 refused the one before it.
 - **Anything that exhaustively matches `UnderstandingReferent.kind`** must
   handle `memory`.
 
@@ -279,15 +334,20 @@ reshapes planning.
   - provenance is recorded for each source;
   - an outside episode's excerpt never carries its raw input;
   - `found`, `nothing_found` and `failed` are recorded.
-- **The controller:** `not_recalled` makes recall due before understanding,
-  and a failed recall still leads to understanding.
+- **The controller,** over fake stages:
+  - `not_recalled` makes recall due before understanding;
+  - a tolerated `failed` or `timed_out` leads to understanding, with the
+    stage entry carrying that outcome;
+  - an error escaping a tolerant stage ends the pass;
+  - an expired activation deadline ends the pass even from a tolerant stage;
+  - no path reaches `stage_repeated`.
 - **Understanding,** against the scripted model fake:
   - `M` labels render;
   - a cited recalled episode resolves to `episode`, and a cited semantic
     record to `memory`;
   - the missing and failed sections render.
-- **The recorded path** for each activation kind #2577 tests, each gaining
-  the same `recall` entry.
+- **The recorded path** for each activation kind ADR-0280 §8 tests, each
+  gaining the same `recall` entry.
 - **The gate,** as always.
 
 ## Options considered
@@ -311,9 +371,12 @@ reshapes planning.
 - **Recording only the found ids**, without an excerpt. Smaller, but the
   record becomes unreadable once a memory is deleted, and the wiki asks for
   it to stay readable. Rejected.
-- **Letting a failed recall end the pass**, #2577's default. Rejected: the
-  input can be understood without memories, and a broken store would then stop
-  every activation.
+- **Letting a failed recall end the pass**, ADR-0280 §5's default. Rejected:
+  the input can be understood without memories, and a broken store would then
+  stop every activation.
+- **The stage catching its error and returning `done`**, with no amendment to
+  ADR-0280. Rejected: the stage record would say `done` for a recall that
+  failed.
 - **Recall only for some channels**, such as skipping it for a busy inbox.
   Cheaper, but it makes recall depend on the channel type, and outside content
   is where remembering the sender and the matter helps most. Rejected. If
@@ -323,15 +386,20 @@ reshapes planning.
 ## What it leaves open
 
 - **Candidate stories.** Once stories exist, recall can suggest the stories an
-  activation might belong to, one or several. It can find them by following
-  existing links, for example the stories the short-term windows' episodes
-  already belong to, and it can show each story's recent episodes and the
+  activation might belong to, one or several, from two places. Both are
+  link-following, not extra searches:
+
+  | Where the candidates come from | What it reaches |
+  | --- | --- |
+  | **The stories of the short-term windows' episodes** | Short replies, such as "yes" or "same as before", that continue what was just happening |
+  | **The stories of the episodes the search found** | An older matter named in the words, which only recall can reach before understanding |
+
+  For each candidate, recall can show the story's recent episodes and the
   memories they cited. **Recall suggests candidates. It never chooses:**
   understanding decides whether and how the activation links to one. This is
-  what will connect short inputs like "yes" or "same as before" to long-term
-  memory, because the connection is structural, not a matter of similarity.
-  It arrives with the stories milestone, as a second source into the same
-  recall record.
+  what will connect short inputs to long-term memory, because the connection
+  is structural, not a matter of similarity. It arrives with the stories
+  milestone, as a second source into the same recall record.
 - **Recall cued by understanding.** A search built from understanding's
   references and meaning finds far more than raw words do. It is the recall
   hook's first form, and it stays with the hook.
@@ -342,14 +410,15 @@ reshapes planning.
   this milestone.
 
 - **The recall hook**: searches during processing, contests, and "planning
-  waits for a pending run". The controller #2577 proposes runs one stage at a
-  time, so the hook will need a stage that runs alongside the others. That is
-  flagged against #2577, not designed here.
+  waits for a pending run". ADR-0280's controller runs one stage at a time and
+  each at most once, so the hook will need a stage that runs alongside the
+  others. It will also need the no-progress limit that replaces the loop
+  guard. That is for the hook's own decision.
 - **Preferences and procedural memory**, when they are populated and when the
   task is named.
 - **Forget over recalled copies**, when routing and the memory commands return.
 - **Audience and provenance done properly**, in their own milestone.
-- **The exact constants** (the threshold, the cap, the budget),
-  settled in the ADR.
+- **The exact constants** (the production threshold for FastEmbed, the cap,
+  the budget), settled in the ADR.
 - **Folding the loop's own relevance reads into recall**, in the milestone
   that reshapes planning.
