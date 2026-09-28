@@ -80,6 +80,18 @@ class PassFacts(Protocol):
         """Routing took the route."""
 
     @property
+    def recall_wired(self) -> bool:
+        """The deployment wired the recall stage (ADR-0281 §2)."""
+
+    @property
+    def recall_decided(self) -> bool:
+        """Recall made its decision, including that it found nothing or failed."""
+
+    @property
+    def deadline_passed(self) -> bool:
+        """The pass's deadline has passed (ADR-0281 §5)."""
+
+    @property
     def understanding_wired(self) -> bool:
         """The deployment wired the understanding stage."""
 
@@ -153,8 +165,9 @@ def _turn_asks_nothing(facts: PassFacts) -> bool:
     return facts.conversation_turn and facts.associated and not facts.asks_which_goal
 
 
-#: ADR-0280 §4's table, in its order. The first rule that answers decides, and
-#: ``nothing_due`` is last and always answers, so every pass ends by a rule.
+#: ADR-0280 §4's table, in its order, with ADR-0281 §2's row. The first rule that
+#: answers decides, and ``nothing_due`` is last and always answers, so every pass ends
+#: by a rule.
 ACTIVATION_RULES: Final[tuple[Rule, ...]] = (
     Rule(
         ControllerRule.CONVERSATION_UNRESOLVED,
@@ -167,6 +180,12 @@ ACTIVATION_RULES: Final[tuple[Rule, ...]] = (
         ControllerStage.ROUTING,
     ),
     Rule(ControllerRule.ROUTE_TAKEN, lambda f: f.route_taken, ControllerStage.END),
+    # ADR-0281 §2: recall runs before understanding, and only where both are wired.
+    Rule(
+        ControllerRule.NOT_RECALLED,
+        lambda f: f.recall_wired and f.understanding_wired and not f.recall_decided,
+        ControllerStage.RECALL,
+    ),
     Rule(
         ControllerRule.NOT_UNDERSTOOD,
         lambda f: f.understanding_wired and not f.understanding_decided,
@@ -226,10 +245,16 @@ class StageResult:
 
     Only the outcome enters the stage's :class:`StageEntry`; the error never does
     (§5). It is carried here so the controller can end the pass and re-raise it.
+
+    ``tolerated`` is set only by a failure-tolerant stage (ADR-0281 §5) returning a
+    ``failed`` or ``timed_out`` it caught and handled, after recording its decision.
+    While the pass's deadline has not passed, the controller then continues rather
+    than ending the pass.
     """
 
     outcome: StageOutcome
     error: Exception | None = None
+    tolerated: bool = False
 
 
 class ControllerStageRun[P](Protocol):
@@ -272,6 +297,34 @@ class Stage[P]:
         except Exception as exc:
             return StageResult(StageOutcome.FAILED, exc)
         return StageResult(StageOutcome.DONE)
+
+
+@dataclass(frozen=True)
+class TolerantStage[P]:
+    """A failure-tolerant stage (ADR-0281 §5), its escaped raise classified as ``Stage``'s.
+
+    ``body`` catches the failures it handles, records its decision in the working
+    set, and returns a :class:`StageResult` marked ``tolerated``. A raise that
+    escapes it is classified exactly as :class:`Stage` classifies one, and is never
+    tolerated: the pass ends on ADR-0280 §5:2's fixed default. ``expired`` is as on
+    :class:`Stage`, and a stage not entered because the deadline passed is not
+    tolerated either.
+    """
+
+    name: ControllerStage
+    body: Callable[[P], Awaitable[StageResult]]
+    expired: Callable[[P], Exception | None] | None = None
+
+    async def run(self, state: P) -> StageResult:
+        """Run the body, unless its deadline already passed, and classify an escaped raise."""
+        if self.expired is not None and (late := self.expired(state)) is not None:
+            return StageResult(StageOutcome.TIMED_OUT, late)
+        try:
+            return await self.body(state)
+        except _TIMEOUTS as exc:
+            return StageResult(StageOutcome.TIMED_OUT, exc)
+        except Exception as exc:
+            return StageResult(StageOutcome.FAILED, exc)
 
 
 @dataclass
@@ -380,7 +433,9 @@ class ActivationController[P: PassFacts]:
         Ends with the rule that ended it; with ``stage_repeated`` where the first
         rule that answers names a stage this pass already ran (the M38 loop guard);
         with ``stage_failed`` or ``stage_timed_out`` where a stage did not end
-        ``done``, re-raising its error; and with ``interrupted`` where the pass is
+        ``done``, re-raising its error — save a failure-tolerant stage's tolerated
+        result while the pass's deadline has not passed, after which the rules are
+        evaluated again (ADR-0281 §5); and with ``interrupted`` where the pass is
         cancelled or interrupted while the controller runs.
 
         Raises:
@@ -414,6 +469,8 @@ class ActivationController[P: PassFacts]:
                     )
                 )
                 if result.outcome is StageOutcome.DONE:
+                    continue
+                if result.tolerated and not state.deadline_passed:
                     continue
                 record.end(
                     ControllerRule.STAGE_TIMED_OUT

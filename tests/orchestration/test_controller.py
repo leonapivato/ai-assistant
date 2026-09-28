@@ -15,7 +15,7 @@ from typing import Final
 
 import pytest
 
-from ai_assistant.core.errors import ModelTimeoutError, PlanningError
+from ai_assistant.core.errors import MemoryStoreError, ModelTimeoutError, PlanningError
 from ai_assistant.core.types import ControllerRule, ControllerStage, StageEntry, StageOutcome
 from ai_assistant.orchestration.controller import (
     ACTIVATION_RULES,
@@ -24,6 +24,7 @@ from ai_assistant.orchestration.controller import (
     Stage,
     StageRecord,
     StageResult,
+    TolerantStage,
 )
 
 _AT: Final = datetime(2026, 9, 27, tzinfo=UTC)
@@ -39,6 +40,9 @@ class _Facts:
     routing_wired: bool = False
     route_decided: bool = False
     route_taken: bool = False
+    recall_wired: bool = False
+    recall_decided: bool = False
+    deadline_passed: bool = False
     understanding_wired: bool = False
     understanding_decided: bool = False
     event_summarized: bool = False
@@ -91,6 +95,31 @@ _PLANNED: Final = replace(_ASSOCIATED, turn_decided=True)
             replace(_RESOLVED, understanding_wired=True),
             ControllerRule.NOT_UNDERSTOOD,
             ControllerStage.UNDERSTANDING,
+        ),
+        (
+            replace(_RESOLVED, understanding_wired=True, recall_wired=True),
+            ControllerRule.NOT_RECALLED,
+            ControllerStage.RECALL,
+        ),
+        (
+            replace(_RESOLVED, understanding_wired=True, recall_wired=True, recall_decided=True),
+            ControllerRule.NOT_UNDERSTOOD,
+            ControllerStage.UNDERSTANDING,
+        ),
+        (
+            replace(_RESOLVED, routing_wired=True, understanding_wired=True, recall_wired=True),
+            ControllerRule.ROUTE_UNCHECKED,
+            ControllerStage.ROUTING,
+        ),
+        (
+            _Facts(informational_event=True, understanding_wired=True, recall_wired=True),
+            ControllerRule.NOT_RECALLED,
+            ControllerStage.RECALL,
+        ),
+        (
+            _Facts(informational_event=True, recall_wired=True),
+            ControllerRule.EVENT_UNSUMMARIZED,
+            ControllerStage.EVENT_SUMMARY,
         ),
         (
             _Facts(informational_event=True, understanding_wired=True, understanding_decided=True),
@@ -164,11 +193,14 @@ def test_the_first_rule_that_answers_decides(
     assert (due.name, due.makes_due) == (rule, stage)
 
 
-def test_the_table_is_the_adrs_twelve_rows_in_order_ending_in_one_that_always_answers() -> None:
+def test_the_table_is_the_adrs_rows_in_order_ending_in_one_that_always_answers() -> None:
+    """ADR-0280 §4's twelve rows, with ADR-0281 §2's between ``route_taken`` and
+    ``not_understood``."""
     assert [rule.name for rule in ACTIVATION_RULES] == [
         ControllerRule.CONVERSATION_UNRESOLVED,
         ControllerRule.ROUTE_UNCHECKED,
         ControllerRule.ROUTE_TAKEN,
+        ControllerRule.NOT_RECALLED,
         ControllerRule.NOT_UNDERSTOOD,
         ControllerRule.EVENT_UNSUMMARIZED,
         ControllerRule.ASSOCIATION_DUE,
@@ -295,6 +327,144 @@ async def test_a_stage_that_did_not_end_done_ends_the_pass_and_reraises_its_erro
         (ControllerStage.EVENT_SUMMARY, ControllerRule.EVENT_UNSUMMARIZED, outcome),
         (ControllerStage.END, ending, StageOutcome.DONE),
     ]
+
+
+# --- ADR-0281 §5: a failure-tolerant stage -----------------------------------------------
+
+
+_EVENT_WIRED: Final = _Facts(informational_event=True, understanding_wired=True, recall_wired=True)
+
+
+def _tolerated(outcome: StageOutcome, error: Exception) -> _FakeStage:
+    """A tolerant recall that records its decision, then returns ``outcome`` tolerated."""
+    return _FakeStage(
+        ControllerStage.RECALL,
+        "recall_decided",
+        result=StageResult(outcome, error, tolerated=True),
+    )
+
+
+@pytest.mark.parametrize(
+    ("outcome", "error"),
+    [
+        (StageOutcome.FAILED, MemoryStoreError("down")),
+        (StageOutcome.TIMED_OUT, TimeoutError()),
+    ],
+)
+async def test_a_tolerated_result_is_recorded_and_understanding_follows(
+    outcome: StageOutcome, error: Exception
+) -> None:
+    record = await _run(
+        replace(_EVENT_WIRED),
+        _tolerated(outcome, error),
+        _FakeStage(ControllerStage.UNDERSTANDING, "understanding_decided"),
+        _FakeStage(ControllerStage.EVENT_SUMMARY, "event_summarized"),
+    )
+    assert _shape(record) == [
+        (ControllerStage.RECALL, ControllerRule.NOT_RECALLED, outcome),
+        (ControllerStage.UNDERSTANDING, ControllerRule.NOT_UNDERSTOOD, StageOutcome.DONE),
+        (ControllerStage.EVENT_SUMMARY, ControllerRule.EVENT_UNSUMMARIZED, StageOutcome.DONE),
+        (ControllerStage.END, ControllerRule.NOTHING_DUE, StageOutcome.DONE),
+    ]
+
+
+async def test_a_tolerated_result_past_the_pass_deadline_ends_the_pass_and_reraises() -> None:
+    late = ModelTimeoutError("the pass's deadline passed")
+    record = StageRecord()
+    _, now = _clock()
+    controller = ActivationController(
+        stages=(_tolerated(StageOutcome.TIMED_OUT, late),),
+        clock=now,  # type: ignore[arg-type]  # a plain callable
+    )
+    with pytest.raises(ModelTimeoutError) as caught:
+        await controller.run(replace(_EVENT_WIRED, deadline_passed=True), record)
+    assert caught.value is late
+    assert _shape(record) == [
+        (ControllerStage.RECALL, ControllerRule.NOT_RECALLED, StageOutcome.TIMED_OUT),
+        (ControllerStage.END, ControllerRule.STAGE_TIMED_OUT, StageOutcome.DONE),
+    ]
+
+
+async def test_an_error_escaping_a_tolerant_stage_ends_the_pass_as_stage_failed() -> None:
+    broken = PlanningError("escaped")
+
+    async def body(_: _Facts) -> StageResult:
+        raise broken
+
+    record = StageRecord()
+    _, now = _clock()
+    controller = ActivationController(
+        stages=(TolerantStage(ControllerStage.RECALL, body),),
+        clock=now,  # type: ignore[arg-type]  # a plain callable
+    )
+    with pytest.raises(PlanningError) as caught:
+        await controller.run(replace(_EVENT_WIRED), record)
+    assert caught.value is broken
+    assert _shape(record) == [
+        (ControllerStage.RECALL, ControllerRule.NOT_RECALLED, StageOutcome.FAILED),
+        (ControllerStage.END, ControllerRule.STAGE_FAILED, StageOutcome.DONE),
+    ]
+
+
+async def test_a_result_not_marked_tolerated_takes_the_fixed_default() -> None:
+    """Only the stage that caught and handled a failure marks it; nothing else continues."""
+    record = StageRecord()
+    _, now = _clock()
+    failed = MemoryStoreError("down")
+    controller = ActivationController(
+        stages=(
+            _FakeStage(
+                ControllerStage.RECALL,
+                "recall_decided",
+                result=StageResult(StageOutcome.FAILED, failed),
+            ),
+        ),
+        clock=now,  # type: ignore[arg-type]  # a plain callable
+    )
+    with pytest.raises(MemoryStoreError):
+        await controller.run(replace(_EVENT_WIRED), record)
+    assert record.entries[-1].due is ControllerRule.STAGE_FAILED
+
+
+@pytest.mark.parametrize(
+    ("raised", "outcome"),
+    [
+        (PlanningError("broken"), StageOutcome.FAILED),
+        (ModelTimeoutError("late"), StageOutcome.TIMED_OUT),
+    ],
+)
+async def test_a_tolerant_stage_classifies_an_escaped_raise_and_never_tolerates_it(
+    raised: Exception, outcome: StageOutcome
+) -> None:
+    async def body(_: _Facts) -> StageResult:
+        raise raised
+
+    assert await TolerantStage(ControllerStage.RECALL, body).run(_Facts()) == StageResult(
+        outcome, raised
+    )
+
+
+async def test_a_tolerant_stage_whose_deadline_passed_is_not_entered_or_tolerated() -> None:
+    late = ModelTimeoutError("the deadline passed")
+    entered = False
+
+    async def body(_: _Facts) -> StageResult:
+        nonlocal entered
+        entered = True
+        return StageResult(StageOutcome.DONE)
+
+    stage = TolerantStage(ControllerStage.RECALL, body, expired=lambda _: late)
+    assert await stage.run(_Facts()) == StageResult(StageOutcome.TIMED_OUT, late)
+    assert not entered
+
+
+async def test_a_tolerant_stage_returns_what_its_body_returned() -> None:
+    tolerated = StageResult(StageOutcome.FAILED, MemoryStoreError("down"), tolerated=True)
+
+    async def body(_: _Facts) -> StageResult:
+        return tolerated
+
+    assert await TolerantStage(ControllerStage.RECALL, body).run(_Facts()) is tolerated
 
 
 async def test_a_pass_cancelled_inside_a_stage_ends_interrupted() -> None:

@@ -194,6 +194,7 @@ if TYPE_CHECKING:
     )
     from ai_assistant.orchestration.delivery import DeliveryOutbox
     from ai_assistant.orchestration.informational_events import InformationalEventStage
+    from ai_assistant.orchestration.recall import RecallStage
     from ai_assistant.orchestration.reconciling import ReconciliationStage
     from ai_assistant.orchestration.understanding import UnderstandingStage
     from ai_assistant.testing.invoker import FakeToolImplementation
@@ -724,6 +725,9 @@ class Harness:
         # stage, so every capture records `not_reached` exactly as before step 3.
         understanding: UnderstandingStage | None = None,
         understanding_version_limit: int | None = 8,
+        # ADR-0281's recall stage. `None` is every other case's deployment: no recall,
+        # so every pass runs exactly as it did before recall was wired.
+        recall: RecallStage | None = None,
         # ADR-0259 §4's turn-start pass and §3's check, wired **together or not at
         # all** — one object holds both. `None` is the default and is every other
         # case's deployment: no stage wired, so no goal's residual is repaired and the
@@ -1106,6 +1110,7 @@ class Harness:
             routing=self.routing,
             understanding=understanding,
             understanding_version_limit=understanding_version_limit,
+            recall=recall,
             # ADR-0244 §5, §6, §11: the enumeration, the answer and the cancellation,
             # over the store above. Wired unconditionally, exactly as the composition
             # root wires the operations object — what varies by deployment is the

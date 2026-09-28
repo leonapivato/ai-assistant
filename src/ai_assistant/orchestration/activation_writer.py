@@ -35,10 +35,26 @@ if TYPE_CHECKING:
     from ai_assistant.core.clock import Clock
     from ai_assistant.core.protocols import ConversationStore, MemoryStore, TranscriptArchiveWriter
     from ai_assistant.core.types import ConversationTurn, EpisodeProcessingRecord
-    from ai_assistant.orchestration.activation_state import ActivationState
+    from ai_assistant.orchestration.activation_state import ActivationState, CaptureFacts
 
 _log = structlog.get_logger(__name__)
 _INSPECTION_CONTENT = "Recorded activation; inspect its processing record."
+
+
+def _content(facts: CaptureFacts | None, processing: EpisodeProcessingRecord) -> str:
+    """What an episode is embedded on: its canonical rendering, or its understanding.
+
+    ADR-0281 §3: an inspection-only record whose activation recorded an understanding
+    is embedded on the latest one's ``meaning`` — the stage's digest of the input,
+    never the raw input — so recall can find it by what it was about. One with none
+    keeps ADR-0275 §8:5's constant. The trigger's input and context are never
+    embedded.
+    """
+    if facts is not None:
+        return facts.content
+    if processing.understanding:
+        return processing.understanding[-1].meaning
+    return _INSPECTION_CONTENT
 
 
 def capture_loss(stage: str, reason: str) -> None:
@@ -236,7 +252,7 @@ class ActivationWriter:
         )
         episode = EpisodicMemory(
             id=address,
-            content=_INSPECTION_CONTENT if facts is None else facts.content,
+            content=_content(facts, processing),
             occurred_at=now,
             outcome=state.response,
             disposition=None if facts is None else facts.disposition,

@@ -19,7 +19,7 @@ from __future__ import annotations
 
 import uuid
 from dataclasses import dataclass
-from datetime import UTC, datetime
+from datetime import UTC, datetime, timedelta
 from typing import TYPE_CHECKING, Final, assert_never
 
 from ai_assistant.archive import SqliteTranscriptArchive
@@ -96,6 +96,7 @@ from ai_assistant.orchestration import (
 )
 from ai_assistant.orchestration.informational_events import InformationalEventStage
 from ai_assistant.orchestration.payloads import ENVELOPE_RESERVE_BYTES
+from ai_assistant.orchestration.recall import RecallStage
 from ai_assistant.orchestration.reconciling import ReconciliationStage
 from ai_assistant.orchestration.understanding import RecentEpisodes, UnderstandingStage
 from ai_assistant.permissions import (
@@ -135,7 +136,7 @@ from ai_assistant.tools.egress_binder import EgressBindingSeam, canonical_destin
 from ai_assistant.tools.provisioning import KeyringConnectionProvisioner
 
 if TYPE_CHECKING:
-    from collections.abc import Awaitable, Callable, Sequence
+    from collections.abc import Awaitable, Callable, Mapping, Sequence
     from pathlib import Path
 
     from ai_assistant.core.config import Settings
@@ -288,6 +289,31 @@ UNDERSTANDING_EXCERPT_CHARS: Final = 2000
 #: bound is what keeps a record's size a function of the activation rather than of how
 #: many stages a later redesign runs.
 UNDERSTANDING_VERSION_LIMIT: Final = 8
+
+#: How many long-term memories recall keeps for one activation at most (ADR-0281 §3).
+#: Thin on purpose: recall leaves the story-following and the understanding-cued
+#: search to later sources, which add to the same record under the type's ceiling.
+RECALL_ITEM_LIMIT: Final = 3
+
+#: Recall's own budget, before the pass's deadline caps it (ADR-0281 §5). A recall
+#: that outruns it is ``timed_out`` and understanding runs without it.
+RECALL_BUDGET: Final = timedelta(seconds=2)
+
+#: The recall threshold for each embedder (ADR-0281 §3): a score's scale belongs to
+#: its embedder, so the value is chosen beside the one wired, never shared.
+#:
+#: **Provisional, and not measured.** ADR-0281 §3 has the implementation record the
+#: measurement the on-device value was chosen from; the owner deferred that
+#: measurement (2026-09-28), so these are reasoned starting points, tracked for
+#: measurement by #2601. The vendored ``bge-small-en-v1.5`` scores unrelated text
+#: high on cosine (commonly 0.4 to 0.6) and paraphrases above about 0.75, so 0.65
+#: sits in that gap, leaning towards keeping a marginal memory rather than missing a
+#: real one. The hashing embedder's similarity is word overlap, not meaning, so its
+#: value asks for a substantial share of shared words.
+RECALL_THRESHOLDS: Final[Mapping[EmbedderKind, float]] = {
+    EmbedderKind.ON_DEVICE: 0.65,
+    EmbedderKind.HASHING: 0.3,
+}
 
 #: How many entries one activation's stage record retains (ADR-0280 §6): the first
 #: ``STAGE_RECORD_LIMIT // 2`` and the last ``STAGE_RECORD_LIMIT - STAGE_RECORD_LIMIT //
@@ -2238,6 +2264,14 @@ def build_composition(  # noqa: PLR0915 — one statement per resource this root
                 excerpt_chars=UNDERSTANDING_EXCERPT_CHARS,
             ),
             understanding_version_limit=UNDERSTANDING_VERSION_LIMIT,
+            # ADR-0281's recall stage, over the same memory store, with the threshold
+            # chosen for the embedder that store was built with.
+            recall=RecallStage(
+                memory=memory,
+                threshold=RECALL_THRESHOLDS[settings.embedder],
+                limit=RECALL_ITEM_LIMIT,
+                budget=RECALL_BUDGET,
+            ),
             stage_record_limit=STAGE_RECORD_LIMIT,
             # ADR-0244's parked-read operations, built above: the **same object** the
             # recipient-grant operations below are handed, which is §18's "wired as one
