@@ -5,7 +5,7 @@
 - Scope: [M39](https://github.com/leonapivato/ai-assistant/milestone/6).
 - Dependency: ADR-0280 and its milestone M38; ADR-0276 and ADR-0275.
 - Authorization: the owner accepted the proposal on #2579 on 2026-09-27, after ruling its shape in conversation the same day, and directed its conversion into this ADR. The dispatcher assigned the next available number, 0281. That authorizes drafting and numbering, not ratification or implementation.
-- **Partially supersedes** [ADR-0275](0275-an-episode-records-one-activation-after-processing-ends.md) — **three scopes.** **§4's `EpisodeProcessingRecord` field set, in the addition alone**: the record gains §6 below's `recall` field; every existing field, value and validator stands. **§7:4's rule that all automatic model-facing episodic reads request eligibility `True`, for one consumer**: recall's read (§3 below) requests no eligibility. **§9:6's exclusion of the trigger's raw input text from automatic model inputs, for one consumer and one field**: the trigger's exact input text or transcript of a recalled episode is admitted to the understanding stage's rendering of it (§7 below), as ADR-0276 admitted it to the episode window, and nothing else is.
+- **Partially supersedes** [ADR-0275](0275-an-episode-records-one-activation-after-processing-ends.md) — **four scopes.** **§8:5's constant `content` for inspection-only records, where the record carries an understanding**: its `content` is that understanding's `meaning` instead (§3 below); the constant stands for every record without one, and `disposition=None`, the archive rule and every other clause stand. **§4's `EpisodeProcessingRecord` field set, in the addition alone**: the record gains §6 below's `recall` field; every existing field, value and validator stands. **§7:4's rule that all automatic model-facing episodic reads request eligibility `True`, for one consumer**: recall's read (§3 below) requests no eligibility. **§9:6's exclusion of the trigger's raw input text from automatic model inputs, for one consumer and one field**: the trigger's exact input text or transcript of a recalled episode is admitted to the understanding stage's rendering of it (§7 below), as ADR-0276 admitted it to the episode window, and nothing else is.
 - **Partially supersedes** [ADR-0276](0276-an-activation-is-understood-before-it-is-associated-and-the-understanding-is-retained-with-its-episode.md) — **four scopes.** **§1:5**, in its *no retrieved memory* and *nothing else* parts alone: the stage also reads what recall found. **§2:5's referent kinds, in the addition alone**: `UnderstandingReferent.kind` gains `memory`. **§3:3's label scheme, in the addition alone**: a third sequence, `M`. **§5:1's *before any relevance read***, for recall's read alone. Every other clause stands.
 - **Partially supersedes** [ADR-0280](0280-an-activation-controller-runs-the-stages-by-rules-and-records-every-choice-with-the-episode.md) — **four scopes.** **§3:5's working set and §4:1–§4:3's enums and table, in the additions alone**: the recall decision, the stage `recall`, the rule `not_recalled` and its row. **§5:2's fixed default, for a failure-tolerant stage alone** (§5 below). **§7:1's `schema_version` literal alone**: it becomes `Literal[4]`. Every other clause stands.
 - **Partially supersedes** [ADR-0217](0217-a-record-carries-who-may-receive-it-and-a-model-may-only-narrow-it.md) — **one scope.** §2:5's *no new site* half, for one further site: the same record-level predicate applied to recall's records (§4 below). Every other clause stands.
@@ -146,6 +146,27 @@ both stages wired.
 > answers anything, is out of date, is relevant or settles a reference, and it
 > resolves no reference.
 
+> **Normative — what an inspection-only episode is searched by.** At capture,
+> an inspection-only record (ADR-0275 §8:5: an informational event, a
+> pre-result failure, an interruption) whose activation recorded an
+> understanding takes as its `content` the `meaning` of the latest
+> `ActivationUnderstanding` it carries, and is embedded on that. A record with
+> no understanding keeps ADR-0275 §8:5's constant. The trigger's input text and
+> attached context are still never embedded.
+
+> **Normative.** A capture-to-recall acceptance test asserts, against
+> `SqliteMemoryStore` and a real embedder, that an informational event captured
+> with an understanding is found by recall on a later activation whose words
+> share its matter, and that one captured without an understanding is not.
+
+**Why the meaning.** Before this decision every inspection-only record was
+embedded on the same constant, so no search could find an old email by what it
+said, and recall could not reach events by their content at all. The meaning is
+the understanding stage's digest of the input, never the raw input, which is
+the same projection §6 already uses for an outside episode's excerpt. The
+loop's own reads request eligibility `True` and so still never see these
+records.
+
 **Why one cue, the words alone.** Understanding already reads the channel
 window as short-term memory, so searching with it too mostly repeats that
 context and adds loosely related items. What connects a short input to the
@@ -262,8 +283,8 @@ the pass with `stage_repeated` rather than loop.
 > ended before recall's decision carries `None`; a record whose trigger is a
 > `RecordedResumeTrigger` carries `None`, enforced by validator.
 
-> **Normative.** An item's excerpt is taken by `orchestration` from the record,
-> never from model output, and cut to the bound:
+> **Normative.** An item's excerpt is taken by `orchestration` from the stored
+> record, never from this pass's model output, and cut to the bound:
 >
 > - a semantic record's `fact`;
 > - for an episode whose trigger arrived on the informational event channel,
@@ -322,7 +343,9 @@ to the same record: recall cued by understanding, and candidate stories.
 > **Normative.** A recalled episode renders with ADR-0276 §4's projection, the
 > projection the episode window uses, including its attribution as a report
 > received and its provisional "understood then". A recalled semantic record
-> renders its `fact`, its `provenance.last_updated` and one attribution by band:
+> renders its `fact`, cut to `UNDERSTANDING_EXCERPT_CHARS` with the cut
+> disclosed as an episode's input is (ADR-0276 §4), its
+> `provenance.last_updated` and one attribution by band:
 > something the user said (`asserted`), something the assistant worked out
 > (`derived`), or something a connected source reported (`attested`).
 
@@ -359,9 +382,10 @@ describes and grants nothing.
 > 2. **`orchestration`, recall and understanding**: `RecallStage`, its
 >    threshold and budget, and the understanding stage's rendering, labels and
 >    resolution of §7, with recall wired into no controller yet.
-> 3. **`orchestration`, the controller**: the stage, the rule and its row, the
->    failure-tolerant path of §5, and the result on `ActivationState` written at
->    capture. It lands after ADR-0280's step 2.
+> 3. **`orchestration`, the controller and capture**: the stage, the rule and
+>    its row, the failure-tolerant path of §5, the result on `ActivationState`
+>    written at capture, and §3's `content` for inspection-only records, with
+>    its capture-to-recall acceptance test. It lands after ADR-0280's step 2.
 > 4. **The cutover, `core`, `memory` and `wire`, as one mechanical unit**:
 >    `Literal[4]` with §6's validators, a second `PROTOCOL_VERSION` advance, and
 >    the format marker's advance. It lands after ADR-0280's step 3.
@@ -391,7 +415,9 @@ describes and grants nothing.
 > raw input; the excerpt of a resumed episode and of an episode whose speech
 > yielded no transcript; and each `RecallOutcome`.
 > Against the scripted model fake, they assert: `M` labels rendering; a
-> recalled record already in a window not rendered twice; citations resolving
+> recalled record already in a window not rendered twice; a semantic fact longer
+> than `UNDERSTANDING_EXCERPT_CHARS` rendered cut, with the cut disclosed;
+> citations resolving
 > to `episode` and to `memory`; and the nothing-recalled and recall-failed
 > sections.
 
@@ -407,6 +433,7 @@ describes and grants nothing.
 
 | Decision | Replaced scope and what remains |
 | --- | --- |
+| ADR-0275 §8:5 | An inspection-only record with an understanding takes its latest `meaning` as `content`. The constant stands for every record without one; the input is still never embedded. |
 | ADR-0275 §4 | The record gains `recall`. Every existing field, value and validator stands. |
 | ADR-0275 §7:4 | Recall's read requests no eligibility. The flag, its producers, the history filter and every other read's obligation stand. |
 | ADR-0275 §9:6 | A recalled episode's exact trigger input text is admitted to the understanding stage's rendering of it. Attached context and every other field stay excluded from every model input. |
