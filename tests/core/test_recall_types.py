@@ -27,6 +27,7 @@ from ai_assistant.core.types import (
     RecallOutcome,
     RecallProvenance,
     RecordedChannelTrigger,
+    RecordedResumeTrigger,
     RecordedTextInput,
     StageEntry,
     StageOutcome,
@@ -217,13 +218,27 @@ def test_a_recall_is_bounded_by_the_types_ceiling() -> None:
         _recall(items=tuple(_item(id=f"m{n}") for n in range(RECALLED_ITEMS_MAX + 1)))
 
 
-# --- §6: the record field, additive --------------------------------------------------
+# --- §6: the record field, and the schema-4 rule --------------------------------------
 
 
-def test_the_record_defaults_to_no_recall_and_keeps_its_schema() -> None:
+def test_the_record_defaults_to_no_recall_at_schema_version_4() -> None:
     record = _record()
     assert record.recall is None
-    assert record.schema_version == 3
+    assert record.schema_version == 4
+
+
+def test_a_schema_3_record_is_refused() -> None:
+    with pytest.raises(ValidationError):
+        _record(schema_version=3)
+
+
+_RESUME = RecordedResumeTrigger(channel=None, approved=True)
+
+
+def test_a_resume_carries_no_recall_result() -> None:
+    assert _record(trigger=_RESUME, stages=()).recall is None
+    with pytest.raises(ValidationError, match="carries no recall result"):
+        _record(trigger=_RESUME, stages=(), recall=_recall())
 
 
 def test_the_record_carries_a_recall_result() -> None:

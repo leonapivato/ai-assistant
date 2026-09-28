@@ -180,7 +180,7 @@ def test_the_end_entry_records_done_at_one_instant() -> None:
 
 
 def test_the_record_is_schema_version_three_and_refuses_any_other() -> None:
-    assert _record().schema_version == 3
+    assert _record().schema_version == 4
     with pytest.raises(ValidationError):
         _record(schema_version=2)
 

@@ -47,6 +47,7 @@ if TYPE_CHECKING:
 from ai_assistant.core.types import (
     MAX_EVIDENCE_CITATIONS,
     MAX_TOPICS_PER_RECORD,
+    ActivationRecall,
     ActivationUnderstanding,
     Attestation,
     BeliefBand,
@@ -73,6 +74,10 @@ from ai_assistant.core.types import (
     ProcessingReason,
     ProcessingStatus,
     Provenance,
+    RecallCue,
+    RecalledItem,
+    RecallOutcome,
+    RecallProvenance,
     RecordedChannelTrigger,
     RecordedResumeTrigger,
     RecordedTextInput,
@@ -1269,7 +1274,7 @@ class MemoryStoreContract:
         got = await store.get("understood")
         assert isinstance(got, EpisodicMemory)
         assert got.processing_record is not None
-        assert got.processing_record.schema_version == 3
+        assert got.processing_record.schema_version == 4
         assert got.processing_record.understanding == (version,)
         assert got.processing_record.understanding[0].meaning_referents[0].id == " "
         assert got.processing_record.understanding_omitted is None
@@ -1328,6 +1333,42 @@ class MemoryStoreContract:
             (),
             0,
         )
+
+    async def test_a_processing_records_recall_result_survives_the_round_trip(
+        self, store: MemoryStore
+    ) -> None:
+        """ADR-0281 §6: the schema-4 record carries its recall result whole.
+
+        The item's ``id`` is pinned with surrounding spaces because §6 carries a stored
+        id **exactly as stored**, and its structured origin in full, because ADR-0189
+        §1 has the projection shown to the owner carry it as the record held it.
+        """
+        channel = _activation_episode("recalled", eligible=True)
+        assert channel.processing_record is not None
+        recall = ActivationRecall(
+            outcome=RecallOutcome.FOUND,
+            cues=(RecallCue.ACTIVATION_INPUT,),
+            items=(
+                RecalledItem(
+                    kind=MemoryKind.SEMANTIC,
+                    id=" fact ",
+                    excerpt="The campsite is booked.",
+                    provenance=RecallProvenance.OUTSIDE,
+                    standing=BeliefBand.ATTESTED,
+                    rests_on_recorded_external_content=True,
+                    attestation=Attestation(reported_by="calendar", reported_at=_IN_WINDOW),
+                    found_by=(RecallCue.ACTIVATION_INPUT,),
+                ),
+            ),
+        )
+        record = channel.processing_record.model_copy(update={"recall": recall})
+        await store.add(channel.model_copy(update={"processing_record": record}))
+
+        got = await store.get("recalled")
+        assert isinstance(got, EpisodicMemory)
+        assert got.processing_record is not None
+        assert got.processing_record.recall == recall
+        assert got.processing_record.recall.items[0].id == " fact "
 
     async def test_an_episodes_disposition_and_capture_survive_the_round_trip(
         self, store: MemoryStore

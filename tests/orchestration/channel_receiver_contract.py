@@ -82,7 +82,7 @@ async def captured_episode(engine: AssistantEngine, result: ChannelResult) -> Ep
 def assert_a_channel_stage_record(episode: EpisodicMemory) -> None:
     """ADR-0280 §7: a channel pass's record ends in exactly one ``end`` entry, last."""
     assert episode.processing_record is not None
-    assert episode.processing_record.schema_version == 3
+    assert episode.processing_record.schema_version == 4
     stages = [entry.stage for entry in episode.processing_record.stages]
     assert stages
     assert stages[-1] is ControllerStage.END
