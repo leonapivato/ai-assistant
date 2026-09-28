@@ -130,6 +130,13 @@ def render_detail(console: Console, record: EpisodicMemory) -> None:
     )
     console.print("Processing status does not report goal achievement or audio playback.")
     console.print(
+        "\n".join(_recall_lines(processing)),
+        markup=False,
+        emoji=False,
+        highlight=False,
+        soft_wrap=True,
+    )
+    console.print(
         "\n".join(_understanding_lines(processing)),
         markup=False,
         emoji=False,
@@ -172,6 +179,26 @@ def _stage_lines(processing: EpisodeProcessingRecord | None) -> list[str]:
         lines.append(
             f"  {entry.stage.value} (due: {entry.due.value}): {entry.outcome.value}, {seconds:.3f}s"
         )
+    return lines
+
+
+def _recall_lines(processing: EpisodeProcessingRecord | None) -> list[str]:
+    """Render the recall result the processing record carries (ADR-0281 §6), deriving none.
+
+    Its outcome, and each kept item's kind, provenance and excerpt in recall's order.
+    ``none recorded`` where recall made no decision on the pass — a resume, a pass
+    that ended before recall, or one where it was not wired. Item ids and each item's
+    structured origin stay in the ``--json`` detail.
+    """
+    if processing is None:
+        return ["Recall: unavailable"]
+    if processing.recall is None:
+        return ["Recall: none recorded"]
+    lines = [f"Recall: {processing.recall.outcome.value}"]
+    lines.extend(
+        f"  {item.kind.value} ({item.provenance.value}): {_quoted(item.excerpt)}"
+        for item in processing.recall.items
+    )
     return lines
 
 

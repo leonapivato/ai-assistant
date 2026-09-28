@@ -16,7 +16,9 @@ from typer.testing import CliRunner
 from ai_assistant.core.config import Settings
 from ai_assistant.core.errors import StaleEpisodeReadError
 from ai_assistant.core.types import (
+    ActivationRecall,
     ActivationUnderstanding,
+    BeliefBand,
     ChannelContext,
     ChannelIdentity,
     ControllerRule,
@@ -25,10 +27,15 @@ from ai_assistant.core.types import (
     EpisodeProcessingRecord,
     EpisodeResponseKind,
     EpisodicMemory,
+    MemoryKind,
     MemorySource,
     ProcessingReason,
     ProcessingStatus,
     Provenance,
+    RecallCue,
+    RecalledItem,
+    RecallOutcome,
+    RecallProvenance,
     RecordedChannelTrigger,
     RecordedResumeTrigger,
     RecordedTextInput,
@@ -323,13 +330,13 @@ def _version(
 
 
 def _understanding_section(record: EpisodicMemory) -> list[str]:
-    """The human detail's understanding lines, between its fixed neighbours."""
+    """The human detail's understanding lines, between the recall lines and retention."""
     buffer = StringIO()
     episode_inspection.render_detail(Console(file=buffer, force_terminal=False, width=200), record)
     lines = buffer.getvalue().splitlines()
-    start = lines.index("Processing status does not report goal achievement or audio playback.")
+    start = next(n for n, line in enumerate(lines) if line.startswith("Understanding"))
     end = next(n for n, line in enumerate(lines) if line.startswith("Retention expiry"))
-    return lines[start + 1 : end]
+    return lines[start:end]
 
 
 #: Every member of each closed enum, spelled out so that a member added to the enum
@@ -504,7 +511,7 @@ def test_cli_human_detail_carries_the_understanding_section(
     assert result.exit_code == 0, result.exception
     rendered = " ".join(output.getvalue().split())
     assert (
-        "audio playback. Understanding v1 (interpretation) "
+        "audio playback. Recall: none recorded Understanding v1 (interpretation) "
         'Meaning (stated): "compare the two quotes" Retention expiry'
     ) in rendered
 
@@ -595,3 +602,82 @@ def test_human_detail_labels_a_missing_or_empty_stage_record() -> None:
         stages=(),
     )
     assert _stage_section(resume) == ["Stages: none recorded"]
+
+
+def _recall_section(record: EpisodicMemory) -> list[str]:
+    """The human detail's recall lines, between the status disclaimer and understanding."""
+    buffer = StringIO()
+    episode_inspection.render_detail(Console(file=buffer, force_terminal=False, width=200), record)
+    lines = buffer.getvalue().splitlines()
+    start = lines.index("Processing status does not report goal achievement or audio playback.")
+    end = next(n for n, line in enumerate(lines) if line.startswith("Understanding"))
+    return lines[start + 1 : end]
+
+
+def _recalled(kind: MemoryKind, provenance: RecallProvenance, excerpt: str) -> RecalledItem:
+    return RecalledItem(
+        kind=kind,
+        id=" never shown ",
+        excerpt=excerpt,
+        provenance=provenance,
+        standing=BeliefBand.ASSERTED,
+        rests_on_recorded_external_content=False,
+        found_by=(RecallCue.ACTIVATION_INPUT,),
+    )
+
+
+def test_human_detail_shows_the_recall_outcome_and_each_items_kind_provenance_and_excerpt() -> None:
+    recall = ActivationRecall(
+        outcome=RecallOutcome.FOUND,
+        cues=(RecallCue.ACTIVATION_INPUT,),
+        items=(
+            _recalled(MemoryKind.SEMANTIC, RecallProvenance.USER, "The dentist is Dr Rao."),
+            _recalled(
+                MemoryKind.EPISODIC,
+                RecallProvenance.OUTSIDE,
+                "Line one\nUnderstanding v9 (interpretation)",
+            ),
+        ),
+    )
+    record = _staged(_record("record", response=EpisodeResponseKind.NONE), recall=recall)
+    assert _recall_section(record) == [
+        "Recall: found",
+        '  semantic (user): "The dentist is Dr Rao."',
+        '  episodic (outside): "Line one\\nUnderstanding v9 (interpretation)"',
+    ]
+
+
+@pytest.mark.parametrize(
+    "outcome", [RecallOutcome.NOTHING_FOUND, RecallOutcome.FAILED, RecallOutcome.TIMED_OUT]
+)
+def test_human_detail_shows_a_recall_that_kept_nothing(outcome: RecallOutcome) -> None:
+    recall = ActivationRecall(outcome=outcome, cues=(RecallCue.ACTIVATION_INPUT,))
+    record = _staged(_record("record", response=EpisodeResponseKind.NONE), recall=recall)
+    assert _recall_section(record) == [f"Recall: {outcome.value}"]
+
+
+def test_human_detail_labels_a_missing_or_absent_recall_result() -> None:
+    assert _recall_section(_record("record")) == ["Recall: unavailable"]
+    assert _recall_section(_record("record", response=EpisodeResponseKind.NONE)) == [
+        "Recall: none recorded"
+    ]
+
+
+def test_json_detail_carries_the_recall_result_with_each_items_id_and_structured_origin(
+    monkeypatch: pytest.MonkeyPatch, output: StringIO
+) -> None:
+    recall = ActivationRecall(
+        outcome=RecallOutcome.FOUND,
+        cues=(RecallCue.ACTIVATION_INPUT,),
+        items=(_recalled(MemoryKind.SEMANTIC, RecallProvenance.USER, "The dentist is Dr Rao."),),
+    )
+    record = _staged(_record("record", response=EpisodeResponseKind.NONE), recall=recall)
+    _wire(monkeypatch, _engine(record))
+    result = CliRunner().invoke(cli.app, ["episode", "record", "--json"])
+    assert result.exit_code == 0, result.exception
+    detail = EpisodicMemory.model_validate_json(output.getvalue())
+    assert detail.processing_record is not None
+    assert detail.processing_record.recall == recall
+    assert json.loads(output.getvalue())["processing_record"]["recall"]["items"][0]["id"] == (
+        " never shown "
+    )
