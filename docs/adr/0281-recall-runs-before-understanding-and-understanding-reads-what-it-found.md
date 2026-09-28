@@ -1,6 +1,6 @@
 # 281. Recall runs before understanding, and understanding reads what it found
 
-- Status: Proposed
+- Status: Accepted
 - Date: 2026-09-27
 - Scope: [M39](https://github.com/leonapivato/ai-assistant/milestone/6).
 - Dependency: ADR-0280 and its milestone M38; ADR-0276 and ADR-0275.
