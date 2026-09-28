@@ -208,14 +208,34 @@ class _Recording(FakeMemoryStore):
         )
 
 
-class _Unscored(FakeMemoryStore):
-    """A store returning its matches with no score."""
+class _Rescored(FakeMemoryStore):
+    """A store returning its matches with one fixed score, or none."""
+
+    def __init__(self, score: float | None, **kwargs: Any) -> None:
+        super().__init__(**kwargs)
+        self._score = score
 
     async def search(self, query: str, **kwargs: Any) -> MemorySearchResult:
         found = await super().search(query, **kwargs)
-        return found.model_copy(
-            update={"records": tuple(r.model_copy(update={"score": None}) for r in found.records)}
-        )
+        rescored = tuple(r.model_copy(update={"score": self._score}) for r in found.records)
+        return found.model_copy(update={"records": rescored})
+
+
+class _Rebanding(FakeMemoryStore):
+    """A store where one record is rewritten into another band after the first search."""
+
+    def __init__(self, rewrite: MemoryRecord, **kwargs: Any) -> None:
+        super().__init__(**kwargs)
+        self._rewrite: MemoryRecord | None = rewrite
+
+    async def search(self, query: str, **kwargs: Any) -> MemorySearchResult:
+        found = await super().search(query, **kwargs)
+        if self._rewrite is not None:
+            await self.write_atomic(
+                [MemoryWrite(record=self._rewrite, mode=MemoryWriteMode.UPSERT)]
+            )
+            self._rewrite = None
+        return found
 
 
 class _Slow(FakeMemoryStore):
@@ -307,10 +327,20 @@ async def test_it_keeps_at_most_the_limit_and_stops_searching_once_filled() -> N
     assert [search.bands for search in memory.searches] == [(BeliefBand.ASSERTED,)]
 
 
-async def test_a_record_returned_with_no_score_is_not_kept() -> None:
-    memory = await _seed(_Unscored(now=lambda: AT), _fact("m"))
+@pytest.mark.parametrize("score", [None, math.nan], ids=["no-score", "nan"])
+async def test_a_record_with_no_score_or_a_nan_one_is_not_kept(score: float | None) -> None:
+    memory = await _seed(_Rescored(score, now=lambda: AT), _fact("m"))
     recalled = await _recall(_stage(memory))
     assert recalled.result.outcome is RecallOutcome.NOTHING_FOUND
+
+
+async def test_a_record_rewritten_into_a_later_band_is_kept_once() -> None:
+    first = _fact("first")
+    second = _fact("second", source=MemorySource.INFERRED)
+    rewritten = _fact("first", source=MemorySource.INFERRED)
+    memory = await _seed(_Rebanding(rewritten, now=lambda: AT), first, second)
+    recalled = await _recall(_stage(memory, limit=2))
+    assert _ids(recalled) == ["first", "second"]
 
 
 async def test_it_requests_no_eligibility_so_an_ineligible_episode_is_reached() -> None:
@@ -505,12 +535,18 @@ async def test_a_timeout_that_is_not_the_budgets_escapes() -> None:
 
 
 @pytest.mark.parametrize(
-    ("limit", "budget"),
-    [(0, BUDGET), (17, BUDGET), (3, timedelta(0))],
-    ids=["no-limit", "above-the-ceiling", "no-budget"],
+    ("threshold", "limit", "budget"),
+    [
+        (math.nan, 3, BUDGET),
+        (math.inf, 3, BUDGET),
+        (0.5, 0, BUDGET),
+        (0.5, 17, BUDGET),
+        (0.5, 3, timedelta(0)),
+    ],
+    ids=["nan-threshold", "infinite-threshold", "no-limit", "above-the-ceiling", "no-budget"],
 )
-def test_the_stage_refuses_a_limit_or_budget_outside_its_bounds(
-    limit: int, budget: timedelta
+def test_the_stage_refuses_a_value_outside_its_bounds(
+    threshold: float, limit: int, budget: timedelta
 ) -> None:
     with pytest.raises(ValueError, match="ADR-0281"):
-        RecallStage(memory=FakeMemoryStore(), threshold=0.5, limit=limit, budget=budget)
+        RecallStage(memory=FakeMemoryStore(), threshold=threshold, limit=limit, budget=budget)

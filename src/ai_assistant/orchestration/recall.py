@@ -35,6 +35,7 @@ exception content (ADR-0275 §8).
 from __future__ import annotations
 
 import asyncio
+import math
 from dataclasses import dataclass
 from typing import TYPE_CHECKING, Final
 
@@ -120,9 +121,12 @@ class RecallStage:
                 deadline caps it (§5).
 
         Raises:
-            ValueError: If ``limit`` is below 1 or above ``RECALLED_ITEMS_MAX``, or
-                ``budget`` is not positive.
+            ValueError: If ``threshold`` is not finite, ``limit`` is below 1 or above
+                ``RECALLED_ITEMS_MAX``, or ``budget`` is not positive.
         """
+        if not math.isfinite(threshold):
+            msg = "recall's threshold must be a finite number (ADR-0281 §3)"
+            raise ValueError(msg)
         if not 1 <= limit <= RECALLED_ITEMS_MAX:
             msg = "recall's limit must be between 1 and RECALLED_ITEMS_MAX (ADR-0281 §3, §6)"
             raise ValueError(msg)
@@ -182,18 +186,23 @@ class RecallStage:
             if isinstance(audience, UnboundedAudienceSupply)
             else (MemoryKind.EPISODIC, MemoryKind.SEMANTIC)
         )
-        kept: list[RecalledRecord] = []
+        kept: dict[str, RecalledRecord] = {}
         for band in _BANDS:
             found = await self._memory.search(text, limit=self._limit, kinds=kinds, bands=(band,))
             for record in admitted_to_understanding(audience, found.records):
                 if not isinstance(record, EpisodicMemory | SemanticMemory):
                     continue
-                if record.score is None or record.score < self._threshold:
+                # Affirmatively at or above: a NaN score is not, and no score is not.
+                if record.score is None or not record.score >= self._threshold:
                     continue
-                kept.append(record)
+                # A record rewritten into a later band between the searches is kept
+                # once, where it was first admitted.
+                if record.id in kept:
+                    continue
+                kept[record.id] = record
                 if len(kept) == self._limit:
-                    return tuple(kept)
-        return tuple(kept)
+                    return tuple(kept.values())
+        return tuple(kept.values())
 
 
 def _decision(outcome: RecallOutcome, items: tuple[RecalledItem, ...] = ()) -> ActivationRecall:
