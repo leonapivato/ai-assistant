@@ -112,7 +112,8 @@ both stages wired.
 
 > **Normative.** Recall makes **one** search: `MemoryStore.search` with the
 > activation's input text, exactly as the pass holds it, as the query;
-> `kinds` episodic and semantic; no other filter; and **no eligibility**
+> `kinds` episodic and semantic, or semantic alone under §4:2; no other filter;
+> and **no eligibility**
 > (`episode_model_eligible` unset). It searches with nothing else: not the
 > channel window, not the episode window, not a goal.
 
@@ -153,9 +154,16 @@ interruptions. Recall is meant to reach those.
 
 > **Normative.** Recall applies `admitted_to_understanding`, the predicate the
 > understanding stage's two windows already use (ADR-0276 §4), to the records
-> the search returned, before the threshold and the cap are applied. That is
-> the only audience rule this decision adds. No controller rule reads the
-> audience.
+> the search returned, before the threshold and the cap are applied. No
+> controller rule reads the audience.
+
+> **Normative — a turn on a channel of unbounded audience recalls no episode.**
+> On the operation ADR-0250 §15 names (`converse_spoken`, as ADR-0200 §3
+> declares it), recall's search asks for semantic records alone, so no episode,
+> and no earlier understanding, reaches the turn through recall. This is
+> ADR-0276 §4:13's rule read over the one new carrier this decision adds; the
+> stage applies it from the pass's audience posture, as the understanding stage
+> applies §4:13, and no controller rule reads it.
 
 > **Normative.** Each kept record carries one of two provenance values:
 > **`outside`**, for a semantic record `rests_on_recorded_external_content`
@@ -164,9 +172,10 @@ interruptions. Recall is meant to reach those.
 > attestation source, the connection) is recorded by this decision.
 
 On a bounded-audience channel the predicate withholds nothing. On the spoken
-operation's unbounded audience, which ADR-0280 §2 keeps, it withholds silently
-every record it does not place, as it does for the windows. The audience
-milestone changes the predicate, not the stage.
+operation's unbounded audience, which ADR-0280 §2 keeps, recall reaches no
+episode at all, and the predicate withholds silently every semantic record it
+does not place, as it does for the windows. The audience milestone changes
+these rules, not the stage's shape.
 
 ### 5. Failure, and the two deadlines
 
@@ -232,12 +241,19 @@ the pass with `stage_repeated` rather than loop.
 > `RecordedResumeTrigger` carries `None`, enforced by validator.
 
 > **Normative.** An item's excerpt is taken by `orchestration` from the record,
-> never from model output: a semantic record's `fact`; an episode's trigger
-> input text or, where it has no processing record, its `content`; and, for an
-> episode whose trigger arrived on the informational event channel, its latest
-> understanding's `meaning`, or where it has none, the fixed text that it was a
-> report received on its channel. **An outside episode's raw input never
-> enters the recall record.**
+> never from model output, and cut to the bound:
+>
+> - a semantic record's `fact`;
+> - for an episode whose trigger arrived on the informational event channel,
+>   its latest understanding's `meaning`, or where it has none, the fixed text
+>   that it was a report received on its channel;
+> - for any other episode, its trigger's input text or transcript where the
+>   trigger carries one, and otherwise its `content`. This covers an episode
+>   with no processing record, one whose trigger is a `RecordedResumeTrigger`,
+>   and one whose speech yielded no transcript. An empty `content` gives an
+>   empty excerpt, which is a valid one.
+>
+> **An outside episode's raw input never enters the recall record.**
 
 > **Normative.** The recall result is held on `ActivationState` once the stage
 > ends, so understanding reads it in the same pass, and it is written **once**,
@@ -334,8 +350,11 @@ describes and grants nothing.
 
 > **Normative.** Step 2's tests assert, against the canonical `MemoryStore`
 > fake: the one search on the input; the threshold, the cap and a record with no
-> score; the audience predicate; each provenance value; that an outside
-> episode's excerpt never carries its raw input; and each `RecallOutcome`.
+> score; the audience predicate; no episode searched for or kept on the
+> unbounded-audience operation, including an episode the predicate would admit;
+> each provenance value; that an outside episode's excerpt never carries its
+> raw input; the excerpt of a resumed episode and of an episode whose speech
+> yielded no transcript; and each `RecallOutcome`.
 > Against the scripted model fake, they assert: `M` labels rendering; a
 > recalled record already in a window not rendered twice; citations resolving
 > to `episode` and to `memory`; and the nothing-recalled and recall-failed
