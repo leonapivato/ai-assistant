@@ -194,6 +194,7 @@ from ai_assistant.core.types import (
     ReadAnswerOutcome,
     ReadCancellation,
     ReadKind,
+    RecallOutcome,
     ReferenceOutcome,
     ReplyCapability,
     ReplyChunk,
@@ -212,6 +213,7 @@ from ai_assistant.core.types import (
     SpokenRendering,
     SpokenReply,
     SpokenTurn,
+    StageOutcome,
     StepOutcome,
     StepStatus,
     StreamingTextReply,
@@ -252,9 +254,12 @@ from ai_assistant.orchestration.composing import ComposedReply
 from ai_assistant.orchestration.controller import (
     DEFAULT_STAGE_RECORD_LIMIT,
     ActivationController,
+    ControllerStageRun,
     PassFacts,
     Stage,
     StageRecord,
+    StageResult,
+    TolerantStage,
 )
 from ai_assistant.orchestration.disclosure import (
     BoundedAudienceSupply,
@@ -414,6 +419,7 @@ if TYPE_CHECKING:
     from ai_assistant.orchestration.observation import ObservationRunReport, ObservationStage
     from ai_assistant.orchestration.parked_reads import ParkedReadOperations
     from ai_assistant.orchestration.questions import QuestionStage
+    from ai_assistant.orchestration.recall import Recalled, RecallStage
     from ai_assistant.orchestration.recipient_grants import RecipientGrantOperations
     from ai_assistant.orchestration.recovery import RecoveryScan
     from ai_assistant.orchestration.routing import RoutedRoute
@@ -490,6 +496,7 @@ _ROUTE_ID_ATTEMPTS: Final = 8
 #: What a pass whose deadline expired before or inside the understanding stage says
 #: (ADR-0276 §5, §6): code-owned, so no provider content reaches the caller.
 _UNDERSTANDING_EXPIRED: Final = "the pass's deadline expired during understanding"
+_RECALL_EXPIRED: Final = "the pass's deadline expired during recall"
 
 
 def _note_failure[T](turn: asyncio.Task[T]) -> None:
@@ -2497,8 +2504,57 @@ class _Composition:
     report: AttemptReport | None
 
 
+@dataclass(slots=True, kw_only=True)
+class _ActivationPass:
+    """What every channel activation's working set holds, whatever its channel (#2598).
+
+    ADR-0280 §3's working set, the part true of every activation: its deadline, its
+    audience posture, what this deployment wired for the phases every activation
+    takes, and those phases' decisions. ADR-0281's recall decision lives here and on
+    no subclass, as the phases after it will. ``text`` is the activation's input, each
+    subclass answering it from what it holds.
+
+    Attributes:
+        deadline: The pass's deadline on the running loop's clock.
+        supply: The pass's audience posture — the object the understanding stage's
+            windows and recall filter by (ADR-0276 §4, ADR-0281 §4).
+        understanding_wired: The deployment wired the understanding stage.
+        recall_wired: The deployment wired the recall stage.
+        understood: The understanding stage ran for the input, whatever its outcome.
+        recalled: Recall's decision and the records it kept; never persisted — the
+            decision is carried on the activation's state for capture (ADR-0281 §6).
+    """
+
+    deadline: float
+    supply: TurnSupply
+    understanding_wired: bool
+    recall_wired: bool
+    understood: bool = False
+    recalled: Recalled | None = None
+
+    @property
+    def text(self) -> str:
+        """The activation's input, exactly as the pass holds it."""
+        raise NotImplementedError
+
+    @property
+    def understanding_decided(self) -> bool:
+        """The understanding stage recorded an outcome."""
+        return self.understood
+
+    @property
+    def recall_decided(self) -> bool:
+        """Recall made its decision, a failed or timed-out one included."""
+        return self.recalled is not None
+
+    @property
+    def deadline_passed(self) -> bool:
+        """The pass's deadline has passed, on the running loop's clock."""
+        return self.deadline <= asyncio.get_running_loop().time()
+
+
 @dataclass(slots=True)
-class _TurnPass:
+class _TurnPass(_ActivationPass):
     """ADR-0280 §3's working set for one conversation turn, typed or spoken.
 
     The first group is what the pass was handed — the channel's arguments, its budget
@@ -2514,20 +2570,16 @@ class _TurnPass:
     context: ChannelContext
     timeout: timedelta
     remaining: TurnRemainder | None
-    deadline: float
     compose: _Composer
     compose_routed: _RoutedComposer
-    supply: TurnSupply
     operation: ConversationalOperation
     spoken: _SpokenCapture | None
     reference: TurnReference | None
     routing_wired: bool
-    understanding_wired: bool
     reconciliation_wired: bool
     input: ResolvedChannelInput | None = None
     route: Literal["declined", "taken"] | None = None
     history: AssembledHistory | None = None
-    understood: bool = False
     association: _Association | None = None
     charged: GoalAttempt | None = None
     asked_which: bool = False
@@ -2536,6 +2588,11 @@ class _TurnPass:
     driven: _Driven | None = None
     composition: _Composition | None = None
     outcome: TurnOutcome | None = None
+
+    @property
+    def text(self) -> str:
+        """The utterance, typed or transcribed."""
+        return self.utterance
 
     @property
     def conversation_turn(self) -> bool:
@@ -2561,11 +2618,6 @@ class _TurnPass:
     def route_taken(self) -> bool:
         """Routing took the route."""
         return self.route == "taken"
-
-    @property
-    def understanding_decided(self) -> bool:
-        """The understanding stage recorded an outcome."""
-        return self.understood
 
     @property
     def event_summarized(self) -> bool:
@@ -2629,19 +2681,21 @@ class _TurnPass:
 
 
 @dataclass(slots=True)
-class _EventPass:
+class _EventPass(_ActivationPass):
     """ADR-0280 §3's working set for one informational event.
 
-    The event's resolved input and deadline, what this deployment wired, and the two
-    decisions an event's stages make: an understanding outcome and the summary's
-    result. Every conversation-turn decision is absent by construction.
+    The event's resolved input, and the summary's result beside what every
+    activation holds. Its audience posture is bounded (ADR-0276 §4). Every
+    conversation-turn decision is absent by construction.
     """
 
     input: ResolvedChannelInput
-    deadline: float
-    understanding_wired: bool
-    understood: bool = False
     result: ChannelResult | None = None
+
+    @property
+    def text(self) -> str:
+        """The event's text."""
+        return self.input.text
 
     @property
     def conversation_turn(self) -> bool:
@@ -2652,11 +2706,6 @@ class _EventPass:
     def informational_event(self) -> bool:
         """Always: this is an event's working set."""
         return True
-
-    @property
-    def understanding_decided(self) -> bool:
-        """The understanding stage recorded an outcome."""
-        return self.understood
 
     @property
     def event_summarized(self) -> bool:
@@ -2700,6 +2749,28 @@ def _event_expired(event: _EventPass) -> Exception | None:
     if event.deadline <= asyncio.get_running_loop().time():
         return ChannelProcessingTimeoutError("informational event processing timed out")
     return None
+
+
+def _recall_expired(working: _ActivationPass) -> Exception | None:
+    """ADR-0281 §5: the activation's deadline, classified as its pass kind classifies it.
+
+    An event's is the event path's expiry and a turn's a classified model timeout, the
+    rows each pass's deadline already takes. ``None`` while there is time.
+    """
+    if not working.deadline_passed:
+        return None
+    if isinstance(working, _EventPass):
+        return ChannelProcessingTimeoutError("informational event processing timed out")
+    return ModelTimeoutError(_RECALL_EXPIRED)
+
+
+#: What a recall decision makes of its stage's entry (ADR-0281 §5).
+_RECALL_STAGE_OUTCOMES: Final = {
+    RecallOutcome.FOUND: StageOutcome.DONE,
+    RecallOutcome.NOTHING_FOUND: StageOutcome.DONE,
+    RecallOutcome.FAILED: StageOutcome.FAILED,
+    RecallOutcome.TIMED_OUT: StageOutcome.TIMED_OUT,
+}
 
 
 def _associated(working: _TurnPass) -> _Association:
@@ -2957,6 +3028,7 @@ class Engine:
         routing: RoutingStage | None = None,
         understanding: UnderstandingStage | None = None,
         understanding_version_limit: int | None = None,
+        recall: RecallStage | None = None,
         stage_record_limit: int = DEFAULT_STAGE_RECORD_LIMIT,
         reconciliation: ReconciliationStage | None = None,
         parked_reads: ParkedReadOperations | None = None,
@@ -3388,6 +3460,10 @@ class Engine:
             understanding_version_limit: ``UNDERSTANDING_VERSION_LIMIT``, ADR-0276 §7's
                 bound on the versions one processing record retains. Required, and at
                 least 2, wherever ``understanding`` is wired.
+            recall: ADR-0281's recall stage, holding the memory store, the threshold
+                set for the wired embedder, the item limit and the budget, or
+                ``None``. Recall runs only where ``understanding`` is wired too
+                (§2), since understanding is what reads what it keeps.
             stage_record_limit: ``STAGE_RECORD_LIMIT``, ADR-0280 §6's bound on the
                 entries one stage record retains; at least 2, so the first entry and
                 the end entry are both kept.
@@ -3747,6 +3823,7 @@ class Engine:
             raise ConfigurationError(msg)
         self._understanding = understanding
         self._understanding_version_limit = understanding_version_limit or 2
+        self._recall = recall
         if stage_record_limit < 2:  # noqa: PLR2004 — the first entry and the end entry
             msg = "a stage record keeps its first entry and its end entry (ADR-0280 §6)"
             raise ConfigurationError(msg)
@@ -4612,12 +4689,20 @@ class Engine:
             event = _EventPass(
                 input=resolved,
                 deadline=deadline,
+                # ADR-0276 §4: an informational-event pass is of bounded audience.
+                supply=BoundedAudienceSupply(
+                    speakable_attested_sources=self._speakable_attested_sources
+                ),
                 understanding_wired=self._understanding is not None,
+                recall_wired=self._recall is not None,
             )
-            # ADR-0280 §4: understanding, then the event summary, by the rules.
+            # ADR-0280 §4: recall, understanding, then the event summary, by the rules.
             await self._controlled(
                 event,
                 (
+                    TolerantStage(
+                        ControllerStage.RECALL, self._recall_stage, expired=_recall_expired
+                    ),
                     Stage(
                         ControllerStage.UNDERSTANDING,
                         self._event_understanding_stage,
@@ -12208,11 +12293,14 @@ class Engine:
                 reference=reference,
                 routing_wired=self._routing is not None,
                 understanding_wired=self._understanding is not None,
+                recall_wired=self._recall is not None,
                 reconciliation_wired=self._reconciliation is not None and remaining is not None,
             )
         )
 
-    async def _controlled[P: PassFacts](self, working: P, stages: Sequence[Stage[P]]) -> None:
+    async def _controlled[P: PassFacts](
+        self, working: P, stages: Sequence[ControllerStageRun[P]]
+    ) -> None:
         """Run one pass's stages by ADR-0280 §4's rules, recording on its state.
 
         The working set is carried on the activation's state while the pass runs
@@ -12226,7 +12314,7 @@ class Engine:
             state.working = working
         await ActivationController(stages=stages, clock=self._clock).run(working, record)
 
-    async def _understand(
+    async def _understand(  # noqa: PLR0913 — the input, its window, the audience, whether it takes episodes, the deadline, and what recall kept
         self,
         input: ResolvedChannelInput,  # noqa: A002 — resolved channel input
         *,
@@ -12234,6 +12322,7 @@ class Engine:
         audience: TurnSupply,
         episodes: bool,
         deadline: float,
+        recalled: Recalled | None,
     ) -> None:
         """Enter the understanding stage once, and carry what it records (ADR-0276 §5, §7).
 
@@ -12261,6 +12350,8 @@ class Engine:
             audience: The pass's audience posture, which filters them (§4).
             episodes: Whether the pass takes an episode window (§4).
             deadline: The pass's deadline, on the running loop's clock.
+            recalled: What recall kept for the pass, rendered to the stage
+                (ADR-0281 §7); ``None`` where recall made no decision.
 
         Raises:
             ModelTimeoutError: If the deadline expired before the stage or inside it.
@@ -12282,6 +12373,7 @@ class Engine:
                     version=1 if state is None else state.next_understanding_version(),
                     now=self._clock,
                     deadline=deadline,
+                    recalled=recalled,
                 )
         except BaseException as exc:
             # A timer fires only when the loop gets control, so a stage can cross the
@@ -12308,7 +12400,7 @@ class Engine:
         if state is not None:
             state.understood(understood, limit=self._understanding_version_limit)
 
-    async def _understand_event(self, input: ResolvedChannelInput, *, deadline: float) -> None:  # noqa: A002 — resolved channel input
+    async def _understand_event(self, event: _EventPass) -> None:
         """The event path's understanding, mapped outward as the event stage maps its own.
 
         ADR-0276 §6: raised in ``_dispatch_channel`` ahead of the event stage, the
@@ -12319,7 +12411,7 @@ class Engine:
         ``UnderstandingError`` to the first — and anything else propagates unchanged.
         The record is the same as on the conversational path, because the state keeps
         the reason. An informational-event pass is a pass of **bounded** audience
-        (§4): the engine holds a ``BoundedAudienceSupply`` for it, and nothing is
+        (§4): its working set holds a ``BoundedAudienceSupply``, and nothing is
         withheld.
 
         Raises:
@@ -12331,13 +12423,12 @@ class Engine:
         failure: type[ChannelProcessingError] | None = None
         try:
             await self._understand(
-                input,
-                window=SuppliedWindow(input.context),
-                audience=BoundedAudienceSupply(
-                    speakable_attested_sources=self._speakable_attested_sources
-                ),
+                event.input,
+                window=SuppliedWindow(event.input.context),
+                audience=event.supply,
                 episodes=True,
-                deadline=deadline,
+                deadline=event.deadline,
+                recalled=event.recalled,
             )
         except ModelTimeoutError:
             failure = ChannelProcessingTimeoutError
@@ -12354,9 +12445,32 @@ class Engine:
         )
         raise failure(message) from None
 
+    async def _recall_stage(self, working: _ActivationPass) -> StageResult:
+        """ADR-0281's recall stage, failure-tolerant (§5), for a turn and an event alike.
+
+        The decision is recorded on the working set and carried on the activation's
+        state before the stage returns, so the rule that made it due does not answer
+        again. A ``failed`` or ``timed_out`` decision is returned ``tolerated`` with
+        its error, and the controller goes on to understanding while the pass's
+        deadline holds; once that deadline has passed, the stage returns the pass's
+        own classified expiry instead, which the controller re-raises.
+        """
+        assert self._recall is not None  # noqa: S101 — the rule makes recall due only where it is wired
+        recalled = await self._recall.recall(
+            working.text, audience=working.supply, deadline=working.deadline
+        )
+        working.recalled = recalled
+        if (state := active_state()) is not None:
+            state.recall = recalled.result
+        outcome = _RECALL_STAGE_OUTCOMES[recalled.result.outcome]
+        if outcome is StageOutcome.DONE:
+            return StageResult(StageOutcome.DONE)
+        late = _recall_expired(working)
+        return StageResult(outcome, late or recalled.error, tolerated=True)
+
     async def _event_understanding_stage(self, event: _EventPass) -> None:
         """ADR-0276 §5: after the event input is resolved and before the event stage."""
-        await self._understand_event(event.input, deadline=event.deadline)
+        await self._understand_event(event)
         event.understood = True
 
     async def _event_summary_stage(self, event: _EventPass) -> None:
@@ -12467,6 +12581,7 @@ class Engine:
             (
                 Stage(ControllerStage.BEGIN_CONVERSATION, self._begin_conversation_stage),
                 Stage(ControllerStage.ROUTING, self._routing_stage),
+                TolerantStage(ControllerStage.RECALL, self._recall_stage, expired=_recall_expired),
                 Stage(
                     ControllerStage.UNDERSTANDING, self._understanding_stage, expired=_turn_expired
                 ),
@@ -12568,6 +12683,7 @@ class Engine:
             audience=working.supply,
             episodes=working.operation is not ConversationalOperation.CONVERSE_SPOKEN,
             deadline=working.deadline,
+            recalled=working.recalled,
         )
         working.understood = True
 

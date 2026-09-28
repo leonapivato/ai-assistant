@@ -20,7 +20,7 @@ from test_activation_state import _admitted
 from test_channel_receiver import ControlledModel
 from test_engine import AT, Harness, NoStepPlanner, confirmable, tool
 from test_engine_goal_association import _associating, _goal, _seed
-from understanding_support import STATED_PROPOSAL, understanding_stage
+from understanding_support import STATED_PROPOSAL, recall_stage, understanding_stage
 
 from ai_assistant.core.errors import (
     ModelTimeoutError,
@@ -75,6 +75,7 @@ _DONE = StageOutcome.DONE
 #: The stages every turn that reaches its turn loop runs first.
 _TO_THE_LOOP: Final = [
     (_S.BEGIN_CONVERSATION, _R.CONVERSATION_UNRESOLVED, _DONE),
+    (_S.RECALL, _R.NOT_RECALLED, _DONE),
     (_S.UNDERSTANDING, _R.NOT_UNDERSTOOD, _DONE),
     (_S.ASSOCIATE_GOAL, _R.ASSOCIATION_DUE, _DONE),
     (_S.TURN_LOOP, _R.UNPLANNED, _DONE),
@@ -92,6 +93,7 @@ def _harness(**knobs: Any) -> Harness:
         ComposingStage(model=FakeModelProvider("Yes."), streaming=FakeStreamingCompleter()),
     )
     understanding = knobs.pop("understanding_model", FakeModelProvider(STATED_PROPOSAL))
+    knobs.setdefault("recall", recall_stage(memory))
     return Harness(
         memory=memory, understanding=understanding_stage(memory, model=understanding), **knobs
     )
@@ -198,6 +200,7 @@ async def test_a_turn_that_ends_in_a_disambiguation() -> None:
     assert outcome.disambiguation is not None
     assert await _entries(harness) == [
         (_S.BEGIN_CONVERSATION, _R.CONVERSATION_UNRESOLVED, _DONE),
+        (_S.RECALL, _R.NOT_RECALLED, _DONE),
         (_S.UNDERSTANDING, _R.NOT_UNDERSTOOD, _DONE),
         (_S.ASSOCIATE_GOAL, _R.ASSOCIATION_DUE, _DONE),
         (_S.ASK_DISAMBIGUATION, _R.DISAMBIGUATION_RAISED, _DONE),
@@ -267,6 +270,7 @@ async def test_a_pass_whose_understanding_fails_ends_on_the_failed_stage() -> No
         await harness.engine.converse("book the campsite", timeout=_BUDGET)
     assert await _entries(harness) == [
         (_S.BEGIN_CONVERSATION, _R.CONVERSATION_UNRESOLVED, _DONE),
+        (_S.RECALL, _R.NOT_RECALLED, _DONE),
         (_S.UNDERSTANDING, _R.NOT_UNDERSTOOD, StageOutcome.FAILED),
         (_S.END, _R.STAGE_FAILED, _DONE),
     ]
@@ -286,6 +290,7 @@ async def test_a_pass_whose_understanding_times_out_ends_on_the_timed_out_stage(
     assert record.status is ProcessingStatus.FAILED
     assert _stages(record) == [
         (_S.BEGIN_CONVERSATION, _R.CONVERSATION_UNRESOLVED, _DONE),
+        (_S.RECALL, _R.NOT_RECALLED, _DONE),
         (_S.UNDERSTANDING, _R.NOT_UNDERSTOOD, StageOutcome.TIMED_OUT),
         (_S.END, _R.STAGE_TIMED_OUT, _DONE),
     ]
@@ -302,7 +307,8 @@ async def test_an_understanding_stage_due_past_the_deadline_is_not_entered() -> 
     router = RoutingStage(
         model=_SlowDecline(json.dumps({"operation": "none"})), recorder=FakeRoutingRecorder()
     )
-    harness = _harness(planner=NoStepPlanner(), routing=router)
+    # Recall unwired, so understanding is the stage due past the deadline.
+    harness = _harness(planner=NoStepPlanner(), routing=router, recall=None)
     reads: list[str] = []
     history = harness.engine._conversations.history
 
@@ -336,6 +342,7 @@ async def test_a_history_read_outlasting_the_deadline_times_the_stage_out() -> N
     assert model.calls == []
     assert await _entries(harness) == [
         (_S.BEGIN_CONVERSATION, _R.CONVERSATION_UNRESOLVED, _DONE),
+        (_S.RECALL, _R.NOT_RECALLED, _DONE),
         (_S.UNDERSTANDING, _R.NOT_UNDERSTOOD, StageOutcome.TIMED_OUT),
         (_S.END, _R.STAGE_TIMED_OUT, _DONE),
     ]
@@ -388,6 +395,7 @@ async def test_an_informational_event_is_understood_then_summarized() -> None:
     harness = _harness(informational_events=InformationalEventStage(FakeModelProvider("Eco.")))
     await harness.engine.receive(event_input(), reply=None, timeout=_BUDGET)
     assert await _entries(harness) == [
+        (_S.RECALL, _R.NOT_RECALLED, _DONE),
         (_S.UNDERSTANDING, _R.NOT_UNDERSTOOD, _DONE),
         (_S.EVENT_SUMMARY, _R.EVENT_UNSUMMARIZED, _DONE),
         (_S.END, _R.NOTHING_DUE, _DONE),
@@ -395,7 +403,13 @@ async def test_an_informational_event_is_understood_then_summarized() -> None:
 
 
 async def test_an_event_with_the_understanding_stage_unwired_is_still_summarized() -> None:
-    harness = Harness(informational_events=InformationalEventStage(FakeModelProvider("Eco.")))
+    """ADR-0281 §2: recall wired but understanding not, so recall is never due."""
+    memory = FakeMemoryStore(now=lambda: AT)
+    harness = Harness(
+        memory=memory,
+        recall=recall_stage(memory),
+        informational_events=InformationalEventStage(FakeModelProvider("Eco.")),
+    )
     await harness.engine.receive(event_input(), reply=None, timeout=_BUDGET)
     assert await _entries(harness) == [
         (_S.EVENT_SUMMARY, _R.EVENT_UNSUMMARIZED, _DONE),
@@ -418,6 +432,7 @@ async def test_a_pass_cancelled_while_the_controller_runs_ends_interrupted() -> 
     record = await _record(harness)
     assert record.status is ProcessingStatus.INTERRUPTED
     assert _stages(record) == [
+        (_S.RECALL, _R.NOT_RECALLED, _DONE),
         (_S.UNDERSTANDING, _R.NOT_UNDERSTOOD, _DONE),
         (_S.END, _R.INTERRUPTED, _DONE),
     ]
@@ -457,4 +472,4 @@ async def test_a_resume_carries_no_stage_record() -> None:
         for r in await harness.memory.export()
         if isinstance(r, EpisodicMemory) and r.processing_record is not None
     ]
-    assert [len(record.stages) for record in records] == [6, 0]
+    assert [len(record.stages) for record in records] == [7, 0]

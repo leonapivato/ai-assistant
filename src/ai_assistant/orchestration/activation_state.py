@@ -48,6 +48,7 @@ if TYPE_CHECKING:
 
     from ai_assistant.core.clock import Clock
     from ai_assistant.core.types import (
+        ActivationRecall,
         ActivationUnderstanding,
         ChannelInput,
         ExchangeDisposition,
@@ -99,6 +100,9 @@ class ActivationState:
     understanding_elided: int = 0
     understanding_omitted: UnderstandingOmission | None = None
     understanding_unparseable: bool = False
+    #: ADR-0281 §6: recall's decision, held once the stage ends and written once, at
+    #: capture. ``None`` where recall made no decision on the pass.
+    recall: ActivationRecall | None = None
     #: ADR-0280 §6: the stages the controller ran, readable while the pass runs and
     #: written once, at capture, bounded at ``stage_limit`` entries.
     stages: StageRecord = field(default_factory=StageRecord)
@@ -232,6 +236,7 @@ class ActivationState:
             understanding_omitted=self._omission(),
             understanding_elided=self.understanding_elided,
             stages=stages,
+            recall=self.recall,
             stages_elided=stages_elided,
         )
 
