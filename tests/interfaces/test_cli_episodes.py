@@ -336,7 +336,9 @@ def _understanding_section(record: EpisodicMemory) -> list[str]:
 #: fails the coverage tests below until its rendering is looked at (ADR-0276 §2).
 _OMISSIONS = ("routed", "no_text", "no_input", "failed", "not_reached")
 _GROUNDS = ("stated", "supplied", "inferred")
-_REFERENT_KINDS = ("input", "channel_item", "episode")
+#: ADR-0281 §7 adds ``memory``; the detail prints each kind's value as it is, so it
+#: renders with no table entry of its own.
+_REFERENT_KINDS = ("input", "channel_item", "episode", "memory")
 
 
 def test_rendering_tables_cover_every_member_of_each_closed_enum() -> None:
@@ -475,7 +477,7 @@ def test_human_detail_renders_every_field_of_a_full_version_and_no_referent_deta
         "Understanding v3 (interpretation)",
         '  Meaning (inferred): "compare [bold]both[/bold] :smile: quotes\\n'
         'Understanding v9 (forged)"',
-        '  Reference "those two"; referent kinds: input, channel_item, episode',
+        '  Reference "those two"; referent kinds: input, channel_item, episode, memory',
         '  Reference "the earlier one"; referent kinds: episode, episode',
         '  Reference "that"; referent kinds: none',
         '  Relationship (stated): "relationship stated"',
