@@ -1,6 +1,6 @@
 # 217. A record carries who may receive it, the owner's act is final over a model's, and a model may only narrow
 
-- Status: Partially superseded by ADR-0276 (§2's application clause, in its *no new site* half alone: the record-level predicate is applied at one further site, over the stored records of the understanding stage's two windows, ahead of that stage)
+- Status: Partially superseded by ADR-0276 (§2's application clause, in its *no new site* half alone: the record-level predicate is applied at one further site, over the stored records of the understanding stage's two windows, ahead of that stage) and ADR-0281 (§2's application clause, in its *no new site* half, for one further site alone: recall's records, ahead of the understanding stage)
 - Date: 2026-08-29
 - Partially superseded: 2026-09-22 by ADR-0276 — §2's clause *"The rule is applied at the
   sites the channel's audience is read today, and at no new site"*, in its *no new site*
@@ -12,6 +12,12 @@
   scoped replacements take effect on ratification of ADR-0276, which remains Proposed.
   This reciprocal header record accompanies the numbered draft under ADR-0070 and
   ADR-0082; the ratified body below is preserved.
+- Partially superseded: 2026-09-27 by ADR-0281 — §2:5's *no new site* half,
+  for one further site: the same record-level predicate is applied to the records
+  recall returned, before recall keeps any of them; it adds no predicate, seam or second
+  pass. Every other part of §2, and every other section, stands entire. These scoped replacements
+  take effect on ratification of ADR-0281. This reciprocal header record accompanies the
+  numbered draft under ADR-0070 and ADR-0082; the ratified body below is preserved.
 - **Partially supersedes:**
   [ADR-0204](0204-a-record-carries-whether-the-supply-it-was-produced-over-held-withheld-content.md)
   — **the instrument, not the rule.** §1's first, second, third and fourth clauses,

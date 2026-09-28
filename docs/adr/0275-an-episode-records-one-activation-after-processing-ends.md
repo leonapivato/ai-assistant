@@ -1,6 +1,6 @@
 # 275. An episode records one activation after processing ends
 
-- Status: Partially superseded by ADR-0276 (§1's "automatic cross-channel continuity" exclusion; §4's `EpisodeProcessingRecord` field set and `ProcessingReason` values, in the additions alone; §7's eligibility-`True` rule on automatic model-facing reads, for the understanding stage's episode window alone; §9's exclusion of the trigger's raw input text from automatic model inputs, for that window alone) and ADR-0280 (§1's "phase/tool history" exclusion, for the record of stages alone; §4's `EpisodeProcessingRecord` field set, in the additions alone)
+- Status: Partially superseded by ADR-0276 (§1's "automatic cross-channel continuity" exclusion; §4's `EpisodeProcessingRecord` field set and `ProcessingReason` values, in the additions alone; §7's eligibility-`True` rule on automatic model-facing reads, for the understanding stage's episode window alone; §9's exclusion of the trigger's raw input text from automatic model inputs, for that window alone) and ADR-0280 (§1's "phase/tool history" exclusion, for the record of stages alone; §4's `EpisodeProcessingRecord` field set, in the additions alone) and ADR-0281 (§4's `EpisodeProcessingRecord` field set, in the addition alone; §7:4's eligibility-`True` rule, for recall's read alone; §9:6's exclusion of the trigger's raw input text from automatic model inputs, for the understanding stage's rendering of a recalled episode alone)
 - Date: 2026-09-18
 - Scope: [M36](https://github.com/leonapivato/ai-assistant/milestone/2), [#2522](https://github.com/leonapivato/ai-assistant/issues/2522).
 - Dependency: ADR-0274 and [M35](https://github.com/leonapivato/ai-assistant/milestone/1).
@@ -26,6 +26,15 @@
   stand entire. These scoped replacements take effect on ratification of ADR-0280. This
   reciprocal header record accompanies the numbered draft under ADR-0070 and ADR-0082;
   the ratified body below is preserved.
+- Partially superseded: 2026-09-27 by ADR-0281 — three narrow scopes. §4's
+  `EpisodeProcessingRecord` gains `recall`, every existing field, value and validator
+  standing. §7:4's rule that automatic model-facing episodic reads request eligibility
+  `True` does not bind recall's read; the flag, its producers, the history filter and every
+  other read's obligation stand. §9:6's exclusion admits one field to one consumer: a
+  recalled episode's exact trigger input text, to the understanding stage's rendering of
+  it; attached context and every other field stay excluded. These scoped replacements
+  take effect on ratification of ADR-0281. This reciprocal header record accompanies the
+  numbered draft under ADR-0070 and ADR-0082; the ratified body below is preserved.
 - Authorization: the owner endorsed the proposal's direction and its interruption/parallelism fit, then requested this draft in clone `ai-assistant-2`. The owner assigned the next available ADR number, 0275. These instructions authorize drafting and numbering, not ratification or implementation.
 - Note (2026-09-26): ADR-0276 was ratified on 2026-09-22 (`2e20ab11`), so the scoped
   replacements recorded by the ADR-0276 note above took effect then; that note's
