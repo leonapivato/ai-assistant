@@ -5,7 +5,7 @@ from __future__ import annotations
 import asyncio
 import hashlib
 import json
-from datetime import UTC, datetime
+from datetime import UTC, datetime, timedelta
 from io import StringIO
 from typing import TYPE_CHECKING, get_args
 
@@ -19,6 +19,8 @@ from ai_assistant.core.types import (
     ActivationUnderstanding,
     ChannelContext,
     ChannelIdentity,
+    ControllerRule,
+    ControllerStage,
     EpisodeChunk,
     EpisodeProcessingRecord,
     EpisodeResponseKind,
@@ -28,7 +30,10 @@ from ai_assistant.core.types import (
     ProcessingStatus,
     Provenance,
     RecordedChannelTrigger,
+    RecordedResumeTrigger,
     RecordedTextInput,
+    StageEntry,
+    StageOutcome,
     UnderstandingGround,
     UnderstandingOmission,
     UnderstandingProducer,
@@ -500,3 +505,91 @@ def test_cli_human_detail_carries_the_understanding_section(
         "audio playback. Understanding v1 (interpretation) "
         'Meaning (stated): "compare the two quotes" Retention expiry'
     ) in rendered
+
+
+def _stage_section(record: EpisodicMemory) -> list[str]:
+    """The human detail's stage lines, between the header and the status disclaimer."""
+    buffer = StringIO()
+    episode_inspection.render_detail(Console(file=buffer, force_terminal=False, width=200), record)
+    lines = buffer.getvalue().splitlines()
+    start = next(n for n, line in enumerate(lines) if line.startswith("Response:"))
+    end = lines.index("Processing status does not report goal achievement or audio playback.")
+    return lines[start + 1 : end]
+
+
+def _staged(record: EpisodicMemory, **fields: object) -> EpisodicMemory:
+    """The record with its processing record's stage fields replaced, and revalidated."""
+    assert record.processing_record is not None
+    processing = EpisodeProcessingRecord.model_validate(
+        {**record.processing_record.model_dump(), **fields}
+    )
+    return record.model_copy(update={"processing_record": processing})
+
+
+def _stage(
+    stage: ControllerStage,
+    due: ControllerRule,
+    outcome: StageOutcome,
+    *,
+    millis: int,
+) -> StageEntry:
+    return StageEntry(
+        stage=stage,
+        due=due,
+        started_at=_AT,
+        ended_at=_AT + timedelta(milliseconds=millis),
+        outcome=outcome,
+    )
+
+
+def test_human_detail_shows_each_stage_entry_in_order() -> None:
+    stages = (
+        _stage(
+            ControllerStage.UNDERSTANDING,
+            ControllerRule.NOT_UNDERSTOOD,
+            StageOutcome.TIMED_OUT,
+            millis=1250,
+        ),
+        *ended_pass(_AT, ControllerRule.STAGE_TIMED_OUT),
+    )
+    record = _staged(_record("record", response=EpisodeResponseKind.NONE), stages=stages)
+    assert _stage_section(record) == [
+        "Stages:",
+        "  understanding (due: not_understood): timed_out, 1.250s",
+        "  end (due: stage_timed_out): done, 0.000s",
+    ]
+
+
+def test_human_detail_shows_the_elided_count_at_the_gap() -> None:
+    kept = tuple(
+        _stage(
+            ControllerStage.UNDERSTANDING,
+            ControllerRule.NOT_UNDERSTOOD,
+            StageOutcome.DONE,
+            millis=n,
+        )
+        for n in range(3)
+    )
+    record = _staged(
+        _record("record", response=EpisodeResponseKind.NONE),
+        stages=(*kept, *ended_pass(_AT, ControllerRule.STAGE_REPEATED)),
+        stages_elided=7,
+    )
+    assert _stage_section(record) == [
+        "Stages:",
+        "  understanding (due: not_understood): done, 0.000s",
+        "  understanding (due: not_understood): done, 0.001s",
+        "  ... 7 elided",
+        "  understanding (due: not_understood): done, 0.002s",
+        "  end (due: stage_repeated): done, 0.000s",
+    ]
+
+
+def test_human_detail_labels_a_missing_or_empty_stage_record() -> None:
+    assert _stage_section(_record("record")) == ["Stages: unavailable"]
+    resume = _staged(
+        _record("record", response=EpisodeResponseKind.NONE),
+        trigger=RecordedResumeTrigger(channel=None, approved=True),
+        stages=(),
+    )
+    assert _stage_section(resume) == ["Stages: none recorded"]
