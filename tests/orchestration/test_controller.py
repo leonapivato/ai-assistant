@@ -337,6 +337,24 @@ async def test_a_wrapped_method_is_classified_by_what_it_raised(
     assert result == StageResult(outcome, raised)
 
 
+async def test_a_stage_whose_deadline_already_passed_is_not_entered() -> None:
+    """§5: not run, and ``timed_out`` carrying the deadline error."""
+    entered = False
+    late = ModelTimeoutError("the deadline passed")
+
+    async def body(_: _Facts) -> None:
+        nonlocal entered
+        entered = True
+
+    stage = Stage(ControllerStage.UNDERSTANDING, body, expired=lambda _: late)
+    assert await stage.run(_Facts()) == StageResult(StageOutcome.TIMED_OUT, late)
+    assert not entered
+    assert await Stage(ControllerStage.UNDERSTANDING, body, expired=lambda _: None).run(
+        _Facts()
+    ) == StageResult(StageOutcome.DONE)
+    assert entered
+
+
 async def test_a_wrapped_method_that_returns_is_done() -> None:
     async def body(_: _Facts) -> None:
         return None

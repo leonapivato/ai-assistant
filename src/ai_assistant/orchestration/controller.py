@@ -250,13 +250,21 @@ class Stage[P]:
     ``body`` runs with the same inputs and effects it has always had. A raise it
     ends in is ``timed_out`` where the error is a classified timeout and ``failed``
     otherwise; a cancellation is not an outcome and propagates.
+
+    ``expired`` is how a stage that runs inside a deadline says it already passed:
+    it answers the classified deadline error, or ``None`` while there is time. A
+    stage whose deadline had passed when it was due is not entered — its body does
+    no I/O at all — and yields ``timed_out`` carrying that error (§5).
     """
 
     name: ControllerStage
     body: Callable[[P], Awaitable[None]]
+    expired: Callable[[P], Exception | None] | None = None
 
     async def run(self, state: P) -> StageResult:
-        """Run the body and classify how it ended."""
+        """Run the body, unless its deadline already passed, and classify how it ended."""
+        if self.expired is not None and (late := self.expired(state)) is not None:
+            return StageResult(StageOutcome.TIMED_OUT, late)
         try:
             await self.body(state)
         except _TIMEOUTS as exc:

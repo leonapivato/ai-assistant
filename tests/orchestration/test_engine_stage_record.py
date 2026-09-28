@@ -291,6 +291,37 @@ async def test_a_pass_whose_understanding_times_out_ends_on_the_timed_out_stage(
     ]
 
 
+class _SlowDecline(FakeModelProvider):
+    async def complete(self, messages: Sequence[Message], *, model: str | None = None) -> Message:
+        await asyncio.sleep(0.1)
+        return await super().complete(messages, model=model)
+
+
+async def test_an_understanding_stage_due_past_the_deadline_is_not_entered() -> None:
+    """§5: routing spent the budget, so understanding reads no history and times out."""
+    router = RoutingStage(
+        model=_SlowDecline(json.dumps({"operation": "none"})), recorder=FakeRoutingRecorder()
+    )
+    harness = _harness(planner=NoStepPlanner(), routing=router)
+    reads: list[str] = []
+    history = harness.engine._conversations.history
+
+    async def counted(conversation_id: str) -> Any:
+        reads.append(conversation_id)
+        return await history(conversation_id)
+
+    harness.engine._conversations.history = counted  # type: ignore[method-assign]  # observe the read
+    with pytest.raises(ModelTimeoutError):
+        await harness.engine.converse("book the campsite", timeout=timedelta(milliseconds=20))
+    assert reads == []
+    assert await _entries(harness) == [
+        (_S.BEGIN_CONVERSATION, _R.CONVERSATION_UNRESOLVED, _DONE),
+        (_S.ROUTING, _R.ROUTE_UNCHECKED, _DONE),
+        (_S.UNDERSTANDING, _R.NOT_UNDERSTOOD, StageOutcome.TIMED_OUT),
+        (_S.END, _R.STAGE_TIMED_OUT, _DONE),
+    ]
+
+
 # --- spoken turns ---------------------------------------------------------------------
 
 
