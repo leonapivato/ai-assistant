@@ -121,6 +121,13 @@ def render_detail(console: Console, record: EpisodicMemory) -> None:
         highlight=False,
         soft_wrap=True,
     )
+    console.print(
+        "\n".join(_stage_lines(processing)),
+        markup=False,
+        emoji=False,
+        highlight=False,
+        soft_wrap=True,
+    )
     console.print("Processing status does not report goal achievement or audio playback.")
     console.print(
         "\n".join(_understanding_lines(processing)),
@@ -142,6 +149,30 @@ def render_detail(console: Console, record: EpisodicMemory) -> None:
 def _quoted(text: str) -> str:
     """Show record text exactly, so a line break in it cannot pose as a rendered line."""
     return json.dumps(text, ensure_ascii=False)
+
+
+def _stage_lines(processing: EpisodeProcessingRecord | None) -> list[str]:
+    """Render the stage record the processing record carries (ADR-0280 §7), deriving none.
+
+    Each entry's stage, the rule that made it due (for the end entry, the rule that
+    ended the pass), its outcome and its duration, in the record's order. Where
+    entries were elided, the count stands at the gap: ADR-0280 §6 keeps the first
+    half of the bound and the last, so the gap falls at the middle of what is kept.
+    """
+    if processing is None:
+        return ["Stages: unavailable"]
+    if not processing.stages:
+        return ["Stages: none recorded"]
+    lines = ["Stages:"]
+    gap = len(processing.stages) // 2
+    for index, entry in enumerate(processing.stages):
+        if processing.stages_elided and index == gap:
+            lines.append(f"  ... {processing.stages_elided} elided")
+        seconds = (entry.ended_at - entry.started_at).total_seconds()
+        lines.append(
+            f"  {entry.stage.value} (due: {entry.due.value}): {entry.outcome.value}, {seconds:.3f}s"
+        )
+    return lines
 
 
 def _understanding_lines(processing: EpisodeProcessingRecord | None) -> list[str]:
