@@ -51,7 +51,6 @@ from ai_assistant.testing import FakeModelProvider, FakeSpeechTranscriber
 if TYPE_CHECKING:
     from collections.abc import Sequence
 
-    from ai_assistant.core.types import TurnOutcome
 
 _BUDGET = timedelta(seconds=10)
 
@@ -197,16 +196,16 @@ async def test_context_snapshot_reaches_production_separately_for_overlapping_ca
     arrived: list[ResolvedChannelInput] = []
     both = asyncio.Event()
     release = asyncio.Event()
-    original = harness.engine._run_turn
+    original = harness.engine._begin_conversation_stage
 
-    async def processing(supplied: ResolvedChannelInput, **kwargs: Any) -> TurnOutcome:
-        arrived.append(supplied)
+    async def processing(working: Any) -> None:
+        await original(working)
+        arrived.append(working.input)
         if len(arrived) == 2:
             both.set()
         await release.wait()
-        return await original(supplied, **kwargs)
 
-    monkeypatch.setattr(harness.engine, "_run_turn", processing)
+    monkeypatch.setattr(harness.engine, "_begin_conversation_stage", processing)
     context = ChannelContext(history=(ChannelContextItem(text="first", item_id="one"),))
     supplied = ChannelInput(
         target=identity, payload=TextChannelPayload(text="  exact text  "), context=context

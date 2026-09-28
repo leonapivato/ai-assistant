@@ -289,6 +289,14 @@ UNDERSTANDING_EXCERPT_CHARS: Final = 2000
 #: many stages a later redesign runs.
 UNDERSTANDING_VERSION_LIMIT: Final = 8
 
+#: How many entries one activation's stage record retains (ADR-0280 §6): the first
+#: ``STAGE_RECORD_LIMIT // 2`` and the last ``STAGE_RECORD_LIMIT - STAGE_RECORD_LIMIT //
+#: 2``, with the rest counted in ``stages_elided``; the end entry is last and never
+#: elided. A stage runs at most once per pass under M38's loop guard, so no record
+#: reaches it yet; the bound is what keeps a record's size a function of the
+#: activation once later decisions let a stage run again.
+STAGE_RECORD_LIMIT: Final = 64
+
 #: How far the conflict probe over-asks its ceiling (ADR-0079 §1, ``memory/
 #: ingest.py``'s ``limit=self._conflict_limit + 2``).
 #:
@@ -2230,6 +2238,7 @@ def build_composition(  # noqa: PLR0915 — one statement per resource this root
                 excerpt_chars=UNDERSTANDING_EXCERPT_CHARS,
             ),
             understanding_version_limit=UNDERSTANDING_VERSION_LIMIT,
+            stage_record_limit=STAGE_RECORD_LIMIT,
             # ADR-0244's parked-read operations, built above: the **same object** the
             # recipient-grant operations below are handed, which is §18's "wired as one
             # instance" and is asserted in `tests/app/test_composition_parked_reads.py`
