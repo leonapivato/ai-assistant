@@ -76,16 +76,9 @@ flowchart LR
 ### Recall is a stage the controller runs
 
 Recall is a new stage in the controller #2577 proposes. It is due by one new
-readiness rule, **`not_recalled`**: the activation has no recall result yet,
-and its channel window is available. The rule sits before `not_understood`,
-so recall runs before understanding on every activation.
-
-The rule reads the pass's state, not the channel type. Its one prerequisite is
-the activation's channel window, because that is one of its cues. On most
-channels the window arrives with the activation. On a channel whose window is
-built from stored history, as a conversation's is today, recall waits until
-that history is resolved (#2577's `conversation_unresolved`). That is a detail
-of how that channel builds its window, not a step recall owes.
+readiness rule, **`not_recalled`**: the activation has no recall result yet.
+The rule sits before `not_understood`, so recall runs before understanding on
+every activation. It reads the pass's state, never the channel type.
 
 Recall is the second stage, after understanding, that does exactly one phase's
 job and nothing else, so under #2577's naming rule it takes the phase's name:
@@ -96,21 +89,38 @@ It lives in a new module `orchestration/recall.py` as `RecallStage`, holding
 an injected `MemoryStore`, the same way the loop holds one. It calls no model.
 There is no Protocol: it is one of orchestration's own stages.
 
+### Recall is thin
+
+Recall runs before anything is understood, so all it has are the activation's
+raw words. That is a good cue for a long input with content in it, and a poor
+one for a short input such as "yes" or "same as before": a similarity search
+on those returns noise that looks relevant, and understanding would have to
+read past it.
+
+So the first recall adds **only a few items, and only strong matches**. It
+leaves room for the two things that do the real work of connecting an
+activation to what came before:
+
+- **Short-term memory.** The channel window and the episode window, which
+  understanding already reads directly.
+- **Later recall with better cues**, once something about the activation is
+  known: recall cued by understanding's references and meaning, and the
+  candidate stories described under "What it leaves open".
+
+**Nothing found is the normal result for a short input**, not a failure.
+
 ### What it searches with, and what it searches
 
-**Two cues, one search each:**
+**One cue, one search:** the activation's own words, as the pass holds them.
+The channel window is not searched with. Understanding already sees it as
+short-term memory, so searching with it mostly repeats that context and adds
+loosely related items.
 
-| Cue | The query |
-| --- | --- |
-| **The activation's words** | The input text, as the pass holds it |
-| **The channel window** | The text of the most recent items on the channel the activation came on, joined and cut to a fixed bound |
+The cue is the same for every activation, whatever channel it came on: a
+typed message's words, an email's text, a calendar change's description.
 
-The second search is skipped when the window holds no text. The cues are the
-same for every activation. For a message they are the words and the exchange
-before it; for an email, its text and the recent mail on that channel.
-
-**Each search** asks `MemoryStore.search` for episodic and semantic records,
-up to a fixed per-search limit, and **requests no eligibility**.
+**The search** asks `MemoryStore.search` for episodic and semantic records,
+and **requests no eligibility**.
 
 `model_eligible` (ADR-0275 §7) is not an audience or relevance filter. It is a
 compatibility flag: it exists so that the model reads from before M36 keep
@@ -121,17 +131,17 @@ conversation, which is the channel-centric bias this design avoids. So recall
 ignores the flag, as the episode window already does. The data directory is
 fresh since M37, so there is no older material the flag still protects.
 
-**The results are merged:**
+**What is kept:**
 
-- deduplicated by record id, keeping the better rank and noting every cue that
-  found it;
-- episodes already in the episode window, or stored behind a channel window
-  item, are dropped, because understanding already sees them;
-- the rest are cut to a fixed total, best first.
+- only records whose relevance score clears a **fixed threshold**;
+- not episodes already in the episode window or stored behind a channel window
+  item, because understanding already sees them;
+- at most a **small cap**, best first.
 
-The constants live beside `UNDERSTANDING_EPISODE_LIMIT` at the composition
-root. The initial values are an ADR detail. Something like 6 per search and 8
-in total keeps the prompt small.
+The threshold and the cap are constants beside `UNDERSTANDING_EPISODE_LIMIT`
+at the composition root. The values are an ADR detail. A cap around 3 keeps
+recall thin. The threshold should be set so that a short input normally
+clears nothing.
 
 **Recall interprets nothing.** It doesn't decide that a memory answers
 anything, is out of date or settles a reference. `capped` is unwrapped and not
@@ -169,9 +179,9 @@ failed**:
 
 | Outcome | What it holds |
 | --- | --- |
-| `found` | The cues, and the found items |
-| `nothing_found` | The cues. The searches ran and returned nothing that survived the merge |
-| `failed` | The cues, and the error class. A search raised or timed out |
+| `found` | The cue, and the found items |
+| `nothing_found` | The cue. The search ran and nothing cleared the threshold |
+| `failed` | The cue, and the error class. The search raised or timed out |
 
 Each **found item** carries:
 
@@ -179,7 +189,9 @@ Each **found item** carries:
 - its stored id, exactly as stored;
 - a short excerpt, bounded like a referent's (240 characters);
 - its provenance, `user` or `outside`;
-- the cues that found it.
+- **how it was found.** In this milestone that is always the search on the
+  activation's words. The field exists so that later sources can add items
+  to the same record: a search cued by understanding, and candidate stories.
 
 The excerpt is the fact for a semantic record, and the input for an episode. For
 an **episode whose input was outside content**, the excerpt comes from its
@@ -260,10 +272,9 @@ reshapes planning.
 ### How it is checked
 
 - **The stage,** against the canonical `MemoryStore` fake:
-  - both cues are searched;
-  - the second cue is skipped on an empty window;
-  - merging and deduplication work, as do dropping window episodes and the
-    total cut;
+  - the one search uses the activation's words;
+  - the threshold, the cap and dropping window episodes all work;
+  - a short input normally records `nothing_found`;
   - the audience predicate is applied;
   - provenance is recorded for each source;
   - an outside episode's excerpt never carries its raw input;
@@ -285,10 +296,14 @@ reshapes planning.
   rendering. That is fewer moving parts, but the record would no longer show
   that recall ran or failed separately from understanding. The recall hook
   also needs recall to be its own stage the controller can run again. Rejected.
-- **One cue, the input only.** Simpler, but a short input finds nothing on
-  its own: a reply of a few words, or an email that says only "see below". The
-  channel window is what it refers to. Rejected; two searches still cost
-  milliseconds.
+- **A second search cued by the channel window**, so that a short input still
+  finds something. Rejected: understanding already reads the window directly,
+  so this mostly adds loosely related items. What connects a short input to
+  the past is structure (the story it continues), not similarity (see "What it
+  leaves open").
+- **A thick first recall**, around 8 items with no threshold. Rejected: before
+  understanding, the only cue is the raw words, and on a short input most of
+  what comes back is noise that understanding has to read past.
 - **One referent kind `memory` for everything recalled, episodes included.**
   It would tell a reader the item came through recall, but the recall record
   already says that. A recalled episode and a window episode would then be the
@@ -307,6 +322,20 @@ reshapes planning.
 
 ## What it leaves open
 
+- **Candidate stories.** Once stories exist, recall can suggest the stories an
+  activation might belong to, one or several. It can find them by following
+  existing links, for example the stories the short-term windows' episodes
+  already belong to, and it can show each story's recent episodes and the
+  memories they cited. **Recall suggests candidates. It never chooses:**
+  understanding decides whether and how the activation links to one. This is
+  what will connect short inputs like "yes" or "same as before" to long-term
+  memory, because the connection is structural, not a matter of similarity.
+  It arrives with the stories milestone, as a second source into the same
+  recall record.
+- **Recall cued by understanding.** A search built from understanding's
+  references and meaning finds far more than raw words do. It is the recall
+  hook's first form, and it stays with the hook.
+
 - **Retiring `model_eligible`.** Once recall and the episode window both
   ignore it, only the loop's own reads and the conversation history still
   request it. Removing the flag altogether is its own small change, outside
@@ -320,7 +349,7 @@ reshapes planning.
   task is named.
 - **Forget over recalled copies**, when routing and the memory commands return.
 - **Audience and provenance done properly**, in their own milestone.
-- **The exact constants** (per-search limit, total, window-cue bound, budget),
+- **The exact constants** (the threshold, the cap, the budget),
   settled in the ADR.
 - **Folding the loop's own relevance reads into recall**, in the milestone
   that reshapes planning.
