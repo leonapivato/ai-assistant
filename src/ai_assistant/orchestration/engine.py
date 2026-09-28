@@ -123,6 +123,7 @@ from ai_assistant.core.types import (
     DEFAULT_PAGE_SIZE,
     MAX_ASSOCIATION_CANDIDATES,
     TERMINAL_ATTEMPT_STATES,
+    ActivationRecall,
     AttemptOutcome,
     AttemptPhase,
     AttemptReport,
@@ -306,6 +307,7 @@ from ai_assistant.orchestration.payloads import (
 )
 from ai_assistant.orchestration.questions import question_state
 from ai_assistant.orchestration.reads import StructuredFacts, outbound_statement
+from ai_assistant.orchestration.recall import Recalled
 from ai_assistant.orchestration.reconciling import Reconciled, ReconciliationStage, TurnRemainder
 from ai_assistant.orchestration.routing import (
     FORGET_LOOKUP_KINDS,
@@ -419,7 +421,7 @@ if TYPE_CHECKING:
     from ai_assistant.orchestration.observation import ObservationRunReport, ObservationStage
     from ai_assistant.orchestration.parked_reads import ParkedReadOperations
     from ai_assistant.orchestration.questions import QuestionStage
-    from ai_assistant.orchestration.recall import Recalled, RecallStage
+    from ai_assistant.orchestration.recall import RecallStage
     from ai_assistant.orchestration.recipient_grants import RecipientGrantOperations
     from ai_assistant.orchestration.recovery import RecoveryScan
     from ai_assistant.orchestration.routing import RoutedRoute
@@ -12452,21 +12454,32 @@ class Engine:
         state before the stage returns, so the rule that made it due does not answer
         again. A ``failed`` or ``timed_out`` decision is returned ``tolerated`` with
         its error, and the controller goes on to understanding while the pass's
-        deadline holds; once that deadline has passed, the stage returns the pass's
-        own classified expiry instead, which the controller re-raises.
+        deadline holds.
+
+        **Past the pass's deadline, whatever recall returned is the expiry** (§5). A
+        search can cross the deadline without the timer firing — work that never
+        yielded — and then return found, nothing found or failed. As the
+        understanding stage does (ADR-0276 §5), what it produced is not recorded:
+        the decision is ``timed_out`` with no items, and the stage returns the pass's
+        own classified expiry, which the controller re-raises.
         """
         assert self._recall is not None  # noqa: S101 — the rule makes recall due only where it is wired
         recalled = await self._recall.recall(
             working.text, audience=working.supply, deadline=working.deadline
         )
+        late = _recall_expired(working)
+        if late is not None:
+            recalled = Recalled(
+                ActivationRecall(outcome=RecallOutcome.TIMED_OUT, cues=recalled.result.cues),
+                error=late,
+            )
         working.recalled = recalled
         if (state := active_state()) is not None:
             state.recall = recalled.result
         outcome = _RECALL_STAGE_OUTCOMES[recalled.result.outcome]
         if outcome is StageOutcome.DONE:
             return StageResult(StageOutcome.DONE)
-        late = _recall_expired(working)
-        return StageResult(outcome, late or recalled.error, tolerated=True)
+        return StageResult(outcome, recalled.error, tolerated=True)
 
     async def _event_understanding_stage(self, event: _EventPass) -> None:
         """ADR-0276 §5: after the event input is resolved and before the event stage."""

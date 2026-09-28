@@ -458,6 +458,28 @@ async def test_a_tolerant_stage_whose_deadline_passed_is_not_entered_or_tolerate
     assert not entered
 
 
+@pytest.mark.parametrize(
+    "returned",
+    [
+        StageResult(StageOutcome.DONE),
+        StageResult(StageOutcome.FAILED, MemoryStoreError("down"), tolerated=True),
+    ],
+    ids=["done", "tolerated"],
+)
+async def test_a_tolerant_stage_that_returns_past_its_deadline_is_timed_out(
+    returned: StageResult,
+) -> None:
+    """ADR-0281 §5: past the deadline, whatever the body returned is the expiry."""
+    late = ModelTimeoutError("the deadline passed")
+    reads = iter((None, late))
+
+    async def body(_: _Facts) -> StageResult:
+        return returned
+
+    stage = TolerantStage(ControllerStage.RECALL, body, expired=lambda _: next(reads))
+    assert await stage.run(_Facts()) == StageResult(StageOutcome.TIMED_OUT, late)
+
+
 async def test_a_tolerant_stage_returns_what_its_body_returned() -> None:
     tolerated = StageResult(StageOutcome.FAILED, MemoryStoreError("down"), tolerated=True)
 

@@ -11,6 +11,7 @@ from __future__ import annotations
 
 import asyncio
 import json
+import time
 from datetime import timedelta
 from typing import TYPE_CHECKING, Any, Final
 
@@ -24,7 +25,11 @@ from understanding_support import (
     understanding_stage,
 )
 
-from ai_assistant.core.errors import ChannelProcessingTimeoutError, ModelTimeoutError
+from ai_assistant.core.errors import (
+    ChannelProcessingTimeoutError,
+    MemoryStoreError,
+    ModelTimeoutError,
+)
 from ai_assistant.core.types import (
     ChannelIdentity,
     ChannelInput,
@@ -265,6 +270,40 @@ async def test_the_pass_deadline_passing_during_recall_ends_an_event() -> None:
         (_S.RECALL, _R.NOT_RECALLED, StageOutcome.TIMED_OUT),
         (_S.END, _R.STAGE_TIMED_OUT, _DONE),
     ]
+
+
+class _Unyielding(FakeMemoryStore):
+    """A store whose search holds the loop past a short deadline, then answers or fails."""
+
+    def __init__(self, *records: MemoryRecord, fails: bool = False) -> None:
+        super().__init__(now=lambda: AT)
+        self._fails = fails
+
+    async def search(self, query: str, **kwargs: Any) -> Any:
+        time.sleep(0.05)  # noqa: ASYNC251 — the point: no timer can fire while it runs
+        if self._fails:
+            msg = "down"
+            raise MemoryStoreError(msg)
+        return await super().search(query, **kwargs)
+
+
+@pytest.mark.parametrize("fails", [False, True], ids=["returns", "fails"])
+async def test_recall_that_crosses_the_deadline_without_yielding_is_the_expiry(
+    fails: bool,
+) -> None:
+    """§5: whatever recall returned past the deadline, the pass ends timed out, and what
+    it produced is not recorded."""
+    harness = _harness(recall=recall_stage(_Unyielding(fails=fails)))
+    with pytest.raises(ModelTimeoutError, match="during recall"):
+        await harness.engine.converse(_TURN, timeout=timedelta(milliseconds=20))
+    record = await _record(harness)
+    assert _entries(record) == [
+        (_S.BEGIN_CONVERSATION, _R.CONVERSATION_UNRESOLVED, _DONE),
+        (_S.RECALL, _R.NOT_RECALLED, StageOutcome.TIMED_OUT),
+        (_S.END, _R.STAGE_TIMED_OUT, _DONE),
+    ]
+    assert record.recall is not None
+    assert (record.recall.outcome, record.recall.items) == (RecallOutcome.TIMED_OUT, ())
 
 
 class _SlowDecline(FakeModelProvider):

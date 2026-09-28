@@ -309,6 +309,11 @@ class TolerantStage[P]:
     tolerated: the pass ends on ADR-0280 §5:2's fixed default. ``expired`` is as on
     :class:`Stage`, and a stage not entered because the deadline passed is not
     tolerated either.
+
+    ``expired`` is read again once the body returns: past the deadline, **whatever
+    the body returned** is ``timed_out`` carrying the deadline error, untolerated
+    (ADR-0281 §5). A body can cross the deadline without the timer firing, and its
+    returned outcome would otherwise let the pass continue.
     """
 
     name: ControllerStage
@@ -320,11 +325,14 @@ class TolerantStage[P]:
         if self.expired is not None and (late := self.expired(state)) is not None:
             return StageResult(StageOutcome.TIMED_OUT, late)
         try:
-            return await self.body(state)
+            result = await self.body(state)
         except _TIMEOUTS as exc:
             return StageResult(StageOutcome.TIMED_OUT, exc)
         except Exception as exc:
             return StageResult(StageOutcome.FAILED, exc)
+        if self.expired is not None and (late := self.expired(state)) is not None:
+            return StageResult(StageOutcome.TIMED_OUT, late)
+        return result
 
 
 @dataclass
