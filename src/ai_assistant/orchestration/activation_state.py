@@ -22,6 +22,7 @@ from ai_assistant.core.errors import (
 from ai_assistant.core.types import (
     ActivationLinks,
     ChannelIdentity,
+    ControllerRule,
     EpisodeCaptureReport,
     EpisodeProcessingRecord,
     EpisodeResponseKind,
@@ -39,6 +40,7 @@ from ai_assistant.core.types import (
     UnderstandingOmission,
     is_live_confirmation_park,
 )
+from ai_assistant.orchestration.controller import DEFAULT_STAGE_RECORD_LIMIT, StageRecord
 
 if TYPE_CHECKING:
     from collections.abc import Callable
@@ -54,6 +56,7 @@ if TYPE_CHECKING:
         RecordedActivationTrigger,
         ReplyCapability,
         SpokenDelivery,
+        StageEntry,
     )
 
 _log = structlog.get_logger(__name__)
@@ -96,6 +99,14 @@ class ActivationState:
     understanding_elided: int = 0
     understanding_omitted: UnderstandingOmission | None = None
     understanding_unparseable: bool = False
+    #: ADR-0280 §6: the stages the controller ran, readable while the pass runs and
+    #: written once, at capture, bounded at ``stage_limit`` entries.
+    stages: StageRecord = field(default_factory=StageRecord)
+    stage_limit: int = DEFAULT_STAGE_RECORD_LIMIT
+    #: ADR-0280 §3: the pass's working set — the decisions its stages made, which
+    #: the rules read. Held here while the pass runs and never persisted; its shape
+    #: is the engine's, which is the one component that knows each decision's type.
+    working: object | None = None
     _last_understanding_version: int = field(default=0, init=False, repr=False)
 
     def transcription(self, transcript: str | None) -> None:
@@ -203,6 +214,7 @@ class ActivationState:
         if self.activation_id is None or self.started_at is None:
             raise ValueError("activation admission metadata is incomplete")
         status, reason = terminal_status(self, failure)
+        stages, stages_elided = self._stage_record(ended_at, failure)
         return EpisodeProcessingRecord(
             activation_id=self.activation_id,
             started_at=self.started_at,
@@ -219,7 +231,33 @@ class ActivationState:
             understanding=self.understanding,
             understanding_omitted=self._omission(),
             understanding_elided=self.understanding_elided,
+            stages=stages,
+            stages_elided=stages_elided,
         )
+
+    def _stage_record(
+        self, ended_at: datetime, failure: BaseException | None
+    ) -> tuple[tuple[StageEntry, ...], int]:
+        """The stage record as capture writes it (ADR-0280 §5, §6).
+
+        A resume carries none. A channel activation the controller never ended —
+        cancelled at the admission barrier, or ended at the speech edge — gains its
+        end entry here, at the finalization reading: ``interrupted`` for a
+        cancellation, ``no_text_input`` for speech with no words or whose
+        transcription failed, and ``ended_before_controller`` for any other end
+        ahead of the controller. The state itself is not changed, so a second
+        finalization reading builds the same record, and no exception, status or
+        reason moves.
+        """
+        if isinstance(self.trigger, RecordedResumeTrigger):
+            return (), 0
+        if isinstance(failure, asyncio.CancelledError):
+            rule = ControllerRule.INTERRUPTED
+        elif self.understanding_omitted is UnderstandingOmission.NO_TEXT:
+            rule = ControllerRule.NO_TEXT_INPUT
+        else:
+            rule = ControllerRule.ENDED_BEFORE_CONTROLLER
+        return self.stages.bounded(self.stage_limit, ending=(rule, ended_at))
 
     def _omission(self) -> UnderstandingOmission | None:
         """ADR-0276 §5's classification, by where the pass ended and never by its text.
@@ -312,6 +350,7 @@ def admit_channel(
     *,
     clock: Clock,
     id_factory: Callable[[], str],
+    stage_limit: int = DEFAULT_STAGE_RECORD_LIMIT,
 ) -> ActivationState:
     """Allocate capture metadata after channel validation, without making it admission policy."""
     event = (
@@ -340,6 +379,7 @@ def admit_channel(
             if isinstance(input.target, ChannelIdentity) and not event
             else None
         ),
+        stage_limit=stage_limit,
     )
 
 

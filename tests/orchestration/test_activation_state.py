@@ -22,6 +22,8 @@ from ai_assistant.core.types import (
     ChannelContext,
     ChannelContextItem,
     ChannelInput,
+    ControllerRule,
+    ControllerStage,
     NewConversation,
     ProcessingReason,
     ProcessingStatus,
@@ -33,6 +35,7 @@ from ai_assistant.core.types import (
     SpokenAudio,
     SpokenAudioFormat,
     SpokenReply,
+    StageOutcome,
     TextChannelPayload,
     UnderstandingGround,
     UnderstandingOmission,
@@ -281,6 +284,48 @@ def test_a_resume_records_no_input() -> None:
         approved=True, remember_recipients_until=None, clock=lambda: _AT, id_factory=lambda: _ID
     )
     assert state.processing(_AT, None).understanding_omitted is UnderstandingOmission.NO_INPUT
+
+
+# --- ADR-0280 §5, §6: the end entry supplied at finalization ----------------------------
+
+
+def test_a_resume_carries_no_stage_record() -> None:
+    state = admit_resume(
+        approved=True, remember_recipients_until=None, clock=lambda: _AT, id_factory=lambda: _ID
+    )
+    record = state.processing(_AT, None)
+    assert (record.stages, record.stages_elided) == ((), 0)
+
+
+@pytest.mark.parametrize(
+    ("failure", "rule"),
+    [
+        (asyncio.CancelledError(), ControllerRule.INTERRUPTED),
+        (
+            ChannelProcessingError("a delivery report was refused"),
+            ControllerRule.ENDED_BEFORE_CONTROLLER,
+        ),
+        (None, ControllerRule.ENDED_BEFORE_CONTROLLER),
+    ],
+)
+def test_a_pass_that_never_entered_the_controller_gains_its_end_entry_at_finalization(
+    failure: BaseException | None, rule: ControllerRule
+) -> None:
+    state = _admitted()
+    ended = _AT + timedelta(seconds=1)
+    record = state.processing(ended, failure)
+    (end,) = record.stages
+    assert (end.stage, end.due, end.outcome) == (ControllerStage.END, rule, StageOutcome.DONE)
+    assert end.started_at == end.ended_at == ended
+    assert state.stages.entries == [], "a finalization reading changes nothing on the state"
+    assert state.processing(ended, failure) == record
+
+
+def test_an_end_entry_the_controller_appended_is_the_one_written() -> None:
+    state = _admitted()
+    state.stages.end(ControllerRule.NOTHING_DUE, _AT)
+    record = state.processing(_AT + timedelta(seconds=1), asyncio.CancelledError())
+    assert [entry.due for entry in record.stages] == [ControllerRule.NOTHING_DUE]
 
 
 @pytest.mark.parametrize("transcript", [None, "", " \n"])

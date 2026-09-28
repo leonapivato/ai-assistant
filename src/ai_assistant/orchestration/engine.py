@@ -89,7 +89,7 @@ from enum import StrEnum
 from functools import partial
 from itertools import count
 from types import MappingProxyType
-from typing import TYPE_CHECKING, Any, Final, TypeVar, assert_never, cast
+from typing import TYPE_CHECKING, Any, Final, Literal, TypeVar, assert_never, cast
 
 import structlog
 
@@ -142,6 +142,7 @@ from ai_assistant.core.types import (
     Confirmation,
     ConfirmationEgress,
     ContinuationToken,
+    ControllerStage,
     ConversationInputOptions,
     ConversationSummary,
     CoverageUnrecordedBinding,
@@ -248,6 +249,13 @@ from ai_assistant.orchestration.channels import (
     text_result,
 )
 from ai_assistant.orchestration.composing import ComposedReply
+from ai_assistant.orchestration.controller import (
+    DEFAULT_STAGE_RECORD_LIMIT,
+    ActivationController,
+    PassFacts,
+    Stage,
+    StageRecord,
+)
 from ai_assistant.orchestration.disclosure import (
     BoundedAudienceSupply,
     TurnSupply,
@@ -391,13 +399,18 @@ if TYPE_CHECKING:
         ConsolidationReport,
         ConsolidationStage,
     )
-    from ai_assistant.orchestration.conversations import ConversationLifecycle
+    from ai_assistant.orchestration.conversations import AssembledHistory, ConversationLifecycle
     from ai_assistant.orchestration.delivery import DeliveryOutbox
     from ai_assistant.orchestration.destination_trust import DestinationTrustOperations
     from ai_assistant.orchestration.grants import GrantOperations
     from ai_assistant.orchestration.informational_events import InformationalEventStage
     from ai_assistant.orchestration.ingestion import IngestionReport, IngestionStage
-    from ai_assistant.orchestration.loop import LearningLoop, MintedActions, RecordedGoal
+    from ai_assistant.orchestration.loop import (
+        LearningLoop,
+        MintedActions,
+        RecordedGoal,
+        RespondedTurn,
+    )
     from ai_assistant.orchestration.observation import ObservationRunReport, ObservationStage
     from ai_assistant.orchestration.parked_reads import ParkedReadOperations
     from ai_assistant.orchestration.questions import QuestionStage
@@ -2396,6 +2409,305 @@ class _SpokenCapture:
     episode_id: str | None = None
 
 
+@dataclass(slots=True)
+class _Planned:
+    """What the turn loop decided, and what this pass derived from it (ADR-0280 §3).
+
+    One value, set once by the ``turn_loop`` stage: the turn ``LearningLoop.respond``
+    returned and every carrier the stages after it read by value. Nothing here is
+    recomputed downstream. ``attempt``, ``engagement`` and ``clarification`` move as
+    the persistence sequence writes them, which is the compare-and-swap chain ADR-0249
+    §12 already has — each later commit is computed against what the last returned.
+
+    Attributes:
+        responded: What ``LearningLoop.respond`` returned.
+        drove_from: ADR-0249 §5's ledger: when this pass's remaining work began.
+        read_confirmation: ADR-0244 §9's question this turn parked, or ``None``.
+        deliveries: ADR-0205 §5's facts, paired to the episodes that survived.
+        withheld: ADR-0204 §2's evaluation, read once.
+        modality: ADR-0221 §5's modality of this pass's own user material.
+        origin: ADR-0223 §2's selection origin, computed once for two consumers.
+        elided: ADR-0250 §14's disclosure, keyed on the disposition.
+        instants: ADR-0250 §8's question instants, or ``None`` on a turn that asks
+            nothing.
+        attempt: The attempt as the last commit left it.
+        engagement: ADR-0250 §5's engagement, once the goal is written.
+        clarification: ADR-0250 §10's recorded question, once raised.
+    """
+
+    responded: RespondedTurn
+    drove_from: datetime
+    read_confirmation: Confirmation | None
+    deliveries: Mapping[str, SpokenDelivery]
+    withheld: bool
+    modality: Modality
+    origin: SelectionOrigin
+    elided: bool
+    instants: tuple[datetime, datetime] | None
+    attempt: OpenedAttempt | None
+    engagement: GoalEngagement | None = None
+    clarification: Clarification | None = None
+
+    @property
+    def turn(self) -> TurnResult:
+        """The turn the loop produced."""
+        return self.responded.turn
+
+    @property
+    def undriven(self) -> bool:
+        """ADR-0250 §10: a turn that raised a question, or planned no step, drives none."""
+        return self.responded.raised is not None or not self.responded.turn.plan.steps
+
+
+@dataclass(frozen=True, slots=True)
+class _Driven:
+    """The drive's disposition (ADR-0280 §3), including a claim a user act refused.
+
+    Attributes:
+        step: The driven step's outcome, or ``None`` where the claim was withheld.
+        disposition: What the runner returned, or ``None`` where it raised.
+        withheld: ADR-0261 §7's carrier, or ``None`` on every turn that dispatched.
+        observed: ADR-0264 §2's egress contribution, observed rather than returned.
+        parked: The binding a parked step parked on, or ``None``.
+    """
+
+    step: StepOutcome | None
+    disposition: StepDisposition | None
+    withheld: DriveWithheld | None
+    observed: DriveObservation
+    parked: ParkedBinding | None
+
+
+@dataclass(frozen=True, slots=True)
+class _Composition:
+    """The composed reply and what the attempt's end gate made of it (ADR-0280 §3).
+
+    Present once the ``compose`` stage returned, whatever the reply: a degraded reply
+    is a composed reply (§4), so its presence is what consumes ``reply_owed``.
+
+    Attributes:
+        composed: What the composing stage returned.
+        outbound: ADR-0264 §6's statement the stage was given.
+        report: ADR-0262 §6's report, present exactly where this pass ended the
+            attempt.
+    """
+
+    composed: ComposedReply | None
+    outbound: OutboundStatement | None
+    report: AttemptReport | None
+
+
+@dataclass(slots=True)
+class _TurnPass:
+    """ADR-0280 §3's working set for one conversation turn, typed or spoken.
+
+    The first group is what the pass was handed — the channel's arguments, its budget
+    and what this deployment wired — and the second is the decisions its stages made,
+    each ``None`` until the stage that makes it has. A decision nothing came of is
+    still recorded: routing records ``declined``, an association that found no goal
+    is an :class:`_Association` with no goal. The rules read only these (§4), through
+    :class:`~ai_assistant.orchestration.controller.PassFacts`.
+    """
+
+    utterance: str
+    requested: str | None
+    context: ChannelContext
+    timeout: timedelta
+    remaining: TurnRemainder | None
+    deadline: float
+    compose: _Composer
+    compose_routed: _RoutedComposer
+    supply: TurnSupply
+    operation: ConversationalOperation
+    spoken: _SpokenCapture | None
+    reference: TurnReference | None
+    routing_wired: bool
+    understanding_wired: bool
+    reconciliation_wired: bool
+    input: ResolvedChannelInput | None = None
+    route: Literal["declined", "taken"] | None = None
+    history: AssembledHistory | None = None
+    understood: bool = False
+    association: _Association | None = None
+    charged: GoalAttempt | None = None
+    asked_which: bool = False
+    reconciliation: Reconciled | None = None
+    planned: _Planned | None = None
+    driven: _Driven | None = None
+    composition: _Composition | None = None
+    outcome: TurnOutcome | None = None
+
+    @property
+    def conversation_turn(self) -> bool:
+        """Always: this is a conversation turn's working set."""
+        return True
+
+    @property
+    def informational_event(self) -> bool:
+        """Never: this is a conversation turn's working set."""
+        return False
+
+    @property
+    def conversation_resolved(self) -> bool:
+        """The conversation has been begun and the input resolved against it."""
+        return self.input is not None
+
+    @property
+    def route_decided(self) -> bool:
+        """Routing declined or took the route."""
+        return self.route is not None
+
+    @property
+    def route_taken(self) -> bool:
+        """Routing took the route."""
+        return self.route == "taken"
+
+    @property
+    def understanding_decided(self) -> bool:
+        """The understanding stage recorded an outcome."""
+        return self.understood
+
+    @property
+    def event_summarized(self) -> bool:
+        """Never: a turn has no event summary."""
+        return False
+
+    @property
+    def associated(self) -> bool:
+        """Association decided, including that it found no goal."""
+        return self.association is not None
+
+    @property
+    def asks_which_goal(self) -> bool:
+        """The association asks which goal is meant."""
+        return self.association is not None and self.association.disambiguation is not None
+
+    @property
+    def disambiguation_asked(self) -> bool:
+        """The disambiguation question was asked."""
+        return self.asked_which
+
+    @property
+    def continues_goal(self) -> bool:
+        """The association continues a stored goal."""
+        return self.association is not None and self.association.goal is not None
+
+    @property
+    def reconciled(self) -> bool:
+        """Reconciliation has a result."""
+        return self.reconciliation is not None
+
+    @property
+    def turn_decided(self) -> bool:
+        """The turn loop returned a turn."""
+        return self.planned is not None
+
+    @property
+    def turn_raised_question(self) -> bool:
+        """The turn's planner raised a question."""
+        return self.planned is not None and self.planned.responded.raised is not None
+
+    @property
+    def plan_has_steps(self) -> bool:
+        """The turn's plan has a step."""
+        return self.planned is not None and bool(self.planned.turn.plan.steps)
+
+    @property
+    def drive_decided(self) -> bool:
+        """The drive has a disposition, a withheld claim included."""
+        return self.driven is not None
+
+    @property
+    def parked(self) -> bool:
+        """The driven step parked for confirmation."""
+        return self.driven is not None and self.driven.parked is not None
+
+    @property
+    def reply_composed(self) -> bool:
+        """The composing stage returned, degraded or not."""
+        return self.composition is not None
+
+
+@dataclass(slots=True)
+class _EventPass:
+    """ADR-0280 §3's working set for one informational event.
+
+    The event's resolved input and deadline, what this deployment wired, and the two
+    decisions an event's stages make: an understanding outcome and the summary's
+    result. Every conversation-turn decision is absent by construction.
+    """
+
+    input: ResolvedChannelInput
+    deadline: float
+    understanding_wired: bool
+    understood: bool = False
+    result: ChannelResult | None = None
+
+    @property
+    def conversation_turn(self) -> bool:
+        """Never: this is an event's working set."""
+        return False
+
+    @property
+    def informational_event(self) -> bool:
+        """Always: this is an event's working set."""
+        return True
+
+    @property
+    def understanding_decided(self) -> bool:
+        """The understanding stage recorded an outcome."""
+        return self.understood
+
+    @property
+    def event_summarized(self) -> bool:
+        """The event stage produced its result."""
+        return self.result is not None
+
+    # An event makes none of a turn's decisions and wires none of a turn's stages.
+    conversation_resolved = routing_wired = route_decided = route_taken = property(lambda _: False)
+    associated = asks_which_goal = disambiguation_asked = continues_goal = property(lambda _: False)
+    reconciliation_wired = reconciled = turn_decided = turn_raised_question = property(
+        lambda _: False
+    )
+    plan_has_steps = drive_decided = parked = reply_composed = property(lambda _: False)
+
+
+def _resolved_turn(working: _TurnPass) -> ResolvedChannelInput:
+    """The turn's resolved input, which every stage after the first reads.
+
+    Raises:
+        RuntimeError: If no conversation was resolved, which the rules make impossible.
+    """
+    if working.input is None:  # pragma: no cover — `conversation_unresolved` runs first
+        msg = "a turn's stages run after its conversation is resolved (ADR-0280 §4)"
+        raise RuntimeError(msg)
+    return working.input
+
+
+def _associated(working: _TurnPass) -> _Association:
+    """The turn's association, which every stage after it reads.
+
+    Raises:
+        RuntimeError: If association has not decided, which the rules make impossible.
+    """
+    if working.association is None:  # pragma: no cover — `association_due` runs first
+        msg = "a turn's later stages run after its association (ADR-0280 §4)"
+        raise RuntimeError(msg)
+    return working.association
+
+
+def _planned(working: _TurnPass) -> _Planned:
+    """What the turn loop decided, which the drive, composing and capture read.
+
+    Raises:
+        RuntimeError: If the turn loop has not decided, which the rules make impossible.
+    """
+    if working.planned is None:  # pragma: no cover — `unplanned` runs first
+        msg = "a turn is driven, composed and captured after its turn loop (ADR-0280 §4)"
+        raise RuntimeError(msg)
+    return working.planned
+
+
 def _announcement_lead(engagement: GoalEngagement | None) -> str | None:
     """ADR-0250 §5's sentence and the break after it, or ``None`` where none is owed.
 
@@ -2627,6 +2939,7 @@ class Engine:
         routing: RoutingStage | None = None,
         understanding: UnderstandingStage | None = None,
         understanding_version_limit: int | None = None,
+        stage_record_limit: int = DEFAULT_STAGE_RECORD_LIMIT,
         reconciliation: ReconciliationStage | None = None,
         parked_reads: ParkedReadOperations | None = None,
         authorization_operations: AuthorizationOperations | None = None,
@@ -3057,6 +3370,9 @@ class Engine:
             understanding_version_limit: ``UNDERSTANDING_VERSION_LIMIT``, ADR-0276 §7's
                 bound on the versions one processing record retains. Required, and at
                 least 2, wherever ``understanding`` is wired.
+            stage_record_limit: ``STAGE_RECORD_LIMIT``, ADR-0280 §6's bound on the
+                entries one stage record retains; at least 2, so the first entry and
+                the end entry are both kept.
             reconciliation: ADR-0259 §4's turn-start pass and §3's check, or ``None``
                 where this deployment wired neither — where the pipeline is exactly
                 what it was before that decision, and a goal's residual is repaired by
@@ -3413,6 +3729,10 @@ class Engine:
             raise ConfigurationError(msg)
         self._understanding = understanding
         self._understanding_version_limit = understanding_version_limit or 2
+        if stage_record_limit < 2:  # noqa: PLR2004 — the first entry and the end entry
+            msg = "a stage record keeps its first entry and its end entry (ADR-0280 §6)"
+            raise ConfigurationError(msg)
+        self._stage_record_limit = stage_record_limit
         self._reconciliation = reconciliation
         self._parked_reads = parked_reads
         # ADR-0254 §11's read side. **Optional, and its absence is fail-closed**:
@@ -4230,7 +4550,11 @@ class Engine:
             raise ConfigurationError("informational event processing is not wired")
         deadline = asyncio.get_running_loop().time() + timeout.total_seconds()
         state = admit_channel(
-            accepted, capability, clock=self._now, id_factory=self._activation_id_factory
+            accepted,
+            capability,
+            clock=self._now,
+            id_factory=self._activation_id_factory,
+            stage_limit=self._stage_record_limit,
         )
         projection = replace(projection, capture_report=state.reserved_report)
         task = self._activation_task(
@@ -4267,16 +4591,22 @@ class Engine:
             resolved = ResolvedChannelInput(
                 target, input.payload.text, input.payload.modality, input.context
             )
-            # ADR-0276 §5: after the event input is resolved and before the event
-            # stage, which is unchanged and reads no understanding.
-            await self._understand_event(resolved, deadline=deadline)
-            result = await self._informational_events.process(
-                resolved,
+            event = _EventPass(
+                input=resolved,
                 deadline=deadline,
-                on_summary=None if (state := active_state()) is None else state.summary,
+                understanding_wired=self._understanding is not None,
             )
-            self._checked(projection.terminal(result), projection.method)
-            return result
+            # ADR-0280 §4: understanding, then the event summary, by the rules.
+            await self._controlled(
+                event,
+                (
+                    Stage(ControllerStage.UNDERSTANDING, self._event_understanding_stage),
+                    Stage(ControllerStage.EVENT_SUMMARY, self._event_summary_stage),
+                ),
+            )
+            assert event.result is not None  # noqa: S101 — the controller ends an event only once it is summarized, or raises
+            self._checked(projection.terminal(event.result), projection.method)
+            return event.result
         if isinstance(input.payload, SpeechChannelPayload):
             assert isinstance(reply, SpokenReply)  # noqa: S101 — narrowed by validated channel dispatch
             transcriber, synthesizer = self._speech_seams()
@@ -4557,7 +4887,11 @@ class Engine:
         """
         chunks: asyncio.Queue[ReplyChunk] = asyncio.Queue()
         state = admit_channel(
-            admitted_input, admitted_reply, clock=self._now, id_factory=self._activation_id_factory
+            admitted_input,
+            admitted_reply,
+            clock=self._now,
+            id_factory=self._activation_id_factory,
+            stage_limit=self._stage_record_limit,
         )
         projection = replace(projection, capture_report=state.reserved_report)
         turn = self._activation_task(
@@ -11831,32 +12165,44 @@ class Engine:
         reference: TurnReference | None = None,
         context: ChannelContext = _EMPTY_CHANNEL_CONTEXT,
     ) -> TurnOutcome:
-        """Resolve the store-owned channel once, then pass supplied context separately."""
+        """Assemble the turn's working set, then run it through the controller (ADR-0280)."""
         remaining = None if self._reconciliation is None else self._reconciliation.opened(timeout)
         # ADR-0276 §5: the pass's existing deadline, read at the turn's entry as the
         # remainder above is — the budget this call was handed, and no second one.
         deadline = asyncio.get_running_loop().time() + timeout.total_seconds()
-        conversation = await self._conversations.begin(conversation_id)
-        if (state := active_state()) is not None:
-            state.resolved_conversation(conversation.id)
-        resolved = ResolvedChannelInput(
-            channel=ChannelIdentity(channel_type="conversation", instance_id=conversation.id),
-            text=utterance,
-            modality=Modality.SPEECH if spoken is not None else Modality.TEXT,
-            context=context,
-        )
         return await self._run_turn(
-            resolved,
-            timeout=timeout,
-            compose=compose,
-            compose_routed=compose_routed,
-            supply=supply,
-            operation=operation,
-            spoken=spoken,
-            reference=reference,
-            remaining=remaining,
-            deadline=deadline,
+            _TurnPass(
+                utterance=utterance,
+                requested=conversation_id,
+                context=context,
+                timeout=timeout,
+                remaining=remaining,
+                deadline=deadline,
+                compose=compose,
+                compose_routed=compose_routed,
+                supply=supply,
+                operation=operation,
+                spoken=spoken,
+                reference=reference,
+                routing_wired=self._routing is not None,
+                understanding_wired=self._understanding is not None,
+                reconciliation_wired=self._reconciliation is not None and remaining is not None,
+            )
         )
+
+    async def _controlled[P: PassFacts](self, working: P, stages: Sequence[Stage[P]]) -> None:
+        """Run one pass's stages by ADR-0280 §4's rules, recording on its state.
+
+        The working set is carried on the activation's state while the pass runs
+        (§3), and the entries accumulate there for capture (§6). A pass with no
+        admitted activation — an internal call no channel admitted — still runs by
+        the rules, into a record nothing writes.
+        """
+        state = active_state()
+        record = StageRecord() if state is None else state.stages
+        if state is not None:
+            state.working = working
+        await ActivationController(stages=stages, clock=self._clock).run(working, record)
 
     async def _understand(
         self,
@@ -11986,21 +12332,28 @@ class Engine:
         )
         raise failure(message) from None
 
-    async def _run_turn(  # noqa: C901, PLR0912, PLR0913, PLR0915 — C901/PLR0912: ADR-0250 §3 and §10 add two branches to one sequence, and ADR-0261 §7 adds the third — a claim a user act refused, which ends the walk and composes without acting; like the other two it is a fact about *this* pass, and its composition reads eleven of this pass's own locals, so a helper could only take it back by threading them through a parameter list. The first two are a turn that could not decide which goal it was about, which returns before the loop, and a turn that raised a question, which takes the undriven path whatever its plan proposed. PLR0913: the utterance, the budget, the conversation, the two composers, the supply filter and the spoken capture; every one is a distinct fact about the pass, and collapsing any pair would put a flag where a value belongs. PLR0915: one pass is one sequence — admit, persist, authorise, drive, compose, capture — and the four statements ADR-0249 §12's authorization boundary adds are a closure over this pass's own attempt carrier, which a helper could only take back by putting that carrier in a mutable cell
-        self,
-        input: ResolvedChannelInput,  # noqa: A002 — resolved channel input
-        *,
-        timeout: timedelta,  # noqa: ASYNC109 — threaded through to the seam (ADR-0029 §4)
-        remaining: TurnRemainder | None,
-        deadline: float,
-        compose: _Composer,
-        compose_routed: _RoutedComposer,
-        supply: TurnSupply,
-        operation: ConversationalOperation,
-        spoken: _SpokenCapture | None = None,
-        reference: TurnReference | None = None,
-    ) -> TurnOutcome:
-        """Route the ask, or resolve the conversation, plan the turn and drive its step.
+    async def _event_understanding_stage(self, event: _EventPass) -> None:
+        """ADR-0276 §5: after the event input is resolved and before the event stage."""
+        await self._understand_event(event.input, deadline=event.deadline)
+        event.understood = True
+
+    async def _event_summary_stage(self, event: _EventPass) -> None:
+        """ADR-0274's event stage, unchanged: it reads no understanding."""
+        assert self._informational_events is not None  # noqa: S101 — refused at admission where unwired
+        event.result = await self._informational_events.process(
+            event.input,
+            deadline=event.deadline,
+            on_summary=None if (state := active_state()) is None else state.summary,
+        )
+
+    async def _run_turn(self, working: _TurnPass) -> TurnOutcome:
+        """Run one turn's stages by ADR-0280's rules, then capture what they decided.
+
+        The activation controller runs the stages §4's rules make due — begin the
+        conversation, route, understand, associate, ask which goal, reconcile, the turn
+        loop, drive, compose — each an existing engine method with the same inputs and
+        effects, over the working set in ``working``. What follows is what each stage
+        does, as it did when this method ran them as one fixed sequence.
 
         ``compose`` is how this pass's answer is produced — atomically for
         :meth:`converse`, as a stream for :meth:`converse_streaming` — and
@@ -12087,102 +12440,202 @@ class Engine:
         supply filter, so a turn whose episode was withheld under ADR-0199 §3 or
         ADR-0204 §3 contributes no delivery fact either.
         """
-        utterance = input.text
-        route = None if self._routing is None else await self._routing.route(utterance)
-        if route is not None:
-            # ADR-0276 §5: a taken route ends the pipeline before the understanding
-            # stage, and the record says so rather than that the stage was not reached.
-            if (activation := active_state()) is not None:
-                activation.omit(UnderstandingOmission.ROUTED)
-            return await self._routed_pass(
-                utterance,
-                route,
-                conversation=input.channel.instance_id,
-                compose=compose_routed,
-                spoken=spoken,
+        await self._controlled(
+            working,
+            (
+                Stage(ControllerStage.BEGIN_CONVERSATION, self._begin_conversation_stage),
+                Stage(ControllerStage.ROUTING, self._routing_stage),
+                Stage(ControllerStage.UNDERSTANDING, self._understanding_stage),
+                Stage(ControllerStage.ASSOCIATE_GOAL, self._associate_stage),
+                Stage(ControllerStage.ASK_DISAMBIGUATION, self._disambiguation_stage),
+                Stage(ControllerStage.RECONCILE, self._reconcile_stage),
+                Stage(ControllerStage.TURN_LOOP, self._turn_loop_stage),
+                Stage(ControllerStage.DRIVE, self._drive_stage),
+                Stage(ControllerStage.COMPOSE, self._compose_stage),
+            ),
+        )
+        # A taken route and a disambiguation produce their outcome inside their stage,
+        # capture included (ADR-0280 §2, ADR-0250 §5).
+        if working.outcome is not None:
+            return working.outcome
+        return await self._captured_turn(working)
+
+    async def _begin_conversation_stage(self, working: _TurnPass) -> None:
+        """ADR-0074 §2: resolve the conversation before the turn's work, and bind it.
+
+        An id the store does not know is refused here, before anything is routed or
+        planned, exactly as it was refused before.
+        """
+        conversation = await self._conversations.begin(working.requested)
+        if (state := active_state()) is not None:
+            state.resolved_conversation(conversation.id)
+        working.input = ResolvedChannelInput(
+            channel=ChannelIdentity(channel_type="conversation", instance_id=conversation.id),
+            text=working.utterance,
+            modality=Modality.SPEECH if working.spoken is not None else Modality.TEXT,
+            context=working.context,
+        )
+
+    async def _routing_stage(self, working: _TurnPass) -> None:
+        """ADR-0280 §2's one legacy stage: ``RoutingStage`` and the routed pass together.
+
+        It declines, recording ``declined``, or takes the route and performs, composes
+        and captures the routed pass exactly as ADR-0197 and its amenders decide. The
+        controller knows only which of the two happened.
+        """
+        assert self._routing is not None  # noqa: S101 — the rule makes routing due only where it is wired
+        conversation = _resolved_turn(working).channel.instance_id
+        route = await self._routing.route(working.utterance)
+        if route is None:
+            working.route = "declined"
+            return
+        working.route = "taken"
+        # ADR-0276 §5: a taken route ends the pipeline before the understanding
+        # stage, and the record says so rather than that the stage was not reached.
+        if (activation := active_state()) is not None:
+            activation.omit(UnderstandingOmission.ROUTED)
+        working.outcome = await self._routed_pass(
+            working.utterance,
+            route,
+            conversation=conversation,
+            compose=working.compose_routed,
+            spoken=working.spoken,
+        )
+
+    async def _turn_history(self, working: _TurnPass) -> AssembledHistory:
+        """The conversation's tail, read once per pass and only by a stage that needs it.
+
+        A routed pass reads none (ADR-0197 §1). The understanding stage reads it first
+        where it is wired; the turn loop reads it otherwise.
+        """
+        if working.history is None:
+            working.history = await self._conversations.history(
+                _resolved_turn(working).channel.instance_id
             )
-        history = await self._conversations.history(input.channel.instance_id)
-        # ADR-0276 §5: the understanding stage runs after routing declined and the
-        # conversation resolved, and **before** `_associate` and every read that is the
-        # goal's. Its window is the tail just read, filtered by this pass's audience
-        # (§3, §4), and a spoken turn takes no episode window — the test is over which
-        # operation is running, as §15's association rule's is. What it records is
-        # carried on the activation's state; no stage below reads it (§8).
+        return working.history
+
+    async def _understanding_stage(self, working: _TurnPass) -> None:
+        """ADR-0276 §5's understanding stage, after routing declined and before association.
+
+        Its window is the tail, filtered by this pass's audience (§3, §4), and a spoken
+        turn takes no episode window — the test is over which operation is running, as
+        ADR-0250 §15's association rule's is. What it records is carried on the
+        activation's state; no stage below reads it (§8).
+        """
+        input = _resolved_turn(working)  # noqa: A001 — the resolved channel input
+        history = await self._turn_history(working)
         await self._understand(
             input,
             window=ConversationWindow(input.channel, history.records),
-            audience=supply,
-            episodes=operation is not ConversationalOperation.CONVERSE_SPOKEN,
-            deadline=deadline,
+            audience=working.supply,
+            episodes=working.operation is not ConversationalOperation.CONVERSE_SPOKEN,
+            deadline=working.deadline,
         )
-        # ADR-0250 §3: **every turn resolves its goal before it plans**, and the
-        # association precedes the relevance read, the episodic supplement and the
-        # planner call because all three are the goal's. The request is normalised
-        # **once**, here, by the same function the turn stage uses (ADR-0248 §1), so the
-        # candidacy and the goal are built from one string rather than from two strips
-        # that happen to agree.
-        request = request_of(utterance)
+        working.understood = True
+
+    async def _associate_stage(self, working: _TurnPass) -> None:
+        """ADR-0250 §3: **every turn resolves its goal before it plans**.
+
+        The association precedes the relevance read, the episodic supplement and the
+        planner call because all three are the goal's. The request is normalised
+        **once**, by the same function the turn stage uses (ADR-0248 §1), so the
+        candidacy and the goal are built from one string rather than from two strips
+        that happen to agree.
+        """
+        request = request_of(working.utterance)
         association = await self._associate(
             request,
-            conversation_id=input.channel.instance_id,
-            reference=reference,
+            conversation_id=_resolved_turn(working).channel.instance_id,
+            reference=working.reference,
             # §15: a turn on a channel of unbounded audience associates to no stored
             # goal, builds no candidacy and makes no `associate` call. The test is over
             # **which operation is running** and over no content at all, which is what
             # §15 says makes the rule checkable.
-            associates=operation is not ConversationalOperation.CONVERSE_SPOKEN,
+            associates=working.operation is not ConversationalOperation.CONVERSE_SPOKEN,
         )
         if association.goal is not None and (capture := active_state()) is not None:
             capture.relate(
                 goal_id=association.goal.id,
                 attempt_id=None if association.attempt is None else association.attempt.id,
             )
-        if association.disambiguation is not None:
-            return await self._undecided(
-                association, conversation=input.channel.instance_id, asked=request, spoken=spoken
-            )
-        # ADR-0259 §4, §3, §7: the reconciliation pass and then the investigation
-        # phase's check, over the goal this turn engaged and no other, **wholly before
-        # this turn's first `Planner.plan` call** — which is what makes §7's stated
-        # sequence mechanical: "§4's acts 1-4 run first and leave the uncertain step
-        # standing `INDETERMINATE` with its attempt repaired to `EFFECT_UNRESOLVED` by
-        # act 3; the turn's investigation phase then surfaces and checks it (§3); and
-        # **both are before the turn's first `Planner.plan` call**, so the planner reads
-        # the record settled where the check resolved it and still `INDETERMINATE` where
-        # it did not — never a goal whose uncertainty is hidden."
-        #
-        # **It sits here rather than in the loop** because the loop holds no
-        # `PlanStore` (ADR-0249 §11) and no `ToolInvoker`, and because this is the one
-        # site on this pass that is after ADR-0250 §3's association — the turn's goal,
-        # resolved before it plans — and before `respond`. A turn that opens a goal has
-        # no residual to repair and takes neither half.
-        reconciled = Reconciled()
-        if (
-            self._reconciliation is not None
-            and remaining is not None
-            and association.goal is not None
-        ):
-            reconciled = await self._reconciliation.run(association.goal.id, remaining=remaining)
-            # **The attempt is re-read after the pass, because act 3 may have moved
-            # it.** ADR-0250 §12's carrier holds the row the association read, and
-            # every later compare-and-swap of this turn is computed against what the
-            # last one returned — so a pass that committed `EFFECT_UNRESOLVED` would
-            # otherwise leave this turn writing against a version the store has left
-            # behind, and the turn would fail on a repair it asked for. Re-reading is
-            # ADR-0014 §5's own instruction for exactly this, and it costs one read on
-            # the turns that continue an attempt at all.
-            association = replace(association, attempt=await self._attempt_now(association.attempt))
+        working.association = association
+
+    async def _disambiguation_stage(self, working: _TurnPass) -> None:
+        """ADR-0250 §5: ask which goal the turn is about, and capture the exchange."""
+        association = _associated(working)
+        working.outcome = await self._undecided(
+            association,
+            conversation=_resolved_turn(working).channel.instance_id,
+            asked=request_of(working.utterance),
+            spoken=working.spoken,
+        )
+        working.asked_which = True
+
+    async def _reconcile_stage(self, working: _TurnPass) -> None:
+        """ADR-0259 §4, §3, §7: reconcile the goal this turn engaged, before it plans.
+
+        The reconciliation pass and then the investigation phase's check, over the goal
+        this turn engaged and no other, **wholly before this turn's first
+        `Planner.plan` call** — which is what makes §7's stated sequence mechanical:
+        "§4's acts 1-4 run first and leave the uncertain step standing `INDETERMINATE`
+        with its attempt repaired to `EFFECT_UNRESOLVED` by act 3; the turn's
+        investigation phase then surfaces and checks it (§3); and **both are before the
+        turn's first `Planner.plan` call**, so the planner reads the record settled
+        where the check resolved it and still `INDETERMINATE` where it did not — never
+        a goal whose uncertainty is hidden."
+
+        **It runs here rather than in the loop** because the loop holds no
+        `PlanStore` (ADR-0249 §11) and no `ToolInvoker`, and because this is the one
+        stage of the pass that is after ADR-0250 §3's association and before
+        `respond`. A turn that opens a goal has no residual to repair and takes
+        neither half.
+        """
+        assert self._reconciliation is not None  # noqa: S101 — the rule makes it due only where it is wired
+        assert working.remaining is not None  # noqa: S101 — wired only with a remainder
+        association = _associated(working)
+        assert association.goal is not None  # noqa: S101 — due only where the turn continues a goal
+        reconciled = await self._reconciliation.run(
+            association.goal.id, remaining=working.remaining
+        )
+        # **The attempt is re-read after the pass, because act 3 may have moved it.**
+        # ADR-0250 §12's carrier holds the row the association read, and every later
+        # compare-and-swap of this turn is computed against what the last one
+        # returned — so a pass that committed `EFFECT_UNRESOLVED` would otherwise
+        # leave this turn writing against a version the store has left behind, and
+        # the turn would fail on a repair it asked for. Re-reading is ADR-0014 §5's
+        # own instruction for exactly this, and it costs one read on the turns that
+        # continue an attempt at all.
+        working.association = replace(
+            association, attempt=await self._attempt_now(association.attempt)
+        )
+        working.reconciliation = reconciled
+
+    async def _turn_loop_stage(self, working: _TurnPass) -> None:
+        """``LearningLoop.respond`` as one stage (ADR-0280 §3), and what it decided.
+
+        The loop's turn and every carrier the later stages read by value are taken
+        here, once. **A turn that will drive no step also persists its decision
+        here** — its goal, plans, attempt and evidence, the question it raised and
+        ADR-0249 §6's phase stamps — in exactly the order it always had: there is no
+        reservation to take first, because nothing that could park is driven
+        (ADR-0014 §2). A turn that will drive a step persists under the drive's
+        reservation instead, so a backpressure refusal writes nothing.
+        """
+        input = _resolved_turn(working)  # noqa: A001 — the resolved channel input
+        association = _associated(working)
+        history = await self._turn_history(working)
+        supply = working.supply
         # ADR-0251 §12's second case, wired as a callable and never as a store (#2294).
         # `charged` follows the stored row, because each charge advances the attempt's
         # `version` and the next compare-and-swap is computed against what the last one
         # returned. A turn that opens its attempt is given neither.
-        charged = association.attempt
+        working.charged = association.attempt
 
         async def charge(total: int) -> None:
-            nonlocal charged
+            charged = working.charged
             if charged is None:  # pragma: no cover — no charge is wired without one
                 return
-            charged = await self._plans.commit_attempt(
+            working.charged = await self._plans.commit_attempt(
                 AttemptTransition(
                     attempt_id=charged.id,
                     expected_version=charged.version,
@@ -12196,16 +12649,16 @@ class Engine:
         # composing stage exactly as the delivery facts below are, never inferred
         # here and never read off `turn.memories`.
         responded = await self._loop.respond(
-            utterance,
+            working.utterance,
             history=history.records,
             history_degraded=history.degraded,
             narrow=supply,
-            operation=operation,
+            operation=working.operation,
             # ADR-0238 §8: the conversation this turn's budget and footing are the
-            # record of. It is passed and never derived — this pass already began the
-            # conversation above, so the id exists whatever the turn does — and the loop
-            # does one thing with it: build the footing the servicing site reads. No
-            # other stage of this method acquires a conversation identity it did not
+            # record of. It is passed and never derived — the pass began the
+            # conversation in its first stage, so the id exists whatever the turn does
+            # — and the loop does one thing with it: build the footing the servicing
+            # site reads. No other stage acquires a conversation identity it did not
             # already hold (ADR-0181 §5's third clause, ADR-0097 §7).
             conversation_id=input.channel.instance_id,
             # ADR-0250 §3: what the association decided, handed over as data. `None`
@@ -12233,47 +12686,10 @@ class Engine:
         # not overlap, and what follows this line is driving and composing — not waiting.
         drove_from = self._clock()
         turn = responded.turn
-        hop_reached = responded.hop_reached
-        # ADR-0228 §5: **every** plan the turn produced, oldest first, and
-        # `turn.plan` is the last of them. Read here beside the turn so that the two
-        # `save_plan` sites below take the whole sequence rather than the driven plan
-        # alone — "a turn that persists a plan at all persists all of them".
-        plans = responded.plans
-        # ADR-0228 §10's carrier, threaded to the composing stage exactly as the hop
-        # set above is and never inferred here — not from the plan, not from the
-        # supply's length, and not from the audit.
-        stopped_while_asking = responded.stopped_while_asking
-        # ADR-0240 §8's three facts, threaded exactly as ADR-0228 §10's is above and
-        # never inferred here — not from the plan, not from the supply, and not from
-        # the audit.
-        structured = responded.structured
-        # ADR-0242 §7's carrier, threaded exactly as the three above are and **never
-        # inferred here** — not from the plan, not from the supply's length, not from
-        # the reply and not from the audit. One value, two consumers: the composing
-        # stage's fragment and the `TurnOutcome` field the surface renders a statement
-        # from, which is what makes those two the same member rather than two that
-        # agree (ADR-0242 §9).
-        search_not_serviced = responded.search_not_serviced
-        # ADR-0264 §2's fold over this turn's `WEB_SEARCH` calls and §4's count over
-        # what they admitted, threaded exactly as the carriers above are and **never
-        # inferred here** — not from the supply's length, not from a latency, not from
-        # a record's shape and not from the audit. The **statement** is assembled below,
-        # because this pass's other input is the executed-egress classification, which
-        # only the branch that drives a step has (§6).
-        searched_reach = responded.outbound_reach
-        searched_records = responded.outbound_records
-        # ADR-0260 §10's two carriers, threaded exactly as the three above are and
-        # **never inferred here** — not from the supply, not from the reply and not from
-        # the audit. The reach is a **second** value beside the search's because ADR-0264
-        # §4's statement names *each class* a turn contacted, so folding the two into one
-        # would leave the assembly unable to say which seam established what; and the
-        # member is the fold ADR-0260 §10 declares, which no site recomputes.
-        forecast_reach = responded.forecast_reach
-        forecast_not_read = responded.forecast_not_read
         # ADR-0244 §9: the question **this turn parked**, assembled once here so it
-        # appears in the exchange that raised it. Threaded exactly as the four carriers
-        # above are and never inferred: the servicing site wrote the park and carried
-        # it, and no render site reads ``ParkedReads``.
+        # appears in the exchange that raised it. Threaded by value and never
+        # inferred: the servicing site wrote the park and carried it, and no render
+        # site reads ``ParkedReads``.
         #
         # **The turn that carries it is not parked** (§1). What parked is the *read*:
         # this pass composes, answers and returns, its reply is present, and ADR-0170
@@ -12287,280 +12703,154 @@ class Engine:
             if responded.parked_read is None
             else await self._read_confirmation(responded.parked_read, responded.parked_decision)
         )
-        # ADR-0205 §5: the fact travels with the episode it qualifies and never
-        # without it. `turn.memories` is the supply as `narrow` returned it, so
-        # intersecting here is what makes a withheld record's delivery unreachable by
-        # construction rather than by the renderer happening not to look for it.
-        deliveries = _paired_deliveries(history.deliveries, turn.memories)
-        # ADR-0204 §2: read once, immediately after the one evaluation that set it,
-        # so every capture below stamps the same turn's own value and no branch can
-        # recompute it from a supply that has moved on.
-        withheld = supply.withheld
-        # ADR-0221 §5's first case, decided once for this pass: the episode renders
-        # this pass's own user material, and `SPEECH` goes exactly where `_capture` is
-        # given a `_SpokenCapture` — the passes of `converse_spoken` and no other.
-        # Nothing is inferred and nothing is asked; this method is told which
-        # operation it is running under, exactly as it is for the delivery.
-        modality = Modality.TEXT if spoken is None else Modality.SPEECH
-        # ADR-0223 §2, hoisted here beside `withheld` and `modality` for their reason
-        # and read once: this pass's own disjunction of
+        # ADR-0223 §2: this pass's own disjunction of
         # `rests_on_recorded_external_content` over the selection it actually made.
-        # ADR-0181 §2, §4 already put computing it on this component — `turn.memories`
-        # **is** that selection, carried on the turn as data `LearningLoop.respond`
-        # assembled (the conversation's recent turns, then the relevance-retrieved
-        # beliefs, then the episodic supplement), so one argument here is already the
+        # `turn.memories` **is** that selection, so one argument here is already the
         # disjunction over every selection that fed this pass. Computed **before
-        # anything is driven** and above the branch, so the no-step branch below
-        # stamps it too — the branch a threading from the old call site, which sat
-        # inside the branch that has a step, would have lost. One computation, two
-        # consumers: the episode's stamp and the `SelectionOrigin` the runner is
+        # anything is driven**, so the no-step branch stamps it too. One computation,
+        # two consumers: the episode's stamp and the `SelectionOrigin` the runner is
         # given, which makes them the same boolean rather than two that agree.
         origin = SelectionOrigin.over(turn.memories)
-        external = origin.planned_with_external_content
         self._check_plan_is_for_goal(turn)
+        raised = responded.raised
+        planned = _Planned(
+            responded=responded,
+            drove_from=drove_from,
+            read_confirmation=read_confirmation,
+            # ADR-0205 §5: the fact travels with the episode it qualifies and never
+            # without it. `turn.memories` is the supply as `narrow` returned it, so
+            # intersecting here is what makes a withheld record's delivery unreachable
+            # by construction rather than by the renderer happening not to look for it.
+            deliveries=_paired_deliveries(history.deliveries, turn.memories),
+            # ADR-0204 §2: read once, immediately after the one evaluation that set it,
+            # so every capture below stamps the same turn's own value.
+            withheld=supply.withheld,
+            # ADR-0221 §5's first case, decided once for this pass: `SPEECH` goes
+            # exactly where `_capture` is given a `_SpokenCapture`.
+            modality=Modality.TEXT if working.spoken is None else Modality.SPEECH,
+            origin=origin,
+            # §14: the elision is disclosed on a turn that **opened** a goal and on a
+            # turn that asked, and on no other. The test is the turn's disposition and
+            # never the verdict: `association.disposition` is `None` exactly where
+            # this turn opened the goal.
+            elided=association.elided > 0 and association.disposition is None,
+            # ADR-0250 §8's two instants, taken **before the persistence sequence
+            # begins** and on the turn that would actually ask, so a lifetime with no
+            # representable deadline fails a turn that has written nothing.
+            instants=self._question_instants() if raised is not None else None,
+            # ADR-0249 §11, §12: the attempt the loop opened. It is written **after**
+            # the goal and the plans it references, and every later change goes through
+            # `commit_attempt` at the moment the fact becomes true.
+            attempt=responded.attempt,
+        )
+        if planned.undriven:
+            await self._persist_undriven(working, planned)
+        working.planned = planned
+
+    async def _persist_undriven(self, working: _TurnPass, planned: _Planned) -> None:
+        """Persist a turn that drives no step, raise its question, stamp its phases.
+
+        A no-action decision is still a decision, and drives nothing that could park
+        — so it needs no capacity slot, and its goal and plan are persisted as an
+        auditable record (ADR-0014 §2). ADR-0250 §10: **a turn that raised a question
+        drives no step of its plan and produces no effect** — "the plan is persisted
+        exactly as ADR-0228 §5 and ADR-0249 §11 already have it persisted; it is not
+        driven, no execution is started, and no `ToolCall` is constructed".
+        """
+        responded = planned.responded
+        association = _associated(working)
         # ADR-0249 §11: the goal **record** to persist, read off the loop's carrier
         # rather than off the turn — a turn carries the projection, which is no record
-        # to save. It travels inside `ai_assistant.orchestration` as data, adding no
-        # member to any Protocol, which is the carrier shape ADR-0242 §7 already uses.
-        goal_record = responded.goal
-        # ADR-0249 §11, §12: the attempt the loop opened, on the same carrier and for
-        # the same reason. It is written **after** the goal and the plans it references,
-        # and every later change goes through `commit_attempt` at the moment the fact
-        # becomes true.
-        attempt = responded.attempt
-        # ADR-0250 §10: the question this turn's planner raised, if any. **A turn that
-        # raised one drives no step of its plan and produces no effect** — "the plan is
-        # persisted exactly as ADR-0228 §5 and ADR-0249 §11 already have it persisted;
-        # it is not driven, no execution is started, and no `ToolCall` is constructed" —
-        # so it takes the undriven branch whatever its plan proposed.
-        raised = responded.raised
-        # §14: the elision is disclosed on a turn that **opened** a goal and on a turn
-        # that asked, and on no other — "a goal was found, and reciting what was not
-        # looked at would be noise on the turns the mechanism worked". The test is the
-        # turn's disposition and never the verdict: a `CONTINUES` over a capped set that
-        # displaced the conversation's only open goal opens a goal while reporting that
-        # one was found, and `association.disposition` is `None` exactly where this turn
-        # opened the goal.
-        elided = association.elided > 0 and association.disposition is None
-        # ADR-0250 §8's two instants, taken **before the persistence sequence begins**
-        # and on the turn that would actually ask: §11's order puts the question's write
-        # after the goal, the plans and the attempt, so a lifetime with no representable
-        # deadline fails a turn that has written nothing. The pair travels to `_raise`
-        # and is stamped there unchanged — one reading, so the addition that can
-        # overflow is performed once and never again after a record stands.
-        instants = self._question_instants() if raised is not None else None
-        if raised is not None or not turn.plan.steps:
-            # A no-action decision is still a decision, and drives nothing that
-            # could park — so it needs no capacity slot, and its goal and plan are
-            # persisted as an auditable record (ADR-0014 §2).
-            version = await self._save_goal(goal_record)
-            engagement = await self._engagement(
-                goal_record, association, conversation_id=input.channel.instance_id, version=version
-            )
-            await self._persist_plans(plans)
-            attempt = await self._persist_attempt(
-                attempt, association=association, plans=plans, charged=charged
-            )
-            # ADR-0252 §14: one row per outcome entry this turn's servicings produced,
-            # written after the goal the row names and the attempt that recorded it.
-            await self._record_evidence(responded.evidence)
-            clarification = await self._raise(
-                raised, record=goal_record, opened=attempt, instants=instants
-            )
-            if raised is not None:
-                # ADR-0250 §10: "The attempt's state becomes `AWAITING_CLARIFICATION`
-                # and its phase does not move" — "a question is a pause, not a retreat,
-                # and the attempt resumes at the phase it stood" (§11). Where
-                # `record_question` refused, "the attempt's state is **not** moved and
-                # nothing durable is outstanding", so only the ledger is written.
-                attempt = await self._move_attempt(
-                    attempt,
-                    to_state=(
-                        None if clarification is None else AttemptState.AWAITING_CLARIFICATION
-                    ),
-                    working=self._worked(attempt, drove_from),
-                )
-            else:
-                # ADR-0249 §6: "a phase whose work is vacuous is stamped and left in the
-                # same instant". A no-action turn authorises nothing and executes
-                # nothing, so both phases are stamped and left — six responsibilities
-                # and six observable transitions, on the turn §6 names as passing
-                # through all six.
-                attempt = await self._move_attempt(attempt, to_phase=AttemptPhase.AUTHORIZE)
-                attempt = await self._move_attempt(attempt, to_phase=AttemptPhase.EXECUTE)
-            # ADR-0262 §1: the comparison is evaluated in `AttemptPhase.VERIFY`, after
-            # the walk has ended and **wholly before the composing stage** — so it runs
-            # here, above the `compose` call, and at this instant **no reply exists** for
-            # an implementation to take as an operand. **A turn that raised a question
-            # compares nothing**: ADR-0250 §10 pauses its attempt and leaves its phase
-            # where it stood, so it never reaches `VERIFY` at all.
-            verified = None if raised is not None else await self._compared(attempt)
-            # ADR-0264 §6's assembly, once for this pass. This branch drove no step, so
-            # the egress contribution is `None` — a turn that drove nothing reached
-            # nothing on a send's account — and the pass composes, which is what makes
-            # the member present rather than `None` even where the turn reached nothing.
-            # That is #2365's shape: `servicing=not_asked`, and the member it needed.
-            outbound = outbound_statement(
-                search=searched_reach,
-                # ADR-0260 §10's second class, folded here beside the first and neither
-                # displacing the other (§13's arm (l)).
-                forecast=forecast_reach,
-                egress=None,
-                records=searched_records,
-                # An answer is owed on this pass, which is the fact §7's `None` rule is
-                # stated over — not what the composing stage below then produced. A
-                # composition that fails still carries the member it was given (§7's
-                # "by value, and never a second computation"), and whether a surface
-                # *renders* it is that surface's rule (§7, §11).
-                composes=True,
-            )
-            composed = await compose(
-                turn,
-                None,
-                input.channel.instance_id,
-                deliveries,
-                hop_reached,
-                stopped_while_asking,
-                structured,
-                search_not_serviced,
-                outbound,
-                _GoalPass(
-                    # ADR-0262 §6: the stage is **given** the comparison's outcome member
-                    # and its `continues`, on ADR-0170 §5's construction — and its
-                    # instruction requires the offer where `continues` is set and
-                    # requires it not to narrate as verified an outcome that was not.
-                    # Both are the **comparison's** values: §1 puts the two commits after
-                    # this stage, so neither asserts that an attempt was ended, that a
-                    # status was written, or that a goal is now closed.
-                    facts=self._pass_to_composing(
-                        verified,
-                        GoalFacts(
-                            # ADR-0250 §10: "**The turn still declines to act in that
-                            # case.** … **Its reply still states the ambiguity**; what is
-                            # missing is a durable question to answer." So what reaches
-                            # composing is the text the **planner raised**, not the one the
-                            # store accepted: a turn whose `record_question` answered
-                            # `False` or raised has nothing durable outstanding and still
-                            # owes the user the question it could not settle. The outcome's
-                            # own `clarification` and the attempt's pause stay conditional
-                            # on the write, because those two *assert* a record.
-                            clarification=None if raised is None else raised.text,
-                            elided=elided,
-                        ),
-                    ),
-                    engagement=engagement,
-                    clarification=clarification,
-                    reference=association.reference,
-                    # ADR-0259 §3: the surfacing, carried by value from the check this
-                    # pass ran before it planned. It is `True` whether or not the check
-                    # then established the effect — what the user is told is that the
-                    # assistant was unsure.
-                    uncertain_effect=bool(reconciled.uncertain),
+        # to save.
+        version = await self._save_goal(responded.goal)
+        planned.engagement = await self._engagement(
+            responded.goal,
+            association,
+            conversation_id=_resolved_turn(working).channel.instance_id,
+            version=version,
+        )
+        # ADR-0228 §5: **every** plan the turn produced, oldest first — "a turn that
+        # persists a plan at all persists all of them".
+        await self._persist_plans(responded.plans)
+        planned.attempt = await self._persist_attempt(
+            planned.attempt, association=association, plans=responded.plans, charged=working.charged
+        )
+        # ADR-0252 §14: one row per outcome entry this turn's servicings produced,
+        # written after the goal the row names and the attempt that recorded it.
+        await self._record_evidence(responded.evidence)
+        planned.clarification = await self._raise(
+            responded.raised,
+            record=responded.goal,
+            opened=planned.attempt,
+            instants=planned.instants,
+        )
+        if responded.raised is not None:
+            # ADR-0250 §10: "The attempt's state becomes `AWAITING_CLARIFICATION`
+            # and its phase does not move" — "a question is a pause, not a retreat,
+            # and the attempt resumes at the phase it stood" (§11). Where
+            # `record_question` refused, "the attempt's state is **not** moved and
+            # nothing durable is outstanding", so only the ledger is written.
+            planned.attempt = await self._move_attempt(
+                planned.attempt,
+                to_state=(
+                    None if planned.clarification is None else AttemptState.AWAITING_CLARIFICATION
                 ),
+                working=self._worked(planned.attempt, planned.drove_from),
             )
-            # ADR-0262 §4, §5: the two commits, taken **after** the composing stage and
-            # from the values the comparison already fixed — and from no value the reply
-            # produced. The only fact either reads about the reply is **that one
-            # exists**, which is the first of §4's three ending conditions; the second is
-            # the attempt's own state, and the third is every step of every execution it
-            # names having settled (#2477).
-            #
-            # **`VERIFY` is stamped either way** — the phase says where the attempt
-            # stands, not what it earned — and a turn that raised a question stamps
-            # nothing: ADR-0250 §10 makes it **paused**, not finished, and its phase
-            # stays where §10 left it.
-            #
-            # **The unconditional `ANSWERED` this site wrote is now §4's limb 6** and no
-            # longer the only answer a turn can earn: which member this attempt takes is
-            # the comparison's, over the criteria, the rung and §4's three derived facts.
-            ends = (
-                raised is None
-                and verified is not None
-                and self._composed_a_reply(composed)
-                and not self._paused(attempt)
-                and await self._every_step_settled(attempt)
-            )
-            report: AttemptReport | None = None
-            if ends:
-                attempt, report = await self._ended(
-                    verified, working=self._worked(attempt, drove_from)
-                )
-            elif raised is None:
-                attempt = await self._move_attempt(
-                    attempt,
-                    to_phase=AttemptPhase.VERIFY,
-                    working=self._worked(attempt, drove_from),
-                )
-            return await self._capture(
-                input.channel.instance_id,
-                turn=turn,
-                step=None,
-                resumed=False,
-                composed=composed,
-                # ADR-0225 §1's first case: the pass carried a turn, so the user's
-                # own words are that turn's own `utterance` (ADR-0248 §4, superseding
-                # §1's fourth clause in its first limb alone) — the value before
-                # `_exchange_of` folds it into a rendering.
-                asked=turn.utterance,
-                supplied_withheld=withheld,
-                modality=modality,
-                # ADR-0223 §3's first case on the branch §2 exists for: the pass
-                # produced the turn this episode renders, so the value is that turn's
-                # own — the same one an otherwise identical pass with a step stamps.
-                derived_from_external=external,
-                spoken=spoken,
-                # ADR-0242 §9's field, folded in at the one place a ``TurnOutcome`` is
-                # built. It is the member the servicing site computed, by value.
-                search_not_serviced=search_not_serviced,
-                # ADR-0260 §10's field, on the identical terms and folded from the same
-                # servicings — a **second** member and never a second spelling of the
-                # first: a turn may carry both, one servicing having refused before it
-                # sent and another having read a forecast it could not use, and neither
-                # suppresses or qualifies the other (ADR-0264 §8's both-statements rule).
-                forecast_not_read=forecast_not_read,
-                # ADR-0264 §7's field, on the same terms: the value assembled above,
-                # by value and never a second computation.
-                outbound_statement=outbound,
-                # ADR-0244 §9's first member, on the same terms.
-                read_confirmation=read_confirmation,
-                # ADR-0250 §5's members, each computed above by the site that knows it.
-                goal_engagement=engagement,
-                clarification=clarification,
-                reference=association.reference,
-                # ADR-0262 §6: present exactly where this pass **ended** the attempt,
-                # and `None` where it did not — including where the ending commit was
-                # refused, which §6 makes a silence rather than a false outcome word.
-                attempt_report=report,
-            )
+            return
+        # ADR-0249 §6: "a phase whose work is vacuous is stamped and left in the same
+        # instant". A no-action turn authorises nothing and executes nothing, so both
+        # phases are stamped and left — six responsibilities and six observable
+        # transitions, on the turn §6 names as passing through all six.
+        planned.attempt = await self._move_attempt(planned.attempt, to_phase=AttemptPhase.AUTHORIZE)
+        planned.attempt = await self._move_attempt(planned.attempt, to_phase=AttemptPhase.EXECUTE)
+
+    async def _drive_stage(self, working: _TurnPass) -> None:
+        """Persist under the reservation, then drive the plan's first step.
+
+        Admit-and-reserve *before* anything is persisted or driven, atomically (no
+        await), so a backpressure refusal at the ceiling writes no durable goal/plan
+        and no execution — a flood of refused turns leaves no inaccessible plan state
+        behind (round 8) — and the ceiling is a hard bound even under concurrency
+        (:meth:`_admit_and_reserve`). The reserved handle is also the continuation
+        token, minted here before the runner can park so a raising id factory fails
+        with no durable state committed (#287).
+        """
+        planned = _planned(working)
+        responded = planned.responded
+        turn = planned.turn
+        association = _associated(working)
         first = turn.plan.steps[0]
-        # Admit-and-reserve *before* anything is persisted or driven, atomically
-        # (no await), so a backpressure refusal at the ceiling writes no durable
-        # goal/plan and no execution — a flood of refused turns leaves no
-        # inaccessible plan state behind (round 8) — and the ceiling is a hard bound
-        # even under concurrency (:meth:`_admit_and_reserve`). The reserved handle
-        # is also the continuation token, minted here before the runner can park so
-        # a raising id factory fails with no durable state committed (#287).
         handle = self._admit_and_reserve()
         # ADR-0261 §7's carrier, `None` on every turn that dispatched (below).
         drive_withheld: DriveWithheld | None = None
+        disposition: StepDisposition | None = None
+        step: StepOutcome | None = None
+        # ADR-0264 §2's egress contribution, observed rather than returned, so the
+        # one exit that returns no disposition still carries it (below).
+        observed = DriveObservation()
         try:
-            version = await self._save_goal(goal_record)
-            engagement = await self._engagement(
-                goal_record, association, conversation_id=input.channel.instance_id, version=version
+            version = await self._save_goal(responded.goal)
+            planned.engagement = await self._engagement(
+                responded.goal,
+                association,
+                conversation_id=_resolved_turn(working).channel.instance_id,
+                version=version,
             )
             # ADR-0228 §5: the **whole** sequence of `save_plan` calls precedes
             # `start_execution`, so a turn whose second `save_plan` raises has driven
             # nothing — no execution is open, no capacity slot is spent on a step and
-            # no side effect has been reached. The naive extension writes each plan as
-            # it is produced, which would put a `save_plan` failure *after* a step had
-            # run: the failure a persistence error should produce is a turn that
-            # decided and recorded nothing, not one that acted and then lost the
-            # record of why.
-            await self._persist_plans(plans)
-            attempt = await self._persist_attempt(
-                attempt, association=association, plans=plans, charged=charged
+            # no side effect has been reached. The failure a persistence error should
+            # produce is a turn that decided and recorded nothing, not one that acted
+            # and then lost the record of why.
+            await self._persist_plans(responded.plans)
+            planned.attempt = await self._persist_attempt(
+                planned.attempt,
+                association=association,
+                plans=responded.plans,
+                charged=working.charged,
             )
-            # ADR-0252 §14, as on the undriven branch: one row per outcome entry, and
+            # ADR-0252 §14, as on the undriven turn: one row per outcome entry, and
             # written before anything is driven — a step that acts must not be able to
             # leave the record of what its turn read unwritten.
             await self._record_evidence(responded.evidence)
@@ -12568,12 +12858,14 @@ class Engine:
             # permission decision the runner takes is that phase's work — and it is
             # stamped whether or not a decision is reached, since §6 makes the six
             # phases six responsibilities rather than six conditions.
-            attempt = await self._move_attempt(attempt, to_phase=AttemptPhase.AUTHORIZE)
+            planned.attempt = await self._move_attempt(
+                planned.attempt, to_phase=AttemptPhase.AUTHORIZE
+            )
             state = await self._plans.start_execution(turn.plan.id)
             # §5: **referenced by id and never inlined**, appended at the moment the
             # execution exists rather than claimed in advance. No phase moves with it:
             # what the drive reaches decides that, below.
-            attempt = await self._move_attempt(attempt, add_execution_id=state.id)
+            planned.attempt = await self._move_attempt(planned.attempt, add_execution_id=state.id)
 
             async def ruled(decision: PermissionDecision) -> None:
                 """ADR-0249 §12's boundary, and **the whole** of this turn's attempt.
@@ -12589,43 +12881,35 @@ class Engine:
                 after that is a second writer racing the answer. Anything else claims
                 the step, so it takes ``EXECUTE`` and the decision it was allowed by.
                 """
-                nonlocal attempt
                 if decision.ruling.outcome is PermissionOutcome.CONFIRM:
-                    attempt = await self._move_attempt(
-                        attempt,
+                    planned.attempt = await self._move_attempt(
+                        planned.attempt,
                         to_state=AttemptState.AWAITING_AUTHORIZATION,
-                        working=self._worked(attempt, drove_from),
+                        working=self._worked(planned.attempt, planned.drove_from),
                     )
                     return
-                attempt = await self._move_attempt(
-                    attempt,
+                planned.attempt = await self._move_attempt(
+                    planned.attempt,
                     to_phase=AttemptPhase.EXECUTE,
                     add_authorization_id=decision.id,
                 )
 
-            # ADR-0181 §2, §4: the origin the authoriser evaluates — the value
-            # hoisted above, handed on rather than recomputed here. Until ADR-0223 §2
-            # it was computed at this line, inside the branch that has a step to
-            # drive; a lane adding a second model call over a second selection adds
-            # an argument to that one call (§4's third clause) rather than replacing
-            # it or reinstating a second one here.
+            # ADR-0181 §2, §4: the origin the authoriser evaluates — the value the
+            # turn loop computed, handed on rather than recomputed here.
             # ADR-0255 §3: the claim is made under the attempt this turn is driving,
             # supplied from the row already in hand rather than fetched — and after
             # `add_execution_id` above, which is what makes the conjunct's membership
             # test resolve. The ordering fails closed: an execution whose append has
             # not landed carries no attempt that names it, so the claim is refused and
             # nothing is invoked.
-            claiming = _driving(attempt, state)
-            # ADR-0264 §2's egress contribution, observed rather than returned, so the
-            # one exit that returns no disposition still carries it (below).
-            observed = DriveObservation()
+            claiming = _driving(planned.attempt, state)
             try:
                 disposition = await self._runner.run(
                     state,
                     first.id,
                     attempt_id=claiming,
-                    timeout=timeout,
-                    origin=origin,
+                    timeout=working.timeout,
+                    origin=planned.origin,
                     on_ruled=ruled,
                     outbound=observed,
                 )
@@ -12654,9 +12938,9 @@ class Engine:
                     disposition,
                     step_id=first.id,
                     handle=handle,
-                    supplied_withheld=withheld,
-                    modality=modality,
-                    derived_from_external=external,
+                    supplied_withheld=planned.withheld,
+                    modality=planned.modality,
+                    derived_from_external=planned.origin.planned_with_external_content,
                 )
         finally:
             # The reservation held the slot across the awaits. It is now either in
@@ -12664,83 +12948,17 @@ class Engine:
             # not); either way the in-flight reservation is released.
             self._reserved.discard(handle)
         if drive_withheld is not None:
-            # ADR-0261 §7: **the turn composes without acting, and does not replan.**
-            # No second `Planner.plan` call is taken on account of the refusal, no walk
-            # is re-entered and no plan is selected — "what causes that later turn is a
-            # user act" — and the refusal **does not fail the turn**, because every
-            # cause of it is *the user changed something* rather than a fault.
-            #
-            # **And nothing is written to the attempt here**, which is the one thing
-            # this branch does that the driven branch below does not. The attempt is
-            # the record the user act has just moved: on four of the seven members it
-            # now stands terminal or paused, and ADR-0249 §12's `commit_attempt` would
-            # refuse a phase stamp over it — turning a turn ADR-0261 §7 requires to
-            # *return* into one that raises. ADR-0249 §6 stamps a phase for the work a
-            # responsibility performed, and this pass claimed nothing, invoked nothing
-            # and answered no goal, so there is no phase to stamp and no `ENDED` to
-            # earn. The `AUTHORIZE` stamp this pass already took stands, truthfully:
-            # its work — the ruling — was done before the claim was refused.
-            outbound = outbound_statement(
-                search=searched_reach,
-                forecast=forecast_reach,
-                # **What the drive established, and not `None`** (ADR-0264 §3). A first
-                # claim the store refused reached no callable and this is `None`, exactly
-                # as on the branch that drove no step at all. But a **re-claim** a retry
-                # spends can be refused after the executor already reached one
-                # (ADR-0037 §6), and there answering `NOT_REACHED` would deny a send that
-                # had gone — "a send the executor reached the callable for, or cannot say
-                # it did not" is `INDETERMINATE`. The observation carries that fact out
-                # of a drive that raised, and is the same value the disposition would
-                # have carried had it returned.
-                egress=observed.reach,
-                records=searched_records,
-                composes=True,
+            # ADR-0261 §7: **the turn composes without acting, and does not replan**,
+            # and **nothing is written to the attempt here** — the attempt is the
+            # record the user act has just moved, and ADR-0249 §12's `commit_attempt`
+            # would refuse a phase stamp over it. The `AUTHORIZE` stamp this pass
+            # already took stands, truthfully: its work — the ruling — was done before
+            # the claim was refused.
+            working.driven = _Driven(
+                step=None, disposition=None, withheld=drive_withheld, observed=observed, parked=None
             )
-            composed = await compose(
-                turn,
-                # **No `StepOutcome`**: nothing was driven, so there is none to project,
-                # and the step the walk left `PENDING` reaches composing the way every
-                # undriven step does (ADR-0255 §11). ADR-0261 §7's own clause is that a
-                # driver *skip* gains no carrier here either.
-                None,
-                input.channel.instance_id,
-                deliveries,
-                hop_reached,
-                stopped_while_asking,
-                structured,
-                search_not_serviced,
-                outbound,
-                _GoalPass(
-                    facts=GoalFacts(elided=elided),
-                    engagement=engagement,
-                    reference=association.reference,
-                    uncertain_effect=bool(reconciled.uncertain),
-                ),
-            )
-            return await self._capture(
-                input.channel.instance_id,
-                turn=turn,
-                step=None,
-                resumed=False,
-                composed=composed,
-                asked=turn.utterance,
-                supplied_withheld=withheld,
-                modality=modality,
-                derived_from_external=external,
-                spoken=spoken,
-                search_not_serviced=search_not_serviced,
-                forecast_not_read=forecast_not_read,
-                outbound_statement=outbound,
-                read_confirmation=read_confirmation,
-                goal_engagement=engagement,
-                reference=association.reference,
-                # ADR-0261 §7's field, and the whole of what this outcome says about
-                # the drive: **where the goal stands**, never why the store refused and
-                # never anything about the step. ADR-0254 §11's announcement is absent
-                # for the reason it is absent on every undriven pass — this drive
-                # reached no ruling it could have opened a row under.
-                drive_withheld=drive_withheld,
-            )
+            return
+        assert step is not None  # noqa: S101 — the drive returned a disposition
         # A turn that parked records the binding it parked on, which is the *only*
         # thing a later resumption — possibly in another process, with no live turn
         # behind its token — has to find its way back to this conversation
@@ -12753,11 +12971,9 @@ class Engine:
         # ADR-0249 §5, §6: a turn that **parked** has already finished with its attempt.
         # `AWAITING_AUTHORIZATION` — one of the three §5 calls a paused goal — and its
         # ledger were both committed at the boundary above, *before* the park became
-        # durable, and nothing below writes the attempt again on this branch. That is
-        # what makes the parking turn and the resolution that answers it two writers
-        # who never overlap rather than two who race: the park is published by the
-        # store, so a turn still owing a write when it is published is a writer the
-        # answer can overtake, and neither ordering of that race has a good outcome.
+        # durable, and nothing writes the attempt again on this pass. That is what
+        # makes the parking turn and the resolution that answers it two writers who
+        # never overlap rather than two who race.
         #
         # Where the drive did not park, `EXECUTE` is owed — but every step that reached a
         # *ruling* had it stamped at the boundary above, at the instant §12 names, so
@@ -12765,166 +12981,204 @@ class Engine:
         # all: no capable tool, an ambiguous capability, invalid parameters, an
         # unbindable egress. There §6's "a phase whose work is vacuous is stamped and
         # left in the same instant" is the only thing that stamps it. Stamping it a
-        # second time would not be refused — §6 forbids a phase *earlier* than the one
-        # held, not an equal one — but it would advance the compare-and-swap token for
-        # no fact, and §12 admits no transition that records nothing.
+        # second time would advance the compare-and-swap token for no fact, and §12
+        # admits no transition that records nothing.
         if parked is None and (
-            attempt is None or attempt.attempt.phase is not AttemptPhase.EXECUTE
+            planned.attempt is None or planned.attempt.attempt.phase is not AttemptPhase.EXECUTE
         ):
-            attempt = await self._move_attempt(attempt, to_phase=AttemptPhase.EXECUTE)
-        # The terminal composing stage, after execution and before the exchange is
-        # recorded (ADR-0170 §1). Ordering against capture is free — ADR-0170 §9
-        # leaves whether the answer joins the captured episode to `track:memory`
-        # (#1314) — so composing first is chosen for the reason that the capture
-        # point is the single place a ``TurnOutcome`` is built, and folding one more
-        # already-computed value into it beats threading a second construction site.
-        # ADR-0264 §6's assembly, once for this pass and from three carriers no site
-        # here recomputes: the turn's folded search reach, what its contacts admitted,
-        # and **the executed-egress classification the component that drove the step
-        # computed** — carried out of the drive on `StepDisposition.outbound` and never
-        # an `EgressBinding`, a `Disposition` or a `StepExecution` read at this fold.
-        #
-        # **A step's send establishes no contact and is not nothing either** (§3): it
-        # can make this turn `INDETERMINATE` and can never make it `REACHED` or name a
-        # destination class, and where the executor proved the callable was never
-        # reached it contributes nothing at all and leaves the search's own answer
-        # standing (§13 item 8).
-        # ADR-0262 §1: the comparison runs here, **wholly before the composing stage**
-        # and after the walk has ended — at this instant no reply exists. **A parked
-        # turn compares nothing**: its attempt is `AWAITING_AUTHORIZATION`, which is
-        # §4's second ending condition refusing it, and the pass owes no answer at all.
-        verified = None if parked is not None else await self._compared(attempt)
-        outbound = outbound_statement(
-            search=searched_reach,
-            # ADR-0260 §10's second class, as on the branch above and for its reason.
-            forecast=forecast_reach,
-            egress=disposition.outbound,
-            records=searched_records,
-            # ADR-0170 §4: a pass whose step parked for confirmation owes no answer, and
-            # `_compose` declines on exactly that shape — which is one of the two §6
-            # names. A parked pass that established a contact still carries the
-            # statement (§7's asymmetry: `REACHED` reports an act this system performed,
-            # which the user is owed whether or not prose was written); one that did not
-            # carries `None`.
-            composes=step.confirmation is None,
-        )
-        composed = await compose(
-            turn,
-            step,
-            input.channel.instance_id,
-            deliveries,
-            hop_reached,
-            stopped_while_asking,
-            structured,
-            search_not_serviced,
-            outbound,
-            # ADR-0250 §10, §14: a turn that reached this branch drove a step, so it
-            # raised no question; and §14's disclosure is keyed on the disposition,
-            # which is what `elided` already is. The outcome's own members ride here
-            # too, because the streaming composer measures its ceiling against them.
-            _GoalPass(
-                # ADR-0262 §6's two values, on the same terms as the undriven branch
-                # above: the comparison's own, given to the stage rather than derived
-                # by it, and asserting nothing about the two commits below.
-                facts=self._pass_to_composing(verified, GoalFacts(elided=elided)),
-                engagement=engagement,
-                reference=association.reference,
-                # ADR-0259 §3's surfacing, as the undriven branch above carries it.
-                uncertain_effect=bool(reconciled.uncertain),
-            ),
-        )
-        # ADR-0262 §4, §5: `VERIFY` is stamped once the answer exists, and the attempt
-        # **ends** where §4's three ending conditions hold — a reply that completed, an
-        # attempt that is not paused, and every step of every execution it names
-        # settled. **The unconditional `ANSWERED` this site wrote is now limb 6**: a
-        # step that failed, was denied, found no capable tool or carried invalid
-        # parameters is no longer a turn whose attempt is disposed of not at all, but
-        # one whose member §4's limbs decide over the criteria, the rung and its three
-        # derived facts.
-        #
-        # **A parked turn writes nothing here**, and the ledger is why the line is a
-        # branch rather than a conditional argument: its interval was closed at the
-        # boundary, before the park was published, so adding to it now would be a write
-        # racing an answer that may already have advanced the same monotonic field. What
-        # that costs is stated rather than hidden — the composing of "I need your
-        # approval" is not counted — and it is the smaller loss by a distance: the
-        # alternative loses either the turn (a raise) or the interval the turn actually
-        # worked (a swallow).
-        # ADR-0262 §4's third ending condition (#2477), and the site it binds hardest:
-        # this engine drives **one step per turn** until #242 lands, so a plan of two
-        # steps reaches here with the second still `PENDING` and the attempt stays live.
-        # That is §4's stated cost — the next turn's reconciliation disposes of it
-        # before planning — and no outcome is written for a turn that ended nothing.
-        ends = (
-            parked is None
-            and verified is not None
-            and self._composed_a_reply(composed)
-            and not self._paused(attempt)
-            and await self._every_step_settled(attempt)
-        )
-        report = None
-        if ends:
-            attempt, report = await self._ended(verified, working=self._worked(attempt, drove_from))
-        elif parked is None:
-            attempt = await self._move_attempt(
-                attempt,
-                to_phase=AttemptPhase.VERIFY,
-                working=self._worked(attempt, drove_from),
+            planned.attempt = await self._move_attempt(
+                planned.attempt, to_phase=AttemptPhase.EXECUTE
             )
+        working.driven = _Driven(
+            step=step, disposition=disposition, withheld=None, observed=observed, parked=parked
+        )
+
+    def _turn_outbound(self, planned: _Planned, driven: _Driven | None) -> OutboundStatement | None:
+        """ADR-0264 §6's assembly, once for this pass, from carriers no site recomputes.
+
+        The turn's folded search reach, what its contacts admitted, ADR-0260 §10's
+        forecast reach beside it, and the drive's egress contribution: ``None`` on a
+        turn that drove no step — a turn that drove nothing reached nothing on a
+        send's account — what the observation carried out of a drive whose claim was
+        refused, since a **re-claim** can be refused after the executor already
+        reached a callable (ADR-0037 §6), and otherwise the executed-egress
+        classification the runner computed. An answer is owed on every pass but a
+        park (ADR-0170 §4), and a parked pass that established a contact still carries
+        the statement (§7's asymmetry).
+        """
+        responded = planned.responded
+        if driven is None:
+            egress = None
+        elif driven.disposition is None:
+            egress = driven.observed.reach
+        else:
+            egress = driven.disposition.outbound
+        return outbound_statement(
+            search=responded.outbound_reach,
+            forecast=responded.forecast_reach,
+            egress=egress,
+            records=responded.outbound_records,
+            composes=driven is None or driven.parked is None,
+        )
+
+    async def _compose_stage(self, working: _TurnPass) -> None:
+        """Compare, compose, and take the attempt's end gate (ADR-0262 §1, §4, ADR-0170 §1).
+
+        ADR-0262 §1: the comparison is evaluated in `AttemptPhase.VERIFY`, after the
+        walk has ended and **wholly before the composing stage** — at this instant no
+        reply exists for an implementation to take as an operand. **A turn that raised
+        a question compares nothing**: ADR-0250 §10 pauses its attempt and leaves its
+        phase where it stood. **A turn whose claim a user act refused compares nothing
+        and ends nothing** (ADR-0261 §7): it composes without acting and writes nothing
+        to the attempt.
+        """
+        planned = _planned(working)
+        driven = working.driven
+        association = _associated(working)
+        reconciled = working.reconciliation or Reconciled()
+        raised = planned.responded.raised
+        withheld = driven is not None and driven.withheld is not None
+        verified = None if raised is not None or withheld else await self._compared(planned.attempt)
+        outbound = self._turn_outbound(planned, driven)
+        goal = _GoalPass(
+            # ADR-0262 §6: the stage is **given** the comparison's outcome member and
+            # its `continues`, on ADR-0170 §5's construction. Both are the
+            # **comparison's** values: §1 puts the two commits after this stage.
+            facts=(
+                GoalFacts(elided=planned.elided)
+                if withheld
+                else self._pass_to_composing(
+                    verified,
+                    GoalFacts(
+                        # ADR-0250 §10: "**The turn still declines to act in that
+                        # case.** … **Its reply still states the ambiguity**" — so
+                        # what reaches composing is the text the **planner raised**,
+                        # not the one the store accepted.
+                        clarification=None if raised is None else raised.text,
+                        elided=planned.elided,
+                    ),
+                )
+            ),
+            engagement=planned.engagement,
+            clarification=planned.clarification,
+            reference=association.reference,
+            # ADR-0259 §3: the surfacing, carried by value from the check this pass ran
+            # before it planned — what the user is told is that the assistant was
+            # unsure.
+            uncertain_effect=bool(reconciled.uncertain),
+        )
+        responded = planned.responded
+        composed = await working.compose(
+            planned.turn,
+            # **No `StepOutcome`** on a turn that drove nothing, or whose claim was
+            # refused: the step the walk left `PENDING` reaches composing the way every
+            # undriven step does (ADR-0255 §11).
+            None if driven is None else driven.step,
+            _resolved_turn(working).channel.instance_id,
+            planned.deliveries,
+            responded.hop_reached,
+            responded.stopped_while_asking,
+            responded.structured,
+            responded.search_not_serviced,
+            outbound,
+            goal,
+        )
+        # ADR-0262 §4, §5: the two commits, taken **after** the composing stage and
+        # from the values the comparison already fixed. The only fact either reads
+        # about the reply is **that one exists**, which is the first of §4's three
+        # ending conditions; the second is the attempt's own state, and the third is
+        # every step of every execution it names having settled (#2477). `VERIFY` is
+        # stamped either way — the phase says where the attempt stands, not what it
+        # earned — and a turn that raised a question stamps nothing.
+        report: AttemptReport | None = None
+        if not withheld:
+            ends = (
+                raised is None
+                and verified is not None
+                and self._composed_a_reply(composed)
+                and not self._paused(planned.attempt)
+                and await self._every_step_settled(planned.attempt)
+            )
+            if ends:
+                planned.attempt, report = await self._ended(
+                    verified, working=self._worked(planned.attempt, planned.drove_from)
+                )
+            elif raised is None:
+                planned.attempt = await self._move_attempt(
+                    planned.attempt,
+                    to_phase=AttemptPhase.VERIFY,
+                    working=self._worked(planned.attempt, planned.drove_from),
+                )
+        working.composition = _Composition(composed=composed, outbound=outbound, report=report)
+
+    async def _captured_turn(self, working: _TurnPass) -> TurnOutcome:
+        """Capture what the turn's stages decided — the one place a ``TurnOutcome`` is built.
+
+        After the controller ends the pass, and after the composing stage (ADR-0170
+        §1). A parked turn composed nothing and owes no answer, and still carries the
+        outbound statement where it established a contact (ADR-0264 §7).
+        """
+        planned = _planned(working)
+        driven = working.driven
+        association = _associated(working)
+        responded = planned.responded
+        composition = working.composition
+        # A drive that dispatched, as against no drive or a claim a user act refused.
+        dispatched = None if driven is None else driven.disposition
         return await self._capture(
-            input.channel.instance_id,
-            turn=turn,
-            step=step,
+            _resolved_turn(working).channel.instance_id,
+            turn=planned.turn,
+            step=None if driven is None else driven.step,
             resumed=False,
-            parked=parked,
-            composed=composed,
-            # ADR-0225 §1's first case as ADR-0248 §4 states it, as on the branch
-            # above and for its reason.
-            asked=turn.utterance,
-            supplied_withheld=withheld,
-            modality=modality,
+            parked=None if driven is None else driven.parked,
+            composed=None if composition is None else composition.composed,
+            # ADR-0225 §1's first case: the pass carried a turn, so the user's own
+            # words are that turn's own `utterance` (ADR-0248 §4).
+            asked=planned.turn.utterance,
+            supplied_withheld=planned.withheld,
+            modality=planned.modality,
             # ADR-0223 §3's first case: this pass's own value, carried unchanged from
-            # the one computation above — the same boolean the runner's
-            # ``SelectionOrigin`` carried to the egress seam on this very pass.
-            derived_from_external=external,
-            spoken=spoken,
-            # ADR-0242 §9's field, as on the branch above and for its reason: the same
-            # member, by value, and never a second computation.
-            search_not_serviced=search_not_serviced,
-            # ADR-0260 §10's field, on the same terms and from the same fold.
-            forecast_not_read=forecast_not_read,
-            # ADR-0264 §7's field, on the same terms and from the same assembly.
-            outbound_statement=outbound,
-            # ADR-0244 §9's first member, on the same terms. **A turn may park a read
-            # and drive a step**: the two are independent facts about one pass, and the
-            # outcome carries both — what ADR-0244 §9's validator refuses is a read
-            # *question* beside a read *answer*, never a question beside a step.
-            read_confirmation=read_confirmation,
-            # ADR-0250 §5's members. A driven turn raised no question (§10) and decided
-            # which goal it was about (§3), so only these two can be present here.
-            goal_engagement=engagement,
+            # the one computation — the same boolean the runner's `SelectionOrigin`
+            # carried to the egress seam on a pass that drove a step.
+            derived_from_external=planned.origin.planned_with_external_content,
+            spoken=working.spoken,
+            # ADR-0242 §9's, ADR-0260 §10's and ADR-0264 §7's fields: the members the
+            # servicing site computed, by value, and never a second computation.
+            search_not_serviced=responded.search_not_serviced,
+            forecast_not_read=responded.forecast_not_read,
+            outbound_statement=(
+                self._turn_outbound(planned, driven)
+                if composition is None
+                else composition.outbound
+            ),
+            # ADR-0244 §9's first member. **A turn may park a read and drive a step**:
+            # the two are independent facts about one pass.
+            read_confirmation=planned.read_confirmation,
+            # ADR-0250 §5's members, each computed by the site that knows it. Only an
+            # undriven turn can have raised a question (§10).
+            goal_engagement=planned.engagement,
+            clarification=planned.clarification,
             reference=association.reference,
             # ADR-0254 §11's announcement: one view per row this drive **opened**
             # without a question, in the order they were written, and empty on every
-            # turn that opened none. This is the one branch that drives a step, and a
-            # path-(iii) row is written only during a turn that drives one — "a step
-            # being dispatched inside one" — so no other outcome site can carry the
-            # member. A driver dispatching **outside** a turn is §19's booked case and
-            # is A7's, not this decision's.
-            authorizations=self._announced_authorizations(disposition, goal_record),
-            # ADR-0259 §2: the ids of the steps this turn satisfied from an effect the
-            # goal had already completed, **in walk order**. This tree drives one step
-            # per turn (`turn.plan.steps[0]`), so the sequence is at most one long; the
-            # accumulator is written over a sequence rather than over a single optional
-            # id because ADR-0255's own L2 lands the walk that fills it, and an
-            # implementation that folded one id here would be the one arm 1 fails for
-            # overwriting at each satisfaction.
-            satisfied_from_earlier=told_once(
-                () if disposition.satisfied is None else (disposition.satisfied,)
+            # turn that dispatched nothing.
+            authorizations=(
+                ()
+                if dispatched is None
+                else self._announced_authorizations(dispatched, responded.goal)
             ),
-            # ADR-0262 §6, on the same terms as the undriven branch: present exactly
-            # where this pass ended the attempt, and `None` where it did not.
-            attempt_report=report,
+            # ADR-0259 §2: the ids of the steps this turn satisfied from an effect the
+            # goal had already completed, **in walk order**.
+            satisfied_from_earlier=(
+                None
+                if dispatched is None
+                else told_once(() if dispatched.satisfied is None else (dispatched.satisfied,))
+            ),
+            # ADR-0262 §6: present exactly where this pass **ended** the attempt.
+            attempt_report=None if composition is None else composition.report,
+            # ADR-0261 §7's field: **where the goal stands**, never why the store
+            # refused and never anything about the step.
+            drive_withheld=None if driven is None else driven.withheld,
         )
 
     # --- ADR-0197's routing stage, driven --------------------------------

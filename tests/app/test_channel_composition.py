@@ -64,7 +64,7 @@ if TYPE_CHECKING:
     from collections.abc import AsyncIterator, Sequence
     from pathlib import Path
 
-    from ai_assistant.core.types import GoalBrief, Message, TurnOutcome
+    from ai_assistant.core.types import GoalBrief, Message
     from ai_assistant.orchestration import Engine
     from ai_assistant.orchestration.channels import ResolvedChannelInput
 
@@ -136,13 +136,13 @@ async def running_channels(
 
     monkeypatch.setattr(engine._loop._planner, "plan", plan)
     resolved: list[ResolvedChannelInput] = []
-    original = engine._run_turn
+    original = engine._begin_conversation_stage
 
-    async def process(supplied: ResolvedChannelInput, **kwargs: Any) -> TurnOutcome:
-        resolved.append(supplied)
-        return await original(supplied, **kwargs)
+    async def process(working: Any) -> None:
+        await original(working)
+        resolved.append(working.input)
 
-    monkeypatch.setattr(engine, "_run_turn", process)
+    monkeypatch.setattr(engine, "_begin_conversation_stage", process)
     monkeypatch.setattr(cli, "load_settings", lambda: settings)
     monkeypatch.setattr(cli, "configure_logging", lambda _settings: None)
     listener = Listener(engine, settings, data_dir=tmp_path)
@@ -420,15 +420,15 @@ async def test_composed_concurrent_activations_keep_records_isolated_when_finish
     assert initial.conversation_id is not None
     channel = ChannelIdentity(channel_type="conversation", instance_id=initial.conversation_id)
     entered, release = asyncio.Event(), asyncio.Event()
-    original = running.engine._run_turn
+    original = running.engine._begin_conversation_stage
 
-    async def controlled(supplied: ResolvedChannelInput, **kwargs: Any) -> TurnOutcome:
-        if supplied.text == "slow":
+    async def controlled(working: Any) -> None:
+        await original(working)
+        if working.input.text == "slow":
             entered.set()
             await release.wait()
-        return await original(supplied, **kwargs)
 
-    monkeypatch.setattr(running.engine, "_run_turn", controlled)
+    monkeypatch.setattr(running.engine, "_begin_conversation_stage", controlled)
     slow_input = ChannelInput(
         target=channel,
         payload=TextChannelPayload(text="slow"),
