@@ -18,6 +18,7 @@ from ai_assistant.core.types import (
     ProcessingReason,
     ProcessingStatus,
     RecordedChannelTrigger,
+    RecordedResumeTrigger,
     RecordedTextInput,
     StageEntry,
     StageOutcome,
@@ -63,6 +64,7 @@ def _record(**overrides: object) -> EpisodeProcessingRecord:
         "response_kind": EpisodeResponseKind.NONE,
         "model_eligible": True,
         "understanding_omitted": UnderstandingOmission.NOT_REACHED,
+        "stages": (_end(),),
     }
     fields.update(overrides)
     return EpisodeProcessingRecord.model_validate(fields)
@@ -170,12 +172,49 @@ def test_the_end_entry_records_done_at_one_instant() -> None:
         )
 
 
-# --- §7 step 1: additive record fields ------------------------------------------
+# --- §7: the record fields and the schema-3 shape rule ----------------------------
 
 
-def test_the_record_defaults_to_no_stages_and_keeps_schema_version_two() -> None:
-    record = _record()
-    assert (record.schema_version, record.stages, record.stages_elided) == (2, (), 0)
+def test_the_record_is_schema_version_three_and_refuses_any_other() -> None:
+    assert _record().schema_version == 3
+    with pytest.raises(ValidationError):
+        _record(schema_version=2)
+
+
+@pytest.mark.parametrize(
+    "stages",
+    [
+        pytest.param((), id="empty"),
+        pytest.param((_entry(),), id="no-end"),
+        pytest.param((_end(), _entry()), id="end-not-last"),
+        pytest.param((_end(), _end()), id="two-ends"),
+    ],
+)
+def test_a_channel_record_must_end_in_exactly_one_end_entry_last(
+    stages: tuple[StageEntry, ...],
+) -> None:
+    with pytest.raises(ValidationError, match="exactly one end entry"):
+        _record(stages=stages)
+
+
+_RESUME = RecordedResumeTrigger(channel=None, approved=True)
+
+
+def test_a_resume_record_carries_no_stage_record() -> None:
+    record = _record(trigger=_RESUME, stages=())
+    assert (record.stages, record.stages_elided) == ((), 0)
+
+
+@pytest.mark.parametrize(
+    "overrides",
+    [
+        pytest.param({"stages": (_end(),)}, id="stages"),
+        pytest.param({"stages": (), "stages_elided": 1}, id="elided"),
+    ],
+)
+def test_a_resume_record_refuses_a_stage_record(overrides: dict[str, object]) -> None:
+    with pytest.raises(ValidationError, match="carries no stage record"):
+        _record(trigger=_RESUME, **overrides)
 
 
 def test_the_record_carries_a_stage_record_and_round_trips() -> None:

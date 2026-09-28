@@ -3541,7 +3541,7 @@ class EpisodeProcessingRecord(BaseModel):
     """Immutable facts about one activation, written after its processing ends."""
 
     model_config = ConfigDict(frozen=True, extra="forbid")
-    schema_version: Literal[2] = 2
+    schema_version: Literal[3] = 3
     activation_id: Identifier
     started_at: UtcInstant
     ended_at: UtcInstant
@@ -3564,6 +3564,21 @@ class EpisodeProcessingRecord(BaseModel):
         # ADR-0276 §7: exactly one of a non-empty history and an omission value.
         if bool(self.understanding) == (self.understanding_omitted is not None):
             msg = "a processing record carries either its understanding or why it has none"
+            raise ValueError(msg)
+        return self
+
+    @model_validator(mode="after")
+    def _stages_follow_the_trigger(self) -> Self:
+        # ADR-0280 §7: a channel activation records its stages ending in exactly one end
+        # entry, last; a resume keeps its legacy path and records none.
+        if isinstance(self.trigger, RecordedResumeTrigger):
+            if self.stages or self.stages_elided:
+                msg = "a resume's processing record carries no stage record"
+                raise ValueError(msg)
+            return self
+        ends = [entry.stage is ControllerStage.END for entry in self.stages]
+        if not ends or not ends[-1] or any(ends[:-1]):
+            msg = "a channel activation's stage record ends in exactly one end entry, last"
             raise ValueError(msg)
         return self
 

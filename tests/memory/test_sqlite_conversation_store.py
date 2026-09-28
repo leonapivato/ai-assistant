@@ -1880,8 +1880,10 @@ def test_incompatible_conversation_state_is_refused_without_mutation(
             raw.execute("ALTER TABLE turns DROP COLUMN model_eligible")
         elif shape == "m36":
             raw.execute("UPDATE episode_record_format SET version = 1")
+        elif shape == "m37":
+            raw.execute("UPDATE episode_record_format SET version = 2")
         elif shape == "newer":
-            raw.execute("UPDATE episode_record_format SET version = 3")
+            raw.execute("UPDATE episode_record_format SET version = 4")
         else:
             raw.execute("ALTER TABLE episode_record_format RENAME COLUMN version TO invalid")
     path.chmod(0o644)
@@ -1932,4 +1934,4 @@ def test_fresh_conversation_initialization_rolls_back_and_can_retry(
         assert raw.execute("SELECT name FROM sqlite_master WHERE type='table'").fetchall() == []
     SqliteConversationStore(path=path, now=_fixed_now).close()
     with sqlite3.connect(path) as raw:
-        assert raw.execute("SELECT version FROM episode_record_format").fetchall() == [(2,)]
+        assert raw.execute("SELECT version FROM episode_record_format").fetchall() == [(3,)]

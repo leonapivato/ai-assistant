@@ -51,6 +51,7 @@ from ai_assistant.orchestration.understanding import (
     UnderstandingStage,
 )
 from ai_assistant.testing import FakeMemoryStore, FakeModelProvider
+from ai_assistant.testing.activation import ended_pass
 
 if TYPE_CHECKING:
     from collections.abc import Sequence
@@ -114,6 +115,7 @@ def _episode(  # noqa: PLR0913 — one knob per projected field a case varies
             model_eligible=eligible,
             understanding=understanding,
             understanding_omitted=None if understanding else UnderstandingOmission.NOT_REACHED,
+            stages=ended_pass(at),
         ),
     )
 

@@ -86,6 +86,7 @@ from ai_assistant.testing import (
     FakeStreamingCompleter,
     StreamAttempt,
 )
+from ai_assistant.testing.activation import ended_pass
 
 if TYPE_CHECKING:
     from collections.abc import AsyncIterator, Sequence
@@ -1030,6 +1031,7 @@ async def test_a_captured_reply_reaches_the_tail_and_the_observation_batch(enric
             response_kind=core_types.EpisodeResponseKind.CONVERSATION_REPLY,
             model_eligible=True,
             understanding_omitted=core_types.UnderstandingOmission.NOT_REACHED,
+            stages=ended_pass(episode.occurred_at),
         )
         # Processing is immutable once recorded; replace the synthetic fixture
         # explicitly instead of mutating a production capture in place.

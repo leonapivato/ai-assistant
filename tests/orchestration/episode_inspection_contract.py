@@ -18,6 +18,7 @@ from ai_assistant.core.errors import (
 from ai_assistant.core.types import (
     ChannelContext,
     ChannelIdentity,
+    ControllerRule,
     EpisodeProcessingRecord,
     EpisodeResponseKind,
     EpisodicMemory,
@@ -32,6 +33,7 @@ from ai_assistant.core.types import (
     UnderstandingOmission,
 )
 from ai_assistant.orchestration.payloads import canonical_payload
+from ai_assistant.testing.activation import ended_pass
 
 if TYPE_CHECKING:
     from ai_assistant.core.protocols import AssistantEngine
@@ -76,6 +78,7 @@ def _episode(record_id: str, *, activation: bool = False) -> EpisodicMemory:
             response_kind=EpisodeResponseKind.NONE,
             model_eligible=False,
             understanding_omitted=UnderstandingOmission.NOT_REACHED,
+            stages=ended_pass(INSPECTION_AT, ControllerRule.STAGE_FAILED),
         )
         if activation
         else None,

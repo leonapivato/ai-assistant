@@ -39,6 +39,7 @@ from ai_assistant.testing import (
     FakeObserver,
     FakeTranscriptArchiveWriter,
 )
+from ai_assistant.testing.activation import ended_pass
 
 _AT = datetime(2026, 9, 18, tzinfo=UTC)
 
@@ -67,6 +68,7 @@ def _episode(identifier: str, *, eligible: bool) -> EpisodicMemory:
             response_kind=EpisodeResponseKind.NONE,
             model_eligible=eligible,
             understanding_omitted=UnderstandingOmission.NOT_REACHED,
+            stages=ended_pass(_AT),
         ),
     )
 
