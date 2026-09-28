@@ -1,6 +1,6 @@
 # 281. Recall runs before understanding, and understanding reads what it found
 
-- Status: Accepted
+- Status: Proposed
 - Date: 2026-09-27
 - Scope: [M39](https://github.com/leonapivato/ai-assistant/milestone/6).
 - Dependency: ADR-0280 and its milestone M38; ADR-0276 and ADR-0275.
@@ -168,13 +168,19 @@ interruptions. Recall is meant to reach those.
 > searches returned, before any is kept. No controller rule reads the
 > audience.
 
-> **Normative — a turn on a channel of unbounded audience recalls no episode.**
-> On the operation ADR-0250 §15 names (`converse_spoken`, as ADR-0200 §3
-> declares it), recall's searches ask for semantic records alone, so no episode,
-> and no earlier understanding, reaches the turn through recall. This is
-> ADR-0276 §4:13's rule read over the one new carrier this decision adds; the
-> stage applies it from the pass's audience posture, as the understanding stage
-> applies §4:13, and no controller rule reads it.
+> **Normative — a pass of unbounded audience recalls no episode.** On a pass
+> whose audience posture is unbounded, recall's searches ask for semantic
+> records alone, so no episode, and no earlier understanding, reaches the pass
+> through recall. The stage reads the posture from the pass's `TurnSupply`, the
+> object the windows' predicate already reads, and never from the input's
+> modality, the operation or the channel type; no controller rule reads it.
+
+> **Normative.** Where the posture comes from is not recall's. Today the one
+> operation that declares an unbounded audience is the one ADR-0250 §15 names
+> (`converse_spoken`, as ADR-0200 §3 declares it), so on that operation this is
+> ADR-0276 §4:13's rule read over the one new carrier this decision adds. When a
+> later decision has each channel declare who may perceive its output, the
+> posture follows that declaration, and this clause is unchanged.
 
 > **Normative.** Each kept record carries one of two provenance values:
 > **`outside`**, for a semantic record `rests_on_recorded_external_content`
@@ -183,8 +189,8 @@ interruptions. Recall is meant to reach those.
 > the only provenance judgment recall makes; the record's structured origin is
 > copied as stored under §6, and recall derives nothing finer from it.
 
-On a bounded-audience channel the predicate withholds nothing. On the spoken
-operation's unbounded audience, which ADR-0280 §2 keeps, recall reaches no
+On a bounded-audience pass the predicate withholds nothing. On an
+unbounded-audience pass, today the spoken operation ADR-0280 §2 keeps, recall reaches no
 episode at all, and the predicate withholds silently every semantic record it
 does not place, as it does for the windows. The audience milestone changes
 these rules, not the stage's shape.
@@ -375,7 +381,8 @@ describes and grants nothing.
 > fake: the three band-scoped searches on the input, in precedence order; an
 > assertion kept ahead of higher-scoring inferences; the threshold, the cap and
 > a record with no score; the audience predicate; no episode searched for or kept on the
-> unbounded-audience operation, including an episode the predicate would admit;
+> unbounded-audience pass, including an episode the predicate would admit, keyed
+> on the posture and not on the operation;
 > each provenance value; that an outside episode's excerpt never carries its
 > raw input; the excerpt of a resumed episode and of an episode whose speech
 > yielded no transcript; and each `RecallOutcome`.
