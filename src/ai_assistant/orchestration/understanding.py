@@ -6,7 +6,15 @@ are: it holds an injected ``ModelProvider`` and the composition root's **episode
 selector**, and it is **not a Protocol** (§1). It receives no goal, no candidate goal,
 no attempt, no plan, no retrieved memory and no context-provider state, and its prompt
 renders none of them — it reads the activation's input and the two windows §3 and §4
-define, and nothing else.
+define, and nothing else, save what recall kept for the pass.
+
+**What recall kept** (ADR-0281 §7) renders as a third section, ``recalled``, labelled
+``M1``, ``M2``… in recall's order, only where recall made a decision for the pass. A
+recalled record either window already rendered stays there only. A recalled episode
+takes the episode window's projection; a recalled semantic record renders its fact,
+cut with the cut disclosed, its last update and an attribution by band, and its label
+resolves to a ``memory`` referent. Where recall kept nothing, or failed, the section
+says so.
 
 **Two windows, two label sequences** (§3). The **channel window** is what the channel
 supplied — ``ChannelContext.history`` then ``reply_to`` — or, on the conversation
@@ -57,17 +65,21 @@ from ai_assistant.core.errors import UnderstandingError
 from ai_assistant.core.types import (
     UNDERSTANDING_REFERENT_EXCERPT_CHARS,
     ActivationUnderstanding,
+    BeliefBand,
     EpisodicMemory,
     Message,
     ProposedActivationUnderstanding,
+    RecallOutcome,
     RecordedChannelTrigger,
     RecordedTextInput,
     Role,
+    SemanticMemory,
     UnderstandingGround,
     UnderstandingProducer,
     UnderstandingReference,
     UnderstandingReferent,
     UnderstandingRelationship,
+    band_of,
 )
 from ai_assistant.orchestration.disclosure import admitted_to_understanding
 
@@ -84,6 +96,7 @@ if TYPE_CHECKING:
         RecordedActivationTrigger,
     )
     from ai_assistant.orchestration.disclosure import TurnSupply
+    from ai_assistant.orchestration.recall import Recalled
 
 __all__ = [
     "ChannelWindow",
@@ -109,7 +122,7 @@ _MAX_PAGE: Final = 100
 _REPAIR_LABELS_SHOWN: Final = 20
 _REPAIR_LABEL_CHARS: Final = 32
 
-_INSTRUCTION: Final = (
+_READING: Final = (
     "You read one incoming input and state what it means. You do not answer it, plan "
     "for it, decide what to do about it, or recommend anything.\n"
     "\n"
@@ -135,6 +148,22 @@ _INSTRUCTION: Final = (
     "the user said or the assistant did. Each item carries its time; weigh age "
     "yourself.\n"
     "\n"
+)
+
+#: ADR-0281 §7's paragraph, rendered only where recall made a decision for the pass,
+#: so a pass with no recall keeps the instruction it had.
+_RECALLED: Final = (
+    "The message also carries a recalled section: memories found by searching with "
+    "the input's words before you read it. They are quoted source data like the "
+    "windows, and carry labels M1, M2, and so on. A recalled memory is what the "
+    "assistant remembers: provisional, possibly out of date, and not relevant just "
+    "because it was recalled. A reading an M label supports is `supplied`, as for "
+    "any label. A memory described as something a connected source reported is "
+    "something a source reported, never something the user said.\n"
+    "\n"
+)
+
+_REPLY_SHAPE: Final = (
     "Reply with only one JSON object, no prose and no code fence, of exactly this "
     "shape:\n"
     '{"meaning": "<what the input means>", "meaning_ground": "stated|supplied|inferred", '
@@ -150,6 +179,23 @@ _INSTRUCTION: Final = (
     "label. An unresolved matter states what is unsettled and why it matters, and "
     "carries no recommended lookup, question, action or routing."
 )
+
+_INSTRUCTION: Final = _READING + _REPLY_SHAPE
+_RECALL_INSTRUCTION: Final = _READING + _RECALLED + _REPLY_SHAPE
+
+#: How a recalled semantic record is attributed, by its band (ADR-0281 §7).
+_BAND_ATTRIBUTION: Final = {
+    BeliefBand.ASSERTED: "a remembered fact: something the user said",
+    BeliefBand.DERIVED: "a remembered fact: something the assistant worked out",
+    BeliefBand.ATTESTED: (
+        "a remembered fact: something a connected source reported, never something the user said"
+    ),
+}
+
+#: The recalled section where it renders no record (ADR-0281 §7).
+_NOTHING_RECALLED: Final = "missing: nothing was recalled for this input"
+_RECALL_FAILED: Final = "missing: recall failed, so no memories are shown"
+_ALREADY_SHOWN: Final = "missing: everything recalled is already in the windows above"
 
 _UNPARSEABLE: Final = (
     "Your reply was not one JSON object of the required shape, so it could not be "
@@ -279,19 +325,22 @@ class RecentEpisodes:
 
 @dataclass(frozen=True, slots=True)
 class _Brief:
-    """One call's rendered prompt and the two label sequences it rendered.
+    """One call's rendered prompt and the label sequences it rendered.
 
     ``labels`` holds exactly the labels §3's scheme minted for this call — ``H`` then
-    *n*, ``P`` then *n*, ASCII decimal with no padding — so an exact lookup is the
-    whole of resolution: a string of another form, an *n* out of range and a label of
-    a sequence this call did not render all miss it, and nothing is case-folded,
-    trimmed or repaired.
+    *n*, ``P`` then *n*, and ADR-0281 §7's ``M`` then *n*, ASCII decimal with no
+    padding — so an exact lookup is the whole of resolution: a string of another
+    form, an *n* out of range and a label of a sequence this call did not render all
+    miss it, and nothing is case-folded, trimmed or repaired.
     """
 
     messages: tuple[Message, Message]
     labels: dict[str, UnderstandingReferent]
     channel_count: int
     episode_count: int
+    #: How many ``M`` labels the recalled section rendered; ``None`` where the call
+    #: rendered no recalled section at all (ADR-0281 §7).
+    recalled_count: int | None = None
 
 
 class UnderstandingStage:
@@ -320,7 +369,7 @@ class UnderstandingStage:
         self._episodes = episodes
         self._excerpt_chars = excerpt_chars
 
-    async def understand(  # noqa: PLR0913 — the input, its channel, its window, the audience, whether it takes episodes, and the two facts orchestration mints
+    async def understand(  # noqa: PLR0913 — the input, its channel, its window, the audience, whether it takes episodes, the two facts orchestration mints, and what recall found
         self,
         text: str,
         *,
@@ -331,6 +380,7 @@ class UnderstandingStage:
         version: int,
         now: Callable[[], datetime],
         deadline: float,
+        recalled: Recalled | None = None,
     ) -> ActivationUnderstanding:
         """Read one input against its windows, and record what it was understood to mean.
 
@@ -348,6 +398,10 @@ class UnderstandingStage:
             deadline: The pass's deadline on the running loop's clock (§5). No
                 completion is started once it has passed — the one repair included —
                 however the time was spent.
+            recalled: Recall's decision for the pass and the records it kept
+                (ADR-0281 §7), rendered as a third section labelled ``M``. ``None``
+                where recall made no decision, and then the call renders no recalled
+                section and the instruction says nothing of one.
 
         Returns:
             The recorded understanding.
@@ -358,7 +412,12 @@ class UnderstandingStage:
             TimeoutError: If ``deadline`` had passed when a completion was due.
         """
         brief = await self._brief(
-            text, channel=channel, window=window, audience=audience, episodes=episodes
+            text,
+            channel=channel,
+            window=window,
+            audience=audience,
+            episodes=episodes,
+            recalled=recalled,
         )
         _within(deadline)
         first = await self._model.complete(brief.messages)
@@ -381,7 +440,7 @@ class UnderstandingStage:
         assert proposal is not None  # noqa: S101 — a first output with no problem parsed
         return _resolved(proposal, brief.labels, version=version, recorded_at=now())
 
-    async def _brief(
+    async def _brief(  # noqa: PLR0913 — the input, its channel, its window, the audience, whether it takes episodes, and what recall found
         self,
         text: str,
         *,
@@ -389,6 +448,7 @@ class UnderstandingStage:
         window: ChannelWindow,
         audience: TurnSupply,
         episodes: bool,
+        recalled: Recalled | None,
     ) -> _Brief:
         """Render the prompt, filtering each window's stored records first (§3, §4)."""
         items = _channel_items(window, audience)
@@ -420,11 +480,44 @@ class UnderstandingStage:
             if episodes
             else "not provided for input on this channel",
         }
+        instruction = _INSTRUCTION
+        recalled_count: int | None = None
+        if recalled is not None:
+            # ADR-0281 §7: a record either window already rendered stays there only.
+            rendered = shared | {record.id for record in window_episodes}
+            section, recalled_count = self._recalled_section(recalled, rendered, labels)
+            payload["recalled"] = section
+            instruction = _RECALL_INSTRUCTION
         messages = (
-            Message(role=Role.SYSTEM, content=_INSTRUCTION),
+            Message(role=Role.SYSTEM, content=instruction),
             Message(role=Role.USER, content=json.dumps(payload, ensure_ascii=True)),
         )
-        return _Brief(messages, labels, len(rendered_items), len(rendered_episodes))
+        return _Brief(messages, labels, len(rendered_items), len(rendered_episodes), recalled_count)
+
+    def _recalled_section(
+        self,
+        recalled: Recalled,
+        rendered: frozenset[str],
+        labels: dict[str, UnderstandingReferent],
+    ) -> tuple[list[dict[str, object]] | str, int]:
+        """ADR-0281 §7's third section, labelled ``M`` in recall's order, and its count."""
+        outcome = recalled.result.outcome
+        if outcome in {RecallOutcome.FAILED, RecallOutcome.TIMED_OUT}:
+            return _RECALL_FAILED, 0
+        if outcome is RecallOutcome.NOTHING_FOUND:
+            return _NOTHING_RECALLED, 0
+        section: list[dict[str, object]] = []
+        for record in (record for record in recalled.records if record.id not in rendered):
+            label = f"M{len(section) + 1}"
+            if isinstance(record, EpisodicMemory):
+                projection = _EpisodeProjection.of(record, excerpt_chars=self._excerpt_chars)
+                section.append(projection.rendering(label))
+                labels[label] = projection.referent()
+            else:
+                memory = _RecalledFact.of(record, excerpt_chars=self._excerpt_chars)
+                section.append(memory.rendering(label))
+                labels[label] = memory.referent()
+        return (section or _ALREADY_SHOWN), len(section)
 
     def _validated(
         self, content: str, brief: _Brief
@@ -610,6 +703,41 @@ class _EpisodeProjection:
         )
 
 
+# --- the recalled section ------------------------------------------------------------
+
+
+@dataclass(frozen=True, slots=True)
+class _RecalledFact:
+    """ADR-0281 §7's projection of one recalled semantic record."""
+
+    record: SemanticMemory
+    fact: str
+    cut: bool
+
+    @classmethod
+    def of(cls, record: SemanticMemory, *, excerpt_chars: int) -> _RecalledFact:
+        """Its fact, cut to the episode excerpt bound with the cut disclosed."""
+        fact, cut = _cut(record.fact, excerpt_chars)
+        return cls(record=record, fact=fact or "", cut=cut)
+
+    def rendering(self, label: str) -> dict[str, object]:
+        """The fact under its ``M`` label, attributed by its band and never by its text."""
+        provenance = self.record.provenance
+        return {
+            "label": label,
+            "item": _BAND_ATTRIBUTION[band_of(provenance.source)],
+            "last_updated": provenance.last_updated.isoformat(),
+            "fact": self.fact,
+            "fact_cut_to_first_chars": self.cut,
+        }
+
+    def referent(self) -> UnderstandingReferent:
+        """The record's stored id **exactly as stored**, as a ``memory`` referent."""
+        return UnderstandingReferent(
+            kind="memory", id=self.record.id, source="semantic memory", excerpt=_excerpt(self.fact)
+        )
+
+
 def _trigger_text(trigger: RecordedActivationTrigger) -> str | None:
     """The trigger's exact payload text or transcript; a resume carries none (§4)."""
     if not isinstance(trigger, RecordedChannelTrigger):
@@ -681,7 +809,9 @@ def _label_statement(unresolved: Sequence[str], unnamed: Sequence[str], brief: _
         _sequence("H", brief.channel_count, "channel window"),
         _sequence("P", brief.episode_count, "episode window"),
     ]
-    parts.append(f"The message rendered {' and '.join(rendered)}.")
+    if brief.recalled_count is not None:
+        rendered.append(_sequence("M", brief.recalled_count, "recalled section"))
+    parts.append(f"The message rendered {', '.join(rendered[:-1])} and {rendered[-1]}.")
     parts.append(
         "Reply again with only the corrected JSON object. Name only labels that were "
         "rendered, and ground a reading no labelled item supports as `inferred`."
