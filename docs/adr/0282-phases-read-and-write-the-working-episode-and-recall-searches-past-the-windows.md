@@ -7,7 +7,7 @@
 - Authorization: the owner accepted proposal #2606 on 2026-09-29, choosing its option A (the working episode kept in memory, the saved episode unchanged), and directed its conversion into this ADR and the start of the work. Option B, saving each phase's reads with the episode, is [#2608](https://github.com/leonapivato/ai-assistant/issues/2608). The dispatcher assigned the next available number, 0282. That authorizes drafting and numbering, not ratification or implementation.
 - **Partially supersedes** [ADR-0276](0276-an-activation-is-understood-before-it-is-associated-and-the-understanding-is-retained-with-its-episode.md) — **one scope.** **§4:1's wiring**, in its *wires into the stage* and *it receives the selector's records* parts alone: the selector runs in §3's windows stage, which records the window's ids, and the understanding stage receives the window's records as §5 below fetches them. The selector itself, its walls (§4:2–§4:4), the disclosure predicate (§4:9–§4:13) and the rendering stand. Every other clause stands.
 - **Partially supersedes** [ADR-0280](0280-an-activation-controller-runs-the-stages-by-rules-and-records-every-choice-with-the-episode.md) — **two scopes.** **§3:5's working set and §4:1–§4:3's enums and table, in the additions alone**: the window decision, the stage `windows`, the rule `windows_unassembled` and its row. **§3:7's list of wrapped stages, for understanding alone**: understanding runs over the working episode as §5 below states, with the same effects. Every other clause stands.
-- **Partially supersedes** [ADR-0281](0281-recall-runs-before-understanding-and-understanding-reads-what-it-found.md) — **three scopes.** **§3:2's `limit`**: each band's search asks for §4's search limit instead of `RECALL_ITEM_LIMIT`. **§3:3's filling rule, in the addition alone**: a record the windows already hold is not kept. **§7:1's first sentence, in its *receives the records recall kept* part alone**: the understanding stage receives them as §5 below fetches them. Every other clause stands, `RECALL_ITEM_LIMIT` as the number kept included.
+- **Partially supersedes** [ADR-0281](0281-recall-runs-before-understanding-and-understanding-reads-what-it-found.md) — **four scopes.** **§3:2's `limit`**: each band's search asks for §4's search limit instead of `RECALL_ITEM_LIMIT`. **§3:3's filling rule, in the addition alone**: a record the windows already hold is not kept. **§7:1's first sentence, in its *receives the records recall kept* part alone**: the understanding stage receives them as §5 below fetches them. **§6:4's last sentence**, *"The records the search returned are held on `ActivationState` for the pass for the understanding stage to render"*: recall's part holds §4:3 below's ids and scores and no record; the recall result held on `ActivationState` and written once at capture, and every other part of §6:4, stand. Every other clause stands, `RECALL_ITEM_LIMIT` as the number kept included.
 
 ## Context
 
@@ -102,9 +102,14 @@ M39 implemented it (`_ActivationPass`): everything the pass holds before capture
 > arrived with the activation, and the channel window as §3 holds it, are not
 > `MemoryStore` records and are held as they are.
 
-> **Normative.** A stage that needs a record's contents fetches it with
-> `MemoryStore.get_many`, over ids the working episode holds, and fetches nothing
-> else. `MemoryStore` gains no member and no signature.
+> **Normative.** A stage that needs the contents of records another stage chose
+> fetches them with `MemoryStore.get_many`, over ids the working episode holds, and
+> fetches no other record. `MemoryStore` gains no member and no signature.
+
+> **Normative.** A stage whose result is a choice of records makes the reads that
+> choose them, and only those: the windows stage its selector's reads (§3), recall
+> its band searches (§4). The ids such a stage writes are the records it chose, after
+> the audience predicate below.
 
 > **Normative.** A fetch returns each record's current version. An id with no record
 > is not an error: the stage goes on without it.
@@ -219,4 +224,5 @@ M39 implemented it (`_ActivationPass`): everything the pass holds before capture
 | ADR-0280 §3:7 | Understanding runs over the working episode, with the same effects. |
 | ADR-0281 §3:2 | Each band search asks for the search limit. |
 | ADR-0281 §3:3 | A record the windows hold is not kept. |
+| ADR-0281 §6:4 | Recall's part holds ids and scores, not the records the search returned. |
 | ADR-0281 §7:1 | Understanding receives recall's records as §5 fetches them. |
