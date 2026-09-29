@@ -80,6 +80,10 @@ class PassFacts(Protocol):
         """Routing took the route."""
 
     @property
+    def windows_decided(self) -> bool:
+        """The windows stage recorded the pass's windows (ADR-0282 §3)."""
+
+    @property
     def recall_wired(self) -> bool:
         """The deployment wired the recall stage (ADR-0281 §2)."""
 
@@ -180,6 +184,12 @@ ACTIVATION_RULES: Final[tuple[Rule, ...]] = (
         ControllerStage.ROUTING,
     ),
     Rule(ControllerRule.ROUTE_TAKEN, lambda f: f.route_taken, ControllerStage.END),
+    # ADR-0282 §3: the windows are assembled before recall, wherever understanding is.
+    Rule(
+        ControllerRule.WINDOWS_UNASSEMBLED,
+        lambda f: f.understanding_wired and not f.windows_decided,
+        ControllerStage.WINDOWS,
+    ),
     # ADR-0281 §2: recall runs before understanding, and only where both are wired.
     Rule(
         ControllerRule.NOT_RECALLED,

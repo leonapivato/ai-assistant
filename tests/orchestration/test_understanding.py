@@ -6,6 +6,7 @@ import asyncio
 import json
 import math
 import time
+from dataclasses import dataclass
 from datetime import UTC, datetime, timedelta
 from typing import TYPE_CHECKING, Any, Final
 
@@ -49,6 +50,8 @@ from ai_assistant.orchestration.understanding import (
     RecentEpisodes,
     SuppliedWindow,
     UnderstandingStage,
+    WindowsStage,
+    fetch_episodes,
 )
 from ai_assistant.testing import FakeMemoryStore, FakeModelProvider
 from ai_assistant.testing.activation import ended_pass
@@ -128,16 +131,26 @@ async def _store(*records: MemoryRecord) -> FakeMemoryStore:
     return memory
 
 
-def _stage(model: FakeModelProvider, memory: FakeMemoryStore, **kwargs: int) -> UnderstandingStage:
-    return UnderstandingStage(
-        model=model,
-        episodes=RecentEpisodes(memory=memory, limit=kwargs.get("limit", 10)),
-        excerpt_chars=kwargs.get("excerpt_chars", 2000),
+@dataclass(frozen=True)
+class _Pipeline:
+    """The windows stage, the understanding phase's fetch and the stage, as a pass runs
+    them (ADR-0282 §3, §5), so these cases read ADR-0276's windows end to end."""
+
+    windows: WindowsStage
+    memory: FakeMemoryStore
+    stage: UnderstandingStage
+
+
+def _stage(model: FakeModelProvider, memory: FakeMemoryStore, **kwargs: int) -> _Pipeline:
+    return _Pipeline(
+        windows=WindowsStage(episodes=RecentEpisodes(memory=memory, limit=kwargs.get("limit", 10))),
+        memory=memory,
+        stage=UnderstandingStage(model=model, excerpt_chars=kwargs.get("excerpt_chars", 2000)),
     )
 
 
 async def _understand(  # noqa: PLR0913 — the stage's own inputs, each defaulted to the ordinary pass
-    stage: UnderstandingStage,
+    pipeline: _Pipeline,
     text: str = "Book the second one.",
     *,
     channel: ChannelIdentity = CONVERSATION,
@@ -146,12 +159,19 @@ async def _understand(  # noqa: PLR0913 — the stage's own inputs, each default
     episodes: bool = True,
     deadline: float = math.inf,
 ) -> ActivationUnderstanding:
-    return await stage.understand(
+    channel_window = ConversationWindow(CONVERSATION, ()) if window is None else window
+    windows = await pipeline.windows.assemble(channel_window, audience=audience, episodes=episodes)
+    records = None
+    if windows.episode_ids is not None:
+        records = (
+            await fetch_episodes(pipeline.memory, windows.episode_ids, audience=audience)
+        ).records
+    return await pipeline.stage.understand(
         text,
         channel=channel,
-        window=ConversationWindow(CONVERSATION, ()) if window is None else window,
+        window=channel_window,
         audience=audience,
-        episodes=episodes,
+        episodes=records,
         version=1,
         now=lambda: AT,
         deadline=deadline,
@@ -509,8 +529,12 @@ async def test_a_spoken_turn_takes_no_episode_window() -> None:
         return ()
 
     model = FakeModelProvider.scripted(_proposal())
-    stage = UnderstandingStage(model=model, episodes=selector, excerpt_chars=2000)
-    await _understand(stage, episodes=False)
+    pipeline = _Pipeline(
+        windows=WindowsStage(episodes=selector),
+        memory=await _store(),
+        stage=UnderstandingStage(model=model, excerpt_chars=2000),
+    )
+    await _understand(pipeline, episodes=False)
     assert calls == []
     assert _sent(model)["episode_window"] == "not provided for input on this channel"
 

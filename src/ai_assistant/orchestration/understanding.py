@@ -2,9 +2,12 @@
 
 One orchestration-local stage, of the kind :class:`~ai_assistant.orchestration.routing.RoutingStage`
 and :class:`~ai_assistant.orchestration.informational_events.InformationalEventStage`
-are: it holds an injected ``ModelProvider`` and the composition root's **episode
-selector**, and it is **not a Protocol** (§1). It receives no goal, no candidate goal,
-no attempt, no plan, no retrieved memory and no context-provider state, and its prompt
+are: it holds an injected ``ModelProvider`` and reads no store, and it is **not a
+Protocol** (§1). The episode window's records are handed to it: ADR-0282's **windows
+stage**, below, holds the composition root's **episode selector** and records the
+window as ids, and the understanding phase fetches them (ADR-0282 §3, §5). It receives
+no goal, no candidate goal, no attempt, no plan, no retrieved memory and no
+context-provider state, and its prompt
 renders none of them — it reads the activation's input and the two windows §3 and §4
 define, and nothing else, save what recall kept for the pass.
 
@@ -230,7 +233,7 @@ class ConversationWindow:
 type ChannelWindow = SuppliedWindow | ConversationWindow
 
 #: ADR-0276 §4's **episode selector**: one orchestration-local function the
-#: composition root wires into the stage, so its *method* changes by wiring a
+#: composition root wires into the windows stage (ADR-0282 §3), so its *method* changes by wiring a
 #: different one and moves no clause and no engine byte.
 #:
 #: It is called with the identifiers of the channel window's items — the ids of §3's
@@ -320,6 +323,114 @@ class RecentEpisodes:
         return tuple(selected)
 
 
+@dataclass(frozen=True, slots=True)
+class Windows:
+    """The windows stage's decision: the two windows, the episodes held as ids (ADR-0282 §3).
+
+    Attributes:
+        channel: The channel window exactly as ADR-0276 §3 defines it for the pass. It
+            is the channel's own material, held as it is, not a set of ids.
+        episode_ids: The ids of the episode window's records, in the selector's order,
+            after the audience predicate; ``None`` where the pass takes no episode
+            window (ADR-0276 §4:13), and then the selector was not called.
+        shared: The stored ids of the channel window's items the audience predicate
+            admitted: §3's *same exchange* ids, which the selector passes over rather
+            than counts, and which recall searches past.
+    """
+
+    channel: ChannelWindow
+    episode_ids: tuple[str, ...] | None
+    shared: frozenset[str]
+
+
+class WindowsStage:
+    """Assemble the pass's two windows ahead of recall and understanding (ADR-0282 §3).
+
+    It holds ADR-0276 §4's episode selector, which runs here unchanged, and makes only
+    the selector's reads: it is a stage whose result is a choice of records (ADR-0282
+    §2). What it writes are ids, after the audience predicate; the understanding phase
+    fetches the records it renders.
+    """
+
+    def __init__(self, *, episodes: EpisodeSelector) -> None:
+        """Wire the stage to the composition root's episode selector.
+
+        Args:
+            episodes: ADR-0276 §4's episode selector.
+        """
+        self._episodes = episodes
+
+    async def assemble(
+        self, channel: ChannelWindow, *, audience: TurnSupply, episodes: bool
+    ) -> Windows:
+        """The window decision for one pass.
+
+        Args:
+            channel: The pass's channel window, stored records not yet filtered.
+            audience: The pass's audience posture, which filters both windows (§4:9).
+            episodes: Whether the pass takes an episode window at all; ``False`` on
+                ``converse_spoken`` (ADR-0276 §4:13), and then no store is read.
+
+        Returns:
+            The windows, with the episode window as ids.
+        """
+        shared = frozenset(
+            item.identifier
+            for item in _channel_items(channel, audience)
+            if item.identifier is not None
+        )
+        if not episodes:
+            return Windows(channel=channel, episode_ids=None, shared=shared)
+        selected = admitted_to_understanding(audience, await self._episodes(shared))
+        return Windows(
+            channel=channel, episode_ids=tuple(record.id for record in selected), shared=shared
+        )
+
+
+@dataclass(frozen=True, slots=True)
+class Fetched:
+    """What one stage fetched by id, and what came back (ADR-0282 §2).
+
+    Attributes:
+        records: The admitted records, in the order the ids were given.
+        fetched: Every id the stage asked for, in order.
+        missing: The ids that returned no episode, or whose record the audience
+            predicate refused on the second application.
+    """
+
+    records: tuple[EpisodicMemory, ...]
+    fetched: tuple[str, ...]
+    missing: tuple[str, ...]
+
+
+async def fetch_episodes(
+    memory: MemoryStore, ids: tuple[str, ...], *, audience: TurnSupply
+) -> Fetched:
+    """Fetch episodes the working episode holds by id, re-applying the audience predicate.
+
+    A fetch returns each record's current version. An id with no record, a record that
+    is no longer an episode, and one the predicate now refuses are not errors: each is
+    recorded as missing and left out, and the rest keep their order (ADR-0282 §2).
+
+    Args:
+        memory: The store the ids were chosen from.
+        ids: The ids, in the order the records are wanted.
+        audience: The pass's audience posture.
+
+    Returns:
+        The records found and admitted, with what was asked for and what was missing.
+    """
+    found = await memory.get_many(ids) if ids else {}
+    candidates = [record for id_ in ids if isinstance(record := found.get(id_), EpisodicMemory)]
+    admitted = admitted_to_understanding(audience, candidates)
+    kept = {record.id for record in admitted}
+    return Fetched(
+        records=tuple(admitted),
+        fetched=ids,
+        missing=tuple(id_ for id_ in ids if id_ not in kept),
+    )
+
+
 # --- the rendered call -----------------------------------------------------------
 
 
@@ -346,16 +457,16 @@ class _Brief:
 class UnderstandingStage:
     """Produce one activation's understanding from its input and two windows (ADR-0276)."""
 
-    def __init__(
-        self, *, model: ModelProvider, episodes: EpisodeSelector, excerpt_chars: int
-    ) -> None:
-        """Wire the stage to the model seam, the episode selector and the excerpt bound.
+    def __init__(self, *, model: ModelProvider, excerpt_chars: int) -> None:
+        """Wire the stage to the model seam and the excerpt bound.
+
+        The stage reads no store: the episode window's records are handed to it, as
+        the understanding phase fetched them (ADR-0282 §5).
 
         Args:
             model: The application's ordinary, already-wrapped route, carrying the
                 provider stack's retry policy (ADR-0011). ``complete`` is called with
                 no ``model=`` override, for ``RoutingStage``'s reason.
-            episodes: The composition root's episode selector (ADR-0276 §4).
             excerpt_chars: ``UNDERSTANDING_EXCERPT_CHARS``: the bound each episode's
                 input and response are cut to, the cut disclosed (§4).
 
@@ -366,7 +477,6 @@ class UnderstandingStage:
             msg = "the episode excerpt bound must be at least 1 (ADR-0276 §4)"
             raise ValueError(msg)
         self._model = model
-        self._episodes = episodes
         self._excerpt_chars = excerpt_chars
 
     async def understand(  # noqa: PLR0913 — the input, its channel, its window, the audience, whether it takes episodes, the two facts orchestration mints, and what recall found
@@ -376,7 +486,7 @@ class UnderstandingStage:
         channel: ChannelIdentity,
         window: ChannelWindow,
         audience: TurnSupply,
-        episodes: bool,
+        episodes: tuple[EpisodicMemory, ...] | None,
         version: int,
         now: Callable[[], datetime],
         deadline: float,
@@ -391,8 +501,10 @@ class UnderstandingStage:
             window: The channel window (§3).
             audience: The pass's audience posture. Its predicate filters the stored
                 records of both windows before anything is rendered (§4).
-            episodes: Whether this pass takes an episode window at all. ``False`` on
-                ``converse_spoken`` (§4, ADR-0250 §15).
+            episodes: The episode window's records, in the window's order, as the
+                understanding phase fetched them (ADR-0282 §5); ``None`` where the
+                pass takes no episode window, as on ``converse_spoken`` (§4, ADR-0250
+                §15). The audience predicate is applied to them again here.
             version: The version orchestration mints for this record.
             now: The clock ``recorded_at`` is read from.
             deadline: The pass's deadline on the running loop's clock (§5). No
@@ -411,7 +523,7 @@ class UnderstandingStage:
             ModelError: Propagated unchanged from the provider stack.
             TimeoutError: If ``deadline`` had passed when a completion was due.
         """
-        brief = await self._brief(
+        brief = self._brief(
             text,
             channel=channel,
             window=window,
@@ -440,22 +552,22 @@ class UnderstandingStage:
         assert proposal is not None  # noqa: S101 — a first output with no problem parsed
         return _resolved(proposal, brief.labels, version=version, recorded_at=now())
 
-    async def _brief(  # noqa: PLR0913 — the input, its channel, its window, the audience, whether it takes episodes, and what recall found
+    def _brief(  # noqa: PLR0913 — the input, its channel, its window, the audience, the window's episodes, and what recall found
         self,
         text: str,
         *,
         channel: ChannelIdentity,
         window: ChannelWindow,
         audience: TurnSupply,
-        episodes: bool,
+        episodes: tuple[EpisodicMemory, ...] | None,
         recalled: Recalled | None,
     ) -> _Brief:
         """Render the prompt, filtering each window's stored records first (§3, §4)."""
         items = _channel_items(window, audience)
         shared = frozenset(item.identifier for item in items if item.identifier is not None)
         window_episodes: tuple[EpisodicMemory, ...] = ()
-        if episodes:
-            window_episodes = admitted_to_understanding(audience, await self._episodes(shared))
+        if episodes is not None:
+            window_episodes = admitted_to_understanding(audience, episodes)
         merged = {record.id: record for record in window_episodes if record.id in shared}
         labels: dict[str, UnderstandingReferent] = {}
         rendered_items: list[dict[str, object]] = []
@@ -477,7 +589,7 @@ class UnderstandingStage:
             "episode_window": (
                 rendered_episodes or "missing: there are no other recent episodes to show"
             )
-            if episodes
+            if episodes is not None
             else "not provided for input on this channel",
         }
         instruction = _INSTRUCTION

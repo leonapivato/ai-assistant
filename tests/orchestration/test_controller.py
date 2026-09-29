@@ -40,6 +40,7 @@ class _Facts:
     routing_wired: bool = False
     route_decided: bool = False
     route_taken: bool = False
+    windows_decided: bool = False
     recall_wired: bool = False
     recall_decided: bool = False
     deadline_passed: bool = False
@@ -91,18 +92,40 @@ _PLANNED: Final = replace(_ASSOCIATED, turn_decided=True)
             ControllerRule.ROUTE_TAKEN,
             ControllerStage.END,
         ),
+        # ADR-0282 §3: the windows first, wherever understanding is wired.
         (
             replace(_RESOLVED, understanding_wired=True),
+            ControllerRule.WINDOWS_UNASSEMBLED,
+            ControllerStage.WINDOWS,
+        ),
+        (
+            replace(_RESOLVED, understanding_wired=True, recall_wired=True),
+            ControllerRule.WINDOWS_UNASSEMBLED,
+            ControllerStage.WINDOWS,
+        ),
+        (
+            _Facts(informational_event=True, understanding_wired=True, recall_wired=True),
+            ControllerRule.WINDOWS_UNASSEMBLED,
+            ControllerStage.WINDOWS,
+        ),
+        (
+            replace(_RESOLVED, understanding_wired=True, windows_decided=True),
             ControllerRule.NOT_UNDERSTOOD,
             ControllerStage.UNDERSTANDING,
         ),
         (
-            replace(_RESOLVED, understanding_wired=True, recall_wired=True),
+            replace(_RESOLVED, understanding_wired=True, windows_decided=True, recall_wired=True),
             ControllerRule.NOT_RECALLED,
             ControllerStage.RECALL,
         ),
         (
-            replace(_RESOLVED, understanding_wired=True, recall_wired=True, recall_decided=True),
+            replace(
+                _RESOLVED,
+                understanding_wired=True,
+                windows_decided=True,
+                recall_wired=True,
+                recall_decided=True,
+            ),
             ControllerRule.NOT_UNDERSTOOD,
             ControllerStage.UNDERSTANDING,
         ),
@@ -112,7 +135,12 @@ _PLANNED: Final = replace(_ASSOCIATED, turn_decided=True)
             ControllerStage.ROUTING,
         ),
         (
-            _Facts(informational_event=True, understanding_wired=True, recall_wired=True),
+            _Facts(
+                informational_event=True,
+                understanding_wired=True,
+                windows_decided=True,
+                recall_wired=True,
+            ),
             ControllerRule.NOT_RECALLED,
             ControllerStage.RECALL,
         ),
@@ -122,7 +150,12 @@ _PLANNED: Final = replace(_ASSOCIATED, turn_decided=True)
             ControllerStage.EVENT_SUMMARY,
         ),
         (
-            _Facts(informational_event=True, understanding_wired=True, understanding_decided=True),
+            _Facts(
+                informational_event=True,
+                understanding_wired=True,
+                windows_decided=True,
+                understanding_decided=True,
+            ),
             ControllerRule.EVENT_UNSUMMARIZED,
             ControllerStage.EVENT_SUMMARY,
         ),
@@ -194,12 +227,13 @@ def test_the_first_rule_that_answers_decides(
 
 
 def test_the_table_is_the_adrs_rows_in_order_ending_in_one_that_always_answers() -> None:
-    """ADR-0280 §4's twelve rows, with ADR-0281 §2's between ``route_taken`` and
-    ``not_understood``."""
+    """ADR-0280 §4's twelve rows, with ADR-0282 §3's and ADR-0281 §2's between
+    ``route_taken`` and ``not_understood``."""
     assert [rule.name for rule in ACTIVATION_RULES] == [
         ControllerRule.CONVERSATION_UNRESOLVED,
         ControllerRule.ROUTE_UNCHECKED,
         ControllerRule.ROUTE_TAKEN,
+        ControllerRule.WINDOWS_UNASSEMBLED,
         ControllerRule.NOT_RECALLED,
         ControllerRule.NOT_UNDERSTOOD,
         ControllerRule.EVENT_UNSUMMARIZED,
@@ -215,7 +249,7 @@ def test_the_table_is_the_adrs_rows_in_order_ending_in_one_that_always_answers()
 
 
 def test_an_event_waits_for_a_wired_understanding_before_its_summary() -> None:
-    event = _Facts(informational_event=True, understanding_wired=True)
+    event = _Facts(informational_event=True, understanding_wired=True, windows_decided=True)
     assert _due(event).name is ControllerRule.NOT_UNDERSTOOD
 
 
@@ -278,7 +312,7 @@ def _shape(record: StageRecord) -> list[tuple[ControllerStage, ControllerRule, S
 
 async def test_the_controller_runs_what_is_due_until_nothing_is() -> None:
     record = await _run(
-        _Facts(informational_event=True, understanding_wired=True),
+        _Facts(informational_event=True, understanding_wired=True, windows_decided=True),
         _FakeStage(ControllerStage.UNDERSTANDING, "understanding_decided"),
         _FakeStage(ControllerStage.EVENT_SUMMARY, "event_summarized"),
     )
@@ -332,7 +366,9 @@ async def test_a_stage_that_did_not_end_done_ends_the_pass_and_reraises_its_erro
 # --- ADR-0281 §5: a failure-tolerant stage -----------------------------------------------
 
 
-_EVENT_WIRED: Final = _Facts(informational_event=True, understanding_wired=True, recall_wired=True)
+_EVENT_WIRED: Final = _Facts(
+    informational_event=True, understanding_wired=True, windows_decided=True, recall_wired=True
+)
 
 
 def _tolerated(outcome: StageOutcome, error: Exception) -> _FakeStage:

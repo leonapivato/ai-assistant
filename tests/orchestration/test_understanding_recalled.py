@@ -4,6 +4,7 @@ from __future__ import annotations
 
 import json
 import math
+from dataclasses import dataclass
 from datetime import UTC, datetime
 from typing import TYPE_CHECKING, Any, Final
 
@@ -99,25 +100,34 @@ def _decided(outcome: RecallOutcome) -> Recalled:
     return Recalled(ActivationRecall(outcome=outcome, cues=CUES))
 
 
-async def _stage(model: FakeModelProvider, *records: MemoryRecord) -> UnderstandingStage:
+@dataclass(frozen=True)
+class _Staged:
+    """The stage, and the episode window the windows stage would hand it over ``records``."""
+
+    stage: UnderstandingStage
+    window: tuple[EpisodicMemory, ...]
+
+
+async def _stage(model: FakeModelProvider, *records: MemoryRecord) -> _Staged:
     memory = FakeMemoryStore(now=lambda: AT)
     await memory.write_atomic(
         [MemoryWrite(record=record, mode=MemoryWriteMode.INSERT_IF_ABSENT) for record in records]
     )
-    return UnderstandingStage(
-        model=model, episodes=RecentEpisodes(memory=memory, limit=10), excerpt_chars=2000
+    return _Staged(
+        stage=UnderstandingStage(model=model, excerpt_chars=2000),
+        window=await RecentEpisodes(memory=memory, limit=10)(frozenset()),
     )
 
 
 async def _understand(
-    stage: UnderstandingStage, recalled: Recalled | None, *, episodes: bool = True
+    staged: _Staged, recalled: Recalled | None, *, episodes: bool = True
 ) -> ActivationUnderstanding:
-    return await stage.understand(
+    return await staged.stage.understand(
         "Same as before.",
         channel=CONVERSATION,
         window=ConversationWindow(CONVERSATION, ()),
         audience=BOUNDED,
-        episodes=episodes,
+        episodes=staged.window if episodes else None,
         version=1,
         now=lambda: AT,
         deadline=math.inf,

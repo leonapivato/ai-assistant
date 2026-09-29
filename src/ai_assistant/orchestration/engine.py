@@ -333,6 +333,7 @@ from ai_assistant.orchestration.understanding import (
     ChannelWindow,
     ConversationWindow,
     SuppliedWindow,
+    fetch_episodes,
 )
 from ai_assistant.orchestration.verification import Comparison, compare
 
@@ -369,6 +370,7 @@ if TYPE_CHECKING:
         DestinationTrustRecord,
         DurableIdentifier,
         EncodableText,
+        EpisodicMemory,
         ExecutionState,
         FeedbackEvent,
         FrozenJsonMapping,
@@ -430,7 +432,12 @@ if TYPE_CHECKING:
         StepDisposition,
         StepRunner,
     )
-    from ai_assistant.orchestration.understanding import UnderstandingStage
+    from ai_assistant.orchestration.understanding import (
+        Fetched,
+        UnderstandingStage,
+        Windows,
+        WindowsStage,
+    )
     from ai_assistant.orchestration.upcoming import UpcomingEventStage
     from ai_assistant.orchestration.writes import WriteOutcome
 
@@ -499,6 +506,7 @@ _ROUTE_ID_ATTEMPTS: Final = 8
 #: (ADR-0276 §5, §6): code-owned, so no provider content reaches the caller.
 _UNDERSTANDING_EXPIRED: Final = "the pass's deadline expired during understanding"
 _RECALL_EXPIRED: Final = "the pass's deadline expired during recall"
+_WINDOWS_EXPIRED: Final = "the pass's deadline expired while assembling the windows"
 
 
 def _note_failure[T](turn: asyncio.Task[T]) -> None:
@@ -2525,6 +2533,10 @@ class _ActivationPass:
         understood: The understanding stage ran for the input, whatever its outcome.
         recalled: Recall's decision and the records it kept; never persisted — the
             decision is carried on the activation's state for capture (ADR-0281 §6).
+        windows: The windows stage's decision, the episode window held as ids
+            (ADR-0282 §3); written by that stage alone.
+        understanding_fetch: What the understanding phase fetched by id and what came
+            back missing (ADR-0282 §2); written by that phase alone, never persisted.
     """
 
     deadline: float
@@ -2533,6 +2545,8 @@ class _ActivationPass:
     recall_wired: bool
     understood: bool = False
     recalled: Recalled | None = None
+    windows: Windows | None = None
+    understanding_fetch: Fetched | None = None
 
     @property
     def text(self) -> str:
@@ -2543,6 +2557,11 @@ class _ActivationPass:
     def understanding_decided(self) -> bool:
         """The understanding stage recorded an outcome."""
         return self.understood
+
+    @property
+    def windows_decided(self) -> bool:
+        """The windows stage recorded the pass's windows (ADR-0282 §3)."""
+        return self.windows is not None
 
     @property
     def recall_decided(self) -> bool:
@@ -2764,6 +2783,19 @@ def _recall_expired(working: _ActivationPass) -> Exception | None:
     if isinstance(working, _EventPass):
         return ChannelProcessingTimeoutError("informational event processing timed out")
     return ModelTimeoutError(_RECALL_EXPIRED)
+
+
+def _windows_expired(working: _ActivationPass) -> Exception | None:
+    """ADR-0282 §3: the windows stage is not entered past the pass's deadline.
+
+    Classified as each pass kind classifies its deadline, as recall's is. ``None``
+    while there is time.
+    """
+    if not working.deadline_passed:
+        return None
+    if isinstance(working, _EventPass):
+        return ChannelProcessingTimeoutError("informational event processing timed out")
+    return ModelTimeoutError(_WINDOWS_EXPIRED)
 
 
 #: What a recall decision makes of its stage's entry (ADR-0281 §5).
@@ -3030,6 +3062,7 @@ class Engine:
         routing: RoutingStage | None = None,
         understanding: UnderstandingStage | None = None,
         understanding_version_limit: int | None = None,
+        windows: WindowsStage | None = None,
         recall: RecallStage | None = None,
         stage_record_limit: int = DEFAULT_STAGE_RECORD_LIMIT,
         reconciliation: ReconciliationStage | None = None,
@@ -3454,14 +3487,17 @@ class Engine:
                 ADR-0197 §9 puts the write-only ``RoutingRecorder`` on the *stage*, so the
                 façade never holds a trail seam of any width and cannot be wired into the
                 half-configured state where a stage could route without recording.
-            understanding: ADR-0276's understanding stage, holding the model seam and
-                the composition root's episode selector, or ``None`` on a deployment
+            understanding: ADR-0276's understanding stage, holding the model seam, or
+                ``None`` on a deployment
                 that wires none — where no pass enters a stage, and every capture that
                 reaches the point it would have run records ``not_reached``. The
                 composition root always wires it.
             understanding_version_limit: ``UNDERSTANDING_VERSION_LIMIT``, ADR-0276 §7's
                 bound on the versions one processing record retains. Required, and at
                 least 2, wherever ``understanding`` is wired.
+            windows: ADR-0282's windows stage, holding the composition root's episode
+                selector. Required wherever ``understanding`` is wired, since the
+                windows are assembled before recall and understanding (§3).
             recall: ADR-0281's recall stage, holding the memory store, the threshold
                 set for the wired embedder, the item limit and the budget, or
                 ``None``. Recall runs only where ``understanding`` is wired too
@@ -3823,8 +3859,15 @@ class Engine:
                 "version 1 and the latest are both kept (ADR-0276 §7)"
             )
             raise ConfigurationError(msg)
+        if understanding is not None and windows is None:
+            msg = (
+                "an understanding stage needs the windows stage, which assembles its "
+                "windows before recall (ADR-0282 §3)"
+            )
+            raise ConfigurationError(msg)
         self._understanding = understanding
         self._understanding_version_limit = understanding_version_limit or 2
+        self._windows = windows
         self._recall = recall
         if stage_record_limit < 2:  # noqa: PLR2004 — the first entry and the end entry
             msg = "a stage record keeps its first entry and its end entry (ADR-0280 §6)"
@@ -4698,10 +4741,12 @@ class Engine:
                 understanding_wired=self._understanding is not None,
                 recall_wired=self._recall is not None,
             )
-            # ADR-0280 §4: recall, understanding, then the event summary, by the rules.
+            # ADR-0280 §4: the windows, recall, understanding, then the event summary,
+            # by the rules.
             await self._controlled(
                 event,
                 (
+                    Stage(ControllerStage.WINDOWS, self._windows_stage, expired=_windows_expired),
                     TolerantStage(
                         ControllerStage.RECALL, self._recall_stage, expired=_recall_expired
                     ),
@@ -12316,15 +12361,67 @@ class Engine:
             state.working = working
         await ActivationController(stages=stages, clock=self._clock).run(working, record)
 
-    async def _understand(  # noqa: PLR0913 — the input, its window, the audience, whether it takes episodes, the deadline, and what recall kept
+    async def _windows_stage(self, working: _ActivationPass) -> None:
+        """ADR-0282 §3: assemble the pass's windows before recall and understanding.
+
+        The channel window is ADR-0276 §3's: a turn's conversation tail, read once for
+        the pass, or what an event's channel supplied. The episode window is the
+        selector's choice, held as ids after the audience predicate; a spoken turn
+        takes none (ADR-0276 §4:13). Its reads run inside the pass's deadline, and an
+        expiry is the pass kind's classified timeout. It is not failure-tolerant: any
+        other failure takes the fixed default.
+
+        Raises:
+            ModelTimeoutError: If a turn's deadline expired inside the stage.
+            ChannelProcessingTimeoutError: If an event's deadline expired inside it.
+        """
+        assert self._windows is not None  # noqa: S101 — the engine refuses understanding without it
+        try:
+            async with asyncio.timeout_at(working.deadline):
+                if isinstance(working, _TurnPass):
+                    input = _resolved_turn(working)  # noqa: A001 — the resolved channel input
+                    history = await self._turn_history(working)
+                    channel: ChannelWindow = ConversationWindow(input.channel, history.records)
+                    episodes = working.operation is not ConversationalOperation.CONVERSE_SPOKEN
+                else:
+                    assert isinstance(working, _EventPass)  # noqa: S101 — the two pass kinds
+                    channel = SuppliedWindow(working.input.context)
+                    episodes = True
+                working.windows = await self._windows.assemble(
+                    channel, audience=working.supply, episodes=episodes
+                )
+        except TimeoutError:
+            late = _windows_expired(working)
+            if late is None:
+                raise
+            raise late from None
+
+    async def _fetch_window(
+        self, working: _ActivationPass, windows: Windows
+    ) -> tuple[EpisodicMemory, ...] | None:
+        """The episode window's records, fetched by id under ADR-0282 §2's rules.
+
+        What was fetched and what came back missing is written on the working episode
+        before the records are returned. ``None`` where the pass takes no episode
+        window, and then nothing is read.
+        """
+        if windows.episode_ids is None:
+            return None
+        fetched = await fetch_episodes(self._memory, windows.episode_ids, audience=working.supply)
+        working.understanding_fetch = fetched
+        _log.info(
+            "stage_fetch",
+            stage="understanding",
+            fetched=len(fetched.fetched),
+            missing=len(fetched.missing),
+        )
+        return fetched.records
+
+    async def _understand(
         self,
         input: ResolvedChannelInput,  # noqa: A002 — resolved channel input
         *,
-        window: ChannelWindow,
-        audience: TurnSupply,
-        episodes: bool,
-        deadline: float,
-        recalled: Recalled | None,
+        working: _ActivationPass,
     ) -> None:
         """Enter the understanding stage once, and carry what it records (ADR-0276 §5, §7).
 
@@ -12337,7 +12434,12 @@ class Engine:
         its class already takes (§6). Nothing is substituted for an understanding the
         stage could not obtain.
 
-        **It runs inside the pass's existing deadline** (§5): the selector and both
+        **It reads what the working episode holds** (ADR-0282 §5): the windows the
+        windows stage recorded, the episode window's records fetched by id — current
+        versions, the audience predicate applied again, a missing one left out and
+        recorded on the working episode — and what recall kept.
+
+        **It runs inside the pass's existing deadline** (§5): the fetch and both
         completions are bounded by what is left of the budget the call was handed,
         and a deadline that expires is a classified timeout — ``ModelTimeoutError``,
         the row a timed-out completion of this stage already takes (§6). A deadline
@@ -12348,34 +12450,34 @@ class Engine:
 
         Args:
             input: The resolved activation input.
-            window: Its channel window, stored records not yet filtered (§3).
-            audience: The pass's audience posture, which filters them (§4).
-            episodes: Whether the pass takes an episode window (§4).
-            deadline: The pass's deadline, on the running loop's clock.
-            recalled: What recall kept for the pass, rendered to the stage
-                (ADR-0281 §7); ``None`` where recall made no decision.
+            working: The pass's working episode, holding the window decision, recall's
+                decision, the audience posture and the deadline.
 
         Raises:
             ModelTimeoutError: If the deadline expired before the stage or inside it.
         """
         if self._understanding is None:
             return
+        windows = working.windows
+        assert windows is not None  # noqa: S101 — the windows row precedes understanding's wherever it is wired
+        deadline = working.deadline
         state = active_state()
         loop = asyncio.get_running_loop()
         if deadline <= loop.time():
             raise ModelTimeoutError(_UNDERSTANDING_EXPIRED)
         try:
             async with asyncio.timeout_at(deadline):
+                episodes = await self._fetch_window(working, windows)
                 understood = await self._understanding.understand(
                     input.text,
                     channel=input.channel,
-                    window=window,
-                    audience=audience,
+                    window=windows.channel,
+                    audience=working.supply,
                     episodes=episodes,
                     version=1 if state is None else state.next_understanding_version(),
                     now=self._clock,
                     deadline=deadline,
-                    recalled=recalled,
+                    recalled=working.recalled,
                 )
         except BaseException as exc:
             # A timer fires only when the loop gets control, so a stage can cross the
@@ -12424,14 +12526,7 @@ class Engine:
         """
         failure: type[ChannelProcessingError] | None = None
         try:
-            await self._understand(
-                event.input,
-                window=SuppliedWindow(event.input.context),
-                audience=event.supply,
-                episodes=True,
-                deadline=event.deadline,
-                recalled=event.recalled,
-            )
+            await self._understand(event.input, working=event)
         except ModelTimeoutError:
             failure = ChannelProcessingTimeoutError
         except ModelError, UnderstandingError:
@@ -12594,6 +12689,7 @@ class Engine:
             (
                 Stage(ControllerStage.BEGIN_CONVERSATION, self._begin_conversation_stage),
                 Stage(ControllerStage.ROUTING, self._routing_stage),
+                Stage(ControllerStage.WINDOWS, self._windows_stage, expired=_windows_expired),
                 TolerantStage(ControllerStage.RECALL, self._recall_stage, expired=_recall_expired),
                 Stage(
                     ControllerStage.UNDERSTANDING, self._understanding_stage, expired=_turn_expired
@@ -12674,30 +12770,12 @@ class Engine:
         ADR-0250 §15's association rule's is. What it records is carried on the
         activation's state; no stage below reads it (§8).
 
-        **The window's history read is inside the pass's deadline too** (§5): the
-        read is now part of this stage, so a read that outlasts the deadline ends the
-        stage ``timed_out`` with the stage's own classified error rather than holding
-        the pass open.
+        Its windows are the windows stage's (ADR-0282 §3), read off the working episode.
 
         Raises:
-            ModelTimeoutError: If the deadline expired during the history read.
+            ModelTimeoutError: If the deadline expired before the stage or inside it.
         """
-        input = _resolved_turn(working)  # noqa: A001 — the resolved channel input
-        try:
-            async with asyncio.timeout_at(working.deadline):
-                history = await self._turn_history(working)
-        except TimeoutError:
-            if working.deadline > asyncio.get_running_loop().time():
-                raise
-            raise ModelTimeoutError(_UNDERSTANDING_EXPIRED) from None
-        await self._understand(
-            input,
-            window=ConversationWindow(input.channel, history.records),
-            audience=working.supply,
-            episodes=working.operation is not ConversationalOperation.CONVERSE_SPOKEN,
-            deadline=working.deadline,
-            recalled=working.recalled,
-        )
+        await self._understand(_resolved_turn(working), working=working)
         working.understood = True
 
     async def _associate_stage(self, working: _TurnPass) -> None:

@@ -139,6 +139,7 @@ from ai_assistant.orchestration.loop import LearningLoop
 from ai_assistant.orchestration.parked_reads import ParkedReadOperations
 from ai_assistant.orchestration.payloads import DEFAULT_MAX_PAYLOAD_BYTES
 from ai_assistant.orchestration.speech import DEFAULT_MAX_SPOKEN_AUDIO_BYTES
+from ai_assistant.orchestration.understanding import RecentEpisodes, WindowsStage
 from ai_assistant.permissions.policy import ThresholdActionPolicy
 from ai_assistant.testing import (
     DEFAULT_SEARCH_ORIGIN,
@@ -725,6 +726,9 @@ class Harness:
         # stage, so every capture records `not_reached` exactly as before step 3.
         understanding: UnderstandingStage | None = None,
         understanding_version_limit: int | None = 8,
+        # ADR-0282's windows stage. `None` wires one over this harness's store wherever
+        # understanding is wired, as the composition root does.
+        windows: WindowsStage | None = None,
         # ADR-0281's recall stage. `None` is every other case's deployment: no recall,
         # so every pass runs exactly as it did before recall was wired.
         recall: RecallStage | None = None,
@@ -1110,6 +1114,11 @@ class Harness:
             routing=self.routing,
             understanding=understanding,
             understanding_version_limit=understanding_version_limit,
+            windows=(
+                WindowsStage(episodes=RecentEpisodes(memory=self.memory, limit=10))
+                if windows is None and understanding is not None
+                else windows
+            ),
             recall=recall,
             # ADR-0244 §5, §6, §11: the enumeration, the answer and the cancellation,
             # over the store above. Wired unconditionally, exactly as the composition

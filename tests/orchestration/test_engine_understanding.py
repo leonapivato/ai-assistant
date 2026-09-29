@@ -110,7 +110,7 @@ def _harness(understanding_model: FakeModelProvider, **knobs: Any) -> Harness:
     )
     return Harness(
         memory=memory,
-        understanding=understanding_stage(memory, model=understanding_model),
+        understanding=understanding_stage(model=understanding_model),
         **knobs,
     )
 
