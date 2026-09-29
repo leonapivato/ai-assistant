@@ -10,13 +10,17 @@ record's placement of the entry for each activation kind is in
 from __future__ import annotations
 
 import json
+import time
 from datetime import timedelta
 from typing import TYPE_CHECKING, Any, Final
 
+import pytest
 from structlog.testing import capture_logs
 from test_engine import AT, Harness, NoStepPlanner
 from understanding_support import EPISODE_LIMIT, STATED_PROPOSAL, understanding_stage
 
+from ai_assistant.core.errors import ModelTimeoutError
+from ai_assistant.core.types import ControllerRule, ControllerStage, EpisodicMemory, StageOutcome
 from ai_assistant.orchestration.composing import ComposingStage
 from ai_assistant.orchestration.understanding import RecentEpisodes, Windows, WindowsStage
 from ai_assistant.testing import FakeMemoryStore, FakeModelProvider, FakeStreamingCompleter
@@ -26,6 +30,7 @@ if TYPE_CHECKING:
     from ai_assistant.orchestration.understanding import ChannelWindow
 
 _BUDGET: Final = timedelta(seconds=10)
+_DONE: Final = StageOutcome.DONE
 
 
 class _ForgetsWhatItChose(WindowsStage):
@@ -89,3 +94,30 @@ async def test_a_window_episode_forgotten_before_understanding_is_not_rendered()
     assert _episode_window(model, 1) == "missing: there are no other recent episodes to show"
     (fetch,) = [log for log in logs if log["event"] == "stage_fetch"]
     assert (fetch["stage"], fetch["fetched"], fetch["missing"]) == ("understanding", 1, 1)
+
+
+class _Unyielding(WindowsStage):
+    """A windows stage that holds the loop past a short deadline, then returns."""
+
+    async def assemble(
+        self, channel: ChannelWindow, *, audience: TurnSupply, episodes: bool
+    ) -> Windows:
+        time.sleep(0.05)  # noqa: ASYNC251 — the point: no timer can fire while it runs
+        return await super().assemble(channel, audience=audience, episodes=episodes)
+
+
+async def test_windows_that_cross_the_deadline_without_yielding_are_the_expiry() -> None:
+    """ADR-0280 §5, ADR-0282 §3: assembly that returned past the deadline is the windows
+    stage's timeout, and its decision is not made."""
+    memory = FakeMemoryStore(now=lambda: AT)
+    windows = _Unyielding(episodes=RecentEpisodes(memory=memory, limit=EPISODE_LIMIT))
+    harness = _harness(FakeModelProvider(STATED_PROPOSAL), memory, windows=windows)
+    with pytest.raises(ModelTimeoutError, match="assembling the windows"):
+        await harness.engine.converse("Who is my dentist?", timeout=timedelta(milliseconds=20))
+    (episode,) = [r for r in await memory.export() if isinstance(r, EpisodicMemory)]
+    assert episode.processing_record is not None
+    assert [(e.stage, e.due, e.outcome) for e in episode.processing_record.stages] == [
+        (ControllerStage.BEGIN_CONVERSATION, ControllerRule.CONVERSATION_UNRESOLVED, _DONE),
+        (ControllerStage.WINDOWS, ControllerRule.WINDOWS_UNASSEMBLED, StageOutcome.TIMED_OUT),
+        (ControllerStage.END, ControllerRule.STAGE_TIMED_OUT, _DONE),
+    ]

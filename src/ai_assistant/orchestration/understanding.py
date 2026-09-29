@@ -199,6 +199,7 @@ _BAND_ATTRIBUTION: Final = {
 _NOTHING_RECALLED: Final = "missing: nothing was recalled for this input"
 _RECALL_FAILED: Final = "missing: recall failed, so no memories are shown"
 _ALREADY_SHOWN: Final = "missing: everything recalled is already in the windows above"
+_NO_LONGER_HELD: Final = "missing: what was recalled is no longer in memory"
 
 _UNPARSEABLE: Final = (
     "Your reply was not one JSON object of the required shape, so it could not be "
@@ -389,45 +390,70 @@ class WindowsStage:
 
 @dataclass(frozen=True, slots=True)
 class Fetched:
-    """What one stage fetched by id, and what came back (ADR-0282 §2).
+    """What the understanding phase fetched by id, and what came back (ADR-0282 §2, §5).
 
     Attributes:
-        records: The admitted records, in the order the ids were given.
-        fetched: Every id the stage asked for, in order.
-        missing: The ids that returned no episode, or whose record the audience
-            predicate refused on the second application.
+        episodes: The episode window's admitted records, in the window's order;
+            ``None`` where the pass takes no episode window.
+        recalled: Recall's kept records that came back admitted, in recall's order.
+        fetched: Every id the phase asked for, in order, each once.
+        missing: The ids that returned no record of the kind held, or whose record
+            the audience predicate refused on the second application.
     """
 
-    records: tuple[EpisodicMemory, ...]
+    episodes: tuple[EpisodicMemory, ...] | None
+    recalled: tuple[EpisodicMemory | SemanticMemory, ...]
     fetched: tuple[str, ...]
     missing: tuple[str, ...]
 
 
-async def fetch_episodes(
-    memory: MemoryStore, ids: tuple[str, ...], *, audience: TurnSupply
+async def fetch_held(
+    memory: MemoryStore,
+    *,
+    episode_ids: tuple[str, ...] | None,
+    recalled_ids: tuple[str, ...],
+    audience: TurnSupply,
 ) -> Fetched:
-    """Fetch episodes the working episode holds by id, re-applying the audience predicate.
+    """Fetch the window's and recall's ids in one read, re-applying the audience predicate.
 
-    A fetch returns each record's current version. An id with no record, a record that
-    is no longer an episode, and one the predicate now refuses are not errors: each is
-    recorded as missing and left out, and the rest keep their order (ADR-0282 §2).
+    One ``get_many`` returns each record's current version (ADR-0282 §5:1). An id with
+    no record, a record no longer of the kind held — an episode for the window, an
+    episode or semantic record for recall — and one the predicate now refuses are not
+    errors: each is recorded as missing and left out, and the rest keep their order
+    (§2, §5:2).
 
     Args:
         memory: The store the ids were chosen from.
-        ids: The ids, in the order the records are wanted.
+        episode_ids: The episode window's ids, in its order; ``None`` where the pass
+            takes no episode window.
+        recalled_ids: Recall's kept ids, in its order.
         audience: The pass's audience posture.
 
     Returns:
         The records found and admitted, with what was asked for and what was missing.
     """
+    ids = tuple(dict.fromkeys((*(episode_ids or ()), *recalled_ids)))
     found = await memory.get_many(ids) if ids else {}
-    candidates = [record for id_ in ids if isinstance(record := found.get(id_), EpisodicMemory)]
-    admitted = admitted_to_understanding(audience, candidates)
-    kept = {record.id for record in admitted}
+    candidates = [
+        record
+        for id_ in ids
+        if isinstance(record := found.get(id_), EpisodicMemory | SemanticMemory)
+    ]
+    admitted = {record.id: record for record in admitted_to_understanding(audience, candidates)}
+    episodes = (
+        None
+        if episode_ids is None
+        else tuple(
+            record for id_ in episode_ids if isinstance(record := admitted.get(id_), EpisodicMemory)
+        )
+    )
+    recalled = tuple(record for id_ in recalled_ids if (record := admitted.get(id_)) is not None)
+    held = {record.id for record in (*(episodes or ()), *recalled)}
     return Fetched(
-        records=tuple(admitted),
+        episodes=episodes,
+        recalled=recalled,
         fetched=ids,
-        missing=tuple(id_ for id_ in ids if id_ not in kept),
+        missing=tuple(id_ for id_ in ids if id_ not in held),
     )
 
 
@@ -629,7 +655,11 @@ class UnderstandingStage:
                 memory = _RecalledFact.of(record, excerpt_chars=self._excerpt_chars)
                 section.append(memory.rendering(label))
                 labels[label] = memory.referent()
-        return (section or _ALREADY_SHOWN), len(section)
+        if section:
+            return section, len(section)
+        # Recall kept records, and none renders: either every one is already shown
+        # above, or the fetch found none of them held any more (ADR-0282 §5:2).
+        return (_ALREADY_SHOWN if recalled.records else _NO_LONGER_HELD), 0
 
     def _validated(
         self, content: str, brief: _Brief

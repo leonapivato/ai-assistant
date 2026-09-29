@@ -17,6 +17,7 @@ from typing import TYPE_CHECKING, Any, Final
 
 import pytest
 from channel_receiver_contract import event_input
+from structlog.testing import capture_logs
 from test_engine import AT, Harness, NoStepPlanner
 from understanding_support import (
     ON_DEVICE_RECALL_THRESHOLD,
@@ -474,3 +475,65 @@ async def test_an_understood_event_is_found_by_a_later_activation_that_shares_it
         assert captured[None] not in found
     finally:
         store.close()
+
+
+# --- understanding fetches what recall kept (ADR-0282 §5) ---------------------------------
+
+#: A second stored belief the ordinary turn's words recall on the canonical fake.
+_PERMIT: Final = SemanticMemory(
+    id="fact-permit",
+    content="The campsite at Pine Flat needs a fire permit.",
+    fact="The campsite at Pine Flat needs a fire permit.",
+    provenance=Provenance(source=MemorySource.USER_ASSERTED, confidence=1.0, last_updated=AT),
+)
+
+
+class _ForgetsAfterSearch(FakeMemoryStore):
+    """A store that deletes the named records once a search has returned them."""
+
+    def __init__(self, *forgotten: str) -> None:
+        super().__init__(now=lambda: AT)
+        self._forgotten = forgotten
+
+    async def search(self, query: str, **kwargs: Any) -> Any:
+        found = await super().search(query, **kwargs)
+        for record_id in self._forgotten:
+            await self.delete(record_id)
+        return found
+
+
+async def _forgetting(*forgotten: str) -> _ForgetsAfterSearch:
+    memory = _ForgetsAfterSearch(*forgotten)
+    await memory.write_atomic(
+        [
+            MemoryWrite(record=record, mode=MemoryWriteMode.INSERT_IF_ABSENT)
+            for record in (_BOOKED, _PERMIT)
+        ]
+    )
+    return memory
+
+
+async def test_a_recalled_record_forgotten_before_understanding_is_not_rendered() -> None:
+    """ADR-0282 §5: understanding renders what its fetch returned, never recall's copy;
+    the rest keep their order and labels, and the missing id is recorded."""
+    model = FakeModelProvider(STATED_PROPOSAL)
+    harness = _harness(await _forgetting("fact-booked"), understanding_model=model)
+    with capture_logs() as logs:
+        await harness.engine.converse(_TURN, timeout=_BUDGET)
+    record = await _record(harness)
+    assert record.recall is not None
+    assert {item.id for item in record.recall.items} == {"fact-booked", "fact-permit"}
+    (shown,) = _shown(model)
+    assert (shown["label"], shown["fact"]) == ("M1", _PERMIT.fact)
+    (fetch,) = [log for log in logs if log["event"] == "stage_fetch"]
+    assert (fetch["fetched"], fetch["missing"]) == (2, 1)
+
+
+async def test_everything_recalled_forgotten_before_understanding_is_said() -> None:
+    model = FakeModelProvider(STATED_PROPOSAL)
+    harness = _harness(await _forgetting("fact-booked", "fact-permit"), understanding_model=model)
+    await harness.engine.converse(_TURN, timeout=_BUDGET)
+    record = await _record(harness)
+    assert record.recall is not None
+    assert record.recall.outcome is RecallOutcome.FOUND
+    assert _shown(model) == "missing: what was recalled is no longer in memory"

@@ -51,7 +51,7 @@ from ai_assistant.orchestration.understanding import (
     SuppliedWindow,
     UnderstandingStage,
     WindowsStage,
-    fetch_episodes,
+    fetch_held,
 )
 from ai_assistant.testing import FakeMemoryStore, FakeModelProvider
 from ai_assistant.testing.activation import ended_pass
@@ -161,17 +161,15 @@ async def _understand(  # noqa: PLR0913 — the stage's own inputs, each default
 ) -> ActivationUnderstanding:
     channel_window = ConversationWindow(CONVERSATION, ()) if window is None else window
     windows = await pipeline.windows.assemble(channel_window, audience=audience, episodes=episodes)
-    records = None
-    if windows.episode_ids is not None:
-        records = (
-            await fetch_episodes(pipeline.memory, windows.episode_ids, audience=audience)
-        ).records
+    fetched = await fetch_held(
+        pipeline.memory, episode_ids=windows.episode_ids, recalled_ids=(), audience=audience
+    )
     return await pipeline.stage.understand(
         text,
         channel=channel,
         window=channel_window,
         audience=audience,
-        episodes=records,
+        episodes=fetched.episodes,
         version=1,
         now=lambda: AT,
         deadline=deadline,
