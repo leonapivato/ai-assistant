@@ -1,14 +1,15 @@
 # 281. Recall runs before understanding, and understanding reads what it found
 
-- Status: Partially superseded by ADR-0282 (§3:2's `limit`; §3:3's filling rule, in the addition alone; §7:1's first sentence, in its *receives the records recall kept* part alone)
+- Status: Partially superseded by ADR-0282 (§3:2's `limit`; §3:3's filling rule, in the addition alone; §6:4's last sentence; §7:1's first sentence, in its *receives the records recall kept* part alone)
 - Date: 2026-09-27
 - Scope: [M39](https://github.com/leonapivato/ai-assistant/milestone/6).
 - Dependency: ADR-0280 and its milestone M38; ADR-0276 and ADR-0275.
 - Authorization: the owner accepted the proposal on #2579 on 2026-09-27, after ruling its shape in conversation the same day, and directed its conversion into this ADR. The dispatcher assigned the next available number, 0281. That authorizes drafting and numbering, not ratification or implementation.
-- Partially superseded: 2026-09-29 by ADR-0282 — three narrow scopes. §3:2's
+- Partially superseded: 2026-09-29 by ADR-0282 — four narrow scopes. §3:2's
   band searches each ask for `RECALL_ITEM_LIMIT` plus the number of ids the windows hold.
   §3:3 keeps no record the windows already hold; `RECALL_ITEM_LIMIT` is still the number
-  kept. §7:1's understanding stage receives recall's records as the understanding phase
+  kept. §6:4's last sentence: the pass holds recall's ids and scores, not the records the
+  search returned; the rest of §6:4 stands. §7:1's understanding stage receives recall's records as the understanding phase
   fetches them by id; the rest of §7:1 stands. These scoped replacements
   take effect on ratification of ADR-0282. This reciprocal header record accompanies the
   numbered draft under ADR-0070 and ADR-0082; the ratified body below is preserved.
