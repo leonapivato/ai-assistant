@@ -3452,6 +3452,7 @@ class ControllerStage(StrEnum):
     COMPOSE = "compose"
     END = "end"
     RECALL = "recall"
+    WINDOWS = "windows"
 
 
 class ControllerRule(StrEnum):
@@ -3481,6 +3482,7 @@ class ControllerRule(StrEnum):
     INTERRUPTED = "interrupted"
     ENDED_BEFORE_CONTROLLER = "ended_before_controller"
     NOT_RECALLED = "not_recalled"
+    WINDOWS_UNASSEMBLED = "windows_unassembled"
 
 
 #: The rules that end a pass rather than make a stage due (ADR-0280 §4, §5).
