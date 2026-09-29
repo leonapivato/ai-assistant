@@ -1,10 +1,17 @@
 # 281. Recall runs before understanding, and understanding reads what it found
 
-- Status: Accepted
+- Status: Partially superseded by ADR-0282 (§3:2's `limit`; §3:3's filling rule, in the addition alone; §7:1's first sentence, in its *receives the records recall kept* part alone)
 - Date: 2026-09-27
 - Scope: [M39](https://github.com/leonapivato/ai-assistant/milestone/6).
 - Dependency: ADR-0280 and its milestone M38; ADR-0276 and ADR-0275.
 - Authorization: the owner accepted the proposal on #2579 on 2026-09-27, after ruling its shape in conversation the same day, and directed its conversion into this ADR. The dispatcher assigned the next available number, 0281. That authorizes drafting and numbering, not ratification or implementation.
+- Partially superseded: 2026-09-29 by ADR-0282 — three narrow scopes. §3:2's
+  band searches each ask for `RECALL_ITEM_LIMIT` plus the number of ids the windows hold.
+  §3:3 keeps no record the windows already hold; `RECALL_ITEM_LIMIT` is still the number
+  kept. §7:1's understanding stage receives recall's records as the understanding phase
+  fetches them by id; the rest of §7:1 stands. These scoped replacements
+  take effect on ratification of ADR-0282. This reciprocal header record accompanies the
+  numbered draft under ADR-0070 and ADR-0082; the ratified body below is preserved.
 - **Partially supersedes** [ADR-0275](0275-an-episode-records-one-activation-after-processing-ends.md) — **four scopes.** **§8:5's constant `content` for inspection-only records, where the record carries an understanding**: its `content` is that understanding's `meaning` instead (§3 below); the constant stands for every record without one, and `disposition=None`, the archive rule and every other clause stand. **§4's `EpisodeProcessingRecord` field set, in the addition alone**: the record gains §6 below's `recall` field; every existing field, value and validator stands. **§7:4's rule that all automatic model-facing episodic reads request eligibility `True`, for one consumer**: recall's read (§3 below) requests no eligibility. **§9:6's exclusion of the trigger's raw input text from automatic model inputs, for one consumer and one field**: the trigger's exact input text or transcript of a recalled episode is admitted to the understanding stage's rendering of it (§7 below), as ADR-0276 admitted it to the episode window, and nothing else is.
 - **Partially supersedes** [ADR-0276](0276-an-activation-is-understood-before-it-is-associated-and-the-understanding-is-retained-with-its-episode.md) — **four scopes.** **§1:5**, in its *no retrieved memory* and *nothing else* parts alone: the stage also reads what recall found. **§2:5's referent kinds, in the addition alone**: `UnderstandingReferent.kind` gains `memory`. **§3:3's label scheme, in the addition alone**: a third sequence, `M`. **§5:1's *before any relevance read***, for recall's read alone. Every other clause stands.
 - **Partially supersedes** [ADR-0280](0280-an-activation-controller-runs-the-stages-by-rules-and-records-every-choice-with-the-episode.md) — **four scopes.** **§3:5's working set and §4:1–§4:3's enums and table, in the additions alone**: the recall decision, the stage `recall`, the rule `not_recalled` and its row. **§5:2's fixed default, for a failure-tolerant stage alone** (§5 below). **§7:1's `schema_version` literal alone**: it becomes `Literal[4]`. Every other clause stands.
