@@ -12,8 +12,9 @@ renders none of them — it reads the activation's input and the two windows §3
 define, and nothing else, save what recall kept for the pass.
 
 **What recall kept** (ADR-0281 §7) renders as a third section, ``recalled``, labelled
-``M1``, ``M2``… in recall's order, only where recall made a decision for the pass. A
-recalled record either window already rendered stays there only. A recalled episode
+``M1``, ``M2``… in recall's order, only where recall made a decision for the pass: its
+records as the understanding phase fetched them (ADR-0282 §5). A recalled record either
+window already rendered stays there only. A recalled episode
 takes the episode window's projection; a recalled semantic record renders its fact,
 cut with the cut disclosed, its last update and an attribution by band, and its label
 resolves to a ``memory`` referent. Where recall kept nothing, or failed, the section
@@ -92,6 +93,7 @@ if TYPE_CHECKING:
 
     from ai_assistant.core.protocols import MemoryStore, ModelProvider
     from ai_assistant.core.types import (
+        ActivationRecall,
         ChannelContext,
         ChannelContextItem,
         ChannelIdentity,
@@ -99,7 +101,6 @@ if TYPE_CHECKING:
         RecordedActivationTrigger,
     )
     from ai_assistant.orchestration.disclosure import TurnSupply
-    from ai_assistant.orchestration.recall import Recalled
 
 __all__ = [
     "ChannelWindow",
@@ -516,7 +517,8 @@ class UnderstandingStage:
         version: int,
         now: Callable[[], datetime],
         deadline: float,
-        recalled: Recalled | None = None,
+        recall: ActivationRecall | None = None,
+        recalled: tuple[EpisodicMemory | SemanticMemory, ...] = (),
     ) -> ActivationUnderstanding:
         """Read one input against its windows, and record what it was understood to mean.
 
@@ -536,10 +538,12 @@ class UnderstandingStage:
             deadline: The pass's deadline on the running loop's clock (§5). No
                 completion is started once it has passed — the one repair included —
                 however the time was spent.
-            recalled: Recall's decision for the pass and the records it kept
-                (ADR-0281 §7), rendered as a third section labelled ``M``. ``None``
-                where recall made no decision, and then the call renders no recalled
+            recall: Recall's decision for the pass (ADR-0281 §7). ``None`` where
+                recall made no decision, and then the call renders no recalled
                 section and the instruction says nothing of one.
+            recalled: The records of recall's kept items the understanding phase
+                fetched, in recall's order, rendered as a third section labelled
+                ``M`` (ADR-0282 §5). A kept item that came back missing is not here.
 
         Returns:
             The recorded understanding.
@@ -555,6 +559,7 @@ class UnderstandingStage:
             window=window,
             audience=audience,
             episodes=episodes,
+            recall=recall,
             recalled=recalled,
         )
         _within(deadline)
@@ -586,7 +591,8 @@ class UnderstandingStage:
         window: ChannelWindow,
         audience: TurnSupply,
         episodes: tuple[EpisodicMemory, ...] | None,
-        recalled: Recalled | None,
+        recall: ActivationRecall | None,
+        recalled: tuple[EpisodicMemory | SemanticMemory, ...],
     ) -> _Brief:
         """Render the prompt, filtering each window's stored records first (§3, §4)."""
         items = _channel_items(window, audience)
@@ -620,10 +626,12 @@ class UnderstandingStage:
         }
         instruction = _INSTRUCTION
         recalled_count: int | None = None
-        if recalled is not None:
+        if recall is not None:
             # ADR-0281 §7: a record either window already rendered stays there only.
             rendered = shared | {record.id for record in window_episodes}
-            section, recalled_count = self._recalled_section(recalled, rendered, labels)
+            section, recalled_count = self._recalled_section(
+                recall.outcome, recalled, rendered, labels
+            )
             payload["recalled"] = section
             instruction = _RECALL_INSTRUCTION
         messages = (
@@ -634,18 +642,18 @@ class UnderstandingStage:
 
     def _recalled_section(
         self,
-        recalled: Recalled,
+        outcome: RecallOutcome,
+        recalled: tuple[EpisodicMemory | SemanticMemory, ...],
         rendered: frozenset[str],
         labels: dict[str, UnderstandingReferent],
     ) -> tuple[list[dict[str, object]] | str, int]:
         """ADR-0281 §7's third section, labelled ``M`` in recall's order, and its count."""
-        outcome = recalled.result.outcome
         if outcome in {RecallOutcome.FAILED, RecallOutcome.TIMED_OUT}:
             return _RECALL_FAILED, 0
         if outcome is RecallOutcome.NOTHING_FOUND:
             return _NOTHING_RECALLED, 0
         section: list[dict[str, object]] = []
-        for record in (record for record in recalled.records if record.id not in rendered):
+        for record in (record for record in recalled if record.id not in rendered):
             label = f"M{len(section) + 1}"
             if isinstance(record, EpisodicMemory):
                 projection = _EpisodeProjection.of(record, excerpt_chars=self._excerpt_chars)
@@ -659,7 +667,7 @@ class UnderstandingStage:
             return section, len(section)
         # Recall kept records, and none renders: either every one is already shown
         # above, or the fetch found none of them held any more (ADR-0282 §5:2).
-        return (_ALREADY_SHOWN if recalled.records else _NO_LONGER_HELD), 0
+        return (_ALREADY_SHOWN if recalled else _NO_LONGER_HELD), 0
 
     def _validated(
         self, content: str, brief: _Brief

@@ -31,7 +31,6 @@ from ai_assistant.core.types import (
     band_of,
 )
 from ai_assistant.orchestration.disclosure import BoundedAudienceSupply
-from ai_assistant.orchestration.recall import Recalled
 from ai_assistant.orchestration.understanding import (
     ConversationWindow,
     RecentEpisodes,
@@ -78,7 +77,11 @@ def _episode(episode_id: str, at: datetime = EARLIER) -> EpisodicMemory:
     )
 
 
-def _found(*records: RecalledRecord) -> Recalled:
+#: What recall decided, and the records of it the understanding phase fetched.
+type _Recall = tuple[ActivationRecall, tuple[RecalledRecord, ...]]
+
+
+def _found(*records: RecalledRecord) -> _Recall:
     items = tuple(
         RecalledItem(
             kind=MemoryKind(record.kind),
@@ -91,13 +94,11 @@ def _found(*records: RecalledRecord) -> Recalled:
         )
         for record in records
     )
-    return Recalled(
-        ActivationRecall(outcome=RecallOutcome.FOUND, cues=CUES, items=items), records=records
-    )
+    return ActivationRecall(outcome=RecallOutcome.FOUND, cues=CUES, items=items), records
 
 
-def _decided(outcome: RecallOutcome) -> Recalled:
-    return Recalled(ActivationRecall(outcome=outcome, cues=CUES))
+def _decided(outcome: RecallOutcome) -> _Recall:
+    return ActivationRecall(outcome=outcome, cues=CUES), ()
 
 
 @dataclass(frozen=True)
@@ -120,7 +121,7 @@ async def _stage(model: FakeModelProvider, *records: MemoryRecord) -> _Staged:
 
 
 async def _understand(
-    staged: _Staged, recalled: Recalled | None, *, episodes: bool = True
+    staged: _Staged, recalled: _Recall | None, *, episodes: bool = True
 ) -> ActivationUnderstanding:
     return await staged.stage.understand(
         "Same as before.",
@@ -131,7 +132,8 @@ async def _understand(
         version=1,
         now=lambda: AT,
         deadline=math.inf,
-        recalled=recalled,
+        recall=None if recalled is None else recalled[0],
+        recalled=() if recalled is None else recalled[1],
     )
 
 

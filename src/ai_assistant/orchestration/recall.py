@@ -5,16 +5,22 @@ One orchestration-local stage, of the kind
 injected ``MemoryStore`` and the composition root's threshold, limit and budget, and it
 is **not a Protocol**. It calls no model and interprets nothing — it does not decide
 that a memory answers anything, is out of date, is relevant or settles a reference
-(§3). What it keeps, the understanding stage reads in the same pass (§7).
+(§3). What it keeps it holds as ids, and the understanding phase fetches them in the
+same pass (ADR-0282 §4, §5).
 
 **One cue, per band** (§3). The activation's input text, exactly as the pass holds it,
 is the query of one :meth:`~ai_assistant.core.protocols.MemoryStore.search` per band —
 ``ASSERTED``, ``ATTESTED``, ``DERIVED``, in that order, ADR-0072 §5's precedence — each
-over episodic and semantic records, bounded by the limit, requesting **no
-eligibility**. From each band's results, in the store's order, a record is kept only
-when its ``score`` is at or above the threshold and the audience predicate admits it,
-until the limit is filled. A record returned with no ``score`` is not kept, and
-``capped`` is not acted on.
+over episodic and semantic records, requesting **no eligibility**. From each band's
+results, in the store's order, a record is kept only when its ``score`` is at or above
+the threshold and the audience predicate admits it, until the limit is filled. A record
+returned with no ``score`` is not kept, and ``capped`` is not acted on.
+
+**Past the windows** (ADR-0282 §4). Recall is handed the ids the pass's windows already
+hold — the episode window's and the channel window's stored items' — and keeps none of
+them: such a record takes no slot, and a further match below it is kept in its place.
+Each band's search asks for the limit plus the number of those ids, so the records it
+passes over cannot crowd the band out.
 
 **Audience** (§4). ``admitted_to_understanding`` — the predicate of the understanding
 stage's two windows — filters what the searches returned before anything is kept, and
@@ -88,19 +94,23 @@ type RecalledRecord = EpisodicMemory | SemanticMemory
 
 @dataclass(frozen=True, slots=True)
 class Recalled:
-    """Recall's decision for one pass, and the records it kept (ADR-0281 §6).
+    """Recall's part of the working episode for one pass (ADR-0282 §4).
+
+    Its decision and each kept item's search score, and no record: the understanding
+    phase fetches the kept ids itself (§5).
 
     Attributes:
-        result: What the episode's processing record carries.
-        records: The kept records, in recall's order, for the understanding stage to
-            render. Held for the pass and never persisted; empty unless ``result``'s
-            outcome is ``found``.
+        result: What the episode's processing record carries; its items name the kept
+            records by id, in recall's order.
+        scores: Each kept item's search score, in the items' order; empty unless
+            ``result``'s outcome is ``found``.
         error: The ``MemoryStoreError`` or ``TimeoutError`` a ``failed`` or
-            ``timed_out`` decision carries, for the controller's stage result (§5).
+            ``timed_out`` decision carries, for the controller's stage result
+            (ADR-0281 §5).
     """
 
     result: ActivationRecall
-    records: tuple[RecalledRecord, ...] = ()
+    scores: tuple[float, ...] = ()
     error: Exception | None = None
 
 
@@ -138,7 +148,14 @@ class RecallStage:
         self._limit = limit
         self._budget = budget.total_seconds()
 
-    async def recall(self, text: str, *, audience: TurnSupply, deadline: float) -> Recalled:
+    async def recall(
+        self,
+        text: str,
+        *,
+        audience: TurnSupply,
+        deadline: float,
+        shown: frozenset[str] = frozenset(),
+    ) -> Recalled:
         """Search with ``text``, and decide what is kept.
 
         Args:
@@ -147,10 +164,12 @@ class RecallStage:
                 searches return, and an unbounded one searches semantic records alone.
             deadline: The pass's deadline on the running loop's clock, which caps
                 recall's budget.
+            shown: The stored ids the pass's windows hold, none of which is kept
+                (ADR-0282 §4).
 
         Returns:
             The decision — ``found``, ``nothing_found``, ``failed`` or
-            ``timed_out`` — with the kept records.
+            ``timed_out`` — with the kept items and their scores.
 
         Raises:
             TimeoutError: If the pass's deadline had already passed, so no search is
@@ -164,7 +183,7 @@ class RecallStage:
         budget = asyncio.timeout_at(min(now + self._budget, deadline))
         try:
             async with budget:
-                kept = await self._search(text, audience)
+                kept = await self._search(text, audience, shown)
         except MemoryStoreError as error:
             _log.warning("recall_failed", stage="recall", reason="memory_store_error")
             return Recalled(_decision(RecallOutcome.FAILED), error=error)
@@ -177,10 +196,19 @@ class RecallStage:
         if not kept:
             return Recalled(_decision(RecallOutcome.NOTHING_FOUND))
         items = tuple(_item(record) for record in kept)
-        return Recalled(_decision(RecallOutcome.FOUND, items), records=kept)
+        # Kept only with a score (§3), so each has one.
+        scores = tuple(record.score for record in kept if record.score is not None)
+        return Recalled(_decision(RecallOutcome.FOUND, items), scores=scores)
 
-    async def _search(self, text: str, audience: TurnSupply) -> tuple[RecalledRecord, ...]:
-        """§3's band-scoped searches, kept in band order until the limit is filled."""
+    async def _search(
+        self, text: str, audience: TurnSupply, shown: frozenset[str]
+    ) -> tuple[RecalledRecord, ...]:
+        """§3's band-scoped searches, kept in band order until the limit is filled.
+
+        A record the windows hold is passed over before it is judged, so it takes no
+        slot, and each search asks for as many more as it may pass over (ADR-0282 §4).
+        """
+        limit = self._limit + len(shown)
         kinds = (
             (MemoryKind.SEMANTIC,)
             if isinstance(audience, UnboundedAudienceSupply)
@@ -188,9 +216,11 @@ class RecallStage:
         )
         kept: dict[str, RecalledRecord] = {}
         for band in _BANDS:
-            found = await self._memory.search(text, limit=self._limit, kinds=kinds, bands=(band,))
+            found = await self._memory.search(text, limit=limit, kinds=kinds, bands=(band,))
             for record in admitted_to_understanding(audience, found.records):
                 if not isinstance(record, EpisodicMemory | SemanticMemory):
+                    continue
+                if record.id in shown:
                     continue
                 # Affirmatively at or above: a NaN score is not, and no score is not.
                 if record.score is None or not record.score >= self._threshold:
