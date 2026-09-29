@@ -7,7 +7,11 @@ from datetime import timedelta
 from typing import TYPE_CHECKING, Final
 
 from ai_assistant.orchestration.recall import RecallStage
-from ai_assistant.orchestration.understanding import RecentEpisodes, UnderstandingStage
+from ai_assistant.orchestration.understanding import (
+    RecentEpisodes,
+    UnderstandingStage,
+    WindowsStage,
+)
 from ai_assistant.testing import FakeModelProvider
 
 if TYPE_CHECKING:
@@ -37,15 +41,17 @@ STATED_PROPOSAL: Final = json.dumps(
 )
 
 
-def understanding_stage(
-    memory: MemoryStore, *, model: ModelProvider | None = None
-) -> UnderstandingStage:
-    """The stage the composition root builds, over ``memory`` and a scripted model."""
+def understanding_stage(*, model: ModelProvider | None = None) -> UnderstandingStage:
+    """The stage the composition root builds, over a scripted model; it reads no store."""
     return UnderstandingStage(
         model=model if model is not None else FakeModelProvider(reply=STATED_PROPOSAL),
-        episodes=RecentEpisodes(memory=memory, limit=EPISODE_LIMIT),
         excerpt_chars=EXCERPT_CHARS,
     )
+
+
+def windows_stage(memory: MemoryStore) -> WindowsStage:
+    """The windows stage the composition root builds, its selector over ``memory``."""
+    return WindowsStage(episodes=RecentEpisodes(memory=memory, limit=EPISODE_LIMIT))
 
 
 def recall_stage(memory: MemoryStore, *, threshold: float = FAKE_RECALL_THRESHOLD) -> RecallStage:

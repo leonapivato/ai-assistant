@@ -70,7 +70,7 @@ from episode_inspection_contract import (
     INSPECTION_LIMIT,
     EpisodeInspectionSubject,
 )
-from understanding_support import VERSION_LIMIT, understanding_stage
+from understanding_support import VERSION_LIMIT, understanding_stage, windows_stage
 
 from ai_assistant.core.protocols import (
     AuditTrail,
@@ -637,8 +637,9 @@ def _wire(  # noqa: PLR0913 — one knob per state the shared suite needs a subj
         routing=RoutingStage(model=_RoutingProvider(routes), recorder=FakeRoutingRecorder()),
         # ADR-0276's understanding stage, as the composition root wires it: the shared
         # channel contract asserts the version-1 record every pass it captures carries.
-        understanding=understanding_stage(records),
+        understanding=understanding_stage(),
         understanding_version_limit=VERSION_LIMIT,
+        windows=windows_stage(records),
         # The **same** store object the drivers would be given, and the only holder
         # of the wide seam (ADR-0097 §3). A second store here would let a grant land
         # somewhere the gate never reads.

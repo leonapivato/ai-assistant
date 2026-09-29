@@ -107,7 +107,7 @@ def _harness(
     return Harness(
         memory=memory,
         understanding=understanding_stage(
-            memory, model=understanding_model or FakeModelProvider(STATED_PROPOSAL)
+            model=understanding_model or FakeModelProvider(STATED_PROPOSAL)
         ),
         recall=recall or recall_stage(memory),
         **knobs,
@@ -172,8 +172,9 @@ async def test_a_found_recall_is_recorded_and_shown_to_understanding() -> None:
     harness = _harness(await _seeded(_BOOKED), understanding_model=model)
     await harness.engine.converse(_TURN, timeout=_BUDGET)
     record = await _record(harness)
-    assert _entries(record)[:3] == [
+    assert _entries(record)[:4] == [
         (_S.BEGIN_CONVERSATION, _R.CONVERSATION_UNRESOLVED, _DONE),
+        (_S.WINDOWS, _R.WINDOWS_UNASSEMBLED, _DONE),
         (_S.RECALL, _R.NOT_RECALLED, _DONE),
         (_S.UNDERSTANDING, _R.NOT_UNDERSTOOD, _DONE),
     ]
@@ -201,7 +202,7 @@ async def test_a_turn_with_recall_unwired_renders_no_recalled_section() -> None:
     harness = Harness(
         memory=memory,
         planner=NoStepPlanner(),
-        understanding=understanding_stage(memory, model=model),
+        understanding=understanding_stage(model=model),
         composing=ComposingStage(
             model=FakeModelProvider("Yes."), streaming=FakeStreamingCompleter()
         ),
@@ -223,7 +224,8 @@ async def test_a_store_failure_is_tolerated_and_understanding_runs() -> None:
     outcome = await harness.engine.converse(_TURN, timeout=_BUDGET)
     assert outcome.reply == "Yes."
     record = await _record(harness)
-    assert _entries(record)[1:3] == [
+    assert _entries(record)[1:4] == [
+        (_S.WINDOWS, _R.WINDOWS_UNASSEMBLED, _DONE),
         (_S.RECALL, _R.NOT_RECALLED, StageOutcome.FAILED),
         (_S.UNDERSTANDING, _R.NOT_UNDERSTOOD, _DONE),
     ]
@@ -238,7 +240,8 @@ async def test_recalls_own_budget_running_out_is_tolerated_and_understanding_run
     harness = _harness(recall=recall)
     await harness.engine.converse(_TURN, timeout=_BUDGET)
     record = await _record(harness)
-    assert _entries(record)[1:3] == [
+    assert _entries(record)[1:4] == [
+        (_S.WINDOWS, _R.WINDOWS_UNASSEMBLED, _DONE),
         (_S.RECALL, _R.NOT_RECALLED, StageOutcome.TIMED_OUT),
         (_S.UNDERSTANDING, _R.NOT_UNDERSTOOD, _DONE),
     ]
@@ -254,6 +257,7 @@ async def test_the_pass_deadline_passing_during_recall_ends_the_turn() -> None:
     record = await _record(harness)
     assert _entries(record) == [
         (_S.BEGIN_CONVERSATION, _R.CONVERSATION_UNRESOLVED, _DONE),
+        (_S.WINDOWS, _R.WINDOWS_UNASSEMBLED, _DONE),
         (_S.RECALL, _R.NOT_RECALLED, StageOutcome.TIMED_OUT),
         (_S.END, _R.STAGE_TIMED_OUT, _DONE),
     ]
@@ -267,6 +271,7 @@ async def test_the_pass_deadline_passing_during_recall_ends_an_event() -> None:
         await harness.engine.receive(event_input(), reply=None, timeout=timedelta(milliseconds=50))
     record = await _record(harness)
     assert _entries(record) == [
+        (_S.WINDOWS, _R.WINDOWS_UNASSEMBLED, _DONE),
         (_S.RECALL, _R.NOT_RECALLED, StageOutcome.TIMED_OUT),
         (_S.END, _R.STAGE_TIMED_OUT, _DONE),
     ]
@@ -299,6 +304,7 @@ async def test_recall_that_crosses_the_deadline_without_yielding_is_the_expiry(
     record = await _record(harness)
     assert _entries(record) == [
         (_S.BEGIN_CONVERSATION, _R.CONVERSATION_UNRESOLVED, _DONE),
+        (_S.WINDOWS, _R.WINDOWS_UNASSEMBLED, _DONE),
         (_S.RECALL, _R.NOT_RECALLED, StageOutcome.TIMED_OUT),
         (_S.END, _R.STAGE_TIMED_OUT, _DONE),
     ]
@@ -312,20 +318,21 @@ class _SlowDecline(FakeModelProvider):
         return await super().complete(messages, model=model)
 
 
-async def test_recall_due_past_the_deadline_is_not_entered() -> None:
-    """Routing spent the budget, so recall searches nothing and makes no decision."""
+async def test_a_pass_out_of_time_before_recall_searches_nothing() -> None:
+    """Routing spent the budget, so the windows stage, due first, is not entered: recall
+    searches nothing and makes no decision (ADR-0282 §3)."""
     slow = _Slow()
     router = RoutingStage(
         model=_SlowDecline(json.dumps({"operation": "none"})), recorder=FakeRoutingRecorder()
     )
     harness = _harness(recall=recall_stage(slow), routing=router)
-    with pytest.raises(ModelTimeoutError, match="during recall"):
+    with pytest.raises(ModelTimeoutError, match="assembling the windows"):
         await harness.engine.converse(_TURN, timeout=timedelta(milliseconds=20))
     record = await _record(harness)
     assert _entries(record) == [
         (_S.BEGIN_CONVERSATION, _R.CONVERSATION_UNRESOLVED, _DONE),
         (_S.ROUTING, _R.ROUTE_UNCHECKED, _DONE),
-        (_S.RECALL, _R.NOT_RECALLED, StageOutcome.TIMED_OUT),
+        (_S.WINDOWS, _R.WINDOWS_UNASSEMBLED, StageOutcome.TIMED_OUT),
         (_S.END, _R.STAGE_TIMED_OUT, _DONE),
     ]
     assert slow.searches == 0
@@ -387,7 +394,8 @@ async def test_an_event_recalls_under_a_bounded_audience() -> None:
         if isinstance(r, EpisodicMemory) and r.id != "episode-eco" and r.processing_record
     ]
     (record,) = records
-    assert _entries(record)[:2] == [
+    assert _entries(record)[:3] == [
+        (_S.WINDOWS, _R.WINDOWS_UNASSEMBLED, _DONE),
         (_S.RECALL, _R.NOT_RECALLED, _DONE),
         (_S.UNDERSTANDING, _R.NOT_UNDERSTOOD, _DONE),
     ]
@@ -434,7 +442,6 @@ async def test_an_understood_event_is_found_by_a_later_activation_that_shares_it
         understood = Harness(
             memory=store,  # type: ignore[arg-type]  # the harness only hands its store on
             understanding=understanding_stage(
-                store,
                 model=FakeModelProvider(
                     json.dumps({"meaning": meaning, "meaning_ground": "stated"})
                 ),

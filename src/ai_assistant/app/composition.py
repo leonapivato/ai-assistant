@@ -98,7 +98,11 @@ from ai_assistant.orchestration.informational_events import InformationalEventSt
 from ai_assistant.orchestration.payloads import ENVELOPE_RESERVE_BYTES
 from ai_assistant.orchestration.recall import RecallStage
 from ai_assistant.orchestration.reconciling import ReconciliationStage
-from ai_assistant.orchestration.understanding import RecentEpisodes, UnderstandingStage
+from ai_assistant.orchestration.understanding import (
+    RecentEpisodes,
+    UnderstandingStage,
+    WindowsStage,
+)
 from ai_assistant.permissions import (
     ConfiguredForecastDestination,
     ConfiguredSearchDestination,
@@ -2254,16 +2258,19 @@ def build_composition(  # noqa: PLR0915 — one statement per resource this root
             routing=RoutingStage(model=model, recorder=routing_trail),
             # ADR-0276's understanding stage, over the **same** model seam routing and
             # the planner reach through — the routing-over-retrying provider built
-            # above, which carries ADR-0011's retry policy — and the initial episode
-            # selector over the one memory store. The selector is the method §4 makes
-            # a wiring choice: swapping it is a change on this line and nowhere else.
-            # The stage receives no goal, plan, memory retrieval or context state.
+            # above, which carries ADR-0011's retry policy. The stage reads no store
+            # and receives no goal, plan, memory retrieval or context state.
             understanding=UnderstandingStage(
                 model=model,
-                episodes=RecentEpisodes(memory=memory, limit=UNDERSTANDING_EPISODE_LIMIT),
                 excerpt_chars=UNDERSTANDING_EXCERPT_CHARS,
             ),
             understanding_version_limit=UNDERSTANDING_VERSION_LIMIT,
+            # ADR-0282's windows stage, holding the initial episode selector over the
+            # one memory store. The selector is the method ADR-0276 §4 makes a wiring
+            # choice: swapping it is a change on this line and nowhere else.
+            windows=WindowsStage(
+                episodes=RecentEpisodes(memory=memory, limit=UNDERSTANDING_EPISODE_LIMIT)
+            ),
             # ADR-0281's recall stage, over the same memory store, with the threshold
             # chosen for the embedder that store was built with.
             recall=RecallStage(
