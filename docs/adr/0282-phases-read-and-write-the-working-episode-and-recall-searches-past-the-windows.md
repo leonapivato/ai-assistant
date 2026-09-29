@@ -1,6 +1,6 @@
 # 282. Phases read and write the working episode, and recall searches past the windows
 
-- Status: Proposed
+- Status: Accepted
 - Date: 2026-09-29
 - Scope: [M39](https://github.com/leonapivato/ai-assistant/milestone/6), [#2607](https://github.com/leonapivato/ai-assistant/issues/2607).
 - Dependency: ADR-0281 and ADR-0280, both implemented at `d974519b`; ADR-0276.
