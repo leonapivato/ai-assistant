@@ -286,8 +286,8 @@ async def _recall(
 
 
 def _ids(recalled: Recalled) -> list[str]:
-    assert [item.id for item in recalled.result.items] == [r.id for r in recalled.records]
-    return [record.id for record in recalled.records]
+    assert len(recalled.scores) == len(recalled.result.items)
+    return [item.id for item in recalled.result.items]
 
 
 # --- §3: what it searches ------------------------------------------------------------
@@ -323,8 +323,30 @@ async def test_a_record_below_the_threshold_is_not_kept() -> None:
 async def test_it_keeps_at_most_the_limit_and_stops_searching_once_filled() -> None:
     memory = await _store(*(_fact(f"m{n}") for n in range(5)))
     recalled = await _recall(_stage(memory, limit=2))
-    assert len(recalled.records) == 2
+    assert len(recalled.result.items) == 2
     assert [search.bands for search in memory.searches] == [(BeliefBand.ASSERTED,)]
+
+
+# --- ADR-0282 §4: past the windows ------------------------------------------------------
+
+
+async def test_a_record_the_windows_hold_takes_no_slot_and_the_next_match_is_kept() -> None:
+    first = _fact("first", "dentist appointment")
+    below = _fact("below", "dentist appointment on Friday")
+    memory = await _store(first, below)
+    assert _ids(await _recall(_stage(memory, limit=1))) == ["first"]
+    recalled = await _stage(memory, limit=1).recall(
+        CUE, audience=BOUNDED, deadline=math.inf, shown=frozenset({"first"})
+    )
+    assert _ids(recalled) == ["below"]
+
+
+async def test_each_search_asks_for_the_limit_plus_the_ids_the_windows_hold() -> None:
+    memory = await _store(_fact("m", "nothing alike"))
+    await _stage(memory, limit=3).recall(
+        CUE, audience=BOUNDED, deadline=math.inf, shown=frozenset({"a", "b"})
+    )
+    assert [search.limit for search in memory.searches] == [5, 5, 5]
 
 
 @pytest.mark.parametrize("score", [None, math.nan], ids=["no-score", "nan"])
@@ -482,15 +504,16 @@ async def test_a_semantic_excerpt_is_its_fact_cut_to_the_referent_bound() -> Non
 # --- §5, §6: outcomes, failure and the two deadlines -----------------------------------
 
 
-async def test_a_found_recall_carries_its_items_and_records() -> None:
+async def test_a_found_recall_carries_its_items_and_scores() -> None:
     recalled = await _recall(_stage(await _store(_fact("m"))))
     assert recalled.result.outcome is RecallOutcome.FOUND
+    assert len(recalled.scores) == len(recalled.result.items) == 1
     assert recalled.error is None
 
 
 async def test_nothing_above_the_threshold_is_nothing_found() -> None:
     recalled = await _recall(_stage(await _store(_fact("m"))), "yes")
-    assert (recalled.result.outcome, recalled.result.items, recalled.records) == (
+    assert (recalled.result.outcome, recalled.result.items, recalled.scores) == (
         RecallOutcome.NOTHING_FOUND,
         (),
         (),
@@ -500,14 +523,14 @@ async def test_nothing_above_the_threshold_is_nothing_found() -> None:
 async def test_a_store_failure_is_a_failed_decision_returned_not_raised() -> None:
     memory = await _seed(FakeMemoryStore(now=lambda: AT, failure="down"), _fact("m"))
     recalled = await _recall(_stage(memory))
-    assert (recalled.result.outcome, recalled.records) == (RecallOutcome.FAILED, ())
+    assert (recalled.result.outcome, recalled.scores) == (RecallOutcome.FAILED, ())
     assert isinstance(recalled.error, MemoryStoreError)
 
 
 async def test_a_spent_budget_is_a_timed_out_decision_returned_not_raised() -> None:
     stage = _stage(await _seed(_Slow(now=lambda: AT)), budget=timedelta(milliseconds=10))
     recalled = await _recall(stage)
-    assert (recalled.result.outcome, recalled.records) == (RecallOutcome.TIMED_OUT, ())
+    assert (recalled.result.outcome, recalled.scores) == (RecallOutcome.TIMED_OUT, ())
     assert isinstance(recalled.error, TimeoutError)
 
 

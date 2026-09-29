@@ -60,6 +60,7 @@ from ai_assistant.orchestration.disclosure import BoundedAudienceSupply
 from ai_assistant.orchestration.informational_events import InformationalEventStage
 from ai_assistant.orchestration.recall import RecallStage
 from ai_assistant.orchestration.routing import RoutingStage
+from ai_assistant.orchestration.understanding import WindowsStage
 from ai_assistant.testing import (
     FakeMemoryStore,
     FakeModelProvider,
@@ -379,6 +380,11 @@ async def test_a_spoken_turn_recalls_no_episode() -> None:
     ]
 
 
+async def _no_episodes(_shared: frozenset[str]) -> tuple[EpisodicMemory, ...]:
+    """An episode selector choosing none, so every stored episode is past the windows."""
+    return ()
+
+
 async def test_an_event_recalls_under_a_bounded_audience() -> None:
     text = "The thermostat entered eco mode at 18:00."
     episode = EpisodicMemory(
@@ -387,7 +393,7 @@ async def test_an_event_recalls_under_a_bounded_audience() -> None:
         occurred_at=AT,
         provenance=Provenance(source=MemorySource.OBSERVED, confidence=0.9, last_updated=AT),
     )
-    harness = _harness(await _seeded(episode))
+    harness = _harness(await _seeded(episode), windows=WindowsStage(episodes=_no_episodes))
     await harness.engine.receive(event_input(), reply=None, timeout=_BUDGET)
     records = [
         r.processing_record
@@ -537,3 +543,36 @@ async def test_everything_recalled_forgotten_before_understanding_is_said() -> N
     assert record.recall is not None
     assert record.recall.outcome is RecallOutcome.FOUND
     assert _shown(model) == "missing: what was recalled is no longer in memory"
+
+
+# --- recall searches past the windows (ADR-0282 §4) --------------------------------------
+
+
+async def test_an_episode_the_window_holds_is_not_recalled() -> None:
+    """The event's episode window holds the stored episode, so recall passes over it and
+    keeps the belief below it; the episode renders in the window alone."""
+    text = "The thermostat entered eco mode at 18:00."
+    episode = EpisodicMemory(
+        id="episode-eco",
+        content=text,
+        occurred_at=AT,
+        provenance=Provenance(source=MemorySource.OBSERVED, confidence=0.9, last_updated=AT),
+    )
+    fact = SemanticMemory(
+        id="fact-eco",
+        content=text,
+        fact=text,
+        provenance=Provenance(source=MemorySource.INFERRED, confidence=0.8, last_updated=AT),
+    )
+    model = FakeModelProvider(STATED_PROPOSAL)
+    harness = _harness(await _seeded(episode, fact), understanding_model=model)
+    await harness.engine.receive(event_input(), reply=None, timeout=_BUDGET)
+    (record,) = [
+        r.processing_record
+        for r in await harness.memory.export()
+        if isinstance(r, EpisodicMemory) and r.id != "episode-eco" and r.processing_record
+    ]
+    assert record.recall is not None
+    assert [item.id for item in record.recall.items] == ["fact-eco"]
+    (shown,) = _shown(model)
+    assert (shown["label"], shown["fact"]) == ("M1", text)

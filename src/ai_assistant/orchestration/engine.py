@@ -12487,10 +12487,8 @@ class Engine:
                     version=1 if state is None else state.next_understanding_version(),
                     now=self._clock,
                     deadline=deadline,
-                    # What renders is what the fetch returned, never recall's own copies.
-                    recalled=None
-                    if recalled is None
-                    else replace(recalled, records=fetched.recalled),
+                    recall=None if recalled is None else recalled.result,
+                    recalled=fetched.recalled,
                 )
         except BaseException as exc:
             # A timer fires only when the loop gets control, so a stage can cross the
@@ -12572,8 +12570,14 @@ class Engine:
         own classified expiry, which the controller re-raises.
         """
         assert self._recall is not None  # noqa: S101 — the rule makes recall due only where it is wired
+        windows = working.windows
+        assert windows is not None  # noqa: S101 — the windows row precedes recall's wherever it is wired
         recalled = await self._recall.recall(
-            working.text, audience=working.supply, deadline=working.deadline
+            working.text,
+            audience=working.supply,
+            deadline=working.deadline,
+            # ADR-0282 §4: what the windows already hold is not recalled again.
+            shown=windows.shared | frozenset(windows.episode_ids or ()),
         )
         late = _recall_expired(working)
         if late is not None:
