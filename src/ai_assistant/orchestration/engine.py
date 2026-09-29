@@ -333,7 +333,7 @@ from ai_assistant.orchestration.understanding import (
     ChannelWindow,
     ConversationWindow,
     SuppliedWindow,
-    fetch_episodes,
+    fetch_held,
 )
 from ai_assistant.orchestration.verification import Comparison, compare
 
@@ -370,7 +370,6 @@ if TYPE_CHECKING:
         DestinationTrustRecord,
         DurableIdentifier,
         EncodableText,
-        EpisodicMemory,
         ExecutionState,
         FeedbackEvent,
         FrozenJsonMapping,
@@ -12368,8 +12367,9 @@ class Engine:
         the pass, or what an event's channel supplied. The episode window is the
         selector's choice, held as ids after the audience predicate; a spoken turn
         takes none (ADR-0276 §4:13). Its reads run inside the pass's deadline, and an
-        expiry is the pass kind's classified timeout. It is not failure-tolerant: any
-        other failure takes the fixed default.
+        expiry — the timer firing, or assembly that crossed the deadline and returned —
+        is the pass kind's classified timeout. It is not failure-tolerant: any other
+        failure takes the fixed default.
 
         Raises:
             ModelTimeoutError: If a turn's deadline expired inside the stage.
@@ -12387,7 +12387,7 @@ class Engine:
                     assert isinstance(working, _EventPass)  # noqa: S101 — the two pass kinds
                     channel = SuppliedWindow(working.input.context)
                     episodes = True
-                working.windows = await self._windows.assemble(
+                windows = await self._windows.assemble(
                     channel, audience=working.supply, episodes=episodes
                 )
         except TimeoutError:
@@ -12395,19 +12395,28 @@ class Engine:
             if late is None:
                 raise
             raise late from None
+        # A timer fires only when the loop gets control, so assembly can cross the
+        # deadline and return: that is the expiry too, and its decision is not made.
+        if (late := _windows_expired(working)) is not None:
+            raise late
+        working.windows = windows
 
-    async def _fetch_window(
-        self, working: _ActivationPass, windows: Windows
-    ) -> tuple[EpisodicMemory, ...] | None:
-        """The episode window's records, fetched by id under ADR-0282 §2's rules.
+    async def _fetch_held(self, working: _ActivationPass, windows: Windows) -> Fetched:
+        """The window's and recall's records, fetched by id in one read (ADR-0282 §5).
 
         What was fetched and what came back missing is written on the working episode
-        before the records are returned. ``None`` where the pass takes no episode
-        window, and then nothing is read.
+        before the records are returned. Recall's ids are the ones its decision kept;
+        a decision that kept none adds none.
         """
-        if windows.episode_ids is None:
-            return None
-        fetched = await fetch_episodes(self._memory, windows.episode_ids, audience=working.supply)
+        recalled = working.recalled
+        fetched = await fetch_held(
+            self._memory,
+            episode_ids=windows.episode_ids,
+            recalled_ids=()
+            if recalled is None
+            else tuple(item.id for item in recalled.result.items),
+            audience=working.supply,
+        )
         working.understanding_fetch = fetched
         _log.info(
             "stage_fetch",
@@ -12415,7 +12424,7 @@ class Engine:
             fetched=len(fetched.fetched),
             missing=len(fetched.missing),
         )
-        return fetched.records
+        return fetched
 
     async def _understand(
         self,
@@ -12435,9 +12444,9 @@ class Engine:
         stage could not obtain.
 
         **It reads what the working episode holds** (ADR-0282 §5): the windows the
-        windows stage recorded, the episode window's records fetched by id — current
-        versions, the audience predicate applied again, a missing one left out and
-        recorded on the working episode — and what recall kept.
+        windows stage recorded, and the episode window's and recall's records fetched
+        by id in one read — current versions, the audience predicate applied again, a
+        missing one left out and recorded on the working episode.
 
         **It runs inside the pass's existing deadline** (§5): the fetch and both
         completions are bounded by what is left of the budget the call was handed,
@@ -12467,17 +12476,21 @@ class Engine:
             raise ModelTimeoutError(_UNDERSTANDING_EXPIRED)
         try:
             async with asyncio.timeout_at(deadline):
-                episodes = await self._fetch_window(working, windows)
+                fetched = await self._fetch_held(working, windows)
+                recalled = working.recalled
                 understood = await self._understanding.understand(
                     input.text,
                     channel=input.channel,
                     window=windows.channel,
                     audience=working.supply,
-                    episodes=episodes,
+                    episodes=fetched.episodes,
                     version=1 if state is None else state.next_understanding_version(),
                     now=self._clock,
                     deadline=deadline,
-                    recalled=working.recalled,
+                    # What renders is what the fetch returned, never recall's own copies.
+                    recalled=None
+                    if recalled is None
+                    else replace(recalled, records=fetched.recalled),
                 )
         except BaseException as exc:
             # A timer fires only when the loop gets control, so a stage can cross the
