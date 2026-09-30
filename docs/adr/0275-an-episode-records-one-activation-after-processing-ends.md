@@ -48,8 +48,8 @@
   `occurred_at` is the admission reading. §6:2: every address is
   `activation:<activation_id>`. §6:3's last sentence gives way for a named conversation
   that does not resolve at admission, whose episode is kept standalone without
-  attached context. §6:6's index-first capture gives way: the episode is frozen
-  before its row, and deletion also sweeps the conversation's channel. §7:4 and §9:6 admit one field, the exact input text, to one
+  attached context. §6:6's index-first capture gives way: the open episode
+  exists before its row, and deletion also sweeps the conversation's channel. §7:4 and §9:6 admit one field, the exact input text, to one
   consumer, other activations' open episodes in the channel window.
   §8:8's `SpokenTurn.episode_id` is the episode's address. §8:13: restart freezes an
   open episode as interrupted and still fabricates none. §9:1 measures each write and

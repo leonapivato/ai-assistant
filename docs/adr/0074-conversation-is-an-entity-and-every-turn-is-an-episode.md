@@ -467,8 +467,8 @@
   append: a turn's episode id is its activation's, `activation:<activation_id>`,
   supplied by the caller; the store still allocates the ordinal, and §3's
   insert-not-upsert and no-retry rules stand. §8's deletion protocol in three parts:
-  the episode exists before its index row, which is written after the episode is
-  frozen; step 2 also deletes every episode whose channel is the conversation; and a
+  the episode exists, open, before its index row, which is written once the episode
+  carries its ending; step 2 also deletes every episode whose channel is the conversation; and a
   refused append deletes the episode it would have indexed. The tombstone, the
   per-conversation mutual exclusion, the verification after writing, the grace period
   and the reclaim sweep stand. These scoped replacements will take effect on
