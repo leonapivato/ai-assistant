@@ -1,6 +1,6 @@
 # 276. An activation is understood before it is associated, and the understanding is retained with its episode
 
-- Status: Partially superseded by ADR-0280 (§7's first clause, in its `schema_version` literal alone) and ADR-0281 (§1:5, in its *no retrieved memory* and *nothing else* parts alone; §2:5's referent kinds and §3:3's label scheme, in the additions alone; §5:1's *before any relevance read*, for recall's read alone) and ADR-0282 (§4:1's wiring, in its *wires into the stage* and *it receives the selector's records* parts alone) and ADR-0283 (§3:1's conversation tail, in the addition alone; §4:3's selection, in the addition alone; §7:1's exactly-one validator, for an open record alone; §7:3's written once at capture)
+- Status: Partially superseded by ADR-0280 (§7's first clause, in its `schema_version` literal alone) and ADR-0281 (§1:5, in its *no retrieved memory* and *nothing else* parts alone; §2:5's referent kinds and §3:3's label scheme, in the additions alone; §5:1's *before any relevance read*, for recall's read alone) and ADR-0282 (§4:1's wiring, in its *wires into the stage* and *it receives the selector's records* parts alone) and ADR-0283 (§3:1's channel window, in the addition alone; §4:3's selection, in the addition alone; §7:1's exactly-one validator, for an open record alone; §7:3's written once at capture)
 - Date: 2026-09-22
 - Scope: [M37](https://github.com/leonapivato/ai-assistant/milestone/4), [#2544](https://github.com/leonapivato/ai-assistant/issues/2544).
 - Dependency: ADR-0274, ADR-0275 and their milestones M35 and M36.
@@ -27,7 +27,8 @@
   takes effect on ratification of ADR-0282. This reciprocal header record accompanies the
   numbered draft under ADR-0070 and ADR-0082; the ratified body below is preserved.
 - Partially superseded: 2026-09-30 by ADR-0283 — four narrow scopes. §3:1's
-  conversation tail is followed by other activations' open turns, marked in progress.
+  channel window is followed by other activations' open episodes on the same channel
+  instance, marked in progress.
   §4:3's selector passes over the pass's own episode. §7:1's exactly-one validator
   does not bind an open record. §7:3's versions are written through as each stage
   ends rather than once at capture. §7:4's bound stands, applied at the freeze, and

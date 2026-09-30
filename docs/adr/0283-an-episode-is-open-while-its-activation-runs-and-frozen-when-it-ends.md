@@ -5,9 +5,9 @@
 - Scope: [M36](https://github.com/leonapivato/ai-assistant/milestone/2), reopened 2026-09-30 for [#2613](https://github.com/leonapivato/ai-assistant/issues/2613); folds in [#2608](https://github.com/leonapivato/ai-assistant/issues/2608) and [#2592](https://github.com/leonapivato/ai-assistant/issues/2592).
 - Dependency: ADR-0275, ADR-0276, ADR-0280, ADR-0281 and ADR-0282, all implemented at `5d872812`.
 - Authorization: the owner accepted proposal #2614 on 2026-09-30, after ruling its seven decisions, its bounds and deletion options and its three additions in conversation the same day, and directed its conversion into this ADR. The dispatcher assigned the next available number, 0283. That authorizes drafting and numbering, not ratification or implementation.
-- **Partially supersedes** [ADR-0074](0074-conversation-is-an-entity-and-every-turn-is-an-episode.md) — **one scope.** §3's rule that *"A captured episode's id is derived from the turn, not minted"*, with the paragraph after it in its *derives the id* part alone: a turn's episode id is its activation's episode id (§1 below), which the caller supplies; the store still allocates the ordinal, the index row still names the episode before the episode is final, and §3's insert-not-upsert rule, its no-retry rule and §8's deletion protocol stand entire.
-- **Partially supersedes** [ADR-0275](0275-an-episode-records-one-activation-after-processing-ends.md) — **twenty scopes.** **§1:3**, in its *its episode is the post-processing record* part alone: the episode is the activation's record from admission, open until processing ends. **§1:4's exclusion list, in one item**: *"live activation log"* is no longer excluded; the open episode is that log, and §1:4's other exclusions stand. **§2:2**, in its *call-local state, with no durable start row* part alone: the activation ID and start reading are written durably in the open episode at admission. **§4's record shapes, in the additions alone**: §2, §6, §9 and §11 below's status, reasons, fields and trigger flag; every existing field, value and validator stands. **§4:9's last sentence**: `occurred_at` is the admission reading (§2 below). **§6:2**, in its *address allocated by `ConversationStore.append`* part alone: every episode's address is `activation:<activation_id>`; the namespace's reservation to the capture producer stands. **§6:3's last sentence**, for a turn-row write refused at admission alone (§11 below). **§7:5**, in its *persist atomically with the index row* and *immutable* parts alone: the flag is set once, at the freeze (§5 and §7 below), and is immutable from then. **§7:4's eligibility-`True` rule and §9:6's exclusion of the trigger's raw input text, for one consumer and one field**: the channel window's open turns of other activations (§8 below) are rendered from their trigger's exact input text or transcript; attached context and every other field stay excluded. **§8:2**'s sequence, in its *after the pass ends* and ordering parts alone: §2–§5 below's sequence replaces it; a frozen record is still never updated in place. **§8:4**'s last sentence, *"not a durable live-progress record"*. **§8:6**'s capture timestamp, in its *capture* reading alone: the reading is the admission reading. **§8:8**, in its *index-row address* part alone: `SpokenTurn.episode_id` is the episode's id. **§8:13**'s first sentence, in its *fabricates interrupted episodes* part alone: restart freezes an episode left open (§6 below) and still fabricates none. **§9:1**, in its *before any index/archive/content write* part alone: each write of the open record is measured (§10 below). **§9:2**, in its *at capture* part alone: the horizon is stamped at admission. **§10:3**'s and **§10:9**'s read-time liveness, for an open episode alone: it is live whatever its expiry until it is frozen (§4 below). **§12:6**'s third sentence, for §4 below's `advance_episode` and `freeze_episode` on an open episode alone. Every other clause stands.
-- **Partially supersedes** [ADR-0276](0276-an-activation-is-understood-before-it-is-associated-and-the-understanding-is-retained-with-its-episode.md) — **four scopes.** **§3:1's conversation-channel tail, in the addition alone**: it also carries the other activations' open turns in the conversation (§8 below). **§4:3's selection, in the addition alone**: the selector passes over the pass's own episode (§8 below). **§7:1's exactly-one validator, for an open record alone**: an open record may carry neither understanding nor an omission (§2 below). **§7:3**, in its *written once, at capture* part alone: versions are written through as §3 below states. Every other clause stands, §7:4's bound included, applied at the freeze.
+- **Partially supersedes** [ADR-0074](0074-conversation-is-an-entity-and-every-turn-is-an-episode.md) — **one scope.** §3's rule that *"A captured episode's id is derived from the turn, not minted"*, with the paragraph after it in its *derives the id* part alone: a turn's episode id is its activation's episode id (§1 below), which the caller supplies; the store still allocates the ordinal, the index row is still written before the episode's final write, and §3's insert-not-upsert rule, its no-retry rule and §8's deletion protocol stand entire.
+- **Partially supersedes** [ADR-0275](0275-an-episode-records-one-activation-after-processing-ends.md) — **twenty scopes.** **§1:3**, in its *its episode is the post-processing record* part alone: the episode is the activation's record from admission, open until processing ends. **§1:4's exclusion list, in one item**: *"live activation log"* is no longer excluded; the open episode is that log, and §1:4's other exclusions stand. **§2:2**, in its *call-local state, with no durable start row* part alone: the activation ID and start reading are written durably in the open episode at admission. **§4's record shapes, in the additions alone**: §2, §6, §9 and §11 below's status, reasons, fields and trigger flag; every existing field, value and validator stands. **§4:9's last sentence**: `occurred_at` is the admission reading (§2 below). **§4:5's last sentence, for an open episode alone**: an open episode's conversational channel names a conversation that indexes it only from the freeze (§7 below). **§6:2**, in its *address allocated by `ConversationStore.append`* part alone: every episode's address is `activation:<activation_id>`; the namespace's reservation to the capture producer stands. **§6:3's last sentence**, for a named conversation that does not resolve at admission alone (§11 below). **§7:4's eligibility-`True` rule and §9:6's exclusion of the trigger's raw input text, for one consumer and one field**: the other activations' open episodes the channel window carries (§8 below) are rendered from their trigger's exact input text or transcript; attached context and every other field stay excluded. **§8:2**'s sequence, in its *after the pass ends* and ordering parts alone: §2–§5 below's sequence replaces it; a frozen record is still never updated in place. **§8:4**'s last sentence, *"not a durable live-progress record"*. **§8:6**'s capture timestamp, in its *capture* reading alone: the reading is the admission reading. **§8:8**, in its *index-row address* part alone: `SpokenTurn.episode_id` is the episode's id. **§8:13**'s first sentence, in its *fabricates interrupted episodes* part alone: restart freezes an episode left open (§6 below) and still fabricates none. **§9:1**, in its *before any index/archive/content write* part alone: each write of the open record is measured (§10 below). **§9:2**, in its *at capture* part alone: the horizon is stamped at admission. **§10:3**'s and **§10:9**'s read-time liveness, for an open episode alone: it is live whatever its expiry until it is frozen (§4 below). **§12:6**'s third sentence, for §4 below's `advance_episode` and `freeze_episode` on an open episode alone. Every other clause stands.
+- **Partially supersedes** [ADR-0276](0276-an-activation-is-understood-before-it-is-associated-and-the-understanding-is-retained-with-its-episode.md) — **four scopes.** **§3:1's channel window, in the addition alone**: it is followed by the other activations' open episodes on the same channel instance (§8 below). **§4:3's selection, in the addition alone**: the selector passes over the pass's own episode (§8 below). **§7:1's exactly-one validator, for an open record alone**: an open record may carry neither understanding nor an omission (§2 below). **§7:3**, in its *written once, at capture* part alone: versions are written through as §3 below states. Every other clause stands, §7:4's bound included, applied at the freeze.
 - **Partially supersedes** [ADR-0280](0280-an-activation-controller-runs-the-stages-by-rules-and-records-every-choice-with-the-episode.md) — **three scopes.** **§4:1–§4:2's enums, in the addition alone**: `ControllerRule` gains `hub_stopped`. **§6:5**, in its *written once, at capture* and *nothing is written durably before finalization* parts alone: entries are written through as §3 below states. **§7:1's validator, for an open record alone**: an open record carries no end entry (§2 below). Every other clause stands, §6:6's bound included, applied at the freeze.
 - **Partially supersedes** [ADR-0281](0281-recall-runs-before-understanding-and-understanding-reads-what-it-found.md) — **three scopes.** **§6:1's `RecalledItem`, in the addition alone**: it gains `score` (§9 below). **§6:4**, in its *written once, at capture* part alone: recall's result is written through as §3 below states. **§6:5's `schema_version` literal alone**: it becomes `Literal[5]`. Every other clause stands.
 - **Supersedes** [ADR-0282](0282-phases-read-and-write-the-working-episode-and-recall-searches-past-the-windows.md) **§1:2 entire**: §9 below saves what the windows stage chose and what each stage fetched, and advances `schema_version` and the format marker. Every other clause of ADR-0282 stands; §2's working episode is still held in memory, and the stored episode records ids, never records.
@@ -54,11 +54,11 @@ the same topic.
 > (ADR-0275 §2:1, §6:1), for a channel activation and for a control activation
 > alike. No producer allocates an episode address from a conversation ordinal.
 
-> **Normative.** A conversation turn row keeps its own position,
-> `(conversation_id, ordinal)`, which `ConversationStore` allocates. Its
-> `episode_id` is the episode's address, which the caller supplies. The store no
-> longer derives an episode address from the ordinal or checks a stored address
-> against one.
+> **Normative.** An episode knows the channel its input arrived on, as the
+> trigger's resolved `channel`, and nothing of any channel's own records. What a
+> channel keeps about its episodes — for the conversation channel, its turn index —
+> is that channel's, and the episode's lifecycle neither reads it nor waits on it,
+> except where §5 and §11 name the conversation index.
 
 ### 2. The episode is written at admission, open
 
@@ -141,10 +141,16 @@ the same topic.
 > `disposition` projections, and the capture stamps. The store embeds the frozen
 > version's content as it embeds any written episode.
 
-> **Normative.** A conversational freeze writes, in order: the archive entry where
-> one is owed, addressed by the episode's address; `freeze_episode`; the turn row's
-> freeze; then ADR-0275 §8:11's verification and compensation. A standalone freeze
-> writes `freeze_episode` alone.
+> **Normative.** Where the episode's channel is a conversation, the freeze writes,
+> in order: the turn row, by `ConversationStore.append` naming the episode's
+> address, with its eligibility, parked binding and delivery as today; the archive
+> entry where one is owed, addressed by the episode's address; `freeze_episode`;
+> then ADR-0275 §8:11's verification and compensation. Any other freeze writes
+> `freeze_episode` alone.
+
+> **Normative.** An append refused because the conversation no longer exists
+> deletes the open episode and degrades capture, as ADR-0275 §8:11's compensation
+> does for a conversation deleted during capture.
 
 > **Normative.** After `freeze_episode` succeeds, the episode is as immutable as
 > ADR-0275 §12:6 makes any record carrying a processing record.
@@ -162,54 +168,39 @@ the same topic.
 > activation's record gains an end stage entry whose `due` is the new
 > `ControllerRule` member `hub_stopped`. A record with neither understanding nor an
 > omission takes the omission `not_reached`. `ended_at` is the latest reading the
-> record already holds. The turn row, where there is one, is frozen with it.
-
-> **Normative.** The restart then freezes every conversation turn row still open,
-> whatever became of its episode: with the episode's `model_eligible` where the
-> episode is frozen, and with `model_eligible=False` where no episode with its
-> address exists. It writes no episode and no binding for such a row.
+> record already holds. It follows §5's order without the archive entry: where
+> the episode's channel is a conversation and no turn row names the episode
+> (`ConversationStore.turn_of_episode`), it appends one with
+> `model_eligible=False`.
 
 > **Normative.** The restart freeze replays no input, resumes no work, writes no
 > archive entry and invents no field the record did not hold, other than those the
 > clause above names. An activation that died before its admission write still
 > leaves no episode.
 
-> **Normative.** Forgetting an episode, or deleting its conversation, while it is
-> open deletes the open episode as it deletes a frozen one. The pass's later writes
+> **Normative.** Forgetting an episode, or deleting the channel instance it arrived
+> on, while it is open deletes the open episode as it deletes a frozen one. The pass's later writes
 > then raise `EpisodeNotOpenError`, which degrades capture under §3 and §5 and
 > changes nothing else.
 
-> **Normative.** Conversation deletion finds open episodes through the
-> conversation's turn rows, exactly as it finds frozen ones, under ADR-0275 §6:6's
-> unfiltered enumeration. `ConversationStore` gains no lookup for it and
-> `MemoryStore` gains no query by conversation.
+> **Normative.** Deleting a channel instance's records — today, a conversation —
+> finds its open episodes by channel: `MemoryStore.episodes` filtered by that
+> channel and by status `open`, read to the last page. Its frozen episodes are
+> found as today, through the conversation's turn rows under ADR-0275 §6:6's
+> unfiltered enumeration. No store gains a member for it.
 
-### 7. The turn row is written when the conversation is known
+### 7. The conversation index stays the conversation channel's own
 
-> **Normative.** `ConversationTurn` gains `open: bool`, and its `model_eligible`
-> becomes `bool | None`, `None` exactly when the row is open. `ConversationStore`
-> gains `open_turn`, which allocates the next ordinal and writes an open row naming
-> a supplied episode address; `freeze_turn`, which marks a row frozen and writes,
-> once, its `model_eligible`, its parked binding where the pass established one,
-> and its delivery fact where one is owed; and `open_turns`, which lists every open
-> row. `freeze_turn` refuses a row that is absent or already frozen.
+> **Normative.** `ConversationStore.append` gains the keyword `episode_id`, the
+> episode's address, which the caller supplies; the store stops deriving an address
+> from the ordinal and stops checking a stored address against one. The ordinal,
+> the parked binding and its uniqueness, the delivery fact, the eligibility flag
+> and the row's immutability are ADR-0074's and ADR-0275 §7's, unchanged.
+> `ConversationTurn` and `ConversationExport` gain no field.
 
-> **Normative.** A parked binding written by `freeze_turn` keeps ADR-0074's
-> uniqueness across the whole index: a binding another row already holds is
-> refused atomically, the row stays open, and capture is degraded. The restart
-> freeze of §6 then freezes the row without a binding.
-
-> **Normative.** For an input naming an existing conversation, the pass writes its
-> open turn row at admission, before `open_episode`, so the row names the episode
-> before it exists. For a new conversation, it writes the row when the begin stage
-> allocates the conversation.
-
-> **Normative.** `ConversationStore.turns` excludes open rows unless the new
-> keyword `include_open` is `True`. Conversation history and export read frozen
-> rows only. `turns_after` returns open rows, and the observer's watermark does not
-> advance past a row that is still open.
-
-> **Normative.** `ConversationExport.schema_version` becomes literal `4`.
+> **Normative.** An open episode has no turn row. The row is written by the freeze
+> (§5) or the restart freeze (§6), so history, export, `turns_after` and the
+> observer's watermark see only frozen episodes' rows, as today.
 
 ### 8. What each reader sees of an open episode
 
@@ -218,11 +209,11 @@ the same topic.
 > any other, and the projection renders its status as in progress, its input, and
 > no response.
 
-> **Normative.** For the conversation channel, the channel window's tail is
-> followed by the other activations' open turns in the conversation, in ordinal
-> order, each rendered with its trigger's exact input text or transcript as the
-> user's half and marked in progress, with no assistant half. The pass's own turn
-> is never in it.
+> **Normative.** For every channel, the channel window (ADR-0276 §3) is followed
+> by the other activations' open episodes on the same channel instance, oldest
+> first, read with `MemoryStore.episodes` filtered by that channel and status
+> `open`. Each is rendered with its trigger's exact input text or transcript,
+> marked in progress, with no response. The pass's own episode is never in it.
 
 > **Normative.** The planner, the observer, consolidation and export read frozen
 > episodes only. Owner inspection (ADR-0275 §10, §11) reads open ones with their
@@ -274,9 +265,9 @@ the same topic.
 
 ### 11. A turn naming a conversation that does not exist (#2592)
 
-> **Normative.** Where the admission turn-row write is refused because the named
-> conversation does not exist, the episode is still written, standalone, with no
-> resolved `channel`. Its trigger keeps the target the input named and records the
+> **Normative.** Where the input names a conversation, admission resolves it with
+> `ConversationStore.get` before `open_episode`. Where it does not exist, the
+> episode is still written, standalone, with no resolved `channel`. Its trigger keeps the target the input named and records the
 > new field `context_withheld=True`, with an empty `context`: the context the
 > client attached is not stored.
 
@@ -287,9 +278,7 @@ the same topic.
 
 > **Normative.** `EpisodeProcessingRecord.schema_version` becomes `Literal[5]`,
 > and the episode-record format marker (`EPISODE_RECORD_FORMAT`) advances, on
-> ADR-0275 §12's mechanism. The conversation index schema changes with §7, and its
-> store refuses a pre-change file with `IncompatibleStateError` on the same
-> mechanism. No migration, backfill or version-4 read path is a deliverable, and
+> ADR-0275 §12's mechanism. No migration, backfill or version-4 read path is a deliverable, and
 > the hub moves to a fresh data directory.
 
 > **Normative.** Each change that alters a shape crossing the wire advances
@@ -312,14 +301,14 @@ the same topic.
 > 1. **`core` with `memory`, the `MemoryStore` contract**: §2, §4 and §9's types,
 >    the three members and `EpisodeNotOpenError`, their conformance suite and
 >    canonical fake, the sqlite implementation, format 5 and the protocol advance.
-> 2. **`core` with `memory`, the `ConversationStore` contract**: §7's fields and
->    members, `include_open`, `open_turns`, their conformance suite and canonical fake, the
->    sqlite implementation, the schema change and export version 4.
+> 2. **`core` with `memory`, the `ConversationStore` contract**: §7's `episode_id`
+>    keyword on `append`, its conformance suite and canonical fake, and the sqlite
+>    implementation.
 > 3. **`orchestration`**: admission, write-through, the freeze, the restart freeze,
 >    deletion while open, §8's readers, §9's saved reads, §10's bounds and §11.
 > 4. **`interfaces`**: `assistant episode` renders open episodes and §9's saved
 >    reads, and the episodes list takes the `open` filter.
-> 5. **`core` with `memory`, removal only**: the members lanes 1 and 2 replace, and
+> 5. **`core` with `memory`, removal only**: what lanes 1 and 2 replace, the derived address included, and
 >    the unused `ConversationLifecycle.capture` path.
 >
 > Lanes 1 and 2 are additive: what they add sits beside what it replaces until
@@ -329,15 +318,16 @@ the same topic.
 > **Normative.** Lane 3's tests assert, through production composition: a speech pass saves its
 > transcript into the open trigger, and a failed transcription leaves it `None`; a
 > restart after an open episode's expiry finds, freezes and then purges it; a
-> restart freezes a turn row whose episode is already frozen, and one whose
-> episode never landed; a parked binding written at the freeze is found by its
-> binding after a restart; a window of more than `SAVED_READ_IDS_MAX` items saves
+> restart writes a conversational episode's turn row exactly once, whether or not
+> the pass's own append landed; another activation's open episode on the same
+> channel instance is in the channel window marked in progress, for a conversation
+> and for an event channel; a window of more than `SAVED_READ_IDS_MAX` items saves
 > its first ids and the elided count; another
 > activation's open episode is in the episode window marked in progress and the
 > pass's own is not; recall never returns an open episode; a hub restart freezes
 > an open episode as `interrupted` / `hub_stopped` keeping its written entries;
-> deleting a conversation mid-pass deletes the open episode and degrades the
-> capture; a turn naming an unknown conversation leaves a standalone failed episode
+> deleting a conversation mid-pass finds and deletes its open episode by channel
+> and degrades the capture; a turn naming an unknown conversation leaves a standalone failed episode
 > with `context_withheld=True`; a pass over a cap freezes to exactly today's
 > trimmed shape; and §9's saved reads appear in the episode's detail.
 
@@ -357,7 +347,6 @@ the same topic.
   out of date once this is implemented.
 - Each stage end costs one local write of the whole open version, bounded by
   ADR-0275 §9:1.
-- Turn ordinals follow arrival order, not finish order.
 - `hub_stopped` means the hub stopped with the episode still open. It also covers
   an episode whose freeze failed while the hub kept running, until the next start.
 - The capture report cannot yet say which of the admission write, a write-through
@@ -369,15 +358,14 @@ the same topic.
 | ADR-0074 §3 | The turn's episode id is the activation's, supplied by the caller; the store still allocates the ordinal. |
 | ADR-0275 §1:3, §1:4 | The episode is the record from admission; the open episode is a live activation log. |
 | ADR-0275 §2:2 | The ID and start reading are stored at admission. |
-| ADR-0275 §4, §4:9 | New status, reasons, fields and trigger flag; `occurred_at` is the admission reading. |
-| ADR-0275 §6:2, §6:3 | Every address is `activation:<id>`; a refused admission row falls back to standalone without context. |
-| ADR-0275 §7:5 | The turn's eligibility is set once, at the freeze. |
-| ADR-0275 §7:4, §9:6 | The channel window renders other activations' open turns from their exact input. |
+| ADR-0275 §4, §4:5, §4:9 | New status, reasons, fields and trigger flag; `occurred_at` is the admission reading. |
+| ADR-0275 §6:2, §6:3 | Every address is `activation:<id>`; an unresolved named conversation falls back to standalone without context. |
+| ADR-0275 §7:4, §9:6 | The channel window renders other activations' open episodes from their exact input. |
 | ADR-0275 §8:2, §8:4, §8:6, §8:8, §8:13 | Write-through and the freeze replace capture once; restart freezes open episodes. |
 | ADR-0275 §9:1, §9:2 | Each write is bounded; expiry is stamped at admission. |
 | ADR-0275 §12:6 | Two store operations change an open episode. |
 | ADR-0275 §10:3, §10:9 | An open episode is live whatever its expiry until it is frozen. |
-| ADR-0276 §3:1, §4:3 | Windows show other activations' open work, never the pass's own. |
+| ADR-0276 §3:1, §4:3 | Both windows show other activations' open episodes on any channel, never the pass's own. |
 | ADR-0276 §7:1, §7:3 | An open record may carry no understanding yet; versions are written through. |
 | ADR-0280 §4:1–§4:2, §6:5, §7:1 | `hub_stopped` rule; entries written through; an open record has no end entry. |
 | ADR-0281 §6:1, §6:4, §6:5 | `score` on each item; recall written through; schema 5. |
@@ -406,13 +394,17 @@ drops. Ending the pass at the cap keeps the record strictly append-only but ends
 passes that run today and needs a new end reason. Writing in full and trimming at
 the freeze changes nothing a reader of a frozen record sees.
 
-**Deleting a conversation mid-activation.** A store query by conversation adds a
-second way for deletion to find episodes. Cleaning up at the freeze leaves the
-deleted conversation's content readable in the open episode for the rest of the
+**Deleting a conversation mid-activation.** Writing the turn row when the
+conversation is known would let deletion find open episodes through the index. It
+gives the conversation index a second lifecycle, open then frozen, beside the
+episode's, and with it restart repair of stranded rows, a moved parked binding and
+an observer rule, all for one kind of channel. Cleaning up only at the freeze leaves
+the deleted conversation's content readable in the open episode for the rest of the
 pass. Cancelling the conversation's running activations first ties deletion to
-concurrency work not yet designed. Writing the turn row when the conversation is
-known keeps one enumeration and the deletion guarantee throughout.
+concurrency work not yet designed. Finding open episodes by the channel they arrived
+on uses a filter `MemoryStore.episodes` already has, and works the same for any
+channel.
 
-**A turn naming an unknown conversation.** Deleting the open episode keeps ADR-0275
+**A turn naming an unknown conversation.** Leaving it unrecorded keeps ADR-0275
 §6:3's rule whole and leaves #2592 unfixed. Keeping it without the attached context
 records the failure while storing only what arrived with this input.

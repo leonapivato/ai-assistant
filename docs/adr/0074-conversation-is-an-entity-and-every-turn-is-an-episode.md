@@ -465,8 +465,8 @@
 - Partially superseded: 2026-09-30 by ADR-0283 — one narrow scope. §3's rule that a
   captured episode's id is derived from the turn, and the store's deriving it in the
   append: a turn's episode id is its activation's, `activation:<activation_id>`,
-  supplied by the caller. The store still allocates the ordinal, the index row still
-  names the episode first, and §3's insert-not-upsert and no-retry rules and §8's
+  supplied by the caller. The store still allocates the ordinal, the index row is still
+  written before the episode's final write, and §3's insert-not-upsert and no-retry rules and §8's
   deletion protocol stand entire. This scoped replacement will take effect on ratification of ADR-0283. This reciprocal header record accompanies the numbered draft under ADR-0070 and ADR-0082; the ratified body below is preserved.
 - Note (2026-09-26): ADR-0275 was ratified on 2026-09-18 (`fb072c9a`), so the scoped
   replacements recorded by the ADR-0275 note above took effect then; that note's
