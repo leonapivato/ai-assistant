@@ -52,7 +52,7 @@ ADR clauses this would supersede or amend:
 | ADR-0275 | §1 | M36 "adds no live activation log". |
 | ADR-0275 | §2 | Activation ID and start time are "call-local state, with no durable start row". |
 | ADR-0275 | §3 | "A later resumption … never rewrites the earlier episode's processing history". This one stands; noted only because an open episode is added to while running. |
-| ADR-0275 | §6 | A conversational episode's address is the one `ConversationStore.append` allocates. |
+| ADR-0275 | §6 | A conversational episode's address is the one `ConversationStore.append` allocates, and no standalone fallback after a refused append. |
 | ADR-0275 | §8 | Capture happens once. "No captured processing envelope is updated in place afterward". "Restart never fabricates interrupted episodes". "Not a durable live-progress record". |
 | ADR-0275 | §9 | Retention is stamped at capture. |
 | ADR-0275 | §12 | Format 4, and the rule that "store updates … preserve that record's activation envelope". |
@@ -98,6 +98,14 @@ As each stage ends, its result is appended in order and nothing is overwritten:
 - and, from #2608, the stage's reads: the window IDs understanding was shown,
   the IDs a stage fetched and those that returned nothing, and recall's score
   for each item it kept.
+
+The open episode has one shape for every activation, whatever its channel.
+#2598 sets the direction that new phases live on one shared working set,
+rather than on today's separate conversation-turn and event classes
+(`_TurnPass` and `_EventPass`). What is written through follows that: the
+saved parts are the shared ones, so the stored format does not fork by channel
+kind for good. Anything specific to one channel kind is recorded as a fact that
+channel declares, not as a separate shape.
 
 The working-set objects themselves stay in memory for the pass. ADR-0282 §2
 stands: a stage's part holds IDs, never copies of records. The records a stage
@@ -172,16 +180,44 @@ content does not survive in an open episode, even for the rest of the pass.
 Between admission and the begin stage, a new conversation does not exist yet,
 so there is nothing to delete.
 
-### 7. A cutover
+### 7. A turn naming a conversation that does not exist
+
+Today such a turn is refused, and its capture then fails at the index append,
+so no episode records even the refusal (#2592). Under this change the episode
+already exists when the turn-row write is refused, and it is kept. It becomes a
+standalone failed episode, `activation:<id>` with no conversation. It records
+which conversation ID the input named and that the name was refused, but it
+does **not** keep the context the client attached to the input.
+
+This relaxes ADR-0275 §6's rule against falling back to standalone storage
+after a refusal. That rule exists so a deleted conversation's context cannot
+escape its deletion through a new episode, and an unknown conversation cannot
+be told apart from a deleted one because nothing records deletions. Dropping
+the attached context keeps what the rule protects: the only content the kept
+episode holds is the new input itself, which arrived with this activation and
+not from the conversation.
+
+A conversation deleted after its turn row is written is §6's case, not this
+one.
+
+### 8. A cutover
 
 - `EpisodeProcessingRecord.schema_version` 5 and `EPISODE_RECORD_FORMAT` 5.
-- A conversation-schema change for the turn row's `episode_id`.
+- A conversation-schema change: the turn row's `episode_id`, and its open or
+  frozen mark.
 - A `PROTOCOL_VERSION` bump.
 - A fresh data directory on the hub, as M36 and M39 each needed.
 
-`MemoryStore` gains members, so this is a **Protocol change**. The contract,
-conformance suite and canonical fake land together (ADR-0015, and ADR-0137 §2
-for the primary implementation).
+It changes **two Protocols**:
+
+- `MemoryStore` gains the operations to create, append to and freeze an open
+  episode.
+- `ConversationStore` writes a turn row before the freeze, marks it open or
+  frozen, and points it at the episode's ID.
+
+For each one, the contract, conformance suite and canonical fake land together
+with the primary implementation (ADR-0015, ADR-0137 §2). Both are decided in
+the one ADR.
 
 ```mermaid
 flowchart LR
@@ -286,21 +322,22 @@ human detail and `--json`:
 
 ## Delivery
 
-Five lanes, in order:
+One ADR, then four implementation lanes, in order:
 
 1. **The ADR.** The number is assigned at conversion. It is merged on its own
    before anything implements against it.
-2. **Contract lane (core + memory):**
+2. **Memory-store contract lane (core + memory):**
    - the new status and record shapes;
    - the `MemoryStore` open/append/freeze members with their conformance suite
      and canonical fake;
    - the sqlite implementation, format 5;
    - the wire additions.
-3. **Conversation store:**
+3. **Conversation-store contract lane (core + memory):**
    - the turn row's `episode_id` holds the episode's ID;
    - rows are written when the conversation is known and carry an open/frozen
      mark;
-   - the channel window marks open rows, and history reads only frozen rows;
+   - history reads only frozen rows;
+   - the conformance suite and canonical fake;
    - the conversation schema is bumped.
 4. **Orchestration:**
    - admission creates the episode;
@@ -308,6 +345,8 @@ Five lanes, in order:
    - `ActivationWriter` becomes the freeze;
    - the restart freeze;
    - the deletion path;
+   - keeping a refused turn's episode (#2592);
+   - the channel window marking other activations' open turns;
    - #2608's reads.
 5. **Interfaces:** `assistant episode` shows open episodes, the status filter,
    and #2608's rendering.
