@@ -121,16 +121,25 @@ So the store has two record shapes behind one ID: open, where appends are
 allowed, and frozen, where nothing may change. It gains one narrow operation
 for each, both refused on anything but an open episode.
 
-The conversation turn row and the archive entry are written at the freeze, in
-today's order: index append, archive, episode. A mid-activation reader of the
-channel window sees what it sees today.
+The conversation turn row is written as soon as the conversation is known.
+For an existing conversation that is admission; for a new one it is the begin
+stage that allocates it. The row points at the open episode, so its ordinal
+follows arrival order, not finish order. This reserves no ordinal that would
+otherwise go unused: capture already appends a turn for every conversational
+activation, including a failed or no-words pass that names a conversation
+(ADR-0275 §6). The one exception is a crash, and the restart freeze (§5) turns
+that into an interrupted turn.
+
+The archive entry is still written at the freeze, after the episode's final
+write, as today.
 
 ### 4. Who sees an open episode
 
 | Reader | Sees open episodes? |
 | --- | --- |
 | Episode window | Yes, other activations' open episodes, marked **in progress**. Never its own. This is the concurrency direction's cross-channel view. |
-| Channel window / history | No change. The turn row only exists once the episode is frozen. |
+| Channel window | Other activations' open turns, marked **in progress**, with their input and no response. Never its own. |
+| Conversation history and export | Frozen turns only. |
 | Recall | No. Recall searches frozen episodes; an open one has no embedding yet. |
 | Planner, observer, consolidation, export | Frozen only. |
 | Inspection (`assistant episode`, the episodes list) | Yes, with its status. The list gains a status filter. |
@@ -154,10 +163,14 @@ deletes the open episode. The activation's later appends and its freeze then
 find no open episode. That degrades capture, as a refused append does today,
 and never changes the answer or repeats processing.
 
-Deleting a conversation has to find open episodes that are not yet in its turn
-index. It needs either an episodes query by conversation, or the freeze refusing
-because the conversation is gone and then deleting the episode (today's
-compensation). The ADR picks one; see "Left open".
+Because the turn row exists as soon as the conversation is known (§3),
+deleting a conversation finds its open episodes the way it finds frozen ones:
+through its turn rows. Deletion keeps today's index-first order and
+verification, with no new query on the store, and a deleted conversation's
+content does not survive in an open episode, even for the rest of the pass.
+
+Between admission and the begin stage, a new conversation does not exist yet,
+so there is nothing to delete.
 
 ### 7. A cutover
 
@@ -175,7 +188,8 @@ flowchart LR
     AD["Admission<br/>episode created, status open"] --> S1["Stage ends<br/>its result appended"]
     S1 --> S2["…each later stage<br/>appends, never overwrites"]
     S2 --> F["Freeze<br/>status, reason, response,<br/>END, embedding"]
-    F --> T["Turn row + archive<br/>written at the freeze"]
+    AD --> T["Turn row, once the<br/>conversation is known"]
+    F --> AR["Archive entry"]
     AD -.->|"hub stops before the freeze"| R["Next start freezes it<br/>interrupted / hub_stopped"]
 ```
 
@@ -184,15 +198,20 @@ flowchart LR
 The episode is added to as the activation runs, so bounds are checked on each
 append and not once at the end.
 
-- **Stage entries:** capped at `STAGE_RECORD_LIMIT` (64). Today the record keeps
-  the first half and the last half and counts what was elided in between. Kept
-  this way, the store would have to drop entries from the middle during the run.
-  Proposed instead: the open episode stores the first half as they happen, the
-  pass keeps a rolling last half in memory, and the freeze writes that tail and
-  `stages_elided`. The END entry is never elided.
-- **Understanding versions:** capped at 8, and the latest is never dropped.
-  Handled the same way: the first versions are written through, and the freeze
-  writes the latest.
+- **Stage entries** (`STAGE_RECORD_LIMIT`, 64) and **understanding versions**
+  (8, the latest never dropped) are saved in full while the episode is open.
+  The freeze trims them to today's shape: the first half and the last half of
+  the stage entries with `stages_elided` counting the rest, and the END entry
+  never elided. The restart freeze trims them the same way. A frozen record is
+  exactly what it would be today, so no reader of frozen episodes changes.
+  Rewriting the lists at the freeze is allowed because the episode is still
+  open until that write lands. Inspecting an open episode shows every entry.
+- **A ceiling on the open record.** Saving in full needs its own limit, or a
+  pass stuck in a loop grows the open record until the freeze. The open record
+  stops taking entries past a ceiling (proposed: four times each cap). After
+  that, new entries stay in memory and the freeze writes the tail from there.
+  An ordinary pass never reaches the ceiling; a runaway one degrades instead of
+  growing.
 - **Size preflight:** the 8·P + 65536 check applies per append against the
   record's running size. The final check at the freeze keeps its current shape.
 
@@ -217,10 +236,34 @@ path in the store, a reader-by-reader decision about open episodes, and a
 cutover.
 
 **The ID.** The alternative was to keep `conv:<cid>:<ordinal>` for
-conversational episodes and allocate the ordinal at admission. That reserves
-ordinals for activations that may never produce a turn, and it gives one
-episode two naming schemes. A single `activation:` namespace is simpler, and
-the turn row already has its own `(conversation_id, ordinal)`.
+conversational episodes. That gives episodes two naming schemes. It also
+leaves an activation that starts a new conversation with no ID until the begin
+stage allocates one, which is after the episode has to exist. A single
+`activation:` namespace is simpler, and the turn row already has its own
+`(conversation_id, ordinal)`.
+
+**The capped lists.** Three other ways were weighed:
+
+- Saving the first half as it happens and writing the tail at the freeze.
+  This loses the tail in a crash and shows an open reader no recent entries
+  once the cap is reached.
+- Keeping only the first N and counting the rest. This drops the latest
+  entries and breaks the "latest understanding is never dropped" rule.
+- Turning the caps into limits the controller enforces, ending the pass at 64
+  stages. This keeps the record strictly append-only, but it ends passes that
+  run today and needs a new end reason.
+
+Saving in full and trimming at the freeze changes nothing a reader can see.
+
+**Deleting a conversation mid-activation.** Three other ways were weighed:
+
+- A store query for episodes by conversation. This adds store surface and a
+  second path for deletion to find episodes.
+- Cleaning up at the freeze: the turn write is refused and the episode is
+  deleted. This leaves the deleted conversation's content readable in the open
+  episode for the rest of the pass.
+- Cancelling the conversation's running activations first. This ties deletion
+  to concurrency work that has not been designed.
 
 ## What it adds from #2608
 
@@ -253,8 +296,12 @@ Five lanes, in order:
      and canonical fake;
    - the sqlite implementation, format 5;
    - the wire additions.
-3. **Conversation store:** the turn row's `episode_id` holds the episode's ID;
-   the conversation schema is bumped.
+3. **Conversation store:**
+   - the turn row's `episode_id` holds the episode's ID;
+   - rows are written when the conversation is known and carry an open/frozen
+     mark;
+   - the channel window marks open rows, and history reads only frozen rows;
+   - the conversation schema is bumped.
 4. **Orchestration:**
    - admission creates the episode;
    - stages write through;
@@ -269,9 +316,10 @@ After lane 5 the hub moves to a fresh data directory.
 
 ## Left open
 
-- **How conversation deletion finds open episodes:** a query by conversation on
-  the episodes list, or leaving it to the freeze refusing and compensating.
-  The first is cleaner; the second adds no store surface.
+- **The open-record ceiling's value:** four times each cap is a first guess,
+  to be set from live runs.
+- **Whether the channel window shows other activations' open turns** or skips
+  them. Proposed: shows them, marked in progress, to match the episode window.
 - **Which stages write through, and when.** Proposed: at every stage end. An
   alternative is only at the end of stages whose results matter to another
   reader (understanding, recall, effects). That writes less but leaves gaps.
