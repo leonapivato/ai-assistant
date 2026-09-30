@@ -75,9 +75,15 @@ the same topic.
 > `extra="forbid"` model holding the ending the freeze will write: `status` (never
 > `open`), `reason`, `ended_at`, `model_eligible`, `response_kind`; `response`,
 > the response text or `None`, under the same pairing rule ADR-0275 §4:3 sets for
-> `outcome`; and `end`, the end stage entry the freeze appends, `None` exactly for a
-> record whose trigger is a `RecordedResumeTrigger`. A frozen record carries
-> `ending=None`.
+> `outcome`; `end`, the end stage entry the freeze appends, `None` exactly for a
+> record whose trigger is a `RecordedResumeTrigger`; and the record-level values the
+> freeze sets on `EpisodicMemory`: `content`, `disposition`, and the capture stamps
+> (`provenance`, `capture`, `importance` and placement) that ADR-0275 §8:5 and §8:6
+> give a captured episode. A frozen record carries `ending=None`.
+
+> **Normative.** An `ending` holds every value the freeze writes that the open
+> record does not already hold, so the frozen version is determined by the open
+> record and its ending alone, without the pass's call-local state.
 
 > **Normative.** At admission the activation writes its episode with status `open`,
 > holding the activation ID, `started_at`, the trigger, `occurred_at` and the
@@ -153,8 +159,8 @@ the same topic.
 > version's content as it embeds any written episode.
 
 > **Normative.** Finalization first writes, with `advance_episode`, the episode's
-> `ending`: what the frozen version will record as its status, reason, `ended_at`,
-> eligibility, response kind, response and end stage entry.
+> `ending`: every value the frozen version will record that the open record does
+> not already hold (§2).
 
 > **Normative.** Where the episode's channel is a conversation, finalization then
 > writes, in ADR-0225 §2:1's order: the turn row, by `ConversationStore.append`
@@ -189,8 +195,9 @@ the same topic.
 ### 6. Restart, and deletion while open
 
 > **Normative.** Before the hub admits its first activation, it freezes every open
-> episode. One carrying an `ending` is frozen with that ending: its processing
-> ended, and only its recording was cut short. Any other is frozen with status
+> episode. One carrying an `ending` is frozen to exactly the version its pass would
+> have written, from the open record and its ending: its processing ended, and only
+> its recording was cut short. Any other is frozen with status
 > `interrupted`, reason `hub_stopped`, no response, and `model_eligible=False`,
 > keeping everything already written; a channel activation's record gains an end
 > stage entry whose `due` is the new `ControllerRule` member `hub_stopped`, a
@@ -357,8 +364,9 @@ the same topic.
 > restart after an open episode's expiry finds, freezes and then purges it; a
 > restart freezes an open episode without an ending as `interrupted` /
 > `hub_stopped` and writes its turn row with `model_eligible=False`; a crash after
-> the ending, before and after the append, is frozen at restart with that ending,
-> and its row and episode agree on eligibility; forgetting an open episode before
+> the ending, before and after the append, is frozen at restart to the same
+> `content`, `disposition`, capture stamps, status and response the pass would have
+> written, and its row and episode agree on eligibility; forgetting an open episode before
 > its freeze leaves no archive entry, and an episode whose retention expires during
 > its freeze keeps its archive entry; deleting a conversation between its allocation and the
 > write that gives the episode its channel deletes the episode; another activation's open episode on the same
