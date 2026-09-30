@@ -64,13 +64,15 @@ the same topic.
 
 > **Normative.** `ProcessingStatus` gains `open`, and `ProcessingReason` gains
 > `in_progress` and `hub_stopped`. A processing record whose status is `open` carries reason
-> `in_progress`, `response_kind` `none`, no `outcome`, `model_eligible=False`, no
-> end stage entry, and may carry neither understanding nor an omission. A record
+> `in_progress`, `ended_at` equal to `started_at`, `response_kind` `none`, no
+> `outcome`, `model_eligible=False`, no end stage entry, and may carry neither
+> understanding nor an omission. A record
 > with any other status carries neither `open` nor `in_progress`.
 
 > **Normative.** At admission the activation writes its episode with status `open`,
 > holding the activation ID, `started_at`, the trigger, `occurred_at` and the
-> expiry. `occurred_at` is the admission reading, equal to `started_at`, and it is
+> expiry, with ADR-0275 §8:5's constant `content` and `disposition=None` until the
+> freeze. `occurred_at` is the admission reading, equal to `started_at`, and it is
 > shared with the conversation turn row. The expiry is stamped then from
 > `episode_retention` measured from `occurred_at`.
 
@@ -120,7 +122,8 @@ the same topic.
 
 > **Normative.** `MemoryStore.search` and `MemoryStore.select` never return an
 > open episode. `get_many` and `episodes` return it; `episodes` accepts `open` as a
-> status filter. Retention purge skips an open episode.
+> status filter. The store computes no embedding for an open episode, and
+> retention purge skips it.
 
 ### 5. Frozen by one last write
 
