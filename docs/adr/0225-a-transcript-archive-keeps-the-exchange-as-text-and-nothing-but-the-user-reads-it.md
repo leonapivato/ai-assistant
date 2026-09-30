@@ -1,6 +1,6 @@
 # 225. A transcript archive keeps the exchange as text, and nothing but the user reads it
 
-- Status: Partially superseded by ADR-0248 (§1's fourth clause in its first limb alone: where the pass carried a turn, "what the user said" is the turn's own `utterance` rather than its goal statement, the user's words having become a value of their own on the turn so that a goal statement which is about to mean the assistant's interpretation can no longer stand in for them. That one limb, and nothing else in this ADR: §1's rule that the value is the user's own words, unrewritten and unrendered, binds entire and is the reason for the change; §1's routed limb, its absent limb, its parked-resolution clause, its three-capture-case partition, its assistant-half clause, its no-part-of-`content` clause and its handed-to-capture clause all bind verbatim; and §§2-16 stand entire)
+- Status: Partially superseded by ADR-0248 (§1's fourth clause in its first limb alone: where the pass carried a turn, "what the user said" is the turn's own `utterance` rather than its goal statement, the user's words having become a value of their own on the turn so that a goal statement which is about to mean the assistant's interpretation can no longer stand in for them. That one limb, and nothing else in this ADR: §1's rule that the value is the user's own words, unrewritten and unrendered, binds entire and is the reason for the change; §1's routed limb, its absent limb, its parked-resolution clause, its three-capture-case partition, its assistant-half clause, its no-part-of-`content` clause and its handed-to-capture clause all bind verbatim; and §§2-16 stand entire) and ADR-0283 (§2:1's order, in its index-first part alone; §2:5's allocated address; §3:1's second sentence)
 - Date: 2026-09-02
 - **Partially superseded: 2026-09-12 by ADR-0248 — §1's fourth clause in its first
   limb alone, and nothing else in this ADR.** The owner ruled on 2026-09-12 (#2255) that
@@ -29,6 +29,15 @@
   archive holds, how it is keyed, when the write happens, the never-list, the retention and
   destruction rules, the search surface and the contract surface are all untouched: ADR-0248
   adds no field to an entry and changes nothing under `archive/`.
+- Partially superseded: 2026-09-30 by ADR-0283 — three narrow scopes. §2:1's order
+  loses its index-first part: the archive entry is written first, then the episode is
+  frozen, then the index entry is appended; the archive still lands before the
+  episode's final write. §2:5's address and §3:1's second sentence: the address is the
+  episode's, `activation:<activation_id>`, not a value `ConversationStore.append`
+  derived. §3:2's stability, §5's expiry and destruction rules and every other clause
+  stand. These scoped replacements will take effect on ratification of ADR-0283. This
+  reciprocal header record accompanies the numbered draft under ADR-0070 and ADR-0082;
+  the ratified body below is preserved.
 
 ## Context
 
