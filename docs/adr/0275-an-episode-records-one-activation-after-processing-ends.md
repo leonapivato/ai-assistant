@@ -1,6 +1,6 @@
 # 275. An episode records one activation after processing ends
 
-- Status: Partially superseded by ADR-0276 (§1's "automatic cross-channel continuity" exclusion; §4's `EpisodeProcessingRecord` field set and `ProcessingReason` values, in the additions alone; §7's eligibility-`True` rule on automatic model-facing reads, for the understanding stage's episode window alone; §9's exclusion of the trigger's raw input text from automatic model inputs, for that window alone) and ADR-0280 (§1's "phase/tool history" exclusion, for the record of stages alone; §4's `EpisodeProcessingRecord` field set, in the additions alone) and ADR-0281 (§8:5's constant `content`, for an inspection-only record carrying an understanding alone; §4's `EpisodeProcessingRecord` field set, in the addition alone; §7:4's eligibility-`True` rule, for recall's read alone; §9:6's exclusion of the trigger's raw input text from automatic model inputs, for the understanding stage's rendering of a recalled episode alone)
+- Status: Partially superseded by ADR-0276 (§1's "automatic cross-channel continuity" exclusion; §4's `EpisodeProcessingRecord` field set and `ProcessingReason` values, in the additions alone; §7's eligibility-`True` rule on automatic model-facing reads, for the understanding stage's episode window alone; §9's exclusion of the trigger's raw input text from automatic model inputs, for that window alone) and ADR-0280 (§1's "phase/tool history" exclusion, for the record of stages alone; §4's `EpisodeProcessingRecord` field set, in the additions alone) and ADR-0281 (§8:5's constant `content`, for an inspection-only record carrying an understanding alone; §4's `EpisodeProcessingRecord` field set, in the addition alone; §7:4's eligibility-`True` rule, for recall's read alone; §9:6's exclusion of the trigger's raw input text from automatic model inputs, for the understanding stage's rendering of a recalled episode alone) and ADR-0283 (§1:3's post-processing record; §1:4's "live activation log" exclusion; §2:2's call-local state; §4's record shapes, in the additions alone; §4:9's last sentence; §6:2's append-allocated address; §6:3's last sentence, for a refused admission turn row alone; §7:4 and §9:6, for the channel window's open turns alone; §7:5's atomic, immutable index flag; §8:2's sequence; §8:4's last sentence; §8:6's capture reading; §8:8's index-row address; §8:13's first sentence; §9:1's measuring point; §9:2's stamping point; §12:6's third sentence, for an open episode alone)
 - Date: 2026-09-18
 - Scope: [M36](https://github.com/leonapivato/ai-assistant/milestone/2), [#2522](https://github.com/leonapivato/ai-assistant/issues/2522).
 - Dependency: ADR-0274 and [M35](https://github.com/leonapivato/ai-assistant/milestone/1).
@@ -38,6 +38,22 @@
   it; attached context and every other field stay excluded. These scoped replacements
   take effect on ratification of ADR-0281. This reciprocal header record accompanies the
   numbered draft under ADR-0070 and ADR-0082; the ratified body below is preserved.
+- Partially superseded: 2026-09-30 by ADR-0283 — eighteen narrow scopes. The episode is
+  written at admission with status `open`, written through as each stage ends and
+  frozen by one last write, so §1:3's post-processing record, §1:4's exclusion of a
+  live activation log, §2:2's call-local state, §8:2's capture sequence, §8:4's last
+  sentence and §8:6's capture reading give way; a frozen record is still never
+  updated in place. §4's shapes gain ADR-0283's status, reasons, fields and trigger
+  flag, and §4:9's `occurred_at` is the admission reading. §6:2: every address is
+  `activation:<activation_id>`. §6:3's last sentence gives way for a turn row refused
+  at admission, whose episode is kept standalone without attached context. §7:5's
+  index flag is set once at the freeze. §7:4 and §9:6 admit one field, the exact
+  input text, to one consumer, the channel window's open turns of other activations.
+  §8:8's `SpokenTurn.episode_id` is the episode's address. §8:13: restart freezes an
+  open episode as interrupted and still fabricates none. §9:1 measures each write and
+  §9:2 stamps retention at admission. §12:6's third sentence yields to the store's
+  two operations on an open episode. Every other clause stands. These scoped
+  replacements will take effect on ratification of ADR-0283. This reciprocal header record accompanies the numbered draft under ADR-0070 and ADR-0082; the ratified body below is preserved.
 - Authorization: the owner endorsed the proposal's direction and its interruption/parallelism fit, then requested this draft in clone `ai-assistant-2`. The owner assigned the next available ADR number, 0275. These instructions authorize drafting and numbering, not ratification or implementation.
 - Note (2026-09-26): ADR-0276 was ratified on 2026-09-22 (`2e20ab11`), so the scoped
   replacements recorded by the ADR-0276 note above took effect then; that note's
