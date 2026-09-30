@@ -76,9 +76,12 @@ the same topic.
 > shared with the conversation turn row. The expiry is stamped then from
 > `episode_retention` measured from `occurred_at`.
 
-> **Normative.** The trigger is fixed at admission, except its resolved `channel`,
-> which is written once: at admission for an input naming an existing
-> conversation, and when the begin stage allocates the conversation for a new one.
+> **Normative.** The trigger is fixed at admission, except two fields, each written
+> once. Its resolved `channel` is written at admission for an input naming an
+> existing conversation, and when the begin stage allocates the conversation for a
+> new one. A speech trigger's transcript, `None` at admission, is written when
+> transcription ends: the exact transcript where one was obtained, including an
+> empty or whitespace-only one, and left `None` where transcription failed.
 
 > **Normative.** A failed admission write degrades capture and does not stop
 > processing. The pass then writes nothing further to the store for its episode,
@@ -111,7 +114,7 @@ the same topic.
 > `EpisodeNotOpenError(MemoryStoreError)` when the stored record is absent or not
 > `open`. Both refuse, with `MemoryStoreError`, a new version that changes the
 > address, `activation_id`, `started_at`, `occurred_at`, the expiry or the trigger
-> other than §2's one write of its `channel`.
+> other than §2's one write of its `channel` and one write of its transcript.
 
 > **Normative.** `advance_episode` refuses a version in which any stored entry of
 > the stage record, the understanding versions or §9's saved reads is changed,
@@ -122,8 +125,13 @@ the same topic.
 
 > **Normative.** `MemoryStore.search` and `MemoryStore.select` never return an
 > open episode. `get_many` and `episodes` return it; `episodes` accepts `open` as a
-> status filter. The store computes no embedding for an open episode, and
-> retention purge skips it.
+> status filter. The store computes no embedding for an open episode.
+
+> **Normative.** An open episode is live whatever its expiry: `get_many`,
+> `episodes` and retention purge treat it as unexpired until it is frozen, and from
+> the freeze its expiry applies as to any record. An episode whose expiry passed
+> while it was open is frozen by §6's restart freeze and then purged by the next
+> purge.
 
 ### 5. Frozen by one last write
 
@@ -156,6 +164,11 @@ the same topic.
 > omission takes the omission `not_reached`. `ended_at` is the latest reading the
 > record already holds. The turn row, where there is one, is frozen with it.
 
+> **Normative.** The restart then freezes every conversation turn row still open,
+> whatever became of its episode: with the episode's `model_eligible` where the
+> episode is frozen, and with `model_eligible=False` where no episode with its
+> address exists. It writes no episode and no binding for such a row.
+
 > **Normative.** The restart freeze replays no input, resumes no work, writes no
 > archive entry and invents no field the record did not hold, other than those the
 > clause above names. An activation that died before its admission write still
@@ -176,9 +189,15 @@ the same topic.
 > **Normative.** `ConversationTurn` gains `open: bool`, and its `model_eligible`
 > becomes `bool | None`, `None` exactly when the row is open. `ConversationStore`
 > gains `open_turn`, which allocates the next ordinal and writes an open row naming
-> a supplied episode address, and `freeze_turn`, which sets a row's
-> `model_eligible` once and marks it frozen, refusing a row that is absent or
-> already frozen.
+> a supplied episode address; `freeze_turn`, which marks a row frozen and writes,
+> once, its `model_eligible`, its parked binding where the pass established one,
+> and its delivery fact where one is owed; and `open_turns`, which lists every open
+> row. `freeze_turn` refuses a row that is absent or already frozen.
+
+> **Normative.** A parked binding written by `freeze_turn` keeps ADR-0074's
+> uniqueness across the whole index: a binding another row already holds is
+> refused atomically, the row stays open, and capture is degraded. The restart
+> freeze of §6 then freezes the row without a binding.
 
 > **Normative.** For an input naming an existing conversation, the pass writes its
 > open turn row at admission, before `open_episode`, so the row names the episode
@@ -215,15 +234,20 @@ the same topic.
 > = None`, written by the windows stage: `channel_ids`, the stored ids of the
 > channel window's items the audience predicate admitted, in window order; and
 > `episode_ids`, the episode window's ids in the selector's order, or `None` where
-> the pass takes no episode window. Each tuple holds at most `SAVED_READ_IDS_MAX`
-> ids, a `core` constant with value **64**.
+> the pass takes no episode window.
 
 > **Normative.** `EpisodeProcessingRecord` gains `fetches: tuple[StageFetch, ...] =
 > ()`, one entry per stage run that fetched by id under ADR-0282 §2: `stage`, the
 > `ControllerStage` that fetched; `fetched`, every id it asked for, in order, each
 > once; and `missing`, the ids that returned no record or that the audience
-> predicate refused. Each tuple holds at most `SAVED_READ_IDS_MAX` ids, and
-> `fetches` holds at most `STAGE_RECORD_LIMIT` entries.
+> predicate refused. `fetches` holds at most `STAGE_RECORD_LIMIT` entries.
+
+> **Normative.** Each saved tuple of ids holds at most `SAVED_READ_IDS_MAX`, a
+> `core` constant with value **64**. Where more were read, it keeps the first
+> `SAVED_READ_IDS_MAX` in order, and a sibling count named for it with the suffix
+> `_elided` (`channel_ids_elided`, `episode_ids_elided`, `fetched_elided`,
+> `missing_elided`) counts the ids dropped. A window or a fetch is never refused or
+> cut short because its saved record is.
 
 > **Normative.** `RecalledItem` gains `score: float`, finite, the search score
 > recall kept the item on, as `MemoryStore.search` returned it.
@@ -289,7 +313,7 @@ the same topic.
 >    the three members and `EpisodeNotOpenError`, their conformance suite and
 >    canonical fake, the sqlite implementation, format 5 and the protocol advance.
 > 2. **`core` with `memory`, the `ConversationStore` contract**: §7's fields and
->    members, `include_open`, their conformance suite and canonical fake, the
+>    members, `include_open`, `open_turns`, their conformance suite and canonical fake, the
 >    sqlite implementation, the schema change and export version 4.
 > 3. **`orchestration`**: admission, write-through, the freeze, the restart freeze,
 >    deletion while open, §8's readers, §9's saved reads, §10's bounds and §11.
@@ -302,7 +326,13 @@ the same topic.
 > lane 3 stops calling it and lane 5 removes it. Lane 3 depends on lanes 1 and 2,
 > and lanes 4 and 5 on lane 3.
 
-> **Normative.** Lane 3's tests assert, through production composition: another
+> **Normative.** Lane 3's tests assert, through production composition: a speech pass saves its
+> transcript into the open trigger, and a failed transcription leaves it `None`; a
+> restart after an open episode's expiry finds, freezes and then purges it; a
+> restart freezes a turn row whose episode is already frozen, and one whose
+> episode never landed; a parked binding written at the freeze is found by its
+> binding after a restart; a window of more than `SAVED_READ_IDS_MAX` items saves
+> its first ids and the elided count; another
 > activation's open episode is in the episode window marked in progress and the
 > pass's own is not; recall never returns an open episode; a hub restart freezes
 > an open episode as `interrupted` / `hub_stopped` keeping its written entries;
