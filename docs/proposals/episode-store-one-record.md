@@ -10,8 +10,9 @@ store holds episode ids, never copies of what an episode says. A channel's
 history, a conversation's history and the user's read-back of past exchanges
 are views over the episodes, found by index. The transcript archive is retired,
 because the episodes it duplicated are now kept. Forgetting an episode is one
-delete in the memory store, and it also deletes the beliefs derived from that
-episode. An episode is an append-only log with an end entry, open while its
+delete in the memory store, which also removes the episode from the beliefs
+derived from it and deletes those it was the last support for. `model_eligible`
+is retired, and the episode's end entry is the same on every channel. An episode is an append-only log with an end entry, open while its
 activation runs, so what a crash leaves behind is an episode without an end.
 
 This absorbs the decisions of ADR-0283 (PR #2614, accepted but not merged),
@@ -118,8 +119,10 @@ surface. The user's read-back moves onto the episodes: search, show a
 conversation, show one exchange, and forget one exchange or one conversation are
 episode reads and forgets, and the CLI `transcript` subcommands are replaced by
 episode commands with the same reach. ADR-0225's rule that only the user reads
-the text becomes a rule about which reads may return the whole episode, which
-`model_eligible` and the audience of the channel already carry.
+the archive gives no model new text: everything the archive held, the episode
+already held. Who may read an episode is the channel's audience, as the
+[Channels](https://github.com/leonapivato/ai-assistant/wiki/Channels) page
+directs, not a flag on the episode.
 
 ### Everything else holds ids
 
@@ -150,7 +153,7 @@ and never changes.
 
 The turn row's other duties move onto the episode:
 
-- **eligibility** is the episode's own `model_eligible`;
+- **eligibility** goes with `model_eligible` (below);
 - **delivery** becomes an annotation on the episode, the one field written after
   the end entry, and never read by a model;
 - **the observer's cursor** runs over episodes in admission order rather than
@@ -163,12 +166,36 @@ The turn row's other duties move onto the episode:
 
 An episode is written open at admission, with its id `activation:<id>`, its
 channel and its admission time. Each stage appends its part as it ends. The end
-entry closes it: status, reason, end time, eligibility, response. Nothing is
-rewritten, and nothing but delivery is added after the end.
+entry closes it: status, reason, end time and response. Nothing is rewritten,
+and nothing but delivery is added after the end.
+
+The end entry is the same on every channel. Two of today's conversational fields
+leave it:
+
+- **`response_kind`** goes. The response is the text the activation produced on
+  its channel, or none; whether it was a reply or a summary follows from the
+  channel's kind.
+- **`disposition`** (`ExchangeDisposition`) goes. What became of each plan step
+  or route is already in the execution stage's part of the episode; a view that
+  wants one line for the exchange derives it from there.
+
+The episode's `content`, today composed for the conversation, is derived from the
+episode's parts when it ends, the same way on every channel.
+
+### `model_eligible` is retired
+
+`model_eligible` existed so that the model reads from before M36 kept seeing what
+they saw (ADR-0275 §7); the owner ruled on 2026-09-27 that this compatibility is
+no longer needed. It is removed from the episode, from the memory store's
+`search` and `select` (`episode_model_eligible`), from the turn row along with
+the turn index, and from the episode window's exemption in ADR-0276 §4. A read
+that should skip an unfinished or failed episode reads the end entry's status,
+which says so directly. The cutover's fresh data directory holds no pre-M36
+episodes for the flag to protect.
 
 A crash leaves an episode without an end entry. Before the hub admits its first
 activation it appends one to each such episode: `interrupted`, reason
-`hub_stopped`, no response, not eligible. Nothing else needs repairing, because
+`hub_stopped`, no response. Nothing else needs repairing, because
 there is no second store for the episode to disagree with. This replaces
 ADR-0283's `EpisodeEnding` and its restart rules.
 
@@ -185,10 +212,14 @@ From ADR-0283, unchanged:
 
 Forgetting an episode deletes, in one memory-store transaction, the episode and
 every belief whose `provenance.evidence` cites it. Both live in the `records`
-table and the `vec_records` index, so the transaction is a local one. A belief
-citing several episodes is deleted when any one of them is forgotten: this is
-the owner's ruling for now (2026-09-30), chosen as the simple option; weakening
-the belief instead is left open below. Parked reads, goal elements and source
+table and the `vec_records` index, so the transaction is a local one.
+
+A belief citing several episodes is weakened rather than deleted: the forgotten
+episode's citation is removed from its `provenance.evidence`, and the belief is
+deleted when its last cited episode is forgotten. So a belief never outlives all
+of the episodes it came from, and never rests on one the user forgot. A belief
+whose confidence the forgotten episode raised keeps the confidence it has; it is
+not recomputed. Parked reads, goal elements and source
 material naming the episode are deleted by their own stores on the same forget,
 and a reference that outlives its episode reads as gone, as ADR-0074 already
 tolerates.
@@ -212,8 +243,11 @@ channel. There is no index to enumerate first.
 - **Give episodes their own store, apart from beliefs.** Cleaner separation, but
   the cascade to beliefs then crosses two stores with no transaction, the problem
   this proposal removes. Kept in the memory store.
-- **Beliefs survive their episode, marked unsupported.** Kinder to the user model,
-  but a forgotten fact would stay known. Deferred, per the ruling above.
+- **Delete every belief citing the episode.** The simplest cascade, and the
+  owner's first ruling (2026-09-30), before weakening was folded in: a belief
+  confirmed by many episodes would vanish when any one was forgotten.
+- **Beliefs survive their episodes, marked unsupported.** Kinder to the user
+  model, but a forgotten fact would stay known.
 
 ## Cutover
 
@@ -222,20 +256,15 @@ existing turn rows, archive entries or expiry stamps.
 
 ## ADRs it would touch
 
-ADR-0007 (retention), ADR-0074 (§3, §7, §8, §9), ADR-0077 (the observer's
-cursor), ADR-0225 (retired whole), ADR-0275 (§3, §8 and its §8:11 compensation,
-§9), and ADR-0276, ADR-0280, ADR-0281 and ADR-0282 where they save excerpts or
-assume the episode is written once.
+ADR-0007 (retention), ADR-0221 (`disposition`), ADR-0074 (§3, §7, §8, §9), ADR-0077 (the observer's
+cursor), ADR-0225 (retired whole), ADR-0275 (§3, §7's eligibility, §8 and its §8:11
+compensation, §9), and ADR-0276, ADR-0280, ADR-0281 and ADR-0282 where they save excerpts, read
+eligibility, or assume the episode is written once.
 
 ## What it leaves open
 
-- Whether a belief should be weakened rather than deleted when one of several
-  episodes it cites is forgotten.
-- Retiring `model_eligible`, which the owner has ruled is backward compatibility
-  only (2026-09-27); this proposal keeps it as the eligibility the turn row used
-  to carry.
-- Whether `disposition` and `response_kind`, which are conversational, become
-  channel-generic parts of the end entry.
+- Whether a weakened belief's confidence should be recomputed from the evidence
+  that remains.
 - The episode commands' exact names, and whether read-back of a forgotten
   conversation's tombstone is shown.
 - Where the parked binding lives once stories land.
