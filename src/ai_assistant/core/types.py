@@ -2776,9 +2776,10 @@ class SpokenDeliveryState(StrEnum):
 class SpokenDelivery(BaseModel):
     """What a device played of one spoken answer, in time (ADR-0205 §2, §3).
 
-    **Exactly three members**, and this is the *fact* rather than the report: §3
-    records it on a :class:`ConversationTurn`'s row, and
-    :class:`SpokenDeliveryReport` is what names the turn it is about.
+    **Exactly three members**, and this is the *fact* rather than the report: the
+    conversation store keeps it on a delivery row keyed by the episode's id
+    (ADR-0283 §6, superseding ADR-0205 §3's turn row), and
+    :class:`SpokenDeliveryReport` is what names the episode it is about.
 
     **Granularity is time.** No lane derives a word, a sentence or a character
     position from these durations, and no surface promises one — the synthesizer
@@ -15528,9 +15529,10 @@ class PlanExport(BaseModel):
 
 # --- a spoken answer's delivery: what a device reports having played --------
 # ADR-0205's three values. Declared **here**, above the conversation block,
-# rather than in the speech block at the foot of this module: §3 puts the fact on
-# `ConversationTurn`, so the type it is spelled with has to exist by the time that
-# model is built. The three depend on nothing but `timedelta`, `StrEnum` and
+# rather than in the speech block at the foot of this module: §3 put the fact on
+# the turn index's row, so the type it is spelled with had to exist by the time
+# that model was built, and ADR-0283 §6's delivery rows keep the placement. The
+# three depend on nothing but `timedelta`, `StrEnum` and
 # `Identifier`, so nothing about the speech block's own ordering rule is weakened
 # by the split — what is below stays below because `SpokenAudio` and `SpokenTurn`
 # depend on `TurnOutcome`, and none of these three does.
@@ -15698,19 +15700,21 @@ class SpokenAudio(BaseModel):
         return base64.b64decode(self.content, validate=True)
 
 
-# --- conversations: the durable thread, and the turns indexed under it -------
-# ADR-0074's four values. A conversation is durable, server-side state with an
-# identity of its own; a turn is the *index entry* that names the episode
-# recording it, never the episode itself. All frozen (ADR-0068), every instant a
+# --- conversations: the durable thread -------------------------------------
+# ADR-0074's conversation and its portable snapshot. A conversation is durable,
+# server-side state with an identity of its own; its history is the episodes on
+# its channel in the ``MemoryStore``, in number order, and nothing here indexes
+# them (ADR-0283 §1, §4, §6). Both frozen (ADR-0068), every instant a
 # `UtcInstant` (ADR-0023, ADR-0030).
 
 
-#: The ordinal of a conversation's first turn. Ordinals are dense, unique and
-#: monotonic per conversation (ADR-0074 §9.2), so "dense from here" is the whole
-#: of the numbering rule and both traversals terminate because of it. Public
-#: because every ``ConversationStore`` implementation and its conformance suite
-#: need the same starting point; a constant one of them re-derived is a numbering
-#: two stores could disagree about.
+#: The least value a conversation-scoped position may take: 1, so 0 is never a
+#: spelling of "none". It floors ``Conversation.observed_through`` — an episode
+#: number since ADR-0283 §6:6, and episode numbers are positive integers
+#: (ADR-0283 §1). The name is the turn index's, which ADR-0283 retired; the value
+#: and the floor it expresses are unchanged. Public because
+#: every store and conformance suite that refuses a position below it needs the
+#: same figure.
 FIRST_TURN_ORDINAL = 1
 
 
@@ -15727,41 +15731,40 @@ class Conversation(BaseModel):
     Activity is "someone was here": set at creation and refreshed whenever a turn
     *begins*, so it is always present and is the key every listing and the
     retention reclaim read. ``last_turn_at`` is "a turn was **recorded**", set by
-    the append that writes a turn into the index and unset until one lands — which
-    is what tells an empty conversation from one whose first turn landed at once.
+    ``ConversationStore.record_turn`` once a conversational episode has landed on
+    the conversation's channel (ADR-0283 §6:2), and unset until one does — which is
+    what tells an empty conversation from one whose first turn landed at once.
 
     ``deleted_at`` is §8's tombstone stamp rather than a status: a stamped
-    conversation is absent from every read that presents it, refuses every later
-    append, and survives only so the deletion sweep can still name the episodes it
-    must destroy.
+    conversation is absent from every read that presents it, makes every later
+    ``record_turn`` write nothing, and survives so the deletion sweep can find it
+    and delete every episode on its channel (ADR-0283 §8).
 
     **``observed_through`` is the observation walk's position, and it is a position
-    rather than a certificate** (ADR-0212 §1). It says the walk over this
-    conversation has advanced past that ordinal, and that no later pass of a build
-    which reads it selects a turn at or below it. It does **not** say that every
-    turn below it was read, that a belief was proposed, that a proposal was ruled,
-    that an episode resolved, or that a model was called: a conversation's first
-    pass starts at its tail window and leaves every turn below that window beneath
-    the first watermark recorded, and a turn whose episode did not resolve is
-    passed over (ADR-0212 §§4, 5). What a reader may conclude from a watermark of
-    *n* is that the turns **above** *n* are the walk's remaining work, and nothing
-    whatever about the turns below it.
+    rather than a certificate** (ADR-0212 §1). Since ADR-0283 §6:6 and §11 it is an
+    **episode number**: the highest ``MemoryStore`` number on the conversation's
+    channel that a pass has recorded. It says the walk over this conversation has
+    advanced past that number, and that no later pass selects an episode at or
+    below it. It does **not** say that every episode below it was read, that a
+    belief was proposed, that a proposal was ruled, or that a model was called: a
+    conversation's first pass starts at its tail and leaves every episode below
+    that page beneath the first watermark recorded (ADR-0212 §§4, 5). What a reader
+    may conclude from a watermark of *n* is that the episodes numbered **above** *n*
+    are the walk's remaining work, and nothing whatever about those below it.
 
     **One consumer reads it and no other may branch on it** (ADR-0212 §7). Because
-    a watermark is present, absent, high or low, no read of this store selects a
-    different set of rows, orders them differently, refuses where it would have
-    answered, or returns a different value in any other member — the one exception
-    being ``ConversationStore.conversations_with_unobserved_turns``, whose whole
-    subject it is. A build that does not read it ignores it and does not refuse to
-    start over it.
+    a watermark is present, absent, high or low, no read of the conversation store
+    selects a different set of rows, orders them differently, refuses where it
+    would have answered, or returns a different value in any other member. A build
+    that does not read it ignores it and does not refuse to start over it.
 
     No cross-field ordering is validated. ``started_at``, ``last_active_at`` and
     ``last_turn_at`` all come from an injected clock, which this project never
     promises is monotonic (``core/clock.py``), so a rule like
     ``last_active_at >= started_at`` would make a legitimate clock adjustment
     unrepresentable rather than catching a bug. ``observed_through`` is likewise
-    not validated against the conversation's turns here: the model cannot see them,
-    so the store discards a watermark its own turns do not reach (ADR-0212 §7).
+    bounded below and nowhere above: the numbers it names are the memory store's,
+    which neither this model nor the conversation store can see (ADR-0283 §6:6).
     """
 
     model_config = ConfigDict(extra="forbid", frozen=True)
@@ -15783,127 +15786,61 @@ class Conversation(BaseModel):
         default=None,
         ge=FIRST_TURN_ORDINAL,
         description=(
-            "Highest turn ordinal an observation pass has recorded for this conversation; "
-            "unset until one has (ADR-0212 §1). A position in the walk, never a claim that "
-            "the turns below it were read."
+            "Highest episode number on this conversation's channel an observation pass has "
+            "recorded; unset until one has (ADR-0212 §1, ADR-0283 §6:6). A position in the "
+            "walk, never a claim that the episodes below it were read."
         ),
-    )
-
-
-class ConversationTurn(BaseModel):
-    """One turn's entry in a conversation's index (ADR-0074 §3).
-
-    **The index entry, not the content.** The turn's content is exactly one
-    ``EpisodicMemory`` in the ``MemoryStore``, named here by ``episode_id`` and
-    written immediately *after* this row lands — which is what makes the index an
-    intent log: no episode can exist for a conversation without its id having been
-    recorded here first (§8). An ``episode_id`` that no longer resolves is
-    therefore an ordinary state, not a fault: the episode may have expired, been
-    deleted, or never been written at all, and every reader renders that as a gap.
-
-    ``ordinal`` is allocated by the store, dense from :data:`FIRST_TURN_ORDINAL`
-    and monotonic within its conversation; ``episode_id`` is *derived* by the same
-    store from the conversation and that ordinal, so two captured episodes cannot
-    collide by construction rather than by probability.
-
-    **``delivery`` is the third fact this row carries about a turn beside its
-    identity** — after ``occurred_at`` and ``parked`` — and it is state about the
-    turn, not content of it (ADR-0205 §3): two durations and a state are not the
-    exchange, so "this store holds no content" binds unchanged. It is what can
-    carry a fact that arrives *late*, which is the whole reason it lives here and
-    not on the episode: ADR-0068 froze the record graph and ``MemoryStore`` has no
-    update, so a field on ``EpisodicMemory`` could only ever keep the value capture
-    gave it — which is the value the report exists to replace.
-
-    **An absent ``delivery`` means no delivery fact was recorded for this turn**
-    (§3) — on the surface as it stands, a turn that did not run on
-    ``converse_spoken``, since §4 stamps every turn that did. It is never read as
-    delivered and never read as heard.
-
-    **And it is not a record of the channel a turn arrived on** (§3). No lane,
-    implementation or later ADR reads it as one, infers an arrival channel from it,
-    or cites ADR-0205 as authority for recording a channel: ADR-0200 §11's deferral
-    of "recording the channel on an episode" and ADR-0074 §11's "nothing on a turn
-    records where it came from" are both untouched. The fact recorded is about the
-    **rendering's delivery** — an output fact — where those deferrals are about
-    **origin**, and a value that happens to correlate is not an answer to a
-    different question.
-    """
-
-    model_config = ConfigDict(extra="forbid", frozen=True)
-
-    conversation_id: Identifier
-    ordinal: int = Field(
-        ge=FIRST_TURN_ORDINAL,
-        description="Position in the conversation; dense, unique and store-allocated.",
-    )
-    episode_id: Identifier = Field(
-        description="Id of the episode recording this turn; derived, and may not resolve."
-    )
-    occurred_at: UtcInstant = Field(description="When the exchange this turn records happened.")
-    model_eligible: bool = True
-    parked: ParkedBinding | None = Field(
-        default=None,
-        description="The binding this turn parked on, where it parked (ADR-0074 §3).",
-    )
-    delivery: SpokenDelivery | None = Field(
-        default=None,
-        description="What a device played of this turn's spoken answer (ADR-0205 §3).",
     )
 
 
 class ConversationExport(BaseModel):
-    """A portable snapshot of conversation state (ADR-0074 §9, ADR-0004 §6).
+    """A portable snapshot of the conversation store's own state (ADR-0074 §9, ADR-0004 §6).
 
-    Flat, like :class:`PlanExport` and for the same reason: a turn names its
-    conversation by id, so the two collections travel side by side rather than
-    nested. It carries **no episode content** — episodes are ``MemoryStore``
-    records and that store's own export carries them, so repeating them here would
-    put the same Tier 1 text in two exports under two retention rules.
+    **The conversations and nothing else** (ADR-0283 §4:3). A conversation's
+    history is the episodes on its channel, which are ``MemoryStore`` records and
+    which that store's own export carries; repeating them here, or an index of
+    them, would put the same Tier 1 history in two exports under two retention
+    rules. The delivery rows the conversation store also keeps are bookkeeping
+    about episodes rather than a record of the conversation, and the observation
+    watermark rides on each :class:`Conversation` already.
 
     **This is the store's raw snapshot.** A conversation stamped deleted is absent
-    from it (that is what the validator below enforces), but a turn whose episode
-    no longer resolves is *present*: the store has no way to ask whether an episode
-    is live and no business asking (golden rule 1). The user-facing export is
-    composed in `orchestration`, which drops those turns and with them any
-    conversation left with nothing to show.
+    from it (that is what the validator below enforces), but a conversation whose
+    channel holds no live episode is *present*: this store has no way to ask
+    whether one is live and no business asking (golden rule 1).
 
-    Order is part of the contract and is the order each read uses (ADR-0074 §9.3):
-    ``conversations`` by ``last_active_at`` descending with ``id`` ascending as the
-    tie-break, ``turns`` by ``conversation_id`` then ``ordinal`` ascending. It is
-    asserted by the conformance suite rather than validated here, so that filtering
-    an export down — which preserves order — stays a total operation.
+    Order is part of the contract and is the order the store's reads use (ADR-0074
+    §9.3): ``conversations`` by ``last_active_at`` descending with ``id`` ascending
+    as the tie-break. It is asserted by the conformance suite rather than validated
+    here, so that filtering an export down — which preserves order — stays a total
+    operation.
 
-    ``schema_version`` is 3 because the index now carries immutable activation
-    eligibility (ADR-0275). Exports have no import operation or historical
-    conversion path. The unfiltered export includes inspection-only rows.
+    ``schema_version`` is 4 because the turns are gone from the document (ADR-0275
+    §7:9 as ADR-0283 §4:3 reads it). Exports have no import operation and no
+    historical conversion path, so a version-3 document is not read here.
     """
 
     model_config = ConfigDict(extra="forbid", frozen=True)
 
-    schema_version: Literal[3] = Field(
-        default=3,
+    schema_version: Literal[4] = Field(
+        default=4,
         description=(
-            "Shape of this export, pinned to exactly 3 (ADR-0039 §10, ADR-0014 §5): an "
-            "export outlives the code that wrote it, so the label must be a fact about "
-            "the document rather than a producer's unchecked claim."
+            "Shape of this export, pinned to exactly 4 (ADR-0039 §10, ADR-0014 §5, "
+            "ADR-0283 §4:3): an export outlives the code that wrote it, so the label must "
+            "be a fact about the document rather than a producer's unchecked claim."
         ),
     )
     exported_at: UtcInstant
     conversations: tuple[Conversation, ...] = ()
-    turns: tuple[ConversationTurn, ...] = ()
 
     @model_validator(mode="after")
-    def _the_index_is_internally_consistent(self) -> ConversationExport:
+    def _the_snapshot_is_internally_consistent(self) -> ConversationExport:
         """Enforce what this export documents rather than assuming it.
 
-        An export is the artifact a user takes elsewhere, so a turn whose
-        conversation is missing is a fragment of a thread with nothing to place it
-        in. The uniqueness rules are the store's own invariants seen from the
-        outside — a repeated ordinal or episode id would make the same turn
-        addressable two ways — and the deleted-conversation rule is §9's "a
-        conversation stamped deleted but not yet reclaimed is **not** exported",
-        made unrepresentable rather than left to each producer.
+        A repeated id would make one conversation addressable twice, and the
+        deleted-conversation rule is §9's "a conversation stamped deleted but not
+        yet reclaimed is **not** exported", made unrepresentable rather than left to
+        each producer.
         """
         stamped = sorted(one.id for one in self.conversations if one.deleted_at is not None)
         if stamped:
@@ -15913,28 +15850,6 @@ class ConversationExport(BaseModel):
         known = {one.id for one in self.conversations}
         if len(known) != len(self.conversations):
             msg = "export contains duplicate conversation ids"
-            raise ValueError(msg)
-
-        dangling = sorted(
-            {turn.conversation_id for turn in self.turns if turn.conversation_id not in known}
-        )
-        if dangling:
-            msg = f"export has turns whose conversation is missing: {', '.join(dangling)}"
-            raise ValueError(msg)
-
-        positions = {(turn.conversation_id, turn.ordinal) for turn in self.turns}
-        if len(positions) != len(self.turns):
-            msg = "export contains two turns at one position in a conversation"
-            raise ValueError(msg)
-
-        episodes = {turn.episode_id for turn in self.turns}
-        if len(episodes) != len(self.turns):
-            msg = "export contains duplicate episode ids"
-            raise ValueError(msg)
-
-        bindings = [turn.parked for turn in self.turns if turn.parked is not None]
-        if len(set(bindings)) != len(bindings):
-            msg = "export contains two turns claiming one parked binding"
             raise ValueError(msg)
 
         return self

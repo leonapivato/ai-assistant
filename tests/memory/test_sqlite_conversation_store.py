@@ -30,13 +30,8 @@ from conversation_store_contract import (
 from ai_assistant.core.errors import (
     ConversationStoreError,
     IncompatibleStateError,
-    UnknownConversationError,
 )
-from ai_assistant.core.types import (
-    ParkedBinding,
-    SpokenDelivery,
-    SpokenDeliveryState,
-)
+from ai_assistant.core.types import SpokenDelivery, SpokenDeliveryState
 from ai_assistant.memory.conversation_store import SqliteConversationStore, _run_to_completion
 from ai_assistant.testing.cancellation import (
     ResourceLog,
@@ -53,7 +48,6 @@ if TYPE_CHECKING:
 
 #: The store's own defaults, restated here rather than imported (see the fake's
 #: binding for why).
-_TAIL_DEFAULT = 20
 _PURGE_DEFAULT = 100
 
 #: The private method each locked operation does its SQL in, which ADR-0060's hook
@@ -65,7 +59,6 @@ _PURGE_DEFAULT = 100
 _SYNC_METHODS = {
     "start": "_insert_sync",
     "mark_active": "_mark_active_sync",
-    "append": "_append_sync",
     "stamp_deleted": "_stamp_deleted_sync",
     "drop_if_eligible": "_drop_if_eligible_sync",
     "record_observed": "_record_observed_sync",
@@ -73,14 +66,8 @@ _SYNC_METHODS = {
     "record_delivery": "_record_delivery_sync",
     "deliveries": "_deliveries_sync",
     "get": "_get_sync",
-    "turns": "_turns_sync",
-    "turns_after": "_turns_after_sync",
-    "conversations_with_unobserved_turns": "_unobserved_sync",
-    "episodes_to_purge": "_episodes_to_purge_sync",
     "stamped_conversation_ids": "_stamped_ids_sync",
     "recent": "_recent_sync",
-    "turn_of_episode": "_turn_of_episode_sync",
-    "turn_of_binding": "_turn_of_binding_sync",
     "export": "_export_sync",
 }
 
@@ -138,49 +125,6 @@ def _watch_the_journal(monkeypatch: pytest.MonkeyPatch, database: Path) -> list[
     return observed
 
 
-#: The conversation id the orphan rows below name, which no record ever carries.
-_ABSENT = "no-such-conversation"
-
-#: The turn columns, in the order every insert here binds them.
-_TURN_COLUMNS = "conversation_id, ordinal, episode_id, occurred_at, execution_id, step_id"
-
-
-def _cascading_keys_of(database: Path) -> list[tuple[object, ...]]:
-    """The cascading foreign keys ``turns`` carries, read as the store reads them."""
-    raw = sqlite3.connect(database)
-    try:
-        return [
-            row
-            for row in raw.execute("PRAGMA foreign_key_list(turns)")
-            if row[2] == "conversations" and row[3] == "conversation_id" and row[4] == "id"
-            if str(row[6]).upper() == "CASCADE"
-        ]
-    finally:
-        raw.close()
-
-
-def _insert_orphan_turn(database: Path, *, binding: ParkedBinding) -> str:
-    """Write a turn naming a conversation that does not exist, and return its episode id.
-
-    Through a raw connection, because that is the only writer that can produce one:
-    ``PRAGMA foreign_keys`` is per connection and off unless asked for, so a tool
-    that never asked can still land the row the store's own connection refuses.
-    That asymmetry is precisely why the constraint is not enough on its own and the
-    reads have to report what they find (#452).
-    """
-    episode_id = f"conv:{_ABSENT}:1"
-    raw = sqlite3.connect(database)
-    try:
-        raw.execute(
-            f"INSERT INTO turns({_TURN_COLUMNS}) VALUES (?, ?, ?, ?, ?, ?)",  # noqa: S608 — literals
-            (_ABSENT, 1, episode_id, 0, binding.execution_id, binding.step_id),
-        )
-        raw.commit()
-    finally:
-        raw.close()
-    return episode_id
-
-
 class TestSqliteConversationStoreContract(ConversationStoreContract):
     """Runs SqliteConversationStore through the shared ConversationStore suite."""
 
@@ -222,13 +166,12 @@ class TestSqliteConversationStoreContract(ConversationStoreContract):
     def factory(self) -> Iterator[ConversationStoreFactory]:
         opened: list[SqliteConversationStore] = []
 
-        def build(  # noqa: PLR0913 — one keyword per injected seam
+        def build(
             *,
             now: Callable[[], datetime],
             new_id: Callable[[], str],
             retention: timedelta | None,
             tombstone_grace: timedelta,
-            tail_limit: int,
             purge_batch: int,
         ) -> ConversationStore:
             store = SqliteConversationStore(
@@ -237,7 +180,6 @@ class TestSqliteConversationStoreContract(ConversationStoreContract):
                 new_id=new_id,
                 retention=retention,
                 tombstone_grace=tombstone_grace,
-                tail_limit=tail_limit,
                 purge_batch=purge_batch,
             )
             opened.append(store)
@@ -246,10 +188,6 @@ class TestSqliteConversationStoreContract(ConversationStoreContract):
         yield build
         for store in opened:
             store.close()
-
-    @pytest.fixture
-    def tail_default(self) -> int:
-        return _TAIL_DEFAULT
 
     @pytest.fixture
     def purge_default(self) -> int:
@@ -316,9 +254,9 @@ class TestSqliteConversationStoreContract(ConversationStoreContract):
         deliberately so. ADR-0060's hook goes *inside* the connection — inside the
         worker thread, past every argument this store reads. ADR-0065's must be at
         the method's own first suspension point, which for both operations the cases
-        drive is ``async with self._lock``: neither ``append`` nor
-        ``turn_of_binding`` awaits anything before it, and both hand their argument
-        to the worker only afterwards. Suspending any later would put the mutation
+        drive is ``async with self._lock``: neither ``record_turn`` nor
+        ``deliveries`` awaits anything before it, and both hand their argument to
+        the worker only afterwards. Suspending any later would put the mutation
         past the point a non-conforming implementation would have read the argument
         — the entry-side mistake ADR-0065 §3 warns about, in mirror image.
 
@@ -543,32 +481,50 @@ def test_sqlite_discards_a_symlinked_journal_rather_than_writing_through_it(
 async def test_what_was_written_survives_a_reopen(tmp_path: Path) -> None:
     """The whole point of the persistent store: an id keeps working across a restart."""
     path = tmp_path / "conversations.db"
-    binding = ParkedBinding(execution_id="exec-1", step_id="step-1")
 
     store = SqliteConversationStore(path=path, now=_fixed_now)
     try:
         conversation = await store.start()
-        first = await store.append(conversation.id, occurred_at=_NOW)
-        parked = await store.append(
-            conversation.id, occurred_at=_NOW, parked=binding, model_eligible=False
+        recorded = await store.record_turn(
+            conversation.id, episode_id="activation:a", occurred_at=_NOW
         )
+        assert recorded is not None
     finally:
         store.close()
 
     reopened = SqliteConversationStore(path=path, now=_fixed_now)
     try:
         restored = await reopened.get(conversation.id)
+        assert restored == recorded
         assert restored is not None
-        assert restored.id == conversation.id
         assert restored.started_at == conversation.started_at
         assert restored.last_turn_at == _NOW
-        assert await reopened.turns(conversation.id) == [first, parked]
-        assert await reopened.turn_of_binding(binding) == parked
-        assert await reopened.turns(conversation.id, model_eligible_only=True) == [first]
-        # The ordinal is read back from the index, not from process state, so a
-        # restarted engine cannot re-use one (ADR-0064's invariant across a restart).
-        following = await reopened.append(conversation.id, occurred_at=_NOW)
-        assert following.ordinal == parked.ordinal + 1
+    finally:
+        reopened.close()
+
+
+@pytest.mark.integration
+async def test_a_fresh_store_holds_no_turn_table_and_reopens(tmp_path: Path) -> None:
+    """ADR-0283 §6, §12: the turn index is retired, so the schema does not carry it.
+
+    Read from the file, because no read on the seam could show a table's absence —
+    and reopened, because the open path no longer probes a turn table's shape and
+    must not refuse a file for lacking one.
+    """
+    path = tmp_path / "conversations.db"
+    SqliteConversationStore(path=path, now=_fixed_now).close()
+
+    raw = sqlite3.connect(path)
+    try:
+        tables = {row[0] for row in raw.execute("SELECT name FROM sqlite_master")}
+    finally:
+        raw.close()
+    assert "turns" not in tables
+    assert {"conversations", "deliveries", "episode_record_format"} <= tables
+
+    reopened = SqliteConversationStore(path=path, now=_fixed_now)
+    try:
+        assert await reopened.recent() == []
     finally:
         reopened.close()
 
@@ -590,7 +546,7 @@ async def test_a_crashed_deletion_is_rediscoverable_across_a_reopen(tmp_path: Pa
     store = SqliteConversationStore(path=path, now=clock, tombstone_grace=grace)
     try:
         conversation = await store.start()
-        turn = await store.append(conversation.id, occurred_at=clock())
+        await store.record_turn(conversation.id, episode_id="activation:a", occurred_at=clock())
         assert await store.stamp_deleted(conversation.id) is True
         # ...and here the process dies: no episode purged, no record dropped.
     finally:
@@ -599,56 +555,12 @@ async def test_a_crashed_deletion_is_rediscoverable_across_a_reopen(tmp_path: Pa
     reopened = SqliteConversationStore(path=path, now=clock, tombstone_grace=grace)
     try:
         assert await reopened.stamped_conversation_ids() == [conversation.id]
-        assert await reopened.episodes_to_purge(conversation.id) == [turn.episode_id]
         assert await reopened.drop_if_eligible(conversation.id) is False, "inside the grace"
 
         clock.advance(grace)
 
         assert await reopened.drop_if_eligible(conversation.id) is True
         assert await reopened.stamped_conversation_ids() == []
-    finally:
-        reopened.close()
-
-
-@pytest.mark.integration
-@pytest.mark.parametrize(
-    ("execution_id", "step_id"),
-    [(None, "step-1"), ("exec-1", None)],
-    ids=["execution-lost", "step-lost"],
-)
-async def test_a_half_present_parked_binding_is_read_as_corruption(
-    tmp_path: Path, execution_id: str | None, step_id: str | None
-) -> None:
-    """A binding is a pair, so half of one is a corrupt row, not an unparked turn.
-
-    The dangerous half is the missing ``execution_id``: a decode that keyed on
-    that column alone would hand back a plausible-looking turn with ``parked``
-    unset, quietly losing the binding a recovered resume is found by (ADR-0074
-    §3). The row is written here through a raw connection because this module
-    never produces one — which is exactly why the guard is on the read.
-    """
-    path = tmp_path / "conversations.db"
-    store = SqliteConversationStore(path=path, now=_fixed_now)
-    try:
-        conversation = await store.start()
-        turn = await store.append(conversation.id, occurred_at=_NOW)
-    finally:
-        store.close()
-
-    raw = sqlite3.connect(path)
-    raw.execute(
-        "UPDATE turns SET execution_id = ?, step_id = ? WHERE episode_id = ?",
-        (execution_id, step_id, turn.episode_id),
-    )
-    raw.commit()
-    raw.close()
-
-    reopened = SqliteConversationStore(path=path, now=_fixed_now)
-    try:
-        with pytest.raises(ConversationStoreError, match="half a parked binding"):
-            await reopened.turns(conversation.id)
-        with pytest.raises(ConversationStoreError, match="half a parked binding"):
-            await reopened.turn_of_episode(turn.episode_id)
     finally:
         reopened.close()
 
@@ -688,132 +600,37 @@ async def test_a_corrupt_timestamp_is_a_store_fault_on_the_lifecycle_path_too(
 
 @pytest.mark.integration
 @pytest.mark.parametrize(
-    ("table", "column", "value"),
+    ("column", "value"),
     [
-        ("conversations", "last_active_at", 1.5),
-        ("conversations", "started_at", "not-an-epoch"),
-        ("turns", "occurred_at", 1.5),
-        ("turns", "ordinal", 2.5),
+        ("last_active_at", 1.5),
+        ("started_at", "not-an-epoch"),
+        ("last_turn_at", 1.5),
     ],
-    ids=["activity-float", "started-text", "occurred-float", "ordinal-float"],
+    ids=["activity-float", "started-text", "turn-float"],
 )
 async def test_a_column_holding_the_wrong_type_is_read_as_corruption(
-    tmp_path: Path, table: str, column: str, value: object
+    tmp_path: Path, column: str, value: object
 ) -> None:
     """SQLite's ``INTEGER`` affinity is a preference, not a constraint.
 
     A ``REAL`` that is not losslessly integral stays a ``REAL`` in the column, and
     ``timedelta`` would happily *round* one into a plausible instant — so the
     store would hand back a fabricated-but-valid record rather than reporting the
-    corruption the contract promises to report. The same argument covers an
-    ordinal: coercing one would place a turn where no append ever allocated it.
+    corruption the contract promises to report.
     """
     path = tmp_path / "conversations.db"
     store = SqliteConversationStore(path=path, now=_fixed_now)
     try:
         conversation = await store.start()
-        await store.append(conversation.id, occurred_at=_NOW)
+        await store.record_turn(conversation.id, episode_id="activation:a", occurred_at=_NOW)
 
         raw = sqlite3.connect(path)
-        raw.execute(f"UPDATE {table} SET {column} = ?", (value,))  # noqa: S608 — literals
+        raw.execute(f"UPDATE conversations SET {column} = ?", (value,))  # noqa: S608 — literals
         raw.commit()
         raw.close()
 
-        read = (
-            store.get(conversation.id) if table == "conversations" else store.turns(conversation.id)
-        )
         with pytest.raises(ConversationStoreError):
-            await read
-    finally:
-        store.close()
-
-
-@pytest.mark.integration
-@pytest.mark.parametrize("ordinal", [-1, 0, 1.5], ids=["negative", "zero", "float"])
-async def test_a_corrupt_ordinal_is_refused_on_every_path_that_reads_one(
-    tmp_path: Path, ordinal: object
-) -> None:
-    """The allocator and the sweep cursor read ordinals too, not only the reader.
-
-    ``append`` adds one to the highest stored ordinal, so a corrupt row would
-    otherwise be *coerced into a position* — ``-1`` allocating ``0``, which the
-    frozen type then rejects with a raw ``ValidationError``, and ``1.5``
-    truncating a sweep cursor to a place it does not name. Both are store faults
-    and both owe this seam's error.
-    """
-    path = tmp_path / "conversations.db"
-    store = SqliteConversationStore(path=path, now=_fixed_now)
-    try:
-        conversation = await store.start()
-        turn = await store.append(conversation.id, occurred_at=_NOW)
-
-        raw = sqlite3.connect(path)
-        raw.execute("UPDATE turns SET ordinal = ?", (ordinal,))
-        raw.commit()
-        raw.close()
-
-        with pytest.raises(ConversationStoreError, match="not a usable position"):
-            await store.append(conversation.id, occurred_at=_NOW)
-        with pytest.raises(ConversationStoreError, match="not a usable position"):
-            await store.episodes_to_purge(conversation.id, after_id=turn.episode_id)
-    finally:
-        store.close()
-
-
-@pytest.mark.integration
-async def test_an_ordinal_at_the_signed_64_bit_ceiling_is_the_seams_own_error(
-    tmp_path: Path,
-) -> None:
-    """A corrupt row at SQLite's ceiling is a store fault, not a value to build on.
-
-    Ordinals start at one and move by one, so a conversation reaches the ceiling
-    only through corruption — and the density check catches it first, because a
-    single turn at ``2**63 - 1`` is a gapped index before it is an exhausted one.
-    The ceiling check behind it stays: it costs one comparison, and it is what
-    keeps the allocation from binding a value the driver cannot carry should the
-    numbering ever start somewhere else.
-    """
-    path = tmp_path / "conversations.db"
-    store = SqliteConversationStore(path=path, now=_fixed_now)
-    try:
-        conversation = await store.start()
-        await store.append(conversation.id, occurred_at=_NOW)
-
-        raw = sqlite3.connect(path)
-        raw.execute("UPDATE turns SET ordinal = ?", (2**63 - 1,))
-        raw.commit()
-        raw.close()
-
-        with pytest.raises(ConversationStoreError, match="gapped turn index"):
-            await store.append(conversation.id, occurred_at=_NOW)
-    finally:
-        store.close()
-
-
-@pytest.mark.integration
-async def test_a_corrupt_episode_id_is_refused_on_the_path_that_destroys_it(
-    tmp_path: Path,
-) -> None:
-    """The sweep's read is the one that must not coerce, because its caller deletes.
-
-    ``str()`` on a ``BLOB`` yields a plausible-looking ``"b'...'"``: a sweep handed
-    one would delete an id nothing holds, then drop the index row that named the
-    real episode, leaving it unreachable. Every other read reaches a frozen type
-    that refuses the same value; this one checks for itself.
-    """
-    path = tmp_path / "conversations.db"
-    store = SqliteConversationStore(path=path, now=_fixed_now)
-    try:
-        conversation = await store.start()
-        await store.append(conversation.id, occurred_at=_NOW)
-
-        raw = sqlite3.connect(path)
-        raw.execute("UPDATE turns SET episode_id = ?", (b"\x00\x01",))
-        raw.commit()
-        raw.close()
-
-        with pytest.raises(ConversationStoreError, match="not usable"):
-            await store.episodes_to_purge(conversation.id)
+            await store.get(conversation.id)
     finally:
         store.close()
 
@@ -824,45 +641,43 @@ async def test_two_stores_over_one_file_serialise_their_mutations(tmp_path: Path
 
     Every in-process case passes on the store's own ``asyncio.Lock`` alone, so
     none of them can tell ``BEGIN IMMEDIATE`` from a deferred transaction. Two
-    stores opened independently over one file can: a deferred read-then-write
-    would let both allocate one ordinal, and a check-and-write split across two
-    transactions would let a turn land in a conversation already stamped.
+    stores opened independently over one file can: a check-and-write split across
+    two transactions would let a turn land in a conversation already stamped.
     """
     path = tmp_path / "conversations.db"
     first = SqliteConversationStore(path=path, now=_fixed_now)
     second = SqliteConversationStore(path=path, now=_fixed_now)
+    unstamped = SpokenDelivery(state=SpokenDeliveryState.UNKNOWN)
     try:
         conversation = await first.start()
         assert await second.get(conversation.id) is not None, "both see one database"
 
-        turns = await asyncio.gather(
+        episodes = [f"activation:{index}" for index in range(8)]
+        await asyncio.gather(
             *(
-                store.append(conversation.id, occurred_at=_NOW)
-                for _ in range(4)
-                for store in (first, second)
+                (first, second)[index % 2].record_turn(
+                    conversation.id, episode_id=episode, occurred_at=_NOW, delivery=unstamped
+                )
+                for index, episode in enumerate(episodes)
             )
         )
+        assert await second.deliveries(conversation.id, episode_ids=episodes) == dict.fromkeys(
+            episodes, unstamped
+        ), "every recorded episode from either engine has its delivery row"
 
-        assert sorted(turn.ordinal for turn in turns) == list(range(1, 9)), (
-            "two engines over one file allocated a conflicting ordinal, so the "
-            "exclusion is not holding across connections"
-        )
-        assert len({turn.episode_id for turn in turns}) == 8
-
-        appended, stamped = await asyncio.gather(
-            first.append(conversation.id, occurred_at=_NOW),
+        recorded, stamped = await asyncio.gather(
+            first.record_turn(
+                conversation.id, episode_id="activation:late", occurred_at=_NOW, delivery=unstamped
+            ),
             second.stamp_deleted(conversation.id),
-            return_exceptions=True,
         )
 
         assert stamped is True
-        named = await second.episodes_to_purge(conversation.id)
-        if isinstance(appended, BaseException):
-            assert isinstance(appended, ConversationStoreError), appended
-            assert len(named) == 8
-        else:
-            assert appended.episode_id in named
-            assert len(named) == 9
+        assert await first.get(conversation.id) is None
+        if recorded is not None:
+            assert recorded.deleted_at is None, (
+                "a recorded conversation is the one as it stood before the stamp"
+            )
     finally:
         first.close()
         second.close()
@@ -877,40 +692,35 @@ async def test_two_stores_over_one_file_serialise_their_mutations(tmp_path: Path
 _HOLD_SECONDS = 0.3
 
 
-def _store_holding_its_ordinal_read(
+def _store_holding_its_liveness_read(
     path: Path, *, announce: Callable[[], None], hold: float
 ) -> SqliteConversationStore:
-    """A store whose first ordinal allocation announces itself and then waits inside.
+    """A store whose first conversation read announces itself and then waits inside.
 
     The rendezvous the cross-process claim actually needs. Starting two children
     together only makes them *runnable*: the OS may run one through all its work
     before scheduling the other, and in that execution a deferred read-then-write
-    allocates dense ordinals too — so a test without this can pass on the very bug it
-    exists to catch. The wait is placed after the competing read and before the write,
-    which is precisely the window ``BEGIN IMMEDIATE`` is there to close.
+    passes too — so a test without this can pass on the very bug it exists to catch.
+    The wait is placed after the liveness read and before the write, which is
+    precisely the window ``BEGIN IMMEDIATE`` is there to close.
 
-    ``_fetch`` is shadowed on the instance and keyed on the human label the store
-    already passes it, so the hook names the read it means rather than matching SQL.
+    ``_row_of`` is shadowed on the instance, which an instance attribute does for a
+    classmethod, so the hook stays on this store's reads.
     """
     store = SqliteConversationStore(path=path, now=_fixed_now)
-    original = SqliteConversationStore._fetch
+    original = SqliteConversationStore._row_of
     announced = False
 
-    def fetch(
-        conn: sqlite3.Connection, what: str, sql: str, params: Sequence[object] = ()
-    ) -> list[Any]:
+    def row_of(conn: sqlite3.Connection, conversation_id: str) -> Sequence[Any] | None:
         nonlocal announced
-        rows = original(conn, what, sql, params)
-        if what == "allocate an ordinal" and not announced:
+        row = original(conn, conversation_id)
+        if not announced:
             announced = True
             announce()
             time.sleep(hold)
-        return rows
+        return row
 
-    # Shadowed on the instance, which is what keeps the hook to this store's reads.
-    # `_append_sync` reaches it as `self._fetch`; `_row_of` is a classmethod and
-    # resolves on the class, so the liveness read stays unhooked.
-    store._fetch = fetch  # type: ignore[method-assign]  # a per-instance test hook
+    store._row_of = row_of  # type: ignore[method-assign]  # a per-instance test hook
     return store
 
 
@@ -946,7 +756,7 @@ def _in_staged_children(work: Sequence[Callable[[Callable[[], None]], str]]) -> 
     """Fork each callable into its own process, releasing each once the last announced.
 
     Staged rather than simultaneous, because simultaneous is not a rendezvous — see
-    :func:`_store_holding_its_ordinal_read`. Each child is released only after its
+    :func:`_store_holding_its_liveness_read`. Each child is released only after its
     predecessor has announced that it is *inside* the critical section, so the overlap
     the cases are about is guaranteed rather than merely likely.
 
@@ -998,109 +808,37 @@ def _in_staged_children(work: Sequence[Callable[[Callable[[], None]], str]]) -> 
 
 @pytest.mark.integration
 @pytest.mark.skipif(not hasattr(os, "fork"), reason="platform has no fork")
-async def test_two_processes_over_one_file_allocate_dense_distinct_ordinals(
-    tmp_path: Path,
-) -> None:
-    """The module's claim is about *processes*, and only processes can test it.
-
-    Every other concurrency case is one process. Even the two-connection case above
-    is: each store's own ``asyncio.Lock`` serialises its connection before SQLite ever
-    sees the contention, so none of them can tell ``BEGIN IMMEDIATE`` from a deferred
-    read-then-write. Two engines really running at once can — a deferred transaction
-    lets both read the same highest ordinal and go on to allocate it twice.
-
-    The first child holds its transaction open across the read, and the second is
-    released only once it is in there, so the collision is *attempted* on every run
-    rather than whenever the scheduler happens to arrange it.
-
-    Each child drives ``_append_sync`` on a store it opened itself: the parent's event
-    loop is copied into a forked child and must not be reused, and a ``sqlite3``
-    connection must not be shared across a fork either.
-    """
-    path = tmp_path / "conversations.db"
-    store = SqliteConversationStore(path=path, now=_fixed_now)
-    try:
-        conversation = await store.start()
-    finally:
-        store.close()
-
-    each = 4
-    total = 2 * each
-
-    def _hold_then_append(announce: Callable[[], None]) -> str:
-        child = _store_holding_its_ordinal_read(path, announce=announce, hold=_HOLD_SECONDS)
-        try:
-            allocated = [
-                child._append_sync(conversation.id, _NOW, None, None, True)[1] for _ in range(each)
-            ]
-        finally:
-            child.close()
-        return ",".join(str(one) for one in allocated)
-
-    def _append(announce: Callable[[], None]) -> str:
-        child = SqliteConversationStore(path=path, now=_fixed_now)
-        try:
-            allocated = [
-                child._append_sync(conversation.id, _NOW, None, None, True)[1] for _ in range(each)
-            ]
-        finally:
-            child.close()
-        return ",".join(str(one) for one in allocated)
-
-    reports = _in_staged_children([_hold_then_append, _append])
-
-    allocated: list[int] = []
-    for report in reports:
-        assert not report.startswith("ERROR"), report
-        allocated.extend(int(one) for one in report.split(",") if one)
-    assert sorted(allocated) == list(range(1, total + 1)), (
-        "two processes over one file allocated a conflicting ordinal, so the "
-        "per-conversation exclusion is not holding across processes"
-    )
-
-    reopened = SqliteConversationStore(path=path, now=_fixed_now)
-    try:
-        recorded = await reopened.turns(conversation.id, limit=total)
-        assert [turn.ordinal for turn in recorded] == list(range(1, total + 1))
-        assert len({turn.episode_id for turn in recorded}) == total
-    finally:
-        reopened.close()
-
-
-@pytest.mark.integration
-@pytest.mark.skipif(not hasattr(os, "fork"), reason="platform has no fork")
 async def test_a_capture_holds_off_a_deletion_in_another_process(tmp_path: Path) -> None:
-    """ADR-0074 §8's other conjunction, across the boundary the clause is written for.
+    """ADR-0074 §8's conjunction, across the boundary the clause is written for.
 
     "A caller-held lock does not survive a second caller" is the whole reason the
-    exclusion sits on the seam, so the shared suite's capture-and-deletion case is
+    exclusion sits on the seam, so the shared suite's record-and-deletion case is
     driven here between two engines. The suite's version accepts *either* consistent
     outcome, because in one process it cannot say which lands first. Staged across two
-    processes it can, and the determinism is the discriminating power: the append is
-    inside its transaction before the deletion is released, so ``BEGIN IMMEDIATE``
-    makes the deletion wait, the turn is recorded, and the stamp then names both turns.
+    processes it can, and the determinism is the discriminating power: ``record_turn``
+    is inside its transaction before the deletion is released, so ``BEGIN IMMEDIATE``
+    makes the deletion wait, the episode is recorded, and the stamp then lands.
 
-    Both weakenings fail it. A deferred *append* lets the stamp reach the row during
-    the hold, and the append's write is then refused as busy; a deferred *stamp*
-    reaches its update while the append holds the write lock, and it is refused
+    Both weakenings fail it. A deferred ``record_turn`` lets the stamp reach the row
+    during the hold, and the record's write is then refused as busy; a deferred stamp
+    reaches its update while the record holds the write lock, and it is refused
     instead. Neither leaves the determined outcome below.
     """
     path = tmp_path / "conversations.db"
     store = SqliteConversationStore(path=path, now=_fixed_now)
     try:
         conversation = await store.start()
-        await store.append(conversation.id, occurred_at=_NOW)
     finally:
         store.close()
+    unstamped = SpokenDelivery(state=SpokenDeliveryState.UNKNOWN)
 
-    def _hold_then_append(announce: Callable[[], None]) -> str:
-        child = _store_holding_its_ordinal_read(path, announce=announce, hold=_HOLD_SECONDS)
+    def _hold_then_record(announce: Callable[[], None]) -> str:
+        child = _store_holding_its_liveness_read(path, announce=announce, hold=_HOLD_SECONDS)
         try:
-            return str(child._append_sync(conversation.id, _NOW, None, None, True)[1])
-        except UnknownConversationError:
-            return "REFUSED"
+            row = child._record_turn_sync(conversation.id, "activation:held", _NOW, unstamped)
         finally:
             child.close()
+        return "NONE" if row is None else "RECORDED"
 
     def _stamp(announce: Callable[[], None]) -> str:
         child = SqliteConversationStore(path=path, now=_fixed_now)
@@ -1109,53 +847,19 @@ async def test_a_capture_holds_off_a_deletion_in_another_process(tmp_path: Path)
         finally:
             child.close()
 
-    appended, stamped = _in_staged_children([_hold_then_append, _stamp])
+    recorded, stamped = _in_staged_children([_hold_then_record, _stamp])
 
-    assert appended == "2", (
-        f"the append held the write lock across the window, so the deletion had to "
-        f"queue behind it and the turn had to be recorded: {appended}"
+    assert recorded == "RECORDED", (
+        f"the record held the write lock across the window, so the deletion had to "
+        f"queue behind it and the episode had to be recorded: {recorded}"
     )
     assert stamped == "True", f"the deletion is unconditional and must have happened: {stamped}"
-
-    reopened = SqliteConversationStore(path=path, now=_fixed_now)
-    try:
-        named = await reopened.episodes_to_purge(conversation.id)
-        assert named == [f"conv:{conversation.id}:1", f"conv:{conversation.id}:2"], (
-            "the append succeeded, so the index the sweep reads must name its episode"
-        )
-    finally:
-        reopened.close()
+    assert [row[1] for row in _delivery_rows(path)] == ["activation:held"], (
+        "the record succeeded, so its delivery row is on the stamped conversation"
+    )
 
 
-@pytest.mark.integration
-async def test_an_episode_id_that_is_not_the_derived_one_is_refused(tmp_path: Path) -> None:
-    """The id is a function of the conversation and the ordinal, so a variant is a fault.
-
-    The destructive path is why it matters: a sweep handed a foreign id deletes
-    something that is not this turn's episode — or nothing at all — and then drops
-    the index row that named the real one, leaving it orphaned with nothing left
-    pointing at it (ADR-0074 §3, §8).
-    """
-    path = tmp_path / "conversations.db"
-    store = SqliteConversationStore(path=path, now=_fixed_now)
-    try:
-        conversation = await store.start()
-        await store.append(conversation.id, occurred_at=_NOW)
-
-        raw = sqlite3.connect(path)
-        raw.execute("UPDATE turns SET episode_id = ?", ("conv:somebody-else:1",))
-        raw.commit()
-        raw.close()
-
-        with pytest.raises(ConversationStoreError, match="not the one this turn derives"):
-            await store.turns(conversation.id)
-        with pytest.raises(ConversationStoreError, match="not the one this turn derives"):
-            await store.episodes_to_purge(conversation.id)
-    finally:
-        store.close()
-
-
-# --- the turn index cannot name a conversation that is absent (#452) --------
+# --- a delivery row cannot name a conversation that is absent (#452) --------
 
 
 @pytest.mark.integration
@@ -1164,137 +868,16 @@ async def test_the_store_enforces_foreign_keys_on_its_own_connection(tmp_path: P
 
     Read off the connection because there is no black-box observation to make, and
     that is the finding rather than a weakness of the test: every statement this
-    module issues is already referentially clean — the one ``INSERT`` into ``turns``
-    proves the parent exists in the same transaction, and the drop deletes the index
-    explicitly — so switching enforcement off changes nothing the store itself does.
+    module issues is already referentially clean — the one ``INSERT`` into
+    ``deliveries`` proves the parent exists in the same transaction, and the drop
+    deletes the rows explicitly — so switching enforcement off changes nothing the
+    store itself does.
     Its whole effect is on a writer that is not this module, which is what the
     constraint exists for. Without this case, deleting the pragma would break no test.
     """
     store = SqliteConversationStore(path=tmp_path / "conversations.db", now=_fixed_now)
     try:
         assert store._conn.execute("PRAGMA foreign_keys").fetchone()[0] == 1
-    finally:
-        store.close()
-
-
-@pytest.mark.integration
-async def test_the_schema_refuses_a_turn_that_names_no_conversation(tmp_path: Path) -> None:
-    """The constraint is in the schema, so any writer that enforces it is held to it."""
-    path = tmp_path / "conversations.db"
-    store = SqliteConversationStore(path=path, now=_fixed_now)
-    store.close()
-
-    raw = sqlite3.connect(path)
-    try:
-        raw.execute("PRAGMA foreign_keys = ON")
-        with pytest.raises(sqlite3.IntegrityError):
-            raw.execute(
-                f"INSERT INTO turns({_TURN_COLUMNS}) VALUES (?, ?, ?, ?, NULL, NULL)",  # noqa: S608
-                (_ABSENT, 1, f"conv:{_ABSENT}:1", 0),
-            )
-    finally:
-        raw.close()
-
-
-@pytest.mark.integration
-async def test_deleting_a_conversation_row_cascades_to_its_turns(tmp_path: Path) -> None:
-    """``ON DELETE CASCADE``, so a foreign writer's delete cannot manufacture an orphan.
-
-    The store's own :meth:`drop_if_eligible` does not rely on this — it deletes the
-    index explicitly, because the pragma is per connection and a cascade it depended
-    on would silently stop happening on a connection that had not enabled it. The
-    cascade is the backstop for everyone else, and this is what pins it.
-    """
-    path = tmp_path / "conversations.db"
-    store = SqliteConversationStore(path=path, now=_fixed_now)
-    try:
-        conversation = await store.start()
-        await store.append(conversation.id, occurred_at=_NOW)
-    finally:
-        store.close()
-
-    raw = sqlite3.connect(path)
-    try:
-        raw.execute("PRAGMA foreign_keys = ON")
-        raw.execute("DELETE FROM conversations WHERE id = ?", (conversation.id,))
-        raw.commit()
-        assert raw.execute("SELECT COUNT(*) FROM turns").fetchone()[0] == 0
-    finally:
-        raw.close()
-
-
-@pytest.mark.integration
-async def test_a_turn_naming_no_conversation_is_reported_rather_than_joined_away(
-    tmp_path: Path,
-) -> None:
-    """#452: the inner joins hid an orphan from every read instead of reporting it.
-
-    A row a foreign writer landed is structurally valid and names nothing. Both
-    reverse lookups and the export used to answer "no such turn" for it — the same
-    answer they owe for a conversation deliberately withheld behind a tombstone — so
-    the fault was indistinguishable from correct behaviour. And it is not merely
-    hidden: the purge walk needs the *conversation* record to enumerate anything, so
-    nothing could ever reach the episode this row names to destroy it.
-    """
-    path = tmp_path / "conversations.db"
-    binding = ParkedBinding(execution_id="exec-orphan", step_id="step-orphan")
-    store = SqliteConversationStore(path=path, now=_fixed_now)
-    try:
-        live = await store.start()
-        await store.append(live.id, occurred_at=_NOW)
-    finally:
-        store.close()
-
-    episode_id = _insert_orphan_turn(path, binding=binding)
-
-    reopened = SqliteConversationStore(path=path, now=_fixed_now)
-    try:
-        with pytest.raises(ConversationStoreError, match="names a conversation that is absent"):
-            await reopened.turn_of_episode(episode_id)
-        with pytest.raises(ConversationStoreError, match="names a conversation that is absent"):
-            await reopened.turn_of_binding(binding)
-        with pytest.raises(ConversationStoreError, match="names a conversation that is absent"):
-            await reopened.export()
-        # The other half of why hiding it was the wrong answer: there is no record
-        # to enumerate it under, so the episode it names is unreachable.
-        with pytest.raises(UnknownConversationError):
-            await reopened.episodes_to_purge(_ABSENT)
-        # A tombstone is still withheld rather than reported, which is the
-        # distinction the left join exists to preserve.
-        sound = await reopened.turns(live.id)
-        assert await reopened.turn_of_episode(sound[0].episode_id) == sound[0]
-        assert await reopened.stamp_deleted(live.id) is True
-        assert await reopened.turn_of_episode(sound[0].episode_id) is None
-    finally:
-        reopened.close()
-
-
-@pytest.mark.integration
-async def test_a_gapped_turn_index_is_reported_rather_than_extended(tmp_path: Path) -> None:
-    """Density is the store's invariant, so a gap is a fault and not a shape to build on.
-
-    A gap can only come from outside this module — rows go when the record is
-    dropped and never one at a time — and allocating past one would extend the
-    corruption instead of reporting it, leaving an index whose walks no longer
-    agree with the ordinals they visit (ADR-0074 §9.2).
-    """
-    path = tmp_path / "conversations.db"
-    store = SqliteConversationStore(path=path, now=_fixed_now)
-    try:
-        conversation = await store.start()
-        await store.append(conversation.id, occurred_at=_NOW)
-        second = await store.append(conversation.id, occurred_at=_NOW)
-
-        raw = sqlite3.connect(path)
-        raw.execute(
-            "UPDATE turns SET ordinal = ?, episode_id = ? WHERE ordinal = ?",
-            (3, f"conv:{conversation.id}:3", second.ordinal),
-        )
-        raw.commit()
-        raw.close()
-
-        with pytest.raises(ConversationStoreError, match="gapped turn index"):
-            await store.append(conversation.id, occurred_at=_NOW)
     finally:
         store.close()
 
@@ -1343,69 +926,21 @@ async def test_a_transaction_is_rolled_back_even_for_a_base_exception(tmp_path: 
         store.close()
 
 
-async def test_a_delivery_duration_this_store_cannot_hold_is_this_seams_error(
+async def test_a_delivery_row_duration_this_store_cannot_hold_is_this_seams_error(
     tmp_path: Path,
 ) -> None:
     """ADR-0205 §3: ``ConversationStoreError`` "where the store cannot be written".
 
-    Adversarial review, round 1, ``blocker``. ``timedelta`` reaches ``timedelta.max``
-    — about 8.6e19 microseconds — which
+    ``timedelta`` reaches ``timedelta.max`` — about 8.6e19 microseconds — which
     :class:`~ai_assistant.core.types.SpokenDelivery`'s partition admits and a signed
-    64-bit SQLite ``INTEGER`` cannot hold, and which a browser can reach through the
-    gateway's twenty-digit duration members. Left to the driver it is an
-    ``OverflowError``, which is **not** a ``sqlite3.Error``, so it crosses this
-    module's translation untouched, escapes ``record_delivery``, and is not caught by
-    ``ConversationLifecycle.record_delivery``'s degradation — costing the owner the
-    turn they had just spoken, for a fact about a turn that had already happened.
+    64-bit SQLite ``INTEGER`` cannot hold. Left to the driver it is an
+    ``OverflowError``, which is **not** a ``sqlite3.Error``, so it would cross this
+    module's translation untouched and escape ``record_delivery``.
 
-    **In this store's own tests and not the shared suite**, for the reason the suite's
-    docstring already gives about stores that persist bytes: the bound is a property
+    **In this store's own tests and not the shared suite**: the bound is a property
     of a backend that persists 64-bit integers, and the canonical fake holds the value
-    perfectly well. What the contract owes is the *class* of the error, which this
-    asserts here against the implementation that has the bound.
-
-    The row is read back afterwards, because a refusal that had already written half a
-    delivery would be the worse failure: it must stay eligible for a report that fits.
-    """
-    store = SqliteConversationStore(path=str(tmp_path / "conversations.db"), now=_fixed_now)
-    try:
-        conversation = await store.start()
-        turn = await store.append(
-            conversation.id,
-            occurred_at=_NOW,
-            delivery=SpokenDelivery(state=SpokenDeliveryState.UNKNOWN),
-        )
-
-        with pytest.raises(ConversationStoreError, match="outside the range"):
-            await store.record_delivery(
-                conversation.id,
-                episode_id=turn.episode_id,
-                delivery=SpokenDelivery(
-                    state=SpokenDeliveryState.COMPLETE,
-                    played=timedelta.max,
-                    rendered=timedelta.max,
-                ),
-            )
-
-        row = await store.turn_of_episode(turn.episode_id)
-        assert row is not None
-        assert row.delivery is not None
-        assert row.delivery.state is SpokenDeliveryState.UNKNOWN, (
-            "the refusal wrote nothing, so a report that fits still lands"
-        )
-    finally:
-        store.close()
-
-
-async def test_a_delivery_row_duration_this_store_cannot_hold_is_this_seams_error(
-    tmp_path: Path,
-) -> None:
-    """The same bound on ADR-0283 §6's delivery rows, which share the encoding.
-
-    The delivery-row branch of ``record_delivery`` renders through the same
-    ``_delivery_row``, so the refusal and its class carry over; asserted rather than
-    assumed, because the branch is a second ``UPDATE`` a later edit could give its
-    own rendering.
+    perfectly well. The row is read back afterwards, because a refusal that had
+    already written half a delivery would be the worse failure.
     """
     store = SqliteConversationStore(path=str(tmp_path / "conversations.db"), now=_fixed_now)
     try:
@@ -1445,8 +980,8 @@ def _delivery_rows(database: Path) -> list[tuple[Any, ...]]:
 async def test_a_dropped_conversation_leaves_no_delivery_row_behind(tmp_path: Path) -> None:
     """ADR-0283 §6:7 against the table itself, which the contract can only infer.
 
-    Deleted explicitly rather than left to the cascade, for the reason the turns are:
-    ``PRAGMA foreign_keys`` is per connection, and a drop that relied on it would leave
+    Deleted explicitly rather than left to the cascade: ``PRAGMA foreign_keys`` is
+    per connection, and a drop that relied on it would leave
     the rows behind on any connection that had not enabled it.
     """
     path = tmp_path / "conversations.db"
@@ -1506,7 +1041,7 @@ async def test_delivery_rows_survive_a_reopen(tmp_path: Path) -> None:
 async def test_the_schema_refuses_a_delivery_row_that_names_no_conversation(
     tmp_path: Path,
 ) -> None:
-    """The ``deliveries`` table carries the turns' cascading key (#452, ADR-0283 §6)."""
+    """The ``deliveries`` table carries a cascading key (#452, ADR-0283 §6)."""
     path = tmp_path / "conversations.db"
     store = SqliteConversationStore(path=path, now=_fixed_now)
     try:
@@ -1648,7 +1183,7 @@ async def test_a_closed_store_reports_the_seams_own_error(tmp_path: Path) -> Non
     with pytest.raises(ConversationStoreError):
         await store.get(conversation.id)
     with pytest.raises(ConversationStoreError):
-        await store.append(conversation.id, occurred_at=_NOW)
+        await store.record_turn(conversation.id, episode_id="activation:a", occurred_at=_NOW)
     with pytest.raises(ConversationStoreError):
         await store.export()
 
@@ -1723,7 +1258,7 @@ async def test_each_transaction_opens_in_the_form_its_call_site_asked_for() -> N
         assert opened[-1].strip().upper() == "COMMIT"
 
         with _traced(store) as read:
-            await store.turns(conversation.id)
+            await store.deliveries(conversation.id, episode_ids=["activation:a"])
         assert read[0].strip().upper() == "BEGIN"
         assert read[-1].strip().upper() == "COMMIT"
 
@@ -1779,7 +1314,7 @@ async def test_an_insert_naming_only_the_older_columns_still_succeeds(tmp_path: 
     would make that build's ``start`` fail against an upgraded database — a refusal
     to serve over a watermark, arriving through the schema instead of through a read.
     The insert below *is* that build's statement, and the conversation it writes then
-    reads back with no watermark and enters the candidate listing at its tail.
+    reads back with no watermark.
     """
     path = tmp_path / "conversations.db"
     store = SqliteConversationStore(path=path, now=_fixed_now)
@@ -1792,15 +1327,13 @@ async def test_an_insert_naming_only_the_older_columns_still_succeeds(tmp_path: 
             )
         finally:
             raw.close()
-        await store.append("older-build", occurred_at=_NOW)
+        await store.record_turn("older-build", episode_id="activation:a", occurred_at=_NOW)
 
         read = await store.get("older-build")
 
         assert read is not None
         assert read.observed_through is None
-        assert [one.id for one in await store.conversations_with_unobserved_turns()] == [
-            "older-build"
-        ]
+        assert read.last_turn_at == _NOW
     finally:
         store.close()
 
@@ -1822,7 +1355,7 @@ async def test_an_unusable_watermark_reads_as_absent_and_no_read_raises(
     ADR-0111 §7's argument transfers word for word — "a cursor holds no evidence and
     answers no query", so discarding one "returns nothing wrong to any client". The
     store-side half is what stops one bad integer becoming a
-    ``ConversationStoreError`` on ``get``, ``recent``, ``turns`` and ``export`` for
+    ``ConversationStoreError`` on ``get``, ``recent`` and ``export`` for
     that conversation: a conversation the user can no longer read because a
     bookkeeping column is wrong, which is the outcome §7 forbids arriving through a
     different door. ADR-0283 §6:6 leaves exactly these limbs: "a stored watermark
@@ -1832,8 +1365,6 @@ async def test_an_unusable_watermark_reads_as_absent_and_no_read_raises(
     store = SqliteConversationStore(path=path, now=_fixed_now)
     try:
         conversation = await store.start()
-        await store.append(conversation.id, occurred_at=_NOW)
-        await store.append(conversation.id, occurred_at=_NOW)
         _write_watermark(path, conversation.id, value)
 
         read = await store.get(conversation.id)
@@ -1842,8 +1373,6 @@ async def test_an_unusable_watermark_reads_as_absent_and_no_read_raises(
         assert read.observed_through is None
         assert [one.observed_through for one in await store.recent()] == [None]
         assert [one.observed_through for one in (await store.export()).conversations] == [None]
-        assert len(await store.turns(conversation.id)) == 2
-        assert len(await store.turns_after(conversation.id)) == 2
     finally:
         store.close()
 
@@ -1852,63 +1381,47 @@ async def test_an_unusable_watermark_reads_as_absent_and_no_read_raises(
 async def test_a_conversation_carrying_an_unusable_watermark_is_recovered(
     tmp_path: Path, value: object
 ) -> None:
-    """§7 end to end, so a coerced read and a wrongly-filtered listing cannot disagree.
+    """§7 end to end: a discarded watermark is one a pass can stamp afresh.
 
-    An implementation that coerced the value on one read and filtered it wrongly on
-    another would leave the conversation **permanently unreachable**: absent from the
-    candidate listing, and so never stamped afresh. The listing's own predicate is
-    where that goes wrong most easily — SQLite sorts every integer below every
-    string, so ``t.ordinal > c.observed_through`` alone excludes a text watermark for
-    good and a real-valued one excludes exactly the turns beneath it.
+    An implementation that compared the stored value rather than the discarded one
+    would refuse every advance against a text watermark — SQLite sorts every integer
+    below every string — leaving the walk unable ever to record a position.
     """
     path = tmp_path / "conversations.db"
     store = SqliteConversationStore(path=path, now=_fixed_now)
     try:
         conversation = await store.start()
-        await store.append(conversation.id, occurred_at=_NOW)
-        await store.append(conversation.id, occurred_at=_NOW)
         _write_watermark(path, conversation.id, value)
 
-        assert [one.id for one in await store.conversations_with_unobserved_turns()] == [
-            conversation.id
-        ]
-        stamped = await store.record_observed(conversation.id, through_ordinal=2)
+        stamped = await store.record_observed(conversation.id, through_episode=2)
 
         assert stamped is not None
         assert stamped.observed_through == 2
-        assert await store.conversations_with_unobserved_turns() == []
+        assert await store.record_observed(conversation.id, through_episode=1) is None
     finally:
         store.close()
 
 
-async def test_a_watermark_above_every_turn_is_kept_and_not_re_observed(
-    tmp_path: Path,
-) -> None:
+async def test_a_large_watermark_is_kept_through_the_raw_column(tmp_path: Path) -> None:
     """ADR-0283 §6:6: the upper limb of ADR-0212 §7's discard is gone.
 
-    The watermark is an episode number, which this store cannot see and which runs
-    far above any ordinal, so a value above the conversation's highest turn is a
-    usable position: every read carries it, and the candidate listing leaves the
-    conversation out until a turn lands above it. Written through the raw column as
-    well as through the seam, so the decode and the listing's predicate are both
-    held to it.
+    The watermark is an episode number, which this store cannot see, so any positive
+    value is a usable position. Written through the raw column as well as through the
+    seam, so the decode is held to it and not only the write.
     """
     path = tmp_path / "conversations.db"
     store = SqliteConversationStore(path=path, now=_fixed_now)
     try:
         conversation = await store.start()
-        await store.append(conversation.id, occurred_at=_NOW)
-        await store.append(conversation.id, occurred_at=_NOW)
-        assert await store.record_observed(conversation.id, through_ordinal=40) is not None
-        _write_watermark(path, conversation.id, 99)
+        assert await store.record_observed(conversation.id, through_episode=40) is not None
+        _write_watermark(path, conversation.id, 2**40)
 
         read = await store.get(conversation.id)
 
         assert read is not None
-        assert read.observed_through == 99
-        assert [one.observed_through for one in await store.recent()] == [99]
-        assert await store.conversations_with_unobserved_turns() == []
-        assert await store.record_observed(conversation.id, through_ordinal=50) is None
+        assert read.observed_through == 2**40
+        assert [one.observed_through for one in await store.recent()] == [2**40]
+        assert await store.record_observed(conversation.id, through_episode=50) is None
     finally:
         store.close()
 
@@ -1919,9 +1432,7 @@ async def test_the_watermark_survives_a_reopen(tmp_path: Path) -> None:
     first = SqliteConversationStore(path=path, now=_fixed_now)
     try:
         conversation = await first.start()
-        await first.append(conversation.id, occurred_at=_NOW)
-        await first.append(conversation.id, occurred_at=_NOW)
-        assert await first.record_observed(conversation.id, through_ordinal=1) is not None
+        assert await first.record_observed(conversation.id, through_episode=1) is not None
     finally:
         first.close()
 
@@ -1931,9 +1442,7 @@ async def test_the_watermark_survives_a_reopen(tmp_path: Path) -> None:
 
         assert read is not None
         assert read.observed_through == 1
-        assert [
-            turn.ordinal for turn in await reopened.turns_after(conversation.id, after_ordinal=1)
-        ] == [2]
+        assert await reopened.record_observed(conversation.id, through_episode=1) is None
     finally:
         reopened.close()
 
@@ -2011,9 +1520,7 @@ async def test_an_insert_naming_only_the_pre_decision_columns_still_succeeds(
 
 
 @pytest.mark.integration
-@pytest.mark.parametrize(
-    "shape", ["unmarked", "old_index", "m36", "m37", "m38", "m39", "newer", "malformed"]
-)
+@pytest.mark.parametrize("shape", ["unmarked", "m36", "m37", "m38", "m39", "newer", "malformed"])
 def test_incompatible_conversation_state_is_refused_without_mutation(
     tmp_path: Path, shape: str
 ) -> None:
@@ -2023,8 +1530,6 @@ def test_incompatible_conversation_state_is_refused_without_mutation(
     with sqlite3.connect(path) as raw:
         if shape == "unmarked":
             raw.execute("DROP TABLE episode_record_format")
-        elif shape == "old_index":
-            raw.execute("ALTER TABLE turns DROP COLUMN model_eligible")
         elif shape == "m36":
             raw.execute("UPDATE episode_record_format SET version = 1")
         elif shape == "m37":
@@ -2053,7 +1558,7 @@ class _InitializationFails(sqlite3.Connection):
 
     def execute(self, sql: str, parameters: Any = (), /) -> sqlite3.Cursor:
         """Inject a storage failure partway through fresh initialization."""
-        if sql.startswith("CREATE TABLE IF NOT EXISTS turns"):
+        if sql.startswith("CREATE TABLE IF NOT EXISTS deliveries"):
             raise sqlite3.OperationalError("injected initialization failure")
         return super().execute(sql, parameters)
 

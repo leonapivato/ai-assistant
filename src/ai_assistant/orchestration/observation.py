@@ -726,7 +726,7 @@ class ObservationStage:
             # The page reached no observer, so passing over it passes over nothing
             # an observer may read — and advancing past it is what stops a
             # conversation of ineligible episodes re-reading one page for ever.
-            await self._conversations.record_observed(target.id, through_ordinal=through)
+            await self._conversations.record_observed(target.id, through_episode=through)
             return ObservationReport(conversation_id=target.id)
         outcome = await self._observer.observe(episodes)
         # The batch *is* the evidence: every citation is drawn from it by contract,
@@ -768,7 +768,7 @@ class ObservationStage:
         # value is deliberately unread — `None` means an overlapping pass already
         # stands at or above this position, which is that rule working rather than a
         # condition to handle.
-        await self._conversations.record_observed(target.id, through_ordinal=through)
+        await self._conversations.record_observed(target.id, through_episode=through)
         return ObservationReport(
             proposals=tuple(proposals),
             discarded_unusable=outcome.discarded_unusable,

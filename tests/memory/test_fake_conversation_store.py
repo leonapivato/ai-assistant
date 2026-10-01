@@ -32,7 +32,6 @@ if TYPE_CHECKING:
 #: The fake's own defaults, restated here rather than imported: the suite asserts
 #: the store *behaves* to these figures, so a default changed without this test
 #: noticing is exactly the drift worth failing on.
-_TAIL_DEFAULT = 20
 _PURGE_DEFAULT = 100
 
 
@@ -54,13 +53,12 @@ class TestFakeConversationStoreContract(ConversationStoreContract):
 
     @pytest.fixture
     def factory(self) -> ConversationStoreFactory:
-        def build(  # noqa: PLR0913 — one keyword per injected seam
+        def build(
             *,
             now: Callable[[], datetime],
             new_id: Callable[[], str],
             retention: timedelta | None,
             tombstone_grace: timedelta,
-            tail_limit: int,
             purge_batch: int,
         ) -> ConversationStore:
             return FakeConversationStore(
@@ -68,15 +66,10 @@ class TestFakeConversationStoreContract(ConversationStoreContract):
                 new_id=new_id,
                 retention=retention,
                 tombstone_grace=tombstone_grace,
-                tail_limit=tail_limit,
                 purge_batch=purge_batch,
             )
 
         return build
-
-    @pytest.fixture
-    def tail_default(self) -> int:
-        return _TAIL_DEFAULT
 
     @pytest.fixture
     def purge_default(self) -> int:
@@ -123,9 +116,9 @@ async def test_no_lock_is_kept_for_a_conversation_the_store_does_not_hold() -> N
     """#453: every call against an id that names nothing used to leave a lock behind.
 
     ``_exclusive`` takes the lock *before* checking whether the id exists — which it
-    must, or a concurrent ``stamp_deleted`` and ``append`` could both observe the
+    must, or a concurrent ``stamp_deleted`` and ``record_turn`` could both observe the
     conversation as live — so the entry was created for a typo, a dropped
-    conversation and a refused append alike, and ``_locks`` grew without bound in a
+    conversation and a refused write alike, and ``_locks`` grew without bound in a
     long-running or fuzzing process. Read off the dict because there is nowhere else
     the leak is observable: every one of these calls is a no-op or an error either
     way, which is exactly why it went unnoticed.
@@ -134,8 +127,10 @@ async def test_no_lock_is_kept_for_a_conversation_the_store_does_not_hold() -> N
 
     assert await store.stamp_deleted("nobody") is False
     assert await store.drop_if_eligible("nobody") is False
-    with pytest.raises(UnknownConversationError):
-        await store.append("nobody", occurred_at=_fixed_now())
+    assert (
+        await store.record_turn("nobody", episode_id="activation:a-1", occurred_at=_fixed_now())
+        is None
+    )
     with pytest.raises(UnknownConversationError):
         await store.mark_active("nobody")
 
@@ -149,7 +144,7 @@ async def test_no_lock_is_kept_for_a_conversation_that_was_dropped() -> None:
     store = FakeConversationStore(now=clock, tombstone_grace=grace)
 
     conversation = await store.start()
-    await store.append(conversation.id, occurred_at=clock())
+    await store.record_turn(conversation.id, episode_id="activation:a-1", occurred_at=clock())
     assert await store.stamp_deleted(conversation.id) is True
     clock.advance(grace)
     assert await store.drop_if_eligible(conversation.id) is True
@@ -218,30 +213,26 @@ async def test_the_fake_refuses_a_clock_that_is_not_a_conforming_reading() -> No
         await store.start()
 
 
-async def test_the_fake_keeps_a_watermark_its_own_turns_do_not_reach() -> None:
-    """ADR-0283 §6:6: the fake no longer discards a watermark above its turns.
+async def test_the_fake_keeps_a_watermark_it_has_no_episode_to_compare_with() -> None:
+    """ADR-0283 §6:6: the fake does not bound the watermark above.
 
-    ADR-0212 §7's upper limb is gone — the watermark is an episode number, which this
-    store cannot see — and the limbs that remain ("not a positive integer") cannot be
-    held by a frozen pydantic model at all, so a dict-backed store has none to apply.
-    A fake that kept the old discard would certify a consumer against behaviour the
-    real store no longer has (ADR-0026 §7): every episode number the observation stage
-    records would read back absent, and the walk would restart from the tail forever.
+    ADR-0212 §7's upper limb is gone — the watermark is an episode number the
+    ``MemoryStore`` issued, which this store cannot see — and the limbs that remain
+    ("not a positive integer") cannot be held by a frozen pydantic model at all, so a
+    dict-backed store has none to apply. A fake that compared the number with
+    anything it holds would certify a consumer against behaviour the real store does
+    not have (ADR-0026 §7): every episode number the observation stage records would
+    read back absent, and the walk would restart from the tail forever.
     """
     store = FakeConversationStore(now=_fixed_now)
     conversation = await store.start()
-    await store.append(conversation.id, occurred_at=datetime(2026, 6, 1, tzinfo=UTC))
-    await store.append(conversation.id, occurred_at=datetime(2026, 6, 1, tzinfo=UTC))
-    assert await store.record_observed(conversation.id, through_ordinal=2) is not None
-
-    # The turn the watermark names goes away, as a partial recovery leaves it.
-    store._turns[conversation.id] = store._turns[conversation.id][:1]
+    far = 2**40
+    assert await store.record_observed(conversation.id, through_episode=far) is not None
 
     read = await store.get(conversation.id)
 
     assert read is not None
-    assert read.observed_through == 2
-    assert [one.observed_through for one in await store.recent()] == [2]
-    assert [one.observed_through for one in (await store.export()).conversations] == [2]
-    assert await store.conversations_with_unobserved_turns() == []
-    assert await store.record_observed(conversation.id, through_ordinal=1) is None
+    assert read.observed_through == far
+    assert [one.observed_through for one in await store.recent()] == [far]
+    assert [one.observed_through for one in (await store.export()).conversations] == [far]
+    assert await store.record_observed(conversation.id, through_episode=1) is None

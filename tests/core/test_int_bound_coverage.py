@@ -31,7 +31,7 @@ would be vacuous against exactly the regression #755 names: drop ``ge=0`` and
 the field stops declaring a bound, so it drops out of the swept set and the
 sweep stays green. The claim has to be that the bound is *there*.
 
-**A lower bound, not ``ge=0`` specifically.** ``ConversationTurn.ordinal`` is
+**A lower bound, not ``ge=0`` specifically.** ``Conversation.observed_through`` is
 ``ge=1`` and ``Settings.hub_max_frame_bytes`` is ``ge=1024``; requiring zero
 everywhere would be a rule the surface does not hold. The zero itself is pinned
 where ADR-0107 §3 fixes it, by the behavioural anchors at the foot of this
@@ -544,7 +544,7 @@ def test_a_validated_default_passes_the_default_check() -> None:
 
 
 def test_a_required_int_has_no_default_to_escape() -> None:
-    """``ConversationTurn.ordinal`` is the shape: a floor and nothing to omit."""
+    """A required position is the shape: a floor and nothing to omit."""
 
     class _Required(BaseModel):
         ordinal: int = Field(ge=1)

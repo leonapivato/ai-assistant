@@ -146,7 +146,6 @@ if TYPE_CHECKING:
         ConversationDigest,
         ConversationExport,
         ConversationSummary,
-        ConversationTurn,
         CoverageAnswer,
         CoverageMember,
         CurrentContext,
@@ -10857,122 +10856,79 @@ class ParkedReads(Protocol):
 
 @runtime_checkable
 class ConversationStore(Protocol):
-    """The durable index of conversations and the turns under them (ADR-0074).
+    """The durable record of conversations (ADR-0074, ADR-0283 §6).
 
     A conversation is first-class, server-side state with an identity of its own,
-    and this store owns that identity end to end: it **mints** the id (§1), it
-    **allocates** each turn's ordinal, and it **derives** each turn's episode id
-    from the two. A caller never supplies any of the three.
+    and this store owns that identity end to end: it **mints** the id (§1), and a
+    caller never supplies one.
 
     A Tier 1 store by ADR-0004 §1's own words ("conversation history"), so §2's
     residency clause governs it: implementations persist **locally only**.
 
-    **This store holds no content.** A turn's content is exactly one
-    ``EpisodicMemory`` in the ``MemoryStore``, named here by ``episode_id``. The
-    two are separate stores with no transaction between them, and the ordering is
-    deliberate: the index entry lands **first** and names the episode before the
-    episode exists, so no episode can exist for a conversation without its id
-    having been recorded here (§8). That makes this index an **intent log** — an
-    enumeration of it names every episode the conversation will ever have,
-    including one whose write has not landed yet — and it is why an
-    ``episode_id`` that does not resolve is an ordinary state (a gap) rather than
-    a fault.
+    **This store holds no history.** A conversation's turns are the episodes on its
+    channel in the ``MemoryStore`` — ``ChannelIdentity(channel_type="conversation",
+    instance_id=<conversation_id>)`` — read in number order, and membership is the
+    episode's channel (ADR-0283 §1, §4). Nothing here indexes them, allocates a
+    position for them or derives their ids: every episode's id is
+    ``activation:<activation_id>``, fixed at admission (ADR-0283 §2). What this store
+    keeps is the conversation itself and two small facts about it: the delivery rows
+    below, and the observation watermark.
 
     **What this contract does not own.** Every sequence spanning both stores —
-    finishing a user deletion, the retention reclaim, and the user-facing export
-    that drops turns whose episodes no longer resolve — belongs to the
-    capture/lifecycle stage in `orchestration`, the one layer that legitimately
-    holds both handles by injection. A store that reached into memory to answer
-    its own precondition would break golden rule 1 (§9).
+    writing a conversational episode, finishing a user deletion, the retention
+    reclaim — belongs to `orchestration`, the one layer that legitimately holds both
+    handles by injection (ADR-0283 §7, §8). Whether a conversation's channel still
+    holds an episode is the memory store's question, asked there; a store that
+    reached into memory to answer its own precondition would break golden rule 1.
 
     **The mutation exclusion, which is this seam's obligation and not a
-    caller's.** Per conversation, an :meth:`append`, a :meth:`mark_active`, a
-    :meth:`record_turn`, a :meth:`record_delivery`, a :meth:`record_observed`, a
-    :meth:`stamp_deleted` and a :meth:`drop_if_eligible` **never interleave**
-    (ADR-0283 §6:8 adds :meth:`record_turn`);
-    each observes the conversation, decides, and writes as one indivisible step.
-    An ``asyncio.Lock`` inside one engine would not discharge this — the engine
-    already contemplates "another engine over the same durable stores", so two
-    engines hold two locks and serialise nothing — which is why the obligation
-    sits here (§8). Each implementation meets it in its own way: an in-memory
-    store with a lock, a SQLite-backed one with a transaction, which is also what
-    makes it hold across processes.
-
-    **Invariants the store proves rather than asks a caller to keep:**
-
-    * **Ordinals move forward.** Per conversation they are dense from
-      :data:`~ai_assistant.core.types.FIRST_TURN_ORDINAL`, unique, and monotonic
-      (ADR-0064's ruling applied to a second log). Stated exactly, because the
-      overclaim is tempting: two appends land in one order every reader agrees on
-      and neither can take the other's position. It does **not** detect that an
-      appender planned against a tail that has since moved — that needs an
-      expected-tail argument and a conflict error, deferred with ADR-0046 §5's
-      compare-and-swap.
-    * **A parked binding is unique across the index.** A step parks once, so a
-      second turn carrying the same ``(execution_id, step_id)`` is a fault —
-      a duplicated capture, or a replay — and :meth:`append` refuses it
-      **atomically**: no ordinal is consumed and no row is left behind. Without
-      that, resolving a recovered park could attach to whichever row an
-      implementation happened to return. Turns that parked nothing are
-      unconstrained.
-    * **The episode id is derived and reserved.** It is a function of the
-      conversation's id and the turn's ordinal — two values this store has already
-      proved unique — so two captured episodes cannot collide by construction
-      rather than by probability. The form is **structurally recognisable and
-      reserved to captured conversation turns**: implementations mint into the
-      ``conv:`` namespace and **no other producer may mint an id into it** (§3).
-      It is opaque to callers, who only pass it back (to
-      :meth:`turn_of_episode`, or as :meth:`episodes_to_purge`'s cursor) and hand
-      it to the ``MemoryStore``.
+    caller's.** Per conversation, a :meth:`mark_active`, a :meth:`record_turn`, a
+    :meth:`record_delivery`, a :meth:`record_observed`, a :meth:`stamp_deleted` and a
+    :meth:`drop_if_eligible` **never interleave** (ADR-0283 §6:8); each observes the
+    conversation, decides, and writes as one indivisible step. An ``asyncio.Lock``
+    inside one engine would not discharge this — the engine already contemplates
+    "another engine over the same durable stores", so two engines hold two locks and
+    serialise nothing — which is why the obligation sits here (ADR-0074 §8). Each
+    implementation meets it in its own way: an in-memory store with a lock, a
+    SQLite-backed one with a transaction, which is also what makes it hold across
+    processes. It is also what makes :meth:`record_turn` the writer's deletion
+    verification (ADR-0283 §7:2).
 
     **A conversation stamped deleted is absent from every read that presents
-    it** — :meth:`get`, :meth:`recent`, :meth:`export`, :meth:`turns`,
-    :meth:`turns_after`, :meth:`conversations_with_unobserved_turns`, and both
-    reverse lookups — while :meth:`episodes_to_purge` still yields the episode
-    ids the sweeps must destroy. That distinction is what keeps a tombstone from
-    being a readable record of a deleted conversation while the deletion can
-    still be carried out (§9).
+    it** — :meth:`get`, :meth:`recent`, :meth:`export` and :meth:`deliveries` —
+    while :meth:`stamped_conversation_ids` still enumerates it, so the deletion
+    sweep can find the tombstone and delete every episode on its channel (ADR-0283
+    §8). That distinction is what keeps a tombstone from being a readable record of
+    a deleted conversation while the deletion can still be carried out.
 
-    **Two reads carve out of that exclusion, and neither presents anything.**
-    ADR-0076 adds the second: :meth:`stamped_conversation_ids` enumerates the
-    tombstones, which is what makes a crashed deletion finishable at all — §8's
-    tombstone was already durable and already named every episode involved, and
-    nothing could *find* it. ADR-0074 §9.4's exclusion set is otherwise untouched
-    in either direction: a caller that obtains a stamped id learns which ids are
-    stamped and can learn nothing else about them.
+    **That one carve-out presents nothing.** :meth:`stamped_conversation_ids`
+    (ADR-0076) returns ids alone: a caller that obtains a stamped id learns which
+    ids are stamped and can learn nothing else about them.
 
     **Every read is bounded by default and totally ordered** (ADR-0021 §4,
-    ADR-0073 §2): turns by ordinal ascending, conversations by ``last_active_at``
-    descending with ``id`` ascending as the tie-break. Paging arguments carry
-    ADR-0073 §2's range posture unchanged — out of range is a ``ValueError``, not
-    a clamp — inherited rather than restated.
-    **:meth:`conversations_with_unobserved_turns` is the one exception to the
-    direction and to nothing else** (ADR-0212 §3, §10(b)): it orders
-    ``last_active_at`` **ascending**, with the same ``id`` tie-break, because a
-    descending listing would re-select the busiest conversation on every
-    observation pass and never reach an idle one. Its default bound is 50 and its
-    refusals are ADR-0073 §2's, both unchanged.
+    ADR-0073 §2): conversations by ``last_active_at`` descending with ``id``
+    ascending as the tie-break, and stamped ids by ``id`` ascending. Paging
+    arguments carry ADR-0073 §2's range posture unchanged — out of range is a
+    ``ValueError``, not a clamp — inherited rather than restated.
 
     **The observation watermark is store-written state on the conversation, and
     exactly one consumer acts on it** (ADR-0212 §1, §7).
     :attr:`~ai_assistant.core.types.Conversation.observed_through` is the position
-    the observation walk has reached in that conversation's ordinals — a position,
-    never a certificate that the turns below it were read. It is **additive**: no
-    read selects a different set of rows, orders them differently, refuses where it
-    would have answered, or returns a different value in any other member because a
-    watermark is present, absent, high or low — the candidate listing above being
-    the operation whose whole subject it is. A build that does not read it ignores
-    it and **must not refuse to start over it**; where a store persists
-    conversations in a table the column is nullable, carries no default, is added
-    to an existing table without rewriting a row, and changes no existing column,
-    so a build written before this member goes on inserting the columns it knows.
+    the observation walk has reached — a position, never a certificate that the
+    episodes below it were read. It is **additive**: no read selects a different set
+    of rows, orders them differently, refuses where it would have answered, or
+    returns a different value in any other member because a watermark is present,
+    absent, high or low. A build that does not read it ignores it and **must not
+    refuse to start over it**; where a store persists conversations in a table the
+    column is nullable, carries no default, is added to an existing table without
+    rewriting a row, and changes no existing column, so a build written before this
+    member goes on inserting the columns it knows.
 
     **The watermark is an episode number** (ADR-0283 §6:6, §11): the position the
     observation walk has reached in ``MemoryStore`` numbers on the conversation's
     channel, which this store cannot see. So nothing this store holds bounds it:
     :meth:`record_observed` refuses only a lowering, and the read-side discard
-    below has no upper limb. While the observation stage still passes turn
-    ordinals, those are positive integers too, and the store treats them alike.
+    below has no upper limb.
 
     **A watermark this store cannot use is discarded, and the discard is the
     store's** (ADR-0212 §7, as ADR-0283 §6:6 reads it). A stored value that is not
@@ -10982,25 +10938,22 @@ class ConversationStore(Protocol):
     never levelled and never advanced past a value that could not be read. Made an
     obligation of the store rather than left to taste, because letting one bad
     bookkeeping integer reach ``Conversation``'s own validation would turn it into
-    a store fault on :meth:`get`, :meth:`recent`, :meth:`turns` and :meth:`export`
-    for that conversation — a conversation the user can no longer read because a
-    column the user never sees is wrong.
+    a store fault on :meth:`get`, :meth:`recent` and :meth:`export` for that
+    conversation — a conversation the user can no longer read because a column the
+    user never sees is wrong.
 
-    **Delivery rows** (ADR-0283 §6, §10). Beside the conversation and its turn
-    index, the store keeps one small fact per spoken episode: a
+    **Delivery rows** (ADR-0283 §6, §10). Beside the conversation, the store keeps
+    one small fact per spoken episode: a
     :class:`~ai_assistant.core.types.SpokenDelivery`, keyed by the conversation and
     the episode's id. :meth:`record_turn` writes it ``UNKNOWN``,
     :meth:`record_delivery` stamps it once, :meth:`deliveries` reads it back, and
     :meth:`drop_if_eligible` drops it with the conversation. It is state about an
-    episode, not content of one, so "this store holds no content" binds unchanged.
-    Until the turn index is retired (ADR-0283 §14, lane 6) a turn row may carry a
-    delivery too, and :meth:`record_delivery` stamps that one where the
-    conversation holds no delivery row for the episode.
+    episode, not content of one, so "this store holds no history" binds unchanged.
 
-    **Every read returns a detached snapshot.** The four exchanged types are
-    frozen pydantic models, so this costs nothing; it is stated so an
-    implementation that grows an internal mutable row cannot hand one out.
-    :meth:`deliveries` returns a mapping, which is a fresh one on every call.
+    **Every read returns a detached snapshot.** The exchanged types are frozen
+    pydantic models, so this costs nothing; it is stated so an implementation that
+    grows an internal mutable row cannot hand one out. :meth:`deliveries` returns a
+    mapping, which is a fresh one on every call.
 
     Every method raises :class:`~ai_assistant.core.errors.ConversationStoreError`
     for a store fault, and **refuses an id the store does not know rather than
@@ -11013,7 +10966,7 @@ class ConversationStore(Protocol):
 
     **The unknown-id refusal is the narrower
     :class:`~ai_assistant.core.errors.UnknownConversationError`** (ADR-0076 §2),
-    a subclass, so §9's sentence above stays true as written and every existing
+    a subclass, so the sentence above stays true as written and every existing
     ``except ConversationStoreError`` still catches it. A store *fault* raises the
     base class. The distinction exists for the sweep and nothing else: an id that
     is gone by the time a sweep reaches it is a deletion someone else completed,
@@ -11021,10 +10974,10 @@ class ConversationStore(Protocol):
     instead of aborting.
 
     Cancelling any method here is governed by this module's cancellation clause
-    (ADR-0060). Input observation (ADR-0065) binds it too and is vacuous in
-    practice: every argument this seam takes is immutable — a ``str``, an ``int``,
-    a ``datetime``, or a frozen model — so there is no second observation to
-    disagree with the first.
+    (ADR-0060). Input observation (ADR-0065) binds it too: every argument this seam
+    takes is immutable — a ``str``, an ``int``, a ``datetime`` or a frozen model —
+    except :meth:`deliveries`' ``episode_ids``, a caller-owned sequence, which an
+    implementation reads once, before its first ``await``.
     """
 
     async def start(self) -> Conversation:
@@ -11086,7 +11039,7 @@ class ConversationStore(Protocol):
         Sets ``last_active_at`` from the store's clock and **leaves
         ``last_turn_at`` alone**: an attempted continuation is not a recorded
         turn, and claiming one would be the worse error. It takes the same
-        per-conversation exclusion as an append, a stamp and a reclaim.
+        per-conversation exclusion as a recorded turn, a stamp and a reclaim.
 
         Raises:
             UnknownConversationError: If ``conversation_id`` names nothing or
@@ -11118,10 +11071,10 @@ class ConversationStore(Protocol):
         Where the conversation is **absent or stamped deleted** it writes nothing
         and returns ``None``, and raises nothing: that is the outcome a capture
         racing a deletion is owed, not a fault. Otherwise it sets ``last_turn_at``
-        to ``occurred_at`` — :meth:`append`'s rule, "a turn was recorded",
-        unconditionally and from the caller's reading rather than the store's clock
-        — leaves ``last_active_at`` alone, and, where ``delivery`` is given, writes
-        the delivery row for ``episode_id`` (see the class docstring).
+        to ``occurred_at`` — "a turn was recorded", unconditionally and from the
+        caller's reading rather than the store's clock — leaves ``last_active_at``
+        alone, and, where ``delivery`` is given, writes the delivery row for
+        ``episode_id`` (see the class docstring).
 
         **The delivery row is written if absent.** A second call naming an episode
         the conversation already holds a row for leaves that row as it stands, so a
@@ -11137,7 +11090,8 @@ class ConversationStore(Protocol):
                 the episode carry one instant (ADR-0283 §7:1).
             delivery: ``SpokenDelivery(state=UNKNOWN)`` on ``converse_spoken``, and
                 ``None`` everywhere else (ADR-0205 §4). An absent value writes no
-                delivery row, which reads as no delivery fact for that episode.
+                delivery row, which reads as no delivery fact for that episode —
+                never as delivered and never as heard.
 
         Returns:
             The conversation as written, or ``None`` where it is absent or stamped.
@@ -11152,74 +11106,6 @@ class ConversationStore(Protocol):
         """
         ...
 
-    async def append(
-        self,
-        conversation_id: str,
-        *,
-        occurred_at: datetime,
-        parked: ParkedBinding | None = None,
-        delivery: SpokenDelivery | None = None,
-        model_eligible: bool = True,
-    ) -> ConversationTurn:
-        """Record a turn: allocate its ordinal, derive its episode id, return it (§3).
-
-        **One operation, because the caller must not guess any part of it.** The
-        ordinal is the store's to allocate, so anything derived from it is the
-        store's to derive: a caller that predicted the next ordinal in order to
-        build the episode id would re-derive the invariant outside the seam that
-        owns it, and two engines guessing at once would build the *same* id for
-        what the store then makes two distinct turns — the collision the
-        derivation exists to prevent, reintroduced by the caller. So allocate,
-        derive and write are one indivisible step, and the returned
-        :class:`~ai_assistant.core.types.ConversationTurn` carries the episode id
-        the caller must then write into the ``MemoryStore``.
-
-        This is the **intent** half of the two-store capture: when it returns, the
-        turn is durably recorded and its episode does not exist yet. Sets the
-        conversation's ``last_turn_at`` to ``occurred_at`` — "a turn was
-        recorded", which is deliberately recorded-time and not landed-time: the
-        episode can be missing from a turn that certainly happened (deleted,
-        expired, or never written), and a field meaning "the episode is on disk"
-        would be false for exactly those turns.
-
-        Args:
-            model_eligible: Whether this row may enter automatic model replay (ADR-0275).
-            conversation_id: The conversation to append to.
-            occurred_at: When the exchange happened, from the caller's injected
-                clock (ADR-0026). Passed rather than read here so the turn and the
-                episode recording it carry one instant.
-            parked: Where the turn parked for confirmation, if it did. Unique
-                across the whole index: a second turn claiming one binding is
-                refused **atomically** — no ordinal consumed, nothing left behind.
-            delivery: The delivery fact to write onto the row this allocates
-                (ADR-0205 §3). Capture on ``converse_spoken`` supplies
-                ``SpokenDelivery(state=UNKNOWN)`` — unconditionally on that
-                operation, the park and the degraded synthesis included — and no
-                other caller supplies one. An absent value means **no delivery fact
-                was recorded for this turn**, which on the surface as it stands is a
-                turn that did not run there; it is never read as delivered and never
-                read as heard.
-
-        Returns:
-            The recorded turn, naming its conversation, its ordinal and the
-            derived episode id.
-
-        ``model_eligible`` (ADR-0275) is immutable, stored atomically with this
-        index row, and preserved by delivery updates and all unfiltered reads.
-
-        Raises:
-            UnknownConversationError: If ``conversation_id`` names nothing, or
-                names a conversation stamped deleted — an append to a stamped
-                conversation is refused, which is what makes a deletion durable
-                against a racing capture (§8).
-            ConversationStoreError: If ``parked`` duplicates a binding already
-                claimed, or the store cannot be written.
-            ValueError: If ``occurred_at`` is not a timezone-aware instant with a
-                determinate offset (ADR-0023 §3): a naive value would be silently
-                localised to the host's zone.
-        """
-        ...
-
     async def record_delivery(
         self, conversation_id: str, *, episode_id: str, delivery: SpokenDelivery
     ) -> bool:
@@ -11230,29 +11116,23 @@ class ConversationStore(Protocol):
         ADR-0068 froze the record graph — so a row here is what can carry a late
         fact at all.
 
-        **Which row** (ADR-0283 §6:4, §14 lane 2). The delivery row the conversation
-        holds for ``episode_id``, which :meth:`record_turn` wrote. Where the
-        conversation holds **no** delivery row for that episode, the turn row whose
-        ``episode_id`` it is, which :meth:`append` wrote — the path today's capture
-        still takes, and which ADR-0283 §14's lane 6 removes. Never both: a delivery
-        row, where there is one, is the only row this call can stamp.
+        **Which row** (ADR-0283 §6:4): the delivery row the conversation holds for
+        ``episode_id``, which :meth:`record_turn` wrote. There is no other.
 
         **It stamps that row if and only if three conditions hold together**: the
         row belongs to the conversation the caller named; its episode is the one
-        the caller named; and its recorded delivery is a
-        :class:`~ai_assistant.core.types.SpokenDelivery` whose state is ``UNKNOWN``.
-        Where any fails the operation **performs nothing and returns ``False``** —
-        no row is written, and no error is raised. A report is never applied across
-        conversations: both kinds of row are keyed by the conversation, so this
-        store is where that relation is checked and no caller re-derives it.
+        the caller named; and its recorded delivery's state is ``UNKNOWN``. Where any
+        fails the operation **performs nothing and returns ``False``** — no row is
+        written, and no error is raised. A report is never applied across
+        conversations: a delivery row is keyed by the conversation, so this store is
+        where that relation is checked and no caller re-derives it.
 
-        **A turn row whose ``delivery`` is absent is left exactly as it stands.**
-        Such a row is a turn no delivery fact was recorded for — a turn that did not
-        run on ``converse_spoken`` — and a report naming one is answered by doing
-        nothing: this is not a way to give such a turn a delivery, and no lane reads
-        it as one. The same holds for an episode with no row at all. A row already
-        carrying ``COMPLETE`` or ``INTERRUPTED`` is likewise left alone, which is
-        ADR-0205 §1's stamped-once rule.
+        **An episode with no delivery row is left exactly as it stands.** Such an
+        episode is one no delivery fact was recorded for — one that did not run on
+        ``converse_spoken`` — and a report naming it is answered by doing nothing:
+        this is not a way to give an episode a delivery, and no lane reads it as
+        one. A row already carrying ``COMPLETE`` or ``INTERRUPTED`` is likewise left
+        alone, which is ADR-0205 §1's stamped-once rule.
 
         **Reading the three conditions and writing the row are one indivisible
         step**, decided by the store under the same per-conversation exclusion its
@@ -11264,12 +11144,10 @@ class ConversationStore(Protocol):
 
         Args:
             conversation_id: The conversation the report is about.
-            episode_id: The episode whose delivery to stamp. A caller supplies no
-                ordinal.
+            episode_id: The episode whose delivery to stamp.
             delivery: What the device played. **Never** ``UNKNOWN``: that value is
-                written by capture, through :meth:`record_turn` or :meth:`append`,
-                and the refusal below is part of this contract rather than a
-                caller's discipline.
+                written by capture, through :meth:`record_turn`, and the refusal
+                below is part of this contract rather than a caller's discipline.
 
         Returns:
             ``True`` where this call stamped a row, ``False`` where no row met all
@@ -11284,8 +11162,7 @@ class ConversationStore(Protocol):
                 §1's stamped-once rule would be a promise this store could not keep
                 against a caller that is not the engine.
             UnknownConversationError: If ``conversation_id`` names nothing or names
-                a conversation stamped deleted — the same refusal :meth:`append`
-                carries, and for the same reason.
+                a conversation stamped deleted (ADR-0205 §3:4's two refusals).
             ConversationStoreError: If the store cannot be written.
         """
         ...
@@ -11298,9 +11175,7 @@ class ConversationStore(Protocol):
         ADR-0283 §6:5, the read history takes once per page to pair each episode it
         returns with its delivery fact (§10). Keyed by episode id; an id the
         conversation holds no delivery row for is **simply missing**, never an
-        error and never a ``None`` value — ``MemoryStore.get_many``'s posture. Only
-        delivery rows are read: a delivery carried on a turn row is
-        :meth:`turns`' to present, not this read's.
+        error and never a ``None`` value — ``MemoryStore.get_many``'s posture.
 
         A conversation that is **absent or stamped deleted** answers with an empty
         mapping, and nothing is raised: a stamped conversation's rows are withheld
@@ -11331,7 +11206,7 @@ class ConversationStore(Protocol):
         ...
 
     async def record_observed(
-        self, conversation_id: str, *, through_ordinal: int
+        self, conversation_id: str, *, through_episode: int
     ) -> Conversation | None:
         """Advance this conversation's observation watermark (ADR-0212 §8, ADR-0283 §6:6).
 
@@ -11342,20 +11217,16 @@ class ConversationStore(Protocol):
         per-conversation exclusion its other mutations run under (ADR-0111 §1).
 
         **The position is an episode number** (ADR-0283 §6:6, §11): a ``MemoryStore``
-        number on the conversation's channel. The keyword keeps its ordinal name
-        until ADR-0283 §14's lane 6 retires the turn index; while the observation
-        stage still passes turn ordinals, those are positive integers too, and the
-        store treats them alike.
+        number on the conversation's channel.
 
-        **It stamps if and only if ``through_ordinal`` is strictly above the
+        **It stamps if and only if ``through_episode`` is strictly above the
         recorded watermark.** Otherwise the operation **performs nothing, returns
         ``None``, and raises nothing** — :meth:`record_delivery`'s shape and its
         reason. A watermark is therefore never lowered, and a request to record a
         value at or below the recorded one is a no-op rather than an error. **It is
         not bounded above by anything this store holds**: the numbers it names are
-        the memory store's, which this one cannot see, so a conversation with no
-        turn row can be stamped and a value above its highest ordinal stands
-        (ADR-0283 §6:6 drops ADR-0212 §8's second condition).
+        the memory store's, which this one cannot see (ADR-0283 §6:6 drops ADR-0212
+        §8's second condition).
 
         **Reading the condition and writing the row are one indivisible step**, so
         two concurrent advances leave the **higher** value recorded. That is what
@@ -11380,7 +11251,7 @@ class ConversationStore(Protocol):
 
         Args:
             conversation_id: The conversation whose watermark to advance.
-            through_ordinal: The position to record: the highest episode number in
+            through_episode: The position to record: the highest episode number in
                 the page the pass read (ADR-0283 §11); this store takes it as given,
                 within the condition above.
 
@@ -11388,122 +11259,18 @@ class ConversationStore(Protocol):
             The conversation as stamped, or ``None`` where it stamped nothing.
 
         Raises:
-            ValueError: If ``through_ordinal`` is outside ``[1, 2**63)`` — refused
+            ValueError: If ``through_episode`` is outside ``[1, 2**63)`` — refused
                 locally, before any I/O, on ADR-0085 §3's convention. ``None`` is
                 not a position and 0 names none, so neither is a spelling of "no
                 pass has recorded one": that is the absence of a watermark, which no
                 caller writes.
             UnknownConversationError: If ``conversation_id`` names nothing or names
-                a conversation stamped deleted — the same refusal :meth:`append` and
-                :meth:`record_delivery` carry. A pass whose conversation is deleted
-                between its page read and its advance meets this, and ADR-0212 §6
-                rules it: the watermark is untouched, the page is never re-read, and
-                none is owed.
+                a conversation stamped deleted — the same refusal :meth:`mark_active`
+                and :meth:`record_delivery` carry. A pass whose conversation is
+                deleted between its page read and its advance meets this, and
+                ADR-0212 §6 rules it: the watermark is untouched, the page is never
+                re-read, and none is owed.
             ConversationStoreError: If the store cannot be written.
-        """
-        ...
-
-    async def turns(
-        self,
-        conversation_id: str,
-        *,
-        limit: int | None = None,
-        before_ordinal: int | None = None,
-        model_eligible_only: bool = False,
-    ) -> list[ConversationTurn]:
-        """Read a conversation's turns, oldest first, most recent page (§5, §9).
-
-        The replay read, and a **complete backwards traversal** rather than only a
-        tail: without ``before_ordinal`` it returns the last ``limit`` turns; with
-        it, the last ``limit`` turns whose ordinal is **strictly below** it. Walk
-        the whole conversation by calling again with ``before_ordinal`` set to the
-        lowest ordinal just returned, until a page comes back empty — which
-        terminates, and visits every turn exactly once, because ordinals are dense.
-
-        Within a page the order is **ordinal ascending**, so a caller can hand the
-        result straight to the planner as the conversation's recent turns in order
-        (§5) without re-sorting.
-
-        Args:
-            model_eligible_only: Filter inspection-only rows before selecting the tail.
-            conversation_id: The conversation to read.
-            limit: Page size. ``None`` asks for the store's **configured replay
-                window** — finite, the same value every caller gets by saying
-                nothing, and a configured value rather than a constant because
-                this bound sizes a prompt rather than a listing (§9.3). ``0``
-                returns an empty page.
-            before_ordinal: Exclusive upper bound on the ordinal. ``None`` reads
-                the tail.
-
-        Returns:
-            The page, ordinal ascending; empty for a conversation with no turns
-            below the bound.
-
-        With ``model_eligible_only=True`` (ADR-0275), filter before selecting
-        the tail window. Returned ordinals remain ordered but may contain gaps.
-        Deletion and turns_after remain unfiltered.
-
-        Raises:
-            ValueError: If ``limit`` is outside ``[0, 2**63)`` or
-                ``before_ordinal`` is outside ``[FIRST_TURN_ORDINAL, 2**63)``.
-                Refused rather than clamped, for ADR-0073 §2's reason: a negative
-                bound reaches SQLite, which reads ``LIMIT -1`` as *no limit at
-                all*, and an over-wide one raises ``OverflowError`` out of the
-                driver — so two backends silently disagree.
-            UnknownConversationError: If ``conversation_id`` names nothing or
-                names a conversation stamped deleted. ``turns`` is an ordinary
-                presenting read, so it refuses a tombstone exactly as :meth:`get`
-                hides one; the sweeps use :meth:`episodes_to_purge` instead.
-            ConversationStoreError: If the store cannot be read.
-        """
-        ...
-
-    async def turns_after(
-        self,
-        conversation_id: str,
-        *,
-        after_ordinal: int | None = None,
-        limit: int | None = None,
-    ) -> list[ConversationTurn]:
-        """Read the **lowest** page of turns above ``after_ordinal`` (ADR-0212 §8).
-
-        :meth:`turns`' mirror image, and the read a forward walk needs: that one
-        traverses backwards from the tail, this one forwards from a position. The
-        page is the *lowest* ``limit`` turns whose ordinal is **strictly above**
-        ``after_ordinal``, ordinal ascending — never the tail. Walk the whole
-        conversation by calling again with ``after_ordinal`` set to the highest
-        ordinal just returned, until a page comes back empty; that terminates and
-        visits every turn exactly once, because ordinals are dense.
-
-        The observation walk is its consumer (ADR-0212 §3), reading the turns above
-        a conversation's watermark. It is an ordinary read for all that: it takes no
-        watermark, writes none, and answers the same page for any caller that names
-        the same position.
-
-        **A short page means there is nothing above it** — a fact about the read,
-        and not a discriminator any advance rule may use: ADR-0212 §5 computes a
-        position from the page's ordinals and never from its length.
-
-        Args:
-            conversation_id: The conversation to read.
-            after_ordinal: Exclusive **lower** bound on the ordinal. ``None`` reads
-                from the conversation's first turn.
-            limit: Page size. ``None`` asks for the store's **configured replay
-                window**, exactly as :meth:`turns` does. ``0`` returns an empty page.
-
-        Returns:
-            The page, ordinal ascending; empty for a conversation with no turns
-            above the bound.
-
-        Raises:
-            ValueError: If ``limit`` is outside ``[0, 2**63)`` or ``after_ordinal``
-                is outside ``[FIRST_TURN_ORDINAL, 2**63)``. Refused rather than
-                clamped, the same posture and the same two refusals :meth:`turns`
-                carries for ``before_ordinal`` and ``limit`` (ADR-0073 §2).
-            UnknownConversationError: If ``conversation_id`` names nothing or names
-                a conversation stamped deleted. This is a presenting read, so it
-                refuses a tombstone exactly as :meth:`turns` does.
-            ConversationStoreError: If the store cannot be read.
         """
         ...
 
@@ -11515,60 +11282,52 @@ class ConversationStore(Protocol):
     ) -> list[str]:
         """Page over the ids of conversations stamped deleted but not yet dropped.
 
-        The read ADR-0076 adds, and the one thing §8's deletion protocol was
-        missing: the tombstone is durable and names every episode involved, but
-        every other read excludes a stamped conversation by design, so a process
-        that died between the stamp and the drop left work **no later run could
-        rediscover**. The episodes the index named were then never destroyed and
-        the index itself outlived its grace indefinitely — the residue §8's grace
-        and reclaim exist to reclaim, made permanent by the absence of a way to
-        enumerate it.
+        The read ADR-0076 adds, and what makes a crashed deletion finishable: the
+        tombstone is durable, but every other read excludes a stamped conversation
+        by design, so a process that died between the stamp and the drop would
+        otherwise leave work **no later run could rediscover** — the episodes on the
+        conversation's channel never deleted, and the record outliving its grace
+        indefinitely. Recovery walks this, and for each id repeats ADR-0283 §8's
+        deletion steps.
 
         **Ids and nothing else.** Not :class:`~ai_assistant.core.types.Conversation`
-        records, not the stamp instant, not turn counts — the same shape and the
-        same argument :meth:`episodes_to_purge` makes: returning only what the work
+        records, not the stamp instant, not counts: returning only what the work
         needs removes the exposure instead of labelling it. A record-returning read
         would be a general resurrection of everything §8's stamp exists to hide,
-        bought for a caller that needs an id to pass to two methods it already has.
+        bought for a caller that needs an id to pass to the deletion it already
+        has.
 
         **The stamp instant is deliberately not returned either.** Handing back
         ``(id, deleted_at)`` so the caller could skip tombstones still inside their
         grace is wrong twice over: :meth:`drop_if_eligible` already re-checks the
         grace under the per-conversation exclusion, so a caller pre-filtering on
         ``deleted_at`` would decide eligibility on a reading taken *outside* that
-        exclusion — the hazard §9.4 forbids, one layer up — and the sweep does not
-        want the filter anyway, because §8's step 2 destroys a stamped
+        exclusion — the hazard ADR-0074 §9.4 forbids, one layer up — and the sweep
+        does not want the filter anyway, because ADR-0283 §8 deletes a stamped
         conversation's episodes **whether or not** its grace has elapsed. So this
         yields every stamped conversation regardless of grace.
 
         **The order is ``id`` ascending and the cursor is placed lexically — not
-        by looking the row up — and that is a correctness requirement.**
-        :meth:`episodes_to_purge` may place its cursor by lookup because §9
-        guarantees its rows survive the whole traversal ("nothing is removed until
-        the record is dropped"). *This* walk has the opposite property: its rows
-        are removed by the very sweep walking them. The ordinary sequence is take a
-        batch, destroy each conversation's episodes, :meth:`drop_if_eligible`, then
-        ask for the next batch using the last id received — by which time that row
-        may be gone. A cursor resolved by lookup would be unplaceable exactly when
-        the sweep is working correctly, and ordering by ``deleted_at`` would
+        by looking the row up — and that is a correctness requirement.** This walk's
+        rows are removed by the very sweep walking them. The ordinary sequence is
+        take a batch, delete each conversation's episodes, :meth:`drop_if_eligible`,
+        then ask for the next batch using the last id received — by which time that
+        row may be gone. A cursor resolved by lookup would be unplaceable exactly
+        when the sweep is working correctly, and ordering by ``deleted_at`` would
         compound it, since a dropped row's stamp instant is unrecoverable. So the
         ordering key must be one the **caller already carries**, and ``id`` is the
         only such value this read returns.
 
-        **Reading removes nothing**, exactly as :meth:`episodes_to_purge` removes
-        nothing: a row leaves when :meth:`drop_if_eligible` succeeds and not
-        before, so the sweep stays idempotent by re-walking and a *resumed* walk is
-        as safe as a restarted one.
+        **Reading removes nothing**: a row leaves when :meth:`drop_if_eligible`
+        succeeds and not before, so the sweep stays idempotent by re-walking and a
+        *resumed* walk is as safe as a restarted one.
 
         Args:
             limit: Batch size; ``None`` asks for the store's configured batch —
-                **100**, the figure the purge walk this is walked beside uses, so
-                one sweep has one number to reason about rather than two. It is a
-                fixed figure and not a ``Settings`` field: unlike the retention
-                horizon it expresses no user policy, and unlike the replay window
-                it sizes no prompt, so it is only ever a round-trip-versus-memory
-                trade on a walk that always runs to exhaustion. ``0`` returns an
-                empty batch.
+                **100**. It is a fixed figure and not a ``Settings`` field: unlike
+                the retention horizon it expresses no user policy, so it is only
+                ever a round-trip-versus-memory trade on a walk that always runs to
+                exhaustion. ``0`` returns an empty batch.
             after_id: Exclusive cursor naming a **position in the id space**: the
                 next batch is every stamped id ordering strictly after that string.
                 An id that names no row is therefore a perfectly good cursor and is
@@ -11578,72 +11337,12 @@ class ConversationStore(Protocol):
         Returns:
             The batch, ``id`` ascending. An empty batch means the walk is done, and
             the deletion sweep **must** drain to one: finishing a batch and
-            stopping is the failure §9's own multi-batch clause forbids.
+            stopping leaves the tombstones after it unswept.
 
         Raises:
             ValueError: If ``limit`` is outside ``[0, 2**63)``. ADR-0073 §2's
                 posture, inherited unchanged; ``after_id`` carries no such refusal,
                 because there is nothing for the store to fail to place.
-            ConversationStoreError: If the store cannot be read.
-        """
-        ...
-
-    async def episodes_to_purge(
-        self,
-        conversation_id: str,
-        *,
-        limit: int | None = None,
-        after_id: str | None = None,
-    ) -> list[str]:
-        """Page forwards over a conversation's episode ids — **ids and nothing else**.
-
-        The read the two sweeps take (§9): finishing a user deletion, which
-        destroys the episodes the index names, and the retention reclaim, which
-        destroys nothing and only asks the ``MemoryStore`` whether any of them
-        still resolves. It works on a stamped conversation *and* on a live one,
-        because those are respectively what each sweep walks.
-
-        **Ids only, deliberately.** No ordinals, no timestamps, no bindings, no
-        ``ConversationTurn``. A `core` Protocol is a cross-subsystem contract, so a
-        method exists for *every* injected consumer — naming one ``sweep_turns``
-        would document an intent the contract cannot enforce, and any caller
-        holding a just-deleted id could still enumerate the whole index for the
-        length of the grace. Returning only what the work needs removes the
-        exposure instead of labelling it: the coordinator must be handed the ids
-        it is about to destroy, and nothing else about a deleted conversation
-        leaves the store until the record is dropped.
-
-        **Nothing is removed by reading.** Sweep progress is a position within a
-        call sequence, never a mutation of the index — the rows *are* the intent
-        log, and a sweep that consumed them would discard the only durable
-        reference to an episode whose write had not landed yet, letting the late
-        write land unreachable. The rows go when :meth:`drop_if_eligible`
-        succeeds, and not before. So the sweep is **idempotent by re-walking**: a
-        run that dies part-way is re-run from the beginning, and every delete it
-        repeats is a no-op on an id already gone.
-
-        Args:
-            conversation_id: The conversation whose episode ids to walk.
-            limit: Batch size; ``None`` asks for the store's configured batch.
-                ``0`` returns an empty batch.
-            after_id: Exclusive cursor — an episode id from the previous batch,
-                which the store resolves to a position because the encoding is its
-                own. ``None`` starts at the first turn.
-
-        Returns:
-            The batch, in ordinal order. An empty batch means the walk is done;
-            the deletion and reclaim sweeps **must** drain to one before asking
-            for the conditional drop.
-
-        Raises:
-            ValueError: If ``limit`` is outside ``[0, 2**63)``, or ``after_id`` is
-                not an episode id of this conversation. A cursor the store cannot
-                place is refused rather than silently restarting the walk, which
-                would make a sweep loop forever over its first batch.
-            UnknownConversationError: If ``conversation_id`` names nothing. A
-                sweep reaching an id another sweep already finished treats this as
-                a **no-op and moves to the next id** (ADR-0076 §2); a store fault
-                aborts it.
             ConversationStoreError: If the store cannot be read.
         """
         ...
@@ -11654,7 +11353,8 @@ class ConversationStore(Protocol):
         The read that lets the hub answer "which conversation?", because a
         stateless client cannot: without it, "continue yesterday's conversation"
         would require the *client* to have kept the id, which is exactly the state
-        VISION §Principle 8 forbids an interface to own.
+        VISION §Principle 8 forbids an interface to own. It is also the observation
+        stage's candidate listing (ADR-0283 §11:2).
 
         **Ordered by ``last_active_at`` descending, ties broken by ``id``
         ascending** — some total order must be named or two implementations answer
@@ -11682,127 +11382,30 @@ class ConversationStore(Protocol):
         """
         ...
 
-    async def conversations_with_unobserved_turns(self, *, limit: int = 50) -> list[Conversation]:
-        """List the conversations an observation pass still has work in (ADR-0212 §3).
-
-        Every conversation that is **not** stamped deleted and holds at least one
-        turn whose ordinal is strictly above its
-        :attr:`~ai_assistant.core.types.Conversation.observed_through` — or any turn
-        at all, where that is absent, which includes a watermark this store
-        discarded (see the class docstring). A conversation with no turns is never
-        a candidate, and one leaves the set only once its watermark reaches its
-        highest turn: a conversation with more unobserved turns than one page
-        **stays** in it after a pass.
-
-        **Ordered by ``last_active_at`` ascending, ties broken by ``id``
-        ascending**, which is the one operation on this contract that does not
-        order conversations by activity descending (ADR-0212 §10(b) records the
-        replacement). Descending cannot be the candidate order: a conversation
-        that keeps receiving turns would be selected on every pass and one the user
-        has stopped using would never be reached. Ascending excludes no candidate,
-        serves the material nearest its retention horizon first, and — where the
-        clock advances monotonically — reaches every candidate in a bounded number
-        of passes. The clock is not promised monotonic
-        (:mod:`ai_assistant.core.clock`), so a stopped or stepped-back one can leave
-        a busy conversation ahead of an idle one indefinitely; that is **accepted
-        and named** rather than closed, since closing it would take a second durable
-        cursor bought against a clock adjustment.
-
-        **It takes no cursor and no offset**, because no consumer pages it: an
-        observation pass serves one conversation, so the stage takes the head of a
-        freshly-read listing each time and never asks for a second page. An offset
-        would offer a position over a set whose membership *and* whose ordering key
-        both move between passes — a row leaves once its watermark reaches its
-        highest turn, and ``last_active_at`` moves under every turn — which is the
-        hazard :meth:`recent` already names for offset paging and
-        :meth:`stamped_conversation_ids` already refuses for a walk whose rows leave
-        under it.
-
-        Args:
-            limit: Page size, bounded by default at 50 — :meth:`recent`'s figure and
-                ADR-0073 §2's argument, unchanged. ``0`` returns an empty page. It
-                is emphatically **not** ``scheduler_chunk_size`` under another name:
-                that field bounds neither this listing nor an observation pass's
-                page, and the two defaults being equal is a coincidence of two
-                independently argued figures (ADR-0212 §3).
-
-        Returns:
-            The page, ``last_active_at`` ascending with ``id`` ascending.
-
-        Raises:
-            ValueError: If ``limit`` is outside ``[0, 2**63)``.
-            ConversationStoreError: If the store cannot be read.
-        """
-        ...
-
-    async def turn_of_episode(self, episode_id: str) -> ConversationTurn | None:
-        """Return the turn an episode records, or ``None`` (§9).
-
-        The store owes both directions of the membership relation, because §10
-        declines to duplicate it onto the record: conversation membership lives in
-        this index and not as a ``conversation_id`` field on ``EpisodicMemory``,
-        so that an episode belonging to no conversation is the *default* shape
-        rather than a permitted exception.
-
-        ``None`` when no turn cites that id **or** when the turn's conversation is
-        stamped deleted. The second half matters: a caller holding an episode id
-        from before the deletion would otherwise receive exactly the ordinal,
-        timestamp and binding metadata a stamped conversation withholds from every
-        other read.
-
-        Raises:
-            ConversationStoreError: If the store cannot be read.
-        """
-        ...
-
-    async def turn_of_binding(self, binding: ParkedBinding) -> ConversationTurn | None:
-        """Return the turn that parked on ``binding``, or ``None`` (§3).
-
-        This is how a resumption finds its conversation. The resume path cannot be
-        *told* which conversation it is in — the adapter relays an opaque token and
-        nothing else, and after a restart that token is reconstructed from durable
-        state with no live turn behind it — so the association is durable and
-        recovered rather than passed: the turn that parked recorded the binding,
-        and this resolves it back.
-
-        ``None`` when no turn claims that binding **or** when the turn's
-        conversation is stamped deleted. Both are the case ADR-0074 §3 already
-        ratifies: nothing is captured for that resumption, and **no conversation
-        is invented** for it — recording it under a conversation created for the
-        purpose would assert a conversation the user never had.
-
-        A binding is unique across the index (:meth:`append` enforces it), so
-        "*the* turn" is a well-defined question rather than a choice between rows.
-
-        Raises:
-            ConversationStoreError: If the store cannot be read.
-        """
-        ...
-
     async def stamp_deleted(self, conversation_id: str) -> bool:
-        """Stamp a conversation deleted — step 1 of §8's deletion protocol.
+        """Stamp a conversation deleted — the first step of ADR-0283 §8's deletion.
 
         The tombstone, and it is the conversation record itself. Stamping is
-        durable, hides the conversation from every presenting read, and **refuses
-        every later append**, so a capture racing the deletion cannot slip a turn
-        in behind it. What the stamp does *not* do is remove anything: the index
-        survives, still naming every episode id involved — including one whose
-        write has not landed yet — which is what lets the sweep finish the
-        deletion after a crash or a racing capture.
+        durable, hides the conversation from every presenting read, and makes every
+        later :meth:`record_turn` write nothing and answer ``None``, so a capture
+        racing the deletion learns the conversation is gone and deletes its own
+        episode (ADR-0283 §7:2). What the stamp does *not* do is remove anything:
+        the record survives, enumerable by :meth:`stamped_conversation_ids`, which
+        is what lets the sweep finish the deletion after a crash.
 
-        The caller then destroys the episodes :meth:`episodes_to_purge` names and
-        asks :meth:`drop_if_eligible` to remove the record. Those steps normally
-        run to completion in the deleting call; the tombstone is what makes a
-        crash survivable rather than final.
+        The caller then discards the archive entries, drops the parked reads,
+        deletes every episode on the conversation's channel, and asks
+        :meth:`drop_if_eligible` to remove the record (ADR-0283 §8:1). Those steps
+        normally run to completion in the deleting call; the tombstone is what makes
+        a crash survivable rather than final.
 
         Returns:
             ``True`` if this call stamped it; ``False`` if it was already stamped
             or the id names nothing. A ``bool`` rather than a raise on absence
-            because §8's protocol is explicitly re-runnable — a deletion whose
-            sweep is repeated after the record was dropped must be a no-op, not an
-            error — and reporting "nothing to stamp" still refuses to create
-            anything, which is all §1 asks of a method that does not present a
-            conversation.
+            because the deletion is explicitly re-runnable — a deletion whose sweep
+            is repeated after the record was dropped must be a no-op, not an error
+            — and reporting "nothing to stamp" still refuses to create anything,
+            which is all §1 asks of a method that does not present a conversation.
 
         Raises:
             ConversationStoreError: If the store cannot be written.
@@ -11810,24 +11413,23 @@ class ConversationStore(Protocol):
         ...
 
     async def drop_if_eligible(self, conversation_id: str) -> bool:
-        """Remove a conversation record and its index, if it is still eligible (§7, §8).
+        """Remove a conversation record, if it is still eligible (§7, §8).
 
-        Step 3 of the deletion protocol and the last step of the retention
-        reclaim, and it **re-checks eligibility while holding the per-conversation
-        exclusion**. That re-check is the whole point: eligibility is a claim about
-        state an append or an activity mark changes, so deciding "idle, empty" and
-        then dropping the record in a separate step is how a reclaim destroys a
-        conversation the user has just come back to.
+        The last step of the deletion and of the retention reclaim, and it
+        **re-checks eligibility while holding the per-conversation exclusion**. That
+        re-check is the whole point: eligibility is a claim about state an activity
+        mark changes, so deciding "idle" and then dropping the record in a separate
+        step is how a reclaim destroys a conversation the user has just come back
+        to.
 
         Eligibility, judged against the store's own clock:
 
         * **A stamped conversation** is eligible once a bounded **grace period**
           has elapsed since the stamp. The grace widens the sweep's reach; it is
           not a bound and is not offered as one — no elapsed time proves a
-          suspended write cannot still commit. What it buys is that the tombstone,
-          and with it the only record naming a pending intent, outlives the
-          deletion long enough for the next reclaim to catch a capture that
-          committed and then died.
+          suspended write cannot still commit. What it buys is that the tombstone
+          outlives the deletion long enough for recovery's sweep to catch an
+          episode whose write committed and then died.
         * **An unstamped conversation** is eligible once its ``last_active_at`` is
           past the retention horizon. Eligibility reads *activity*, never
           ``last_turn_at``, so a continuation that is underway protects the
@@ -11840,33 +11442,32 @@ class ConversationStore(Protocol):
 
         The horizon is read at the moment reclaim runs, not stamped at creation, so
         a store moved from a 7-day horizon to a 30-day one keeps an emptied
-        conversation's index until day 30 though its episodes left on day 7 — and
+        conversation's record until day 30 though its episodes left on day 7 — and
         moved the other way, drops it sooner. That is the behaviour a user changing
         the setting would predict, and what lingers is metadata rather than content.
 
-        **The caller owns the other half of the precondition.** Whether a
-        conversation still has live turns is a ``MemoryStore`` fact this store
-        cannot see and may not ask about (golden rule 1). The coordinator drains
-        :meth:`episodes_to_purge` — destroying the episodes for a deletion, merely
-        observing them for a reclaim — and only then calls this.
+        **The caller owns the other half of the precondition** (ADR-0283 §6:7, §8).
+        Whether the conversation's channel is empty is a ``MemoryStore`` fact this
+        store cannot see and may not ask about (golden rule 1): the deletion has
+        deleted every episode on it, and the reclaim calls this only where the
+        channel holds none.
 
         **What the re-check does and does not promise.** It defeats a reclaim whose
         eligibility was evaluated while the activity mark was still *within* the
         horizon. It does **not** keep a conversation alive for an arbitrarily long
         turn: once the mark itself has aged past the horizon the conversation is
-        eligible again, and §7's ratified mid-turn outcome applies — the record is
-        dropped, the capture append behind it is refused, and the user gets an
-        answer that was not recorded. The two clauses describe different instants
-        and neither weakens the other.
+        eligible again, and ADR-0074 §7's ratified mid-turn outcome applies — the
+        record is dropped, the :meth:`record_turn` behind it answers ``None``, and
+        the user gets an answer that was not recorded. The two clauses describe
+        different instants and neither weakens the other.
 
         **The delivery rows go with the record** (ADR-0283 §6:7), in the same
         step: a conversation's delivery rows never outlive it, and none is left for
         a conversation minted later to inherit.
 
         Returns:
-            ``True`` if the record, its index rows and its delivery rows were
-            removed; ``False`` if the conversation is not (or no longer) eligible,
-            or the id names
+            ``True`` if the record and its delivery rows were removed; ``False`` if
+            the conversation is not (or no longer) eligible, or the id names
             nothing. ``False`` on absence is what makes the sweep idempotent: it
             can run any number of times, and a re-run after a successful drop is a
             no-op rather than an error.
@@ -11879,29 +11480,21 @@ class ConversationStore(Protocol):
     async def export(self) -> ConversationExport:
         """Return this store's own portable snapshot (§9, ADR-0004 §6).
 
-        The conversations and their turn index, as the two frozen types, which the
-        caller serialises with ``model_dump(mode="json")`` — ADR-0007 §3's rule
-        applied to a second store, so the store does not invent a bespoke format.
-        Conversations stamped deleted are **excluded**: they are deleted as far as
-        every read is concerned.
+        The conversations, as the frozen type, which the caller serialises with
+        ``model_dump(mode="json")`` — ADR-0007 §3's rule applied to a second store,
+        so the store does not invent a bespoke format. Conversations stamped
+        deleted are **excluded**: they are deleted as far as every read is
+        concerned.
 
-        **No liveness filtering, because this store has no way to ask and no
-        business asking.** A turn outlives its episode, so this snapshot carries
-        rows whose episodes have expired or been destroyed. The user-facing export
-        is composed in `orchestration`, which drops those turns — filtering them
-        against the ``MemoryStore`` half of *the same export* rather than against a
-        live read, so no exported turn can point at content the artifact does not
-        carry — and a conversation left with nothing to show is dropped with them.
-        Both reads are needed and neither substitutes for the other: the deletion
-        sweep must see every row, the user's export must see none of them.
+        It carries **no history** (ADR-0283 §4:3): a conversation's episodes are
+        ``MemoryStore`` records and that store's export already carries them, so
+        repeating them here would put the same Tier 1 text in two exports under two
+        retention rules. **No liveness filtering** either: this store has no way to
+        ask whether a conversation's channel still holds an episode, and no
+        business asking.
 
-        It carries **no episode content**: episodes are ``MemoryStore`` records and
-        that store's export already carries them, so repeating them here would put
-        the same Tier 1 text in two exports under two retention rules.
-
-        Ordered as the reads are (§9.3): conversations by ``last_active_at``
-        descending with ``id`` ascending, turns by ``conversation_id`` then
-        ``ordinal`` ascending.
+        Ordered as :meth:`recent` is: ``last_active_at`` descending with ``id``
+        ascending.
 
         Raises:
             ConversationStoreError: If the store cannot be read, or a stored row

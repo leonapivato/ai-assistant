@@ -684,9 +684,9 @@ class UnknownConversationError(ConversationStoreError):
 
     Narrowed out of :class:`ConversationStoreError` for one caller and one
     question: **a sweep cannot otherwise tell "already done" from "broken".**
-    Sweeper A enumerates conversation ``C``; sweeper B — or the deleting call, or
-    a later scheduler — finishes ``C`` and drops it; A's next
-    ``episodes_to_purge(C)`` then raises. Against one undifferentiated class A
+    Walker A enumerates conversation ``C``; sweeper B — or the deleting call, or
+    a later scheduler — finishes ``C`` and drops it; A's next call naming ``C``
+    (``record_observed(C, ...)``, say) then raises. Against one undifferentiated class A
     either aborts a start-up sweep that was working perfectly, or swallows real
     store faults to avoid doing so.
 

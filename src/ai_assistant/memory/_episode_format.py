@@ -46,7 +46,7 @@ def check_format(conn: sqlite3.Connection, *, allow_empty: bool = False) -> bool
     )
 
 
-def inspect_existing(path: str, *, conversation: bool = False) -> None:
+def inspect_existing(path: str) -> None:
     """Check existing files without allowing SQLite recovery to modify them.
 
     A read-only connection suffices for a clean rollback-mode database. Pending
@@ -54,6 +54,10 @@ def inspect_existing(path: str, *, conversation: bool = False) -> None:
     SQLite must not touch the rejected original or its shared-memory sidecar.
     The normal writable opener rechecks the marker inside its initialization
     transaction after this probe has admitted the recovered format.
+
+    The marker is the whole test, for the conversation store as for the memory
+    store: the conversation store's turn table and its column check are retired
+    (ADR-0283 §6, §12), so there is no second shape to probe.
     """
     if path == ":memory:":
         return
@@ -64,14 +68,14 @@ def inspect_existing(path: str, *, conversation: bool = False) -> None:
         source = source.resolve()
         sidecars = tuple(Path(f"{source}{suffix}") for suffix in ("-journal", "-wal", "-shm"))
         if _wal_header(source) or any(file.exists() or file.is_symlink() for file in sidecars):
-            _inspect_copy(source, sidecars, conversation=conversation)
+            _inspect_copy(source, sidecars)
         else:
             with contextlib.closing(
                 sqlite3.connect(
                     f"{source.resolve().as_uri()}?mode=ro", uri=True, isolation_level=None
                 )
             ) as conn:
-                _inspect_connection(conn, conversation=conversation)
+                _inspect_connection(conn)
     except (OSError, sqlite3.Error, ValueError) as exc:
         raise MemoryStoreError("cannot inspect existing episode record format") from exc
 
@@ -84,19 +88,8 @@ def _wal_header(path: Path) -> bool:
     return header.startswith(b"SQLite format 3\0") and b"\x02" in header[18:20]
 
 
-def _inspect_connection(conn: sqlite3.Connection, *, conversation: bool) -> None:
-    marked = check_format(conn, allow_empty=True)
-    if marked and conversation:
-        columns = {row[1] for row in conn.execute("PRAGMA table_info(turns)")}
-        if "model_eligible" not in columns:
-            raise IncompatibleStateError(
-                "conversation store requires a fresh M39 data directory",
-                expected="conversation index with activation eligibility",
-                found="conversation index without activation eligibility",
-                operator_action=(
-                    "Stop the old hub and configure a new empty development data directory."
-                ),
-            )
+def _inspect_connection(conn: sqlite3.Connection) -> None:
+    check_format(conn, allow_empty=True)
 
 
 def _file_state(path: Path) -> tuple[int, int, int, int, int] | None:
@@ -107,7 +100,7 @@ def _file_state(path: Path) -> tuple[int, int, int, int, int] | None:
     return stat.st_dev, stat.st_ino, stat.st_size, stat.st_mtime_ns, stat.st_ctime_ns
 
 
-def _inspect_copy(source: Path, sidecars: tuple[Path, ...], *, conversation: bool) -> None:
+def _inspect_copy(source: Path, sidecars: tuple[Path, ...]) -> None:
     files = (source, *sidecars)
     before = tuple(_file_state(file) for file in files)
     with tempfile.TemporaryDirectory(prefix="assistant-format-") as directory:
@@ -125,7 +118,7 @@ def _inspect_copy(source: Path, sidecars: tuple[Path, ...], *, conversation: boo
         if journal.exists():
             _refuse_super_journal(journal)
         with contextlib.closing(sqlite3.connect(copied, isolation_level=None)) as conn:
-            _inspect_connection(conn, conversation=conversation)
+            _inspect_connection(conn)
 
 
 def _refuse_super_journal(journal: Path) -> None:

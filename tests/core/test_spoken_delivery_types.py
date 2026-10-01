@@ -8,10 +8,9 @@ reason — "a value that has already contradicted itself is not a report, it is 
 defect" — so every arm of it is checked here rather than left to the one caller that
 happens to build the value today.
 
-§3's member on :class:`~ai_assistant.core.types.ConversationTurn` and §1's member on
-:class:`~ai_assistant.core.types.SpokenTurn` are pinned beside them: the counts are
-what ADR-0205 §10 partially supersedes, and a sixth arriving unnoticed is exactly
-what an enumeration stops.
+§3's member on the turn index row is gone with the row (ADR-0283 §6): the fact now
+lives on a delivery row the ``ConversationStore`` keys by episode id, and the store's
+own conformance suite is where that row's behaviour is pinned.
 """
 
 from __future__ import annotations
@@ -23,7 +22,6 @@ import pytest
 from pydantic import ValidationError
 
 from ai_assistant.core.types import (
-    ConversationTurn,
     SpokenDelivery,
     SpokenDeliveryReport,
     SpokenDeliveryState,
@@ -35,18 +33,6 @@ _AT: Final = datetime(2026, 8, 28, 9, 0, tzinfo=UTC)
 _WHOLE: Final = timedelta(seconds=10)
 _PART: Final = timedelta(seconds=3)
 _NONE: Final = timedelta(0)
-
-
-def _turn(**overrides: object) -> ConversationTurn:
-    """One index row, with whatever member a case is about overridden."""
-    fields: dict[str, object] = {
-        "conversation_id": "c-1",
-        "ordinal": 1,
-        "episode_id": "conv:c-1:1",
-        "occurred_at": _AT,
-    }
-    fields.update(overrides)
-    return ConversationTurn(**fields)  # type: ignore[arg-type]  # a row assembled from a mapping
 
 
 # --- §2: the vocabulary ------------------------------------------------------
@@ -175,40 +161,3 @@ def test_every_value_outside_the_partition_is_refused(fields: dict[str, object],
     with pytest.raises(ValidationError):
         SpokenDelivery(**fields)  # type: ignore[arg-type]  # deliberately outside the partition
     assert why
-
-
-# --- §3: the member on the index row -----------------------------------------
-
-
-def test_the_turn_carries_the_one_member_adr_0205_adds() -> None:
-    # §10 partially supersedes ADR-0074 §9's enumeration in exactly one scope. The
-    # ADR-0275 subsequently adds the immutable activation eligibility flag.
-    assert set(ConversationTurn.model_fields) == {
-        "conversation_id",
-        "ordinal",
-        "episode_id",
-        "occurred_at",
-        "parked",
-        "delivery",
-        "model_eligible",
-    }
-
-
-def test_a_turn_carries_no_delivery_by_default() -> None:
-    # §3: "An absent ``delivery`` means **no delivery fact was recorded for this
-    # turn**". The default is what makes every operation but `converse_spoken` leave
-    # the row absent without any of them saying so.
-    assert _turn().delivery is None
-
-
-def test_a_turn_can_carry_any_state_the_partition_admits() -> None:
-    # §3's last clause: "``UNKNOWN`` is the whole of what is stampable, and a turn
-    # whose rendering never existed is stampable like any other" — so the row admits
-    # every state, and the eligibility rule lives in `record_delivery` rather than
-    # in the type.
-    for fact in (
-        SpokenDelivery(state=SpokenDeliveryState.UNKNOWN),
-        SpokenDelivery(state=SpokenDeliveryState.COMPLETE, played=_WHOLE, rendered=_WHOLE),
-        SpokenDelivery(state=SpokenDeliveryState.INTERRUPTED, played=_PART, rendered=_WHOLE),
-    ):
-        assert _turn(delivery=fact).delivery == fact

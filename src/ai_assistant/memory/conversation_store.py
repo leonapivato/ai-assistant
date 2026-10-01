@@ -1,11 +1,11 @@
 """A persistent :class:`~ai_assistant.core.protocols.ConversationStore` on SQLite.
 
-Local-first storage (ADR-0002) for ADR-0074's conversation index: the durable
-identity of a conversation, and the ordered turns recorded under it. It holds no
-content — a turn's content is one ``EpisodicMemory`` in the ``MemoryStore``, named
-here by a derived episode id — so this store needs no embedder and no vector
-table, which is the whole of why it is a second store rather than a widening of
-the first (ADR-0074 §9).
+Local-first storage (ADR-0002) for ADR-0074's conversation record: the durable
+identity of a conversation, the delivery rows ADR-0283 §6 keeps beside it, and the
+observation watermark. It holds no history — a conversation's turns are the
+episodes on its channel in the ``MemoryStore`` (ADR-0283 §1, §4) — so this store
+needs no embedder and no vector table, which is the whole of why it is a second
+store rather than a widening of the first (ADR-0074 §9).
 
 **Why this module lives in `memory/` while its contract does not.** ADR-0074 §9
 rules that ``ConversationStore`` is its *own* Protocol and not an extension of
@@ -22,34 +22,23 @@ mutation runs inside one ``BEGIN IMMEDIATE`` transaction, which is how the
 per-conversation exclusion ADR-0074 §8 puts on the *seam* holds across processes
 as well as across coroutines — a lock inside one engine would not.
 
-**A turn cannot name a conversation that does not exist** (#452). ``turns``
-carries a foreign key to ``conversations`` with ``ON DELETE CASCADE``, and
-enforcement is switched on for the connection at open — ``PRAGMA foreign_keys``
-is off by default and is *per connection*, so it has to be. Two consequences the
-statements below are written against:
+**A delivery row cannot name a conversation that does not exist** (#452).
+``deliveries`` carries a foreign key to ``conversations`` with ``ON DELETE
+CASCADE``, and enforcement is switched on for the connection at open — ``PRAGMA
+foreign_keys`` is off by default and is *per connection*, so it has to be. The only
+``INSERT`` into ``deliveries`` already proves the parent exists inside the same
+``IMMEDIATE`` transaction, so the constraint is there for a writer that is not this
+module; and :meth:`SqliteConversationStore.drop_if_eligible` deletes the rows
+*explicitly* before the record rather than leaning on the cascade — see the
+comment there for why the pragma's per-connection scope makes that the safer of the
+two.
 
-* The only ``INSERT`` into ``turns`` already proves the parent exists inside the
-  same ``IMMEDIATE`` transaction, so the constraint never fires on this
-  module's own writes; it is there for a writer that is not this module. Were it
-  ever to fire, the ``IntegrityError`` reaches the caller as this seam's error
-  like any other backend failure.
-* :meth:`SqliteConversationStore.drop_if_eligible` keeps deleting the index
-  rows *explicitly* before the record, rather than leaning on the cascade —
-  see the comment there for why the pragma's per-connection scope makes that the
-  safer of the two.
-
-The constraint binds a database written before it existed only after a rebuild,
-which :meth:`SqliteConversationStore._migrate_turns` performs at open. An orphan
-that predates all of this is *reported* rather than repaired: the two reverse
-lookups and the export left-join the conversation so a turn naming nothing
-surfaces as ``ConversationStoreError`` instead of vanishing from every read.
-
-**Delivery rows** (ADR-0283 §6) live in a third table, ``deliveries``, keyed by the
-conversation and the episode's id and carrying the same cascading key to
-``conversations`` the turns do. It is created ``IF NOT EXISTS`` at open, so a file
-written before it gains the table without a row being rewritten; ADR-0283 §12's
-format marker is the memory-store lane's to advance, and this table needs nothing
-from it.
+**There is no turn table** (ADR-0283 §6, §12). The turn index ADR-0074 gave this
+store is retired: nothing here creates, reads or writes one. ADR-0283 §12 moves the
+hub to a fresh data directory with no migration, so the schema simply lacks it; a
+file written by an interim build of the same format that still carries a ``turns``
+table is opened without the table being read, and its foreign key cascades away
+with each conversation that is dropped.
 """
 
 from __future__ import annotations
@@ -78,9 +67,7 @@ from ai_assistant.core.types import (
     FIRST_TURN_ORDINAL,
     Conversation,
     ConversationExport,
-    ConversationTurn,
     Identifier,
-    ParkedBinding,
     SpokenDelivery,
     SpokenDeliveryState,
     UtcInstant,
@@ -117,11 +104,8 @@ _SIDECARS = ("-journal", "-wal", "-shm")
 #: import a subsystem (golden rule 1), and ADR-0074 adds nothing to ``core``.
 _PAGE_BOUND = 2**63
 
-#: The configured replay window :meth:`SqliteConversationStore.turns` uses when a
-#: caller names no ``limit`` (ADR-0074 §9.3): finite, and the same for everyone.
-_DEFAULT_TAIL_LIMIT = 20
-
-#: The default batch :meth:`SqliteConversationStore.episodes_to_purge` yields.
+#: The default batch :meth:`SqliteConversationStore.stamped_conversation_ids`
+#: yields (ADR-0076 §2).
 _DEFAULT_PURGE_BATCH = 100
 
 #: The retention horizon an idle conversation is judged against when nobody
@@ -150,28 +134,7 @@ _MAX_DELIVERY_IDS: Final = 1000
 _EPISODE_ID: Final[TypeAdapter[str]] = TypeAdapter(Identifier)
 _INSTANT: Final[TypeAdapter[datetime]] = TypeAdapter(UtcInstant)
 
-#: The reserved namespace a captured turn's episode id is minted into (ADR-0074
-#: §3): structurally recognisable, and no other producer may mint into it.
-_EPISODE_NAMESPACE = "conv"
-
 _EPOCH = datetime(1970, 1, 1, tzinfo=UTC)
-
-#: ADR-0205 §3's fact, spelled as three nullable columns rather than one blob: the
-#: state as its ``StrEnum`` value, and each duration as a whole number of
-#: microseconds, which is ``timedelta``'s own resolution and so exact in both
-#: directions. A row whose ``delivery_state`` is ``NULL`` carries **no delivery fact**
-#: — on the surface as it stands, a turn that did not run on ``converse_spoken`` — and
-#: is left exactly as it stands by :meth:`SqliteConversationStore.record_delivery`.
-#:
-#: Three columns rather than a JSON member for ``parked``'s reason one field over: the
-#: partition ADR-0205 §2 fixes is enforced by the ``core`` model on the way out, and a
-#: column per member is what lets a stored row's corruption surface as this seam's own
-#: error rather than as a decode of text nobody validated.
-#:
-#: ``TEXT`` for the state and ``INTEGER`` microseconds for the two durations, each
-#: nullable because ``UNKNOWN`` carries neither and an absent delivery carries none of
-#: the three.
-_DELIVERY_COLUMNS: Final = "delivery_state TEXT, delivery_played INTEGER, delivery_rendered INTEGER"
 
 #: What a SQLite ``INTEGER`` holds: a signed 64-bit value. A duration beyond it is
 #: refused by :func:`_to_micros_of` as this seam's own error rather than left to raise
@@ -179,37 +142,17 @@ _DELIVERY_COLUMNS: Final = "delivery_state TEXT, delivery_played INTEGER, delive
 #: :meth:`SqliteConversationStore._transaction`'s translation untouched.
 _SQLITE_INT_BOUND: Final = 2**63
 
-#: The columns of the ``turns`` table, foreign key and all — held in one place so
-#: the fresh-database path and :meth:`SqliteConversationStore._migrate_turns`'
-#: rebuild cannot drift apart. Two spellings of one schema is how a migration
-#: ends up producing a table subtly unlike the one a fresh open produces.
-_TURNS_COLUMNS = (
-    "conversation_id TEXT NOT NULL REFERENCES conversations(id) ON DELETE CASCADE, "
-    "ordinal INTEGER NOT NULL, episode_id TEXT NOT NULL, occurred_at INTEGER NOT NULL, "
-    "execution_id TEXT, step_id TEXT, " + _DELIVERY_COLUMNS + ", "
-    "model_eligible INTEGER NOT NULL DEFAULT 1 CHECK(model_eligible IN (0, 1)), "
-    "PRIMARY KEY(conversation_id, ordinal)"
-)
-
-#: The turn columns every read selects, aliased to ``t`` for the joins. The unaliased
-#: spelling is written out at each of the three reads that needs it rather than held
-#: here: ruff's ``S608`` reads a query assembled from a name as a possible injection
-#: vector whatever the name holds, and a literal at the call site is the cheaper answer
-#: than a suppression on each of them. What keeps the four in step is
-#: :meth:`SqliteConversationStore._decode_turn`, which every one of them feeds and which
-#: fails loudly on a row whose positions have moved.
-_TURN_SELECT = (
-    "t.conversation_id, t.ordinal, t.episode_id, t.occurred_at, t.execution_id, t.step_id, "
-    "t.delivery_state, t.delivery_played, t.delivery_rendered, t.model_eligible"
-)
-
 #: The columns of the ``deliveries`` table (ADR-0283 §6): one row per spoken episode,
-#: keyed by the conversation and the episode's id, carrying ADR-0205 §3's fact in
-#: :data:`_DELIVERY_COLUMNS`' three-column encoding — except that the state is ``NOT
-#: NULL`` here, because a row exists only where a delivery was recorded and absence is
-#: spelled by there being no row. The cascading key to ``conversations`` is the turns'
-#: own (#452), for the same reason: a delivery row cannot name a conversation that
-#: does not exist. No index beyond the primary key: every read and write names the
+#: keyed by the conversation and the episode's id, carrying ADR-0205 §3's fact as
+#: three columns rather than one blob — the state as its ``StrEnum`` value, and each
+#: duration as a whole number of microseconds, which is ``timedelta``'s own resolution
+#: and so exact in both directions. A column per member is what lets a stored row's
+#: corruption surface as this seam's own error rather than as a decode of text nobody
+#: validated. The state is ``NOT NULL``, because a row exists only where a delivery
+#: was recorded and absence is spelled by there being no row; the two durations are
+#: nullable, because ``UNKNOWN`` carries neither. The cascading key to
+#: ``conversations`` (#452) means a delivery row cannot name a conversation that does
+#: not exist. No index beyond the primary key: every read and write names the
 #: conversation and the episode together.
 _DELIVERIES_COLUMNS: Final = (
     "conversation_id TEXT NOT NULL REFERENCES conversations(id) ON DELETE CASCADE, "
@@ -219,10 +162,10 @@ _DELIVERIES_COLUMNS: Final = (
 )
 
 #: ADR-0212 §1's watermark, one nullable column with no default on the *conversation*
-#: — the row whose progress it records, and the store that allocated the ordinal it
-#: names. Held apart from the fresh-database ``CREATE TABLE`` for
-#: :meth:`SqliteConversationStore._migrate_observed` to add to a file written before
-#: it, exactly as :data:`_DELIVERY_COLUMNS` is one table down.
+#: — the row whose progress it records. Since ADR-0283 §6:6 the position it holds is
+#: an episode number the memory store issued. Held apart from the fresh-database
+#: ``CREATE TABLE`` for :meth:`SqliteConversationStore._migrate_observed` to add to a
+#: file written before it.
 #:
 #: **Nullable and defaultless is a contract obligation, not a convenience**
 #: (ADR-0212 §7): SQLite adds such a column in constant time without rewriting a row,
@@ -258,18 +201,12 @@ _SEARCH_DRAW_COLUMNS: Final = (
 
 # **The six columns every conversation read selects.** An ordinary comment and not
 # a ``#:`` attribute block, because there is deliberately no name here to attach one
-# to: the list is written out at each of the five reads that needs it — ``_TURN_SELECT``'s
-# reason one table down, that ruff's ``S608`` reads a query assembled from a name as a
-# possible injection vector whatever the name holds, and a literal at the call site is
-# the cheaper answer than a suppression on each of them. The six are the five stored
-# columns and ``observed_through``.
-#
-# There was a seventh, the conversation's highest turn ordinal, derived beside them so
-# that ADR-0212 §7 could discard a watermark "above the highest ordinal the
-# conversation holds". ADR-0283 §6:6 makes the watermark an episode number this store
-# cannot see and drops that limb, so nothing reads the figure any more. What keeps the
-# five reads in step is ``SqliteConversationStore._decode_conversation``, which every
-# one of them feeds.
+# to: the list is written out at each read that needs it, because ruff's ``S608`` reads
+# a query assembled from a name as a possible injection vector whatever the name
+# holds, and a literal at the call site is the cheaper answer than a suppression on
+# each of them. The six are the five stored columns and ``observed_through``. What
+# keeps the reads in step is ``SqliteConversationStore._decode_conversation``, which
+# every one of them feeds.
 
 
 async def _run_to_completion[T](fn: Callable[..., T], /, *args: object) -> T:
@@ -389,12 +326,10 @@ def _instant_from(value: object, *, what: str) -> datetime:
 def _episode_id_of(value: object) -> str:
     """Read a stored episode id, refusing anything that is not a usable identifier.
 
-    This is the one read whose caller *destroys* what it is handed, so coercing a
-    corrupt value — ``str()`` on a ``BLOB`` yields a plausible-looking
-    ``"b'...'"`` — would send a sweep to delete an id nothing holds, and then let
-    it drop the index row that named the real episode. Every other read reaches a
-    frozen type whose ``Identifier`` refuses the same values; this one does not,
-    so it makes the check itself.
+    :meth:`SqliteConversationStore.deliveries` keys its answer by this value and
+    reaches no frozen type whose ``Identifier`` would refuse a corrupt one first, so
+    it makes the check itself: coercing a ``BLOB`` with ``str()`` would yield a
+    plausible-looking ``"b'...'"`` key that names no episode the caller asked about.
 
     Raises:
         ConversationStoreError: If the stored value is not a non-blank ``str``.
@@ -428,15 +363,15 @@ def _stamped_id_of(value: object) -> str:
 def _delivery_from(state: object, played: object, rendered: object) -> SpokenDelivery | None:
     """Rebuild ADR-0205 §3's fact from its three columns, or report there is none.
 
-    ``NULL`` in ``delivery_state`` is **absence** and not a state: it is what every
-    turn that did not run on ``converse_spoken`` carries, and what every turn written
-    before ADR-0205 landed carries after :meth:`SqliteConversationStore._migrate_delivery`.
-    The two durations are read only where a state is present, so a stray microsecond
-    beside a ``NULL`` state cannot conjure a delivery out of half a row.
+    ``NULL`` in ``delivery_state`` is reported as **absence** and not as a state;
+    the column is ``NOT NULL``, so :meth:`SqliteConversationStore._decode_delivery`
+    reads that answer as the corruption it is. The two durations are read only where
+    a state is present, so a stray microsecond beside a ``NULL`` state cannot conjure
+    a delivery out of half a row.
 
     The partition itself is not re-checked here. :class:`SpokenDelivery`'s validator
     owns it and a row that breaches it raises ``ValidationError``, which
-    :meth:`SqliteConversationStore._decode_turn` already translates into this seam's
+    :meth:`SqliteConversationStore._decode_delivery` translates into this seam's
     corrupt-row error — one rule, in the one place ADR-0205 §2 puts it.
 
     Raises:
@@ -448,7 +383,7 @@ def _delivery_from(state: object, played: object, rendered: object) -> SpokenDel
     try:
         member = SpokenDeliveryState(str(state))
     except ValueError as exc:
-        msg = f"a stored turn carries an unknown delivery state: {describe_untrusted(state)}"
+        msg = f"a stored delivery carries an unknown state: {describe_untrusted(state)}"
         raise ConversationStoreError(msg) from exc
     return SpokenDelivery(
         state=member,
@@ -460,7 +395,7 @@ def _delivery_from(state: object, played: object, rendered: object) -> SpokenDel
 def _refuse_unknown_delivery(delivery: SpokenDelivery) -> None:
     """Refuse an ``UNKNOWN`` report before any I/O (ADR-0205 §3).
 
-    ``UNKNOWN`` is written by capture and only through ``append``; it is not a value
+    ``UNKNOWN`` is written by capture and only through ``record_turn``; it is not a value
     ``record_delivery`` carries. Without this a consumer holding the Protocol could
     stamp ``UNKNOWN`` over ``UNKNOWN`` — a write the row's own state cannot
     distinguish from no write, leaving the row eligible afterwards — and ADR-0205
@@ -473,8 +408,8 @@ def _refuse_unknown_delivery(delivery: SpokenDelivery) -> None:
     if delivery.state is SpokenDeliveryState.UNKNOWN:
         msg = (
             "record_delivery does not carry an UNKNOWN delivery: that value is written "
-            "by capture through append, and a device that does not know reports nothing "
-            "(ADR-0205 §2, §3)"
+            "by capture through record_turn, and a device that does not know reports "
+            "nothing (ADR-0205 §2, §3)"
         )
         raise ValueError(msg)
 
@@ -488,9 +423,8 @@ def _checked_turn(
     ``UNKNOWN`` and nothing else, and a device's report reaches a row only through
     ``record_delivery`` and its stamped-once rule. The id and the instant go through
     ``core``'s own annotated types, so a naive or indeterminate instant is refused
-    rather than localised to the host's zone (ADR-0023 §3) — :meth:`append` gets the
-    same refusal from ``ConversationTurn`` — and a blank id is refused rather than
-    written as a key nothing will ever name.
+    rather than localised to the host's zone (ADR-0023 §3), and a blank id is refused
+    rather than written as a key nothing will ever name.
 
     Returns:
         The episode id and the instant, as ``core`` normalises them.
@@ -591,7 +525,7 @@ def _to_micros_of(duration: timedelta) -> int:
     if not -_SQLITE_INT_BOUND <= micros < _SQLITE_INT_BOUND:
         msg = (
             f"a delivery duration of {micros} microseconds is outside the range this "
-            f"store can hold, so the turn's delivery was not written (ADR-0205 §3)"
+            f"store can hold, so the episode's delivery was not written (ADR-0205 §3)"
         )
         raise ConversationStoreError(msg)
     return micros
@@ -607,27 +541,7 @@ def _micros_of(value: object) -> int:
         ConversationStoreError: If the stored value is not an integer.
     """
     if isinstance(value, bool) or not isinstance(value, int):
-        msg = f"a stored turn carries a delivery duration that is not an integer: {value!r}"
-        raise ConversationStoreError(msg)
-    return value
-
-
-def _ordinal_of(value: object) -> int:
-    """Read a stored ordinal, refusing anything outside the domain one can have.
-
-    The same affinity argument :func:`_instant_from` makes, plus the range: a
-    ``REAL`` in an ``INTEGER`` column is a store fault, and coercing one would
-    hand back a turn at a position no append ever allocated. The *whole* domain is
-    checked here rather than in pieces, because every caller needs the same
-    answer — the reader that decodes a row, the cursor that places a sweep, and
-    the allocator that adds one to the highest.
-
-    Raises:
-        ConversationStoreError: If the stored value is not an exact ``int`` in
-            ``[FIRST_TURN_ORDINAL, 2**63)``.
-    """
-    if type(value) is not int or not FIRST_TURN_ORDINAL <= value < _PAGE_BOUND:
-        msg = f"a stored ordinal is not a usable position: {describe_untrusted(value)}"
+        msg = f"a stored delivery carries a duration that is not an integer: {value!r}"
         raise ConversationStoreError(msg)
     return value
 
@@ -639,18 +553,16 @@ def _usable_watermark(stored: object) -> int | None:
     decided: a value that is **not a positive integer** below ``2**63`` is
     discarded, and the conversation is read as one with no watermark at all. It is
     never levelled, never advanced past a value that could not be read, and — the
-    part that matters most — **never an error**. :func:`_ordinal_of`'s posture is
-    deliberately not taken here: a watermark is bookkeeping that holds no evidence
-    and answers no query, so letting a bad one raise would make a conversation
-    unreadable through ``get``, ``recent``, ``turns`` and ``export`` because a
+    part that matters most — **never an error**. A watermark is bookkeeping that
+    holds no evidence and answers no query, so letting a bad one raise would make a
+    conversation unreadable through ``get``, ``recent`` and ``export`` because a
     column the user never sees is wrong, which is exactly the outcome ADR-0111 §7
     forbids arriving through a different door.
 
     **There is no upper limb.** ADR-0212 §7 also discarded a value above the
     conversation's highest turn ordinal; ADR-0283 §6:6 makes the watermark an
-    episode number — a ``MemoryStore`` number this store cannot see, and ordinarily
-    far above any ordinal — so that limb would discard every watermark the
-    observation stage records once it reads episodes.
+    episode number — a ``MemoryStore`` number this store cannot see — and drops
+    that limb.
 
     Args:
         stored: The raw ``observed_through`` column value.
@@ -697,7 +609,6 @@ class SqliteConversationStore:
         new_id: Callable[[], str] = _random_id,
         retention: timedelta | None = _DEFAULT_EPISODE_RETENTION,
         tombstone_grace: timedelta = _DEFAULT_TOMBSTONE_GRACE,
-        tail_limit: int = _DEFAULT_TAIL_LIMIT,
         purge_batch: int = _DEFAULT_PURGE_BATCH,
     ) -> None:
         """Open (or create) the store at ``path``.
@@ -713,15 +624,15 @@ class SqliteConversationStore:
             new_id: The injected id factory ``start`` mints through (ADR-0074 §1).
             retention: The horizon an idle conversation is reclaimed against;
                 ``None`` disables reclaim entirely (ADR-0074 §7).
-            tombstone_grace: How long a stamped conversation's index outlives the
+            tombstone_grace: How long a stamped conversation's record outlives the
                 stamp (ADR-0074 §8).
-            tail_limit: The configured replay window :meth:`turns` uses by default.
-            purge_batch: The batch size :meth:`episodes_to_purge` uses by default.
+            purge_batch: The batch size :meth:`stamped_conversation_ids` uses by
+                default.
 
         Raises:
             ValueError: If ``tombstone_grace`` is not strictly positive, if
-                ``retention`` is set and not strictly positive, or if either
-                default page size is out of range. The two durations are refused
+                ``retention`` is set and not strictly positive, or if the default
+                batch size is out of range. The two durations are refused
                 rather than clamped for ADR-0074 §8's reason: a zero or negative
                 grace and an unbounded one break the deletion protocol in opposite
                 directions.
@@ -740,13 +651,11 @@ class SqliteConversationStore:
             described = describe_untrusted(retention)
             msg = f"retention must be a strictly positive timedelta or None, got {described}"
             raise ValueError(msg)
-        _check_page_bound("tail_limit", tail_limit)
         _check_page_bound("purge_batch", purge_batch)
         self._clock = checked_clock(now, owner="SqliteConversationStore")
         self._new_id = new_id
         self._retention = retention
         self._grace = tombstone_grace
-        self._tail_limit = tail_limit
         self._purge_batch = purge_batch
         self._path = path if path == ":memory:" else str(Path(path))
         self._lock = asyncio.Lock()
@@ -757,7 +666,7 @@ class SqliteConversationStore:
     def _setup(self) -> sqlite3.Connection:
         """Open the connection and create the schema, or fail with the seam's error."""
         try:
-            inspect_existing(self._path, conversation=True)
+            inspect_existing(self._path)
         except MemoryStoreError as exc:
             raise ConversationStoreError("cannot inspect conversation store format") from exc
         try:
@@ -786,19 +695,10 @@ class SqliteConversationStore:
             # interrupted write leaves that journal on disk holding Tier 1 pages
             # (ADR-0004 §4). `connect` creates the file, so there is something to
             # restrict by the time this runs.
-            # Refuse incompatible state before chmod or a write transaction.
-            existing_format = check_format(conn, allow_empty=True)
-            if existing_format:
-                columns = {row[1] for row in conn.execute("PRAGMA table_info(turns)")}
-                if "model_eligible" not in columns:
-                    raise IncompatibleStateError(
-                        "conversation store requires a fresh M39 data directory",
-                        expected="conversation index with activation eligibility",
-                        found="conversation index without activation eligibility",
-                        operator_action=(
-                            "Stop the old hub and configure a new empty development data directory."
-                        ),
-                    )
+            # Refuse incompatible state before chmod or a write transaction. The
+            # format marker is the whole test: the turn table whose shape was
+            # probed here is retired (ADR-0283 §6, §12).
+            check_format(conn, allow_empty=True)
             self._restrict_permissions()
             conn.execute("BEGIN IMMEDIATE")
             existing_format = check_format(conn, allow_empty=True)
@@ -825,28 +725,9 @@ class SqliteConversationStore:
             # Beside it and for its reason: a database written before ADR-0238 would
             # otherwise fail its first read on two columns that are not there.
             self._migrate_search_draw(conn)
-            conn.execute("CREATE TABLE IF NOT EXISTS turns(" + _TURNS_COLUMNS + ")")
-            # Before the indexes, because the rebuild drops the table and takes
-            # them with it. It switches enforcement off for itself, because a
-            # legacy file may already hold a row the constraint would refuse.
-            self._migrate_turns(conn)
-            # After the rebuild rather than before it: a rebuild writes the current
-            # schema and so already carries these, and running this first would add
-            # columns to a table about to be dropped.
-            self._migrate_delivery(conn)
-            # ADR-0283 §6's delivery rows. `IF NOT EXISTS` is the whole migration: a
-            # file written before the table gains it empty, which is exactly what it
-            # holds — no episode has been recorded through `record_turn` yet.
+            # ADR-0283 §6's delivery rows. No turn table is created: the index is
+            # retired (ADR-0283 §6, §12).
             conn.execute("CREATE TABLE IF NOT EXISTS deliveries(" + _DELIVERIES_COLUMNS + ")")
-            # The two uniqueness invariants the store *proves* rather than asks a
-            # caller to keep (ADR-0074 §9.1): one turn per episode id, and one turn
-            # per parked binding. In the schema, so a second writer racing the
-            # in-transaction check cannot land the row that check refused.
-            conn.execute("CREATE UNIQUE INDEX IF NOT EXISTS turns_episode ON turns(episode_id)")
-            conn.execute(
-                "CREATE UNIQUE INDEX IF NOT EXISTS turns_binding "
-                "ON turns(execution_id, step_id) WHERE execution_id IS NOT NULL"
-            )
             conn.execute(
                 "CREATE INDEX IF NOT EXISTS conversations_activity "
                 "ON conversations(last_active_at DESC, id)"
@@ -870,27 +751,20 @@ class SqliteConversationStore:
         """Set foreign key enforcement for this connection, and prove the setting took.
 
         ``PRAGMA foreign_keys`` is **per connection**, so switching it on here is
-        what makes the constraint in :data:`_TURNS_COLUMNS` mean anything at all — a
-        schema carrying a key nobody enforces is documentation.
-
-        **Both** directions are set rather than assumed. Enforcement being off is
-        the documented default, but it is a *compile-time* default: a driver built
-        with ``SQLITE_DEFAULT_FOREIGN_KEYS`` starts with it on, and
-        :meth:`_migrate_turns` copying a legacy orphan under enforcement would fail
-        and make that file unopenable — the exact outcome the migration is written
-        to avoid. Saying so explicitly makes the rebuild's semantics independent of
-        how the driver happens to have been compiled.
+        what makes the constraint in :data:`_DELIVERIES_COLUMNS` mean anything at all
+        — a schema carrying a key nobody enforces is documentation.
 
         Reading the setting back is the point of the method rather than a flourish:
         the statement is a **silent no-op** in a build compiled with
         ``SQLITE_OMIT_FOREIGN_KEY`` and inside an open transaction alike, and either
         way the store would go on believing something about a setting it had not
-        changed. Both calls are issued at open, where nothing has begun one.
+        changed. The call is issued at open, where nothing has begun one.
 
         A build that omits foreign keys altogether reads back ``0`` whatever is
-        asked of it, so it satisfies the ``enforced=False`` call and fails the
-        ``enforced=True`` one — loudly, at construction, which is where to discover
-        that this store cannot keep its own invariant.
+        asked of it, so it fails the ``enforced=True`` call — loudly, at
+        construction, which is where to discover that this store cannot keep its
+        own invariant. ``enforced=False`` is kept for a caller that must copy rows
+        the constraint would refuse; nothing in this module is one today.
 
         Raises:
             ConversationStoreError: If the setting did not take.
@@ -907,149 +781,23 @@ class SqliteConversationStore:
         reading = conn.execute("PRAGMA foreign_keys").fetchone()
         if not reading or reading[0] != wanted:
             msg = (
-                "this SQLite build does not enforce foreign keys, so a turn could not be "
-                "kept from naming a conversation that does not exist"
+                "this SQLite build does not enforce foreign keys, so a delivery row could "
+                "not be kept from naming a conversation that does not exist"
                 if enforced
                 else "foreign key enforcement could not be switched off for the schema rebuild"
             )
             raise ConversationStoreError(msg)
 
     @staticmethod
-    def _turns_reference_conversations(conn: sqlite3.Connection) -> bool:
-        """Whether ``turns`` already carries the cascading key to ``conversations``.
-
-        Read off ``PRAGMA foreign_key_list`` rather than the stored DDL text,
-        because the whole *shape* is what decides whether a rebuild is owed: the
-        right child column, the right parent column, and ``ON DELETE CASCADE``. A
-        substring match on ``sqlite_master`` would accept a key pointing at the
-        right table through the wrong column, and skip the migration that would
-        have fixed it.
-        """
-        return any(
-            row[2] == "conversations"
-            and row[3] == "conversation_id"
-            and row[4] == "id"
-            and str(row[6]).upper() == "CASCADE"
-            for row in conn.execute("PRAGMA foreign_key_list(turns)")
-        )
-
-    def _migrate_turns(self, conn: sqlite3.Connection) -> None:
-        """Rebuild a pre-existing ``turns`` table that carries no foreign key (#452).
-
-        ``CREATE TABLE IF NOT EXISTS`` is a no-op against a file whose ``turns``
-        table already exists, so the constraint above binds **fresh databases
-        only**; a store opened over a database written before it would go on
-        accepting rows that name nothing. SQLite has no ``ADD CONSTRAINT``, so
-        making it bind an existing file is a table rebuild — the shape
-        ``SqliteMemoryStore._migrate_records`` already carries in this repo.
-
-        The copy runs with enforcement **switched off, explicitly**, and that is
-        deliberate rather than a reliance on the default. A legacy file may already
-        hold an orphan, and enforcing during the copy would make that file
-        *unopenable* rather than readable: no read could reach the sound rows
-        beside the broken one, and the fault would surface as a failure to
-        construct the store rather than as the report the contract owes. The orphan
-        therefore survives the rebuild and is named by the reads that would
-        otherwise join it away. Saying ``OFF`` rather than trusting the ordering
-        against :meth:`_set_foreign_keys` matters because "off" is only a
-        *compile-time* default — a driver built with ``SQLITE_DEFAULT_FOREIGN_KEYS``
-        starts with it on, and this rebuild would refuse the very row it exists to
-        carry across.
-
-        No ``rowid`` is carried forward, unlike the memory store's rebuild: nothing
-        joins ``turns`` by rowid, and a turn's identity is its
-        ``(conversation_id, ordinal)`` pair.
-
-        It runs in an **explicit** transaction, because SQLite auto-commits a bare
-        DDL statement in autocommit mode (issue #289's review): without the
-        ``BEGIN``, a failure during the row copy would leave the table swapped and
-        the rows lost — permanently, since a later open would find the foreign key
-        and skip the migration. ``DROP TABLE`` takes the table's indexes with it,
-        which is why this runs *before* the ``CREATE ... IF NOT EXISTS`` index
-        statements that put them back.
-        """
-        if self._turns_reference_conversations(conn):
-            return  # already on the constrained schema; nothing to do
-        # Outside the `BEGIN` below, where the pragma would be a silent no-op.
-        self._set_foreign_keys(conn, enforced=False)
-        conn.execute("BEGIN")
-        try:
-            conn.execute("CREATE TABLE turns_migrated(" + _TURNS_COLUMNS + ")")
-            # Streamed through a dedicated read cursor rather than ``fetchall()``,
-            # so migrating a long history does not materialise the whole table at
-            # once. Reads come from ``turns`` and writes go to ``turns_migrated``,
-            # a different table, so the scan cursor stays valid across the inserts.
-            read = conn.execute(
-                "SELECT conversation_id, ordinal, episode_id, occurred_at, execution_id, step_id "
-                "FROM turns"
-            )
-            for row in read:
-                # The six columns a pre-foreign-key file can be relied on to have.
-                # A file old enough to want this rebuild predates ADR-0205's three
-                # entirely, and :meth:`_migrate_delivery` — which runs after this —
-                # finds them already present on the table this writes, so every
-                # carried-across turn lands carrying no delivery. Which is what
-                # ADR-0205 §3 says of a turn that did not run on ``converse_spoken``,
-                # and true of every one of them.
-                conn.execute(
-                    "INSERT INTO turns_migrated(conversation_id, ordinal, episode_id, "
-                    "occurred_at, execution_id, step_id) VALUES (?, ?, ?, ?, ?, ?)",
-                    row,
-                )
-            conn.execute("DROP TABLE turns")
-            conn.execute("ALTER TABLE turns_migrated RENAME TO turns")
-            conn.execute("COMMIT")
-        except BaseException:
-            # The whole rewrite, DDL included, has to come undone: a reopen then
-            # re-attempts a clean migration instead of finding a half-swapped
-            # schema. A crash mid-rebuild is covered too — SQLite discards the
-            # uncommitted transaction on the next open.
-            with contextlib.suppress(sqlite3.Error):
-                conn.execute("ROLLBACK")
-            raise
-
-    @staticmethod
-    def _migrate_delivery(conn: sqlite3.Connection) -> None:
-        """Add ADR-0205 §3's three columns to a ``turns`` table written before them.
-
-        ``CREATE TABLE IF NOT EXISTS`` is a no-op against a file whose ``turns``
-        table already exists, so the columns in :data:`_TURNS_COLUMNS` bind **fresh
-        databases only** — and a store opened over a database written by a build
-        before this one would fail its first read on a column that is not there.
-
-        **An ``ALTER TABLE ... ADD COLUMN`` rather than the rebuild
-        :meth:`_migrate_turns` performs**, because that is the whole of what is
-        owed: the three are nullable with no default, so SQLite adds each in
-        constant time without rewriting a row, and every existing turn comes back
-        carrying no delivery — which is exactly what ADR-0205 §3's absence clause
-        says of a turn that did not run on ``converse_spoken``, and true of every
-        turn written before the operation existed.
-
-        Each column is added on its own and only where it is missing, so a database
-        left half-migrated by an interrupted upgrade is finished rather than
-        refused. ``PRAGMA table_info`` is read rather than the stored DDL text, for
-        :meth:`_turns_reference_conversations`' reason: what decides is the shape
-        the table actually has.
-        """
-        present = {str(row[1]) for row in conn.execute("PRAGMA table_info(turns)")}
-        for column in _DELIVERY_COLUMNS.split(", "):
-            if column.split(" ")[0] not in present:
-                conn.execute("ALTER TABLE turns ADD COLUMN " + column)
-
-    @staticmethod
     def _migrate_observed(conn: sqlite3.Connection) -> None:
         """Add ADR-0212 §7's watermark column to a ``conversations`` table without it.
 
-        :meth:`_migrate_delivery`'s shape one table up, and the ADR names that
-        migration as the precedent to apply: the column is nullable with no default,
-        so SQLite adds it in constant time **without rewriting a row**, every
-        conversation written before it comes back carrying no watermark — which §4
-        reads as a walk that has not started — and no existing column changes.
-
-        An ``ALTER TABLE ... ADD COLUMN`` rather than the rebuild
-        :meth:`_migrate_turns` performs, because that is the whole of what is owed.
-        ``PRAGMA table_info`` is read rather than the stored DDL text, for
-        :meth:`_turns_reference_conversations`' reason: what decides is the shape the
+        The column is nullable with no default, so SQLite adds it in constant time
+        **without rewriting a row**, every conversation written before it comes back
+        carrying no watermark — which §4 reads as a walk that has not started — and no
+        existing column changes. An ``ALTER TABLE ... ADD COLUMN`` rather than a
+        rebuild, because that is the whole of what is owed. ``PRAGMA table_info`` is
+        read rather than the stored DDL text, because what decides is the shape the
         table actually has.
         """
         present = {str(row[1]) for row in conn.execute("PRAGMA table_info(conversations)")}
@@ -1074,12 +822,11 @@ class SqliteConversationStore:
         conversation whose flag reads ``0`` behaves exactly as one whose flag reads
         ``1``, because neither is read.
 
-        An ``ALTER TABLE ... ADD COLUMN`` rather than the rebuild
-        :meth:`_migrate_turns` performs, because that is the whole of what is owed.
-        ``PRAGMA table_info`` is read rather than the stored DDL text, for
-        :meth:`_turns_reference_conversations`' reason: what decides is the shape the
-        table actually has. Each column is checked on its own, so a file interrupted
-        between the two ``ALTER`` statements is brought forward rather than left half-migrated.
+        An ``ALTER TABLE ... ADD COLUMN`` rather than a rebuild, because that is the
+        whole of what is owed. ``PRAGMA table_info`` is read rather than the stored DDL
+        text, because what decides is the shape the table actually has. Each column is
+        checked on its own, so a file interrupted between the two ``ALTER`` statements
+        is brought forward rather than left half-migrated.
         """
         present = {str(row[1]) for row in conn.execute("PRAGMA table_info(conversations)")}
         for column in _SEARCH_DRAW_COLUMNS.split(", "):
@@ -1154,8 +901,8 @@ class SqliteConversationStore:
         consistent snapshot rather than two states either side of a racing write.
 
         Anything other than a backend failure propagates unchanged, after the
-        transaction is rolled back — which is how :meth:`append` refuses a
-        duplicate binding without consuming an ordinal or leaving a row behind.
+        transaction is rolled back, so a refusal raised inside a block leaves
+        nothing of that block written.
 
         Raises:
             ConversationStoreError: If the backend fails at any point.
@@ -1208,73 +955,6 @@ class SqliteConversationStore:
             raise ConversationStoreError(msg) from exc
 
     @classmethod
-    def _decode_turn(cls, row: Sequence[Any]) -> ConversationTurn:
-        """Rebuild a :class:`ConversationTurn` from its row, surfacing corruption.
-
-        Raises:
-            ConversationStoreError: If the stored row does not validate.
-        """
-        # The binding is a *pair*, so a row carrying half of one is corrupt — and
-        # the half that would otherwise pass unnoticed is `(NULL, 's')`, which a
-        # check on `execution_id` alone reads as an unparked turn and hands back
-        # as a plausible-but-wrong record, losing the durable recovery binding.
-        # This module always writes both columns in one statement, so the pair can
-        # only break through something outside the store; the guard therefore sits
-        # where the store reads foreign data, which is where the contract's
-        # promise about a corrupt row lives.
-        if (row[4] is None) != (row[5] is None):
-            msg = (
-                f"a stored turn carries half a parked binding: "
-                f"execution_id={describe_untrusted(row[4])}, step_id={describe_untrusted(row[5])}"
-            )
-            raise ConversationStoreError(msg)
-        try:
-            parked = None if row[4] is None else ParkedBinding(execution_id=row[4], step_id=row[5])
-            return ConversationTurn(
-                conversation_id=row[0],
-                ordinal=_ordinal_of(row[1]),
-                episode_id=cls._verified_episode_id(row[0], _ordinal_of(row[1]), row[2]),
-                occurred_at=_instant_from(row[3], what="occurred_at"),
-                parked=parked,
-                delivery=_delivery_from(row[6], row[7], row[8]),
-                model_eligible=row[9],
-            )
-        except (ValidationError, TypeError, OverflowError) as exc:
-            msg = f"a stored turn could not be decoded: {exc}"
-            raise ConversationStoreError(msg) from exc
-
-    @classmethod
-    def _verified_episode_id(cls, conversation_id: str, ordinal: int, stored: object) -> str:
-        """Return the stored episode id, having checked it is the one derived.
-
-        The id is a *function* of the conversation and the ordinal (ADR-0074 §3),
-        so a stored value that is not that function's output is a store fault, not
-        a variant. It matters most on the destructive path: a sweep handed a
-        foreign id would delete something that is not this turn's episode — or
-        nothing at all — and then drop the index row that named the real one,
-        leaving it orphaned with nothing left pointing at it.
-
-        Raises:
-            ConversationStoreError: If the stored id is not the derived one.
-        """
-        expected = cls._episode_id(conversation_id, ordinal)
-        if _episode_id_of(stored) != expected:
-            described = describe_untrusted(stored)
-            msg = f"a stored episode id is not the one this turn derives: {described}"
-            raise ConversationStoreError(msg)
-        return expected
-
-    @staticmethod
-    def _episode_id(conversation_id: str, ordinal: int) -> str:
-        """Derive a turn's episode id from the two values the store proved unique.
-
-        Reserved to captured conversation turns (ADR-0074 §3): no other producer
-        mints into this namespace, so a collision inside it is a broken invariant
-        rather than bad luck.
-        """
-        return f"{_EPISODE_NAMESPACE}:{conversation_id}:{ordinal}"
-
-    @classmethod
     def _row_of(cls, conn: sqlite3.Connection, conversation_id: str) -> Sequence[Any] | None:
         """Read one conversation row inside an open transaction, or ``None``."""
         rows = cls._fetch(
@@ -1286,54 +966,6 @@ class SqliteConversationStore:
             (conversation_id,),
         )
         return rows[0] if rows else None
-
-    @staticmethod
-    def _orphan(conversation_id: object) -> ConversationStoreError:
-        """The fault a turn naming no conversation is (#452).
-
-        The base class and not :meth:`_unknown`'s subclass: the caller named
-        something the store *does* hold a turn for, so this is not "another sweeper
-        already finished this id" (ADR-0076 §2) — it is the index disagreeing with
-        itself, which is a store fault.
-        """
-        described = describe_untrusted(conversation_id)
-        return ConversationStoreError(
-            f"a stored turn names a conversation that is absent: {described}"
-        )
-
-    def _presented_turn(self, rows: Sequence[Any]) -> ConversationTurn | None:
-        """Decode a reverse lookup's row: report an orphan, withhold a tombstone.
-
-        The two lookups **left**-join the conversation rather than requiring it,
-        because an inner join answers "no such turn" for two rows that are nothing
-        alike: one whose conversation is stamped, withheld on purpose (ADR-0074
-        §9), and one whose conversation does not exist at all, which is corruption
-        the contract owes an error for. Joining the second away is the worst of the
-        options — the row is invisible to every read *and* unreachable by the purge
-        walk, which needs the conversation record to enumerate anything, so the
-        episode it names could never be destroyed (#452).
-
-        ``c.id IS NULL`` is an unambiguous "no parent row" here even though SQLite
-        tolerates a ``NULL`` in a ``TEXT PRIMARY KEY``: the join predicate is
-        ``c.id = t.conversation_id``, and a ``NULL`` id matches nothing.
-
-        Raises:
-            ConversationStoreError: If the turn names a conversation the store does
-                not hold, or the row itself does not decode.
-        """
-        if not rows:
-            return None
-        row = rows[0]
-        # The two joined conversation columns sit **after** every turn column, so
-        # their positions move with :data:`_TURN_SELECT` rather than being written
-        # out twice; a literal 6 and 7 here is what a column added to the turn would
-        # silently break.
-        joined = _TURN_SELECT.count(",") + 1
-        if row[joined] is None:
-            raise self._orphan(row[0])
-        if row[joined + 1] is not None:
-            return None
-        return self._decode_turn(row)
 
     @staticmethod
     def _unknown(conversation_id: str) -> UnknownConversationError:
@@ -1479,10 +1111,7 @@ class SqliteConversationStore:
         before or wholly after it — which is what lets the writer read a ``None``
         here as "the conversation was gone when the episode landed" (§7:2). The
         delivery row is inserted only where none exists, so a retried capture cannot
-        reset a stamped delivery; and where this conversation's turn row already
-        carries the episode's delivery, the new row inherits that value instead of
-        ``delivery``, so a stamp made through the turn row stays the one stamp
-        (ADR-0205 §1).
+        reset a stamped delivery (ADR-0205 §1).
 
         The argument checks are **before the lock and before any I/O** (§6:3).
 
@@ -1516,164 +1145,30 @@ class SqliteConversationStore:
                 (_to_micros(occurred_at), conversation_id),
             )
             if delivery is not None:
-                # ADR-0205 §1: a delivery is stamped once. Where this conversation's
-                # turn row already carries the episode's delivery, the new row inherits
-                # it rather than resetting it — otherwise the preferred row would read
-                # UNKNOWN again and a second report would stamp the episode twice,
-                # hiding the first.
-                inherited = conn.execute(
-                    "SELECT delivery_state, delivery_played, delivery_rendered "
-                    "FROM turns WHERE conversation_id = ? AND episode_id = ? "
-                    "AND delivery_state IS NOT NULL",
-                    (conversation_id, episode_id),
-                ).fetchone()
-                values = tuple(inherited) if inherited is not None else _delivery_row(delivery)
+                # `OR IGNORE`: a row this conversation already holds for the episode
+                # stands as it is, so a retried capture cannot put UNKNOWN back over a
+                # stamp (ADR-0205 §1).
                 conn.execute(
                     "INSERT OR IGNORE INTO deliveries(conversation_id, episode_id, "
                     "delivery_state, delivery_played, delivery_rendered) "
                     "VALUES (?, ?, ?, ?, ?)",
-                    (conversation_id, episode_id, *values),
+                    (conversation_id, episode_id, *_delivery_row(delivery)),
                 )
             recorded = self._row_of(conn, conversation_id)
             if recorded is None:  # pragma: no cover — the row was just updated here
                 return None
             return recorded
 
-    async def append(
-        self,
-        conversation_id: str,
-        *,
-        occurred_at: datetime,
-        parked: ParkedBinding | None = None,
-        delivery: SpokenDelivery | None = None,
-        model_eligible: bool = True,
-    ) -> ConversationTurn:
-        """Allocate the ordinal, derive the episode id, and record the turn.
-
-        Allocation, derivation and the write are one transaction, so two engines
-        cannot derive one id for two turns (ADR-0074 §3). A duplicate binding is
-        refused before anything is allocated and the transaction is rolled back,
-        so no ordinal is consumed and no row is left behind (§9.1).
-
-        ``model_eligible`` (ADR-0275) is immutable, stored atomically with this
-        index row, and preserved by delivery updates and all unfiltered reads.
-
-        Raises:
-            UnknownConversationError: If the id names nothing or names a stamped
-                conversation.
-            ConversationStoreError: If ``parked`` duplicates a binding already
-                claimed, or the store cannot be written.
-            ValueError: If ``occurred_at`` is not a timezone-aware instant.
-        """
-        async with self._lock:
-            row = await _run_to_completion(
-                self._append_sync, conversation_id, occurred_at, parked, delivery, model_eligible
-            )
-        return self._decode_turn(row)
-
-    def _append_sync(
-        self,
-        conversation_id: str,
-        occurred_at: datetime,
-        parked: ParkedBinding | None,
-        delivery: SpokenDelivery | None,
-        model_eligible: bool,
-    ) -> Sequence[Any]:
-        with self._transaction("append a turn") as conn:
-            row = self._row_of(conn, conversation_id)
-            if row is None or row[4] is not None:
-                raise self._unknown(conversation_id)
-            if parked is not None:
-                claimed = self._fetch(
-                    conn,
-                    "check a parked binding",
-                    "SELECT 1 FROM turns WHERE execution_id = ? AND step_id = ?",
-                    (parked.execution_id, parked.step_id),
-                )
-                if claimed:
-                    msg = (
-                        f"a turn already parked on execution {parked.execution_id!r} "
-                        f"step {parked.step_id!r}"
-                    )
-                    raise ConversationStoreError(msg)
-            highest, stored = self._fetch(
-                conn,
-                "allocate an ordinal",
-                "SELECT MAX(ordinal), COUNT(*) FROM turns WHERE conversation_id = ?",
-                (conversation_id,),
-            )[0]
-            if highest is None:
-                ordinal = FIRST_TURN_ORDINAL
-            else:
-                # Density is exactly `MAX == COUNT` when the numbering starts at
-                # one, which is the cheap total check. A gap can only come from
-                # outside this module — rows go when the record is dropped and
-                # never one at a time — and allocating past one would *extend* the
-                # corruption rather than report it, leaving an index whose walks
-                # no longer agree with the ordinals they visit.
-                last = _ordinal_of(highest)
-                if last != stored:
-                    msg = (
-                        f"conversation {describe_untrusted(conversation_id)} has a gapped "
-                        f"turn index: {stored} turns ending at ordinal {last}"
-                    )
-                    raise ConversationStoreError(msg)
-                ordinal = last + 1
-            if ordinal >= _PAGE_BOUND:
-                # Unreachable by appending — ordinals start at 1 and move by one —
-                # so this is a corrupt or hostile row. It still owes this seam's
-                # error rather than the `OverflowError` binding the value would
-                # raise, which is what the contract promises for a store fault.
-                msg = f"conversation {describe_untrusted(conversation_id)} has no ordinal left"
-                raise ConversationStoreError(msg)
-            # Built before anything is written, because `occurred_at` is the one
-            # argument this seam cannot vouch for: a naive value is refused rather
-            # than silently localised to the host's zone (ADR-0023 §3), and the
-            # rollback leaves the ordinal unconsumed.
-            turn = ConversationTurn(
-                conversation_id=conversation_id,
-                ordinal=ordinal,
-                episode_id=self._episode_id(conversation_id, ordinal),
-                occurred_at=occurred_at,
-                parked=parked,
-                delivery=delivery,
-                model_eligible=model_eligible,
-            )
-            stamp = _to_micros(turn.occurred_at)
-            row = (
-                turn.conversation_id,
-                turn.ordinal,
-                turn.episode_id,
-                stamp,
-                None if parked is None else parked.execution_id,
-                None if parked is None else parked.step_id,
-                *_delivery_row(delivery),
-                int(model_eligible),
-            )
-            conn.execute(
-                "INSERT INTO turns(conversation_id, ordinal, episode_id, occurred_at, "
-                "execution_id, step_id, delivery_state, delivery_played, "
-                "delivery_rendered, model_eligible) "
-                "VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?)",
-                row,
-            )
-            conn.execute(
-                "UPDATE conversations SET last_turn_at = ? WHERE id = ?",
-                (stamp, conversation_id),
-            )
-            return row
-
     async def record_delivery(
         self, conversation_id: str, *, episode_id: str, delivery: SpokenDelivery
     ) -> bool:
-        """Stamp the episode's delivery row — or its turn row — if it is still ``UNKNOWN``.
+        """Stamp the episode's delivery row if it is still ``UNKNOWN`` (ADR-0283 §6:4).
 
-        The delivery row where the conversation holds one for ``episode_id``, and the
-        turn row otherwise (ADR-0283 §6:4, §14 lane 2). Which row, the three
-        conditions and the write are one ``IMMEDIATE`` transaction, so two reports
-        observing ``UNKNOWN`` cannot both write: the second finds a state that is no
-        longer ``UNKNOWN`` and performs nothing, which is ADR-0205 §1's stamped-once
-        rule held across processes and not only across coroutines on one loop.
+        The three conditions and the write are one ``IMMEDIATE`` transaction, so two
+        reports observing ``UNKNOWN`` cannot both write: the second finds a state that
+        is no longer ``UNKNOWN`` and performs nothing, which is ADR-0205 §1's
+        stamped-once rule held across processes and not only across coroutines on one
+        loop.
 
         The ``UNKNOWN`` refusal is **before the lock and before any I/O**, on
         ADR-0085 §3's convention for a malformed argument.
@@ -1697,45 +1192,22 @@ class SqliteConversationStore:
             row = self._row_of(conn, conversation_id)
             if row is None or row[4] is not None:
                 raise self._unknown(conversation_id)
-            # A delivery row, where the conversation holds one for this episode, is
-            # the only row this call may stamp: the turn row is the fallback for an
-            # episode `record_turn` never wrote one for, and never a second target.
-            held = self._fetch(
-                conn,
-                "find an episode's delivery row",
-                "SELECT 1 FROM deliveries WHERE conversation_id = ? AND episode_id = ?",
-                (conversation_id, episode_id),
-            )
-            # All three of ADR-0205 §3's conditions in one predicate either way, so
-            # the row is written only where every one of them held at the moment of
-            # writing — the conversation, the episode, and a recorded state of
-            # ``UNKNOWN``. A turn row carrying no delivery at all fails the third and
-            # is left as it stands: this operation is not a way to give such a turn
-            # one.
-            if held:
-                written = conn.execute(
-                    "UPDATE deliveries SET delivery_state = ?, delivery_played = ?, "
-                    "delivery_rendered = ? WHERE conversation_id = ? AND episode_id = ? "
-                    "AND delivery_state = ?",
-                    (
-                        *_delivery_row(delivery),
-                        conversation_id,
-                        episode_id,
-                        SpokenDeliveryState.UNKNOWN.value,
-                    ),
-                ).rowcount
-            else:
-                written = conn.execute(
-                    "UPDATE turns SET delivery_state = ?, delivery_played = ?, "
-                    "delivery_rendered = ? WHERE conversation_id = ? AND episode_id = ? "
-                    "AND delivery_state = ?",
-                    (
-                        *_delivery_row(delivery),
-                        conversation_id,
-                        episode_id,
-                        SpokenDeliveryState.UNKNOWN.value,
-                    ),
-                ).rowcount
+            # All three of ADR-0205 §3's conditions in one predicate, so the row is
+            # written only where every one of them held at the moment of writing —
+            # the conversation, the episode, and a recorded state of ``UNKNOWN``. An
+            # episode with no row fails the second and is left as it stands: this
+            # operation is not a way to give an episode a delivery.
+            written = conn.execute(
+                "UPDATE deliveries SET delivery_state = ?, delivery_played = ?, "
+                "delivery_rendered = ? WHERE conversation_id = ? AND episode_id = ? "
+                "AND delivery_state = ?",
+                (
+                    *_delivery_row(delivery),
+                    conversation_id,
+                    episode_id,
+                    SpokenDeliveryState.UNKNOWN.value,
+                ),
+            ).rowcount
             return bool(written)
 
     async def deliveries(
@@ -1804,7 +1276,7 @@ class SqliteConversationStore:
         return delivery
 
     async def record_observed(
-        self, conversation_id: str, *, through_ordinal: int
+        self, conversation_id: str, *, through_episode: int
     ) -> Conversation | None:
         """Advance the watermark if it moves it forward (ADR-0212 §8, ADR-0283 §6:6).
 
@@ -1820,20 +1292,20 @@ class SqliteConversationStore:
         §3's convention.
 
         Raises:
-            ValueError: If ``through_ordinal`` is outside ``[1, 2**63)``.
+            ValueError: If ``through_episode`` is outside ``[1, 2**63)``.
             UnknownConversationError: If the id names nothing or names a stamped
                 conversation.
             ConversationStoreError: If the store cannot be written.
         """
-        _check_page_bound("through_ordinal", through_ordinal, floor=FIRST_TURN_ORDINAL)
+        _check_page_bound("through_episode", through_episode, floor=FIRST_TURN_ORDINAL)
         async with self._lock:
             row = await _run_to_completion(
-                self._record_observed_sync, conversation_id, through_ordinal
+                self._record_observed_sync, conversation_id, through_episode
             )
         return None if row is None else self._decode_conversation(row)
 
     def _record_observed_sync(
-        self, conversation_id: str, through_ordinal: int
+        self, conversation_id: str, through_episode: int
     ) -> Sequence[Any] | None:
         with self._transaction("record an observation watermark") as conn:
             row = self._row_of(conn, conversation_id)
@@ -1844,207 +1316,19 @@ class SqliteConversationStore:
             # stampable again from the tail rather than leaving the conversation
             # permanently stuck behind a value nobody can read.
             recorded = _usable_watermark(row[5])
-            if recorded is not None and through_ordinal <= recorded:
+            if recorded is not None and through_episode <= recorded:
                 # `record_delivery`'s shape and its reason: no row is written, and
                 # no error is raised. An attempt that loses is an attempt whose
                 # position already stands.
                 return None
             conn.execute(
                 "UPDATE conversations SET observed_through = ? WHERE id = ?",
-                (through_ordinal, conversation_id),
+                (through_episode, conversation_id),
             )
             stamped = self._row_of(conn, conversation_id)
             if stamped is None:  # pragma: no cover — the row was just updated here
                 raise self._unknown(conversation_id)
             return stamped
-
-    async def turns(
-        self,
-        conversation_id: str,
-        *,
-        limit: int | None = None,
-        before_ordinal: int | None = None,
-        model_eligible_only: bool = False,
-    ) -> list[ConversationTurn]:
-        """Return a page of turns, ordinal ascending, ending below ``before_ordinal``.
-
-        With ``model_eligible_only=True`` (ADR-0275), filter before selecting
-        the tail window. Returned ordinals remain ordered but may contain gaps.
-        Deletion and turns_after remain unfiltered.
-
-        Raises:
-            ValueError: If ``limit`` or ``before_ordinal`` is out of range.
-            UnknownConversationError: If the id names nothing or names a stamped
-                conversation.
-        """
-        page = self._tail_limit if limit is None else limit
-        _check_page_bound("limit", page)
-        if before_ordinal is not None:
-            _check_page_bound("before_ordinal", before_ordinal, floor=FIRST_TURN_ORDINAL)
-        async with self._lock:
-            rows = await _run_to_completion(
-                self._turns_sync, conversation_id, page, before_ordinal, model_eligible_only
-            )
-        return [self._decode_turn(row) for row in rows]
-
-    def _turns_sync(
-        self, conversation_id: str, page: int, before_ordinal: int | None, model_eligible_only: bool
-    ) -> list[Any]:
-        with self._transaction("read a conversation's turns", immediate=False) as conn:
-            row = self._row_of(conn, conversation_id)
-            if row is None or row[4] is not None:
-                raise self._unknown(conversation_id)
-            if page == 0:
-                return []
-            # Take the newest `page` rows below the ceiling, then hand them back
-            # oldest-first: the tail is what a continuation wants, and ordinal
-            # ascending is the order it replays them in. The unbounded form is a
-            # *separate* query rather than a sentinel ceiling, because there is no
-            # in-range integer above every ordinal: `2**63` is one past what a
-            # SQLite bind parameter can carry and raises `OverflowError`.
-            head = (
-                "SELECT conversation_id, ordinal, episode_id, occurred_at, execution_id, "
-                "step_id, delivery_state, delivery_played, delivery_rendered, model_eligible "
-                "FROM turns WHERE conversation_id = ?"
-            )
-            if model_eligible_only:
-                head += " AND model_eligible = 1"
-            if before_ordinal is None:
-                rows = self._fetch(
-                    conn,
-                    "read a conversation's turns",
-                    head + " ORDER BY ordinal DESC LIMIT ?",
-                    (conversation_id, page),
-                )
-            else:
-                rows = self._fetch(
-                    conn,
-                    "read a conversation's turns",
-                    head + " AND ordinal < ? ORDER BY ordinal DESC LIMIT ?",
-                    (conversation_id, before_ordinal, page),
-                )
-            return list(reversed(rows))
-
-    async def turns_after(
-        self,
-        conversation_id: str,
-        *,
-        after_ordinal: int | None = None,
-        limit: int | None = None,
-    ) -> list[ConversationTurn]:
-        """Return the lowest page of turns above ``after_ordinal``, ordinal ascending.
-
-        Raises:
-            ValueError: If ``limit`` or ``after_ordinal`` is out of range.
-            UnknownConversationError: If the id names nothing or names a stamped
-                conversation.
-            ConversationStoreError: If the store cannot be read.
-        """
-        page = self._tail_limit if limit is None else limit
-        _check_page_bound("limit", page)
-        if after_ordinal is not None:
-            _check_page_bound("after_ordinal", after_ordinal, floor=FIRST_TURN_ORDINAL)
-        async with self._lock:
-            rows = await _run_to_completion(
-                self._turns_after_sync, conversation_id, page, after_ordinal
-            )
-        return [self._decode_turn(row) for row in rows]
-
-    def _turns_after_sync(
-        self, conversation_id: str, page: int, after_ordinal: int | None
-    ) -> list[Any]:
-        with self._transaction("read a conversation's turns", immediate=False) as conn:
-            row = self._row_of(conn, conversation_id)
-            if row is None or row[4] is not None:
-                raise self._unknown(conversation_id)
-            if page == 0:
-                return []
-            # `ORDER BY ordinal ASC` and no reversal afterwards: this read takes the
-            # *lowest* rows above the floor rather than the newest below a ceiling,
-            # which is the whole difference between it and `turns`. Both hand the
-            # page back oldest-first, so the two are interchangeable to a consumer
-            # that only replays what it is given.
-            head = (
-                "SELECT conversation_id, ordinal, episode_id, occurred_at, execution_id, "
-                "step_id, delivery_state, delivery_played, delivery_rendered, model_eligible "
-                "FROM turns WHERE conversation_id = ?"
-            )
-            if after_ordinal is None:
-                return self._fetch(
-                    conn,
-                    "read a conversation's turns",
-                    head + " ORDER BY ordinal ASC LIMIT ?",
-                    (conversation_id, page),
-                )
-            return self._fetch(
-                conn,
-                "read a conversation's turns",
-                head + " AND ordinal > ? ORDER BY ordinal ASC LIMIT ?",
-                (conversation_id, after_ordinal, page),
-            )
-
-    async def episodes_to_purge(
-        self,
-        conversation_id: str,
-        *,
-        limit: int | None = None,
-        after_id: str | None = None,
-    ) -> list[str]:
-        """Return the next batch of this conversation's episode ids, in ordinal order.
-
-        Reads a stamped conversation *and* a live one — the deletion sweep walks
-        the first, the retention reclaim the second — and removes nothing either
-        way: the rows are the intent log, and they go only when
-        :meth:`drop_if_eligible` succeeds.
-
-        Raises:
-            ValueError: If ``limit`` is out of range, or ``after_id`` is not an
-                episode id of this conversation.
-            UnknownConversationError: If the id names nothing.
-        """
-        batch = self._purge_batch if limit is None else limit
-        _check_page_bound("limit", batch)
-        async with self._lock:
-            return await _run_to_completion(
-                self._episodes_to_purge_sync, conversation_id, batch, after_id
-            )
-
-    def _episodes_to_purge_sync(
-        self, conversation_id: str, batch: int, after_id: str | None
-    ) -> list[str]:
-        with self._transaction("read a conversation's episode ids", immediate=False) as conn:
-            if self._row_of(conn, conversation_id) is None:
-                raise self._unknown(conversation_id)
-            floor = 0
-            if after_id is not None:
-                # The cursor is an id the caller already holds, and the store
-                # places it because the encoding is its own. One it cannot place is
-                # refused rather than silently restarting the walk, which would
-                # make a sweep loop forever over its first batch.
-                placed = self._fetch(
-                    conn,
-                    "place a purge cursor",
-                    "SELECT ordinal FROM turns WHERE conversation_id = ? AND episode_id = ?",
-                    (conversation_id, after_id),
-                )
-                if not placed:
-                    described = describe_untrusted(after_id)
-                    msg = f"after_id {described} is not an episode id of this conversation"
-                    raise ValueError(msg)
-                floor = _ordinal_of(placed[0][0])
-            if batch == 0:
-                return []
-            rows = self._fetch(
-                conn,
-                "read a conversation's episode ids",
-                "SELECT episode_id, ordinal FROM turns WHERE conversation_id = ? AND ordinal > ? "
-                "ORDER BY ordinal ASC LIMIT ?",
-                (conversation_id, floor, batch),
-            )
-            return [
-                self._verified_episode_id(conversation_id, _ordinal_of(row[1]), row[0])
-                for row in rows
-            ]
 
     async def stamped_conversation_ids(
         self,
@@ -2115,105 +1399,6 @@ class SqliteConversationStore:
             (limit, offset),
         )
 
-    async def conversations_with_unobserved_turns(self, *, limit: int = 50) -> list[Conversation]:
-        """List candidates for observation, least recently active first.
-
-        Raises:
-            ValueError: If ``limit`` is outside ``[0, 2**63)``.
-            ConversationStoreError: If the store cannot be read.
-        """
-        _check_page_bound("limit", limit)
-        if limit == 0:
-            return []
-        async with self._lock:
-            rows = await _run_to_completion(self._unobserved_sync, limit)
-        return [self._decode_conversation(row) for row in rows]
-
-    def _unobserved_sync(self, limit: int) -> list[Any]:
-        # Candidacy in three disjuncts over one subquery, which is ADR-0212 §3's rule
-        # composed with §7's discard, as ADR-0283 §6:6 reads it, rather than either
-        # taken alone. A conversation with no turn is never a candidate (`highest IS
-        # NOT NULL`); one whose stored watermark this build cannot use is a
-        # candidate on its own terms, because a discarded watermark reads as absent
-        # — and *that* is why the first two disjuncts exist. Filtering on
-        # `t.ordinal > c.observed_through` alone would get them wrong in the same
-        # silent direction: SQLite sorts every integer below every string, so a text
-        # watermark excludes the conversation for good, and a REAL one excludes
-        # exactly the turns beneath it. A watermark above the highest ordinal is no
-        # longer discarded (ADR-0283 §6:6), so it leaves the conversation out until a
-        # turn lands above it.
-        return self._fetch(
-            self._conn,
-            "list conversations with unobserved turns",
-            "SELECT id, started_at, last_active_at, last_turn_at, deleted_at, "
-            "observed_through FROM ("
-            "SELECT c.id AS id, c.started_at AS started_at, "
-            "c.last_active_at AS last_active_at, c.last_turn_at AS last_turn_at, "
-            "c.deleted_at AS deleted_at, c.observed_through AS observed_through, "
-            "(SELECT MAX(t.ordinal) FROM turns t WHERE t.conversation_id = c.id) AS highest "
-            "FROM conversations c WHERE c.deleted_at IS NULL) "
-            "WHERE highest IS NOT NULL AND ("
-            "typeof(observed_through) <> 'integer' "
-            "OR observed_through < ? "
-            "OR highest > observed_through) "
-            "ORDER BY last_active_at ASC, id ASC LIMIT ?",
-            (FIRST_TURN_ORDINAL, limit),
-        )
-
-    async def turn_of_episode(self, episode_id: str) -> ConversationTurn | None:
-        """Return the turn an episode records, or ``None`` if absent or stamped.
-
-        Raises:
-            ConversationStoreError: If the turn names a conversation the store does
-                not hold, or the stored row is corrupt.
-        """
-        async with self._lock:
-            rows = await _run_to_completion(self._turn_of_episode_sync, episode_id)
-        return self._presented_turn(rows)
-
-    async def turn_of_binding(self, binding: ParkedBinding) -> ConversationTurn | None:
-        """Return the turn that parked on ``binding``, or ``None`` if absent or stamped.
-
-        Raises:
-            ConversationStoreError: If the turn names a conversation the store does
-                not hold, or the stored row is corrupt.
-        """
-        async with self._lock:
-            rows = await _run_to_completion(
-                self._turn_of_binding_sync, binding.execution_id, binding.step_id
-            )
-        return self._presented_turn(rows)
-
-    def _turn_of_episode_sync(self, episode_id: str) -> list[Any]:
-        """Resolve an episode id, carrying enough to withhold a stamped turn.
-
-        Withholding is the whole of ADR-0074 §9's rule here: a caller holding an
-        episode id from before a deletion must not get back the ordinal, timestamp
-        and binding metadata every presenting read withholds. The filter is applied
-        in :meth:`_presented_turn` rather than in the ``WHERE`` clause, over a
-        **left** join, so that a turn naming no conversation at all is reported
-        instead of being indistinguishable from a stamped one (#452).
-        """
-        return self._fetch(
-            self._conn,
-            "resolve an episode id",
-            "SELECT " + _TURN_SELECT + ", c.id, c.deleted_at "
-            "FROM turns t LEFT JOIN conversations c ON c.id = t.conversation_id "
-            "WHERE t.episode_id = ?",
-            (episode_id,),
-        )
-
-    def _turn_of_binding_sync(self, execution_id: str, step_id: str) -> list[Any]:
-        """Resolve a parked binding, on the same left join for the same reason."""
-        return self._fetch(
-            self._conn,
-            "resolve a parked binding",
-            "SELECT " + _TURN_SELECT + ", c.id, c.deleted_at "
-            "FROM turns t LEFT JOIN conversations c ON c.id = t.conversation_id "
-            "WHERE t.execution_id = ? AND t.step_id = ?",
-            (execution_id, step_id),
-        )
-
     async def stamp_deleted(self, conversation_id: str) -> bool:
         """Stamp the conversation deleted, returning whether this call did it.
 
@@ -2237,7 +1422,7 @@ class SqliteConversationStore:
             return True
 
     async def drop_if_eligible(self, conversation_id: str) -> bool:
-        """Remove the record and its index if it is still eligible, under the exclusion.
+        """Remove the record and its delivery rows if still eligible, under the exclusion.
 
         The eligibility re-check happens *inside* the transaction that drops, which
         is what stops a reclaim destroying a conversation the user has just come
@@ -2275,59 +1460,40 @@ class SqliteConversationStore:
                 )
             if not eligible:
                 return False
-            # The index rows go first and **explicitly**, with ``ON DELETE
-            # CASCADE`` behind them as a backstop rather than as the mechanism
-            # (#452). ``PRAGMA foreign_keys`` is per connection and off by
-            # default, so a cascade this module *relied* on would stop happening
-            # on any connection that had not enabled it — and the failure mode is
-            # the silent one: every drop would leave the turns behind as orphans,
-            # unreachable by the very sweep that had just run. Deleting them here
-            # makes the drop correct whatever the pragma says; the cascade then
-            # only ever fires for a writer that is not this module. The delivery rows
-            # go the same way and for the same reason (ADR-0283 §6:7).
+            # The delivery rows go first and **explicitly** (ADR-0283 §6:7), with
+            # ``ON DELETE CASCADE`` behind them as a backstop rather than as the
+            # mechanism (#452). ``PRAGMA foreign_keys`` is per connection and off by
+            # default, so a cascade this module *relied* on would stop happening on
+            # any connection that had not enabled it — and the failure mode is the
+            # silent one: every drop would leave rows behind for a conversation
+            # minted later under the same id to inherit. Deleting them here makes
+            # the drop correct whatever the pragma says; the cascade then only ever
+            # fires for a writer that is not this module.
             conn.execute("DELETE FROM deliveries WHERE conversation_id = ?", (conversation_id,))
-            conn.execute("DELETE FROM turns WHERE conversation_id = ?", (conversation_id,))
             conn.execute("DELETE FROM conversations WHERE id = ?", (conversation_id,))
             return True
 
     async def export(self) -> ConversationExport:
-        """Return the store's own snapshot: unstamped conversations and their turns.
+        """Return the store's own snapshot: its unstamped conversations (ADR-0283 §4:3).
 
-        No liveness filtering — this store cannot ask the ``MemoryStore`` whether
-        an episode still resolves, and the user-facing export is composed in
-        `orchestration` (ADR-0074 §9). Both halves are read in one deferred
-        transaction, so the turns cannot describe a conversation the other half
-        missed.
+        No liveness filtering — this store cannot ask the ``MemoryStore`` whether a
+        conversation's channel still holds an episode (ADR-0074 §9). The clock and
+        the rows are read in one deferred transaction.
 
         Raises:
-            ConversationStoreError: If the store cannot be read, a stored row is
-                corrupt, or any turn names a conversation the store does not hold.
+            ConversationStoreError: If the store cannot be read, or a stored row is
+                corrupt.
         """
         async with self._lock:
-            exported_at, conversation_rows, turn_rows = await _run_to_completion(self._export_sync)
+            exported_at, conversation_rows = await _run_to_completion(self._export_sync)
         return ConversationExport(
             exported_at=exported_at,
             conversations=tuple(self._decode_conversation(row) for row in conversation_rows),
-            turns=tuple(self._decode_turn(row) for row in turn_rows),
         )
 
-    def _export_sync(self) -> tuple[datetime, list[Any], list[Any]]:
+    def _export_sync(self) -> tuple[datetime, list[Any]]:
         with self._transaction("export conversations", immediate=False) as conn:
             exported_at = self._now()
-            # Probed before either half is materialised, and over the whole table
-            # rather than only the rows this export would present: the snapshot is
-            # the store's account of itself, so a turn naming nothing is a fault to
-            # report and not a row to leave out. The query the turns are read with
-            # below is an inner join and would silently drop it (#452).
-            orphaned = self._fetch(
-                conn,
-                "export conversation turns",
-                "SELECT t.conversation_id FROM turns t "
-                "LEFT JOIN conversations c ON c.id = t.conversation_id "
-                "WHERE c.id IS NULL LIMIT 1",
-            )
-            if orphaned:
-                raise self._orphan(orphaned[0][0])
             conversations = self._fetch(
                 conn,
                 "export conversations",
@@ -2336,11 +1502,4 @@ class SqliteConversationStore:
                 "FROM conversations c WHERE c.deleted_at IS NULL "
                 "ORDER BY c.last_active_at DESC, c.id ASC",
             )
-            turns = self._fetch(
-                conn,
-                "export conversation turns",
-                "SELECT " + _TURN_SELECT + " "
-                "FROM turns t JOIN conversations c ON c.id = t.conversation_id "
-                "WHERE c.deleted_at IS NULL ORDER BY t.conversation_id ASC, t.ordinal ASC",
-            )
-            return exported_at, conversations, turns
+            return exported_at, conversations
