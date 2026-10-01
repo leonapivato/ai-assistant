@@ -12,7 +12,6 @@ from ai_assistant.core.episode_encoding import canonical_json
 from ai_assistant.core.errors import MemoryStoreConflictError
 from ai_assistant.core.types import (
     Capture,
-    ChannelIdentity,
     EpisodeCaptureReport,
     EpisodicMemory,
     MemorySource,
@@ -34,7 +33,7 @@ if TYPE_CHECKING:
 
     from ai_assistant.core.clock import Clock
     from ai_assistant.core.protocols import ConversationStore, MemoryStore, TranscriptArchiveWriter
-    from ai_assistant.core.types import ConversationTurn, EpisodeProcessingRecord
+    from ai_assistant.core.types import EpisodeProcessingRecord
     from ai_assistant.orchestration.activation_state import ActivationState, CaptureFacts
 
 _log = structlog.get_logger(__name__)
@@ -64,15 +63,22 @@ def capture_loss(stage: str, reason: str) -> None:
 
 @dataclass
 class _Writes:
+    """What one capture's writes are known to have done, for its fence and its report."""
+
+    #: The episode write was attempted and is not known to have failed uncommitted:
+    #: an episode at this address may exist, so a deleted conversation owes its delete.
     episode_possible: bool = False
-    archive_possible: bool = False
     episode_confirmed: bool = False
+    archive_possible: bool = False
     archive_confirmed: bool = False
+    #: ``record_turn`` returned the conversation: it stands, and it knows the turn.
     verified: bool = False
+    #: ``record_turn`` returned ``None``: the conversation is absent or stamped.
+    gone: bool = False
 
 
 class ActivationWriter:
-    """Write once at an index-owned address, then drain deletion verification."""
+    """Write one episode at its admission address, then verify and fence it (ADR-0283 §7)."""
 
     def __init__(  # noqa: PLR0913 — the same lifecycle collaborators and configuration
         self,
@@ -101,73 +107,76 @@ class ActivationWriter:
         checked_output: Callable[[], EpisodeProcessingRecord],
         drain: Callable[[Awaitable[None]], Awaitable[None]],
     ) -> EpisodeCaptureReport:
-        """Perform no work beyond final metadata, one capture, and its safety fence."""
+        """Write the episode, then the archive entry, then ``record_turn`` (ADR-0283 §7).
+
+        **The address is fixed at admission**: ``activation:<activation_id>`` on every
+        channel (§2), so it is sized, written and reported as one value and nothing is
+        allocated by a store first. A conversational episode is written on the
+        conversation's channel; a standalone one is written alone.
+
+        **For a conversational capture the order is the protocol** (§7:1): the episode,
+        insert-if-absent; then, only where it is confirmed written, the archive entry
+        where one is owed; then ``record_turn``, which is the deletion verification
+        (§7:2). A ``None`` from it means the conversation was deleted, and the fence
+        discards the archive entry and deletes the episode.
+
+        **Where the episode write is known not to have committed** — the store's
+        conflict, which created nothing at this address — no archive entry is written
+        and ``record_turn`` is not called (§7:3). **Where its outcome is
+        indeterminate** — any other failure, cancellation and timeout included — no
+        archive entry is written either, and the fence re-reads the conversation and
+        deletes the episode by id where it is stamped or absent (§7:4). Either way the
+        capture is reported degraded.
+
+        **The fence runs through ``drain``** (ADR-0275 §8:11), on every path where an
+        episode may have landed and the conversation was not verified standing, so a
+        cancellation of this call cannot strand an episode on a conversation the user
+        deleted.
+        """
         if isinstance(state.trigger, RecordedResumeTrigger) and state.conversation_id is None:
             capture_loss("association", "unresolved")
             return state.degraded_report()
+        conversation_id = state.conversation_id
+        facts = state.facts
+        if facts is not None and facts.parked is not None:
+            # ADR-0283 §3:4: the binding this activation's own step parked, which is
+            # what a later resume finds its conversation through (§5).
+            state.relate(parks=facts.parked)
+        if conversation_id is not None:
+            # ADR-0275 §4:5 as ADR-0283 partially supersedes it: a conversational
+            # channel names the conversation the episode is written for.
+            state.resolved_conversation(conversation_id)
         try:
             now = self._now()
-            # SQLite's existing ordinal domain is [1, 2**63). This is a length
-            # reservation, never a prediction or reservation of the next row.
-            address = (
-                f"activation:{processing.activation_id}"
-                if state.conversation_id is None
-                else f"conv:{state.conversation_id}:{2**63 - 1}"
+            address = f"activation:{processing.activation_id}"
+            preflight = processing.model_copy(
+                update={"trigger": state.trigger, "links": state.links}
             )
-            preflight = processing
-            if state.conversation_id is not None:
-                preflight = processing.model_copy(
-                    update={
-                        "trigger": processing.trigger.model_copy(
-                            update={
-                                "channel": ChannelIdentity(
-                                    channel_type="conversation",
-                                    instance_id=state.conversation_id,
-                                )
-                            }
-                        )
-                    }
-                )
             self._bounded(state, preflight, address, now, payload_limit)
-        except Exception:
-            capture_loss("preflight", "invalid_or_oversized")
-            return state.degraded_report()
-        turn = None
-        if state.conversation_id is not None:
-            try:
-                facts = state.facts
-                turn = await self._conversations.append(
-                    state.conversation_id,
-                    occurred_at=now,
-                    parked=None if facts is None else facts.parked,
-                    delivery=None if facts is None else facts.delivery,
-                    model_eligible=processing.model_eligible,
-                )
-                state.index_episode_id = turn.episode_id
-                state.resolved_conversation(turn.conversation_id)
-                address = turn.episode_id
-            except Exception:
-                capture_loss("append", "failed")
-                return state.degraded_report()
-        try:
             processing = checked_output()
             episode = self._bounded(state, processing, address, now, payload_limit)
         except Exception:
             capture_loss("preflight", "invalid_or_oversized")
             return state.degraded_report()
         writes = _Writes()
-        owed = turn is not None and state.facts is not None and self._archive_enabled
+        owed = conversation_id is not None and facts is not None and self._archive_enabled
         try:
-            if owed and turn is not None:
-                await self._archive_once(state, turn, writes)
             await self._episode_once(episode, writes)
+            if conversation_id is not None and writes.episode_confirmed:
+                if owed:
+                    await self._archive_once(state, conversation_id, episode, writes)
+                await self._record_turn(state, conversation_id, episode, writes)
         finally:
-            if turn is not None and (writes.episode_possible or writes.archive_possible):
-                await drain(self._verify(state, turn, writes))
+            if (
+                conversation_id is not None
+                and (writes.episode_possible or writes.archive_possible)
+                and not writes.verified
+            ):
+                await drain(self._fence(conversation_id, address, writes))
         if (
             writes.episode_confirmed
             and (not owed or writes.archive_confirmed)
-            and (turn is None or writes.verified)
+            and (conversation_id is None or writes.verified)
         ):
             return EpisodeCaptureReport(
                 activation_id=processing.activation_id, episode_id=address, state="recorded"
@@ -175,16 +184,20 @@ class ActivationWriter:
         return state.degraded_report()
 
     async def _archive_once(
-        self, state: ActivationState, turn: ConversationTurn, writes: _Writes
+        self,
+        state: ActivationState,
+        conversation_id: str,
+        episode: EpisodicMemory,
+        writes: _Writes,
     ) -> None:
+        """Write the transcript entry at the episode's own address, with no ordinal."""
         facts = state.facts
         assert facts is not None  # noqa: S101 — only canonical capture facts owe an archive entry
         try:
             entry = TranscriptEntry(
-                address=turn.episode_id,
-                conversation_id=turn.conversation_id,
-                ordinal=turn.ordinal,
-                occurred_at=turn.occurred_at,
+                address=episode.id,
+                conversation_id=conversation_id,
+                occurred_at=episode.occurred_at,
                 asked=facts.asked,
                 replied=facts.response,
                 disposition=facts.disposition,
@@ -210,21 +223,55 @@ class ActivationWriter:
         except Exception:
             capture_loss("episode", "failed")
 
-    async def _verify(
-        self, state: ActivationState, turn: ConversationTurn, writes: _Writes
+    async def _record_turn(
+        self,
+        state: ActivationState,
+        conversation_id: str,
+        episode: EpisodicMemory,
+        writes: _Writes,
     ) -> None:
+        """Tell the conversation its episode landed, which is the verification (§7:2)."""
+        facts = state.facts
         try:
-            standing = await self._conversations.get(turn.conversation_id)
+            standing = await self._conversations.record_turn(
+                conversation_id,
+                episode_id=episode.id,
+                occurred_at=episode.occurred_at,
+                delivery=None if facts is None else facts.delivery,
+            )
         except Exception:
-            capture_loss("verify", "uncertain")
+            # Indeterminate, so the fence re-reads the conversation (§7:4's posture).
+            capture_loss("record_turn", "failed")
             return
-        if standing is not None:
-            writes.verified = True
+        if standing is None:
+            writes.gone = True
             return
-        state.index_episode_id = None
+        writes.verified = True
+        state.recorded_episode_id = episode.id
+
+    async def _fence(self, conversation_id: str, address: str, writes: _Writes) -> None:
+        """Destroy what this capture wrote where its conversation is gone (§7:2, §7:4).
+
+        ``record_turn``'s ``None`` is the conversation's own answer and needs no
+        re-read. Every other unverified path re-reads the conversation, and an
+        unreadable one leaves the writes standing: where it was in fact stamped,
+        recovery's sweep finds the episode on its channel while the tombstone stands
+        (ADR-0283 §8).
+
+        **The archive entry goes first**, on ADR-0225 §5's rule that the residue of a
+        partial failure must be one the user can still reach and destroy.
+        """
+        if not writes.gone:
+            try:
+                standing = await self._conversations.get(conversation_id)
+            except Exception:
+                capture_loss("verify", "uncertain")
+                return
+            if standing is not None:
+                return
         if writes.archive_possible:
             try:
-                await self._archive.discard(turn.episode_id)
+                await self._archive.discard(address)
             except Exception:
                 capture_loss("compensate_archive", "failed")
                 # Keep the memory record reachable until archive destruction
@@ -232,7 +279,7 @@ class ActivationWriter:
                 return
         if writes.episode_possible:
             try:
-                await self._memory.delete(turn.episode_id)
+                await self._memory.delete(address)
             except Exception:
                 capture_loss("compensate_episode", "failed")
 

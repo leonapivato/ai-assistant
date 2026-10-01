@@ -1,20 +1,25 @@
-"""The capture/lifecycle stage: every sequence that spans both durable stores.
+"""The conversation lifecycle stage: every sequence that spans both durable stores.
 
-ADR-0074 §9's coordinator ruling in one object. Whether a conversation still has
-live turns is a ``MemoryStore`` fact — expiry and deletion are enforced there —
-while the conversation index holds only ids, so a ``ConversationStore`` asked to
-answer it would have to reach into memory and break golden rule 1. This stage is
-the one place that legitimately holds both handles by injection, and it therefore
-owns **all four** cross-store sequences:
+ADR-0074 §9's coordinator ruling in one object, as ADR-0283 partially supersedes
+it. A conversation's history, membership and deletion are the episodes on its
+channel (``ChannelIdentity("conversation", <id>)``), which the ``MemoryStore``
+holds; the ``ConversationStore`` holds the conversation and two small facts about
+it, its delivery rows and the observer's watermark. A ``ConversationStore`` asked
+whether a conversation still has live episodes would have to reach into memory and
+break golden rule 1, so this stage — the one place that legitimately holds both
+handles by injection — owns the cross-store sequences:
 
-* **capture** (§3) — append the turn (the intent log), write its episode, then
-  verify the conversation still stands;
-* **deletion** (§8) — stamp, destroy the episodes the index names, drop the
-  record conditionally;
-* **retention reclaim** (§7) — which **destroys nothing**: it only asks whether
-  any turn still resolves, and drops a conversation record that has none;
-* **the user-facing export** (§9) — the conversation half filtered against the
-  memory half of *the same* artifact.
+* **history** (ADR-0283 §4, §10) — the conversation's eligible episodes in number
+  order within the replay bound, each paired with its delivery row;
+* **resume association** (§5) — a binding resolved through the episode that parked
+  it;
+* **deletion** (§8) — stamp, destroy every episode the conversation's channel
+  holds, drop the record conditionally;
+* **retention reclaim** (§8) — which **destroys nothing**: it only asks whether the
+  channel still holds an episode, and drops a conversation record that holds none.
+
+Capture itself is the :class:`~ai_assistant.orchestration.activation_writer.ActivationWriter`'s
+(ADR-0283 §7), which this stage builds over the same three stores.
 
 **The two sweeps are opposite, and collapsing them is the error to avoid.**
 Finishing a user deletion destroys episodes because that is the request being
@@ -31,34 +36,21 @@ from __future__ import annotations
 
 from dataclasses import dataclass, field
 from datetime import UTC, datetime
-from typing import TYPE_CHECKING
+from typing import TYPE_CHECKING, Final
 
 import structlog
-from pydantic import ValidationError
 
 from ai_assistant.core.clock import ClockReadingError, checked_clock
 from ai_assistant.core.episode_encoding import admits_model_eligibility
 from ai_assistant.core.errors import (
     ConversationStoreError,
     MemoryStoreError,
-    TranscriptArchiveError,
     UnknownConversationError,
 )
 from ai_assistant.core.types import (
-    Capture,
+    ChannelIdentity,
     ConversationDigest,
-    EpisodicMemory,
-    ExchangeDisposition,
     MemoryKind,
-    MemorySource,
-    MemoryWrite,
-    MemoryWriteMode,
-    Modality,
-    Placement,
-    PlacementReach,
-    PlacementSetter,
-    Provenance,
-    TranscriptEntry,
 )
 from ai_assistant.orchestration.activation_writer import ActivationWriter
 
@@ -75,8 +67,6 @@ if TYPE_CHECKING:
     )
     from ai_assistant.core.types import (
         Conversation,
-        ConversationExport,
-        ConversationTurn,
         MemoryRecord,
         ParkedBinding,
         SpokenDelivery,
@@ -111,83 +101,43 @@ BELIEF_KINDS: tuple[MemoryKind, ...] = (
 #: How many conversations the retention reclaim shortlists per ``recent`` page.
 _RECLAIM_PAGE = 50
 
+#: The replay bound: how many of a conversation's most recent eligible episodes
+#: :meth:`ConversationLifecycle.history` reads (ADR-0283 §4:1). The value the turn
+#: index's configured replay window had (ADR-0074 §9.3) — finite, and the same for
+#: every caller, because an unbounded replay of a months-old conversation is a
+#: prompt nobody sized.
+HISTORY_REPLAY_BOUND: Final = 20
+
+#: How many identifiers one ``channel_episode_ids`` page asks for while a deletion
+#: or a reclaim walks a conversation's channel (ADR-0283 §8). The read's own bound.
+_CHANNEL_PAGE: Final = 1000
+
+
+def conversation_channel(conversation_id: str) -> ChannelIdentity:
+    """The channel a conversation's episodes are written on (ADR-0275 §4:5, ADR-0283 §4)."""
+    return ChannelIdentity(channel_type="conversation", instance_id=conversation_id)
+
 
 def _utcnow() -> datetime:
     return datetime.now(UTC)
 
 
-def _refusals_in(refusal: ValidationError) -> tuple[str, ...]:
-    """What a refused transcript entry may say about itself in a log (ADR-0225 §4).
-
-    Each refusal rendered as ``<field path>:<error code>`` and nothing else. Both
-    halves come from pydantic's own closed vocabularies — a location is a tuple of
-    field names and indices, a type is one of pydantic's error codes — so neither can
-    carry the value that was refused, which for this model is the transcript itself.
-
-    The ``msg`` and ``input`` keys are deliberately not read: ``input`` *is* the
-    refused value, and ``msg`` is rendered from a validator that may quote it.
-
-    Args:
-        refusal: What the model raised.
-
-    Returns:
-        One entry per refusal, sorted so the record is stable to compare.
-    """
-    return tuple(
-        sorted(
-            f"{'.'.join(str(part) for part in each['loc'])}:{each['type']}"
-            for each in refusal.errors()
-        )
-    )
-
-
-@dataclass(frozen=True, slots=True)
-class CaptureReport:
-    """What became of one turn's durable record (ADR-0074 §3, §9 item 6).
-
-    Attributes:
-        conversation_id: The conversation the turn ran under, or ``None`` when
-            none could be resolved — a resumption whose parked binding no longer
-            names a turn, which §3 ratifies as "not captured at all, and no
-            conversation invented".
-        episode_id: The id of the episode recording the turn, or ``None`` where no
-            index row stands for it — a refused append, or a capture compensated
-            because the conversation was deleted underneath it. It is **not**
-            ``None`` merely because the episode write failed (ADR-0205 §1): the
-            turn's index row exists either way, and that row is what carries the
-            turn's delivery, so a report naming it can still be applied.
-        degraded: Whether the exchange went **unrecorded**. The turn's answer is
-            still the answer — capture failure degrades a turn, it never fails one
-            — but it is reported rather than swallowed, because a user whose turns
-            are silently not being recorded will not find out until they try to
-            continue.
-    """
-
-    conversation_id: str | None
-    episode_id: str | None = None
-    degraded: bool = False
-
-
 @dataclass(frozen=True, slots=True)
 class AssembledHistory:
-    """A conversation's recent turns, resolved to records (ADR-0074 §5, ADR-0205 §5).
+    """A conversation's recent episodes, with their delivery facts (ADR-0283 §4, §10).
 
     Attributes:
-        records: The turns' episodes, oldest first, with every id that no longer
-            resolves **skipped**: a turn that was deleted, expired, or whose
-            episode write never landed is a gap, never an error, so a conversation
-            that lost a turn still resumes and never resurrects the deleted one.
-        deliveries: What a device reported playing of each of those turns, keyed by
-            the episode qualified (ADR-0205 §5). **Every such turn of the tail and
-            not only the previous one**, because a report may name a turn that is no
-            longer the previous one — a turn whose episode is in front of the
-            composing stage carrying words the device did not play must arrive with
-            the fact that it did not. It is read off the rows :meth:`history` walked
-            for the records themselves, so the count of them costs no second store
-            call and no second retrieval. A turn whose row carries no ``delivery``,
-            and one whose episode did not resolve, are both simply absent: a
-            delivery fact travels with the episode it qualifies and never without
-            it.
+        records: The channel's live, eligible episodes, oldest first in number order
+            (ADR-0283 §1), within the replay bound. A deleted or expired episode is
+            simply not on the channel's live read, so a conversation that lost a turn
+            still resumes and never resurrects the deleted one.
+        deliveries: What a device reported playing of each of those episodes, keyed
+            by the episode qualified (ADR-0205 §5, ADR-0283 §10). **Every such
+            episode of the tail and not only the previous one**, because a report may
+            name a turn that is no longer the previous one. It is read with one
+            ``deliveries`` call for the episodes this page returned, so a delivery
+            fact travels with the episode it qualifies and never without it; an
+            episode with no delivery row is simply absent.
         degraded: Whether reading them failed outright, which costs the turn its
             continuity exactly as a failed retrieval costs it its personalisation.
     """
@@ -198,31 +148,17 @@ class AssembledHistory:
 
 
 @dataclass(frozen=True, slots=True)
-class DataExport:
-    """Everything a user's "export my data" hands back (ADR-0004 §6, ADR-0074 §9).
-
-    **Not an atomic snapshot of the two stores**, and it does not claim to be:
-    both halves are separate reads and no seam spans them (a cross-store
-    transaction is deferred to leg 5). What *is* guaranteed is the property that
-    keeps the artifact coherent — the conversation half is filtered against the
-    memory half of **this** artifact, never against a live read — so no exported
-    turn can point at content the artifact does not carry.
-
-    The residue therefore runs one way only: an episode captured, or a
-    conversation deleted, mid-export can leave an episode in ``memories`` with no
-    turn indexing it. That reads as an un-indexed episode — content the user
-    *has*. The reverse, a turn whose episode is absent, cannot happen.
+class ParkingOrigin:
+    """Where a parked binding was parked: its conversation and its episode (ADR-0283 §5).
 
     Attributes:
-        memories: Every retained memory record, ``MemoryStore.export``'s own
-            snapshot, unfiltered.
-        conversations: The conversation snapshot with every turn whose episode is
-            absent from ``memories`` dropped, and with it any conversation that
-            had turns and has none left.
+        conversation_id: The conversation whose channel the parking episode is on.
+        episode_id: The parking episode's id, which a resumed episode relates as its
+            predecessor.
     """
 
-    memories: tuple[MemoryRecord, ...]
-    conversations: ConversationExport
+    conversation_id: str
+    episode_id: str
 
 
 class ConversationLifecycle:
@@ -351,51 +287,51 @@ class ConversationLifecycle:
         return await self._conversations.mark_active(conversation_id)
 
     async def history(self, conversation_id: str) -> AssembledHistory:
-        """The conversation's recent turns, as records, oldest first (§5).
+        """The conversation's recent episodes, oldest first, with their deliveries (§4).
 
-        Read through the index and fetched by id, and **an id that does not
-        resolve is skipped, not an error** — deleted, expired, or an intent whose
-        episode write never landed all look the same to a reader, and all three are
-        gaps rather than faults. The window is the store's configured replay
-        bound, because an unbounded replay of a months-old conversation is a prompt
-        nobody sized.
+        ADR-0283 §4:1: a ``get`` that answers nothing for a stamped or absent
+        conversation, then the conversation's channel read with
+        ``MemoryStore.channel_episodes`` — the replay bound as ``limit`` and
+        ``episode_model_eligible=True``, so an ineligible run never consumes the page
+        — and then, by §10, one ``deliveries`` call for the episodes it returned,
+        each paired with its episode. No turn is read from the conversation store.
 
-        **The tail is one batch read** (ADR-0086 §6, §8 item 7). §5 declined a
-        ``get_many`` as "a contract change bought for one caller at a scale where it
-        buys nothing measurable", and named the hub as where to revisit it; ADR-0086
-        §6 records that that trigger never fired — the hub owns the databases, so a
-        resume's *k* reads never cross a socket — and lands the method on the
-        argument the deferral actually turned on, with a second caller and a figure.
-        This is the resume half of it, and §6 partially supersedes §5 here.
-
-        **Both behaviours the loop had for ratified reasons survive the batch, and
-        neither is free.** The order is the *conversation's* ordinal sequence and not
-        the mapping's, so the result is assembled by walking ``turns`` and looking
-        each id up. And an id that does not resolve is still simply absent from the
-        mapping — §6's omission is the same skip ``get`` answering ``None`` was, on
-        the identical liveness predicate, so a deleted, expired or never-landed
-        episode is a gap here exactly as before.
+        **The order is the channel's, the episodes' numbers ascending** (§1), never a
+        timestamp and never an id. The read already filters by liveness, so a
+        deleted, expired or never-landed episode is a gap here rather than a fault.
 
         Returns:
-            The records and whether reading them failed outright.
+            The records and their deliveries, and whether reading them failed
+            outright — which a stamped or absent conversation counts as, exactly as
+            the turn index's refusal of it did.
         """
         try:
-            turns = await self._conversations.turns(conversation_id, model_eligible_only=True)
-            episodes = await self._memory.get_many([turn.episode_id for turn in turns])
-            records: list[MemoryRecord] = []
-            deliveries: dict[str, SpokenDelivery] = {}
-            for turn in turns:
-                episode = episodes.get(turn.episode_id)
-                if episode is None or not admits_model_eligibility(episode, True):
-                    continue
-                records.append(episode)
-                # ADR-0205 §5: paired with the episode it qualifies, off the row
-                # this loop already holds. Collected **inside** the liveness check,
-                # so a fact whose episode did not resolve is dropped with it — a
-                # delivery travelling without the answer it is about is a value that
-                # says how long something ran with nothing beside it.
-                if turn.delivery is not None:
-                    deliveries[turn.episode_id] = turn.delivery
+            if await self._conversations.get(conversation_id) is None:
+                return AssembledHistory(degraded=True)
+            page = await self._memory.channel_episodes(
+                conversation_channel(conversation_id),
+                limit=HISTORY_REPLAY_BOUND,
+                episode_model_eligible=True,
+            )
+            records: list[MemoryRecord] = [
+                entry.record
+                for entry in page.entries
+                # Belt and braces over the read's own axis: a record the decoder
+                # does not admit as eligible never reaches a prompt (ADR-0275 §7).
+                if admits_model_eligibility(entry.record, True)
+            ]
+            delivered = (
+                await self._conversations.deliveries(
+                    conversation_id, episode_ids=[record.id for record in records]
+                )
+                if records
+                else {}
+            )
+            # ADR-0205 §5 / ADR-0283 §10: paired with the episode it qualifies, so a
+            # fact whose episode is not in this page is never carried.
+            deliveries: dict[str, SpokenDelivery] = {
+                record.id: delivered[record.id] for record in records if record.id in delivered
+            }
         except ConversationStoreError, MemoryStoreError:
             # Losing continuity costs the answer its history, not its usefulness —
             # so the turn goes on, saying so, exactly as a failed retrieval does.
@@ -403,248 +339,34 @@ class ConversationLifecycle:
             return AssembledHistory(degraded=True)
         return AssembledHistory(records=tuple(records), deliveries=deliveries)
 
-    async def conversation_of_binding(self, binding: ParkedBinding) -> ConversationTurn | None:
-        """The turn a parked confirmation belongs to, or ``None`` (§3).
+    async def conversation_of_binding(self, binding: ParkedBinding) -> ParkingOrigin | None:
+        """Where a parked confirmation was parked, or ``None`` (ADR-0283 §5).
 
         A resumption cannot be *told* which conversation it is in — the adapter
-        relays an opaque token and nothing else, and after a restart that token is
-        reconstructed from durable state with no live turn behind it — so the
-        association is durable and recovered rather than passed. ``None`` for a
-        park predating capture, or one whose conversation the user deleted; both
-        mean the resumption is not captured and **no conversation is invented** for
-        it, because recording it under a fresh conversation would assert one the
-        user never had.
+        relays an opaque token and nothing else — so the association is durable and
+        recovered rather than passed: ``MemoryStore.episode_parking`` finds the
+        episode whose own step parked ``binding`` (its ``links.parks``). Where that
+        episode's channel is a conversation, the conversation is that channel's
+        instance and the predecessor is that episode's id.
+
+        ``None`` where no live episode parked the binding, where it is on no
+        conversation's channel, and where the conversation is stamped or absent: all
+        three keep ADR-0275 §6:5's degraded, no-episode behaviour, because recording
+        the resumption under a fresh conversation would assert one the user never had.
+
+        Raises:
+            MemoryStoreError: If the memory store cannot be read.
+            ConversationStoreError: If the conversation store cannot be read.
         """
-        return await self._conversations.turn_of_binding(binding)
-
-    # --- capture (§3, §4, §8) ------------------------------------------------
-
-    async def capture(  # noqa: PLR0913 — the conversation, the rendering, the reply, what became of the pass, the binding a park recorded, the turn's disclosure evaluation, how its user material reached this system, what its supply rested on, and its delivery; every one is a distinct fact about the turn being recorded
-        self,
-        conversation_id: str,
-        *,
-        content: str,
-        asked: str | None,
-        outcome: str | None = None,
-        disposition: ExchangeDisposition | None = None,
-        parked: ParkedBinding | None = None,
-        supplied_withheld: bool = False,
-        modality: Modality = Modality.TEXT,
-        derived_from_external: bool = False,
-        delivery: SpokenDelivery | None = None,
-    ) -> CaptureReport:
-        """Record one turn: the index entry first, then its episode (§3).
-
-        **The ordering is the protocol, not a preference.** The index entry lands
-        first and names the episode before the episode exists, which makes the
-        index an intent log: no episode can exist for a conversation without its id
-        having been recorded there, so an enumeration of the index names every
-        episode that conversation will ever have — including one whose write has
-        not landed. That is what lets §8's deletion be finished after a crash. The
-        cost is that a crash between the two writes leaves an index entry with no
-        episode, which every reader already renders as a gap.
-
-        **The episode is written directly** — a one-element ``write_atomic`` in
-        ``INSERT_IF_ABSENT`` mode — and never through ``MemoryWriter.ingest``.
-        ADR-0075 partially supersedes ADR-0005's proposal → policy path for exactly
-        this producer: capture records what happened and infers nothing, and the
-        shipped policy would actively corrupt it (an episode's "conflicts" are
-        other episodes, and a ``REINFORCE`` would store the later turn at the
-        earlier turn's id). ``add`` is refused for its own reason: it is a
-        documented upsert keyed on the caller's id.
-
-        With a store-derived id the insert-if-absent mode is a **guard rather than
-        a routine path** — an id derived from a unique conversation and a
-        store-proved ordinal collides only if that invariant has broken or a
-        foreign producer took a reserved-namespace id. Both are faults, neither is
-        a race, and a retry answers neither, so a conflict fails the capture loudly
-        and nothing is retried. Capture is attempted **at most once per outcome**
-        (ADR-0075 §2): a second attempt would take a second ``append``, allocating a
-        second ordinal and a second id, and so record the same exchange twice.
-
-        **The archive entry lands between the index entry and the episode**
-        (ADR-0225 §2). The order is the protocol there too, and for a reason of its
-        own: ADR-0074 §3 accepts a failed episode write on the ground that "a missing
-        episode is the one outcome that loses nothing but the record", which is true
-        while the record's whole life is thirty days and less true once there is a
-        store whose job is to still hold the exchange in three years. Ordering the
-        archive last would make the long-lived copy the one most exposed to the very
-        failure §3 accepts. Ordering it first costs nothing §8 does not already
-        handle: the index entry still lands before either write, and a crash between
-        the two writes leaves exactly the state §3 already ratifies — with the
-        transcript intact.
-
-        **The archive write never fails a turn and never fails a capture** (§2). A
-        store failure writing it is logged and reported on this capture's own
-        degraded outcome exactly as a failed episode write is, the episode write
-        proceeds, and nothing is retried. Nor does a landed archive entry make a lost
-        episode undegraded: the archive makes the loss smaller and does not make it
-        disappear.
-
-        **No entry is written where the caller supplied no ``disposition``** (§10).
-        That caller is recording an exchange this system did not drive, and the
-        archive holds what this system's own capture recorded; coercing a member
-        would recreate for a parked turn exactly the ambiguity the field is carried
-        to prevent. ``archive_enabled`` set false likewise stops the write and
-        destroys nothing (§6).
-
-        **The verification after the write is the fence, not the clock.** An append
-        that succeeded before a deletion stamped the conversation is no evidence
-        that it still exists when the episode write commits — the two are separate
-        calls on separate stores, and ``write_atomic`` awaits an embedder before it
-        reaches its own lock. So this re-reads the conversation afterwards and
-        destroys the episode it just wrote if the conversation is stamped or gone.
-        Because the episode's id is determined by its own conversation and ordinal,
-        that delete can never destroy a record capture did not write.
-
-        Args:
-            conversation_id: The conversation to record the turn in.
-            content: The canonical text rendering of the exchange — what was asked
-                and how it turned out (ADR-0005 §1).
-            asked: **What the user said**, in their own words, unrewritten and
-                unrendered — the archive entry's user half (ADR-0225 §1). ``None``
-                where the pass received no user words at all, which includes the
-                resolution of a parked step: the utterance that parked was archived
-                at its own address by the pass that parked, and repeating it here
-                would render one sentence as though the user had said it twice.
-                **Handed to capture, not computed here** — capture judges nothing
-                (§4), and this method could not derive it anyway: ``content`` is a
-                rendering built for the observer and for retrieval, from which the
-                user's sentence is recoverable, if at all, by parsing a prefix this
-                system is free to change (ADR-0225 §1).
-            outcome: **What the assistant said** — the composed reply, whole, as the
-                episode's own ``outcome`` (ADR-0221 §1). ``None`` where the pass
-                produced no reply, which is the five paths §1 enumerates; the caller
-                passes what its composing stage produced, and this method stores it
-                without inspecting it, truncating it or summarising it. Until ADR-0221
-                this field carried one of sixteen constant phrases and the reply was
-                stored nowhere; ``disposition`` is where that fact went.
-            disposition: What became of the pass, as a member of a closed vocabulary
-                (ADR-0221 §2). **Handed to capture, not computed here** — capture
-                judges nothing (§4), and which member a pass reached is the engine's
-                to say. ``None`` only where a caller records an exchange this system
-                did not drive; the three render sites read this field first and fall
-                back to ``outcome``, so a record carrying a member has its ``outcome``
-                rendered into no model prompt (§3).
-            parked: The binding this turn parked on, where it parked, so a
-                recovered resumption can find its way back to this conversation.
-            supplied_withheld: Whether content ADR-0199 §3 withholds from a
-                channel of unbounded audience stood in the warrant of the turn whose
-                rendering ``content`` carries (ADR-0204 §2, whose evaluation ADR-0217
-                §3 leaves unchanged). **Handed to capture, not computed here** —
-                capture judges nothing (§4), and this is the pipeline's evaluation
-                exactly as ``content`` is the pipeline's rendering. What the episode
-                *records* is ADR-0217 §1's placement: ``True`` here writes reach
-                ``OWNER`` with setter ``DERIVED``, and ``False`` writes the default.
-                ``False`` where no turn produced the rendering at all: a routed pass
-                and a resumption recovered from durable state each carry no goal
-                statement and no plan rationale of any turn, so there is nothing in
-                their episode for a narrowing to be about.
-            modality: How the user material this episode renders reached this system
-                (ADR-0221 §5). **Handed to capture, not computed here**, for
-                ``supplied_withheld``'s own reason and at the same sites: the value
-                "belongs to the user material the episode renders, not to the pass
-                that performs the capture and not to the conversation", so the
-                resolution of a parked step carries the *parked* turn's value and this
-                method can no more derive it than it can derive ``content``. It says
-                nothing about the assistant's own contributions to the record — not
-                the plan rationale in ``content``, not the reply in ``outcome``.
-            derived_from_external: Whether the supply the turn ran over held a record
-                resting on recorded external content (ADR-0223 §1) — the disjunction
-                of ``rests_on_recorded_external_content`` over what that turn
-                selected, which is the same boolean the pass handed the egress seam
-                (§2). **Handed to capture, not computed here**, for
-                ``supplied_withheld``'s own reason and at the same sites: this stage
-                holds no supply, reads no record and evaluates no predicate over any
-                selection, so "capture judges nothing" holds for this field too.
-                ``False`` where the pass carried no turn — a routed pass, a routed
-                park's resolution and a resumption recovered from durable state — and
-                it is true of what those episodes hold rather than a default they
-                fall back on (§3). A ``True`` says *the supply this turn ran over held
-                a record whose recorded origin is external*; a ``False`` says *no
-                record in that supply carried the marker*, never *no external content
-                was involved* (§7).
-            delivery: What is known about this turn's spoken answer having been
-                played, written onto the index row this allocates (ADR-0205 §4).
-                ``converse_spoken`` supplies ``SpokenDelivery(state=UNKNOWN)`` —
-                unconditionally, the park, the absent reply and the degraded
-                synthesis included, because at capture the hub has produced an answer
-                and knows nothing about what reached anyone. Every other operation
-                supplies ``None``, and an absent value is never read as delivered and
-                never read as heard.
-
-        Returns:
-            What became of the record. Never raises for a store failure: capture
-            degrades a turn rather than failing it, because failing would throw
-            away an answer the user already has.
-        """
-        try:
-            # The clock reading is **inside** the boundary, not above it. A
-            # non-conforming reading is a capture failure like any other, and by
-            # this point the turn's answer already exists — raising here would
-            # throw it away because the record of it could not be written, which
-            # is the outcome §3 explicitly rejects. Nothing has been written when
-            # it fails, so it degrades exactly as a refused append does.
-            turn = await self._conversations.append(
-                conversation_id, occurred_at=self._now(), parked=parked, delivery=delivery
-            )
-        except ConversationStoreError:
-            # A refused append needs no compensation, because nothing was written:
-            # the intent comes first and the store mints the episode id inside it,
-            # so a capture whose append is refused never received an id and never
-            # reached the memory store. This is the ordering paying for itself.
-            _log.warning("conversation_capture_degraded", stage="append", exc_info=True)
-            return CaptureReport(conversation_id=conversation_id, degraded=True)
-
-        # ADR-0225 §2: between the index entry and the episode. `archived` is what
-        # the verification below needs — it compensates an entry that landed, on
-        # every path including the one where the episode write then fails, because
-        # that path now has something to compensate where before it had nothing.
-        archived = await self._archive_turn(
-            turn, asked=asked, outcome=outcome, disposition=disposition
-        )
-        degraded = self._archive_owed(disposition) and not archived
-
-        # The turn and the episode recording it carry **one** instant: the reading
-        # rides back on the turn rather than being taken twice, so no clock
-        # adjustment between the two writes can make them disagree.
-        episode = self._episode(
-            turn,
-            content=content,
-            outcome=outcome,
-            disposition=disposition,
-            now=turn.occurred_at,
-            supplied_withheld=supplied_withheld,
-            modality=modality,
-            derived_from_external=derived_from_external,
-        )
-        try:
-            await self._memory.write_atomic(
-                [MemoryWrite(record=episode, mode=MemoryWriteMode.INSERT_IF_ABSENT)]
-            )
-        except MemoryStoreError:
-            # The turn keeps its index entry and the transcript shows a gap at that
-            # ordinal. Propagating instead would turn a delivered answer into a
-            # failed turn; rolling the index entry back would lose the only durable
-            # record that the exchange happened at all.
-            _log.warning("conversation_capture_degraded", stage="episode", exc_info=True)
-            if not archived:
-                # The **id is still reported**, degraded though the capture is
-                # (ADR-0205 §1): the index row landed and it is what carries the
-                # delivery, so a device reporting on this turn later reaches a row
-                # that exists. What did not land is the episode, which every reader
-                # already renders as a gap. Nothing was written that a compensation
-                # could reach, so this path still returns without verifying.
-                return CaptureReport(
-                    conversation_id=conversation_id, episode_id=turn.episode_id, degraded=True
-                )
-            # ADR-0225 §2: the verification runs whenever **either** write landed.
-            # An archive entry stands at this address, so a conversation stamped
-            # underneath this capture has something to compensate here that it did
-            # not have before.
-            return await self._verify(turn, wrote_episode=False, wrote_entry=True, degraded=True)
-
-        return await self._verify(turn, wrote_episode=True, wrote_entry=archived, degraded=degraded)
+        episode = await self._memory.episode_parking(binding)
+        if episode is None or episode.processing_record is None:
+            return None
+        channel = episode.processing_record.trigger.channel
+        if channel is None or channel.channel_type != "conversation":
+            return None
+        if await self._conversations.get(channel.instance_id) is None:
+            return None
+        return ParkingOrigin(conversation_id=channel.instance_id, episode_id=episode.id)
 
     async def record_delivery(self, conversation_id: str, report: SpokenDeliveryReport) -> bool:
         """Apply one device's report to the turn it names (ADR-0205 §1, §3).
@@ -694,292 +416,15 @@ class ConversationLifecycle:
             _log.warning("spoken_delivery_unrecorded", stage="record_delivery", exc_info=True)
             return False
 
-    def _archive_owed(self, disposition: ExchangeDisposition | None) -> bool:
-        """Whether this capture owes the archive an entry at all (ADR-0225 §6, §10).
-
-        Two conditions and no others: the archive is switched on, and the caller
-        supplied a disposition. A caller that supplies none is recording an exchange
-        this system did not drive, and the archive holds what this system's own
-        capture recorded.
-        """
-        return self._archive_enabled and disposition is not None
-
-    async def _archive_turn(
-        self,
-        turn: ConversationTurn,
-        *,
-        asked: str | None,
-        outcome: str | None,
-        disposition: ExchangeDisposition | None,
-    ) -> bool:
-        """Write this turn's transcript entry; report whether one landed (§1, §2).
-
-        **The entry is built from values handed here and from no rendering** (§1).
-        ``asked`` is the user's own words as the call site threaded them, ``outcome``
-        is the composed reply this capture is already storing whole, and no part of
-        ``content`` reaches the archive: not the plan rationale, not the confirmation
-        line, not the tool line.
-
-        The address is the episode's own id, which
-        :meth:`~ai_assistant.core.protocols.ConversationStore.append` derived and
-        returned on the turn (§3) — this stage mints nothing and predicts nothing —
-        and the conversation and ordinal ride along as §1's grouping fields.
-
-        Returns:
-            Whether an entry now stands at this turn's address. ``False`` where none
-            was owed, and ``False`` where the write failed — the caller distinguishes
-            the two through :meth:`_archive_owed`, because only the second degrades
-            the capture.
-
-        Never raises. §2's "never fails a turn and never fails a capture" is
-        unconditional, so a value the archive's own model refuses degrades this
-        capture exactly as a store fault does rather than propagating — and is
-        reported without the refusal's own text, which would carry the entry into a
-        log (§4).
-        """
-        if not self._archive_owed(disposition):
-            return False
-        try:
-            entry = TranscriptEntry(
-                address=turn.episode_id,
-                conversation_id=turn.conversation_id,
-                ordinal=turn.ordinal,
-                occurred_at=turn.occurred_at,
-                asked=asked,
-                replied=outcome,
-                # Narrowed by `_archive_owed` above, which is what `disposition is
-                # not None` there buys: the field is required and carries no `None`
-                # (§10).
-                disposition=disposition,  # type: ignore[arg-type]
-            )
-            await self._archive.append(entry)
-        except ValidationError as refusal:
-            # **The model's refusal is logged without the exception**, and that is
-            # the whole reason it has an arm of its own (§4, ADR-0004 §5). A
-            # `ValidationError` renders the value it refused into its own text, and
-            # here that value *is* the transcript — so `exc_info` on this path would
-            # write into a log the very content §4 exists to keep out of one, on the
-            # failure path rather than the ordinary one, which is where such a leak
-            # would sit unnoticed longest. What travels instead is a closed
-            # vocabulary of pydantic's own: which field was refused and under which
-            # error code, neither of which carries any input.
-            _log.warning(
-                "conversation_capture_degraded",
-                stage="archive",
-                address=turn.episode_id,
-                refused=_refusals_in(refusal),
-            )
-            return False
-        except TranscriptArchiveError:
-            # §2: never fails a turn, never fails a capture, never retried. Logged
-            # rather than swallowed, and the address is what the log carries — an
-            # entry's text reaches no log, trace or audit trail (§4, ADR-0004 §5).
-            # `exc_info` is safe here and not above: this seam's own error names an
-            # address and a backend fault, never an entry's text (ADR-0225 §10).
-            _log.warning(
-                "conversation_capture_degraded",
-                stage="archive",
-                address=turn.episode_id,
-                exc_info=True,
-            )
-            return False
-        return True
-
-    async def _verify(
-        self,
-        turn: ConversationTurn,
-        *,
-        wrote_episode: bool,
-        wrote_entry: bool,
-        degraded: bool,
-    ) -> CaptureReport:
-        """Destroy what this capture wrote if its conversation is gone (§8).
-
-        §8's compensation has exactly one trigger, the one the ordering cannot rule
-        out: an append that *succeeded* before the conversation was stamped, whose
-        writes land after. ADR-0225 §2 widens what it destroys rather than when it
-        runs: the archive entry at that address goes too, so a conversation the user
-        deleted mid-capture leaves neither an episode nor a transcript.
-
-        **The archive entry is discarded first**, on §5's rule that the residue of a
-        partial failure must be the one the user can still reach and destroy: the
-        other order would leave retained text after a deletion the user was told
-        succeeded.
-
-        Args:
-            turn: The index row this capture allocated.
-            wrote_episode: Whether the episode write landed, so there is one to
-                compensate. ``False`` on the path where it raised.
-            wrote_entry: Whether an archive entry landed, likewise.
-            degraded: What this capture already knows about itself — a failed archive
-                write, which §2 reports here and which a standing conversation does
-                not clear.
-        """
-        try:
-            standing = await self._conversations.get(turn.conversation_id)
-        except ConversationStoreError:
-            # We cannot tell whether to compensate. The writes went in and, absent
-            # evidence otherwise, they stand — so the turn is **not** reported as
-            # unrecorded, which would be a false alarm. A conversation that was in
-            # fact stamped still has its tombstone, and the next sweep destroys this
-            # episode and this entry through it.
-            _log.warning("conversation_capture_unverified", stage="verify", exc_info=True)
-            return CaptureReport(
-                conversation_id=turn.conversation_id,
-                episode_id=turn.episode_id,
-                degraded=degraded,
-            )
-        if standing is not None:
-            return CaptureReport(
-                conversation_id=turn.conversation_id,
-                episode_id=turn.episode_id,
-                degraded=degraded,
-            )
-
-        if wrote_entry:
-            try:
-                await self._archive.discard(turn.episode_id)
-            except TranscriptArchiveError:
-                _log.warning(
-                    "conversation_capture_compensation_failed",
-                    stage="archive",
-                    address=turn.episode_id,
-                    exc_info=True,
-                )
-        if wrote_episode:
-            try:
-                await self._memory.delete(turn.episode_id)
-            except MemoryStoreError:
-                # §9.6: the turn still returns its answer and the failure is reported
-                # rather than swallowed. What is left is an orphan the tombstone's own
-                # sweep will find, for as long as the grace holds.
-                _log.warning("conversation_capture_compensation_failed", exc_info=True)
-        return CaptureReport(conversation_id=turn.conversation_id, degraded=True)
-
-    def _episode(  # noqa: PLR0913 — the turn, the rendering, the reply, what became of the pass, the instant both writes share, the disclosure evaluation, the modality and the origin mark; every one is a distinct fact about the turn being recorded
-        self,
-        turn: ConversationTurn,
-        *,
-        content: str,
-        outcome: str | None,
-        disposition: ExchangeDisposition | None,
-        now: datetime,
-        supplied_withheld: bool,
-        modality: Modality,
-        derived_from_external: bool,
-    ) -> EpisodicMemory:
-        """Build the one ``EpisodicMemory`` a turn deposits (§4).
-
-        **Capture judges nothing.** ``importance`` stays at its default, because
-        importance is a judgement and salience is leg 7's decision, not a number the
-        recorder invents. ``participants`` stays empty, because the two parties to a
-        turn are structural rather than informative and constants there would
-        occupy, with noise, the field an observer means to fill with the people an
-        episode is *about*. ``validity`` stays fully open, because nothing retires
-        an episode: supersession is a law about beliefs that contradict each other,
-        and two things that both happened never do. ``evidence`` stays empty: §3's
-        obligation to cite binds a *proposal of a belief*, and an episode is the
-        terminal citation — the thing other records cite — so requiring it to cite
-        something would demand a regress.
-
-        ``OBSERVED`` places every captured episode in the ``DERIVED`` band, which
-        makes capture the first producer into it, arriving before the observer it
-        exists to feed.
-
-        **``last_confirmed_at`` stays unset, and that is a decision rather than an
-        omission** (ADR-0109 §4). ADR-0103 §9's derived rule ranges over the
-        episodes a record *cites*, and this one cites nothing by the paragraph
-        above, so over the empty set it yields nothing and the record reads as
-        ADR-0103 §9's **unknown**. That is the honest answer: an episode records
-        that something happened, nothing retires it, and "is this still true?" is
-        not a question about it. Writing ``occurred_at`` into the field instead
-        would make every episode in the store claim a currency it has no use for.
-
-        **``placement``, ``disposition``, ``capture`` and the provenance's origin mark
-        are the four fields this method neither defaults nor decides** (ADR-0204 §2,
-        ADR-0217 §1, ADR-0221 §2 and §5, ADR-0223 §1). Each is stamped from a value the
-        pipeline computed and carried here,
-        so "capture judges nothing" holds exactly as it does for ``content``: this
-        method reads no record, no supply and no channel, and every other field
-        ADR-0074 §4 fixes is stamped as it always was. What ``placement`` writes is
-        ADR-0217 §3's **derivation** — reach ``OWNER``, setter ``DERIVED`` — and never
-        an act or a proposal, neither of which this producer can make.
-
-        **``outcome`` now carries the composed reply and ``disposition`` carries what
-        became of the pass** (ADR-0221 §1, §2). Both are the caller's values, written
-        here unexamined: this method does not inspect the reply for a Tier 0 value and
-        no implementation adds such an inspection on this path (§7), because the
-        reliance is residency — Tier 0 secrets live in the OS keyring, are read
-        through ``SecretStore`` by ``models/`` and ``tools/`` alone, and are in no
-        record, facet, plan or step account the composing stage is given (ADR-0004
-        §3).
-
-        **``capture`` is built here from the modality the pipeline passed**, exactly as
-        ``placement`` is built from its boolean. What ADR-0221 §5 fixes is that the
-        value belongs to the user material the episode renders — so a resolution
-        carries the parked turn's, and this method is handed the answer rather than
-        deriving one.
-
-        **``provenance.derived_from_external`` is stamped from the value the pipeline
-        threaded** (ADR-0223 §1, partially superseding ADR-0221 §6's first sentence).
-        It is the disjunction of ``rests_on_recorded_external_content`` over the
-        records the turn whose rendering this episode carries actually selected —
-        computed once per pass by the component that made the selection, and carried
-        here as data exactly as ``content`` is. This method evaluates no predicate,
-        holds no supply and reads no record to obtain it, and a capture site with no
-        turn to thread from states ADR-0223 §3's third case in code rather than
-        falling back on a default.
-
-        **What the mark says, and what no reader may make it say** (ADR-0223 §7,
-        inheriting ADR-0098 §5 and ADR-0106 §1 verbatim). A ``True`` says *the supply
-        this turn ran over held a record whose recorded origin is external*. A
-        ``False`` says *no record in that supply carried the marker* — never *no
-        external content was involved*, and never *nothing external influenced this
-        exchange*. Nothing here detects external content embedded in text whose
-        recorded origin is not external, and no lane cites ADR-0223 as authority that
-        it does or that ADR-0098 §5's corridor has narrowed.
-
-        **The instant is this turn's own**, which is ADR-0217 §1's producer
-        obligation discharged at the one site that can: "every derivation this system
-        performs writes the instant of the narrowing it makes", so that an untimed
-        ``DERIVED`` placement found in a store is diagnostic of §9's decode of a
-        pre-field record rather than of a producer that forgot. The turn's
-        ``occurred_at`` is the reading this method already carries, so the narrowing
-        and the record of it cannot disagree about when the turn happened.
-        """
-        return EpisodicMemory(
-            id=turn.episode_id,
-            content=content,
-            occurred_at=turn.occurred_at,
-            outcome=outcome,
-            disposition=disposition,
-            capture=Capture(modality=modality),
-            expires_at=None if self._retention is None else now + self._retention,
-            provenance=Provenance(
-                source=MemorySource.OBSERVED,
-                confidence=CAPTURE_CONFIDENCE,
-                last_updated=now,
-                derived_from_external=derived_from_external,
-                # `last_confirmed_at` left at its `None` default — see above.
-            ),
-            placement=(
-                Placement(reach=PlacementReach.OWNER, set_by=PlacementSetter.DERIVED, set_at=now)
-                if supplied_withheld
-                else Placement()
-            ),
-        )
-
     # --- deletion (§8) -------------------------------------------------------
 
     async def digest(self, conversation_id: str) -> ConversationDigest | None:
-        """The count and span a deletion ceremony shows, or ``None`` (§8).
+        """The count and span a deletion ceremony shows, or ``None`` (ADR-0283 §4:2).
 
-        Two reads and no walk: the record for the span, and the *tail* turn for the
-        count, whose ordinal **is** the count because ordinals are dense from
-        :data:`~ai_assistant.core.types.FIRST_TURN_ORDINAL` and rows leave only when
-        the whole record is dropped. ADR-0073 §7 declined a turn count on the record
-        for want of a consumer and noted it is derivable from the ordinal; this is
-        that consumer, deriving it.
+        Two reads and no walk: the record for the span and ``last_turn_at``, which is
+        the conversation's own, and an **unfiltered** ``channel_episodes`` read of its
+        channel, whose ``total`` is the count — every live episode on the channel,
+        eligible or not, whatever the page held.
 
         Returns:
             The digest, or ``None`` when the id names nothing or names a
@@ -987,17 +432,18 @@ class ConversationLifecycle:
             consent for, something it cannot display.
 
         Raises:
-            ConversationStoreError: If the index cannot be read.
+            ConversationStoreError: If the conversation store cannot be read.
+            MemoryStoreError: If the memory store cannot be read.
         """
         conversation = await self._conversations.get(conversation_id)
         if conversation is None:
             return None
-        tail = await self._conversations.turns(conversation_id, limit=1)
+        page = await self._memory.channel_episodes(conversation_channel(conversation_id), limit=1)
         return ConversationDigest(
             id=conversation.id,
             started_at=conversation.started_at,
             last_turn_at=conversation.last_turn_at,
-            recorded_turns=tail[-1].ordinal if tail else 0,
+            recorded_turns=page.total,
         )
 
     async def delete(self, conversation_id: str) -> bool:
@@ -1006,8 +452,8 @@ class ConversationLifecycle:
         The three steps normally run to completion here, and the tombstone is what
         makes a crash survivable rather than final. If this process dies at any
         point — or a racing capture writes its episode after step 2 — the stamped
-        record and its index are still there, still naming every episode id
-        involved, and :meth:`sweep_deletions` finishes it.
+        record is still there and the episodes are still on the conversation's
+        channel, so :meth:`sweep_deletions` finishes it (ADR-0283 §8).
 
         **Step 2 destroys this conversation's parked reads too** (ADR-0244 §3), through
         ``ParkedReads.drop_for_conversation`` and never through a concrete store —
@@ -1079,9 +525,15 @@ class ConversationLifecycle:
     async def _finish_deletion(self, conversation_id: str) -> bool:
         """Destroy this conversation's transcript and episodes, then ask for the drop (§8).
 
-        Idempotent by re-walking: nothing removes an index row until the record is
-        dropped, so a run that dies part-way is re-run from the beginning and every
-        delete it repeats is a no-op on an id already gone.
+        ADR-0283 §8:1, in order: the archive's ``discard_conversation``, the parked
+        reads' drop, then **every episode ``channel_episode_ids`` returns for the
+        conversation's channel**, page by page until a read is empty, then
+        ``drop_if_eligible``. That enumeration is what the store physically holds —
+        expired but unpurged, not yet valid and ineligible episodes included — and no
+        read filtered by liveness, validity or eligibility is used in its place
+        (ADR-0275 §6:6). Idempotent by re-walking: a run that dies part-way is re-run
+        from the beginning, and the episodes it already deleted are no longer on the
+        channel.
 
         **The archive discard is the first action of §8's step 2** (ADR-0225 §5),
         before any episode is deleted, on the rule §5 draws from ADR-0074 §8's own
@@ -1091,7 +543,7 @@ class ConversationLifecycle:
         would leave retained text after a deletion the user was told succeeded.
 
         **A discard that raises aborts the call here, and no clause of §8 changes.**
-        Every episode the index names still resolves, so step 3's own condition is
+        Every episode on the channel is still there, so step 3's own condition is
         unmet by §8's own terms — the tombstone survives and the reclaim re-runs the
         whole of step 2, this discard included, in the deleting call, at engine start
         and later on the hub's schedule. No third conjunct is added to step 3.
@@ -1113,11 +565,9 @@ class ConversationLifecycle:
         of its own or a second lifecycle — none of which §3 admits.
 
         It goes **after** the archive discard, which ADR-0225 §5 fixes as "the first
-        action of §8's step 2", and **before** the episode walk, which is the first thing
-        here that raises ``UnknownConversationError``: a call arriving for a conversation
-        another sweep already dropped would otherwise return through
-        :meth:`delete`'s own handler with the parks untouched, and this is the one route
-        to them ADR-0244 §3 names besides the deadline.
+        action of §8's step 2", and **before** the episode walk, so a call arriving for
+        a conversation another sweep already dropped still reaches the parks — the one
+        route to them ADR-0244 §3 names besides the deadline.
 
         **An open park stranded by a crash anywhere in this sequence is not an
         unrecoverable orphan** (ADR-0244 §3): it carries its own ``expires_at``,
@@ -1142,14 +592,15 @@ class ConversationLifecycle:
         await self._archive.discard_conversation(conversation_id)
         if self._parked_reads is not None:
             await self._parked_reads.drop_for_conversation(conversation_id)
-        cursor: str | None = None
+        channel = conversation_channel(conversation_id)
+        after: int | None = None
         while True:
-            batch = await self._conversations.episodes_to_purge(conversation_id, after_id=cursor)
-            if not batch:
+            held = await self._memory.channel_episode_ids(channel, after=after, limit=_CHANNEL_PAGE)
+            if not held:
                 break
-            for episode_id in batch:
-                await self._memory.delete(episode_id)
-            cursor = batch[-1]
+            for one in held:
+                await self._memory.delete(one.episode_id)
+            after = held[-1].number
         return await self._conversations.drop_if_eligible(conversation_id)
 
     # --- retention reclaim (§7) ---------------------------------------------
@@ -1159,16 +610,18 @@ class ConversationLifecycle:
 
         **This sweep never destroys an episode.** Episodes leave on their own
         ``expires_at``, stamped at capture from the horizon in force when they were
-        written; this only *observes* — it asks the ``MemoryStore`` whether any turn
-        still resolves — and drops a conversation record when none does. Stated as
+        written; this only *observes* — it asks the ``MemoryStore`` whether the
+        conversation's channel still holds any episode — and drops a conversation
+        record when it holds none (ADR-0283 §8:2). Stated as
         one sequence with the deletion sweep, a live episode would be destroyed
         because its *conversation* was old, and a record stamped under a 30-day
         horizon would die under a later 7-day setting it was never written against.
 
-        A conversation is reclaimable when it has **no live turns and** its
+        A conversation is reclaimable when its channel holds **no episode and** its
         ``last_active_at`` is past the horizon — both, not the first alone. With
         only the first, a conversation whose single turn expired would be dropped
-        while its owner still held a working id.
+        while its owner still held a working id. "Holds" is ``channel_episode_ids``'
+        sense, so an expired episode not yet purged, or one not yet valid, delays it.
 
         **The horizon shortlists; the store decides.** ``recent`` is read once to
         find candidates whose activity is already past the horizon, and
@@ -1221,65 +674,18 @@ class ConversationLifecycle:
             offset += len(page)
 
     async def _is_emptied(self, conversation_id: str) -> bool:
-        """Whether **no** turn of this conversation still resolves to an episode.
+        """Whether the conversation's channel holds **no** episode (ADR-0283 §8:2).
 
         The half of the reclaim precondition ``ConversationStore`` cannot answer
-        (golden rule 1). It walks every batch, because an implementation that
-        inspected only the first would let the record be dropped while live
-        episodes sat behind it — and it stops at the first episode that *does*
-        resolve, since one live turn already settles the question and reclaim
-        destroys nothing it walks past.
+        (golden rule 1). One read: ``channel_episode_ids`` returns identifiers alone
+        and filters by nothing, so a single held episode — live, expired but not yet
+        purged, or not yet valid — settles the question, and reclaim destroys nothing
+        it finds.
         """
-        cursor: str | None = None
-        while True:
-            batch = await self._conversations.episodes_to_purge(conversation_id, after_id=cursor)
-            if not batch:
-                return True
-            for episode_id in batch:
-                if await self._memory.get(episode_id) is not None:
-                    return False
-            cursor = batch[-1]
-
-    # --- the composed export (§9) -------------------------------------------
-
-    async def export(self) -> DataExport:
-        """Assemble the export a user receives (§9, ADR-0004 §6).
-
-        A ``ConversationTurn`` outlives its episode: the row survives expiry and
-        deletion, carrying an ordinal, an occurrence time and a derived episode id.
-        Handing those rows over would say *that* an exchange happened and *when*,
-        for content the artifact cannot show — leaking when the user was talking
-        and how often. So a turn whose episode does not resolve is skipped, and a
-        conversation that had turns and has none left is dropped with them.
-
-        **The filter's source of truth is the artifact, not the store.** The
-        conversation half is filtered against the memory half of *this* export
-        rather than against a live read, which is what makes the result internally
-        consistent without a transaction spanning the two stores: no turn can
-        dangle, because the thing it is checked against cannot move underneath it.
-
-        A conversation that never had a turn is **kept**. The rule §9 states is
-        about a conversation "whose episodes have all expired" exporting as nothing
-        rather than as an empty shell with a timeline; a conversation that never
-        recorded one has no timeline to leak, and the store's own contract already
-        holds that an empty conversation is state the user holds.
-        """
-        memories = tuple(await self._memory.export())
-        snapshot = await self._conversations.export()
-        live = {record.id for record in memories}
-
-        turns = tuple(turn for turn in snapshot.turns if turn.episode_id in live)
-        indexed = {turn.conversation_id for turn in snapshot.turns}
-        surviving = {turn.conversation_id for turn in turns}
-        conversations = tuple(
-            one for one in snapshot.conversations if one.id in surviving or one.id not in indexed
+        held = await self._memory.channel_episode_ids(
+            conversation_channel(conversation_id), limit=1
         )
-        return DataExport(
-            memories=memories,
-            conversations=snapshot.model_copy(
-                update={"conversations": conversations, "turns": turns}
-            ),
-        )
+        return not held
 
     # --- listing (§2) --------------------------------------------------------
 
@@ -1312,9 +718,10 @@ class ConversationLifecycle:
 __all__ = [
     "BELIEF_KINDS",
     "CAPTURE_CONFIDENCE",
+    "HISTORY_REPLAY_BOUND",
     "AssembledHistory",
-    "CaptureReport",
     "ConversationDigest",
     "ConversationLifecycle",
-    "DataExport",
+    "ParkingOrigin",
+    "conversation_channel",
 ]

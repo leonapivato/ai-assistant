@@ -2406,17 +2406,15 @@ class _SpokenCapture:
     asks which operation it is running under, because it is told.
 
     Attributes:
-        delivery: What capture writes onto the turn's index row —
+        delivery: What capture writes as the episode's delivery row (ADR-0283 §10) —
             ``SpokenDelivery(state=UNKNOWN)`` unconditionally on this operation (§4),
             the park, the absent reply and the degraded synthesis included. At
             capture the hub has produced an answer and knows nothing about what
             reached anyone, and that is what ``UNKNOWN`` says.
-        episode_id: The id of the episode recording the turn, written back by the
-            capture point so ``SpokenTurn.episode_id`` can disclose it (§1).
-            ``None`` where no index row stands for the turn: it is the
-            :class:`~ai_assistant.orchestration.conversations.CaptureReport`'s own
-            value, which is present even where the *episode* write failed, because
-            the row is what carries the delivery.
+        episode_id: ``None`` while the pass runs: capture happens after it ends, and
+            ``SpokenTurn.episode_id`` is then written from the writer's own record of
+            the turn (:func:`~ai_assistant.orchestration.channels.captured_result`,
+            ADR-0283 §2).
     """
 
     delivery: SpokenDelivery = field(
@@ -4710,7 +4708,7 @@ class Engine:
         )
         result, report = await task if event else await asyncio.shield(task)
         assert report is not None  # noqa: S101 — channel admission always creates state
-        return captured_result(result, report, index_episode_id=state.index_episode_id)
+        return captured_result(result, report, episode_id=state.recorded_episode_id)
 
     async def _dispatch_channel(
         self,
@@ -5112,7 +5110,7 @@ class Engine:
         # error frame's value one layer down (ADR-0173 §1).
         result, report = turn.result()
         assert report is not None  # noqa: S101 — channel admission always creates state
-        yield captured_result(result, report, index_episode_id=state.index_episode_id)
+        yield captured_result(result, report, episode_id=state.recorded_episode_id)
 
     async def converse_spoken(
         self,
@@ -7849,10 +7847,10 @@ class Engine:
             offset: How many ordered entries to skip before the page begins.
 
         Returns:
-            The page, in ordinal order, entries whole. Empty where the conversation
-            has no surviving entries — not distinguished from never having had any,
-            because a surface that told them apart would report on transcripts it is
-            meant to have evicted.
+            The page, by instant ascending and then address (ADR-0283 §9), entries
+            whole. Empty where the conversation has no surviving entries — not
+            distinguished from never having had any, because a surface that told
+            them apart would report on transcripts it is meant to have evicted.
 
         Raises:
             RuntimeError: If the engine is shutting down.
@@ -15445,9 +15443,9 @@ class Engine:
     ) -> TurnOutcome:
         """Record the resolution in the conversation that parked, or say it was not.
 
-        The association is **durable and recovered rather than passed** (ADR-0074
-        §3): the parking turn wrote its ``(execution_id, step_id)`` binding into the
-        index, and this resolves it back. Nothing resolving is the ratified case,
+        The association is **durable and recovered rather than passed** (ADR-0283
+        §5): the parking episode recorded its ``(execution_id, step_id)`` binding as
+        its ``links.parks``, and this resolves it back. Nothing resolving is the ratified case,
         not a fault — a park predating capture, or one whose conversation the user
         deleted — and the answer is that the resumption is not captured and no
         conversation is invented for it.
@@ -15460,7 +15458,7 @@ class Engine:
         binding = ParkedBinding(execution_id=parked.execution_id, step_id=parked.step_id)
         try:
             origin = await self._conversations.conversation_of_binding(binding)
-        except ConversationStoreError:
+        except ConversationStoreError, MemoryStoreError:
             capture_loss("association", "failed")
             origin = None
         if origin is None:

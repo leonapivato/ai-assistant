@@ -575,11 +575,9 @@ class FakeAssistantEngine:
         #: discarded — which is §1's rule, kept here so a consumer can drive the page
         #: against it without a store.
         self.deliveries: dict[str, SpokenDelivery] = {}
-        #: How many turns :meth:`converse_spoken` has recorded per conversation, so
-        #: that each one's episode id is distinct and in ADR-0074 §3's reserved
-        #: ``conv:`` namespace. A counter rather than the length of anything, for
-        #: :attr:`_written`'s reason one field over.
-        self._episode_ordinals: dict[str, int] = {}
+        #: Which conversation each captured episode was recorded in, by episode id.
+        #: Every id is ``activation:<activation_id>``, fixed at admission
+        #: (ADR-0283 §2), so membership is retained here rather than read off the id.
         self._episode_conversations: dict[str, str] = {}
         activation_ids = count(1)
         self.activation_id_factory: Callable[[], str] = lambda: str(
@@ -1372,7 +1370,7 @@ class FakeAssistantEngine:
         if activation.output_failure is not None:
             raise activation.output_failure
         assert result is not None  # noqa: S101 — a successful dispatch returned a value
-        return captured_result(result, report, index_episode_id=activation.episode_id)
+        return captured_result(result, report, episode_id=activation.episode_id)
 
     def _validate_legacy_channel(
         self,
@@ -1540,7 +1538,7 @@ class FakeAssistantEngine:
         for value in values[:-1]:
             assert isinstance(value, ReplyChunk)  # noqa: S101 — stream prefix
             yield value
-        yield captured_result(result, report, index_episode_id=activation.episode_id)
+        yield captured_result(result, report, episode_id=activation.episode_id)
 
     def _fit_channel_stream(
         self,
@@ -1868,13 +1866,15 @@ class FakeAssistantEngine:
             "converse_spoken",
         )
 
-    def _allocate_episode(
-        self, conversation_id: str, activation: FakeActivation | None = None
-    ) -> str:
-        """Allocate one shared text/speech ordinal and retain explicit membership."""
-        ordinal = self._episode_ordinals.get(conversation_id, 0) + 1
-        self._episode_ordinals[conversation_id] = ordinal
-        episode = f"conv:{conversation_id}:{ordinal}"
+    def _allocate_episode(self, conversation_id: str, activation: FakeActivation) -> str:
+        """Record the activation's episode in its conversation (ADR-0283 §2, §7).
+
+        The id is the activation's own, ``activation:<activation_id>`` — the same value
+        on every channel, so nothing here derives it from the conversation or a count —
+        and membership is retained explicitly, standing in for the conversation's
+        channel.
+        """
+        episode = f"activation:{activation.activation_id}"
         self._episode_conversations[episode] = conversation_id
         digest = self.conversations_held[conversation_id]
         self.conversations_held[conversation_id] = digest.model_copy(
@@ -1883,7 +1883,7 @@ class FakeAssistantEngine:
                 "last_turn_at": _AT,
             }
         )
-        if activation is None or (
+        if (
             isinstance(activation.trigger, RecordedChannelTrigger)
             and isinstance(activation.trigger.payload, RecordedSpeechInput)
             and activation.outcome is not None
@@ -1984,12 +1984,13 @@ class FakeAssistantEngine:
         except BaseException as exc:
             failure = exc
         if activation is not None:
+            admitted = activation
             if result is not None:
-                activation.observe(result)
-            report = await activation.finish(
+                admitted.observe(result)
+            report = await admitted.finish(
                 memory=self.episode_memory,
                 conversations=self.conversations_held,
-                allocate=self._allocate_episode,
+                allocate=lambda conversation: self._allocate_episode(conversation, admitted),
                 max_bytes=self._max_payload_bytes,
                 failure=failure,
                 check_output=lambda: self._checked(result, "resume"),
@@ -3531,7 +3532,7 @@ class FakeAssistantEngine:
         limit: int = DEFAULT_PAGE_SIZE,
         offset: int = 0,
     ) -> tuple[TranscriptEntry, ...]:
-        """Read one conversation's transcript, in ordinal order."""
+        """Read one conversation's transcript, by instant and then address (ADR-0283 §9)."""
         named = identifier(conversation_id, name="conversation_id")
         positive_page_argument(limit, name="limit")
         page_argument(offset, name="offset")
