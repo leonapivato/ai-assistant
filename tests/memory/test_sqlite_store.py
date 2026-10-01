@@ -3142,3 +3142,25 @@ async def test_episode_numbers_survive_a_reopen_and_are_never_reissued(tmp_path:
         assert held[-1].number > top
     finally:
         reopened.close()
+
+
+async def test_a_corrupt_blob_is_still_deletable_under_the_parking_index(tmp_path: Path) -> None:
+    """SQLite evaluates ``records_by_parking``'s expression on every write and delete.
+
+    Unguarded, ``json_extract`` over a malformed blob raises inside that evaluation, so
+    the corrupt row could neither be rewritten nor deleted; guarded, it indexes as
+    ``NULL`` and the store can still remove it.
+    """
+    store = SqliteMemoryStore(
+        traces_sink=FakeTraceSink(),
+        path=tmp_path / "memory.db",
+        embedder=HashingEmbedder(dimensions=8),
+        now=_fixed_now,
+    )
+    try:
+        await store.add(_on_channel("corrupt"))
+        store._conn.execute("UPDATE records SET data = '{not json' WHERE id = 'corrupt'")
+        assert await store.delete("corrupt") is True
+        assert await store.channel_episode_ids(_CHANNEL_A, limit=10) == ()
+    finally:
+        store.close()
