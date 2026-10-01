@@ -22,7 +22,7 @@ contract, and the archive's predicates in ``tests/archive/``.
 from __future__ import annotations
 
 import re
-from datetime import UTC, datetime
+from datetime import UTC, datetime, timedelta
 from io import StringIO
 from typing import TYPE_CHECKING, Final
 
@@ -52,13 +52,18 @@ def _entry(  # noqa: PLR0913 — one keyword per field of the model this builds,
     address: str = "c1:1",
     *,
     conversation: str = "c1",
-    ordinal: int = 1,
+    ordinal: int | None = None,
     at: datetime | None = None,
     asked: str | None = "where did I put the lease",
     replied: str | None = "in the blue folder, you said",
     disposition: ExchangeDisposition = ExchangeDisposition.NO_ACTION_NEEDED,
 ) -> TranscriptEntry:
-    """One archived turn, with every field defaulted to something a case can vary."""
+    """One archived turn, with every field defaulted to something a case can vary.
+
+    ``ordinal`` defaults to ``None``, the entry the writer produces once it addresses
+    a turn by its episode's id (ADR-0283 §9); a case passes one only to show that a
+    legacy entry still carrying it does not have it rendered.
+    """
     return TranscriptEntry(
         address=address,
         conversation_id=conversation,
@@ -248,7 +253,7 @@ def test_the_two_size_figures_are_both_shown_and_are_never_netted(
     _, screen = _run(
         output,
         monkeypatch,
-        _engine(_entry(), _entry("c1:2", ordinal=2)),
+        _engine(_entry(), _entry("c1:2")),
         [
             "transcript",
             "export",
@@ -301,7 +306,7 @@ def test_a_shortened_excerpt_says_so_and_points_at_the_whole_turn(
     one, and the excerpt bound would read as the turn itself — which is the one way a
     bounded rendering can mislead about the thing it is bounding.
     """
-    long_turn = _entry("c1:9", ordinal=9, asked="lease " + ("x" * 2000), replied="mm")
+    long_turn = _entry("c1:9", asked="lease " + ("x" * 2000), replied="mm")
     _, screen = _run(output, monkeypatch, _engine(long_turn), ["transcript", "search", "lease"])
 
     assert "Shortened" in screen
@@ -373,19 +378,93 @@ def test_an_unknown_address_is_reported_without_saying_which_kind_of_absence(
 def test_a_conversation_is_rendered_in_the_order_the_engine_handed_over(
     output: StringIO, monkeypatch: pytest.MonkeyPatch
 ) -> None:
-    """§7: ordinal order, and the adapter re-sorts nothing (golden rule 3).
+    """§7 as ADR-0283 §9 amends it: by instant, then address, and the adapter re-sorts
+    nothing (golden rule 3).
 
-    The archive is seeded out of order so that a surface establishing the order
-    itself and one relaying it cannot both pass.
+    The archive is seeded out of order, and the addresses run against the instants,
+    so that a surface establishing the order itself — by address or by insertion —
+    and one relaying the archive's cannot both pass.
     """
     engine = _engine(
-        _entry("c1:3", ordinal=3, asked="third"),
-        _entry("c1:1", ordinal=1, asked="first"),
-        _entry("c1:2", ordinal=2, asked="second"),
+        _entry("c1:a", at=_AT + timedelta(seconds=20), asked="third"),
+        _entry("c1:b", at=_AT, asked="first"),
+        _entry("c1:c", at=_AT + timedelta(seconds=10), asked="second"),
     )
     _, screen = _run(output, monkeypatch, engine, ["transcript", "conversation", "c1"])
 
     assert screen.index("first") < screen.index("second") < screen.index("third")
+
+
+# --- ADR-0283 §9: the instant is rendered where the ordinal was ---------------
+
+
+@pytest.mark.parametrize(
+    "argv",
+    [
+        ["transcript", "show", "c1:1"],
+        ["transcript", "conversation", "c1"],
+        ["transcript", "export"],
+        ["transcript", "forget", "c1:1"],
+        ["transcript", "forget-conversation", "c1"],
+    ],
+)
+def test_an_entry_is_placed_in_its_conversation_by_its_instant(
+    output: StringIO, monkeypatch: pytest.MonkeyPatch, argv: list[str]
+) -> None:
+    """ADR-0283 §9:2: "The CLI renders a transcript entry's instant where it rendered
+    its ordinal."
+
+    Over an entry whose ordinal is ``None`` — what the writer produces once it
+    addresses a turn by its episode's id — and over every command that renders an
+    entry whole, the destroys' previews included. The instant sits on the
+    conversation line, in the ordinal's place, and no ``turn`` position is printed
+    there.
+    """
+    entry = _entry(at=datetime(2026, 3, 1, 9, 0, 7, 250_000, tzinfo=UTC))
+
+    _, screen = _run(output, monkeypatch, _engine(entry), argv, stdin="n\n")
+
+    assert "Conversation: c1 at 2026-03-01 09:00:07.250000 UTC · no_action_needed" in screen
+    assert "turn None" not in screen
+
+
+def test_a_legacy_entry_s_ordinal_is_not_rendered(
+    output: StringIO, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """ADR-0283 §9:1: an entry carries no ordinal, so one an older writer left is not
+    shown.
+
+    Until the field is removed (§14, lane 7) an archive can still hand over an entry
+    carrying one. Rendering it would put a position on the screen that orders nothing
+    — the conversation's read is by instant, then address — so a reader would be
+    shown a sequence the page is not in.
+    """
+    legacy = _entry(ordinal=4242)
+
+    _, screen = _run(output, monkeypatch, _engine(legacy), ["transcript", "show", "c1:1"])
+
+    assert "4242" not in screen
+    assert "Conversation: c1 at 2026-03-01 09:00:00.000000 UTC" in screen
+
+
+def test_two_turns_in_one_minute_render_two_instants(
+    output: StringIO, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """The instant is the conversation's order key now, so it is rendered whole.
+
+    Two turns of one exchange are routinely seconds apart. At minute precision the
+    page would show them at one instant, an order the reader is shown and cannot
+    account for; at the microsecond each turn's place in the read is legible.
+    """
+    engine = _engine(
+        _entry("c1:a", at=_AT + timedelta(seconds=3), asked="first"),
+        _entry("c1:b", at=_AT + timedelta(seconds=41), asked="second"),
+    )
+
+    _, screen = _run(output, monkeypatch, engine, ["transcript", "conversation", "c1"])
+
+    assert "at 2026-03-01 09:00:03.000000 UTC" in screen
+    assert "at 2026-03-01 09:00:41.000000 UTC" in screen
 
 
 # --- ADR-0085 §9 at the parse boundary --------------------------------------
@@ -488,7 +567,7 @@ def test_destroying_a_conversation_s_transcript_shows_what_is_held_and_states_th
     the prompt states the scope in words. A count taken from the first page would be
     read as the number about to be destroyed, which is worse than no count at all.
     """
-    engine = _engine(_entry(), _entry("c1:2", ordinal=2, asked="and the keys"))
+    engine = _engine(_entry(), _entry("c1:2", asked="and the keys"))
     code, screen = _run(
         output,
         monkeypatch,
