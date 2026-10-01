@@ -1486,6 +1486,42 @@ class ConversationStoreContract:
         assert untouched is not None
         assert untouched.delivery == _UNSTAMPED, "the turn row is not a second target"
 
+    async def test_a_delivery_row_made_after_a_turn_row_stamp_inherits_the_stamp(
+        self, store: ConversationStore
+    ) -> None:
+        """ADR-0205 §1 across the two rows: a turn-row stamp is not reset by ``record_turn``.
+
+        The episode is stamped through its turn row first, before any delivery row
+        exists. A later ``record_turn`` naming the same episode with ``UNKNOWN`` must
+        not create a fresh ``UNKNOWN`` delivery row — that row is the preferred
+        target, so a second report would stamp the episode twice and hide the first.
+        """
+        conversation = await store.start()
+        turn = await store.append(conversation.id, occurred_at=_NOW, delivery=_UNSTAMPED)
+        assert (
+            await store.record_delivery(
+                conversation.id, episode_id=turn.episode_id, delivery=_INTERRUPTED
+            )
+            is True
+        )
+
+        await store.record_turn(
+            conversation.id, episode_id=turn.episode_id, occurred_at=_NOW, delivery=_UNSTAMPED
+        )
+
+        assert await store.deliveries(conversation.id, episode_ids=[turn.episode_id]) == {
+            turn.episode_id: _INTERRUPTED
+        }
+        assert (
+            await store.record_delivery(
+                conversation.id, episode_id=turn.episode_id, delivery=_COMPLETE
+            )
+            is False
+        )
+        assert await store.deliveries(conversation.id, episode_ids=[turn.episode_id]) == {
+            turn.episode_id: _INTERRUPTED
+        }
+
     async def test_a_delivery_row_report_is_never_applied_across_conversations(
         self, store: ConversationStore
     ) -> None:

@@ -554,7 +554,9 @@ class FakeConversationStore:
         here the writer's deletion verification (§7:2): a ``stamp_deleted`` or a
         ``drop_if_eligible`` lands wholly before or wholly after it. The delivery
         row is written only where none exists, so a retried capture cannot reset a
-        stamped delivery.
+        stamped delivery; where this conversation's turn row already carries the
+        episode's delivery, the new row inherits that value instead of ``delivery``
+        (ADR-0205 §1).
 
         The argument checks are before the exclusion is taken and before anything
         is read, which is "locally, before any I/O" (§6:3).
@@ -571,7 +573,17 @@ class FakeConversationStore:
             recorded = conversation.model_copy(update={"last_turn_at": checked_at})
             self._conversations[conversation_id] = recorded
             if delivery is not None:
-                self._deliveries[conversation_id].setdefault(checked_id, delivery)
+                # ADR-0205 §1: inherit a delivery this conversation's turn row already
+                # carries for the episode, so a stamp made there is not reset here.
+                inherited = next(
+                    (
+                        turn.delivery
+                        for turn in self._turns[conversation_id]
+                        if turn.episode_id == checked_id and turn.delivery is not None
+                    ),
+                    delivery,
+                )
+                self._deliveries[conversation_id].setdefault(checked_id, inherited)
             return recorded
 
     async def append(
