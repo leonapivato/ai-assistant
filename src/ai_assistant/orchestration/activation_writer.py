@@ -75,6 +75,9 @@ class _Writes:
     verified: bool = False
     #: ``record_turn`` returned ``None``: the conversation is absent or stamped.
     gone: bool = False
+    #: A record-scoped ``forget`` named this address while the capture was in flight
+    #: (:meth:`ActivationWriter.forgetting`).
+    forgotten: bool = False
 
 
 class ActivationWriter:
@@ -97,6 +100,27 @@ class ActivationWriter:
         self._archive_enabled = archive_enabled
         self._retention = retention
         self._now = checked_clock(now, owner="ActivationWriter")
+        #: The captures in flight, by address, so a ``forget`` can reach one.
+        self._in_flight: dict[str, list[_Writes]] = {}
+
+    def forgetting(self, address: str) -> None:
+        """Tell any capture in flight at ``address`` that its record is being forgotten.
+
+        ADR-0283 §7:1 writes a conversational episode before its archive entry, so a
+        record-scoped ``forget`` (ADR-0225 §5) landing between the two would find no
+        entry to discard, delete the episode, and leave the entry to be written for a
+        record the user was told was gone. ``forget`` calls this **before** its
+        discard: an entry appended before that discard is destroyed by it, and a
+        capture that appends after it sees the mark, calls no ``record_turn``, and
+        destroys its own entry and episode through the fence.
+
+        The coordination is in-process, which is the whole of the hub's: one resident
+        process per data directory owns both the writer and ``forget``. It reads no
+        store, so neither a failing read nor an episode's ordinary expiry can stand in
+        for the user's act.
+        """
+        for writes in self._in_flight.get(address, ()):
+            writes.forgotten = True
 
     async def write(
         self,
@@ -133,14 +157,9 @@ class ActivationWriter:
         cancellation of this call cannot strand an episode on a conversation the user
         deleted.
 
-        **An entry whose episode the user forgot meanwhile is discarded** (ADR-0225
-        §5). §7:1 writes the episode before the archive entry, so a record-scoped
-        ``forget`` landing between the two finds no entry to discard and deletes the
-        episode, and the entry would then be written for a record the user was told
-        was gone. So once an entry may have been written, the episode is read back
-        before ``record_turn``: where it is gone, ``record_turn`` is not called and the
-        fence discards the entry. ``forget`` discards again after its delete, which
-        covers an entry landing after its first discard and before this read.
+        **A record the user forgets while it is captured leaves nothing** (ADR-0225
+        §5): where :meth:`forgetting` marked this capture before ``record_turn``, the
+        turn is not recorded and the fence destroys the entry and the episode.
         """
         if isinstance(state.trigger, RecordedResumeTrigger) and state.conversation_id is None:
             capture_loss("association", "unresolved")
@@ -169,20 +188,24 @@ class ActivationWriter:
             return state.degraded_report()
         writes = _Writes()
         owed = conversation_id is not None and facts is not None and self._archive_enabled
+        self._in_flight.setdefault(address, []).append(writes)
         try:
             await self._episode_once(episode, writes)
             if conversation_id is not None and writes.episode_confirmed:
                 if owed:
                     await self._archive_once(state, conversation_id, episode, writes)
-                if not writes.archive_possible or await self._held(address):
+                if not writes.forgotten:
                     await self._record_turn(state, conversation_id, episode, writes)
         finally:
-            if (
-                conversation_id is not None
-                and (writes.episode_possible or writes.archive_possible)
-                and not writes.verified
-            ):
-                await drain(self._fence(conversation_id, address, writes))
+            try:
+                if (
+                    conversation_id is not None
+                    and (writes.episode_possible or writes.archive_possible)
+                    and not writes.verified
+                ):
+                    await drain(self._fence(conversation_id, address, writes))
+            finally:
+                self._settled(address, writes)
         if (
             writes.episode_confirmed
             and (not owed or writes.archive_confirmed)
@@ -259,17 +282,14 @@ class ActivationWriter:
         writes.verified = True
         state.recorded_episode_id = episode.id
 
-    async def _held(self, address: str) -> bool:
-        """Whether the episode this capture wrote still stands (ADR-0225 §5).
-
-        An unreadable store answers ``True``: the ordinary case is that it stands, and
-        a ``record_turn`` withheld on a guess would cost the turn its delivery row.
-        """
-        try:
-            return await self._memory.get(address) is not None
-        except Exception:
-            capture_loss("verify_episode", "uncertain")
-            return True
+    def _settled(self, address: str, writes: _Writes) -> None:
+        """Stop tracking one capture at ``address`` once its fence has run."""
+        held = self._in_flight.get(address)
+        if held is None:
+            return
+        held[:] = [one for one in held if one is not writes]
+        if not held:
+            del self._in_flight[address]
 
     async def _fence(self, conversation_id: str, address: str, writes: _Writes) -> None:
         """Destroy what this capture wrote where its conversation is gone (§7:2, §7:4).
@@ -283,18 +303,16 @@ class ActivationWriter:
         **The archive entry goes first**, on ADR-0225 §5's rule that the residue of a
         partial failure must be one the user can still reach and destroy.
 
-        **Where the conversation stands, an entry is still discarded if its episode is
-        gone**, because the user forgot the record while this capture ran (ADR-0225 §5).
+        **A forgotten capture is destroyed whatever its conversation's state**,
+        because the user's act named the record itself (ADR-0225 §5).
         """
-        if not writes.gone:
+        if not writes.gone and not writes.forgotten:
             try:
                 standing = await self._conversations.get(conversation_id)
             except Exception:
                 capture_loss("verify", "uncertain")
                 return
             if standing is not None:
-                if writes.archive_possible and not await self._held(address):
-                    await self._discard(address)
                 return
         if writes.archive_possible and not await self._discard(address):
             # Keep the memory record reachable until archive destruction succeeds,

@@ -247,15 +247,16 @@ class CommitThen(FakeMemoryStore):
 async def test_a_record_forgotten_between_episode_and_entry_leaves_no_entry() -> None:
     """ADR-0225 §5 under §7:1: the user forgot the record before its entry landed.
 
-    ``forget``'s first discard finds nothing and its delete takes the episode; the
-    writer then appends the entry, reads its episode back, finds it gone, calls no
-    ``record_turn`` and discards the entry.
+    ``forget`` marks the capture, its discard finds nothing and its delete takes the
+    episode; the writer then appends the entry, sees the mark, calls no
+    ``record_turn`` and destroys the entry through the fence.
     """
     memory = CommitThen()
     wiring = Wiring(memory=memory)
     state = await wiring.state()
 
     async def forgotten() -> None:
+        wiring.writer.forgetting(_ADDRESS)
         await wiring.archive.discard(_ADDRESS)
         await memory.delete(_ADDRESS)
 
@@ -267,6 +268,44 @@ async def test_a_record_forgotten_between_episode_and_entry_leaves_no_entry() ->
     assert await wiring.memory.get(_ADDRESS) is None
     assert await wiring.last_turn_at(state) is None, "no record_turn for a forgotten episode"
     assert state.recorded_episode_id is None
+
+
+async def test_an_episode_forgotten_before_it_commits_is_destroyed_by_its_capture() -> None:
+    """ADR-0225 §5: ``forget`` found nothing yet, so the capture destroys what it writes."""
+    memory = CommitThen()
+    wiring = Wiring(memory=memory)
+    state = await wiring.state()
+    wiring.writer.forgetting(_ADDRESS)  # before any capture: marks nothing
+
+    async def marked() -> None:
+        wiring.writer.forgetting(_ADDRESS)
+
+    memory.after = marked
+    report = await wiring.write(state)
+
+    assert report.state == "degraded"
+    assert wiring.archive.recorded == {}
+    assert await wiring.on_channel(state) == []
+    assert await wiring.last_turn_at(state) is None
+    assert wiring.writer._in_flight == {}, "the capture stopped being tracked"
+
+
+async def test_an_expired_episode_keeps_its_transcript() -> None:
+    """ADR-0225 §5: expiry removes nothing from the archive, and no read stands in for forget.
+
+    The episode's retention has already passed when the entry is written; the capture
+    is unmarked, so the entry, the turn and the report stand.
+    """
+    later = _AT + timedelta(seconds=5)
+    wiring = Wiring(memory=FakeMemoryStore(now=lambda: later))
+    wiring.writer._retention = timedelta(seconds=1)
+    state = await wiring.state()
+    report = await wiring.write(state)
+
+    assert report.state == "recorded"
+    assert _ADDRESS in wiring.archive.recorded
+    assert await wiring.memory.get(_ADDRESS) is None, "the episode reads as expired"
+    assert await wiring.last_turn_at(state) == _AT
 
 
 async def test_the_archive_switch_off_records_the_episode_and_the_turn_and_no_entry() -> None:

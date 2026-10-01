@@ -163,3 +163,38 @@ async def test_a_colliding_activation_id_moves_no_episode_to_the_second_conversa
     first_digest = await engine.conversation(first)
     assert first_digest is not None
     assert first_digest.recorded_turns == 1
+
+
+async def test_a_conversation_colliding_with_a_standalone_episode_cannot_claim_it() -> None:
+    """ADR-0283 §7:3: the standalone episode keeps its address and leaves with no forget.
+
+    Empty speech records a standalone episode; a conversation's capture at the same
+    address degrades, and forgetting that conversation leaves the standalone one.
+    """
+    engine = FakeAssistantEngine()
+    engine.activation_id_factory = lambda: "00000000-0000-4000-8000-0000000000bb"
+    engine.spoken_transcript = " \t\n"
+    address = "activation:00000000-0000-4000-8000-0000000000bb"
+    spoken = await engine.receive(
+        ChannelInput(target=NewConversation(), payload=SpeechChannelPayload(audio=_AUDIO)),
+        reply=SpokenReply(plays=(SpokenAudioFormat.MP4,)),
+        timeout=_BUDGET,
+    )
+    assert spoken.channel is None
+    assert spoken.capture.state == "recorded"
+    assert await engine.episode_memory.get(address) is not None
+
+    texted = await engine.receive(
+        ChannelInput(target=NewConversation(), payload=TextChannelPayload(text="hello")),
+        reply=WholeTextReply(),
+        timeout=_BUDGET,
+    )
+
+    assert texted.capture.state == "degraded"
+    assert texted.channel is not None
+    conversation = texted.channel.instance_id
+    digest = await engine.conversation(conversation)
+    assert digest is not None
+    assert digest.recorded_turns == 0
+    assert await engine.forget_conversation(conversation) is True
+    assert await engine.episode_memory.get(address) is not None

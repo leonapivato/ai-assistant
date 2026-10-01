@@ -41,7 +41,7 @@ from ai_assistant.testing.routing import FakeRoutingRecorder
 if TYPE_CHECKING:
     from collections.abc import Sequence
 
-    from ai_assistant.core.types import CurrentContext, MemoryRecord, ShownFile
+    from ai_assistant.core.types import CurrentContext, MemoryRecord, MemoryWrite, ShownFile
 
 #: A span nothing else in this tree says, so a match anywhere is this entry's.
 ARCHIVED_SPAN = "the lender was Ravensworth and the account was nine-nine-four"
@@ -245,30 +245,36 @@ async def test_forget_discards_the_transcript_before_it_destroys_the_record() ->
     assert await harness.memory.get(entry.address) is None
 
 
-async def test_forget_discards_an_entry_that_lands_between_its_discard_and_its_delete(
+async def test_a_record_forgotten_while_it_is_captured_leaves_no_transcript(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
-    """ADR-0225 §5 under ADR-0283 §7:1: a capture writes its entry after its episode.
+    """ADR-0225 §5 under ADR-0283 §7:1: the episode lands first, then ``forget`` runs.
 
-    So an entry can land after ``forget``'s first discard and before the record is
-    destroyed; the closing discard is what keeps it from outliving the record.
+    ``forget`` completes between the episode's commit and the archive append, so its
+    discard finds nothing. The capture, told by ``forget`` before it discarded, must
+    destroy the entry it then writes, and the episode with it.
     """
     harness = Harness(tools=(tool(),))
-    await harness.engine.converse("where did I say that", timeout=PATIENT)
-    (entry,) = await harness.archive.entries()
-    original = harness.memory.delete
+    original = harness.memory.write_atomic
+    forgotten: list[str] = []
 
-    async def delete(record_id: str) -> bool:
-        # A concurrent capture's append, landing between the two halves of forget.
-        await harness.archive.writer().append(entry)
-        return await original(record_id)
+    async def write_atomic(writes: Sequence[MemoryWrite]) -> Sequence[str]:
+        written = await original(writes)
+        episode = [write.record.id for write in writes if write.record.id.startswith("activation:")]
+        if episode and not forgotten:
+            forgotten.append(episode[0])
+            assert await harness.engine.forget(episode[0]) is True
+        return written
 
-    monkeypatch.setattr(harness.memory, "delete", delete)
+    monkeypatch.setattr(harness.memory, "write_atomic", write_atomic)
 
-    assert await harness.engine.forget(entry.address) is True
+    outcome = await harness.engine.converse("where did I say that", timeout=PATIENT)
 
-    assert await harness.archive.entry(entry.address) is None
-    assert await harness.memory.get(entry.address) is None
+    assert forgotten, "forget ran between the episode and the entry"
+    assert outcome.capture_degraded is True
+    assert await harness.archive.entry(forgotten[0]) is None
+    assert await harness.archive.entries() == []
+    assert await harness.memory.get(forgotten[0]) is None
 
 
 async def test_forget_reaches_the_transcript_of_a_record_that_is_already_gone() -> None:
