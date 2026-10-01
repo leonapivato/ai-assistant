@@ -399,6 +399,10 @@ dev = [
     # invocation whose exact collection defines an anchor (ADR-0166 §1). The
     # layer uses `playwright.async_api` with the suite's own fixtures.
     "playwright>=1.62.0",
+    # The default per-test deadline set under `[tool.pytest.ini_options]`: a test
+    # that awaits an event nothing will set fails by name instead of holding the
+    # whole run until an outer timeout kills it with no name at all.
+    "pytest-timeout>=2.3",
 ]
 
 # ADR-0024 §4 supersedes ADR-0002's `uv_build` clause: `uv_build` supports no
@@ -582,6 +586,17 @@ pythonpath = ["."]
 # workers, so a serial run is the serial run it was.
 addopts = "-ra --strict-markers --strict-config --dist loadgroup"
 asyncio_mode = "auto"
+# A per-test deadline (pytest-timeout). Many async tests park on an
+# `asyncio.Event` with no deadline of their own, so a change that reorders what
+# they wait on turns a failure into a silent hang, and a directory run then only
+# says "timed out" once something outside it gives up. On expiry the test fails
+# with every thread's stack, which names the await it was stuck on, and the run
+# continues. The slowest test takes about 40s under `just test-fast`, so the
+# default leaves roughly three times that much headroom; a test that legitimately
+# needs longer says so with `@pytest.mark.timeout(seconds)`. The `signal` method
+# fails only the one test; `thread` would exit the whole worker.
+timeout = 120
+timeout_method = "signal"
 markers = [
     "integration: tests that touch the network, filesystem, or external services",
     # On a conformance-suite test only: this obligation may not apply to every
