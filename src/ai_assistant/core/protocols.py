@@ -18672,9 +18672,12 @@ class TranscriptArchive(Protocol):
     ) -> list[TranscriptEntry]:
         """One conversation's entries, in the order they were said (§7).
 
-        **Ordinal order, ascending**, because a transcript's order is the order it was
-        said in — the one read whose order is not the newest-first total order the
-        other three use.
+        **By instant ascending, then address** (ADR-0283 §9), because a transcript's
+        order is the order it was said in — the one read whose order is not the
+        newest-first total order the other three use. The address breaks a shared
+        instant, so the order is total and a paged read neither repeats nor loses an
+        entry. No entry's ``ordinal`` orders it; the field is optional and on its way
+        out.
 
         It resolves inside the archive, so a conversation whose index and record
         ADR-0074 §7's reclaim has already dropped still yields its transcript. That
@@ -18684,7 +18687,7 @@ class TranscriptArchive(Protocol):
         Args:
             conversation_id: The conversation to read, taken as opaque.
             limit: Maximum entries to return.
-            offset: How many entries to skip, in ordinal order.
+            offset: How many entries to skip, in that order.
 
         Returns:
             Up to ``limit`` entries, whole — elided, truncated and summarised in no

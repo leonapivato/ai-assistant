@@ -109,6 +109,30 @@ def test_the_first_turn_ordinal_is_admitted() -> None:
     assert _entry(ordinal=FIRST_TURN_ORDINAL).ordinal == FIRST_TURN_ORDINAL
 
 
+# --- the ordinal is optional (ADR-0283 §9, §14 lane 3) ----------------------
+
+
+def test_an_entry_with_no_ordinal_is_admitted_and_defaults_to_none() -> None:
+    """ADR-0283 §9: an entry carries no ordinal once its writer addresses it by episode.
+
+    Both spellings of "no ordinal" construct, and both read back as ``None``: a
+    writer that no longer allocates one omits it, and a decoded frame from a peer
+    that sent ``null`` carries it explicitly. The domain check above still binds a
+    value that *is* given.
+    """
+    fields: dict[str, object] = {
+        "address": "activation:a1",
+        "conversation_id": "c1",
+        "occurred_at": AT,
+        "asked": None,
+        "replied": None,
+        "disposition": ExchangeDisposition.NO_ACTION_NEEDED,
+    }
+
+    assert TranscriptEntry.model_validate(fields).ordinal is None
+    assert _entry(ordinal=None).ordinal is None
+
+
 # --- the disposition is required (§10, §13 item 15) -------------------------
 
 

@@ -429,6 +429,85 @@ def test_a_second_writer_of_the_same_address_is_refused_across_connections(
         archive.close()
 
 
+#: The table and the conversation index as a file created before ADR-0283 §9 holds
+#: them: ``ordinal`` refuses ``NULL``, and the conversation read's index is ordered
+#: by it. Spelled out rather than derived, because the point is a file this version
+#: of the store did not create.
+_LEGACY_SCHEMA = (
+    "CREATE TABLE entries("
+    "address TEXT PRIMARY KEY NOT NULL, conversation_id TEXT NOT NULL, "
+    "ordinal INTEGER NOT NULL, occurred_at_us INTEGER NOT NULL, asked TEXT, "
+    "replied TEXT, asked_folded TEXT, replied_folded TEXT, disposition TEXT NOT NULL)",
+    "CREATE INDEX entries_by_conversation ON entries(conversation_id, ordinal, address)",
+)
+
+
+def _legacy_file(path: Path) -> None:
+    """Create ``path`` holding :data:`_LEGACY_SCHEMA` and no rows."""
+    conn = sqlite3.connect(path)
+    try:
+        for statement in _LEGACY_SCHEMA:
+            conn.execute(statement)
+        conn.commit()
+    finally:
+        conn.close()
+
+
+def _index_names(path: Path) -> set[str]:
+    """The names of the archive's own indexes in the file at ``path``."""
+    conn = sqlite3.connect(path)
+    try:
+        rows = conn.execute(
+            "SELECT name FROM sqlite_master WHERE type = 'index' AND name LIKE 'entries_by_%'"
+        )
+        return {name for (name,) in rows}
+    finally:
+        conn.close()
+
+
+def test_the_conversation_index_follows_the_instant_order(tmp_path: Path) -> None:
+    """ADR-0283 §9: the index the conversation read uses is ordered as the read is.
+
+    And the ordinal-ordered index a file created before that decision carries is
+    dropped on open rather than left standing: no read uses it, and it would cost
+    every write and count against ``stored_bytes``.
+    """
+    fresh = tmp_path / "fresh.db"
+    _at_now(path=fresh).close()
+    legacy = tmp_path / "legacy.db"
+    _legacy_file(legacy)
+    _at_now(path=legacy).close()
+
+    expected = {"entries_by_conversation_instant", "entries_by_instant"}
+    assert _index_names(fresh) == expected
+    assert _index_names(legacy) == expected
+
+
+async def test_a_legacy_file_refusing_an_absent_ordinal_is_not_reported_as_a_collision(
+    tmp_path: Path,
+) -> None:
+    """A file created before ADR-0283 §9 keeps its ``NOT NULL`` ordinal column.
+
+    ``CREATE TABLE IF NOT EXISTS`` rewrites no table and §12 owes no migration — the
+    hub moves to a fresh data directory — so such a file refuses an entry without an
+    ordinal. What it must not do is say an entry already stands at that address:
+    nothing does, and that message names a fault of a different class.
+    """
+    path = tmp_path / "transcripts.db"
+    _legacy_file(path)
+    archive = _at_now(path=path)
+    try:
+        with pytest.raises(TranscriptArchiveError) as refused:
+            await archive.append(entry("activation:a1", ordinal=None, asked=_PRIVATE))
+
+        assert "already stands" not in str(refused.value)
+        assert "activation:a1" in str(refused.value)
+        assert _PRIVATE not in str(refused.value)
+        assert await archive.entries() == []
+    finally:
+        archive.close()
+
+
 def _run(coro: Any) -> Any:
     """Drive one coroutine to completion from a synchronous case."""
     import asyncio  # noqa: PLC0415 — one synchronous case needs a loop of its own

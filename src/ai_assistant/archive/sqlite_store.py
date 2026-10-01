@@ -101,7 +101,9 @@ _CREATE_TABLE = (
     "CREATE TABLE IF NOT EXISTS entries("
     "address TEXT PRIMARY KEY NOT NULL, "
     "conversation_id TEXT NOT NULL, "
-    "ordinal INTEGER NOT NULL, "
+    # Nullable since ADR-0283 §9: an entry carries no ordinal once its writer
+    # addresses it by the episode's id, and no read orders by this column.
+    "ordinal INTEGER, "
     "occurred_at_us INTEGER NOT NULL, "
     "asked TEXT, "
     "replied TEXT, "
@@ -114,11 +116,16 @@ _CREATE_TABLE = (
 #: set closed: an index is not a second on-disk artifact, so every byte
 #: ``stored_bytes`` counts is a byte ADR-0225 §9's ``0600`` protects.
 _INDEXES = (
-    "CREATE INDEX IF NOT EXISTS entries_by_conversation ON entries("
+    # The index the conversation read used while it ordered by ordinal. Dropped
+    # rather than left standing in a file created before ADR-0283 §9: no read uses
+    # it any more, and it would only cost writes and bytes `stored_bytes` counts.
+    "DROP INDEX IF EXISTS entries_by_conversation",
+    "CREATE INDEX IF NOT EXISTS entries_by_conversation_instant ON entries("
     # Carries the tie-break column for the reason the instant index does: the
-    # conversation read's order is `(ordinal, address)`, and an index stopping at
-    # `ordinal` leaves the tie-break to a sort over the whole conversation.
-    "conversation_id, ordinal, address)",
+    # conversation read's order is `(occurred_at_us, address)` (ADR-0283 §9), and an
+    # index stopping at the instant leaves the tie-break to a sort over the whole
+    # conversation.
+    "conversation_id, occurred_at_us, address)",
     "CREATE INDEX IF NOT EXISTS entries_by_instant ON entries(occurred_at_us DESC, address)",
 )
 
@@ -592,6 +599,17 @@ class SqliteTranscriptArchive:
             try:
                 conn.execute(_INSERT, row)
             except sqlite3.IntegrityError as exc:
+                if exc.sqlite_errorname != "SQLITE_CONSTRAINT_PRIMARYKEY":
+                    # Not a collision, so not reported as one. The case this names
+                    # is a file created before ADR-0283 §9, whose `ordinal` column
+                    # still refuses `NULL`: `CREATE TABLE IF NOT EXISTS` does not
+                    # rewrite a table, and §12 moves the hub to a fresh data
+                    # directory rather than owing a migration.
+                    msg = (
+                        f"the transcript archive refused the entry at address {row[0]!r} "
+                        f"({exc.sqlite_errorname})"
+                    )
+                    raise TranscriptArchiveError(msg) from exc
                 # The address is the episode's own id, derived from a unique
                 # conversation and a store-proved ordinal, so a collision means a
                 # broken ordinal invariant or a foreign producer in the reserved
@@ -688,7 +706,7 @@ class SqliteTranscriptArchive:
     async def conversation(
         self, conversation_id: str, *, limit: int = 50, offset: int = 0
     ) -> list[TranscriptEntry]:
-        """One conversation's entries, in ordinal order (§7).
+        """One conversation's entries, by instant ascending, then address (ADR-0283 §9).
 
         Raises:
             ValueError: If ``conversation_id`` is blank, ``limit`` is zero or below,
@@ -710,14 +728,14 @@ class SqliteTranscriptArchive:
                 conn.execute(
                     f"SELECT {_COLUMNS} FROM entries "  # noqa: S608 — a module constant, no input
                     "WHERE conversation_id = ? AND occurred_at_us >= ? "
-                    # `address` breaks the tie for the reason it breaks the other
-                    # two reads': §7's order is **total**, and the schema does not
-                    # make `(conversation_id, ordinal)` unique. Two entries at one
-                    # ordinal would otherwise come back in whatever order the query
-                    # plan happened to produce, so a paged read could repeat one and
-                    # lose the other — which for a transcript is a silently
-                    # incomplete one.
-                    "ORDER BY ordinal ASC, address ASC LIMIT ? OFFSET ?",
+                    # By instant, then address (ADR-0283 §9). `address` breaks the
+                    # tie for the reason it breaks the other two reads': §7's order
+                    # is **total**, and nothing makes an instant unique within a
+                    # conversation. Two entries at one instant would otherwise come
+                    # back in whatever order the query plan happened to produce, so
+                    # a paged read could repeat one and lose the other — which for a
+                    # transcript is a silently incomplete one.
+                    "ORDER BY occurred_at_us ASC, address ASC LIMIT ? OFFSET ?",
                     (conversation_id, floor, limit, offset),
                 )
             )
@@ -905,6 +923,15 @@ def _integer(value: object) -> int:
     return value
 
 
+def _optional_integer(value: object) -> int | None:
+    """:func:`_integer`, admitting ``NULL`` — an entry whose writer gave no ordinal.
+
+    ADR-0283 §9 makes ``TranscriptEntry.ordinal`` optional, so ``None`` is what that
+    column legitimately holds and is the one non-``int`` this admits.
+    """
+    return None if value is None else _integer(value)
+
+
 def _unreadable(address: object, fault: Exception) -> TranscriptArchiveError:
     """The one error a row this store cannot rebuild raises (ADR-0225 §10).
 
@@ -1001,7 +1028,7 @@ def _entry_of(row: tuple[Any, ...]) -> TranscriptEntry:
         return TranscriptEntry(
             address=_text(address),
             conversation_id=_text(conversation_id),
-            ordinal=_integer(ordinal),
+            ordinal=_optional_integer(ordinal),
             occurred_at=_from_micros(_integer(occurred_at_us)),
             asked=_optional_text(asked),
             replied=_optional_text(replied),
