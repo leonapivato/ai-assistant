@@ -50,6 +50,7 @@ from ai_assistant.core.errors import (
     GrantError,
     InvalidGrantError,
     InvalidRecipientGrantError,
+    MemoryStoreConflictError,
     NotificationBudgetError,
     OversizedValueError,
     PlanningError,
@@ -1875,8 +1876,20 @@ class FakeAssistantEngine:
         on every channel, so nothing here derives it from the conversation or a count —
         and membership is retained explicitly, standing in for the conversation's
         channel.
+
+        **An address this double already holds is refused before anything moves**,
+        as the insert-if-absent write refuses it in production (§7:3): a colliding
+        activation id must not transfer the standing episode's membership, digest or
+        delivery to the second conversation.
+
+        Raises:
+            MemoryStoreConflictError: If the address already names an episode of a
+                conversation this double holds. The capture degrades.
         """
         episode = f"activation:{activation.activation_id}"
+        if episode in self._episode_conversations:
+            msg = "an existing episode holds this address"
+            raise MemoryStoreConflictError(msg)
         self._episode_conversations[episode] = conversation_id
         digest = self.conversations_held[conversation_id]
         self.conversations_held[conversation_id] = digest.model_copy(

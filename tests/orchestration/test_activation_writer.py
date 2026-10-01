@@ -230,6 +230,45 @@ async def test_an_ended_exchange_is_written_at_its_activation_address_on_its_cha
     assert entry.occurred_at == _AT
 
 
+class CommitThen(FakeMemoryStore):
+    """A store that runs a hook once its write has committed, and then answers."""
+
+    def __init__(self) -> None:
+        super().__init__(now=lambda: _AT)
+        self.after: Callable[[], Awaitable[None]] | None = None
+
+    async def write_atomic(self, writes: Sequence[MemoryWrite]) -> Sequence[str]:
+        written = await super().write_atomic(writes)
+        if self.after is not None:
+            await self.after()
+        return written
+
+
+async def test_a_record_forgotten_between_episode_and_entry_leaves_no_entry() -> None:
+    """ADR-0225 §5 under §7:1: the user forgot the record before its entry landed.
+
+    ``forget``'s first discard finds nothing and its delete takes the episode; the
+    writer then appends the entry, reads its episode back, finds it gone, calls no
+    ``record_turn`` and discards the entry.
+    """
+    memory = CommitThen()
+    wiring = Wiring(memory=memory)
+    state = await wiring.state()
+
+    async def forgotten() -> None:
+        await wiring.archive.discard(_ADDRESS)
+        await memory.delete(_ADDRESS)
+
+    memory.after = forgotten
+    report = await wiring.write(state)
+
+    assert report.state == "degraded"
+    assert wiring.archive.recorded == {}
+    assert await wiring.memory.get(_ADDRESS) is None
+    assert await wiring.last_turn_at(state) is None, "no record_turn for a forgotten episode"
+    assert state.recorded_episode_id is None
+
+
 async def test_the_archive_switch_off_records_the_episode_and_the_turn_and_no_entry() -> None:
     """ADR-0225 §6: with the archive switched off the capture is otherwise unchanged."""
     wiring = Wiring(archive_enabled=False)
