@@ -990,8 +990,13 @@ class MemoryStore(Protocol):
     when it inserts it, a **number**: a positive integer from one counter shared by
     every record the store holds, greater than every number it issued before, never
     reissued and never changed. An upsert at a stored id keeps the number that id
-    holds; neither a deletion, :meth:`purge_expired` nor :meth:`clear` releases one;
-    and a durable store's counter survives a close, a restart and a re-embedding. A
+    holds, and so may not move the record's channel: a write through :meth:`add` or
+    any :meth:`write_atomic` mode whose record is on a different channel from the
+    one stored at its id — no channel to a channel included — raises
+    ``MemoryStoreError`` and writes nothing, since a channel gained at a low number
+    would sit below a reader's watermark. Neither a deletion, :meth:`purge_expired`
+    nor :meth:`clear` releases a number, and a durable store's counter survives a
+    close, a restart and a re-embedding. A
     channel's order is its episodes' numbers, ascending, and three reads answer by
     it: :meth:`channel_episodes` reads a channel's live episodes,
     :meth:`channel_episode_ids` enumerates every episode the store holds on a
