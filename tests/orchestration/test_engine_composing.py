@@ -13,6 +13,7 @@ import asyncio
 from typing import TYPE_CHECKING
 
 import pytest
+from channel_episodes import channel_ids
 from test_engine import (
     CAPABILITY,
     PARAMETERS,
@@ -223,9 +224,8 @@ async def test_a_declined_plan_is_persisted_and_composed_and_drives_nothing(
     # ...and captured either way, which a failing composition does not degrade.
     assert outcome.capture_degraded is False
     assert outcome.conversation_id is not None
-    turns = await harness.conversation_store.turns(outcome.conversation_id)
-    assert [one.ordinal for one in turns] == [1]
-    assert await harness.memory.get(turns[0].episode_id) is not None
+    (episode_id,) = await channel_ids(harness.memory, outcome.conversation_id)
+    assert await harness.memory.get(episode_id) is not None
 
 
 # --- §5: the engine hands over what the stage may not infer ------------------

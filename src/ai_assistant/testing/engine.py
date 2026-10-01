@@ -36,6 +36,7 @@ import re
 from base64 import b64encode
 from dataclasses import dataclass
 from datetime import UTC, datetime, timedelta
+from functools import partial
 from itertools import count
 from typing import TYPE_CHECKING, Final, assert_never, cast
 from uuid import UUID
@@ -90,6 +91,7 @@ from ai_assistant.core.types import (
     Disposition,
     DriveWithheld,
     EgressBinding,
+    EpisodeCaptureReport,
     EpisodeChunk,
     EpisodePage,
     ExecutionState,
@@ -1345,7 +1347,7 @@ class FakeAssistantEngine:
         self._validate_legacy_channel(supplied, capability, timeout, projection.method)
         activation = FakeActivation.channel(supplied, capability, _AT)
         activation.identify(self.activation_id_factory)
-        projection = ChannelProjection(projection.method, activation.report)
+        projection = ChannelProjection(projection.method, partial(_reserved_report, activation))
         result: ChannelResult | None = None
         failure: BaseException | None = None
         try:
@@ -1500,7 +1502,7 @@ class FakeAssistantEngine:
         options = supplied.conversation or ConversationInputOptions()
         activation = FakeActivation.channel(supplied, StreamingTextReply(), _AT)
         activation.identify(self.activation_id_factory)
-        projection = ChannelProjection(projection.method, activation.report)
+        projection = ChannelProjection(projection.method, partial(_reserved_report, activation))
         result: ChannelResult | None = None
         failure: BaseException | None = None
         values: list[ReplyChunk | TurnOutcome] = []
@@ -4995,6 +4997,19 @@ class FakeAssistantEngine:
         page_argument(offset, name="offset")
         check_arguments(method, max_bytes=self._max_payload_bytes, limit=limit, offset=offset)
         self.calls.append((method, {"limit": limit, "offset": offset}))
+
+
+def _reserved_report(activation: FakeActivation) -> EpisodeCaptureReport:
+    """The receipt a channel call reserves, at the address fixed at admission.
+
+    ADR-0283 §2: every episode's id is ``activation:<activation_id>``, so the receipt
+    is sized at the address capture writes — what the real engine's
+    ``ActivationState.reserved_report`` reserves — and no placeholder is sized.
+    """
+    address = None if activation.activation_id is None else f"activation:{activation.activation_id}"
+    return EpisodeCaptureReport(
+        activation_id=activation.activation_id, episode_id=address, state="degraded"
+    )
 
 
 def _approving(confirmed: PermissionDecision) -> PermissionRuling:

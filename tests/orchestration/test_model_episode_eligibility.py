@@ -5,6 +5,7 @@ from __future__ import annotations
 from datetime import UTC, datetime
 
 import pytest
+from channel_episodes import channel_numbers, conversation_episode
 from test_loop_reads import _belief, _bounded, _loop
 from test_loop_structured import _Script, _structured
 
@@ -26,7 +27,7 @@ from ai_assistant.core.types import (
     UnderstandingOmission,
 )
 from ai_assistant.orchestration import MemoryWriteStage, ObservationStage
-from ai_assistant.orchestration.conversations import ConversationLifecycle
+from ai_assistant.orchestration.conversations import HISTORY_REPLAY_BOUND, ConversationLifecycle
 from ai_assistant.orchestration.loop import ConversationalOperation
 from ai_assistant.orchestration.reads import READ_BUDGET, _hop_records, _Reads
 from ai_assistant.orchestration.retrieval import assemble_by_band
@@ -73,8 +74,10 @@ def _episode(identifier: str, *, eligible: bool) -> EpisodicMemory:
     )
 
 
-async def test_history_filters_index_before_the_tail_limit_and_checks_the_envelope() -> None:
-    conversations = FakeConversationStore(now=lambda: _AT, tail_limit=2)
+async def test_history_filters_eligibility_before_the_replay_bound() -> None:
+    """ADR-0283 §4:1: the eligibility axis applies before the bound, so a run of
+    inspection-only episodes never consumes the page that eligible ones need."""
+    conversations = FakeConversationStore(now=lambda: _AT)
     memory = FakeMemoryStore(now=lambda: _AT)
     stage = ConversationLifecycle(
         conversations=conversations,
@@ -85,21 +88,17 @@ async def test_history_filters_index_before_the_tail_limit_and_checks_the_envelo
         now=lambda: _AT,
     )
     conversation = await conversations.start()
-    rows = []
-    for eligible in (True, True, False, False, False):
-        row = await conversations.append(conversation.id, occurred_at=_AT, model_eligible=eligible)
-        rows.append(row)
-        await memory.add(_episode(row.episode_id, eligible=eligible))
+    eligible = [f"activation:eligible-{index}" for index in range(2)]
+    for identifier in eligible:
+        await memory.add(conversation_episode(conversation.id, identifier, occurred_at=_AT))
+    for index in range(HISTORY_REPLAY_BOUND + 5):
+        await memory.add(
+            conversation_episode(
+                conversation.id, f"activation:hidden-{index}", occurred_at=_AT, eligible=False
+            )
+        )
 
-    assert [record.id for record in (await stage.history(conversation.id)).records] == [
-        row.episode_id for row in rows[:2]
-    ]
-    # A mismatched eligible index must not resurrect an ineligible envelope.
-    mismatch = await conversations.append(conversation.id, occurred_at=_AT)
-    await memory.add(_episode(mismatch.episode_id, eligible=False))
-    assert [record.id for record in (await stage.history(conversation.id)).records] == [
-        rows[1].episode_id
-    ]
+    assert [record.id for record in (await stage.history(conversation.id)).records] == eligible
 
 
 async def test_ineligible_episodes_do_not_displace_retrieval_results() -> None:
@@ -201,16 +200,18 @@ async def test_citation_hops_exclude_ineligible_evidence_and_named_records() -> 
 @pytest.mark.parametrize(
     "flags",
     [
-        ((False, False), (False, False)),
-        ((True, True), (False, False), (False, False)),
-        ((False, False), (True, True)),
-        ((False, True),),
-        ((True, False),),
+        (False, False),
+        (True, False, False),
+        (False, True),
+        (True,),
+        (False,),
     ],
 )
-async def test_observation_skips_ineligible_rows_without_stalling_the_watermark(
-    flags: tuple[tuple[bool, bool], ...],
+async def test_observation_skips_ineligible_episodes_without_stalling_the_watermark(
+    flags: tuple[bool, ...],
 ) -> None:
+    """ADR-0283 §11:1: ineligible episodes are skipped, and the pass advances to the
+    page's highest number whatever it skipped, so nothing is read twice."""
     memory = FakeMemoryStore(now=lambda: _AT)
     conversations = FakeConversationStore(now=lambda: _AT)
     observer = FakeObserver()
@@ -227,27 +228,22 @@ async def test_observation_skips_ineligible_rows_without_stalling_the_watermark(
         now=lambda: _AT,
     )
     conversation = await conversations.start()
-    rows = []
-    for index_flag, envelope_flag in flags:
-        row = await conversations.append(
-            conversation.id, occurred_at=_AT, model_eligible=index_flag
+    identifiers = [f"activation:{index}" for index in range(len(flags))]
+    for identifier, eligible in zip(identifiers, flags, strict=True):
+        await memory.add(
+            conversation_episode(conversation.id, identifier, occurred_at=_AT, eligible=eligible)
         )
-        rows.append(row)
-        await memory.add(_episode(row.episode_id, eligible=envelope_flag))
+    numbers = await channel_numbers(memory, conversation.id)
 
     await stage.observe(conversation.id)
 
-    expected_rows = [row for row, pair in zip(rows, flags, strict=True) if all(pair)]
-    expected = [row.episode_id for row in expected_rows]
+    expected = [
+        identifier for identifier, eligible in zip(identifiers, flags, strict=True) if eligible
+    ]
     assert [record.id for batch in observer.batches for record in batch] == expected
     assert observer.call_count == int(bool(expected))
     stored = await conversations.get(conversation.id)
     assert stored is not None
-    last_eligible = max((row.ordinal for row in expected_rows), default=len(rows))
-    assert stored.observed_through == last_eligible
-    if last_eligible < len(rows):
-        await stage.observe(conversation.id)
-        stored = await conversations.get(conversation.id)
-        assert stored is not None
-        assert stored.observed_through == len(rows)
-        assert observer.call_count == 1
+    assert stored.observed_through == numbers[identifiers[-1]]
+    await stage.observe(conversation.id)
+    assert observer.call_count == int(bool(expected)), "nothing above the watermark is re-read"

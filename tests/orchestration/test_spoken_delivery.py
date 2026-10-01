@@ -24,10 +24,12 @@ call, and the captured episode's content byte-unchanged by any of it.
 from __future__ import annotations
 
 from base64 import b64encode
+from dataclasses import dataclass
 from datetime import UTC, datetime, timedelta
 from typing import TYPE_CHECKING, Final
 
 import pytest
+from channel_episodes import channel_records
 from test_engine import PATIENT, Harness, NoStepPlanner
 
 from ai_assistant.core.errors import (
@@ -59,9 +61,9 @@ from ai_assistant.testing import (
 )
 
 if TYPE_CHECKING:
-    from collections.abc import Sequence
+    from collections.abc import Mapping, Sequence
 
-    from ai_assistant.core.types import ConversationTurn, MemoryRecord, ParkedBinding
+    from ai_assistant.core.types import Conversation, MemoryRecord
 
 _AT: Final = datetime(2026, 8, 28, 12, 0, tzinfo=UTC)
 _MP4: Final = SpokenAudioFormat.MP4
@@ -113,9 +115,34 @@ def _prompt(model: FakeModelProvider, call: int) -> str:
     return next(one.content for one in model.calls[call].messages if one.role is Role.USER)
 
 
-async def _rows(harness: Harness, conversation_id: str) -> list[ConversationTurn]:
-    """This conversation's index rows, oldest first."""
-    return await harness.conversation_store.turns(conversation_id)
+@dataclass(frozen=True, slots=True)
+class _Row:
+    """One episode on a conversation's channel, and the delivery row it carries."""
+
+    episode_id: str
+    delivery: SpokenDelivery | None
+    model_eligible: bool
+
+
+async def _rows(harness: Harness, conversation_id: str) -> list[_Row]:
+    """This conversation's episodes oldest first, each with its delivery row or ``None``.
+
+    Since ADR-0283 the conversation's history is the episodes on its channel, and a
+    delivery fact is a row keyed by an episode id (§10), so a turn with no row reads
+    ``None`` exactly as a text turn's absent column did.
+    """
+    records = await channel_records(harness.memory, conversation_id)
+    held = await harness.conversation_store.deliveries(
+        conversation_id, episode_ids=[one.id for one in records]
+    )
+    return [
+        _Row(
+            one.id,
+            held.get(one.id),
+            one.processing_record is None or one.processing_record.model_eligible,
+        )
+        for one in records
+    ]
 
 
 def _report(episode_id: str, delivery: SpokenDelivery = _INTERRUPTED) -> SpokenDeliveryReport:
@@ -142,7 +169,7 @@ async def test_a_report_beside_no_conversation_is_refused_before_any_seam() -> N
     harness = _wired()
 
     with pytest.raises(ValueError, match="fresh conversation"):
-        await _spoken(harness, delivery=_report("conv:c-1:1"))
+        await _spoken(harness, delivery=_report("activation:c-1"))
 
     assert isinstance(harness.transcriber, FakeSpeechTranscriber)
     assert harness.transcriber.call_count == 0, "refused before any I/O"
@@ -204,7 +231,9 @@ async def test_a_report_naming_no_turn_of_this_conversation_is_discarded() -> No
     assert first.outcome is not None
     conversation = str(first.outcome.conversation_id)
 
-    second = await _spoken(harness, conversation_id=conversation, delivery=_report("conv:nobody:1"))
+    second = await _spoken(
+        harness, conversation_id=conversation, delivery=_report("activation:nobody")
+    )
 
     assert second.heard == _ASKED, "the turn the owner just spoke still ran"
     assert second.outcome is not None
@@ -268,7 +297,7 @@ async def test_a_report_arriving_after_a_later_turn_stamps_the_turn_it_names() -
     await _spoken(harness, conversation_id=conversation, delivery=_report(str(first.episode_id)))
 
     rows = await _rows(harness, conversation)
-    assert [one.ordinal for one in rows] == [1, 2, 3]
+    assert len(rows) == 3
     assert rows[0].delivery == _INTERRUPTED, "the turn the report named"
     assert rows[1].delivery == _UNSTAMPED, "and the later one is left unknown"
     assert rows[2].delivery == _UNSTAMPED
@@ -332,7 +361,7 @@ async def test_a_report_against_an_unknown_conversation_is_refused() -> None:
     harness = _wired()
 
     with pytest.raises(UnknownConversationError):
-        await _spoken(harness, conversation_id="no-such-thing", delivery=_report("conv:x:1"))
+        await _spoken(harness, conversation_id="no-such-thing", delivery=_report("activation:x"))
 
 
 async def test_a_store_fault_on_the_report_does_not_cost_the_owner_the_turn() -> None:
@@ -461,19 +490,21 @@ async def test_the_disclosed_episode_id_is_the_one_record_delivery_accepts_back(
 async def test_the_episode_id_is_absent_exactly_where_no_turn_was_recorded() -> None:
     """§1: ``None`` "**exactly when** the call recorded no turn — a recording that
     carried no words … or a capture whose index entry did not land".
+
+    Since ADR-0283 §7:2 the second shape is a ``record_turn`` that did not return the
+    conversation: the capture is then not verified, so there is no turn to name.
     """
 
     class Refusing(FakeConversationStore):
-        async def append(
+        async def record_turn(
             self,
             conversation_id: str,
             *,
+            episode_id: str,
             occurred_at: datetime,
-            parked: ParkedBinding | None = None,
             delivery: SpokenDelivery | None = None,
-            model_eligible: bool = True,
-        ) -> ConversationTurn:
-            msg = "the index is unwritable"
+        ) -> Conversation | None:
+            msg = "the conversation store is unwritable"
             raise ConversationStoreError(msg)
 
     silent = _wired(transcriber=FakeSpeechTranscriber(transcripts=["   "]))
@@ -482,7 +513,7 @@ async def test_the_episode_id_is_absent_exactly_where_no_turn_was_recorded() -> 
     unrecorded = _wired(conversation_store=Refusing(now=lambda: _AT))
     turn = await _spoken(unrecorded)
     assert turn.outcome is not None
-    assert turn.episode_id is None, "no index row landed, so there is nothing to name"
+    assert turn.episode_id is None, "record_turn did not land, so there is nothing to name"
 
 
 # --- §5: what the composing stage is told ------------------------------------
@@ -557,8 +588,7 @@ async def test_a_report_about_turn_one_reaches_turn_threes_composing_input() -> 
     # Paired with the episode it qualifies: turn 1's own bullet is the one the line
     # follows, and turn 2's — captured after it and never reported on — is not.
     rows = await _rows(harness, conversation)
-    episodes = {one.episode_id: one.ordinal for one in rows}
-    assert episodes[str(first.episode_id)] == 1
+    assert rows[0].episode_id == str(first.episode_id), "turn 1's episode is the channel's first"
     bullets = [line for line in prompt.splitlines() if line.startswith("  - [episodic/")]
     assert len(bullets) >= 3, "the tail carries the three earlier turns"
     lines = prompt.splitlines()
@@ -605,7 +635,7 @@ async def test_a_withheld_turns_delivery_does_not_reach_the_stage_either() -> No
         episode_id=str(first.episode_id),
         delivery=_INTERRUPTED,
     )
-    assert stamped is True, "turn 1 is stamped in the index"
+    assert stamped is True, "turn 1's delivery row is stamped"
 
     second = await _spoken(harness, conversation_id=conversation)
 
@@ -622,10 +652,10 @@ async def test_a_withheld_turns_delivery_does_not_reach_the_stage_either() -> No
 async def test_the_supply_path_makes_no_second_store_call() -> None:
     """§5: the facts "ride the tail that stage's inputs are already assembled from".
 
-    "``ConversationLifecycle.history`` walks ``ConversationStore.turns`` and holds
-    **every** one of those rows already, so the composing supply reads them off what
-    was fetched and the count of them costs nothing." Counted rather than argued: one
-    ``turns`` read for the tail, and no reverse lookup at all.
+    Since ADR-0283 §4 and §10, ``ConversationLifecycle.history`` reads the channel's
+    tail from memory and the delivery rows for exactly those episodes in **one**
+    ``deliveries`` call, so the composing supply reads the facts off what was fetched.
+    Counted rather than argued: one ``deliveries`` read for the whole turn.
     """
 
     class Counting(FakeConversationStore):
@@ -633,25 +663,11 @@ async def test_the_supply_path_makes_no_second_store_call() -> None:
             super().__init__(**knobs)  # type: ignore[arg-type]  # the fake's own knobs
             self.reads: list[str] = []
 
-        async def turns(
-            self,
-            conversation_id: str,
-            *,
-            limit: int | None = None,
-            before_ordinal: int | None = None,
-            model_eligible_only: bool = False,
-        ) -> list[ConversationTurn]:
-            self.reads.append("turns")
-            return await super().turns(
-                conversation_id,
-                limit=limit,
-                before_ordinal=before_ordinal,
-                model_eligible_only=model_eligible_only,
-            )
-
-        async def turn_of_episode(self, episode_id: str) -> ConversationTurn | None:
-            self.reads.append("turn_of_episode")
-            return await super().turn_of_episode(episode_id)
+        async def deliveries(
+            self, conversation_id: str, *, episode_ids: Sequence[str]
+        ) -> Mapping[str, SpokenDelivery]:
+            self.reads.append("deliveries")
+            return await super().deliveries(conversation_id, episode_ids=episode_ids)
 
     store = Counting(now=lambda: _AT)
     harness = _wired(conversation_store=store)
@@ -661,9 +677,9 @@ async def test_the_supply_path_makes_no_second_store_call() -> None:
 
     await _spoken(harness, conversation_id=first.outcome.conversation_id)
 
-    assert store.reads == ["turns"], (
-        "one tail read for the whole turn: the delivery facts come off those rows, "
-        "and nothing looks an episode back up to find them (ADR-0205 §5)"
+    assert store.reads == ["deliveries"], (
+        "one delivery read for the whole turn: the facts come off the tail's own "
+        "episodes, and nothing looks an episode back up to find them (ADR-0205 §5)"
     )
 
 

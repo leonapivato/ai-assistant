@@ -311,9 +311,9 @@ async def test_new_stream_reserves_actual_wrapper_room_before_emitting(shortfall
     baseline = initial[-1]
     assert isinstance(baseline, ChannelResult)
     assert isinstance(baseline.result, TextChannelResult)
-    # Capture reserves the largest ordinal before append; the real first ordinal
-    # is eighteen characters shorter. Include that reservation in the boundary.
-    exact = len(canonical_payload(baseline)) + len(str(2**63 - 1)) - 1
+    # The reserved capture report names the activation address the writer will
+    # record (ADR-0283 §2), so the reservation is exactly the final report.
+    exact = len(canonical_payload(baseline))
     tight = _harness(planner=NoStepPlanner(), max_payload_bytes=exact - shortfall)
     values = [
         value

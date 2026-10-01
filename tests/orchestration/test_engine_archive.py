@@ -19,6 +19,7 @@ from base64 import b64encode
 from typing import TYPE_CHECKING
 
 import pytest
+from channel_episodes import channel_records
 from test_engine import AT, PATIENT, Harness, confirmable, tool
 from test_engine_routing import _UTTERANCE, _parked, _routed_harness, _seed_belief, _token
 
@@ -59,7 +60,6 @@ def _entry(address: str = "seeded:1", conversation: str = "seeded") -> Transcrip
     return TranscriptEntry(
         address=address,
         conversation_id=conversation,
-        ordinal=1,
         occurred_at=AT,
         asked=ARCHIVED_SPAN,
         replied=ARCHIVED_SPAN,
@@ -332,10 +332,13 @@ async def test_a_parked_steps_resolution_archives_no_user_words() -> None:
 
     await harness.engine.resume(parked.step.confirmation.token, approved=True, timeout=PATIENT)
 
-    # The harness's clock is frozen, so both entries share an instant and §7's
-    # **address** tie-break decides the order — ordinal 1 then ordinal 2, which here
-    # is the park then its resolution.
-    entries = await harness.archive.entries()
+    # The harness's clock is frozen, so both entries share an instant, and an address
+    # is an activation's own id (ADR-0283 §2): read each entry at its episode's id, in
+    # the order the conversation's channel numbers them — the park, then its resolution.
+    assert parked.conversation_id is not None
+    by_address = {one.address: one for one in await harness.archive.entries()}
+    records = await channel_records(harness.memory, parked.conversation_id)
+    entries = [by_address[record.id] for record in records]
     assert [one.asked for one in entries] == ["send it", None], (
         "the park says what was asked; its resolution says nothing"
     )
@@ -354,5 +357,8 @@ async def test_a_routed_parks_resolution_archives_no_user_words() -> None:
 
     await harness.engine.resume(_token(parked), approved=True, timeout=PATIENT)
 
-    entries = await harness.archive.entries()
-    assert [one.asked for one in entries] == [_UTTERANCE, None]
+    # Read in channel order, since an address is an activation's own id (ADR-0283 §2).
+    assert parked.conversation_id is not None
+    by_address = {one.address: one for one in await harness.archive.entries()}
+    records = await channel_records(harness.memory, parked.conversation_id)
+    assert [by_address[record.id].asked for record in records] == [_UTTERANCE, None]
