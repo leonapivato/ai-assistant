@@ -95,7 +95,11 @@ class ActivationState:
     reply_degraded: bool = False
     spoken_degraded: bool = False
     no_words: bool = False
-    index_episode_id: str | None = None
+    #: The episode's id once its conversation recorded the turn (ADR-0283 §7:1): set
+    #: when ``ConversationStore.record_turn`` returned the conversation, so the
+    #: episode is on the channel and any delivery row it wrote exists. ``None`` for a
+    #: standalone capture and for a conversational one that never got that far.
+    recorded_episode_id: str | None = None
     understanding: tuple[ActivationUnderstanding, ...] = ()
     understanding_elided: int = 0
     understanding_omitted: UnderstandingOmission | None = None
@@ -290,6 +294,7 @@ class ActivationState:
         parked: ParkedBinding | None = None,
         goal_id: str | None = None,
         attempt_id: str | None = None,
+        parks: ParkedBinding | None = None,
     ) -> None:
         """Retain established relationships without manufacturing absent ones."""
         known = {
@@ -299,22 +304,27 @@ class ActivationState:
             "parked": parked,
             "goal_id": goal_id,
             "attempt_id": attempt_id,
+            "parks": parks,
         }
         self.links = self.links.model_copy(
             update={name: value for name, value in known.items() if value is not None}
         )
 
     def reserved_report(self) -> EpisodeCaptureReport:
-        """Bound the receipt before append, using SQLite's largest index ordinal."""
-        address = self.index_episode_id
-        if address is None:
-            if self.conversation_id is not None:
-                address = f"conv:{self.conversation_id}:9223372036854775807"
-            elif self.activation_id is not None:
-                address = f"activation:{self.activation_id}"
+        """Bound the receipt before capture, at the address fixed at admission.
+
+        ADR-0283 §2: every episode's id is ``activation:<activation_id>``, on every
+        channel, so the receipt is sized at the very address capture writes and no
+        placeholder is sized.
+        """
         return EpisodeCaptureReport(
-            activation_id=self.activation_id, episode_id=address, state="degraded"
+            activation_id=self.activation_id, episode_id=self.episode_address, state="degraded"
         )
+
+    @property
+    def episode_address(self) -> str | None:
+        """The episode's id, ``activation:<activation_id>`` (ADR-0283 §2), once admitted."""
+        return None if self.activation_id is None else f"activation:{self.activation_id}"
 
     def summary(self, text: str) -> None:
         """Observe a produced summary before the stage's final deadline check."""
@@ -327,9 +337,9 @@ class ActivationState:
         self.response_kind = EpisodeResponseKind.CONVERSATION_REPLY
 
     def degraded_report(self) -> EpisodeCaptureReport:
-        """An index address alone never claims that the episode was recorded."""
+        """Name the episode only where its conversation recorded it, never claiming more."""
         return EpisodeCaptureReport(
-            activation_id=self.activation_id, episode_id=self.index_episode_id, state="degraded"
+            activation_id=self.activation_id, episode_id=self.recorded_episode_id, state="degraded"
         )
 
 

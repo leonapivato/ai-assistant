@@ -43,7 +43,7 @@ class ChannelProjection:
     capture_report: Callable[[], EpisodeCaptureReport] | None = None
 
     def report(self) -> EpisodeCaptureReport:
-        """Reserve this call's final receipt without guessing a stored ordinal."""
+        """Reserve this call's final receipt at the address fixed at admission (ADR-0283 §2)."""
         return UNCAPTURED if self.capture_report is None else self.capture_report()
 
     def text(self, outcome: TurnOutcome) -> TurnOutcome | ChannelResult:
@@ -101,9 +101,15 @@ def spoken_result(
 
 
 def captured_result(
-    result: ChannelResult, report: EpisodeCaptureReport, *, index_episode_id: str | None
+    result: ChannelResult, report: EpisodeCaptureReport, *, episode_id: str | None
 ) -> ChannelResult:
-    """Fold the final receipt into the channel and its existing legacy projection."""
+    """Fold the final receipt into the channel and its existing legacy projection.
+
+    ``episode_id`` is what ``SpokenTurn.episode_id`` discloses: the episode's
+    ``activation:<activation_id>`` address where its conversation recorded the turn,
+    and so holds the delivery row a later report names (ADR-0205 §1, ADR-0283 §2),
+    and ``None`` otherwise.
+    """
     value = result.result
     if isinstance(value, TextChannelResult):
         value = value.model_copy(update={"outcome": _captured_outcome(value.outcome, report)})
@@ -111,7 +117,7 @@ def captured_result(
         spoken = value.outcome.model_copy(
             update={
                 "outcome": _captured_outcome(value.outcome.outcome, report),
-                "episode_id": index_episode_id,
+                "episode_id": episode_id,
             }
         )
         value = value.model_copy(update={"outcome": spoken})
