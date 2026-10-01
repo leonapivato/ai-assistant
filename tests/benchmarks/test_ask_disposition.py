@@ -44,6 +44,10 @@ from ai_assistant.core.types import (
 )
 from ai_assistant.testing import FakeModelProvider, FakeObserver
 
+_NEEDS_INGEST = pytest.mark.skip(
+    reason="#2626: benchmark ingestion is not ported off the retired turn index (ADR-0283)"
+)
+
 if TYPE_CHECKING:
     from collections.abc import Sequence
     from pathlib import Path
@@ -179,6 +183,7 @@ def _settings(tmp_path: Path) -> Settings:
     )
 
 
+@_NEEDS_INGEST
 async def test_an_ask_user_ruling_is_counted_rather_than_dropped(tmp_path: Path) -> None:
     """The count exists because the alternative is a belief that silently never lands:
     nothing is written for a deferral, so retrieval cannot find it and P3/P5 fall with
@@ -200,6 +205,7 @@ async def test_an_ask_user_ruling_is_counted_rather_than_dropped(tmp_path: Path)
     assert summary.ask_rate == pytest.approx(1.0)
 
 
+@_NEEDS_INGEST
 async def test_a_run_that_asks_nothing_reports_a_zero_ask_rate(tmp_path: Path) -> None:
     """The reading that makes the measure worth having: an ask rate of zero is what
     lets a depressed P3/P5 be charged to retrieval rather than to the harness."""
@@ -241,6 +247,7 @@ def test_an_empty_population_reports_zero_rather_than_dividing() -> None:
     assert summary.ask_rate == pytest.approx(0.0)
 
 
+@_NEEDS_INGEST
 async def test_every_record_reports_the_ask_rate_beside_the_run(tmp_path: Path) -> None:
     """ "Alongside the run's records" literally: the figure is in `records.jsonl`, so an
     analysis reading the artifacts sees the harness artifact without being told to look

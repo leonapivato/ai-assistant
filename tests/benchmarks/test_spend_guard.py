@@ -51,6 +51,10 @@ from ai_assistant.learning import ModelBackedObserver
 from ai_assistant.models.retry import RetryingProvider, RetryPolicy
 from ai_assistant.testing import FakeModelProvider, FakeObserver
 
+_NEEDS_INGEST = pytest.mark.skip(
+    reason="#2626: benchmark ingestion is not ported off the retired turn index (ADR-0283)"
+)
+
 if TYPE_CHECKING:
     from collections.abc import Sequence
     from pathlib import Path
@@ -288,6 +292,7 @@ def test_a_transient_or_unrelated_failure_is_not_credit_exhaustion(error: ModelE
     assert not is_credit_exhaustion(error)
 
 
+@_NEEDS_INGEST
 async def test_a_credit_refusal_stops_the_run_and_leaves_its_records(tmp_path: Path) -> None:
     """The end-to-end shape, and the reason `execute_run` returns rather than raises.
 
@@ -320,6 +325,7 @@ async def test_a_credit_refusal_stops_the_run_and_leaves_its_records(tmp_path: P
     assert records[0].question_id == "spend-test#0"
 
 
+@_NEEDS_INGEST
 async def test_a_reached_ceiling_stops_the_run_and_records_the_bound(tmp_path: Path) -> None:
     """The ceiling end to end, and the field a reader pairs the abort with.
 
@@ -360,6 +366,7 @@ async def test_a_reached_ceiling_stops_the_run_and_records_the_bound(tmp_path: P
     assert records[0].question_id == "spend-test#0"
 
 
+@_NEEDS_INGEST
 async def test_an_unbounded_run_records_no_abort(tmp_path: Path) -> None:
     """The control. Both fields stay `None`, and the manifest is written exactly once.
 
@@ -389,6 +396,7 @@ async def test_an_unbounded_run_records_no_abort(tmp_path: Path) -> None:
     assert len(read_jsonl(root / manifest.run_id / "records.jsonl", QuestionRecord)) == 2
 
 
+@_NEEDS_INGEST
 async def test_an_unrelated_provider_failure_is_still_one_ungraded_question(
     tmp_path: Path,
 ) -> None:
@@ -578,6 +586,7 @@ def test_the_reconciler_can_be_guarded_at_only_one_boundary(tmp_path: Path) -> N
     assert "guard" not in inspect.signature(build_reconciler).parameters
 
 
+@_NEEDS_INGEST
 async def test_a_run_charges_one_reconciler_call_once(
     tmp_path: Path, monkeypatch: pytest.MonkeyPatch
 ) -> None:

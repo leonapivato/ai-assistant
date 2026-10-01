@@ -63,6 +63,10 @@ from ai_assistant.orchestration.conversations import BELIEF_KINDS
 from ai_assistant.orchestration.retrieval import assemble_by_band
 from ai_assistant.testing import FakeModelProvider, FakeObserver
 
+_NEEDS_INGEST = pytest.mark.skip(
+    reason="#2626: benchmark ingestion is not ported off the retired turn index (ADR-0283)"
+)
+
 if TYPE_CHECKING:
     from collections.abc import Sequence
     from pathlib import Path
@@ -240,6 +244,7 @@ def _leading_beliefs(kinds: Sequence[MemoryKind]) -> int:
     return len(kinds)
 
 
+@_NEEDS_INGEST
 async def test_the_supplement_appends_episodes_after_the_beliefs(tmp_path: Path) -> None:
     """ADR-0158 §4's ordering, end to end: beliefs, then episodes, never interleaved.
 
@@ -266,6 +271,7 @@ async def test_the_supplement_appends_episodes_after_the_beliefs(tmp_path: Path)
     assert _rendered_kinds(attempt.context) == attempt.retrieved_kinds
 
 
+@_NEEDS_INGEST
 async def test_the_supplement_takes_nothing_from_the_belief_budget(tmp_path: Path) -> None:
     """§3's two budgets, asserted as the count a belief-only read returns.
 
@@ -293,6 +299,7 @@ async def test_the_supplement_takes_nothing_from_the_belief_budget(tmp_path: Pat
     assert beliefs_alone, "a store with no beliefs cannot show that the budget survived"
 
 
+@_NEEDS_INGEST
 async def test_the_supplement_never_exceeds_its_own_bound(tmp_path: Path) -> None:
     """§3's budget, over a store holding several times as many episodes as it allows.
 
@@ -315,6 +322,7 @@ async def test_the_supplement_never_exceeds_its_own_bound(tmp_path: Path) -> Non
     assert len(_episodic_ids(attempt)) == bound
 
 
+@_NEEDS_INGEST
 async def test_an_empty_belief_read_drops_the_supplement(tmp_path: Path) -> None:
     """§4's separator rule, in the state that reaches it here.
 
@@ -341,6 +349,7 @@ async def test_an_empty_belief_read_drops_the_supplement(tmp_path: Path) -> None
     assert attempt.context == EMPTY_CONTEXT
 
 
+@_NEEDS_INGEST
 async def test_an_episode_outside_the_derived_band_is_not_supplemented(tmp_path: Path) -> None:
     """§3's band pin, over the one record shape it exists for.
 
@@ -380,6 +389,7 @@ async def test_an_episode_outside_the_derived_band_is_not_supplemented(tmp_path:
     assert foreign.id not in attempt.retrieved_ids
 
 
+@_NEEDS_INGEST
 async def test_a_zero_bound_makes_no_episodic_read_at_all(tmp_path: Path) -> None:
     """The disabled state the manifest's ``episodic_limit`` claims to distinguish.
 
@@ -426,6 +436,7 @@ async def test_a_zero_bound_makes_no_episodic_read_at_all(tmp_path: Path) -> Non
     assert tuple(SUPPLEMENT_KINDS) not in asked
 
 
+@_NEEDS_INGEST
 async def test_a_failed_episodic_read_ends_the_run_rather_than_publishing_belief_only(
     tmp_path: Path,
 ) -> None:

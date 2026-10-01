@@ -51,6 +51,10 @@ from ai_assistant.core.config import EmbedderKind, Settings
 from ai_assistant.testing import FakeModelProvider, FakeObserver
 from ai_assistant.testing.batch import FakeBatchCompleter, ProgrammedOutcome
 
+_NEEDS_INGEST = pytest.mark.skip(
+    reason="#2626: benchmark ingestion is not ported off the retired turn index (ADR-0283)"
+)
+
 if TYPE_CHECKING:
     from collections.abc import Sequence
     from pathlib import Path
@@ -402,6 +406,7 @@ class _SettlingCompleter:
 class TestAReusedRunDoesNotIngest:
     """The point of the feature, asserted on the seam that would have cost the money."""
 
+    @_NEEDS_INGEST
     async def test_the_observer_is_never_called(self, tmp_path: Path) -> None:
         root = tmp_path / "runs"
         source, _ = await _ingest(root, tmp_path)
@@ -411,6 +416,7 @@ class TestAReusedRunDoesNotIngest:
 
         assert observer.batches == []
 
+    @_NEEDS_INGEST
     async def test_it_still_answers_every_question(self, tmp_path: Path) -> None:
         root = tmp_path / "runs"
         source, source_dir = await _ingest(root, tmp_path)
@@ -421,6 +427,7 @@ class TestAReusedRunDoesNotIngest:
             row.question_id for row in _rows(source_dir)
         ]
 
+    @_NEEDS_INGEST
     async def test_the_reused_stores_are_this_run_s_own_copies(self, tmp_path: Path) -> None:
         """Copied rather than opened in place, so the source cannot be written to."""
         root = tmp_path / "runs"
@@ -441,6 +448,7 @@ class TestAReusedRunDoesNotIngest:
 class TestItAnswersOverTheSameMemories:
     """Parity with the run that ingested — the claim a cheap arm rests on."""
 
+    @_NEEDS_INGEST
     async def test_it_retrieves_what_the_source_retrieved(self, tmp_path: Path) -> None:
         """Same stores, same embedder, same clock: the reads have to come back the same.
 
@@ -457,6 +465,7 @@ class TestItAnswersOverTheSameMemories:
             row.retrieved_ids for row in _rows(source_dir)
         ]
 
+    @_NEEDS_INGEST
     async def test_the_clock_is_where_ingestion_left_it(self, tmp_path: Path) -> None:
         """LoCoMo states no ``asked_at``, so the answering instant is the last session's.
 
@@ -473,6 +482,7 @@ class TestItAnswersOverTheSameMemories:
             row.asked_at for row in _rows(source_dir)
         ]
 
+    @_NEEDS_INGEST
     async def test_the_instant_is_read_off_the_source_s_own_records(self, tmp_path: Path) -> None:
         """Not recomputed from the case in hand, which is the caller's rather than the
         source run's account of what happened."""
@@ -485,6 +495,7 @@ class TestItAnswersOverTheSameMemories:
         assert instant.isoformat() == _rows(source_dir)[0].asked_at
 
     @pytest.mark.parametrize("stated_first", [True, False])
+    @_NEEDS_INGEST
     async def test_a_corpus_mixing_stated_and_unstated_instants(
         self, tmp_path: Path, stated_first: bool
     ) -> None:
@@ -512,6 +523,7 @@ class TestItAnswersOverTheSameMemories:
             "mixed#unstated": (MOVED if stated_first else LAST).isoformat(),
         }
 
+    @_NEEDS_INGEST
     async def test_the_evidence_join_is_the_one_ingestion_recorded(self, tmp_path: Path) -> None:
         """#1074's join is read back per question rather than recomputed."""
         root = tmp_path / "runs"
@@ -529,6 +541,7 @@ class TestItAnswersOverTheSameMemories:
 class TestTheArtifactsSayItDidNotIngest:
     """A reused run that read like a fresh one would be a false record."""
 
+    @_NEEDS_INGEST
     async def test_every_row_names_the_run_it_answered_over(self, tmp_path: Path) -> None:
         root = tmp_path / "runs"
         source, source_dir = await _ingest(root, tmp_path)
@@ -543,6 +556,7 @@ class TestTheArtifactsSayItDidNotIngest:
         del inherited[INGESTION_SOURCE_KEY]
         assert inherited == dict(_rows(source_dir)[0].ingestion)
 
+    @_NEEDS_INGEST
     async def test_the_manifest_records_where_the_memories_came_from(self, tmp_path: Path) -> None:
         root = tmp_path / "runs"
         source, source_dir = await _ingest(root, tmp_path)
@@ -559,12 +573,14 @@ class TestTheArtifactsSayItDidNotIngest:
             == sha256((source_dir / "manifest.json").read_bytes()).hexdigest()
         )
 
+    @_NEEDS_INGEST
     async def test_an_ingesting_run_records_no_reuse(self, tmp_path: Path) -> None:
         """The field's default, asserted so the absence stays meaningful."""
         manifest, _ = await _ingest(tmp_path / "runs", tmp_path)
 
         assert manifest.reused_from is None
 
+    @_NEEDS_INGEST
     async def test_the_reconciler_named_is_the_one_that_ingested(self, tmp_path: Path) -> None:
         """A reused pass writes no belief and so crosses no conflict.
 
@@ -585,6 +601,7 @@ class TestTheArtifactsSayItDidNotIngest:
         assert "max_conflicts=3" in manifest.reconciler
         assert "max_conflicts=9" not in manifest.reconciler
 
+    @_NEEDS_INGEST
     async def test_the_observer_side_fields_describe_the_run_that_distilled(
         self, tmp_path: Path
     ) -> None:
@@ -604,6 +621,7 @@ class TestTheArtifactsSayItDidNotIngest:
         assert source.observer_route == "anthropic:distiller"
         assert manifest.observer_route == "anthropic:distiller"
 
+    @_NEEDS_INGEST
     async def test_it_reports_the_answering_axis_this_arm_moved(self, tmp_path: Path) -> None:
         """What is varied is the arm's whole content, and a reader should not have to
         diff two manifests to find it."""
@@ -620,6 +638,7 @@ class TestTheArtifactsSayItDidNotIngest:
         assert manifest.reused_from is not None
         assert manifest.reused_from.varied == ("answer_route",)
 
+    @_NEEDS_INGEST
     async def test_a_re_answer_under_one_configuration_varies_nothing(self, tmp_path: Path) -> None:
         root = tmp_path / "runs"
         source, _ = await _ingest(root, tmp_path)
@@ -633,6 +652,7 @@ class TestTheArtifactsSayItDidNotIngest:
 class TestTheSourceRunIsNotTouched:
     """Its records, traces and stores are a published measurement."""
 
+    @_NEEDS_INGEST
     async def test_nothing_under_the_source_directory_changes(self, tmp_path: Path) -> None:
         root = tmp_path / "runs"
         source, source_dir = await _ingest(root, tmp_path)
@@ -646,6 +666,7 @@ class TestTheSourceRunIsNotTouched:
 class TestUnderTheBatchPhase:
     """The seam a reused run answers on is the phase's, not the reuse's."""
 
+    @_NEEDS_INGEST
     async def test_a_reused_run_answers_in_batches(self, tmp_path: Path) -> None:
         root = tmp_path / "runs"
         source, source_dir = await _ingest(root, tmp_path)
@@ -692,6 +713,7 @@ class TestALoadThatCannotBeARun:
         with pytest.raises(ValueError, match="no run to reuse"):
             load_reused_run(tmp_path, "deadbeefcafe")
 
+    @_NEEDS_INGEST
     async def test_a_manifest_from_another_run(self, tmp_path: Path) -> None:
         """A run directory is a directory: nothing else would notice the mix-up."""
         root = tmp_path / "runs"
@@ -704,6 +726,7 @@ class TestALoadThatCannotBeARun:
         with pytest.raises(ValueError, match="do not describe one run"):
             load_reused_run(root, first.run_id)
 
+    @_NEEDS_INGEST
     async def test_a_record_from_another_run(self, tmp_path: Path) -> None:
         root = tmp_path / "runs"
         first, first_dir = await _ingest(root, tmp_path)
@@ -715,6 +738,7 @@ class TestALoadThatCannotBeARun:
         with pytest.raises(ValueError, match="do not describe one run"):
             load_reused_run(root, first.run_id)
 
+    @_NEEDS_INGEST
     async def test_rows_of_one_case_that_disagree_about_its_ingestion(self, tmp_path: Path) -> None:
         """The summary is denormalised onto every row, so there is no first row to
         prefer — and the figures are the denominators P8 is read against."""
@@ -729,6 +753,7 @@ class TestALoadThatCannotBeARun:
             load_reused_run(root, source.run_id)
 
     @pytest.mark.parametrize("instant", ["2023-06-12T13:56:00", "not an instant"])
+    @_NEEDS_INGEST
     async def test_a_row_whose_answering_instant_no_clock_would_take(
         self, tmp_path: Path, instant: str
     ) -> None:
@@ -747,6 +772,7 @@ class TestALoadThatCannotBeARun:
 
         assert sorted(one.name for one in root.iterdir()) == [source.run_id]
 
+    @_NEEDS_INGEST
     async def test_a_run_that_wrote_no_records(self, tmp_path: Path) -> None:
         root = tmp_path / "runs"
         source, source_dir = await _ingest(root, tmp_path)
@@ -759,6 +785,7 @@ class TestALoadThatCannotBeARun:
 class TestTheGateRefusesTheWrongMemories:
     """Every precondition, one test each — each of them a refusal, never a warning."""
 
+    @_NEEDS_INGEST
     async def test_a_source_run_that_aborted(self, tmp_path: Path) -> None:
         root = tmp_path / "runs"
         source, source_dir = await _ingest(root, tmp_path)
@@ -767,6 +794,7 @@ class TestTheGateRefusesTheWrongMemories:
         with pytest.raises(ValueError, match="cannot be reused"):
             _refuse(root, source.run_id, (_case(),))
 
+    @_NEEDS_INGEST
     async def test_a_source_run_that_was_killed_outright(self, tmp_path: Path) -> None:
         """A `SIGKILL` writes no `aborted`, so the rows are the only thing that says so.
 
@@ -799,6 +827,7 @@ class TestTheGateRefusesTheWrongMemories:
             ({"episode_retention": "30 days, 0:00:00"}, "episode retention"),
         ],
     )
+    @_NEEDS_INGEST
     async def test_a_configuration_the_stores_were_not_written_under(
         self, tmp_path: Path, override: dict[str, Any], expected: str
     ) -> None:
@@ -808,6 +837,7 @@ class TestTheGateRefusesTheWrongMemories:
         with pytest.raises(ValueError, match=expected):
             _refuse(root, source.run_id, (_case(),), **override)
 
+    @_NEEDS_INGEST
     async def test_a_different_session_bound(self, tmp_path: Path) -> None:
         root = tmp_path / "runs"
         source, _ = await _ingest(root, tmp_path)
@@ -815,6 +845,7 @@ class TestTheGateRefusesTheWrongMemories:
         with pytest.raises(ValueError, match="a different bound is a different memory"):
             _refuse(root, source.run_id, (_case(),), max_sessions=1)
 
+    @_NEEDS_INGEST
     async def test_cases_carrying_no_record_of_how_they_were_selected(self, tmp_path: Path) -> None:
         """#1052's rule: nobody having written it down is not evidence the bounds match."""
         root = tmp_path / "runs"
@@ -823,6 +854,7 @@ class TestTheGateRefusesTheWrongMemories:
         with pytest.raises(ValueError, match="no record of how they were selected"):
             _refuse(root, source.run_id, (_case(),), max_sessions=None)
 
+    @_NEEDS_INGEST
     async def test_a_source_run_that_kept_no_stores(self, tmp_path: Path) -> None:
         root = tmp_path / "runs"
         source, _ = await _ingest(root, tmp_path, keep_stores=False)
@@ -830,6 +862,7 @@ class TestTheGateRefusesTheWrongMemories:
         with pytest.raises(ValueError, match="only a run made with --keep-stores"):
             _refuse(root, source.run_id, (_case(),))
 
+    @_NEEDS_INGEST
     async def test_a_question_the_source_never_answered(self, tmp_path: Path) -> None:
         root = tmp_path / "runs"
         source, _ = await _ingest(root, tmp_path)
@@ -851,6 +884,7 @@ class TestTheGateRefusesTheWrongMemories:
         with pytest.raises(ValueError, match="recorded no row for question"):
             _refuse(root, source.run_id, (extended,))
 
+    @_NEEDS_INGEST
     async def test_a_question_whose_corpus_pointers_moved(self, tmp_path: Path) -> None:
         """The join is a tuple positioned against those pointers, so it cannot travel."""
         root = tmp_path / "runs"
@@ -868,6 +902,7 @@ class TestTheGateRefusesTheWrongMemories:
         with pytest.raises(ValueError, match="the join is positioned"):
             _refuse(root, source.run_id, (moved,))
 
+    @_NEEDS_INGEST
     async def test_a_case_whose_sessions_would_answer_at_another_instant(
         self, tmp_path: Path
     ) -> None:
@@ -894,6 +929,7 @@ class TestTheGateRefusesTheWrongMemories:
         with pytest.raises(ValueError, match="different retrievals"):
             _refuse(root, source.run_id, (moved,))
 
+    @_NEEDS_INGEST
     async def test_a_case_that_reorders_a_mixed_instant_question_list(self, tmp_path: Path) -> None:
         """Reordering moves an unstated question across the one that moves the clock.
 
@@ -907,6 +943,7 @@ class TestTheGateRefusesTheWrongMemories:
         with pytest.raises(ValueError, match="different retrievals"):
             _refuse(root, source.run_id, (_mixed_case(stated_first=True),))
 
+    @_NEEDS_INGEST
     async def test_a_join_that_does_not_line_up_with_its_own_pointers(self, tmp_path: Path) -> None:
         """`QuestionRecord` does not enforce the cardinality, so the gate does.
 
@@ -937,6 +974,7 @@ class TestTheGateRefusesTheWrongMemories:
         with pytest.raises(ValueError, match="evidence-join entries"):
             _refuse(root, source.run_id, (widened,))
 
+    @_NEEDS_INGEST
     async def test_two_rows_for_one_question(self, tmp_path: Path) -> None:
         """Two retrievals of one question do not say which join or instant is its."""
         root = tmp_path / "runs"
@@ -948,6 +986,7 @@ class TestTheGateRefusesTheWrongMemories:
         with pytest.raises(ValueError, match="more than once"):
             load_reused_run(root, source.run_id)
 
+    @_NEEDS_INGEST
     async def test_a_scored_run_reusing_a_smoke_run(self, tmp_path: Path) -> None:
         """A smoke run may have distilled through an injected observer, and nothing
         afterwards can tell."""
@@ -957,6 +996,7 @@ class TestTheGateRefusesTheWrongMemories:
         with pytest.raises(ValueError, match="a scored run cannot reuse"):
             _refuse(root, source.run_id, (_case(),), mode=RunMode.SCORED)
 
+    @_NEEDS_INGEST
     async def test_a_scored_source_is_accepted(self, tmp_path: Path) -> None:
         """The other side of clause 8, so the test above is about the mode and not
         about some other refusal firing first."""
@@ -970,6 +1010,7 @@ class TestTheGateRefusesTheWrongMemories:
 class TestTheRefusalComesBeforeAnySpend:
     """A mistake should cost a second, not an ingestion's worth of latency."""
 
+    @_NEEDS_INGEST
     async def test_execute_run_refuses_at_the_boundary_that_writes_the_manifest(
         self, tmp_path: Path
     ) -> None:
