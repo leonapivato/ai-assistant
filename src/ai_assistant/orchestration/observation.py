@@ -1087,12 +1087,14 @@ class ObservationStage:
 
         ADR-0283 §11:2: the conversations ``recent`` returns, bounded at fifty as the
         turn index's listing was, whose channel holds an episode above the watermark.
-        ``recent`` lists by activity descending, so its page is walked reversed to
-        keep ADR-0212 §3's ascending order among the conversations it returned.
+        ``recent`` lists by activity descending with ``id`` ascending on a tie, so its
+        page is re-sorted rather than reversed: ADR-0212 §3's order is activity
+        ascending with ``id`` ascending on a tie, and reversing would break ties by
+        ``id`` descending.
         """
         listed = await self._conversations.recent(limit=_CANDIDATE_LIMIT)
         candidates: list[tuple[Conversation, tuple[ChannelEpisode, ...]]] = []
-        for conversation in reversed(listed):
+        for conversation in sorted(listed, key=lambda one: (one.last_active_at, one.id)):
             page = await self._page(conversation)
             if page:
                 candidates.append((conversation, page))

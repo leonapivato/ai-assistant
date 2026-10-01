@@ -1,4 +1,4 @@
-"""Ended-activation capture ordering, uncertainty, and deletion compensation."""
+"""Ended-activation capture ordering, uncertainty, and deletion compensation (ADR-0283 §7)."""
 
 from __future__ import annotations
 
@@ -9,7 +9,11 @@ from typing import TYPE_CHECKING
 import pytest
 from structlog.testing import capture_logs
 
-from ai_assistant.core.errors import ConversationStoreError, MemoryStoreError
+from ai_assistant.core.errors import (
+    ConversationStoreError,
+    MemoryStoreConflictError,
+    MemoryStoreError,
+)
 from ai_assistant.core.types import (
     ChannelContext,
     ChannelIdentity,
@@ -19,12 +23,16 @@ from ai_assistant.core.types import (
     ExchangeDisposition,
     Modality,
     NewConversation,
+    ParkedBinding,
     RecordedChannelTrigger,
+    SpokenDelivery,
+    SpokenDeliveryState,
     TextChannelPayload,
     WholeTextReply,
 )
 from ai_assistant.orchestration.activation_state import CaptureFacts, admit_channel
 from ai_assistant.orchestration.activation_writer import ActivationWriter
+from ai_assistant.orchestration.conversations import conversation_channel
 from ai_assistant.testing import (
     FakeConversationStore,
     FakeMemoryStore,
@@ -34,11 +42,17 @@ from ai_assistant.testing import (
 if TYPE_CHECKING:
     from collections.abc import Awaitable, Callable, Sequence
 
-    from ai_assistant.core.types import Conversation, EpisodeCaptureReport, MemoryWrite
+    from ai_assistant.core.types import (
+        Conversation,
+        EpisodeCaptureReport,
+        MemoryWrite,
+        TranscriptEntry,
+    )
     from ai_assistant.orchestration.activation_state import ActivationState
 
 _AT = datetime(2026, 9, 20, tzinfo=UTC)
 _UUID = "1bed03e1-3b38-4e67-a2e4-6f6bf9c97eb1"
+_ADDRESS = f"activation:{_UUID}"
 
 
 async def _drain(work: Awaitable[None]) -> None:
@@ -62,11 +76,47 @@ class CommitThenFail(FakeMemoryStore):
         raise MemoryStoreError("secret input must not appear in capture logs")
 
 
-class VerificationFailure(FakeConversationStore):
-    """A live index whose post-write verification is unavailable."""
+class Conflicting(FakeMemoryStore):
+    """A store reporting the atomic collision that is known to have written nothing."""
+
+    async def write_atomic(self, writes: Sequence[MemoryWrite]) -> Sequence[str]:
+        raise MemoryStoreConflictError("an existing record holds this address")
+
+
+class TurnUnrecordable(FakeConversationStore):
+    """A conversation store whose ``record_turn`` outcome is unknown to its caller."""
+
+    def __init__(self, *, unreadable: bool = False) -> None:
+        super().__init__(now=lambda: _AT)
+        self.unreadable = unreadable
+
+    async def record_turn(
+        self,
+        conversation_id: str,
+        *,
+        episode_id: str,
+        occurred_at: datetime,
+        delivery: SpokenDelivery | None = None,
+    ) -> Conversation | None:
+        raise ConversationStoreError("private provider diagnostics")
 
     async def get(self, conversation_id: str) -> Conversation | None:
-        raise ConversationStoreError("private provider diagnostics")
+        if self.unreadable:
+            raise ConversationStoreError("private provider diagnostics")
+        return await super().get(conversation_id)
+
+
+class DeletingArchive(FakeTranscriptArchiveWriter):
+    """An archive whose append is followed by the conversation's deletion."""
+
+    def __init__(self) -> None:
+        super().__init__()
+        self.after: Callable[[], Awaitable[None]] | None = None
+
+    async def append(self, entry: TranscriptEntry) -> None:
+        await super().append(entry)
+        if self.after is not None:
+            await self.after()
 
 
 class Wiring:
@@ -77,22 +127,30 @@ class Wiring:
         *,
         memory: FakeMemoryStore | None = None,
         conversations: FakeConversationStore | None = None,
+        archive_enabled: bool = True,
     ) -> None:
         self.memory = memory if memory is not None else FakeMemoryStore(now=lambda: _AT)
         self.conversations = (
             conversations if conversations is not None else FakeConversationStore(now=lambda: _AT)
         )
-        self.archive = FakeTranscriptArchiveWriter()
+        self.archive = DeletingArchive()
         self.writer = ActivationWriter(
             memory=self.memory,
             conversations=self.conversations,
             archive=self.archive,
-            archive_enabled=True,
+            archive_enabled=archive_enabled,
             retention=timedelta(days=30),
             now=lambda: _AT,
         )
 
-    async def state(self, *, eligible: bool = True, standalone: bool = False) -> ActivationState:
+    async def state(
+        self,
+        *,
+        eligible: bool = True,
+        standalone: bool = False,
+        parked: ParkedBinding | None = None,
+        delivery: SpokenDelivery | None = None,
+    ) -> ActivationState:
         """One admitted text activation, optionally with canonical conversational facts."""
         conversation = None if standalone else await self.conversations.start()
         state = admit_channel(
@@ -117,15 +175,15 @@ class Wiring:
                 modality=Modality.TEXT,
                 supplied_withheld=False,
                 derived_from_external=False,
-                parked=None,
-                delivery=None,
+                parked=parked,
+                delivery=delivery,
             )
             state.response = "the complete reply"
             state.response_kind = EpisodeResponseKind.CONVERSATION_REPLY
         return state
 
     async def write(self, state: ActivationState, *, limit: int = 1024) -> EpisodeCaptureReport:
-        """Use a fixed end reading and rebuild metadata after the index resolves."""
+        """Use a fixed end reading, rebuilt from the state as the coordinator does."""
         return await self.writer.write(
             state,
             state.processing(_AT, None),
@@ -134,32 +192,66 @@ class Wiring:
             drain=_drain,
         )
 
+    async def on_channel(self, state: ActivationState) -> list[str]:
+        """The ids the store physically holds on this state's conversation channel."""
+        held = await self.memory.channel_episode_ids(
+            conversation_channel(str(state.conversation_id)), limit=1000
+        )
+        return [one.episode_id for one in held]
 
-async def test_ended_exchange_uses_one_index_address_and_shared_capture_timestamp() -> None:
+    async def last_turn_at(self, state: ActivationState) -> datetime | None:
+        """The conversation's own ``last_turn_at``, which ``record_turn`` moves."""
+        conversation = await self.conversations.get(str(state.conversation_id))
+        assert conversation is not None
+        return conversation.last_turn_at
+
+
+async def test_an_ended_exchange_is_written_at_its_activation_address_on_its_channel() -> None:
+    """§2, §7:1: the id is the activation's, the channel names the conversation, and the
+    conversation and the episode carry one instant."""
     wiring = Wiring()
     state = await wiring.state()
     report = await wiring.write(state)
     assert report.state == "recorded"
-    assert report.episode_id is not None
-    row = (await wiring.conversations.turns(str(state.conversation_id)))[0]
-    episode = await wiring.memory.get(report.episode_id)
+    assert report.episode_id == _ADDRESS
+    episode = await wiring.memory.get(_ADDRESS)
     assert isinstance(episode, EpisodicMemory)
-    assert episode.id == row.episode_id == state.index_episode_id
-    assert episode.occurred_at == row.occurred_at == _AT
+    assert episode.processing_record is not None
+    assert episode.processing_record.trigger.channel == conversation_channel(
+        str(state.conversation_id)
+    )
+    assert state.recorded_episode_id == _ADDRESS
+    assert episode.occurred_at == await wiring.last_turn_at(state) == _AT
     assert episode.expires_at == _AT + timedelta(days=30)
-    assert episode.processing_record == state.processing(_AT, None)
     assert episode.outcome == "the complete reply"
-    assert wiring.archive.recorded[episode.id].asked == "exact request"
+    entry = wiring.archive.recorded[_ADDRESS]
+    assert entry.asked == "exact request"
+    assert entry.ordinal is None
+    assert entry.occurred_at == _AT
+
+
+async def test_the_archive_switch_off_records_the_episode_and_the_turn_and_no_entry() -> None:
+    """ADR-0225 §6: with the archive switched off the capture is otherwise unchanged."""
+    wiring = Wiring(archive_enabled=False)
+    state = await wiring.state()
+    report = await wiring.write(state)
+    assert report.state == "recorded"
+    assert report.episode_id == _ADDRESS
+    assert wiring.archive.recorded == {}
+    assert await wiring.on_channel(state) == [_ADDRESS]
+    assert state.recorded_episode_id == _ADDRESS
+    assert await wiring.last_turn_at(state) == _AT
 
 
 @pytest.mark.parametrize("standalone", [False, True])
 async def test_inspection_only_capture_has_no_archive_or_eligible_history(standalone: bool) -> None:
+    """§7:5: a pass that ends before capture is still on its channel, ineligible."""
     wiring = Wiring()
     state = await wiring.state(eligible=False, standalone=standalone)
     report = await wiring.write(state)
     assert report.state == "recorded"
-    assert report.episode_id is not None
-    episode = await wiring.memory.get(report.episode_id)
+    assert report.episode_id == _ADDRESS
+    episode = await wiring.memory.get(_ADDRESS)
     assert isinstance(episode, EpisodicMemory)
     assert episode.content == "Recorded activation; inspect its processing record."
     assert episode.disposition is None
@@ -167,16 +259,15 @@ async def test_inspection_only_capture_has_no_archive_or_eligible_history(standa
     assert not episode.processing_record.model_eligible
     assert wiring.archive.recorded == {}
     if standalone:
-        assert report.episode_id == f"activation:{_UUID}"
         assert await wiring.conversations.recent() == []
-    else:
-        assert (
-            await wiring.conversations.turns(str(state.conversation_id), model_eligible_only=True)
-            == []
-        )
+        return
+    channel = conversation_channel(str(state.conversation_id))
+    eligible = await wiring.memory.channel_episodes(channel, limit=10, episode_model_eligible=True)
+    assert eligible.entries == ()
+    assert await wiring.on_channel(state) == [_ADDRESS]
 
 
-async def test_complete_record_bound_refuses_before_index_or_content_writes() -> None:
+async def test_complete_record_bound_refuses_before_any_write() -> None:
     wiring = Wiring()
     state = await wiring.state()
     assert isinstance(state.trigger, RecordedChannelTrigger)
@@ -184,31 +275,49 @@ async def test_complete_record_bound_refuses_before_index_or_content_writes() ->
         update={"payload": state.trigger.payload.model_copy(update={"text": "x" * 100000})}
     )
     assert (await wiring.write(state)).state == "degraded"
-    assert await wiring.conversations.turns(str(state.conversation_id)) == []
     assert await wiring.memory.export() == []
     assert wiring.archive.recorded == {}
+    assert await wiring.last_turn_at(state) is None
 
 
-async def test_verification_uncertainty_cannot_claim_recorded() -> None:
-    wiring = Wiring(conversations=VerificationFailure(now=lambda: _AT))
+async def test_an_unknown_record_turn_outcome_leaves_a_standing_conversation_s_writes() -> None:
+    """A ``record_turn`` that raised is indeterminate: the fence re-reads, finds the
+    conversation standing, and destroys nothing — but the capture cannot claim recorded."""
+    wiring = Wiring(conversations=TurnUnrecordable())
     state = await wiring.state()
     with capture_logs() as logs:
         report = await wiring.write(state)
     assert report.state == "degraded"
-    assert report.episode_id is not None
-    assert await wiring.memory.get(report.episode_id) is not None
+    assert report.episode_id is None
+    assert await wiring.memory.get(_ADDRESS) is not None
+    assert _ADDRESS in wiring.archive.recorded
     assert logs == [
         {
             "event": "activation_capture_degraded",
-            "stage": "verify",
-            "reason": "uncertain",
+            "stage": "record_turn",
+            "reason": "failed",
             "log_level": "warning",
         }
     ]
 
 
+async def test_an_unreadable_conversation_cannot_claim_recorded() -> None:
+    wiring = Wiring(conversations=TurnUnrecordable(unreadable=True))
+    state = await wiring.state()
+    with capture_logs() as logs:
+        report = await wiring.write(state)
+    assert report.state == "degraded"
+    assert await wiring.memory.get(_ADDRESS) is not None
+    assert [row["stage"] for row in logs] == ["record_turn", "verify"]
+    assert all("private" not in str(row) for row in logs)
+
+
 @pytest.mark.parametrize("cancelled", [False, True])
-async def test_commit_then_failure_still_drains_deletion_compensation(cancelled: bool) -> None:
+async def test_commit_then_failure_on_a_deleted_conversation_leaves_no_episode(
+    cancelled: bool,
+) -> None:
+    """§7:4, §14:2: an episode write that commits and then propagates cancellation (or
+    fails), on a conversation deleted meanwhile, leaves no episode and no archive entry."""
     memory = CommitThenFail(cancelled=cancelled)
     wiring = Wiring(memory=memory)
     state = await wiring.state()
@@ -225,8 +334,75 @@ async def test_commit_then_failure_still_drains_deletion_compensation(cancelled:
             assert (await wiring.write(state)).state == "degraded"
         assert all("secret" not in str(row) for row in logs)
     assert await wiring.memory.export() == []
+    assert await wiring.on_channel(state) == []
     assert wiring.archive.recorded == {}
-    assert state.index_episode_id is None
+    assert state.recorded_episode_id is None
+
+
+async def test_an_indeterminate_write_on_a_standing_conversation_writes_no_archive_entry() -> None:
+    """§7:4: no archive entry and no ``record_turn`` after an indeterminate write, and
+    the episode it may have left stays where the conversation stands."""
+    wiring = Wiring(memory=CommitThenFail())
+    state = await wiring.state()
+    assert (await wiring.write(state)).state == "degraded"
+    assert wiring.archive.recorded == {}
+    assert await wiring.on_channel(state) == [_ADDRESS]
+    assert await wiring.last_turn_at(state) is None
+
+
+async def test_a_conversation_deleted_before_record_turn_keeps_neither_write() -> None:
+    """§7:2, §14:2: ``record_turn``'s ``None`` deletes the episode and discards the
+    archive entry, and the capture is degraded."""
+    wiring = Wiring()
+    state = await wiring.state()
+
+    async def deleted() -> None:
+        await wiring.conversations.stamp_deleted(str(state.conversation_id))
+
+    wiring.archive.after = deleted
+    report = await wiring.write(state)
+    assert report.state == "degraded"
+    assert report.episode_id is None
+    assert await wiring.memory.export() == []
+    assert await wiring.on_channel(state) == []
+    assert wiring.archive.recorded == {}
+
+
+async def test_a_write_known_not_to_have_committed_reaches_nothing_else() -> None:
+    """§7:3: no archive entry and no ``record_turn``, and no compensation that could
+    delete the record already holding the address."""
+    wiring = Wiring(memory=Conflicting(now=lambda: _AT))
+    state = await wiring.state()
+    assert (await wiring.write(state)).state == "degraded"
+    assert wiring.archive.recorded == {}
+    assert await wiring.last_turn_at(state) is None
+
+
+async def test_the_parked_binding_is_recorded_as_the_episode_s_own_park() -> None:
+    """§3:4: ``links.parks`` is the binding this activation's own step parked, and a
+    resume finds the episode by it (§5)."""
+    binding = ParkedBinding(execution_id="execution-1", step_id="step-1")
+    wiring = Wiring()
+    state = await wiring.state(parked=binding)
+    assert (await wiring.write(state)).state == "recorded"
+    episode = await wiring.memory.get(_ADDRESS)
+    assert isinstance(episode, EpisodicMemory)
+    assert episode.processing_record is not None
+    assert episode.processing_record.links.parks == binding
+    assert episode.processing_record.links.parked is None
+    parking = await wiring.memory.episode_parking(binding)
+    assert parking is not None
+    assert parking.id == _ADDRESS
+
+
+async def test_a_spoken_capture_writes_its_unknown_delivery_row() -> None:
+    """§10: capture passes ``UNKNOWN`` through ``record_turn``."""
+    unknown = SpokenDelivery(state=SpokenDeliveryState.UNKNOWN)
+    wiring = Wiring()
+    state = await wiring.state(delivery=unknown)
+    assert (await wiring.write(state)).state == "recorded"
+    rows = await wiring.conversations.deliveries(str(state.conversation_id), episode_ids=[_ADDRESS])
+    assert dict(rows) == {_ADDRESS: unknown}
 
 
 async def test_standalone_collision_preserves_existing_record_and_does_not_retry() -> None:

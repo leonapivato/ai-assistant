@@ -27,6 +27,7 @@ import asyncio
 from typing import TYPE_CHECKING
 
 import pytest
+from channel_episodes import channel_ids
 from test_engine import PATIENT, Harness, NoStepPlanner, confirmable, tool
 
 from ai_assistant.core.errors import OversizedValueError
@@ -357,8 +358,8 @@ async def test_a_client_that_goes_away_leaves_the_turn_completed_and_captured() 
 
     conversations = await harness.conversation_store.recent(limit=10)
     assert len(conversations) == 1
-    turns = await harness.conversation_store.turns(conversations[0].id)
-    assert len(turns) == 1, "§9: the turn's record survives, whoever was reading"
+    episodes = await channel_ids(harness.memory, conversations[0].id)
+    assert len(episodes) == 1, "§9: the turn's record survives, whoever was reading"
 
 
 async def test_an_abandoned_stream_re_executes_nothing() -> None:

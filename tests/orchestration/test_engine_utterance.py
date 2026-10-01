@@ -56,9 +56,21 @@ _SAID: Final = 'where did I leave the "café" receipt'
 _PADDED: Final = f"  \n{_SAID}\t "
 
 
-async def _entries(archive: Any) -> list[TranscriptEntry]:
-    """Every archive entry this engine wrote, in write order."""
-    return list(await archive.entries())
+async def _entries(wired: Any) -> list[TranscriptEntry]:
+    """Every archive entry this engine wrote, in the order its episodes were written.
+
+    The archive orders by instant and then address (ADR-0283 §9), and an address is an
+    activation's own id (§2), so under a frozen clock the archive's order says nothing
+    about which pass came first. The episode store's write order does, and every entry
+    sits at its episode's id.
+    """
+    entries = {entry.address: entry for entry in await wired.archive.entries()}
+    ordered = [
+        entries.pop(episode.id)
+        for episode in await _episodes(wired.memory)
+        if episode.id in entries
+    ]
+    return [*ordered, *entries.values()]
 
 
 async def _episodes(memory: Any) -> list[EpisodicMemory]:
@@ -88,7 +100,7 @@ async def test_a_turn_archives_and_renders_the_request_it_received(
 
     outcome = await harness.engine.converse(_SAID, timeout=PATIENT)
 
-    (entry,) = await _entries(harness.archive)
+    (entry,) = await _entries(harness)
     assert entry.asked == _SAID, "ADR-0225 §1's first case, taken from the turn's own request"
     (episode,) = await _episodes(harness.memory)
     assert episode.content.startswith(f"The user asked: {_SAID}"), (
@@ -117,7 +129,7 @@ async def test_the_pass_normalises_once_so_the_request_and_the_statement_cannot_
     assert outcome.turn is not None
     assert outcome.turn.utterance == _SAID
     assert outcome.turn.goal.outcome == _SAID
-    (entry,) = await _entries(harness.archive)
+    (entry,) = await _entries(harness)
     assert entry.asked == _SAID
 
 
@@ -138,7 +150,7 @@ async def test_a_routed_pass_still_archives_the_utterance_it_threads() -> None:
     outcome = await harness.engine.converse(_UTTERANCE, timeout=PATIENT)
 
     assert outcome.turn is None, "a routed pass produces no turn to read words off"
-    (entry,) = await _entries(harness.archive)
+    (entry,) = await _entries(harness)
     assert entry.asked == _UTTERANCE
 
 
@@ -167,7 +179,7 @@ async def test_a_parked_reads_resolution_archives_the_parked_passs_request() -> 
     assert outcome.read_answer is ReadAnswerOutcome.DISPATCHED
     assert outcome.turn is not None
     assert outcome.turn.utterance == _ASKED
-    entries = await _entries(wired.archive)
+    entries = await _entries(wired)
     assert [one.asked for one in entries] == [_ASKED, _ASKED], (
         "the parking turn's entry and the resolution's, each carrying the same request "
         "— which is what this decision preserves rather than changes (§8, #2265)"
@@ -209,7 +221,7 @@ async def test_a_park_written_without_an_utterance_falls_back_to_its_goal_statem
     assert outcome.read_answer is ReadAnswerOutcome.DISPATCHED
     assert outcome.turn is not None
     assert outcome.turn.utterance == _ASKED, "the parked goal's outcome, which is those words"
-    assert (await _entries(wired.archive))[-1].asked == _ASKED
+    assert (await _entries(wired))[-1].asked == _ASKED
 
 
 # --- §6's further arm: a pass that received no user words at all --------------
@@ -229,7 +241,7 @@ async def test_the_resolution_of_a_parked_step_archives_no_user_words() -> None:
 
     await harness.engine.resume(parked.step.confirmation.token, approved=True, timeout=PATIENT)
 
-    assert [one.asked for one in await _entries(harness.archive)] == [_SAID, None]
+    assert [one.asked for one in await _entries(harness)] == [_SAID, None]
 
 
 async def test_a_resumption_recovered_from_durable_state_archives_no_user_words() -> None:
@@ -248,7 +260,7 @@ async def test_a_resumption_recovered_from_durable_state_archives_no_user_words(
     resumed = await harness.engine.resume(recovered.token, approved=True, timeout=PATIENT)
 
     assert resumed.turn is None, "a recovered resume carries no live turn"
-    assert [one.asked for one in await _entries(harness.archive)] == [_SAID, None]
+    assert [one.asked for one in await _entries(harness)] == [_SAID, None]
     assert not (await _episodes(harness.memory))[-1].content.startswith("The user asked:")
 
 
@@ -260,7 +272,7 @@ async def test_the_resolution_of_a_routed_park_archives_no_user_words() -> None:
 
     await harness.engine.resume(_token(outcome), approved=True, timeout=PATIENT)
 
-    assert [one.asked for one in await _entries(harness.archive)] == [_UTTERANCE, None]
+    assert [one.asked for one in await _entries(harness)] == [_UTTERANCE, None]
 
 
 # --- §6's composing arm ------------------------------------------------------
@@ -341,7 +353,7 @@ async def test_every_moved_reader_takes_the_request_when_the_goal_says_something
     assert outcome.turn is not None
     assert outcome.turn.goal.outcome == _INTERPRETED, "the goal really did diverge"
     assert outcome.turn.utterance == _SAID
-    (entry,) = await _entries(harness.archive)
+    (entry,) = await _entries(harness)
     assert entry.asked == _SAID, "ADR-0225 §1: the user's own words, unrewritten"
     (episode,) = await _episodes(harness.memory)
     assert episode.content.startswith(f"The user asked: {_SAID}")
@@ -387,7 +399,7 @@ async def test_a_park_carrying_its_own_request_is_never_read_off_its_goal() -> N
     assert outcome.turn is not None
     assert outcome.turn.goal.outcome == _INTERPRETED, "the parked goal really did diverge"
     assert outcome.turn.utterance == _SAID, "the park's own request, not its goal statement"
-    assert (await _entries(wired.archive))[-1].asked == _SAID
+    assert (await _entries(wired))[-1].asked == _SAID
     assert _INTERPRETED not in (await _episodes(wired.memory))[-1].content
 
 
@@ -420,7 +432,7 @@ async def test_a_blank_utterance_is_refused_on_the_production_path_as_it_was(bla
     with pytest.raises(PlanningError, match="a turn needs a non-empty utterance"):
         await harness.engine.converse(blank, timeout=PATIENT)
 
-    assert await _entries(harness.archive) == [], "nothing was captured for a turn that never ran"
+    assert await _entries(harness) == [], "nothing was captured for a turn that never ran"
 
 
 @pytest.mark.parametrize("blank", ["", "   ", "\n\t "], ids=["empty", "spaces", "mixed"])

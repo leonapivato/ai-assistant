@@ -4551,7 +4551,10 @@ async def test_ask_continues_the_conversation_it_is_given(output: StringIO) -> N
 
     assert code == 0
     assert len(await conversations.recent()) == 1, "no second conversation was started"
-    assert [turn.ordinal for turn in await conversations.turns(existing)] == [1, 2]
+    # ADR-0283 §4:2: the digest counts the episodes on the conversation's channel.
+    digest = await engine.conversation(existing)
+    assert digest is not None
+    assert digest.recorded_turns == 2
     assert existing in output.getvalue()
 
 
@@ -5299,7 +5302,10 @@ async def test_ask_streams_the_conversation_it_is_told_to_continue(
     assert "Still here." in rendered, "the resumed turn streamed its answer too"
     assert opened in rendered, "and ran under the conversation it was given"
     assert len(await conversations.recent()) == 1, "no second conversation was started"
-    assert [turn.ordinal for turn in await conversations.turns(opened)] == [1, 2]
+    # ADR-0283 §4:2: the digest counts the episodes on the conversation's channel.
+    digest = await engine.conversation(opened)
+    assert digest is not None
+    assert digest.recorded_turns == 2
     await engine.aclose()
 
 

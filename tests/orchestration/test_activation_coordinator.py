@@ -54,11 +54,12 @@ async def test_finalization_reads_end_once_and_records_original_processing_cance
     assert episode.processing_record.status is (
         ProcessingStatus.INTERRUPTED if interrupted else ProcessingStatus.COMPLETED
     )
-    assert len(tasks) == 2
+    # The write alone: a capture `record_turn` verified owes no fence (ADR-0283 §7:2).
+    assert len(tasks) == 1
     assert all(task.done() for task in tasks)
 
 
-async def test_output_refusal_uses_actual_index_before_content_and_retains_original_error() -> None:
+async def test_output_refusal_is_checked_before_content_and_retains_original_error() -> None:
     wiring = Wiring()
     state = await wiring.state()
     tasks: list[asyncio.Task[None]] = []
@@ -72,7 +73,9 @@ async def test_output_refusal_uses_actual_index_before_content_and_retains_origi
     refusal = OversizedValueError("result is too large", limit=1024, size=1025)
 
     def check_output() -> None:
-        assert state.index_episode_id is not None
+        # ADR-0283 §2: the address is fixed at admission, so the output check runs
+        # before anything is written.
+        assert state.recorded_episode_id is None
         assert wiring.archive.recorded == {}
         raise refusal
 
@@ -120,7 +123,7 @@ async def test_cleanup_budget_cancels_and_waits_for_the_registered_write(
         result = await parent
 
     assert result.report.state == "degraded"
-    assert result.report.episode_id == state.index_episode_id
+    assert result.report.episode_id == state.recorded_episode_id
     assert any(log.get("reason") == "timeout" for log in logs)
     assert len(tasks) == 2
     assert all(task.done() for task in tasks)
@@ -172,6 +175,6 @@ async def test_second_cancellation_drains_registered_deletion_compensation() -> 
         await parent
     await asyncio.gather(*drivers)
     assert all(task.done() for task in tasks)
-    assert state.index_episode_id is None
+    assert state.recorded_episode_id is None
     assert await memory.export() == []
     assert wiring.archive.recorded == {}

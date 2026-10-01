@@ -36,6 +36,7 @@ from datetime import UTC, datetime, timedelta
 from typing import TYPE_CHECKING, Any
 
 import pytest
+from channel_episodes import channel_numbers, conversation_episode
 
 from ai_assistant.core.errors import (
     ConversationStoreError,
@@ -87,8 +88,9 @@ if TYPE_CHECKING:
 
     from ai_assistant.core.protocols import MemoryWriter, Observer
     from ai_assistant.core.types import (
+        ChannelEpisodePage,
+        ChannelIdentity,
         Conversation,
-        ConversationTurn,
         MemoryIngestResult,
         SourceReading,
     )
@@ -279,29 +281,23 @@ class _WatchedConversations(FakeConversationStore):
         #: advance — §6's deletion race, which no fake produces on its own.
         self.stamp_before_advance = False
         #: Seconds the candidate listing parks for before answering. ADR-0218 §2's
-        #: due test is awaited work of its own — a listing and up to fifty page
-        #: probes — so a case about the run budget needs a way to spend it *there*
-        #: rather than inside a pass.
+        #: due test is awaited work of its own — a listing and a page read per
+        #: candidate — so a case about the run budget needs a way to spend it
+        #: *there* rather than inside a pass.
         self.listing_delay = 0.0
-        #: Every ``turns_after`` and every ``turns`` this store was asked for, in
-        #: call order. ADR-0218 §2 rules that "the page read to decide is the page
-        #: the pass reads: no turn is read twice", which is a claim about *calls*
-        #: and is unobservable from any report.
-        self.pages_read: list[tuple[str, int | None]] = []
-        self.tails_read: list[str] = []
 
-    def plant_watermark(self, conversation_id: str, ordinal: int) -> None:
+    def plant_watermark(self, conversation_id: str, number: int) -> None:
         """Write a watermark directly, without ``record_observed``'s monotonicity.
 
         Since ADR-0283 §6:6 the store no longer bounds a watermark by the
-        conversation's turns and discards only a value that is not a positive
+        conversation's episodes and discards only a value that is not a positive
         integer — which a frozen pydantic model cannot hold, so no planted value here
         is ever discarded. The ``sqlite3`` store's own cases carry the limbs a *file*
         can hold.
         """
         stored = self._conversations[conversation_id]
         self._conversations[conversation_id] = stored.model_copy(
-            update={"observed_through": ordinal}
+            update={"observed_through": number}
         )
 
     def raw_watermark(self, conversation_id: str) -> int | None:
@@ -313,39 +309,14 @@ class _WatchedConversations(FakeConversationStore):
         """
         return self._conversations[conversation_id].observed_through
 
-    async def conversations_with_unobserved_turns(self, *, limit: int = 50) -> list[Conversation]:
-        """List the candidates, parking first if the case wants the budget spent here."""
+    async def recent(self, *, limit: int = 50, offset: int = 0) -> list[Conversation]:
+        """List the conversations, parking first if the case wants the budget spent here.
+
+        ``recent`` is the candidate listing since ADR-0283 §11:2.
+        """
         if self.listing_delay:
             await asyncio.sleep(self.listing_delay)
-        return await super().conversations_with_unobserved_turns(limit=limit)
-
-    async def turns_after(
-        self,
-        conversation_id: str,
-        *,
-        after_ordinal: int | None = None,
-        limit: int | None = None,
-    ) -> list[ConversationTurn]:
-        """Read the page above a position, recording that the read happened."""
-        self.pages_read.append((conversation_id, after_ordinal))
-        return await super().turns_after(conversation_id, after_ordinal=after_ordinal, limit=limit)
-
-    async def turns(
-        self,
-        conversation_id: str,
-        *,
-        limit: int | None = None,
-        before_ordinal: int | None = None,
-        model_eligible_only: bool = False,
-    ) -> list[ConversationTurn]:
-        """Read the tail, recording that the read happened."""
-        self.tails_read.append(conversation_id)
-        return await super().turns(
-            conversation_id,
-            limit=limit,
-            before_ordinal=before_ordinal,
-            model_eligible_only=model_eligible_only,
-        )
+        return await super().recent(limit=limit, offset=offset)
 
     async def record_observed(
         self, conversation_id: str, *, through_ordinal: int
@@ -358,7 +329,7 @@ class _WatchedConversations(FakeConversationStore):
             async with asyncio.timeout(5.0):
                 await self.release[index].wait()
         if self.advance_raises:
-            msg = "the conversation index could not be written"
+            msg = "the conversation store could not be written"
             raise ConversationStoreError(msg)
         if self.stamp_before_advance:
             await super().stamp_deleted(conversation_id)
@@ -399,6 +370,11 @@ class _WatchedMemory(FakeMemoryStore):
         self.stale_on: set[str] = set()
         #: Record ids whose conditional write fails as a broken backing would.
         self.fail_on: set[str] = set()
+        #: Every channel page this store was asked for, as ``(conversation id,
+        #: after)``, in call order. ADR-0218 §2 rules that "the page read to decide
+        #: is the page the pass reads", which is a claim about *calls* and is
+        #: unobservable from any report.
+        self.pages_read: list[tuple[str, int | None]] = []
 
     @property
     def labelling_writes(self) -> list[MemoryWrite]:
@@ -414,6 +390,20 @@ class _WatchedMemory(FakeMemoryStore):
             if write.mode is MemoryWriteMode.IF_UNCHANGED
             and isinstance(write.record, EpisodicMemory)
         ]
+
+    async def channel_episodes(
+        self,
+        channel: ChannelIdentity,
+        *,
+        after: int | None = None,
+        limit: int,
+        episode_model_eligible: bool | None = None,
+    ) -> ChannelEpisodePage:
+        """Read a channel's page, recording that the read happened."""
+        self.pages_read.append((channel.instance_id, after))
+        return await super().channel_episodes(
+            channel, after=after, limit=limit, episode_model_eligible=episode_model_eligible
+        )
 
     async def write_atomic(self, writes: Sequence[MemoryWrite]) -> Sequence[str]:
         """Apply the batch, recording it and honouring whichever refusal is scripted."""
@@ -451,6 +441,9 @@ class Harness:
         #: move it between ``start`` and ``append``.
         self.store_clock = now if isinstance(now, _Clock) else None
         self.memory = memory if memory is not None else FakeMemoryStore(now=lambda: AT)
+        #: Each conversation's seeded episode ids, oldest first, so a case can name
+        #: "the third episode" without knowing the store-wide number it was given.
+        self.episode_ids: defaultdict[str, list[str]] = defaultdict(list)
         self.conversations = _WatchedConversations(
             now=self._advancing if now is None else now, new_id=new_id
         )
@@ -485,7 +478,7 @@ class Harness:
 
         ``swap_writer``'s shape for the producer, and it exists for a reason of
         ADR-0239's: a labelling names an **episode id**, and the ids are minted by
-        the conversation store when the harness records the turns — so a case
+        the harness when it seeds the conversation's channel — so a case
         scripting a labelling cannot know what to script until after the harness
         exists. Swapping keeps the canonical fake as the producer rather than
         introducing a second hand-rolled double for the sake of construction order.
@@ -543,44 +536,82 @@ class Harness:
             route=ROUTE,
         )
 
-    async def conversation_with(self, turns: int, *, captured: int | None = None) -> str:
-        """Start a conversation with ``turns`` turns, ``captured`` of them recorded.
+    async def seed(
+        self,
+        conversation_id: str,
+        *,
+        eligible: bool = True,
+        occurred_at: datetime = AT,
+        placement: Placement | None = None,
+    ) -> str:
+        """Land one episode on the conversation's channel, as the writer does (ADR-0283 §7).
 
-        The default records every turn. A lower ``captured`` leaves the *oldest*
-        turns with an index entry and no episode — the shape ADR-0074 §3 makes
-        ordinary, since the index entry lands first and the episode write is
-        best-effort.
+        The episode is written to the channel and then ``record_turn`` stamps the
+        conversation's ``last_turn_at`` with its instant. Its id names the
+        conversation and its 1-based position in this harness's seeding, so a
+        batch's ids say which episodes a pass read (:func:`_indexes`).
+
+        ``eligible=False`` is an inspection-only episode — a pass that ended before
+        capture — which is on the channel and which no model-facing read admits.
+        """
+        index = len(self.episode_ids[conversation_id]) + 1
+        episode_id = f"activation:{conversation_id}-{index}"
+        episode = conversation_episode(
+            conversation_id, episode_id, occurred_at=occurred_at, eligible=eligible
+        )
+        if placement is not None:
+            episode = episode.model_copy(update={"placement": placement})
+        await self.memory.add(episode)
+        await self.conversations.record_turn(
+            conversation_id, episode_id=episode_id, occurred_at=occurred_at
+        )
+        self.episode_ids[conversation_id].append(episode_id)
+        return episode_id
+
+    def ids(self, conversation_id: str) -> list[str]:
+        """The episode ids seeded on ``conversation_id``, oldest first."""
+        return list(self.episode_ids[conversation_id])
+
+    async def number(self, conversation_id: str, index: int) -> int:
+        """The store-wide number of the ``index``-th (1-based) seeded episode.
+
+        Numbers are the memory store's own (ADR-0283 §1) and every inserted record
+        consumes one, beliefs included, so a watermark is asserted against the number
+        read back rather than against a position.
+        """
+        numbers = await channel_numbers(self.memory, conversation_id)
+        return numbers[self.episode_ids[conversation_id][index - 1]]
+
+    async def conversation_with(self, turns: int, *, captured: int | None = None) -> str:
+        """Start a conversation with ``turns`` episodes, ``captured`` of them eligible.
+
+        The default makes every episode eligible. A lower ``captured`` makes the
+        *oldest* episodes inspection-only, which every model-facing read skips.
         """
         recorded = turns if captured is None else captured
         conversation = await self.conversations.start()
-        for ordinal in range(turns):
-            turn = await self.conversations.append(conversation.id, occurred_at=AT)
-            if ordinal >= turns - recorded:
-                await self.memory.add(_episode(turn.episode_id))
+        for index in range(turns):
+            await self.seed(conversation.id, eligible=index >= turns - recorded)
         return conversation.id
 
-    async def conversation_of(self, ordinals_with_episodes: Sequence[int], *, turns: int) -> str:
-        """Start a conversation of ``turns`` turns, landing only the named ordinals.
+    async def conversation_of(self, eligible: Sequence[int], *, turns: int) -> str:
+        """Start a conversation of ``turns`` episodes, only the named (1-based) eligible.
 
         The general form of :meth:`conversation_with`, for the cases where *which*
-        turns resolve is the point — a gap at the end of a page, a gap in its middle,
-        or a page that resolves to nothing at all (ADR-0212 §5).
+        episodes a model may read is the point — at the end of a page, in its
+        middle, or nowhere at all (ADR-0283 §11:1).
         """
         conversation = await self.conversations.start()
-        for _ in range(turns):
-            turn = await self.conversations.append(conversation.id, occurred_at=AT)
-            if turn.ordinal in ordinals_with_episodes:
-                await self.memory.add(_episode(turn.episode_id))
+        for index in range(1, turns + 1):
+            await self.seed(conversation.id, eligible=index in eligible)
         return conversation.id
 
     async def append_turns(
         self, conversation_id: str, count: int, *, captured: bool = True
     ) -> None:
-        """Record ``count`` further turns on an existing conversation."""
+        """Land ``count`` further episodes on an existing conversation."""
         for _ in range(count):
-            turn = await self.conversations.append(conversation_id, occurred_at=AT)
-            if captured:
-                await self.memory.add(_episode(turn.episode_id))
+            await self.seed(conversation_id, eligible=captured)
 
     async def conversation_stamped(
         self,
@@ -589,21 +620,20 @@ class Harness:
         stamps: Sequence[datetime],
         captured: bool = True,
     ) -> str:
-        """Start a conversation *active* at one instant, with turns stamped at others.
+        """Start a conversation *active* at one instant, with episodes stamped at others.
 
         The two instants ADR-0218 §1 turns on come from different clocks and this is
         what lets a case separate them: ``active_at`` is the store's, read by
-        ``start``, and each of ``stamps`` is the **caller's** ``occurred_at``, which
-        also sets ``last_turn_at``. A case wanting a conversation whose activity is
-        recent and whose turns are old — or the reverse — sets them apart here.
+        ``start``, and each of ``stamps`` is the episode's ``occurred_at``, which
+        ``record_turn`` also sets as ``last_turn_at``. A case wanting a conversation
+        whose activity is recent and whose episodes are old — or the reverse — sets
+        them apart here.
         """
         assert self.store_clock is not None, "a case building stamped turns needs a _Clock"
         self.store_clock.at = active_at
         conversation = await self.conversations.start()
         for stamp in stamps:
-            turn = await self.conversations.append(conversation.id, occurred_at=stamp)
-            if captured:
-                await self.memory.add(_episode(turn.episode_id))
+            await self.seed(conversation.id, eligible=captured, occurred_at=stamp)
         return conversation.id
 
     async def mark_active_at(self, conversation_id: str, at: datetime) -> None:
@@ -617,25 +647,11 @@ class Harness:
         self.store_clock.at = at
         await self.conversations.mark_active(conversation_id)
 
-    async def land(self, conversation_id: str, ordinal: int) -> None:
-        """Write the episode a recorded turn names, as a late capture would."""
-        await self.memory.add(_episode(f"conv:{conversation_id}:{ordinal}"))
-
     async def watermark(self, conversation_id: str) -> int | None:
         """Where the observation walk stands in this conversation, as the store reads it."""
         conversation = await self.conversations.get(conversation_id)
         assert conversation is not None
         return conversation.observed_through
-
-
-def _episode(episode_id: str) -> EpisodicMemory:
-    """One captured turn, as the capture stage writes it (ADR-0074 §4)."""
-    return EpisodicMemory(
-        id=episode_id,
-        content=f"the user said something in {episode_id}",
-        occurred_at=AT,
-        provenance=Provenance(source=MemorySource.OBSERVED, confidence=0.9, last_updated=AT),
-    )
 
 
 # --- selecting the batch (ADR-0077 §8) ----------------------------------
@@ -685,9 +701,7 @@ async def test_naming_the_other_conversation_reaches_the_episodes_outside_that_b
 
     assert report.conversation_id == older
     batch = harness.fake.batches[-1]
-    assert {episode.id for episode in batch} == {
-        turn.episode_id for turn in await harness.conversations.turns(older)
-    }
+    assert {episode.id for episode in batch} == set(harness.ids(older))
 
 
 async def test_two_unscoped_runs_walk_on_rather_than_re_reading_one_conversation() -> None:
@@ -721,7 +735,7 @@ async def test_two_unscoped_runs_walk_on_rather_than_re_reading_one_conversation
         "the second run walks on to the conversation behind the first, so the two "
         "passes read different episodes (ADR-0212 §3)"
     )
-    # And with both conversations observed through their last turn there is no
+    # And with both conversations observed through their last episode there is no
     # candidate left: the third run reads nothing, asks no model, and reports the
     # zero report — which is what makes a timer safe to set (ADR-0212, Consequences).
     assert third == ObservationReport()
@@ -758,7 +772,7 @@ async def test_a_producer_re_proposing_a_stored_id_is_refused() -> None:
 
     await harness.stage.observe(conversation)
 
-    # Fresh turns, because the first pass advanced the watermark past the two it read
+    # Fresh episodes, because the first pass advanced the watermark past the two it read
     # and a second pass over nothing reaches no producer at all (ADR-0212 §3, §5).
     # What is under test is the *refusal*, so the pass has to get as far as proposing.
     await harness.append_turns(conversation, 2)
@@ -783,15 +797,15 @@ async def test_the_batch_is_bounded_by_the_configured_size() -> None:
     report = await harness.stage.observe(conversation)
 
     assert report.episodes_read == 3
-    turns = await harness.conversations.turns(conversation)
     batch = harness.fake.batches[-1]
-    assert [episode.id for episode in batch] == [turn.episode_id for turn in turns[-3:]]
+    assert [episode.id for episode in batch] == harness.ids(conversation)[-3:]
 
 
-async def test_a_turn_whose_episode_never_landed_is_skipped_without_backfilling() -> None:
-    """A gap shortens the batch; it never reaches further back (ADR-0074 §5, §9.7).
+async def test_an_ineligible_episode_is_skipped_without_backfilling() -> None:
+    """An ineligible episode shortens the batch; it never reaches further back.
 
-    Backfilling would make the window's *span* depend on how many gaps it contains,
+    ADR-0283 §11:1, keeping ADR-0077 §8's no-backfill rule: backfilling would make
+    the window's *span* depend on how many skipped episodes it contains,
     so two runs over one conversation would read different stretches of it.
     """
     harness = Harness(batch_size=3)
@@ -799,12 +813,12 @@ async def test_a_turn_whose_episode_never_landed_is_skipped_without_backfilling(
 
     report = await harness.stage.observe(conversation)
 
-    assert report.episodes_read == 2  # one short: the window's third turn has no episode
+    assert report.episodes_read == 2  # one short: the window's oldest is ineligible
     assert report.route == ROUTE  # it still ran
     assert harness.fake.call_count == 1
 
 
-async def test_a_window_where_no_episode_resolves_reaches_no_model_at_all() -> None:
+async def test_a_window_holding_no_eligible_episode_reaches_no_model_at_all() -> None:
     """No provider is called, and the report names **no** route (§9.7).
 
     Naming one would claim a read that never happened, which is the one thing §3's
@@ -955,8 +969,7 @@ async def test_a_writer_failure_on_the_second_of_three_leaves_the_first_stored()
 
 async def _batch_ids(harness: Harness, conversation_id: str) -> tuple[str, ...]:
     """The episode ids the stage will select for ``conversation_id``."""
-    turns = await harness.conversations.turns(conversation_id)
-    return tuple(turn.episode_id for turn in turns)
+    return tuple(harness.ids(conversation_id))
 
 
 async def test_an_episode_that_expires_mid_batch_drops_one_proposal_and_keeps_the_rest() -> None:
@@ -1090,52 +1103,52 @@ async def test_a_second_pass_over_the_same_page_reinforces_rather_than_duplicati
     after = await harness.memory.get("rec-1")
     assert after is not None
     assert after.provenance.confidence == before  # the same evidence scores the same
-    assert await harness.watermark(conversation) == 2
+    assert await harness.watermark(conversation) == await harness.number(conversation, 2)
 
 
 # --- the observation watermark: selection, advance, failure (ADR-0212) ------
 
 
-def _ordinals(batch: Sequence[EpisodicMemory]) -> list[int]:
-    """The turn ordinals a batch of episodes came from.
+def _indexes(batch: Sequence[EpisodicMemory]) -> list[int]:
+    """The 1-based seeding positions a batch of episodes came from.
 
-    The episode id is derived from the conversation and the ordinal (ADR-0074 §3),
-    so the batch says which *turns* the pass read — which is what every case below
+    :meth:`Harness.seed` names each episode after its conversation and position, so
+    the batch says which *episodes* the pass read — which is what every case below
     is actually about, and what an assertion on opaque ids would not show.
     """
-    return [int(episode.id.rsplit(":", 1)[1]) for episode in batch]
+    return [int(episode.id.rsplit("-", 1)[1]) for episode in batch]
 
 
-async def test_a_first_pass_reads_the_tail_and_records_its_highest_ordinal() -> None:
-    """§4: a conversation with no watermark starts at its tail, not at its first turn.
+async def test_a_first_pass_reads_the_tail_and_records_its_highest_number() -> None:
+    """§4: a conversation with no watermark starts at its tail, not at its first episode.
 
     And §4's cost is pinned beside the rule rather than left to be discovered: the
-    turns below that first window stay below the first watermark recorded and are
+    episodes below that first window stay below the first watermark recorded and are
     never selected again, however long the prefix is. The watermark asserts nothing
     about them (§1's second clause), which is why this is a pinned behaviour and not
     a defect.
     """
     harness = Harness(batch_size=2)
     conversation = await harness.conversation_with(5)
+    top = await harness.number(conversation, 5)
 
     report = await harness.stage.observe(conversation)
 
-    assert _ordinals(harness.fake.batches[-1]) == [4, 5]
+    assert _indexes(harness.fake.batches[-1]) == [4, 5]
     assert report.episodes_read == 2
-    assert harness.conversations.advances == [(conversation, 5)]
-    assert await harness.watermark(conversation) == 5
+    assert harness.conversations.advances == [(conversation, top)]
+    assert await harness.watermark(conversation) == top
 
     assert (await harness.stage.observe(conversation)).episodes_read == 0
-    assert harness.fake.call_count == 1, "turns 1-3 are below the window and stay there"
+    assert harness.fake.call_count == 1, "episodes 1-3 are below the window and stay there"
 
 
 async def test_a_named_conversation_with_nothing_above_its_watermark_makes_no_advance() -> None:
-    """§5: a pass that read no turns makes **no** attempt and writes nothing.
+    """§5: a pass that read no episodes makes **no** attempt and writes nothing.
 
     Asserted on the **store** and not only on the report, which is what §8 asks for:
-    there is no ordinal for such a pass to name, ``None`` is not one, and
-    ``record_observed`` refuses anything below the first ordinal before any I/O — so
-    an implementation that "advanced to where it already was" would be making a call
+    there is no number for such a pass to name, and ``None`` is not one — so an
+    implementation that "advanced to where it already was" would be making a call
     the contract has nothing for it to pass.
 
     This is also the named consequence of the whole decision on the CLI path:
@@ -1155,10 +1168,10 @@ async def test_a_named_conversation_with_nothing_above_its_watermark_makes_no_ad
 
 
 async def test_a_pass_with_no_candidate_at_all_makes_no_advance() -> None:
-    """§3, §5: no candidate means no turns read, no model called, nothing written."""
+    """§3, §5: no candidate means no episodes read, no model called, nothing written."""
     harness = Harness()
     conversation = await harness.conversation_with(2)
-    await harness.conversations.start()  # a conversation with no turns is no candidate
+    await harness.conversations.start()  # a conversation with no episodes is no candidate
     await harness.stage.observe(conversation)
     harness.conversations.advances.clear()
 
@@ -1171,123 +1184,87 @@ async def test_a_pass_with_no_candidate_at_all_makes_no_advance() -> None:
 
 
 async def test_a_page_that_resolves_to_nothing_advances_past_it_in_one_pass() -> None:
-    """§5's second branch, and the stall it exists to prevent.
+    """§5's second branch, and the stall it exists to prevent (ADR-0283 §11:1).
 
-    #1737 item 3 words the rule as "the cursor advances to the last turn *handed
-    over*", and a page that hands nothing over would then never move it: the next
-    pass reads the same dead page and does not move it either. A conversation whose
-    unobserved turns have all expired — the ordinary state of one reached after a
-    long idle period — would be a permanent candidate re-reading one dead page for
-    as long as it lives.
+    A page holding no episode a model may read would, under a rule advancing only to
+    the last episode *handed over*, never move the watermark: the next pass reads the
+    same page and does not move it either, and the conversation is a permanent
+    candidate re-reading one page for as long as it lives.
 
-    **In one pass, not one turn at a time**, which is what the single advance to the
-    page's highest ordinal pins. It costs nothing: the page reached no observer at
-    all, so passing over it passes over nothing that was ever readable.
+    **In one pass, not one episode at a time**, which is what the single advance to
+    the page's highest number pins. It costs nothing: the page reached no observer at
+    all.
     """
     harness = Harness(batch_size=3)
     conversation = await harness.conversation_of([], turns=3)
+    top = await harness.number(conversation, 3)
 
     report = await harness.stage.observe(conversation)
 
     assert harness.fake.call_count == 0
     assert report == ObservationReport(conversation_id=conversation)
-    assert harness.conversations.advances == [(conversation, 3)]
-    assert await harness.watermark(conversation) == 3
+    assert harness.conversations.advances == [(conversation, top)]
+    assert await harness.watermark(conversation) == top
 
 
-async def test_a_page_whose_last_turn_is_unresolvable_advances_to_the_highest_below_it() -> None:
-    """§5: the position is the highest turn the pass actually handed over.
+async def test_a_page_whose_last_episode_is_ineligible_advances_past_it() -> None:
+    """ADR-0283 §11:1: the position is the page's highest number, whatever was skipped.
 
-    A trailing gap gets a second reading, and the reason is that it is the one gap
-    that is ordinarily still **in flight**: where captures of one conversation are
-    sequential, an in-flight turn is always the newest, because a later append
-    happens after the earlier capture returned. So the common case is covered by the
-    rule itself rather than by a special case for it.
+    The turn index gave a trailing unresolved turn a second reading because its
+    episode might still be in flight. A channel holds only episodes that landed, so
+    an ineligible one is final rather than late, and re-reading it would buy nothing.
     """
     harness = Harness(batch_size=3)
     conversation = await harness.conversation_of([1, 2], turns=3)
+    top = await harness.number(conversation, 3)
 
     await harness.stage.observe(conversation)
 
-    assert _ordinals(harness.fake.batches[-1]) == [1, 2]
-    assert await harness.watermark(conversation) == 2
-
-    # The next pass reads that turn alone. Its episode still has not landed, so the
-    # page resolves to nothing and the second branch advances past it.
-    second = await harness.stage.observe(conversation)
-
-    assert second.episodes_read == 0
+    assert _indexes(harness.fake.batches[-1]) == [1, 2]
+    assert await harness.watermark(conversation) == top
+    assert (await harness.stage.observe(conversation)).episodes_read == 0
     assert harness.fake.call_count == 1
-    assert await harness.watermark(conversation) == 3
 
 
-async def test_an_episode_landing_between_two_passes_is_observed_on_the_second() -> None:
-    """The other half of the trailing gap: the late capture is not lost (§5).
+async def test_an_ineligible_episode_in_the_middle_of_a_page_is_passed_over() -> None:
+    """ADR-0283 §11:1: an ineligible episode is skipped and the batch is not backfilled.
 
-    The pair matters. Advancing past an unresolved trailing turn unconditionally
-    would lose a turn whose episode was merely slow; stopping below it for ever would
-    be the stall the case above pins. The rule reads it once more, and *then* moves
-    on.
-    """
-    harness = Harness(batch_size=3)
-    conversation = await harness.conversation_of([1, 2], turns=3)
-    await harness.stage.observe(conversation)
-
-    await harness.land(conversation, 3)
-    second = await harness.stage.observe(conversation)
-
-    assert _ordinals(harness.fake.batches[-1]) == [3]
-    assert second.episodes_read == 1
-    assert await harness.watermark(conversation) == 3
-
-
-async def test_an_unresolvable_turn_in_the_middle_of_a_page_is_passed_over() -> None:
-    """§5's accepted residual, pinned as a decision rather than found as a defect.
-
-    An interior gap is **not** given a second reading. A rule that gave every gap one
-    would have to stop the watermark below the lowest unresolved turn, which re-reads
-    that page's resolved turns above the gap on every following pass until the gap
-    clears, and needs a further fallback for a page whose lowest turn is the gap — and
-    another again for a page carrying two. The coverage that buys is the interior
-    in-flight turn alone, which takes two overlapping captures of one conversation.
-
-    So a later lane that wants the other rule has to change this test deliberately.
-    The loss is one turn's *distillation*: the episode itself is unaffected, stays
-    readable by retrieval, and expires on its own horizon.
+    The episode itself is unaffected: it stays on the channel, readable by
+    inspection, and expires on its own horizon. What it never reaches is a model.
     """
     harness = Harness(batch_size=3)
     conversation = await harness.conversation_of([1, 3], turns=3)
+    top = await harness.number(conversation, 3)
 
     await harness.stage.observe(conversation)
 
-    assert _ordinals(harness.fake.batches[-1]) == [1, 3]
-    assert await harness.watermark(conversation) == 3
-
-    # Even once turn 2's episode lands, it is behind the watermark and is not read.
-    await harness.land(conversation, 2)
+    assert _indexes(harness.fake.batches[-1]) == [1, 3]
+    assert await harness.watermark(conversation) == top
     assert (await harness.stage.observe(conversation)).episodes_read == 0
     assert harness.fake.call_count == 1
 
 
 async def test_a_full_page_behaves_exactly_as_a_short_one_does() -> None:
-    """§5: no rule depends on the page's length, only on its ordinals.
+    """§5: no rule depends on the page's length, only on its numbers.
 
-    The position is "the highest ordinal in the page whose episode resolved", and an
-    implementation computing it from ``len(page)`` — or treating a full page as
-    "there is more, so stop short" — passes every case above and fails this one.
+    The position is the highest number in the page, and an implementation computing
+    it from ``len(page)`` — or treating a full page as "there is more, so stop
+    short" — passes every case above and fails this one.
     """
     exact = Harness(batch_size=2)
     full = await exact.conversation_with(2)
     short = Harness(batch_size=2)
     partial = await short.conversation_with(1)
+    full_top = await exact.number(full, 2)
+    partial_top = await short.number(partial, 1)
 
     await exact.stage.observe(full)
     await short.stage.observe(partial)
 
-    assert exact.conversations.advances == [(full, 2)]
-    assert short.conversations.advances == [(partial, 1)]
-    assert await exact.watermark(full) == 2
-    assert await short.watermark(partial) == 1
+    assert exact.conversations.advances == [(full, full_top)]
+    assert short.conversations.advances == [(partial, partial_top)]
+    assert await exact.watermark(full) == full_top
+    assert await short.watermark(partial) == partial_top
 
 
 @pytest.mark.parametrize("earlier_stamps_first", [True, False])
@@ -1297,10 +1274,10 @@ async def test_two_overlapping_passes_leave_the_higher_position_standing(
     """§5: overlap safety rests on ``record_observed``'s monotonicity and nothing else.
 
     Two passes over one conversation may overlap and neither the store nor the
-    decision serialises them. Each computes its position from **its own** page and
-    its own resolution of that page's episodes, and the two may legitimately differ —
-    here because turn 3's episode lands between the two page reads. Whichever order
-    the stamps arrive in, the higher position stands and the lower performs nothing.
+    decision serialises them. Each computes its position from **its own** page, and
+    the two may legitimately differ — here because a third episode lands between the
+    two page reads. Whichever order the stamps arrive in, the higher position stands
+    and the lower performs nothing.
 
     Written end to end over two interleaved passes rather than as two store calls in
     a row, because what is under test is the stage and the store composing: a stage
@@ -1316,18 +1293,18 @@ async def test_two_overlapping_passes_leave_the_higher_position_standing(
         ),
         policy=FakeMemoryPolicy(MemoryDecisionKind.REINFORCE),
     )
-    conversation = await harness.conversation_of([1, 2], turns=3)
+    conversation = await harness.conversation_with(2)
     later = harness.stage_over(
         FakeObserver(
             [ObservedBelief(content=belief)], id_factory=lambda: next(minted), gate=later_gate
         )
     )
 
-    # The earlier pass reads the page while turn 3 is still in flight, and is held
-    # before it can advance; the later one reads the same page once it has landed.
+    # The earlier pass reads the page before the third episode lands, and is held
+    # before it can advance; the later one reads the page once it has landed.
     earlier_pass = asyncio.create_task(harness.stage.observe(conversation))
     await earlier_gate.reached()
-    await harness.land(conversation, 3)
+    await harness.append_turns(conversation, 1)
     later_pass = asyncio.create_task(later.observe(conversation))
     await later_gate.reached()
 
@@ -1342,10 +1319,12 @@ async def test_two_overlapping_passes_leave_the_higher_position_standing(
         earlier_gate.release()
         await earlier_pass
 
-    assert sorted(harness.conversations.advances) == [(conversation, 2), (conversation, 3)], (
-        "each pass names the position **it** read, and neither is recomputed"
-    )
-    assert await harness.watermark(conversation) == 3, (
+    second, third = await harness.number(conversation, 2), await harness.number(conversation, 3)
+    assert sorted(harness.conversations.advances) == [
+        (conversation, second),
+        (conversation, third),
+    ], "each pass names the position **it** read, and neither is recomputed"
+    assert await harness.watermark(conversation) == third, (
         "the higher of the two positions stands whichever order the stamps arrived in"
     )
     landed = {record.id for record in await harness.memory.export()} & {"rec-1", "rec-2"}
@@ -1371,20 +1350,21 @@ async def test_a_pass_cancelled_after_its_advance_commits_leaves_the_stamped_wat
     """
     harness = Harness()
     conversation = await harness.conversation_with(2)
+    top = await harness.number(conversation, 2)
     harness.conversations.cancel_after_advance = True
 
     outcome = await asyncio.gather(harness.stage.observe(conversation), return_exceptions=True)
 
     assert isinstance(outcome[0], asyncio.CancelledError)
-    assert harness.conversations.advances == [(conversation, 2)], "no compensating write"
-    assert await harness.watermark(conversation) == 2
+    assert harness.conversations.advances == [(conversation, top)], "no compensating write"
+    assert await harness.watermark(conversation) == top
 
     harness.conversations.cancel_after_advance = False
     assert (await harness.stage.observe(conversation)).episodes_read == 0
     await harness.append_turns(conversation, 1)
     resumed = await harness.stage.observe(conversation)
 
-    assert _ordinals(harness.fake.batches[-1]) == [3], (
+    assert _indexes(harness.fake.batches[-1]) == [3], (
         "the next pass resumes above the stamped position rather than re-reading the page"
     )
     assert resumed.episodes_read == 1
@@ -1394,9 +1374,9 @@ async def test_a_pass_that_raises_in_the_write_path_advances_nothing() -> None:
     """§6: a pass that raises **before** its attempt moves the watermark by nothing.
 
     There is no partial advance within a pass, and the re-read is never narrowed to
-    "the turns whose proposals were not ruled" — which is what #1737 item 4 asks for
-    and §6 refuses, because a proposal may cite several turns and a turn may be cited
-    by none, so that set does not name a *position* in the ordinal order at all.
+    "the episodes whose proposals were not ruled" — which is what #1737 item 4 asks
+    for and §6 refuses, because a proposal may cite several episodes and an episode
+    may be cited by none, so that set does not name a *position* at all.
     """
     # A minting observer, as the producer it doubles is (#736): the re-read pass
     # proposes the same content at fresh ids, which is the production shape. Scripted
@@ -1432,8 +1412,8 @@ async def test_a_conversation_deleted_between_the_page_read_and_the_advance() ->
     deletes the conversation, and ``record_observed`` then refuses — a refusal and
     not a commit, so the watermark is untouched; and by then the conversation has
     left the candidate listing, so no later pass can re-read what the failed one
-    read. A belief the aborted pass would have proposed from those turns is precisely
-    what a deletion is for.
+    read. A belief the aborted pass would have proposed from those episodes is
+    precisely what a deletion is for.
 
     The exception leaves **this pass**. What a multi-pass *run* does with it is
     ADR-0218 §9's — it catches it, drops that candidate and carries on — and that is
@@ -1441,15 +1421,17 @@ async def test_a_conversation_deleted_between_the_page_read_and_the_advance() ->
     """
     harness = Harness()
     conversation = await harness.conversation_with(2)
+    top = await harness.number(conversation, 2)
     harness.conversations.stamp_before_advance = True
 
     with pytest.raises(UnknownConversationError):
         await harness.stage.observe(conversation)
 
-    assert harness.conversations.advances == [(conversation, 2)]
+    assert harness.conversations.advances == [(conversation, top)]
     assert harness.conversations.raw_watermark(conversation) is None
     assert await harness.conversations.get(conversation) is None
-    assert await harness.conversations.conversations_with_unobserved_turns() == []
+    harness.conversations.stamp_before_advance = False
+    assert await harness.stage.observe() == ObservationReport(), "no longer a candidate"
 
 
 async def test_under_a_stopped_clock_a_busy_candidate_stays_first() -> None:
@@ -1464,7 +1446,8 @@ async def test_under_a_stopped_clock_a_busy_candidate_stays_first() -> None:
     That is **accepted and named**, not closed: closing it would take a durable
     service-order position — a second cursor with its own upgrade discipline and its
     own ``core`` surface — bought against a clock adjustment rather than against
-    anything the walk does.
+    anything the walk does. ADR-0283 §11:2 lists the candidates from ``recent``,
+    and the walk keeps §3's tie-break over that listing.
     """
     ids = iter(["busy", "idle"])
     harness = Harness(now=lambda: AT, new_id=lambda: next(ids))
@@ -1482,21 +1465,22 @@ async def test_under_a_stopped_clock_a_busy_candidate_stays_first() -> None:
     assert await harness.watermark(idle) is None, "the idle conversation is not reached"
 
 
-async def test_a_watermark_above_every_turn_is_kept_and_not_a_candidate() -> None:
+async def test_a_watermark_above_every_episode_is_kept_and_not_a_candidate() -> None:
     """ADR-0283 §6:6: the store no longer discards a watermark above the turns.
 
     ADR-0212 §7's upper limb is gone — the watermark is an episode number, which the
-    conversation store cannot see — so a planted value above every turn is a usable
-    position: it reads back as written, and the conversation stays out of the
-    candidate listing until a turn lands above it.
+    conversation store cannot see — so a planted value above every episode is a
+    usable position: it reads back as written, and the conversation is no candidate
+    until an episode lands above it.
     """
     harness = Harness(batch_size=2)
     conversation = await harness.conversation_with(3)
     harness.conversations.plant_watermark(conversation, 99)
 
-    candidates = await harness.conversations.conversations_with_unobserved_turns()
+    report = await harness.stage.observe()
 
-    assert candidates == []
+    assert report == ObservationReport()
+    assert harness.fake.call_count == 0
     assert await harness.watermark(conversation) == 99
 
 
@@ -1598,8 +1582,7 @@ async def test_a_deferred_proposal_carries_the_episodes_it_cites() -> None:
         policy=FakeMemoryPolicy(MemoryDecisionKind.ASK_USER),
     )
     conversation = await harness.conversation_with(2)
-    turns = await harness.conversations.turns(conversation)
-    cited = [await harness.memory.get(turn.episode_id) for turn in turns]
+    cited = [await harness.memory.get(episode_id) for episode_id in harness.ids(conversation)]
 
     report = await harness.stage.observe(conversation)
 
@@ -1776,27 +1759,15 @@ async def test_an_observed_deferral_against_a_full_queue_is_reported_and_raises_
 _NARROWED = Placement(reach=PlacementReach.OWNER, set_by=PlacementSetter.DERIVED, set_at=AT)
 
 
-def _episode_placed(episode_id: str, *, placement: Placement) -> EpisodicMemory:
-    """One captured turn, as capture writes it once ADR-0217 §3 narrows it."""
-    return EpisodicMemory(
-        id=episode_id,
-        content=f"the user said something in {episode_id}",
-        occurred_at=AT,
-        provenance=Provenance(
-            source=MemorySource.OBSERVED,
-            confidence=0.9,
-            last_updated=AT,
-        ),
-        placement=placement,
-    )
-
-
 async def _conversation_of(harness: Harness, *placements: Placement) -> str:
-    """A conversation whose turns carry ``placements``, oldest first."""
+    """A conversation whose episodes carry ``placements``, oldest first.
+
+    What capture writes once the turn's ADR-0204 §2 evaluation is ``True``
+    (ADR-0217 §3) is a narrowed episode, so a placement is seeded on the record.
+    """
     conversation = await harness.conversations.start()
     for placement in placements:
-        turn = await harness.conversations.append(conversation.id, occurred_at=AT)
-        await harness.memory.add(_episode_placed(turn.episode_id, placement=placement))
+        await harness.seed(conversation.id, placement=placement)
     return conversation.id
 
 
@@ -1956,7 +1927,7 @@ async def test_quiet_is_decided_on_the_activity_instant_and_never_on_the_recorde
     ended_report = await ended.stage.run()
 
     assert ended_report.passes == 1
-    assert ended.conversations.advances == [(quiet, 2)]
+    assert ended.conversations.advances == [(quiet, await ended.number(quiet, 2))]
 
     mid = Harness(now=_Clock())
     busy = await mid.conversation_stamped(active_at=AT, stamps=[AT, AT])
@@ -1988,7 +1959,7 @@ async def test_the_age_arm_is_decided_on_the_unobserved_page_s_first_turn() -> N
     )
 
     assert (await aging.stage.run()).passes == 1
-    assert aging.conversations.advances == [(old_first, 2)]
+    assert aging.conversations.advances == [(old_first, await aging.number(old_first, 2))]
 
     fresh = Harness(now=_Clock())
     await fresh.conversation_stamped(active_at=RUN, stamps=[RUN, RUN - timedelta(hours=3)])
@@ -2019,7 +1990,7 @@ async def test_the_full_arm_fires_on_a_page_of_exactly_the_batch_size() -> None:
 
     assert report.passes == 1
     assert report.episodes_read == 3
-    assert whole.conversations.advances == [(page, 3)]
+    assert whole.conversations.advances == [(page, await whole.number(page, 3))]
 
 
 async def test_a_turn_stamped_ahead_of_the_run_s_clock_is_still_reached() -> None:
@@ -2034,7 +2005,7 @@ async def test_a_turn_stamped_ahead_of_the_run_s_clock_is_still_reached() -> Non
     So the reach is asserted **deterministically and through the full arm alone**:
     the same conversation, at the same forward stamps and the same activity instant,
     is due at a whole page and not due one turn short. Nothing here waits for a clock
-    to catch up, because ordinals are the store's own.
+    to catch up, because episode numbers are the store's own.
     """
     ahead = RUN + timedelta(hours=1)
 
@@ -2049,7 +2020,7 @@ async def test_a_turn_stamped_ahead_of_the_run_s_clock_is_still_reached() -> Non
     report = await whole.stage.run()
 
     assert report.passes == 1
-    assert whole.conversations.advances == [(forward, 3)]
+    assert whole.conversations.advances == [(forward, await whole.number(forward, 3))]
 
 
 async def test_a_conversation_kept_out_of_quiet_by_turns_that_never_complete_is_due_on_no_arm() -> (
@@ -2105,57 +2076,57 @@ async def test_a_run_takes_the_first_due_candidate_and_not_merely_the_first() ->
     report = await harness.stage.run()
 
     assert report.passes == 1
-    assert harness.conversations.advances == [(behind, 3)]
+    assert harness.conversations.advances == [(behind, await harness.number(behind, 3))]
     assert await harness.watermark(head) is None
 
 
 async def test_the_page_read_to_decide_is_the_page_the_pass_reads() -> None:
-    """ADR-0218 §2: "no turn is read twice to decide whether to read it".
+    """ADR-0218 §2: "no episode is read twice to decide whether to read it".
 
-    Unobservable from any report, so it is asserted on the store's own call log. The
-    candidate carries a watermark and is due on the full arm, which is the arm that
-    *has* to probe — the quiet arm reads nothing at all — so this is the case where a
-    second read would actually happen if the page were not carried through.
+    Unobservable from any report, so it is asserted on the memory store's own call
+    log: since ADR-0283 §11:2 the page above the watermark is what decides candidacy,
+    and the pass observes that same page rather than reading it again.
     """
-    harness = Harness(batch_size=2, now=_Clock())
+    memory = _WatchedMemory(now=lambda: AT)
+    harness = Harness(batch_size=2, now=_Clock(), memory=memory)
     conversation = await harness.conversation_stamped(active_at=RUN, stamps=[RUN, RUN, RUN])
     # A watermark a pass really left, through the seam that leaves one: the first
-    # turn is behind it, so the forward page is the next two and the full arm binds.
-    await harness.conversations.record_observed(conversation, through_ordinal=1)
-    harness.conversations.pages_read.clear()
-    harness.conversations.tails_read.clear()
+    # episode is behind it, so the forward page is the next two and the full arm binds.
+    first = await harness.number(conversation, 1)
+    await harness.conversations.record_observed(conversation, through_ordinal=first)
+    memory.pages_read.clear()
 
     report = await harness.stage.run()
 
     assert report.passes == 1
-    assert harness.conversations.pages_read == [(conversation, 1)]
-    assert harness.conversations.tails_read == []
+    # Read once, to decide and to observe. The run's next listing then reads above
+    # the new watermark, finds nothing, and ends.
+    assert memory.pages_read.count((conversation, first)) == 1
+    assert memory.pages_read[0] == (conversation, first)
+    assert _indexes(harness.fake.batches[-1]) == [2, 3]
 
 
-async def test_a_first_pass_reads_two_pages_because_the_tail_is_a_different_page() -> None:
-    """The one case ADR-0218 §2 names as reading two pages, and it names it as such.
+async def test_a_first_pass_reads_the_tail_once() -> None:
+    """ADR-0212 §4's tail is the page that decides, and the page the first pass reads.
 
-    "Where the selected candidate has **no** recorded watermark, ADR-0212 §4 governs
-    what the pass reads — 'that conversation's most recent ``observation_batch_size``
-    turns' — which is a different page from the forward one the due test read. That
-    is the one case in which a run reads two pages of one conversation, it happens on
-    that conversation's first pass and never again."
-
-    Asserted as the *tail* being read rather than merely as two calls, because the
-    point is which turns the pass observes: the forward probe decided due-ness, and
-    ADR-0212 §4's tail is still where the first pass begins.
+    The turn index probed a forward page to decide and then read the tail, so a
+    conversation's first pass read two pages. The channel read for a conversation
+    with no watermark *is* the tail (ADR-0283 §11:1), so the candidacy read and the
+    pass's page are one call.
     """
-    harness = Harness(batch_size=2, now=_Clock())
+    memory = _WatchedMemory(now=lambda: AT)
+    harness = Harness(batch_size=2, now=_Clock(), memory=memory)
     conversation = await harness.conversation_stamped(active_at=RUN, stamps=[RUN, RUN, RUN])
 
     report = await harness.stage.run()
 
     assert report.passes == 1
-    assert harness.conversations.pages_read == [(conversation, None)]
-    assert harness.conversations.tails_read == [conversation]
-    # ADR-0212 §4's tail: the *newest* two turns, so the watermark lands at the top
-    # and the prefix below it is passed over — which this ADR does not change.
-    assert harness.conversations.advances == [(conversation, 3)]
+    assert memory.pages_read.count((conversation, None)) == 1
+    assert memory.pages_read[0] == (conversation, None)
+    # ADR-0212 §4's tail: the *newest* two episodes, so the watermark lands at the
+    # top and the prefix below it is passed over.
+    assert _indexes(harness.fake.batches[-1]) == [2, 3]
+    assert harness.conversations.advances == [(conversation, await harness.number(conversation, 3))]
 
 
 # --- the scheduled run: what one run does (ADR-0218 §3, §9) -----------------
@@ -2232,7 +2203,7 @@ async def test_the_budget_is_checked_at_a_pass_boundary_and_never_inside_one() -
 
     assert report.passes == 1
     assert report.budget_spent is True
-    assert harness.conversations.advances == [(first, 2)]
+    assert harness.conversations.advances == [(first, await harness.number(first, 2))]
     assert await harness.watermark(second) is None
 
 
@@ -2283,7 +2254,7 @@ async def test_a_store_fault_at_the_advance_halts_the_run_and_propagates() -> No
     with pytest.raises(ConversationStoreError):
         await harness.stage.run()
 
-    assert harness.conversations.advances == [(first, 1)]
+    assert harness.conversations.advances == [(first, await harness.number(first, 1))]
 
 
 async def test_a_run_returns_counts_and_no_proposal_content_however_many_passes() -> None:
@@ -2339,17 +2310,22 @@ async def test_a_run_drains_one_conversation_across_passes_until_it_leaves_the_s
     # A watermark a pass really left, so the four turns above it are two pages. A
     # conversation with **no** watermark drains in one pass whatever its length,
     # because ADR-0212 §4 starts it at the tail and passes over the prefix.
-    await harness.conversations.record_observed(conversation, through_ordinal=1)
+    await harness.conversations.record_observed(
+        conversation, through_ordinal=await harness.number(conversation, 1)
+    )
     harness.conversations.advances.clear()
 
     report = await harness.stage.run()
 
     assert report.passes == 2
     assert report.conversations == 1
-    assert harness.conversations.advances == [(conversation, 3), (conversation, 5)]
+    assert harness.conversations.advances == [
+        (conversation, await harness.number(conversation, 3)),
+        (conversation, await harness.number(conversation, 5)),
+    ]
     # The third pass is stopped by the **watermark** and not by the listing's bound:
     # the conversation has left the candidate set because nothing stands above it.
-    assert await harness.watermark(conversation) == 5
+    assert await harness.watermark(conversation) == await harness.number(conversation, 5)
 
 
 async def test_a_budget_the_due_test_spent_leaves_the_pass_unbegun() -> None:
@@ -2448,23 +2424,23 @@ async def _labelled_harness(
 ) -> tuple[Harness, str, list[str]]:
     """A harness whose observer files the episodes of a freshly-built conversation.
 
-    The ids a labelling names are minted by the conversation store, so the
+    The ids a labelling names are minted when the harness seeds the channel, so the
     conversation is built first and the canonical fake is scripted and swapped in
     after — see :meth:`Harness.swap_observer`.
 
     Args:
-        turns: How many turns the conversation holds, every one captured.
+        turns: How many episodes the conversation holds, every one eligible.
         labels: ``(index into the page, topics, participants)`` per labelling.
         memory: The store to wire, for a case that watches it.
         gate: Held at the observer's first ``await``, for a case that moves the
             store while the pass is suspended.
 
     Returns:
-        The harness, the conversation's id, and its episode ids in ordinal order.
+        The harness, the conversation's id, and its episode ids, oldest first.
     """
     harness = Harness(memory=memory)
     conversation = await harness.conversation_with(turns)
-    episodes = [turn.episode_id for turn in await harness.conversations.turns(conversation)]
+    episodes = harness.ids(conversation)
     harness.swap_observer(
         FakeObserver(
             gate=gate,
@@ -2676,14 +2652,14 @@ async def test_a_failed_labelling_write_stops_neither_the_advance_nor_anything_e
 
     assert (await _stored(harness, episodes[0])).topics == ()
     assert report.proposals
-    assert await harness.watermark(conversation) == 2
-    assert harness.conversations.advances == [(conversation, 2)]
+    assert await harness.watermark(conversation) == await harness.number(conversation, 2)
+    assert harness.conversations.advances == [(conversation, await harness.number(conversation, 2))]
 
 
 async def test_the_labelling_is_durable_before_the_advance_is_attempted() -> None:
     """ADR-0111 §3's ordering, which ADR-0239 §3 takes rather than chooses.
 
-    The effects land in the memory store and the cursor on the conversation index,
+    The effects land in the memory store and the cursor on the conversation store,
     and where they live in different stores the effects are made durable first: "a
     cursor that lags its effects costs repeated work; a cursor that leads them costs
     coverage, permanently and silently". Asserted by holding the advance open and
@@ -2703,7 +2679,7 @@ async def test_the_labelling_is_durable_before_the_advance_is_attempted() -> Non
         harness.conversations.release[1].set()
     await call
 
-    assert await harness.watermark(conversation) == 2
+    assert await harness.watermark(conversation) == await harness.number(conversation, 2)
 
 
 async def test_a_page_re_read_after_an_uncommitted_advance_is_not_relabelled() -> None:
@@ -2814,9 +2790,7 @@ async def test_a_page_whose_episodes_differ_in_placement_reach_is_labelled_nowhe
     )
     episodes = []
     for placement in placements:
-        turn = await harness.conversations.append(conversation.id, occurred_at=AT)
-        await harness.memory.add(_episode_placed(turn.episode_id, placement=placement))
-        episodes.append(turn.episode_id)
+        episodes.append(await harness.seed(conversation.id, placement=placement))
     harness.swap_observer(
         FakeObserver(
             labellings=[
@@ -2836,7 +2810,7 @@ async def test_a_page_whose_episodes_differ_in_placement_reach_is_labelled_nowhe
         assert stored.placement == placement
     # The page is otherwise an ordinary page: the beliefs landed and the walk moved.
     assert report.proposals
-    assert await harness.watermark(conversation.id) == 2
+    assert await harness.watermark(conversation.id) == await harness.number(conversation.id, 2)
 
 
 async def test_a_page_sharing_a_reach_but_split_between_setters_is_labelled_nowhere() -> None:
@@ -2856,14 +2830,12 @@ async def test_a_page_sharing_a_reach_but_split_between_setters_is_labelled_nowh
     conversation = await harness.conversations.start()
     episodes = []
     for setter in (PlacementSetter.DERIVED, PlacementSetter.OWNER_ACT):
-        turn = await harness.conversations.append(conversation.id, occurred_at=AT)
-        await harness.memory.add(
-            _episode_placed(
-                turn.episode_id,
+        episodes.append(
+            await harness.seed(
+                conversation.id,
                 placement=Placement(reach=PlacementReach.OWNER, set_by=setter, set_at=AT),
             )
         )
-        episodes.append(turn.episode_id)
     harness.swap_observer(
         FakeObserver(
             labellings=[
@@ -2915,9 +2887,7 @@ async def test_an_unlabelled_episode_of_the_page_still_decides_the_uniformity(
     conversation = await harness.conversations.start()
     episodes = []
     for placement in (destination, beside):
-        turn = await harness.conversations.append(conversation.id, occurred_at=AT)
-        await harness.memory.add(_episode_placed(turn.episode_id, placement=placement))
-        episodes.append(turn.episode_id)
+        episodes.append(await harness.seed(conversation.id, placement=placement))
     harness.swap_observer(
         FakeObserver(labellings=[EpisodeLabelling(episode_id=episodes[0], topics=("health",))])
     )
@@ -2928,7 +2898,7 @@ async def test_an_unlabelled_episode_of_the_page_still_decides_the_uniformity(
     assert (await _stored(harness, episodes[0])).topics == ()
     assert (await _stored(harness, episodes[1])).placement == beside
     assert report.proposals
-    assert await harness.watermark(conversation.id) == 2
+    assert await harness.watermark(conversation.id) == await harness.number(conversation.id, 2)
 
 
 async def test_a_uniformly_placed_page_is_labelled_and_its_placement_does_not_move() -> None:
@@ -2945,9 +2915,7 @@ async def test_a_uniformly_placed_page_is_labelled_and_its_placement_does_not_mo
     placement = Placement(reach=PlacementReach.OWNER, set_by=PlacementSetter.DERIVED, set_at=AT)
     episodes = []
     for _ in range(2):
-        turn = await harness.conversations.append(conversation.id, occurred_at=AT)
-        await harness.memory.add(_episode_placed(turn.episode_id, placement=placement))
-        episodes.append(turn.episode_id)
+        episodes.append(await harness.seed(conversation.id, placement=placement))
     harness.swap_observer(
         FakeObserver(labellings=[EpisodeLabelling(episode_id=episodes[0], participants=("alex",))])
     )
@@ -2981,8 +2949,8 @@ async def test_a_labelling_naming_an_episode_outside_the_page_writes_nothing() -
     harness = Harness(memory=memory)
     watched = await harness.conversation_with(2)
     elsewhere = await harness.conversation_with(1)
-    foreign = (await harness.conversations.turns(elsewhere))[0].episode_id
-    episodes = [turn.episode_id for turn in await harness.conversations.turns(watched)]
+    foreign = harness.ids(elsewhere)[0]
+    episodes = harness.ids(watched)
     harness.swap_observer(
         _ForeignLabelling(
             FakeObserver(labellings=[EpisodeLabelling(episode_id=episodes[1], topics=("health",))]),
@@ -2996,7 +2964,7 @@ async def test_a_labelling_naming_an_episode_outside_the_page_writes_nothing() -
     assert (await _stored(harness, foreign)).topics == ()
     assert (await _stored(harness, episodes[1])).topics == ("health",)
     assert report.proposals
-    assert await harness.watermark(watched) == 2
+    assert await harness.watermark(watched) == await harness.number(watched, 2)
 
 
 async def test_a_pass_whose_producer_labels_nothing_writes_nothing() -> None:
@@ -3021,7 +2989,7 @@ async def test_a_provider_failure_leaves_every_episode_exactly_as_capture_wrote_
     memory = _WatchedMemory(now=lambda: AT)
     harness = Harness(observer=_FailingObserver(), memory=memory)
     conversation = await harness.conversation_with(2)
-    episodes = [turn.episode_id for turn in await harness.conversations.turns(conversation)]
+    episodes = harness.ids(conversation)
 
     with pytest.raises(ModelError):
         await harness.stage.observe(conversation)
@@ -3046,7 +3014,7 @@ async def test_a_labelling_is_ruled_by_no_policy_and_parks_no_question() -> None
     """
     harness = Harness(policy=FakeMemoryPolicy(MemoryDecisionKind.REJECT))
     conversation = await harness.conversation_with(2)
-    episodes = [turn.episode_id for turn in await harness.conversations.turns(conversation)]
+    episodes = harness.ids(conversation)
     harness.swap_observer(
         FakeObserver(labellings=[EpisodeLabelling(episode_id=episodes[0], topics=("health",))])
     )

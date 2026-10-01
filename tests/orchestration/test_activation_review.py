@@ -7,11 +7,11 @@ from datetime import timedelta
 from typing import TYPE_CHECKING
 
 import pytest
-from test_activation_writer import CommitThenFail, Wiring
+from test_activation_writer import Wiring
 from test_engine import AT, PATIENT, Harness
 from test_engine_routing import _parked, _routed_harness, _seed_belief, _token
 
-from ai_assistant.core.errors import OversizedValueError
+from ai_assistant.core.errors import ConversationStoreError, OversizedValueError
 from ai_assistant.core.types import (
     ChannelIdentity,
     ChannelInput,
@@ -21,10 +21,32 @@ from ai_assistant.core.types import (
 )
 from ai_assistant.orchestration.activation_state import ActivationScope
 from ai_assistant.orchestration.engine import DrainPhase
-from ai_assistant.testing import FakeAssistantEngine
+from ai_assistant.testing import FakeAssistantEngine, FakeConversationStore
 
 if TYPE_CHECKING:
-    from ai_assistant.core.types import Conversation
+    from datetime import datetime
+
+    from ai_assistant.core.types import Conversation, SpokenDelivery
+
+
+class StampedThenUnknown(FakeConversationStore):
+    """``record_turn`` meets a conversation deleted meanwhile, and its outcome is unknown.
+
+    The episode and the archive entry are both written by then (ADR-0283 §7:1), so
+    the writer's compensation re-reads the conversation, finds it gone, and destroys
+    both through the drain (§7:4, ADR-0275 §8:11).
+    """
+
+    async def record_turn(
+        self,
+        conversation_id: str,
+        *,
+        episode_id: str,
+        occurred_at: datetime,
+        delivery: SpokenDelivery | None = None,
+    ) -> Conversation | None:
+        await self.stamp_deleted(conversation_id)
+        raise ConversationStoreError("private provider diagnostics")
 
 
 async def _hold(entered: asyncio.Event, release: asyncio.Event, cancelled: asyncio.Event) -> None:
@@ -41,17 +63,11 @@ async def test_shutdown_does_not_cancel_safety_work_already_in_its_snapshot(
     monkeypatch: pytest.MonkeyPatch,
     stage: str,
 ) -> None:
-    memory = CommitThenFail()
-    wiring = Wiring(memory=memory)
+    wiring = Wiring(conversations=StampedThenUnknown(now=lambda: AT))
+    memory = wiring.memory
     state = await wiring.state()
     assert state.conversation_id is not None
     entered, release, cancelled, closed = (asyncio.Event() for _ in range(4))
-
-    async def deleted() -> None:
-        assert state.conversation_id is not None
-        await wiring.conversations.stamp_deleted(state.conversation_id)
-
-    memory.after = deleted
     original_get = wiring.conversations.get
     original_discard = wiring.archive.discard
 
@@ -79,7 +95,8 @@ async def test_shutdown_does_not_cancel_safety_work_already_in_its_snapshot(
     task = harness.engine._activation_task(
         ActivationScope(state), work, seam="receive", check_output=lambda _: None
     )
-    await entered.wait()
+    async with asyncio.timeout(5):
+        await entered.wait()
     assert len(wiring.archive.recorded) == 1
     assert len(await memory.export()) == 1
     closing = asyncio.create_task(harness.engine.aclose())

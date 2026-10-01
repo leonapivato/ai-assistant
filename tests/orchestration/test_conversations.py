@@ -1,25 +1,27 @@
-"""The capture/lifecycle stage: every sequence that spans both durable stores.
+"""The conversation lifecycle: every sequence that spans the conversation and memory stores.
 
 ADR-0074 §9 assigns this list here rather than to the shared conformance suite,
-and says why: "a conformance suite exercises one store against one contract; §3's
-insert, §8's ordering, its compensation and its serialisation span two stores and
-the coordinator between them". Every case below is one where the guarantee is
-either kept or silently lost, and **none of them is reachable from a suite that
-only writes successfully**.
+and says why: "a conformance suite exercises one store against one contract; §8's
+ordering and its serialisation span two stores and the coordinator between them".
+Since ADR-0283 a conversation's history, membership and deletion have one source —
+the episodes on its channel — so every case below seeds that channel directly
+(``channel_episodes.conversation_episode``) and asserts what the stage reads from it
+or destroys on it. How an episode is *written* is the writer's, and its own suite
+(``test_activation_writer.py``) owns it.
 
 Both stores are canonical fakes from ``ai_assistant.testing``, so nothing here
-imports a subsystem concrete (CLAUDE.md golden rule 1) — except the two cases that
-have to survive a *reopen*, which is the whole point of a tombstone and needs a
-persistent index.
+imports a subsystem concrete (CLAUDE.md golden rule 1) — except the case that has to
+survive a *reopen*, which is the whole point of a tombstone and needs a persistent
+conversation store.
 """
 
 from __future__ import annotations
 
-import asyncio
 from datetime import UTC, datetime, timedelta
 from typing import TYPE_CHECKING
 
 import pytest
+from channel_episodes import channel_ids, channel_numbers, conversation_episode
 
 from ai_assistant.core.errors import (
     AssistantError,
@@ -29,26 +31,24 @@ from ai_assistant.core.errors import (
 )
 from ai_assistant.core.types import (
     ActionPlan,
-    Attestation,
-    Capture,
-    EpisodicMemory,
-    ExchangeDisposition,
     Goal,
     GoalBrief,
     GoalInterpretation,
     Ground,
-    MemoryKind,
     MemorySource,
-    Modality,
+    ParkedBinding,
     ParkedRead,
     ParkedReadDisposition,
     Provenance,
+    SpokenDelivery,
+    SpokenDeliveryState,
     Validity,
 )
 from ai_assistant.memory.conversation_store import SqliteConversationStore
 from ai_assistant.orchestration.conversations import (
-    CAPTURE_CONFIDENCE,
+    HISTORY_REPLAY_BOUND,
     ConversationLifecycle,
+    ParkingOrigin,
 )
 from ai_assistant.testing import (
     FakeConversationStore,
@@ -61,7 +61,7 @@ if TYPE_CHECKING:
     from collections.abc import Mapping, Sequence
     from pathlib import Path
 
-    from ai_assistant.core.types import MemoryRecord, MemoryWrite
+    from ai_assistant.core.types import ChannelEpisodeId, ChannelEpisodePage, ChannelIdentity
 
 AT = datetime(2026, 7, 28, 9, 0, tzinfo=UTC)
 MINUTE = timedelta(minutes=1)
@@ -70,6 +70,13 @@ DAY = timedelta(days=1)
 
 RETENTION = 30 * DAY
 GRACE = HOUR
+
+UNSTAMPED = SpokenDelivery(state=SpokenDeliveryState.UNKNOWN)
+COMPLETE = SpokenDelivery(
+    state=SpokenDeliveryState.COMPLETE,
+    played=timedelta(seconds=9, milliseconds=800),
+    rendered=timedelta(seconds=9, milliseconds=800),
+)
 
 
 class MovableClock:
@@ -95,7 +102,6 @@ class Wiring:
         clock: MovableClock | None = None,
         retention: timedelta | None = RETENTION,
         grace: timedelta = GRACE,
-        purge_batch: int = 100,
         memory: FakeMemoryStore | None = None,
         conversations: FakeConversationStore | None = None,
         archive: FakeTranscriptArchiveWriter | None = None,
@@ -103,23 +109,17 @@ class Wiring:
         parked_reads: FakeParkedReads | None = None,
     ) -> None:
         self.clock = clock if clock is not None else MovableClock()
+        self.retention = retention
         self.memory = memory if memory is not None else FakeMemoryStore(now=self.clock)
         self.conversations = (
             conversations
             if conversations is not None
-            else FakeConversationStore(
-                now=self.clock,
-                retention=retention,
-                tombstone_grace=grace,
-                purge_batch=purge_batch,
-            )
+            else FakeConversationStore(now=self.clock, retention=retention, tombstone_grace=grace)
         )
-        # ADR-0225 §10's narrow seam, held on the harness so a case can look at what
-        # capture wrote: the seam itself carries no read, which is the point of it.
         self.archive = archive if archive is not None else FakeTranscriptArchiveWriter()
-        # ``None`` unless a case asks for one: ADR-0244 §18 lands the store in its own
-        # lane, and a stage wired without one carries out §8 exactly as it did before
-        # that decision — which is the arm below that holds the absence.
+        # ``None`` unless a case asks for one: a stage wired without one carries out
+        # §8 exactly as it did before ADR-0244 — which is the arm below that holds
+        # the absence.
         self.parked_reads = parked_reads
         self.stage = ConversationLifecycle(
             conversations=self.conversations,
@@ -131,421 +131,63 @@ class Wiring:
             parked_reads=parked_reads,
         )
 
+    async def seed(  # noqa: PLR0913 — one keyword per axis a seeded episode varies
+        self,
+        conversation_id: str,
+        episode_id: str,
+        *,
+        eligible: bool = True,
+        delivery: SpokenDelivery | None = None,
+        occurred_at: datetime | None = None,
+        parks: ParkedBinding | None = None,
+        expires_at: datetime | None = None,
+        validity: Validity | None = None,
+        unexpiring: bool = False,
+    ) -> str:
+        """Put one episode on ``conversation_id``'s channel, as the writer leaves it.
 
-async def _capture_turns(wiring: Wiring, count: int) -> tuple[str, list[str]]:
-    """Start a conversation and capture ``count`` turns into it."""
+        The episode first, then ``record_turn`` — ADR-0283 §7's order — so the
+        conversation's ``last_turn_at`` and its delivery row are what a written turn
+        leaves. The expiry is the writer's (``occurred_at`` plus the retention)
+        unless a case names one or asks for none.
+        """
+        at = occurred_at if occurred_at is not None else self.clock()
+        if expires_at is None and not unexpiring and self.retention is not None:
+            expires_at = at + self.retention
+        await self.memory.add(
+            conversation_episode(
+                conversation_id,
+                episode_id,
+                occurred_at=at,
+                eligible=eligible,
+                parks=parks,
+                expires_at=expires_at,
+                validity=validity or Validity(),
+            )
+        )
+        await self.conversations.record_turn(
+            conversation_id, episode_id=episode_id, occurred_at=at, delivery=delivery
+        )
+        return episode_id
+
+
+async def _seed_turns(wiring: Wiring, count: int) -> tuple[str, list[str]]:
+    """Start a conversation and put ``count`` eligible episodes on its channel."""
     conversation = await wiring.stage.begin(None)
-    episodes: list[str] = []
-    for index in range(count):
-        report = await wiring.stage.capture(conversation.id, content=f"turn {index}", asked=None)
-        assert report.episode_id is not None, "the fixture must actually record its turns"
-        episodes.append(report.episode_id)
+    episodes = [
+        await wiring.seed(conversation.id, f"activation:{conversation.id}-{index}")
+        for index in range(count)
+    ]
     return conversation.id, episodes
 
 
-def _foreign_episode(episode_id: str) -> EpisodicMemory:
-    """A record some other producer put in the reserved namespace (ADR-0074 §3).
-
-    ``EXTERNAL`` because the point is that *capture* did not write it; since
-    ADR-0092 §1 that band must name what reported it and when, which this fixture
-    supplies and no assertion below reads.
-    """
-    return EpisodicMemory(
-        id=episode_id,
-        content="a record capture did not write",
-        occurred_at=AT,
-        provenance=Provenance(
-            source=MemorySource.EXTERNAL,
-            confidence=0.5,
-            last_updated=AT,
-            attestation=Attestation(reported_by="calendar:work", reported_at=AT),
-        ),
-    )
+# --- continuity: reading the channel back (ADR-0283 §4:1) ----------------
 
 
-# --- what capture writes, and what it stamps (§3, §4) --------------------
-
-
-async def test_capture_writes_one_episode_carrying_exactly_what_section_4_ratifies() -> None:
-    """§4: OBSERVED, a sub-1.0 constant, and *nothing judged*.
-
-    Every omission here is ruled rather than incidental. ``importance`` is a
-    judgement and salience is leg 7's; ``participants`` filled with constants would
-    occupy, with noise, the field an observer means for the people an episode is
-    *about*; ``validity`` stays open because supersession is a law about beliefs
-    that contradict each other and two things that both happened never do; and
-    ``evidence`` stays empty because an episode is the terminal citation — the thing
-    other records cite — so requiring one would demand a regress.
-
-    **Three fields divide the exchange between them since ADR-0221**, and the two new
-    ones are stamped here exactly as ``content`` is: handed over by the pipeline and
-    written unexamined. ``outcome`` carries what the assistant *said* — the composed
-    reply, whole (§1) — where it used to carry one of sixteen constant phrases;
-    ``disposition`` carries what became of the pass (§2); and ``capture`` carries how
-    the user material this episode renders reached this system (§5). Everything ADR-0074
-    §4 and ADR-0217 §1 fix is stamped as it always was, which is the whole of what §12
-    asks of this method.
-    """
+async def test_history_returns_the_channels_episodes_oldest_first() -> None:
+    """§4:1: the conversation's recent episodes, in number order, as records."""
     wiring = Wiring()
-    conversation = await wiring.stage.begin(None)
-
-    report = await wiring.stage.capture(
-        conversation.id,
-        content="The user asked: hello",
-        outcome="Nothing needed doing, so I did nothing.",
-        disposition=ExchangeDisposition.NO_ACTION_NEEDED,
-        modality=Modality.SPEECH,
-        asked=None,
-    )
-
-    assert report.degraded is False
-    assert report.episode_id is not None
-    stored = await wiring.memory.get(report.episode_id)
-    assert isinstance(stored, EpisodicMemory)
-    assert stored.kind == MemoryKind.EPISODIC.value
-    assert stored.content == "The user asked: hello"
-    assert stored.outcome == "Nothing needed doing, so I did nothing.", (
-        "ADR-0221 §1: the composed reply, whole — not a phrase for the disposition"
-    )
-    assert stored.disposition is ExchangeDisposition.NO_ACTION_NEEDED
-    assert stored.capture == Capture(modality=Modality.SPEECH), (
-        "ADR-0221 §5: the value the pipeline passed, neither defaulted nor recomputed here"
-    )
-    assert stored.occurred_at == AT
-    assert stored.provenance.source is MemorySource.OBSERVED
-    assert stored.provenance.confidence == CAPTURE_CONFIDENCE
-    assert stored.provenance.confidence < 1.0, (
-        "1.0 is the standing only the user's own word carries (ADR-0072 §3); an "
-        "episode rendered beside an assertion at equal confidence teaches the false "
-        "model ADR-0072 §6 exists to prevent"
-    )
-    assert stored.provenance.evidence == ()
-    assert stored.importance == 0.0
-    assert stored.participants == ()
-    assert stored.validity == Validity()
-    # ADR-0109 §4's episode paragraph, which is *about* the empty `evidence`
-    # above: a `DERIVED` belief's confirming instant ranges over the episodes it
-    # cites, and over the empty set it yields nothing, so this record reads as
-    # ADR-0103 §9's **unknown**. `is None` exactly, never merely falsy. The
-    # assertion earns its place on a path that can produce no other outcome
-    # because it fails the moment a producer writes `occurred_at` — asserted
-    # non-`None` two lines above — into the field, which is what §4 decided
-    # against: nothing retires an episode, so "is this still true?" is not a
-    # question about it, and every episode in the store would otherwise claim a
-    # currency it has no use for.
-    assert stored.provenance.last_confirmed_at is None
-    # ADR-0213 §6, the same clause one field along: "**Capture judges nothing
-    # else.**" A topic is a judgement of the same kind as `importance`, capture is
-    # on the turn's own path with no provider and no budget for one, and nothing
-    # labels a record it did not itself produce — so the observer reading this
-    # episode may not stamp one on it either. §15 names the residue honestly: a
-    # topic-scoped act does not reach the transcript of the conversation a belief
-    # came from, which is why ADR-0201 §1's exclusion of `EPISODIC` from a routed
-    # `forget`'s lookup is aligned with this decision rather than in tension with it.
-    assert stored.topics == ()
-    # ADR-0221 §6: capture stamps no origin mark. The field exists and the producer is
-    # in hand, and the decision is still deferred — because stamping it changes the
-    # composing prompt's origin phrase and removes ADR-0181 §5's automatic ALLOW for
-    # the egress calls of every later turn. A lane that stamps it changes this line.
-    assert stored.provenance.derived_from_external is False
-
-
-async def test_capture_defaults_the_two_new_fields_where_a_caller_states_neither() -> None:
-    """ADR-0221 §8's defaults, at the seam that writes them.
-
-    A caller stating neither — which after this change is no production path, and is
-    what a benchmark-style row or an older caller looks like — leaves ``disposition``
-    ``None`` and ``capture`` at ``TEXT``. That is §8's discriminator working from the
-    writing side: the **absence** of ``disposition`` is what separates a record written
-    before ADR-0221 from one written after it, so a producer that quietly stamped a
-    member here would erase the distinction the three render sites read.
-    """
-    wiring = Wiring()
-    conversation = await wiring.stage.begin(None)
-
-    report = await wiring.stage.capture(
-        conversation.id, content="The user asked: hello", asked=None
-    )
-
-    assert report.episode_id is not None
-    stored = await wiring.memory.get(report.episode_id)
-    assert isinstance(stored, EpisodicMemory)
-    assert stored.outcome is None
-    assert stored.disposition is None
-    assert stored.capture == Capture(modality=Modality.TEXT)
-
-
-async def test_a_capture_on_a_resumed_conversation_still_writes_no_topics() -> None:
-    """ADR-0213 §12.17's second path, which is where a later lane would reach for one.
-
-    A resumption is the case with a history in front of it, so it is the one where
-    "the assistant already knows what this conversation is about" is a tempting
-    sentence — and §6 rules it out for the same reason the ordinary path is ruled
-    out: capture holds no provider, and no producer labels a record it did not
-    itself produce. The assertion is on **every** episode the resumed conversation
-    holds, not only the newest, because the tempting implementation labels the
-    thread rather than the turn.
-    """
-    wiring = Wiring()
-    conversation = await wiring.stage.begin(None)
-    await wiring.stage.capture(conversation.id, content="The user asked: hello", asked=None)
-
-    resumed = await wiring.stage.begin(conversation.id)
-    report = await wiring.stage.capture(resumed.id, content="The user asked: and again", asked=None)
-
-    assert report.episode_id is not None
-    stored = [
-        record for record in await wiring.memory.export() if isinstance(record, EpisodicMemory)
-    ]
-    assert len(stored) == 2
-    assert all(episode.topics == () for episode in stored)
-
-
-async def test_an_unset_retention_stamps_a_finite_expiry() -> None:
-    """§7: the horizon in force at capture becomes the episode's own deadline."""
-    wiring = Wiring(retention=7 * DAY)
-    conversation = await wiring.stage.begin(None)
-
-    report = await wiring.stage.capture(conversation.id, content="x", asked=None)
-
-    assert report.episode_id is not None
-    stored = await wiring.memory.get(report.episode_id)
-    assert stored is not None
-    assert stored.expires_at == AT + 7 * DAY
-
-
-async def test_retention_set_to_none_stamps_no_expiry_at_all() -> None:
-    """§7's ratified pair: "keep forever" is the user's deliberate choice.
-
-    The half that catches an implementation which inherited a nullable duration's
-    ``None`` default: without this case, one that read ``None`` as "expire
-    immediately" or "expire at the default" would pass every other clause.
-    """
-    wiring = Wiring(retention=None)
-    conversation = await wiring.stage.begin(None)
-
-    report = await wiring.stage.capture(conversation.id, content="x", asked=None)
-
-    assert report.episode_id is not None
-    stored = await wiring.memory.get(report.episode_id)
-    assert stored is not None
-    assert stored.expires_at is None
-
-
-async def test_two_captures_derive_distinct_episode_ids() -> None:
-    """§3: the id is a function of the conversation and an ordinal the store allocates.
-
-    The clause that catches an implementation deriving the id from anything it does
-    not allocate under the same exclusion — which would let two turns collide by
-    construction rather than not collide by construction.
-    """
-    wiring = Wiring()
-    _, episodes = await _capture_turns(wiring, 2)
-
-    assert len(set(episodes)) == 2
-    for episode_id in episodes:
-        assert await wiring.memory.get(episode_id) is not None
-
-
-async def test_an_episode_id_that_is_already_stored_fails_the_capture_loudly() -> None:
-    """§3: with a derived id a conflict is a broken invariant, not a race.
-
-    So it fails the capture and **overwrites nothing** — no retry, because a retry
-    answers neither a broken ordinal invariant nor a foreign producer that took an
-    id in the reserved namespace. The occupant here is deliberately foreign, which
-    is the case the reservation rule forbids and this guard exists to catch.
-    """
-    wiring = Wiring()
-    conversation = await wiring.stage.begin(None)
-    # Predict the id the first turn will derive, and squat on it.
-    squatted = f"conv:{conversation.id}:1"
-    await wiring.memory.add(_foreign_episode(squatted))
-
-    report = await wiring.stage.capture(conversation.id, content="mine", asked=None)
-
-    assert report.degraded is True
-    # The **index row landed** before the episode write was attempted, and ADR-0205
-    # §1 makes that the whole test of what this id says: it is `None` only where no
-    # row stands, and "not `None` merely because the episode write failed, since the
-    # turn's index row exists either way and is what carries the delivery".
-    assert report.episode_id == squatted
-    occupant = await wiring.memory.get(squatted)
-    assert occupant is not None
-    assert occupant.content == "a record capture did not write", "nothing was overwritten"
-    assert occupant.provenance.source is MemorySource.EXTERNAL
-
-
-async def test_an_append_refused_because_the_conversation_is_gone_writes_no_episode() -> None:
-    """§8: a refused append needs no compensation, because nothing was written.
-
-    The assertion worth making is the **negative** one — no record reached the
-    memory store — which is what the intent-first ordering buys. Under the reverse
-    order the same refusal would strand an episode already written.
-    """
-    wiring = Wiring()
-    conversation = await wiring.stage.begin(None)
-    await wiring.conversations.stamp_deleted(conversation.id)
-
-    report = await wiring.stage.capture(conversation.id, content="too late", asked=None)
-
-    assert report.degraded is True
-    assert report.episode_id is None
-    assert await wiring.memory.export() == [], "nothing reached the memory store"
-
-
-async def test_a_memory_store_fault_leaves_the_turn_recorded_with_no_episode() -> None:
-    """§3: the honest form of "every turn is captured" — durable index, best-effort episode.
-
-    Not a conflict: an embedder or database fault *after* a successful append. The
-    turn keeps its index entry, no episode exists, the already-produced answer is
-    still returned, and the degradation is reported. An implementation that
-    propagated the error — turning a delivered answer into a failed turn — or that
-    rolled the index entry back would pass every other failure case on this list.
-    """
-
-    class Faulting(FakeMemoryStore):
-        async def write_atomic(self, writes: Sequence[MemoryWrite]) -> Sequence[str]:
-            msg = "the embedder is down"
-            raise MemoryStoreError(msg)
-
-    wiring = Wiring(memory=Faulting())
-    conversation = await wiring.stage.begin(None)
-
-    report = await wiring.stage.capture(conversation.id, content="answered anyway", asked=None)
-
-    assert report.degraded is True
-    # The index entry stands: the turn happened, and the transcript shows a gap.
-    turns = await wiring.conversations.turns(conversation.id)
-    assert [turn.ordinal for turn in turns] == [1]
-    # And the id is still reported, which is ADR-0205 §1's clause exactly: the row it
-    # names is the one a later delivery report is applied to, so withholding the id
-    # here would make an interrupted answer unreportable for the one failure that
-    # leaves the row perfectly intact.
-    assert report.episode_id == turns[0].episode_id
-    replayed = await wiring.stage.history(conversation.id)
-    assert replayed.records == (), "an unresolvable episode id is a gap, not an error"
-
-
-async def test_a_deletion_landing_mid_write_is_compensated() -> None:
-    """§8: the *only* trigger compensation has, and the one elapsed time cannot decide.
-
-    The append succeeded before the stamp; the episode write commits after it. So
-    capture re-reads the conversation afterwards and destroys the episode it just
-    wrote. Because the id is determined by its own conversation and ordinal, that
-    delete can never destroy a record capture did not write.
-    """
-    stamped: list[str] = []
-
-    class StampsMidWrite(FakeMemoryStore):
-        """Commits the episode, then lets the deletion land before verification."""
-
-        def __init__(self) -> None:
-            super().__init__(now=clock)
-            self.conversations: FakeConversationStore | None = None
-            self.target: str | None = None
-
-        async def write_atomic(self, writes: Sequence[MemoryWrite]) -> Sequence[str]:
-            written = await super().write_atomic(writes)
-            assert self.conversations is not None
-            assert self.target is not None
-            await self.conversations.stamp_deleted(self.target)
-            stamped.append(self.target)
-            return written
-
-    clock = MovableClock()
-    memory = StampsMidWrite()
-    wiring = Wiring(clock=clock, memory=memory)
-    conversation = await wiring.stage.begin(None)
-    memory.conversations = wiring.conversations
-    memory.target = conversation.id
-
-    report = await wiring.stage.capture(conversation.id, content="racing the deletion", asked=None)
-
-    assert stamped == [conversation.id], "the fixture must really have deleted mid-write"
-    assert report.degraded is True
-    assert report.episode_id is None
-    assert await memory.export() == [], "the episode it wrote was destroyed"
-
-
-async def test_a_failing_compensating_delete_is_reported_rather_than_raised() -> None:
-    """§9.6: the turn still returns its answer, and the failure is not swallowed.
-
-    The same race as above — the deletion lands after the episode write commits —
-    but the compensating delete itself fails. What is left is an orphan the
-    tombstone's own sweep will find while the grace holds, so the honest answer is
-    to degrade and log rather than to raise: the answer is already delivered.
-    """
-    clock = MovableClock()
-
-    class StampsThenRefusesToDelete(FakeMemoryStore):
-        def __init__(self) -> None:
-            super().__init__(now=clock)
-            self.conversations: FakeConversationStore | None = None
-            self.target: str | None = None
-            self.refused = 0
-
-        async def write_atomic(self, writes: Sequence[MemoryWrite]) -> Sequence[str]:
-            written = await super().write_atomic(writes)
-            assert self.conversations is not None
-            assert self.target is not None
-            await self.conversations.stamp_deleted(self.target)
-            return written
-
-        async def delete(self, record_id: str) -> bool:
-            self.refused += 1
-            msg = "the store would not delete"
-            raise MemoryStoreError(msg)
-
-    memory = StampsThenRefusesToDelete()
-    wiring = Wiring(clock=clock, memory=memory)
-    conversation = await wiring.stage.begin(None)
-    memory.conversations = wiring.conversations
-    memory.target = conversation.id
-
-    report = await wiring.stage.capture(conversation.id, content="racing the deletion", asked=None)
-
-    assert memory.refused == 1, "the compensation was attempted"
-    assert report.degraded is True
-    assert report.episode_id is None
-    # The orphan is real and reachable: the tombstone still names it, so the sweep
-    # destroys it for as long as the grace holds.
-    assert await wiring.conversations.episodes_to_purge(conversation.id) != []
-
-
-async def test_an_interruption_between_the_two_writes_leaves_the_ratified_residue() -> None:
-    """§8, both orders: what a crash between the index entry and the episode leaves.
-
-    Interrupted **after** the append: an index entry with no episode, which every
-    reader renders as a gap — the same thing a deleted turn looks like, and a great
-    deal better than the reverse, which is content no conversation admits to.
-    Interrupted **after** a deletion's stamp: a tombstone that still names every
-    episode, so a re-run finishes it.
-    """
-    wiring = Wiring()
-    conversation = await wiring.stage.begin(None)
-
-    # Order one: the append lands, then the process dies.
-    turn = await wiring.conversations.append(conversation.id, occurred_at=wiring.clock())
-    assert await wiring.memory.get(turn.episode_id) is None
-    assert (await wiring.stage.history(conversation.id)).records == ()
-    assert await wiring.conversations.episodes_to_purge(conversation.id) == [turn.episode_id], (
-        "the index still names the episode whose write never landed, which is what "
-        "lets a deletion sweep reach a late write"
-    )
-
-    # Order two: a deletion stamps, then the process dies before the purge.
-    await wiring.conversations.stamp_deleted(conversation.id)
-    assert await wiring.conversations.stamped_conversation_ids() == [conversation.id]
-    assert await wiring.conversations.episodes_to_purge(conversation.id) == [turn.episode_id]
-
-
-# --- continuity: reading the tail back (§5) ------------------------------
-
-
-async def test_history_returns_the_recent_turns_oldest_first() -> None:
-    """§5: the conversation's recent turns, in order, as records the planner renders."""
-    wiring = Wiring()
-    conversation_id, episodes = await _capture_turns(wiring, 3)
+    conversation_id, episodes = await _seed_turns(wiring, 3)
 
     history = await wiring.stage.history(conversation_id)
 
@@ -553,10 +195,51 @@ async def test_history_returns_the_recent_turns_oldest_first() -> None:
     assert history.degraded is False
 
 
-async def test_history_skips_a_turn_whose_episode_no_longer_resolves() -> None:
-    """§5: a gap, never an error — and the deleted turn is never resurrected."""
+async def test_the_order_is_the_episodes_numbers_and_never_their_instants() -> None:
+    """§1: a channel's order is its episodes' numbers, never a timestamp.
+
+    The later-written episode carries the *earlier* instant, so an implementation
+    that sorted by ``occurred_at`` would replay the conversation backwards.
+    """
     wiring = Wiring()
-    conversation_id, episodes = await _capture_turns(wiring, 3)
+    conversation = await wiring.stage.begin(None)
+    first = await wiring.seed(conversation.id, "activation:first", occurred_at=AT + HOUR)
+    second = await wiring.seed(conversation.id, "activation:second", occurred_at=AT)
+
+    history = await wiring.stage.history(conversation.id)
+
+    assert [record.id for record in history.records] == [first, second]
+
+
+async def test_history_skips_a_pass_that_ended_before_capture() -> None:
+    """§4:1, ADR-0275 §7: an ineligible episode is on the channel and absent from history.
+
+    The digest still counts it, which is the pair that shows it really is on the
+    channel rather than never written.
+    """
+    wiring = Wiring()
+    conversation = await wiring.stage.begin(None)
+    kept = await wiring.seed(conversation.id, "activation:kept")
+    await wiring.seed(conversation.id, "activation:ended-early", eligible=False)
+    last = await wiring.seed(conversation.id, "activation:last")
+
+    history = await wiring.stage.history(conversation.id)
+
+    assert [record.id for record in history.records] == [kept, last]
+    assert await channel_ids(wiring.memory, conversation.id) == [
+        kept,
+        "activation:ended-early",
+        last,
+    ]
+    digest = await wiring.stage.digest(conversation.id)
+    assert digest is not None
+    assert digest.recorded_turns == 3
+
+
+async def test_history_skips_a_deleted_episode_without_resurrecting_it() -> None:
+    """§4:1: a gap, never an error — the read is already filtered by liveness."""
+    wiring = Wiring()
+    conversation_id, episodes = await _seed_turns(wiring, 3)
     assert await wiring.memory.delete(episodes[1]) is True
 
     history = await wiring.stage.history(conversation_id)
@@ -565,159 +248,383 @@ async def test_history_skips_a_turn_whose_episode_no_longer_resolves() -> None:
     assert history.degraded is False, "a gap is an ordinary state, not a degradation"
 
 
-async def test_history_reads_the_whole_tail_in_one_batch() -> None:
-    """ADR-0086 §8 item 7: one ``get_many`` for the resume, not one ``get`` per turn.
-
-    The ids go in the conversation's own order, which is also what makes the result
-    reconstructible: the batch is read back by walking ``turns``.
-    """
-
-    class Counting(FakeMemoryStore):
-        def __init__(self, *, now: MovableClock) -> None:
-            super().__init__(now=now)
-            self.singles: list[str] = []
-            self.batches: list[tuple[str, ...]] = []
-
-        async def get(self, record_id: str) -> MemoryRecord | None:
-            self.singles.append(record_id)
-            return await super().get(record_id)
-
-        async def get_many(self, record_ids: Sequence[str]) -> Mapping[str, MemoryRecord]:
-            self.batches.append(tuple(record_ids))
-            return await super().get_many(record_ids)
-
-    clock = MovableClock()
-    store = Counting(now=clock)
-    wiring = Wiring(clock=clock, memory=store)
-    conversation_id, episodes = await _capture_turns(wiring, 3)
-    store.singles.clear()
-    store.batches.clear()
+async def test_history_reads_the_newest_episodes_within_the_replay_bound() -> None:
+    """§4:1: the replay bound is the page, and the page is the channel's newest."""
+    wiring = Wiring()
+    conversation_id, episodes = await _seed_turns(wiring, HISTORY_REPLAY_BOUND + 5)
 
     history = await wiring.stage.history(conversation_id)
 
-    assert [record.id for record in history.records] == episodes
-    assert store.batches == [tuple(episodes)]
-    assert store.singles == [], "no turn is read on its own any more"
+    assert [record.id for record in history.records] == episodes[-HISTORY_REPLAY_BOUND:]
 
 
-async def test_history_keeps_the_conversations_order_not_the_mappings() -> None:
-    """§8 item 7: the order is the conversation's ordinal sequence (ADR-0074 §5).
+async def test_an_ineligible_run_never_consumes_the_replay_page() -> None:
+    """§4:1: eligibility is applied by the read, before its limit.
 
-    A mapping carries no order the caller may rely on, so the result is assembled by
-    walking ``turns``. This store hands back a mapping deliberately iterating the
-    other way; an implementation that walked the mapping would replay the
-    conversation backwards, which is a plausible migration and a silent one — every
-    record is present and only the sequence is wrong.
+    Twenty eligible episodes followed by five a pass ended early left: filtering
+    after the limit would hand the planner fifteen and lose the five oldest turns
+    the conversation actually has.
     """
-
-    class Reversing(FakeMemoryStore):
-        async def get_many(self, record_ids: Sequence[str]) -> Mapping[str, MemoryRecord]:
-            found = await super().get_many(record_ids)
-            return dict(reversed(list(found.items())))
-
-    clock = MovableClock()
-    wiring = Wiring(clock=clock, memory=Reversing(now=clock))
-    conversation_id, episodes = await _capture_turns(wiring, 3)
+    wiring = Wiring()
+    conversation_id, episodes = await _seed_turns(wiring, HISTORY_REPLAY_BOUND)
+    for index in range(5):
+        await wiring.seed(conversation_id, f"activation:ended-{index}", eligible=False)
 
     history = await wiring.stage.history(conversation_id)
 
     assert [record.id for record in history.records] == episodes
 
 
-async def test_history_of_a_conversation_with_no_turns_asks_the_store_for_nothing() -> None:
-    """§6: an empty argument is answered without a round trip, and relied on here."""
+async def test_history_pairs_each_episode_with_its_delivery() -> None:
+    """§10, ADR-0205 §5: a delivery fact travels with the episode it qualifies.
 
-    class Counting(FakeMemoryStore):
-        def __init__(self, *, now: MovableClock) -> None:
-            super().__init__(now=now)
-            self.batches: list[tuple[str, ...]] = []
+    A spoken turn's row starts ``UNKNOWN`` and a device's report stamps it; a typed
+    turn has no row at all and is simply absent from the mapping.
+    """
+    wiring = Wiring()
+    conversation = await wiring.stage.begin(None)
+    spoken = await wiring.seed(conversation.id, "activation:spoken", delivery=UNSTAMPED)
+    typed = await wiring.seed(conversation.id, "activation:typed")
+    unreported = await wiring.seed(conversation.id, "activation:unreported", delivery=UNSTAMPED)
+    assert await wiring.conversations.record_delivery(
+        conversation.id, episode_id=spoken, delivery=COMPLETE
+    )
 
-        async def get_many(self, record_ids: Sequence[str]) -> Mapping[str, MemoryRecord]:
-            self.batches.append(tuple(record_ids))
-            return await super().get_many(record_ids)
+    history = await wiring.stage.history(conversation.id)
+
+    assert [record.id for record in history.records] == [spoken, typed, unreported]
+    assert dict(history.deliveries) == {spoken: COMPLETE, unreported: UNSTAMPED}
+
+
+async def test_a_delivery_whose_episode_is_outside_the_page_is_never_carried() -> None:
+    """§10: one ``deliveries`` call, for exactly the episodes the page returned."""
+
+    class Recording(FakeConversationStore):
+        def __init__(self) -> None:
+            super().__init__(now=clock, retention=RETENTION)
+            self.asked: list[tuple[str, ...]] = []
+
+        async def deliveries(
+            self, conversation_id: str, *, episode_ids: Sequence[str]
+        ) -> Mapping[str, SpokenDelivery]:
+            self.asked.append(tuple(episode_ids))
+            return await super().deliveries(conversation_id, episode_ids=episode_ids)
 
     clock = MovableClock()
-    store = Counting(now=clock)
-    wiring = Wiring(clock=clock, memory=store)
+    conversations = Recording()
+    wiring = Wiring(clock=clock, conversations=conversations)
+    conversation = await wiring.stage.begin(None)
+    old = await wiring.seed(conversation.id, "activation:old", delivery=UNSTAMPED)
+    newest = [
+        await wiring.seed(conversation.id, f"activation:new-{index}")
+        for index in range(HISTORY_REPLAY_BOUND)
+    ]
+
+    history = await wiring.stage.history(conversation.id)
+
+    assert conversations.asked == [tuple(newest)]
+    assert old not in history.deliveries
+
+
+async def test_history_of_a_conversation_with_no_episodes_asks_for_no_deliveries() -> None:
+    """§10: an empty page reads nothing further."""
+
+    class Recording(FakeConversationStore):
+        def __init__(self) -> None:
+            super().__init__(now=clock, retention=RETENTION)
+            self.asked = 0
+
+        async def deliveries(
+            self, conversation_id: str, *, episode_ids: Sequence[str]
+        ) -> Mapping[str, SpokenDelivery]:
+            self.asked += 1
+            return await super().deliveries(conversation_id, episode_ids=episode_ids)
+
+    clock = MovableClock()
+    conversations = Recording()
+    wiring = Wiring(clock=clock, conversations=conversations)
     conversation = await wiring.stage.begin(None)
 
     history = await wiring.stage.history(conversation.id)
 
     assert history.records == ()
     assert history.degraded is False
-    assert store.batches == [()]
+    assert conversations.asked == 0
 
 
-async def test_history_degrades_rather_than_failing_the_turn() -> None:
+async def test_history_of_a_stamped_conversation_is_degraded_and_reads_no_channel() -> None:
+    """§4:1: a ``get`` that answers nothing for a stamped conversation comes first."""
+
+    class Watching(FakeMemoryStore):
+        reads = 0
+
+        async def channel_episodes(
+            self,
+            channel: ChannelIdentity,
+            *,
+            after: int | None = None,
+            limit: int,
+            episode_model_eligible: bool | None = None,
+        ) -> ChannelEpisodePage:
+            self.reads += 1
+            return await super().channel_episodes(
+                channel, after=after, limit=limit, episode_model_eligible=episode_model_eligible
+            )
+
+    clock = MovableClock()
+    memory = Watching(now=clock)
+    wiring = Wiring(clock=clock, memory=memory)
+    conversation_id, _ = await _seed_turns(wiring, 1)
+    await wiring.conversations.stamp_deleted(conversation_id)
+    memory.reads = 0
+
+    history = await wiring.stage.history(conversation_id)
+
+    assert history.records == ()
+    assert history.degraded is True
+    assert memory.reads == 0
+
+
+@pytest.mark.parametrize("failing", ["memory", "conversations"])
+async def test_history_degrades_rather_than_failing_the_turn(failing: str) -> None:
     """Losing continuity costs the answer its history, not its usefulness.
 
-    Faults the method the tail actually reads through — ``get_many`` since ADR-0086
-    §8 item 7 — because a store that only refuses ``get`` no longer reaches this path
-    at all, and a case wired to the abandoned method would report a degradation this
-    code never produced.
+    Each store faults the one read history makes of it: the channel read, and the
+    delivery read that follows it.
     """
 
-    class Faulting(FakeMemoryStore):
-        async def get_many(self, record_ids: Sequence[str]) -> Mapping[str, MemoryRecord]:
-            msg = "the store would not read"
-            raise MemoryStoreError(msg)
+    class FaultingMemory(FakeMemoryStore):
+        fail = False
 
-    wiring = Wiring()
-    conversation_id, _ = await _capture_turns(wiring, 1)
-    broken = ConversationLifecycle(
-        conversations=wiring.conversations,
-        memory=Faulting(now=wiring.clock),
-        retention=RETENTION,
-        now=wiring.clock,
-        archive=FakeTranscriptArchiveWriter(),
-        archive_enabled=True,
-    )
+        async def channel_episodes(
+            self,
+            channel: ChannelIdentity,
+            *,
+            after: int | None = None,
+            limit: int,
+            episode_model_eligible: bool | None = None,
+        ) -> ChannelEpisodePage:
+            if self.fail:
+                msg = "the store would not read"
+                raise MemoryStoreError(msg)
+            return await super().channel_episodes(
+                channel, after=after, limit=limit, episode_model_eligible=episode_model_eligible
+            )
 
-    history = await broken.history(conversation_id)
+    class FaultingConversations(FakeConversationStore):
+        fail = False
+
+        async def deliveries(
+            self, conversation_id: str, *, episode_ids: Sequence[str]
+        ) -> Mapping[str, SpokenDelivery]:
+            if self.fail:
+                msg = "the index would not read"
+                raise ConversationStoreError(msg)
+            return await super().deliveries(conversation_id, episode_ids=episode_ids)
+
+    clock = MovableClock()
+    memory = FaultingMemory(now=clock)
+    conversations = FaultingConversations(now=clock, retention=RETENTION)
+    wiring = Wiring(clock=clock, memory=memory, conversations=conversations)
+    conversation_id, _ = await _seed_turns(wiring, 1)
+    if failing == "memory":
+        memory.fail = True
+    else:
+        conversations.fail = True
+
+    history = await wiring.stage.history(conversation_id)
 
     assert history.records == ()
     assert history.degraded is True
 
 
-# --- deletion: the three ordered steps (§8) ------------------------------
+# --- the digest a deletion ceremony shows (ADR-0283 §4:2) ----------------
 
 
-async def test_deleting_a_conversation_destroys_every_episode_across_every_batch() -> None:
-    """§9: a fixture with one batch of turns passes a single-batch implementation.
+async def test_the_digest_counts_every_episode_on_the_channel() -> None:
+    """§4:2: the count is the channel's, eligible or not, and no other conversation's."""
+    wiring = Wiring()
+    conversation_id, _ = await _seed_turns(wiring, 2)
+    await wiring.seed(conversation_id, "activation:ended-early", eligible=False)
+    other_id, _ = await _seed_turns(wiring, 4)
 
-    So this spans several, and asserts the record is dropped only once the drain
-    returns empty — destroying one batch and dropping the record is the failure
-    that clause exists to forbid.
+    digest = await wiring.stage.digest(conversation_id)
+
+    assert digest is not None
+    assert digest.id == conversation_id
+    assert digest.recorded_turns == 3
+    assert digest.last_turn_at == AT
+    other = await wiring.stage.digest(other_id)
+    assert other is not None
+    assert other.recorded_turns == 4
+
+
+async def test_the_digest_of_a_conversation_with_no_episodes_counts_none() -> None:
+    """§4:2: an emptied conversation still shows, with nothing to destroy but itself."""
+    wiring = Wiring()
+    conversation = await wiring.stage.begin(None)
+
+    digest = await wiring.stage.digest(conversation.id)
+
+    assert digest is not None
+    assert digest.recorded_turns == 0
+    assert digest.last_turn_at is None
+
+
+# --- where a parked confirmation was parked (ADR-0283 §5) ----------------
+
+BINDING = ParkedBinding(execution_id="execution-1", step_id="step-1")
+
+
+async def test_a_resume_finds_its_conversation_through_the_parking_episode() -> None:
+    """§5: recovered through ``episode_parking``, never passed."""
+    wiring = Wiring()
+    conversation = await wiring.stage.begin(None)
+    await wiring.seed(conversation.id, "activation:before")
+    parking = await wiring.seed(conversation.id, "activation:parking", parks=BINDING)
+
+    origin = await wiring.stage.conversation_of_binding(BINDING)
+
+    assert origin == ParkingOrigin(conversation_id=conversation.id, episode_id=parking)
+
+
+async def test_a_binding_no_live_episode_parked_finds_no_conversation() -> None:
+    """§5: no live parking episode keeps ADR-0275 §6:5's degraded behaviour."""
+    wiring = Wiring()
+    conversation = await wiring.stage.begin(None)
+    parking = await wiring.seed(conversation.id, "activation:parking", parks=BINDING)
+    assert (
+        await wiring.stage.conversation_of_binding(
+            ParkedBinding(execution_id="execution-1", step_id="another-step")
+        )
+        is None
+    )
+    assert await wiring.memory.delete(parking) is True
+
+    assert await wiring.stage.conversation_of_binding(BINDING) is None
+
+
+async def test_a_binding_parked_in_a_deleted_conversation_finds_none() -> None:
+    """§5: recording a resumption under a stamped conversation would assert one gone."""
+    wiring = Wiring()
+    conversation = await wiring.stage.begin(None)
+    await wiring.seed(conversation.id, "activation:parking", parks=BINDING)
+    await wiring.conversations.stamp_deleted(conversation.id)
+
+    assert await wiring.stage.conversation_of_binding(BINDING) is None
+
+
+# --- deletion: the ordered steps (ADR-0283 §8:1) -------------------------
+
+
+async def test_deletion_runs_its_steps_in_the_ratified_order(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """§8:1: archive discard, parked-reads drop, the channel walk, then the drop.
+
+    The walk reads the channel page by page until a read comes back empty — so the
+    last ``channel_episode_ids`` call answers nothing and is followed only by
+    ``drop_if_eligible``.
     """
+    log: list[str] = []
     clock = MovableClock()
-    wiring = Wiring(clock=clock, purge_batch=2)
-    conversation_id, episodes = await _capture_turns(wiring, 7)
+
+    class Archive(FakeTranscriptArchiveWriter):
+        async def discard_conversation(self, conversation_id: str) -> int:
+            log.append("discard_conversation")
+            return await super().discard_conversation(conversation_id)
+
+    class Memory(FakeMemoryStore):
+        async def channel_episode_ids(
+            self, channel: ChannelIdentity, *, after: int | None = None, limit: int
+        ) -> tuple[ChannelEpisodeId, ...]:
+            held = await super().channel_episode_ids(channel, after=after, limit=limit)
+            log.append(f"channel_episode_ids(after={after}) -> {len(held)}")
+            return held
+
+        async def delete(self, record_id: str) -> bool:
+            log.append(f"delete({record_id})")
+            return await super().delete(record_id)
+
+    class Conversations(FakeConversationStore):
+        async def drop_if_eligible(self, conversation_id: str) -> bool:
+            log.append("drop_if_eligible")
+            return await super().drop_if_eligible(conversation_id)
+
+    # ``FakeParkedReads`` is final, so its one call here is spied on the instance.
+    parks = FakeParkedReads()
+    drop = parks.drop_for_conversation
+
+    async def spied_drop(conversation_id: str, /) -> int:
+        log.append("drop_for_conversation")
+        return await drop(conversation_id)
+
+    monkeypatch.setattr(parks, "drop_for_conversation", spied_drop)
+    memory = Memory(now=clock)
+    wiring = Wiring(
+        clock=clock,
+        memory=memory,
+        archive=Archive(),
+        parked_reads=parks,
+        conversations=Conversations(now=clock, retention=RETENTION, tombstone_grace=GRACE),
+    )
+    conversation_id, episodes = await _seed_turns(wiring, 2)
+    last = list((await channel_numbers(memory, conversation_id)).values())[-1]
+    log.clear()
 
     assert await wiring.stage.delete(conversation_id) is True
 
-    for episode_id in episodes:
-        assert await wiring.memory.get(episode_id) is None
-    assert await wiring.memory.export() == [], "every batch, not just the first"
-    assert await wiring.conversations.get(conversation_id) is None
+    assert log == [
+        "discard_conversation",
+        "drop_for_conversation",
+        "channel_episode_ids(after=None) -> 2",
+        f"delete({episodes[0]})",
+        f"delete({episodes[1]})",
+        f"channel_episode_ids(after={last}) -> 0",
+        "drop_if_eligible",
+    ]
+
+
+async def test_deleting_a_conversation_deletes_every_episode_on_its_channel() -> None:
+    """§8:1: eligible or not, expired but unpurged, or not yet valid.
+
+    The enumeration is what the store physically holds; a read filtered by liveness,
+    validity or eligibility in its place would leave each of the last three behind
+    (ADR-0275 §6:6). Another conversation's episodes are untouched.
+    """
+    clock = MovableClock()
+    wiring = Wiring(clock=clock)
+    conversation = await wiring.stage.begin(None)
+    await wiring.seed(conversation.id, "activation:eligible")
+    await wiring.seed(conversation.id, "activation:ineligible", eligible=False)
+    await wiring.seed(conversation.id, "activation:expired", expires_at=AT + MINUTE)
+    await wiring.seed(
+        conversation.id, "activation:not-yet-valid", validity=Validity(valid_from=AT + DAY)
+    )
+    other_id, other_episodes = await _seed_turns(wiring, 1)
+    clock.advance(HOUR)  # the expired one is now past its horizon and not yet purged
+    assert len(await channel_ids(wiring.memory, conversation.id)) == 4
+
+    assert await wiring.stage.delete(conversation.id) is True
+
+    assert await channel_ids(wiring.memory, conversation.id) == []
+    assert await channel_ids(wiring.memory, other_id) == other_episodes
+    assert await wiring.conversations.get(conversation.id) is None
     # The tombstone deliberately outlives the deleting call: the grace is what keeps
     # the only record naming a pending intent alive past the deletion, so a capture
-    # that commits and then dies is still swept (§8). It is not a bound and is not
-    # offered as one.
-    assert await wiring.conversations.stamped_conversation_ids() == [conversation_id]
+    # that commits and then dies is still swept (§8).
+    assert await wiring.conversations.stamped_conversation_ids() == [conversation.id]
 
     clock.advance(GRACE)
     assert await wiring.stage.sweep_deletions() == 1
     assert await wiring.conversations.stamped_conversation_ids() == []
 
 
-async def test_a_deletion_interrupted_between_two_batches_is_completed_by_a_re_run() -> None:
-    """§9: the sweep is idempotent by re-walking, and the index still named everything.
+async def test_a_deletion_interrupted_part_way_is_completed_by_a_re_run() -> None:
+    """§8:1: idempotent by re-walking the channel.
 
-    Nothing removes an index row until the record is dropped, so a run that dies
-    part-way is re-run from the beginning and every delete it repeats is a no-op on
-    an id already gone. The assertion that matters is the second one: when the
-    re-run resumed, the index still named **every** episode, including the ones the
-    first pass had already destroyed.
+    A run that dies part-way leaves the tombstone and the episodes it had not yet
+    reached on the channel; the re-run walks from the beginning and finds only those.
     """
     clock = MovableClock()
     interrupt = 3
@@ -736,51 +643,46 @@ async def test_a_deletion_interrupted_between_two_batches_is_completed_by_a_re_r
             return await super().delete(record_id)
 
     memory = DiesMidSweep()
-    wiring = Wiring(clock=clock, memory=memory, purge_batch=2)
-    conversation_id, episodes = await _capture_turns(wiring, 7)
-    clock.advance(GRACE)
+    wiring = Wiring(clock=clock, memory=memory)
+    conversation_id, episodes = await _seed_turns(wiring, 7)
     memory.arm = True
 
     with pytest.raises(MemoryStoreError):
         await wiring.stage.delete(conversation_id)
 
-    # The tombstone survived, and still names every episode — the ones already
-    # destroyed included, since rows go only when the record is dropped.
     assert await wiring.conversations.stamped_conversation_ids() == [conversation_id]
-    assert await wiring.conversations.episodes_to_purge(conversation_id, limit=100) == episodes
+    assert await channel_ids(memory, conversation_id) == episodes[interrupt:]
 
     memory.arm = False
-    clock.advance(GRACE)  # the stamp landed after the first advance, so time it out
+    clock.advance(GRACE)
     assert await wiring.stage.sweep_deletions() == 1
 
-    assert await wiring.memory.export() == []
+    assert await channel_ids(memory, conversation_id) == []
     assert await wiring.conversations.stamped_conversation_ids() == []
 
 
-async def test_the_sweeps_read_a_tombstone_no_presenting_read_will_show() -> None:
-    """§9: the pair that keeps a tombstone from being a readable record.
+async def test_the_sweep_reaches_a_tombstone_no_presenting_read_will_show() -> None:
+    """§8: the coordinator still finds what it is about to destroy.
 
-    Asserted through the stage, because this is the property the *sweep* depends
-    on: the coordinator must be handed the ids it is about to destroy while every
-    surface a user reaches still says the conversation is gone.
+    Every surface a user reaches says the conversation is gone, while the stamped
+    enumeration and the channel still hold what the sweep needs.
     """
     wiring = Wiring()
-    conversation_id, episodes = await _capture_turns(wiring, 2)
+    conversation_id, episodes = await _seed_turns(wiring, 2)
     await wiring.conversations.stamp_deleted(conversation_id)
 
     assert await wiring.conversations.get(conversation_id) is None
     assert await wiring.stage.recent() == []
     assert await wiring.stage.digest(conversation_id) is None
-    with pytest.raises(UnknownConversationError):
-        await wiring.conversations.turns(conversation_id)
-    assert await wiring.conversations.episodes_to_purge(conversation_id) == episodes
+    assert await wiring.conversations.stamped_conversation_ids() == [conversation_id]
+    assert await channel_ids(wiring.memory, conversation_id) == episodes
 
 
 async def test_a_repeat_deletion_reports_it_did_not_stamp_and_still_finishes_the_sweep() -> None:
     """§8's protocol is explicitly re-runnable, so a repeat is a no-op and not an error."""
     clock = MovableClock()
     wiring = Wiring(clock=clock)
-    conversation_id, _ = await _capture_turns(wiring, 1)
+    conversation_id, _ = await _seed_turns(wiring, 1)
 
     assert await wiring.stage.delete(conversation_id) is True  # inside the grace: no drop yet
     assert await wiring.conversations.stamped_conversation_ids() == [conversation_id]
@@ -795,6 +697,27 @@ async def test_deleting_something_that_is_already_gone_is_not_an_error() -> None
     wiring = Wiring()
 
     assert await wiring.stage.delete("nobody") is False
+
+
+async def test_an_episode_landing_inside_the_grace_is_swept() -> None:
+    """§8: the reach the grace buys, now that the channel is the enumeration.
+
+    An episode that lands on the channel after the stamp — a capture racing the
+    deletion — is found by the next sweep's channel walk while the tombstone stands,
+    and the sweep is idempotent once the record is dropped.
+    """
+    clock = MovableClock()
+    wiring = Wiring(clock=clock)
+    conversation_id, _ = await _seed_turns(wiring, 1)
+    assert await wiring.stage.delete(conversation_id) is True
+    await wiring.memory.add(conversation_episode(conversation_id, "activation:late"))
+
+    assert await wiring.stage.sweep_deletions() == 0, "the grace has not elapsed"
+    assert await wiring.memory.get("activation:late") is None, "step 2 runs regardless"
+
+    clock.advance(GRACE)
+    assert await wiring.stage.sweep_deletions() == 1
+    assert await wiring.stage.sweep_deletions() == 0, "a re-run is a no-op"
 
 
 # --- the parked reads a deletion takes with it (ADR-0244 §3) -------------
@@ -852,8 +775,8 @@ async def test_a_deletion_drops_this_conversations_parks_and_no_others() -> None
     """
     parks = FakeParkedReads()
     wiring = Wiring(parked_reads=parks)
-    conversation_id, _ = await _capture_turns(wiring, 1)
-    other_id, _ = await _capture_turns(wiring, 1)
+    conversation_id, _ = await _seed_turns(wiring, 1)
+    other_id, _ = await _seed_turns(wiring, 1)
     await parks.park(_park("park-1", conversation_id, "decision-1"))
     await parks.settle("park-1", disposition=ParkedReadDisposition.DENIED, at=AT)
     await parks.park(_park("park-2", conversation_id, "decision-2"))
@@ -867,14 +790,12 @@ async def test_a_deletion_drops_this_conversations_parks_and_no_others() -> None
     assert (await parks.get("park-3")) is not None, "another conversation is untouched"
 
 
-async def test_the_parks_go_before_the_walk_that_refuses_an_unknown_conversation() -> None:
-    """The placement argument, asserted where it can be broken.
+async def test_the_parks_of_a_conversation_another_sweep_already_dropped_still_go() -> None:
+    """The placement argument: the parks are dropped whatever the record's state.
 
-    ``episodes_to_purge`` raises ``UnknownConversationError`` for an id naming nothing,
-    and :meth:`ConversationLifecycle.delete` treats that as a deletion another sweep
-    completed. A drop placed *after* the walk would therefore never run for such an id —
-    and this is the one route to a park ADR-0244 §3 names besides its deadline, so the
-    parks would be left to expire on their own after the record naming them was gone.
+    A call arriving for a conversation another sweep already dropped still reaches
+    the parks, which is the one route to them ADR-0244 §3 names besides the deadline —
+    so the drop sits inside step 2, ahead of anything that depends on the record.
     """
     parks = FakeParkedReads()
     wiring = Wiring(parked_reads=parks)
@@ -897,7 +818,7 @@ async def test_the_start_up_sweep_drops_the_parks_a_crashed_deletion_left() -> N
     clock = MovableClock()
     parks = FakeParkedReads()
     wiring = Wiring(clock=clock, parked_reads=parks)
-    conversation_id, _ = await _capture_turns(wiring, 1)
+    conversation_id, _ = await _seed_turns(wiring, 1)
     await parks.park(_park("park-1", conversation_id, "decision-1"))
     # The stamp with nothing after it: a process that died between §8's step 1 and its
     # step 2, which is the state ADR-0076 exists to find.
@@ -919,7 +840,7 @@ async def test_a_park_store_fault_aborts_step_two_and_the_tombstone_stands() -> 
     """
     parks = FakeParkedReads()
     wiring = Wiring(parked_reads=parks)
-    conversation_id, episodes = await _capture_turns(wiring, 1)
+    conversation_id, episodes = await _seed_turns(wiring, 1)
     parks.fail_writes()
 
     with pytest.raises(AssistantError):
@@ -937,7 +858,7 @@ async def test_a_stage_with_no_park_store_deletes_exactly_as_it_did_before() -> 
     than a degradation.
     """
     wiring = Wiring()
-    conversation_id, episodes = await _capture_turns(wiring, 1)
+    conversation_id, episodes = await _seed_turns(wiring, 1)
 
     assert await wiring.stage.delete(conversation_id) is True
 
@@ -953,13 +874,13 @@ async def test_the_deletion_sweep_finishes_what_a_previous_run_left() -> None:
 
     The stamp hides a conversation from every presenting read, so a process that
     died between the stamp and the drop left episodes that were never destroyed and
-    an index that outlived its grace indefinitely.
+    a record that outlived its grace indefinitely.
     """
     clock = MovableClock()
     wiring = Wiring(clock=clock)
-    first, first_episodes = await _capture_turns(wiring, 2)
-    second, second_episodes = await _capture_turns(wiring, 1)
-    live, live_episodes = await _capture_turns(wiring, 1)
+    first, first_episodes = await _seed_turns(wiring, 2)
+    second, second_episodes = await _seed_turns(wiring, 1)
+    live, live_episodes = await _seed_turns(wiring, 1)
     await wiring.conversations.stamp_deleted(first)
     await wiring.conversations.stamp_deleted(second)
     clock.advance(GRACE)
@@ -974,11 +895,21 @@ async def test_the_deletion_sweep_finishes_what_a_previous_run_left() -> None:
 
 async def test_the_deletion_sweep_drains_every_batch_of_tombstones() -> None:
     """ADR-0076 §4.5: finishing one batch and stopping is the failure to forbid."""
+
+    class SmallBatches(FakeConversationStore):
+        async def stamped_conversation_ids(
+            self, *, limit: int | None = None, after_id: str | None = None
+        ) -> list[str]:
+            return await super().stamped_conversation_ids(limit=2, after_id=after_id)
+
     clock = MovableClock()
-    wiring = Wiring(clock=clock, purge_batch=2)
+    wiring = Wiring(
+        clock=clock,
+        conversations=SmallBatches(now=clock, retention=RETENTION, tombstone_grace=GRACE),
+    )
     ids = []
     for _ in range(7):
-        conversation_id, _episodes = await _capture_turns(wiring, 1)
+        conversation_id, _episodes = await _seed_turns(wiring, 1)
         ids.append(conversation_id)
     for conversation_id in ids:
         await wiring.conversations.stamp_deleted(conversation_id)
@@ -1007,20 +938,18 @@ async def test_a_sweep_continues_past_a_conversation_someone_else_finished() -> 
 
         vanish: str | None = None
 
-        async def episodes_to_purge(
-            self, conversation_id: str, *, limit: int | None = None, after_id: str | None = None
-        ) -> list[str]:
+        async def drop_if_eligible(self, conversation_id: str) -> bool:
             reached.append(conversation_id)
             if conversation_id == self.vanish:
                 msg = "no such conversation"
                 raise UnknownConversationError(msg)
-            return await super().episodes_to_purge(conversation_id, limit=limit, after_id=after_id)
+            return await super().drop_if_eligible(conversation_id)
 
     conversations = FinishedByAnother(now=clock, retention=RETENTION, tombstone_grace=GRACE)
     wiring = Wiring(clock=clock, conversations=conversations)
     started = []
     for _ in range(3):
-        conversation_id, _episodes = await _capture_turns(wiring, 1)
+        conversation_id, _episodes = await _seed_turns(wiring, 1)
         started.append(conversation_id)
     ids = sorted(started)
     for conversation_id in ids:
@@ -1030,10 +959,7 @@ async def test_a_sweep_continues_past_a_conversation_someone_else_finished() -> 
 
     dropped = await wiring.stage.sweep_deletions()
 
-    # The drain calls `episodes_to_purge` more than once per conversation, so compare
-    # the *order they were first reached in* rather than the raw call log.
-    visited = list(dict.fromkeys(reached))
-    assert visited == ids, "the sweep carried on to every remaining id"
+    assert reached == ids, "the sweep carried on to every remaining id"
     assert dropped == 2, "the vanished one was a no-op, the other two were finished"
     assert await conversations.stamped_conversation_ids() == [ids[0]]
 
@@ -1048,15 +974,13 @@ async def test_a_genuine_store_fault_aborts_the_sweep_and_is_reported() -> None:
     clock = MovableClock()
 
     class Broken(FakeConversationStore):
-        async def episodes_to_purge(
-            self, conversation_id: str, *, limit: int | None = None, after_id: str | None = None
-        ) -> list[str]:
+        async def drop_if_eligible(self, conversation_id: str) -> bool:
             msg = "the index is unreadable"
             raise ConversationStoreError(msg)
 
     conversations = Broken(now=clock, retention=RETENTION, tombstone_grace=GRACE)
     wiring = Wiring(clock=clock, conversations=conversations)
-    conversation_id, _ = await _capture_turns(wiring, 1)
+    conversation_id, _ = await _seed_turns(wiring, 1)
     await conversations.stamp_deleted(conversation_id)
     clock.advance(GRACE)
 
@@ -1078,10 +1002,10 @@ async def test_a_crashed_deletion_is_finished_after_the_index_is_reopened(tmp_pa
     """ADR-0076 §3, in the case #447 was found in: "at engine start", across a reopen.
 
     Persist an interrupted §8 sequence — a stamped conversation whose episodes are
-    still in the ``MemoryStore`` — then open a **fresh** store over the same file and
-    run the stage's start-up sweep. Every conformance clause can pass against a
-    method nothing calls; this is the one that proves the tombstone survives the
-    process boundary it exists for.
+    still on its channel — then open a **fresh** store over the same file and run the
+    stage's start-up sweep. Every conformance clause can pass against a method
+    nothing calls; this is the one that proves the tombstone survives the process
+    boundary it exists for.
     """
     clock = MovableClock()
     path = tmp_path / "conversations.db"
@@ -1098,16 +1022,13 @@ async def test_a_crashed_deletion_is_finished_after_the_index_is_reopened(tmp_pa
             archive_enabled=True,
         )
         conversation = await stage.begin(None)
-        report = await stage.capture(
-            conversation.id, content="recorded before the crash", asked=None
-        )
-        assert report.episode_id is not None
+        await memory.add(conversation_episode(conversation.id, "activation:before-the-crash"))
         assert await first.stamp_deleted(conversation.id) is True
-        # ...and here the process dies: no episode purged, no record dropped.
+        # ...and here the process dies: no episode deleted, no record dropped.
     finally:
         first.close()
 
-    assert await memory.get(report.episode_id) is not None, "the episode outlived the crash"
+    assert await memory.get("activation:before-the-crash") is not None, "it outlived the crash"
     clock.advance(GRACE)
 
     reopened = SqliteConversationStore(path=path, now=clock, tombstone_grace=GRACE)
@@ -1123,74 +1044,64 @@ async def test_a_crashed_deletion_is_finished_after_the_index_is_reopened(tmp_pa
 
         assert await restarted.sweep_deletions() == 1
 
-        assert await memory.get(report.episode_id) is None, "the leaked episode was destroyed"
+        assert await memory.get("activation:before-the-crash") is None, "the leak was destroyed"
         assert await reopened.stamped_conversation_ids() == []
         assert await reopened.get(conversation.id) is None
     finally:
         reopened.close()
 
 
-# --- retention reclaim: observes, never destroys (§7) --------------------
+# --- retention reclaim: observes, never destroys (ADR-0283 §8:2) ---------
 
 
 async def test_reclaim_drops_an_emptied_idle_conversation_without_destroying_anything() -> None:
-    """§7: the record goes because it is empty and idle; the episodes left on their own."""
+    """§8:2: the record goes because its channel is empty and it is idle.
+
+    The episodes left on their own — expired, then purged by the memory store's own
+    sweep — and reclaim destroyed none of them.
+    """
     clock = MovableClock()
     wiring = Wiring(clock=clock, retention=7 * DAY)
-    conversation_id, episodes = await _capture_turns(wiring, 2)
+    conversation_id, episodes = await _seed_turns(wiring, 2)
 
     clock.advance(7 * DAY + MINUTE)  # past both the episodes' expiry and the horizon
     assert await wiring.memory.get(episodes[0]) is None, "the episodes expired on their own"
+    assert await wiring.memory.purge_expired() == 2
 
     assert await wiring.stage.reclaim() == 1
     assert await wiring.conversations.get(conversation_id) is None
 
 
-async def test_reclaim_never_destroys_a_live_episode() -> None:
-    """§7, §9: the sweep that asks for nothing must not carry anything out.
+@pytest.mark.parametrize("held", ["live", "expired-unpurged", "not-yet-valid"])
+async def test_reclaim_keeps_a_conversation_whose_channel_holds_an_episode(held: str) -> None:
+    """§8:2: "holds" is ``channel_episode_ids``' sense, and reclaim destroys nothing.
 
-    A conversation past its horizon whose episode is still live: reclaim's
-    precondition is that **no** turn resolves, so nothing is dropped and — the
-    load-bearing half — nothing is destroyed either. Stated as one sequence with the
-    deletion sweep, a live episode would be destroyed for the crime of belonging to
-    an old conversation.
+    A live episode, one expired but not yet purged, and one not yet valid each delay
+    the reclaim — and the load-bearing half is that none of them is destroyed for the
+    crime of belonging to an old conversation.
     """
     clock = MovableClock()
-    # Retention is unset on the *stage's clock path* by giving the episode no
-    # expiry, so it stays live while the conversation ages past the horizon.
     wiring = Wiring(clock=clock, retention=7 * DAY)
-    conversation_id, episodes = await _capture_turns(wiring, 1)
-    kept = await wiring.memory.get(episodes[0])
-    assert kept is not None
-    await wiring.memory.add(kept.model_copy(update={"expires_at": None}))
+    conversation = await wiring.stage.begin(None)
+    if held == "live":
+        episode = await wiring.seed(conversation.id, "activation:held", unexpiring=True)
+    elif held == "expired-unpurged":
+        episode = await wiring.seed(conversation.id, "activation:held")
+    else:
+        episode = await wiring.seed(
+            conversation.id,
+            "activation:held",
+            unexpiring=True,
+            validity=Validity(valid_from=AT + 365 * DAY),
+        )
 
     clock.advance(30 * DAY)
 
     assert await wiring.stage.reclaim() == 0
-    assert await wiring.conversations.get(conversation_id) is not None
-    assert await wiring.memory.get(episodes[0]) is not None, "reclaim destroys nothing"
-
-
-async def test_reclaim_inspects_every_batch_before_deciding_a_conversation_is_empty() -> None:
-    """§7: an implementation that inspected only the first batch would orphan the rest.
-
-    The live episode sits **beyond** the first batch, which is the case the
-    single-batch fixture cannot catch — and which the multi-batch *deletion* test
-    does not catch either, since deletion destroys what it finds rather than asking
-    whether anything survives.
-    """
-    clock = MovableClock()
-    wiring = Wiring(clock=clock, retention=7 * DAY, purge_batch=2)
-    conversation_id, episodes = await _capture_turns(wiring, 5)
-    survivor = await wiring.memory.get(episodes[4])
-    assert survivor is not None
-    await wiring.memory.add(survivor.model_copy(update={"expires_at": None}))
-
-    clock.advance(30 * DAY)
-
-    assert await wiring.stage.reclaim() == 0
-    assert await wiring.conversations.get(conversation_id) is not None
-    assert await wiring.memory.get(episodes[4]) is not None
+    assert await wiring.conversations.get(conversation.id) is not None
+    assert await channel_ids(wiring.memory, conversation.id) == [episode], (
+        "reclaim destroys nothing"
+    )
 
 
 class RetunableStore(FakeConversationStore):
@@ -1265,244 +1176,3 @@ async def test_reclaim_is_switched_off_when_retention_is_unset() -> None:
 
     assert await wiring.stage.reclaim() == 0
     assert await wiring.conversations.get(conversation.id) is not None
-
-
-async def test_a_turn_held_past_the_horizon_is_answered_but_not_recorded() -> None:
-    """§7: the accepted mid-turn window, pinned rather than rediscovered as a bug.
-
-    A conversation idle for the whole horizon, revived by a continuation that then
-    takes longer than that horizon to produce an answer: reclaim fires mid-turn, the
-    record is dropped, and the capture append behind it is refused. The user gets
-    their answer and no turn is recorded — reported, never silent. Pinning it stops
-    a later reader mistaking the window for a bug, and a later implementer from
-    inventing the lease this ADR declines.
-    """
-    clock = MovableClock()
-    wiring = Wiring(clock=clock, retention=7 * DAY)
-    conversation = await wiring.stage.begin(None)
-
-    clock.advance(7 * DAY)
-    await wiring.stage.begin(conversation.id)  # the turn begins; activity is marked
-    clock.advance(7 * DAY + MINUTE)  # ...and the turn outlasts the whole horizon
-    assert await wiring.stage.reclaim() == 1
-
-    report = await wiring.stage.capture(
-        conversation.id, content="answered, far too late", asked=None
-    )
-
-    assert report.degraded is True
-    assert report.episode_id is None
-
-
-# --- the composed export (§9) --------------------------------------------
-
-
-async def test_the_user_facing_export_drops_a_turn_whose_episode_is_gone() -> None:
-    """§9: this is a capture-stage test, not a store one.
-
-    The store snapshot legitimately still carries the rows. An implementation that
-    handed the raw snapshot to the user would pass every store-level export
-    assertion while leaking when the user was talking and how often.
-    """
-    wiring = Wiring()
-    conversation_id, episodes = await _capture_turns(wiring, 3)
-    assert await wiring.memory.delete(episodes[1]) is True
-
-    exported = await wiring.stage.export()
-
-    assert [turn.episode_id for turn in exported.conversations.turns] == [
-        episodes[0],
-        episodes[2],
-    ]
-    assert [one.id for one in exported.conversations.conversations] == [conversation_id]
-    assert {record.id for record in exported.memories} == {episodes[0], episodes[2]}
-
-
-async def test_a_conversation_whose_episodes_have_all_expired_exports_as_nothing() -> None:
-    """§9: not an empty shell with a timeline.
-
-    Exporting the rows would say *that* an exchange happened and *when*, for content
-    §7 has already removed from every read.
-    """
-    clock = MovableClock()
-    wiring = Wiring(clock=clock, retention=7 * DAY)
-    conversation_id, _ = await _capture_turns(wiring, 2)
-
-    clock.advance(7 * DAY + MINUTE)
-
-    exported = await wiring.stage.export()
-
-    assert exported.conversations.turns == ()
-    assert [one.id for one in exported.conversations.conversations] == []
-    assert conversation_id not in {one.id for one in exported.conversations.conversations}
-
-
-async def test_a_conversation_that_never_had_a_turn_still_exports() -> None:
-    """§9's rule is about a conversation *whose episodes have all expired*.
-
-    One that never recorded a turn has no timeline to leak, and the store's own
-    contract already holds that an empty conversation is state the user holds. The
-    boundary is stated here so a later reader finds the decision rather than
-    re-deriving it from the filter's shape.
-    """
-    wiring = Wiring()
-    conversation = await wiring.stage.begin(None)
-
-    exported = await wiring.stage.export()
-
-    assert [one.id for one in exported.conversations.conversations] == [conversation.id]
-    assert exported.conversations.turns == ()
-
-
-@pytest.mark.parametrize("whole_conversation", [False, True], ids=["one-turn", "conversation"])
-async def test_a_deletion_racing_the_export_never_strands_a_turn(
-    *, whole_conversation: bool
-) -> None:
-    """§9: the property filtering against *the same artifact* buys.
-
-    ``MemoryStore.export`` is taken first, then the deletion lands, then the
-    conversation snapshot is taken. Filtering against a **live** read would drop
-    nothing — the memory half still carries the episode — while filtering against
-    the artifact keeps the two halves agreeing. Either way the artifact never
-    carries a turn whose episode it does not also carry, which is the one thing that
-    cannot happen in any race.
-    """
-    clock = MovableClock()
-    deleted: list[str] = []
-
-    class DeletesMidExport(FakeMemoryStore):
-        """Lets a deletion land between the two halves of the export."""
-
-        def __init__(self) -> None:
-            super().__init__(now=clock)
-            self.on_export: object | None = None
-
-        async def export(self) -> list[MemoryRecord]:
-            records = await super().export()
-            if self.on_export is not None:
-                await self.on_export()  # type: ignore[operator]  # a test hook
-                self.on_export = None
-            return records
-
-    memory = DeletesMidExport()
-    wiring = Wiring(clock=clock, memory=memory)
-    conversation_id, episodes = await _capture_turns(wiring, 2)
-
-    async def _delete() -> None:
-        if whole_conversation:
-            await wiring.stage.delete(conversation_id)
-        else:
-            await memory.delete(episodes[0])
-        deleted.append(conversation_id)
-
-    memory.on_export = _delete
-
-    exported = await wiring.stage.export()
-
-    assert deleted == [conversation_id], "the fixture must really have raced the export"
-    carried = {record.id for record in exported.memories}
-    assert all(turn.episode_id in carried for turn in exported.conversations.turns), (
-        "the artifact must never claim an exchange whose content it cannot show"
-    )
-    indexed = {turn.conversation_id for turn in exported.conversations.turns}
-    assert {one.id for one in exported.conversations.conversations} <= indexed | {conversation_id}
-
-
-# --- serialisation across two engines (§8) -------------------------------
-
-
-async def test_a_capture_and_a_deletion_of_one_conversation_serialise() -> None:
-    """§8: through **two stages sharing one pair of stores**, not one.
-
-    A lock inside a single coordinator passes the one-coordinator version of this
-    test and fails the topology the engine already supports — "another engine over
-    the same durable stores" — which is the fault this clause exists to catch. The
-    guarantee is the *store's*, so two stages over it get it for free, and that is
-    the point being asserted.
-    """
-    clock = MovableClock()
-    wiring = Wiring(clock=clock)
-    conversation_id, _ = await _capture_turns(wiring, 1)
-    other = ConversationLifecycle(
-        conversations=wiring.conversations,
-        memory=wiring.memory,
-        retention=RETENTION,
-        now=clock,
-        archive=FakeTranscriptArchiveWriter(),
-        archive_enabled=True,
-    )
-
-    captured, _ = await asyncio.gather(
-        wiring.stage.capture(conversation_id, content="racing", asked=None),
-        other.delete(conversation_id),
-    )
-
-    if captured.episode_id is None:
-        assert captured.degraded is True
-    else:  # the append won the race; the post-write verification then compensated
-        assert await wiring.memory.get(captured.episode_id) is None, (
-            "an episode written into a conversation being deleted must not survive it"
-        )
-
-
-async def test_a_capture_landing_inside_the_grace_is_swept_and_one_after_it_is_the_residue() -> (
-    None
-):
-    """§8: the window this ADR accepts, and the reach the grace buys.
-
-    Inside the grace the tombstone still names the late episode, so the reclaim
-    finds and destroys it. After the grace the record is gone and the episode is an
-    orphan — the accepted residue, which is **visible and destroyable** through the
-    surfaces the user already has, not invisible. And the reclaim is idempotent.
-    """
-    clock = MovableClock()
-    wiring = Wiring(clock=clock)
-    conversation_id, episodes = await _capture_turns(wiring, 1)
-    await wiring.conversations.stamp_deleted(conversation_id)
-
-    # Inside the grace: the sweep still reaches the episode the index names.
-    assert await wiring.stage.sweep_deletions() == 0, "the grace has not elapsed"
-    assert await wiring.memory.get(episodes[0]) is None, "step 2 destroys regardless of grace"
-
-    clock.advance(GRACE)
-    assert await wiring.stage.sweep_deletions() == 1
-    assert await wiring.stage.sweep_deletions() == 0, "a re-run is a no-op"
-
-    # After the record is dropped, a capture that commits has nowhere to record
-    # itself: the append is refused, which is the loud half of the residue.
-    late = await wiring.stage.capture(conversation_id, content="far too late", asked=None)
-    assert late.degraded is True
-    assert late.episode_id is None
-
-
-async def test_a_non_conforming_clock_degrades_the_capture_rather_than_failing_the_turn() -> None:
-    """§3, §9 item 6: by capture time the answer already exists, so nothing may raise.
-
-    The clock is the one input capture reads before it touches either store, and a
-    non-conforming reading is a capture failure like any other — not a reason to
-    turn a delivered answer into a failed turn. Nothing has been written when it
-    fails, so it degrades exactly as a refused append does: no index entry, no
-    episode, and nothing to compensate.
-
-    Only the *stage's* clock is broken. Both stores keep a conforming one, so the
-    assertions below read real state rather than tripping over the same fault.
-    """
-    wiring = Wiring()
-    conversation = await wiring.stage.begin(None)
-    unreadable = ConversationLifecycle(
-        conversations=wiring.conversations,
-        memory=wiring.memory,
-        retention=RETENTION,
-        now=lambda: datetime(2026, 7, 28, 9, 0),  # noqa: DTZ001 — naive, which is the fault
-        archive=FakeTranscriptArchiveWriter(),
-        archive_enabled=True,
-    )
-
-    report = await unreadable.capture(
-        conversation.id, content="answered, then unrecordable", asked=None
-    )
-
-    assert report.degraded is True
-    assert report.episode_id is None
-    assert await wiring.memory.export() == [], "nothing reached the memory store"
-    assert await wiring.conversations.turns(conversation.id) == [], "and nothing reached the index"

@@ -791,7 +791,7 @@ async def test_the_turn_view_discloses_the_episode_the_next_report_will_name() -
         status, body = await one.whole("POST", _SPOKEN, _body())
 
         assert status == 200
-        assert body["turn"]["episode_id"] == "conv:c-1:1"
+        assert body["turn"]["episode_id"] == "activation:00000000-0000-4000-8000-000000000001"
 
 
 @pytest.mark.parametrize(

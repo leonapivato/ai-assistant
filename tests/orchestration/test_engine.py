@@ -20,6 +20,7 @@ from pathlib import Path
 from typing import TYPE_CHECKING, Any, Final, Protocol
 
 import pytest
+from channel_episodes import channel_ids, channel_records, conversation_episode
 from pydantic import SecretStr
 
 from ai_assistant.core.errors import (
@@ -4702,10 +4703,10 @@ async def test_converse_runs_under_a_conversation_and_reports_the_one_it_ran_und
     assert outcome.conversation_id is not None
     assert outcome.capture_degraded is False
     assert await harness.conversation_store.get(outcome.conversation_id) is not None
-    # One episode per outcome (§3), recorded in the conversation's index.
-    turns = await harness.conversation_store.turns(outcome.conversation_id)
-    assert [turn.ordinal for turn in turns] == [1]
-    assert await harness.memory.get(turns[0].episode_id) is not None
+    # One episode per outcome (§3), on the conversation's channel (ADR-0283 §2).
+    (episode_id,) = await channel_ids(harness.memory, outcome.conversation_id)
+    assert episode_id.startswith("activation:")
+    assert await harness.memory.get(episode_id) is not None
 
 
 async def test_converse_continues_the_conversation_it_is_given() -> None:
@@ -4720,8 +4721,7 @@ async def test_converse_continues_the_conversation_it_is_given() -> None:
     )
 
     assert second.conversation_id == first.conversation_id
-    turns = await harness.conversation_store.turns(first.conversation_id)
-    assert [turn.ordinal for turn in turns] == [1, 2]
+    assert len(await channel_ids(harness.memory, first.conversation_id)) == 2
 
 
 async def test_converse_refuses_an_id_the_store_does_not_know() -> None:
@@ -4826,10 +4826,13 @@ async def test_a_resumption_is_captured_into_the_conversation_that_parked() -> N
 
     assert resumed.conversation_id == parked.conversation_id
     assert resumed.capture_degraded is False
-    turns = await harness.conversation_store.turns(parked.conversation_id)
-    assert [turn.ordinal for turn in turns] == [1, 2], "the resolution is its own episode"
-    assert turns[0].parked is not None, "the parking turn recorded its binding"
-    assert turns[1].parked is None
+    records = await channel_records(harness.memory, parked.conversation_id)
+    assert len(records) == 2, "the resolution is its own episode"
+    first, second = (record.processing_record for record in records)
+    assert first is not None
+    assert second is not None
+    assert first.links.parks is not None, "the parking episode recorded its binding"
+    assert second.links.parks is None
     assert len(await harness.conversation_store.recent()) == 1, "no conversation was invented"
 
 
@@ -4906,14 +4909,14 @@ async def test_engine_start_finishes_a_deletion_a_previous_run_left_unfinished()
     harness = Harness(planner=NoStepPlanner())
     outcome = await harness.engine.converse("hello", timeout=PATIENT)
     assert outcome.conversation_id is not None
-    turns = await harness.conversation_store.turns(outcome.conversation_id)
+    (episode_id,) = await channel_ids(harness.memory, outcome.conversation_id)
     # An interrupted §8 sequence: the stamp landed, nothing else did.
     assert await harness.conversation_store.stamp_deleted(outcome.conversation_id) is True
-    assert await harness.memory.get(turns[0].episode_id) is not None
+    assert await harness.memory.get(episode_id) is not None
 
     await harness.engine.start()
 
-    assert await harness.memory.get(turns[0].episode_id) is None, "the leak was swept"
+    assert await harness.memory.get(episode_id) is None, "the leak was swept"
 
 
 async def test_recent_conversations_projects_what_a_person_chooses_from() -> None:
@@ -4953,10 +4956,19 @@ async def test_forget_conversation_shows_the_span_then_destroys_everything() -> 
 
 
 async def _one_captured_turn(harness: Harness) -> str:
-    """Record one turn through the capture stage, so an episode exists to observe."""
+    """Seed one episode on a conversation's channel, so an episode exists to observe.
+
+    Since ADR-0283 a conversation's history is the episodes on its channel, so the
+    episode is written there directly and the conversation's ``last_turn_at`` moved
+    with ``record_turn``, as the activation writer does.
+    """
     conversation = await harness.conversations.begin(None)
-    await harness.conversations.capture(
-        conversation.id, content="the user said something", asked=None
+    episode = conversation_episode(
+        conversation.id, "activation:observed", content="the user said something", occurred_at=AT
+    )
+    await harness.memory.add(episode)
+    await harness.conversation_store.record_turn(
+        conversation.id, episode_id=episode.id, occurred_at=AT
     )
     return conversation.id
 

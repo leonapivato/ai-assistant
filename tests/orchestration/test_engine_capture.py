@@ -93,10 +93,9 @@ if TYPE_CHECKING:
     from datetime import datetime
 
     from ai_assistant.core.types import (
-        ConversationTurn,
+        Conversation,
         MemoryRecord,
         MemoryWrite,
-        ParkedBinding,
         ReplyChunk,
         SpokenDelivery,
     )
@@ -1096,24 +1095,23 @@ async def test_no_log_on_the_capture_or_observation_path_carries_the_reply() -> 
             raise MemoryStoreError(msg)
 
     class _RefusingIndex(FakeConversationStore):
-        """An index whose ``append`` is refused, which is capture's *other* logging branch.
+        """A store whose ``record_turn`` is refused, which is capture's *other* logging branch.
 
-        ``ActivationWriter`` logs ``activation_capture_degraded`` twice
-        over, at two stages and from two except blocks, and the reply is in hand at
-        both. Driving only the episode-write branch would leave a future change that
-        logged the reply at the append branch undetected.
+        ``ActivationWriter`` logs ``activation_capture_degraded`` at more than one
+        stage and from more than one except block, and the reply is in hand at each.
+        Driving only the episode-write branch would leave a future change that logged
+        the reply at the ``record_turn`` branch (ADR-0283 §7:2) undetected.
         """
 
-        async def append(
+        async def record_turn(
             self,
             conversation_id: str,
             *,
+            episode_id: str,
             occurred_at: datetime,
-            parked: ParkedBinding | None = None,
             delivery: SpokenDelivery | None = None,
-            model_eligible: bool = True,
-        ) -> ConversationTurn:
-            msg = "the index is down"
+        ) -> Conversation | None:
+            msg = "the conversation store is down"
             raise ConversationStoreError(msg)
 
     observing_model = FakeModelProvider(json.dumps({"beliefs": []}))
@@ -1171,7 +1169,7 @@ async def test_no_log_on_the_capture_or_observation_path_carries_the_reply() -> 
     stages = {
         event.get("stage") for event in captured if event["event"] == "activation_capture_degraded"
     }
-    assert stages == {"append", "episode"}, (
+    assert stages == {"record_turn", "episode"}, (
         "both of capture's logging branches ran, so the assertion below has both subjects"
     )
     counted = {
