@@ -1,5 +1,12 @@
 """Put one case's conversation through the real capture and distillation path.
 
+**Not runnable since ADR-0283** (#2626). The driver captured through
+``ConversationLifecycle.capture`` and kept its cadence in turn ordinals, and both
+were retired with the turn index: a conversation's history is now its episodes,
+and an episode is on a conversation's channel only through its processing record.
+:func:`ingest_case` raises ``NotImplementedError`` until #2626 ports it onto that
+path. The description below is the driver as it stood, kept for that port.
+
 **The cadence is interleaved, and that is forced rather than chosen.** An
 observation pass reads *the turns above the conversation's durable observation
 watermark* (ADR-0212 §3), and a conversation that has never been observed starts at
@@ -103,13 +110,11 @@ from __future__ import annotations
 from dataclasses import dataclass, field
 from typing import TYPE_CHECKING
 
-from ai_assistant.core.errors import UnknownConversationError
-from ai_assistant.core.types import FIRST_TURN_ORDINAL, LearnDecision
+from ai_assistant.core.types import LearnDecision
 
 if TYPE_CHECKING:
     from collections.abc import Sequence
 
-    from ai_assistant.core.protocols import ConversationStore
     from benchmarks.memory.cases import BenchCase, BenchSession, BenchTurn
     from benchmarks.memory.wiring import Harness
 
@@ -413,166 +418,25 @@ def _distinct(keys: Sequence[str]) -> tuple[str, ...]:
 
 
 async def ingest_case(harness: Harness, case: BenchCase, *, batch_size: int) -> IngestionSummary:
-    """Capture and distil one case's whole conversation.
+    """Capture a case's conversation and distil it — not runnable since ADR-0283.
+
+    ADR-0283 retired what this driver stood on: ``ConversationLifecycle.capture``,
+    which wrote an episode on no conversation's channel, and the turn ordinals its
+    cadence and closing flush counted. Porting it onto the activation writer's path
+    is #2626; until then it refuses rather than ingesting nothing, so a run cannot
+    report an empty ingestion as a measured one.
 
     Args:
-        harness: The wired pipeline. Its clock is moved to each session's instant
-            before that session is captured.
+        harness: The wired pipeline.
         case: The case to ingest.
-        batch_size: How many turns above its watermark an observation pass reads.
-            Must be the same value the harness's ``ObservationStage`` was built with,
-            or the driver's cadence stops naming the stage's page — pass
-            ``settings.observation_batch_size``.
-
-    Returns:
-        What it cost and produced.
+        batch_size: The observation page size.
 
     Raises:
-        ValueError: If ``batch_size`` is not positive, which would make the cadence
-            below fire on a conversation with nothing above its watermark.
-        UnknownConversationError: If the conversation this driver began stops being
-            readable mid-case — relayed from :func:`_turns_above_watermark`, which
-            cannot compute a cadence over a conversation that is gone.
+        NotImplementedError: Always, citing #2626.
     """
-    if batch_size < 1:
-        msg = f"batch_size must be positive, got {batch_size}"
-        raise ValueError(msg)
-
-    # The clock is set before `begin`, because starting a conversation stamps it.
-    harness.clock.set(case.sessions[0].occurred_at)
-    conversation = await harness.lifecycle.begin(None)
-    summary = IngestionSummary(conversation_id=conversation.id)
-
-    for session in case.sessions:
-        harness.clock.set(session.occurred_at)
-        for exchange in exchanges_of(session):
-            report = await harness.lifecycle.capture(
-                conversation.id,
-                content=exchange.content,
-                # ADR-0225 §1's user half. This corpus's `content` **is** the user's
-                # side rather than a rendering of it (see :class:`Exchange`), so it
-                # is the honest value here — and no entry is written anyway, since
-                # this call supplies no `disposition` (§10).
-                asked=exchange.content,
-                outcome=exchange.outcome,
-            )
-            if report.degraded or report.episode_id is None:
-                summary.turns_degraded += 1
-            else:
-                summary.turns_captured += 1
-                if not exchange.user_led:
-                    summary.assistant_led_turns += 1
-                # #1074's join, written at the only moment both halves exist. A
-                # degraded capture is deliberately *not* recorded above: it has no
-                # episode id to point at, and an entry mapping a pointer to nothing
-                # would read as "retrieved nothing" where the truth is "was never
-                # stored".
-                for key in exchange.evidence_keys:
-                    summary.evidence_episodes.setdefault(key, []).append(report.episode_id)
-            # **Asked of the store, never inferred from the report** (ADR-0220 §3).
-            # The cadence is one full page in ADR-0212 §3's sense, and `CaptureReport`
-            # cannot say whether this capture produced a turn: it reports a lost
-            # **append**, which stores no turn and moves no ordinal, identically to a
-            # lost **episode**, which leaves a turn the stage passes over without
-            # backfilling (#1075, ADR-0074 §5). Two rows per capture, against a model
-            # call per pass.
-            if await _turns_above_watermark(harness.conversations, conversation.id) >= batch_size:
-                await _observe(harness, conversation.id, summary)
-    # **The closing flush** (ADR-0220 §3): a case whose turn count is not a multiple
-    # of the batch, and the commoner case of one shorter than a batch outright, both
-    # end holding turns no pass has reached. The loop is over passes that **return** —
-    # a raise is not retried here, it surfaces and leaves the watermark wherever
-    # ADR-0212 §6 leaves it — and it terminates because every page it reads is
-    # non-empty, over which ADR-0212 §5 guarantees the watermark never stands still.
-    while await _turns_above_watermark(harness.conversations, conversation.id) > 0:
-        await _observe(harness, conversation.id, summary)
-    return summary
-
-
-async def _tail_ordinal(conversations: ConversationStore, conversation_id: str) -> int:
-    """The ordinal of the conversation's most recent turn, or 0 where it has none.
-
-    The one exact answer to "did that capture put a turn in the conversation, and
-    where". ``ConversationTurn.ordinal`` is store-allocated, dense and monotonic
-    within its conversation (ADR-0074 §3), so a lost append leaves it where it was and
-    an episode-stage failure advances it — the distinction ``CaptureReport`` cannot
-    make (#1075) and this driver's cadence needs. It is the upper end of
-    :func:`_turns_above_watermark`'s range; the watermark is the lower one.
-
-    **The dependency is the Protocol and not a store**, which is why this takes the
-    contract rather than the ``Harness`` it comes off. Any conforming
-    ``ConversationStore`` answers this, the driver names nothing a particular
-    implementation has, and ``mypy`` checks that structurally. One row, and never
-    derived from an episode id: an id is opaque, and a driver reading a position out of
-    one would be inventing a second id space beside the store's own.
-
-    Args:
-        conversations: The conversation index, read through
-            :meth:`~ai_assistant.core.protocols.ConversationStore.turns`.
-        conversation_id: The conversation.
-
-    Returns:
-        The last ordinal, or 0 for a conversation with no turns yet — below
-        ``FIRST_TURN_ORDINAL`` by construction, so it can never be mistaken for one.
-    """
-    tail = await conversations.turns(conversation_id, limit=1)
-    return tail[-1].ordinal if tail else 0
-
-
-async def _turns_above_watermark(conversations: ConversationStore, conversation_id: str) -> int:
-    """How many of this conversation's turns an observation pass has not reached.
-
-    The whole of the driver's cadence (ADR-0220 §3): a pass is due once this reaches
-    ``batch_size`` — one full page in ADR-0212 §3's sense, a bound in **turns** and
-    never in captures — and the closing flush passes while it is above zero.
-
-    **A subtraction rather than a count, because the ordinals are dense.**
-    ``ConversationTurn.ordinal`` is store-allocated, dense from
-    :data:`~ai_assistant.core.types.FIRST_TURN_ORDINAL` and monotonic within its
-    conversation (ADR-0074 §3), so the turns strictly above a position *p* are exactly
-    the ordinals in ``[p + 1, tail]``. Counting them by reading them would page up to
-    ``batch_size`` rows to learn a number two rows already give.
-
-    **Both ends are read from the store on every call, and neither is cached.** The
-    tail moves under a capture and the watermark moves under a pass, and the driver is
-    not the only thing that may write either — ``record_observed`` is a store operation
-    on a shared contract (ADR-0212 §8), and a cached watermark would be this driver
-    asserting that nothing else advanced it. It costs two rows against a model call
-    per pass.
-
-    **No watermark reads as a floor of ``FIRST_TURN_ORDINAL - 1``**, which makes every
-    turn unobserved and is what ADR-0212 §1 means by a position: absent is "no pass has
-    recorded one", never zero and never a claim about the turns below anything. That a
-    conversation with no watermark has its *first* page read from the tail rather than
-    from that floor is ADR-0212 §4's rule and the stage's business, not this cadence's:
-    the driver fires at one full page, so the tail window and the forward page are the
-    same turns.
-
-    Args:
-        conversations: The conversation index, read through its Protocol.
-        conversation_id: The conversation.
-
-    Returns:
-        The count, never negative — the store refuses a watermark above the highest
-        ordinal the conversation holds and discards a stored one that leads it
-        (ADR-0212 §7).
-
-    Raises:
-        UnknownConversationError: If the conversation is absent or stamped deleted.
-            ``get`` answers ``None`` for both, and a driver that read that as "no
-            turns above the watermark" would end its case silently rather than
-            surfacing that the conversation it was ingesting into is gone.
-    """
-    conversation = await conversations.get(conversation_id)
-    if conversation is None:
-        msg = f"no such conversation: {conversation_id}"
-        raise UnknownConversationError(msg)
-    floor = (
-        FIRST_TURN_ORDINAL - 1
-        if conversation.observed_through is None
-        else conversation.observed_through
-    )
-    return max(0, await _tail_ordinal(conversations, conversation_id) - floor)
+    del harness, case, batch_size
+    msg = "benchmark ingestion is not ported off the retired turn index (#2626, ADR-0283)"
+    raise NotImplementedError(msg)
 
 
 async def _observe(harness: Harness, conversation_id: str, summary: IngestionSummary) -> None:

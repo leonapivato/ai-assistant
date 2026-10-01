@@ -30,6 +30,10 @@ from ai_assistant.core.config import EmbedderKind, Settings
 from ai_assistant.core.types import TRACE_RECORD_SET_CAP, TraceKind, TraceRecordSet
 from ai_assistant.testing import FakeModelProvider, FakeObserver
 
+_NEEDS_INGEST = pytest.mark.skip(
+    reason="#2626: benchmark ingestion is not ported off the retired turn index (ADR-0283)"
+)
+
 if TYPE_CHECKING:
     from pathlib import Path
 
@@ -127,6 +131,7 @@ async def _retrieval_traces(tmp_path: Path) -> tuple[tuple[EvaluationTrace, ...]
     )
 
 
+@_NEEDS_INGEST
 async def test_every_retrieval_trace_carries_its_returned_ids_whole(tmp_path: Path) -> None:
     """Truncated exactly when `total` exceeds `len(ids)` — there is no separate flag to
     disagree with — so a complete set is the observed half of #848's "it is zero today"."""
@@ -140,6 +145,7 @@ async def test_every_retrieval_trace_carries_its_returned_ids_whole(tmp_path: Pa
         assert returned.total <= TRACE_RECORD_SET_CAP
 
 
+@_NEEDS_INGEST
 async def test_the_records_the_prompt_was_built_from_are_named_in_the_traces(
     tmp_path: Path,
 ) -> None:

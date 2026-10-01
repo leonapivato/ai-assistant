@@ -34,6 +34,10 @@ from ai_assistant.core.types import (
 from ai_assistant.orchestration.conversations import CAPTURE_CONFIDENCE
 from ai_assistant.testing import FakeObserver
 
+_NEEDS_INGEST = pytest.mark.skip(
+    reason="#2626: benchmark ingestion is not ported off the retired turn index (ADR-0283)"
+)
+
 if TYPE_CHECKING:
     from pathlib import Path
 
@@ -111,6 +115,7 @@ def test_no_exchange_has_an_assistant_half(case_file: Path) -> None:
     assert all(exchange.user_led for exchange in built)
 
 
+@_NEEDS_INGEST
 async def test_ingestion_counts_no_assistant_led_turn(case_file: Path, tmp_path: Path) -> None:
     """The bookkeeping claim: `user_led` throughout, so `assistant_led_turns` is 0 —
     where the old mapping made the summary say the assistant led half the corpus."""
@@ -121,6 +126,7 @@ async def test_ingestion_counts_no_assistant_led_turn(case_file: Path, tmp_path:
     assert summary.assistant_led_turns == 0
 
 
+@_NEEDS_INGEST
 async def test_each_pointer_maps_to_exactly_one_episode(case_file: Path, tmp_path: Path) -> None:
     """#1074's join at its finest resolution: no fold, so no pointer shares an episode."""
     summary = await _ingest(case_file, tmp_path)
@@ -130,6 +136,7 @@ async def test_each_pointer_maps_to_exactly_one_episode(case_file: Path, tmp_pat
     assert len({episodes[0] for episodes in summary.evidence_episodes.values()}) == 5
 
 
+@_NEEDS_INGEST
 async def test_every_episode_is_stored_as_the_users_own_turn(
     case_file: Path, tmp_path: Path
 ) -> None:
@@ -145,6 +152,7 @@ async def test_every_episode_is_stored_as_the_users_own_turn(
     assert not any(rests_on_recorded_external_content(episode.provenance) for episode in episodes)
 
 
+@_NEEDS_INGEST
 async def test_every_episode_the_observer_reads_names_its_own_speaker(
     case_file: Path, tmp_path: Path
 ) -> None:

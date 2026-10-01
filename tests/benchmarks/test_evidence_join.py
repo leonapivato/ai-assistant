@@ -30,13 +30,17 @@ from harness_reconcilers import offline_reconciler
 
 from ai_assistant.core.config import EmbedderKind, Settings
 from ai_assistant.core.types import MemoryKind
-from ai_assistant.orchestration.conversations import CaptureReport
 from ai_assistant.testing import FakeModelProvider, FakeObserver
 
 if TYPE_CHECKING:
     from pathlib import Path
 
-pytestmark = pytest.mark.integration
+pytestmark = [
+    pytest.mark.integration,
+    pytest.mark.skip(
+        reason="#2626: benchmark ingestion is not ported off the retired turn index (ADR-0283)"
+    ),
+]
 
 FIRST = datetime(2023, 5, 8, 13, 56, tzinfo=UTC)
 
@@ -168,47 +172,6 @@ async def test_ingestion_maps_every_pointer_of_an_exchange_to_the_episode_it_bec
     assert len(episodes) == 1  # one exchange, one episode, both pointers on it
     assert all(len(ids) == 1 for ids in summary.evidence_episodes.values())
     assert summary.evidence_keys_captured == 2
-
-
-async def test_a_degraded_capture_leaves_its_pointers_unmapped(tmp_path: Path) -> None:
-    """An entry mapping a pointer to nothing would read as "retrieved nothing" when the
-    truth is "was never stored", so a capture that reported degraded contributes none —
-    and `evidence_keys_captured` is then the zero that says the split is *missing*."""
-    harness = build_harness(
-        _settings(tmp_path),
-        data_dir=tmp_path / "case",
-        model=FakeModelProvider("x"),
-        observer=FakeObserver(max_batch_size=BATCH),
-        reconciler=offline_reconciler(),
-    )
-    real_capture = harness.lifecycle.capture
-
-    async def _capture(conversation_id: str, *, content: str, **kwargs: object) -> CaptureReport:
-        """Capture for real, then fail the episode the way the store failing would.
-
-        Args:
-            conversation_id: The conversation.
-            content: The user half.
-            kwargs: Relayed.
-
-        Returns:
-            A degraded report.
-        """
-        report = await real_capture(conversation_id, content=content, **kwargs)  # type: ignore[arg-type]
-        if report.episode_id is None:
-            return report
-        await harness.store.delete(report.episode_id)
-        return CaptureReport(conversation_id=conversation_id, degraded=True)
-
-    try:
-        harness.lifecycle.capture = _capture  # type: ignore[method-assign]
-        summary = await ingest_case(harness, _case(), batch_size=BATCH)
-    finally:
-        harness.close()
-
-    assert summary.turns_degraded == 1
-    assert summary.evidence_episodes == {}
-    assert summary.evidence_keys_captured == 0
 
 
 async def test_a_record_carries_the_episodes_its_own_pointers_became(tmp_path: Path) -> None:
