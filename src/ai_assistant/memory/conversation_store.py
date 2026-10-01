@@ -1479,7 +1479,10 @@ class SqliteConversationStore:
         before or wholly after it — which is what lets the writer read a ``None``
         here as "the conversation was gone when the episode landed" (§7:2). The
         delivery row is inserted only where none exists, so a retried capture cannot
-        reset a stamped delivery.
+        reset a stamped delivery; and where this conversation's turn row already
+        carries the episode's delivery, the new row inherits that value instead of
+        ``delivery``, so a stamp made through the turn row stays the one stamp
+        (ADR-0205 §1).
 
         The argument checks are **before the lock and before any I/O** (§6:3).
 
@@ -1513,11 +1516,23 @@ class SqliteConversationStore:
                 (_to_micros(occurred_at), conversation_id),
             )
             if delivery is not None:
+                # ADR-0205 §1: a delivery is stamped once. Where this conversation's
+                # turn row already carries the episode's delivery, the new row inherits
+                # it rather than resetting it — otherwise the preferred row would read
+                # UNKNOWN again and a second report would stamp the episode twice,
+                # hiding the first.
+                inherited = conn.execute(
+                    "SELECT delivery_state, delivery_played, delivery_rendered "
+                    "FROM turns WHERE conversation_id = ? AND episode_id = ? "
+                    "AND delivery_state IS NOT NULL",
+                    (conversation_id, episode_id),
+                ).fetchone()
+                values = tuple(inherited) if inherited is not None else _delivery_row(delivery)
                 conn.execute(
                     "INSERT OR IGNORE INTO deliveries(conversation_id, episode_id, "
                     "delivery_state, delivery_played, delivery_rendered) "
                     "VALUES (?, ?, ?, ?, ?)",
-                    (conversation_id, episode_id, *_delivery_row(delivery)),
+                    (conversation_id, episode_id, *values),
                 )
             recorded = self._row_of(conn, conversation_id)
             if recorded is None:  # pragma: no cover — the row was just updated here
