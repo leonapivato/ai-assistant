@@ -192,7 +192,8 @@ class ActivationWriter:
         try:
             await self._episode_once(episode, writes)
             if conversation_id is not None and writes.episode_confirmed:
-                if owed:
+                if owed and not writes.forgotten:
+                    # A record already forgotten is never given an entry (ADR-0225 §5).
                     await self._archive_once(state, conversation_id, episode, writes)
                 if not writes.forgotten:
                     await self._record_turn(state, conversation_id, episode, writes)

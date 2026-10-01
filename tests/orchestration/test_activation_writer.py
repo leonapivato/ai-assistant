@@ -13,6 +13,7 @@ from ai_assistant.core.errors import (
     ConversationStoreError,
     MemoryStoreConflictError,
     MemoryStoreError,
+    TranscriptArchiveError,
 )
 from ai_assistant.core.types import (
     ChannelContext,
@@ -268,6 +269,34 @@ async def test_a_record_forgotten_between_episode_and_entry_leaves_no_entry() ->
     assert await wiring.memory.get(_ADDRESS) is None
     assert await wiring.last_turn_at(state) is None, "no record_turn for a forgotten episode"
     assert state.recorded_episode_id is None
+
+
+class Undiscardable(DeletingArchive):
+    """An archive whose discard fails, as a broken backing's would."""
+
+    async def discard(self, address: str) -> bool:
+        raise TranscriptArchiveError("private provider diagnostics")
+
+
+async def test_a_record_forgotten_before_its_entry_is_never_given_one() -> None:
+    """ADR-0225 §5: a marked capture writes no entry, so no failed discard can strand one."""
+    memory = CommitThen()
+    wiring = Wiring(memory=memory)
+    wiring.archive = Undiscardable()
+    wiring.writer._archive = wiring.archive
+    state = await wiring.state()
+
+    async def forgotten() -> None:
+        wiring.writer.forgetting(_ADDRESS)
+        await memory.delete(_ADDRESS)
+
+    memory.after = forgotten
+    report = await wiring.write(state)
+
+    assert report.state == "degraded"
+    assert wiring.archive.recorded == {}, "no entry was written for a forgotten record"
+    assert await wiring.memory.get(_ADDRESS) is None
+    assert await wiring.last_turn_at(state) is None
 
 
 async def test_an_episode_forgotten_before_it_commits_is_destroyed_by_its_capture() -> None:

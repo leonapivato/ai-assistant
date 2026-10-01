@@ -1367,12 +1367,12 @@ class FakeAssistantEngine:
             failure=failure,
             check_output=lambda: self._check_channel_result(result, projection),
         )
+        self._commit_episode(activation, report)
         if failure is not None:
             raise failure
         if activation.output_failure is not None:
             raise activation.output_failure
         assert result is not None  # noqa: S101 — a successful dispatch returned a value
-        self._commit_episode(activation, report)
         return captured_result(result, report, episode_id=_turn_episode(activation, report))
 
     def _validate_legacy_channel(
@@ -1533,6 +1533,9 @@ class FakeAssistantEngine:
             failure=failure,
             check_output=lambda: self._check_channel_result(result, projection),
         )
+        # Before the first chunk is yielded: the episode has landed, and a consumer
+        # that abandons the stream must leave it inside its conversation's deletion.
+        self._commit_episode(activation, report)
         if failure is not None:
             raise failure
         if activation.output_failure is not None:
@@ -1541,7 +1544,6 @@ class FakeAssistantEngine:
         for value in values[:-1]:
             assert isinstance(value, ReplyChunk)  # noqa: S101 — stream prefix
             yield value
-        self._commit_episode(activation, report)
         yield captured_result(result, report, episode_id=_turn_episode(activation, report))
 
     def _fit_channel_stream(
@@ -1885,11 +1887,14 @@ class FakeAssistantEngine:
     def _commit_episode(self, activation: FakeActivation, report: EpisodeCaptureReport) -> None:
         """Record a landed conversational episode in its conversation (ADR-0283 §7).
 
-        **Only after the insert committed**, as ``record_turn`` follows the episode in
-        production: a capture that degraded — a colliding address the insert-if-absent
-        write refused (§7:3) among them — moves no membership, digest or delivery, so
-        forgetting its conversation cannot take another's episode. Membership is
-        retained explicitly, standing in for the conversation's channel.
+        **Only after the insert committed, and at once**, as ``record_turn`` follows the
+        episode in production — before a stream yields its first chunk and before a
+        processing failure is re-raised, so nothing the consumer does next can leave a
+        landed episode outside its conversation's deletion. A capture that degraded — a
+        colliding address the insert-if-absent write refused (§7:3) among them — moves
+        no membership, digest or delivery, so forgetting its conversation cannot take
+        another's episode. Membership is retained explicitly, standing in for the
+        conversation's channel.
         """
         conversation_id = activation.conversation_id
         episode = report.episode_id
