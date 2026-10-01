@@ -131,6 +131,8 @@ if TYPE_CHECKING:
         BoundEgressCall,
         CanonicalDestination,
         CarriedProvenance,
+        ChannelEpisodeId,
+        ChannelEpisodePage,
         ChannelIdentity,
         ChannelInput,
         ChannelResult,
@@ -984,6 +986,20 @@ class MemoryStore(Protocol):
     order is a position rather than a judgement of relevance, so it is no part of
     what ADR-0112 governs.
 
+    **Episodes are numbered** (ADR-0283 §1). The store gives every episodic record,
+    when it inserts it, a **number**: a positive integer from one counter shared by
+    every record the store holds, greater than every number it issued before, never
+    reissued and never changed. An upsert at a stored id keeps the number that id
+    holds; neither a deletion, :meth:`purge_expired` nor :meth:`clear` releases one;
+    and a durable store's counter survives a close, a restart and a re-embedding. A
+    channel's order is its episodes' numbers, ascending, and three reads answer by
+    it: :meth:`channel_episodes` reads a channel's live episodes,
+    :meth:`channel_episode_ids` enumerates every episode the store holds on a
+    channel, and :meth:`episode_parking` finds the episode whose step parked a
+    binding. A durable store keeps an episode's channel type, channel instance and
+    number as indexed columns written with the record, so none of these reads
+    filters a channel through the record's JSON.
+
     Cancelling any method here is governed by this module's cancellation clause
     (ADR-0060), :meth:`select` included. How :meth:`add` and :meth:`write_atomic`
     observe the records they are handed, how :meth:`get_many` observes its
@@ -1773,6 +1789,121 @@ class MemoryStore(Protocol):
             StaleEpisodeReadError: A valid supplied digest differs from this read,
                 with a fixed content-free message.
             MemoryStoreError: Store or record corruption failure.
+        """
+        ...
+
+    async def channel_episodes(
+        self,
+        channel: ChannelIdentity,
+        *,
+        after: int | None = None,
+        limit: int,
+        episode_model_eligible: bool | None = None,
+    ) -> ChannelEpisodePage:
+        """Read a channel's live episodes in number order (ADR-0283 §3:1, §3:2).
+
+        **The channel's order is its episodes' numbers, ascending** (§1), and
+        nothing else: no timestamp and no id orders this read. An episode's channel
+        is its processing record's ``trigger.channel``; an episode with no
+        processing record, or whose trigger names no channel, is on no channel. A
+        channel matches when both ``channel_type`` and ``instance_id`` are equal,
+        exactly as stored.
+
+        **Live** is :meth:`get`'s sense: an expired record, one whose window is
+        closed and one whose window is not yet open are not read, both ends of the
+        window enforced (ADR-0007, ADR-0045 §6).
+
+        **The eligibility axis is applied as** :meth:`search` **applies it, before
+        any limit**: ``None`` applies no eligibility filter, and a boolean selects the
+        episodes whose ``model_eligible`` equals it, so an ineligible run never
+        consumes the page an eligible read asked for.
+
+        It returns, in number order ascending, **the newest** ``limit`` of the
+        matching episodes when ``after`` is ``None``, or **the oldest** ``limit``
+        numbered above ``after`` otherwise. A short page is the whole remainder in
+        that mode. ``total`` is the count of the channel's live episodes matching
+        the eligibility axis — every one of them, whatever ``after`` and ``limit``
+        are — so a page and its ``total`` answer from one read instant and one
+        state of the store.
+
+        This is not the enumeration a deletion walks: it filters by liveness and
+        may filter by eligibility, and :meth:`channel_episode_ids` is that
+        enumeration (ADR-0283 §8). Each record is a detached snapshot carrying its
+        stored ``revision``, with ``score`` cleared to ``None`` because this read
+        ranks nothing.
+
+        Args:
+            channel: The channel whose episodes are read.
+            after: ``None`` for the channel's tail, or an episode number to read
+                above. A number no store has issued yet is a valid value and
+                answers an empty page.
+            limit: The page size.
+            episode_model_eligible: Optional episode eligibility filter (ADR-0275).
+
+        Returns:
+            The page and the channel's matching ``total``.
+
+        Raises:
+            ValueError: ``limit`` is not a strict integer in ``[1, 1000]``, ``after``
+                is neither ``None`` nor a strict positive integer, or
+                ``episode_model_eligible`` is neither ``None`` nor a boolean —
+                ``bool`` is not a strict integer here. Refused before any I/O.
+            MemoryStoreError: If the store cannot be read, or a stored record is
+                corrupt.
+        """
+        ...
+
+    async def episode_parking(self, binding: ParkedBinding) -> EpisodicMemory | None:
+        """Return the episode whose own step parked ``binding`` (ADR-0283 §3:3).
+
+        The **lowest-numbered live** episode whose
+        ``processing_record.links.parks`` equals ``binding``, or ``None`` where no
+        live episode carries it. It matches ``parks`` — the binding an activation's
+        own step parked — and never ``parked``, the binding a resumed activation
+        continues (§3:4), so a resume finds the episode that parked its step and not
+        an earlier resumption of it. Live is :meth:`get`'s sense. The record is a
+        detached snapshot carrying its stored ``revision``.
+
+        Raises:
+            MemoryStoreError: If the store cannot be read, or a stored record is
+                corrupt.
+        """
+        ...
+
+    async def channel_episode_ids(
+        self,
+        channel: ChannelIdentity,
+        *,
+        after: int | None = None,
+        limit: int,
+    ) -> tuple[ChannelEpisodeId, ...]:
+        """Enumerate what this store physically holds on a channel (ADR-0283 §3:5).
+
+        The number and id of **every** episodic record whose channel is ``channel``,
+        in :meth:`channel_episodes`' sense of a channel: an expired record not yet
+        purged, one whose window is closed or not yet open, and an ineligible one are
+        all included. It returns the lowest ``limit`` numbered above ``after`` — or
+        from the start of the channel where ``after`` is ``None`` — in number order
+        ascending, and identifiers alone, never a record's content.
+
+        This is the enumeration a conversation's deletion and reclaim walk, page by
+        page until a read is empty (§8): no read filtered by liveness, validity or
+        eligibility is that enumeration, and this read filters by none of them.
+
+        Args:
+            channel: The channel whose held episodes are enumerated.
+            after: ``None`` for the channel's start, or an episode number to read
+                above.
+            limit: The page size.
+
+        Returns:
+            The page's identifiers, in number order.
+
+        Raises:
+            ValueError: ``limit`` is not a strict integer in ``[1, 1000]``, or
+                ``after`` is neither ``None`` nor a strict positive integer, as
+                :meth:`channel_episodes` bounds them. Refused before any I/O.
+            MemoryStoreError: If the store cannot be read.
         """
         ...
 

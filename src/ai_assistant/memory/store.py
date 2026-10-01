@@ -36,6 +36,9 @@ from ai_assistant.core.errors import (
     MemoryStoreStaleError,
 )
 from ai_assistant.core.types import (
+    ChannelEpisode,
+    ChannelEpisodeId,
+    ChannelEpisodePage,
     ChannelIdentity,
     EpisodeChunk,
     EpisodeCursor,
@@ -50,6 +53,7 @@ from ai_assistant.core.types import (
     band_of,
     caseless_key,
 )
+from ai_assistant.memory._channel_reads import channel_of, check_channel_page, parks_of
 from ai_assistant.memory._walk import (
     check_walk_limit,
     check_walk_name,
@@ -67,6 +71,7 @@ if TYPE_CHECKING:
         MemoryKind,
         MemoryRecord,
         MemoryWrite,
+        ParkedBinding,
         TimeWindow,
         WalkPosition,
     )
@@ -885,6 +890,86 @@ class InMemoryMemoryStore:
         if not isinstance(record, EpisodicMemory):
             return None
         return detail_of(record, version=version, offset=offset, max_bytes=max_bytes)
+
+    async def channel_episodes(
+        self,
+        channel: ChannelIdentity,
+        *,
+        after: int | None = None,
+        limit: int,
+        episode_model_eligible: bool | None = None,
+    ) -> ChannelEpisodePage:
+        """Read a channel's live episodes in number order (ADR-0283 §3:1, §3:2).
+
+        The number is the record's walk key, issued once when it is inserted and
+        never reissued, which is ADR-0283 §1's counter exactly. ``_keys`` is in
+        ascending key order, so the read is one pass with no sort.
+
+        Raises:
+            ValueError: An argument outside the bounds the Protocol states.
+            MemoryStoreError: If the injected clock's reading is not a conforming one.
+        """
+        check_channel_page(after, limit)
+        check_eligibility(episode_model_eligible)
+        now = self._now_utc()  # one reading for the page and its total
+        matching = [
+            (key, record)
+            for rid, key in self._keys.items()
+            if channel_of(record := self._records[rid]) == channel
+            and self._is_readable(record, now)
+            and admits_model_eligibility(record, episode_model_eligible)
+        ]
+        page = (
+            matching[-limit:]
+            if after is None
+            else [entry for entry in matching if entry[0] > after][:limit]
+        )
+        return ChannelEpisodePage(
+            entries=tuple(
+                ChannelEpisode(
+                    number=key, record=record.model_copy(deep=True, update={"score": None})
+                )
+                for key, record in page
+                if isinstance(record, EpisodicMemory)
+            ),
+            total=len(matching),
+        )
+
+    async def episode_parking(self, binding: ParkedBinding) -> EpisodicMemory | None:
+        """Return the lowest-numbered live episode whose step parked ``binding`` (§3:3)."""
+        now = self._now_utc()
+        for rid in self._keys:
+            record = self._records[rid]
+            if (
+                isinstance(record, EpisodicMemory)
+                and parks_of(record) == binding
+                and self._is_readable(record, now)
+            ):
+                return record.model_copy(deep=True)
+        return None
+
+    async def channel_episode_ids(
+        self,
+        channel: ChannelIdentity,
+        *,
+        after: int | None = None,
+        limit: int,
+    ) -> tuple[ChannelEpisodeId, ...]:
+        """Enumerate every episode held on ``channel``, whatever its liveness (§3:5).
+
+        Raises:
+            ValueError: An argument outside the bounds the Protocol states.
+        """
+        check_channel_page(after, limit)
+        held: list[ChannelEpisodeId] = []
+        for rid, key in self._keys.items():
+            if after is not None and key <= after:
+                continue
+            if channel_of(self._records[rid]) == channel:
+                held.append(ChannelEpisodeId(number=key, episode_id=rid))
+                if len(held) == limit:
+                    break
+        return tuple(held)
 
     async def list_beliefs(
         self,

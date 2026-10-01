@@ -1,4 +1,4 @@
-"""Fresh-state memory format boundary for ADR-0275 §12, advanced by ADRs 0276, 0280 and 0281."""
+"""Fresh-state memory format boundary for ADR-0275 §12, advanced by ADRs 0276, 0280, 0281, 0283."""
 
 from __future__ import annotations
 
@@ -17,8 +17,10 @@ from ai_assistant.core.errors import IncompatibleStateError, MemoryStoreError
 #: schema_version-2 record, so a store written before that tree is refused before
 #: mutation exactly as a pre-M36 store is, its files neither erased nor upgraded; ADR-0280
 #: §7 advances it to 3 for the schema_version-3 record, and ADR-0281 §6 to 4 for the
-#: schema_version-4 record, on the same terms.
-EPISODE_RECORD_FORMAT: Final[int] = 4
+#: schema_version-4 record, on the same terms. ADR-0283 §12 advances it to 5 for the
+#: numbered, channel-indexed memory store and ``ActivationLinks.parks``, in the memory
+#: store and the conversation store alike, again with no migration or version-4 read.
+EPISODE_RECORD_FORMAT: Final[int] = 5
 
 
 def check_format(conn: sqlite3.Connection, *, allow_empty: bool = False) -> bool:

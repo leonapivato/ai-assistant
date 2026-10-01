@@ -57,6 +57,9 @@ from ai_assistant.core.errors import (
     MemoryStoreStaleError,
 )
 from ai_assistant.core.types import (
+    ChannelEpisode,
+    ChannelEpisodeId,
+    ChannelEpisodePage,
     ChannelIdentity,
     Embedding,
     EpisodeChunk,
@@ -77,6 +80,11 @@ from ai_assistant.core.types import (
     caseless_key,
 )
 from ai_assistant.memory import traces
+from ai_assistant.memory._channel_reads import (
+    MAX_EPISODE_NUMBER,
+    channel_of,
+    check_channel_page,
+)
 from ai_assistant.memory._episode_format import (
     EPISODE_RECORD_FORMAT,
     check_format,
@@ -101,6 +109,7 @@ if TYPE_CHECKING:
         BeliefBand,
         MemoryKind,
         MemoryWrite,
+        ParkedBinding,
         TimeWindow,
         WalkPosition,
     )
@@ -150,6 +159,19 @@ _SIDECARS = ("-journal", "-wal", "-shm")
 #: One past the largest value ``list_beliefs`` accepts for ``limit``/``offset``:
 #: the signed 64-bit ceiling a SQLite bind parameter tops out at (ADR-0073 §2).
 _PAGE_BOUND = 2**63
+#: The two halves of the binding an episode's own step parked, as the expression
+#: ``records_by_parking`` indexes and :meth:`SqliteMemoryStore.episode_parking`
+#: compares — one spelling, because SQLite uses an expression index only for a
+#: query naming the identical expression (ADR-0283 §3:3).
+_PARKS_EXECUTION: Final = "json_extract(data, '$.processing_record.links.parks.execution_id')"
+_PARKS_STEP: Final = "json_extract(data, '$.processing_record.links.parks.step_id')"
+#: The read-time liveness predicate over the lifecycle and window columns, as
+#: ``get`` applies it — expiry and both window ends — taking ``now`` three times.
+_LIVE: Final = (
+    "(expires_at IS NULL OR expires_at > ?) "
+    "AND (valid_from IS NULL OR valid_from <= ?) "
+    "AND (valid_until IS NULL OR valid_until > ?)"
+)
 
 
 async def _run_to_completion[T](fn: Callable[..., T], /, *args: object) -> T:
@@ -711,11 +733,19 @@ class SqliteMemoryStore:
                 # downstream aware the record existed. ``AUTOINCREMENT`` keeps a
                 # high-water mark in ``sqlite_sequence`` and never reissues, which
                 # is that clause exactly.
+                #
+                # The same never-reissued ``rowid`` is an episode's **number**
+                # (ADR-0283 §1): one counter shared by every record, issued on
+                # insertion, kept by an upsert, never reissued. ``channel_type`` and
+                # ``channel_instance`` are the episode's channel, written with the
+                # record (``NULL`` for a record on no channel) and indexed below with
+                # the number, so no channel read reaches into the blob.
                 "CREATE TABLE IF NOT EXISTS records("
                 "rowid INTEGER PRIMARY KEY AUTOINCREMENT, id TEXT UNIQUE NOT NULL, "
                 "kind TEXT NOT NULL, data TEXT NOT NULL, "
                 "expires_at INTEGER, valid_until INTEGER, valid_from INTEGER, "
-                "about_person TEXT, revision INTEGER NOT NULL DEFAULT 0, occurred_at INTEGER)"
+                "about_person TEXT, revision INTEGER NOT NULL DEFAULT 0, occurred_at INTEGER, "
+                "channel_type TEXT, channel_instance TEXT)"
             )
             self._init_revision_issuer(conn)
             conn.execute(
@@ -734,6 +764,7 @@ class SqliteMemoryStore:
             # the label rows this keys on stay valid, and building them before a
             # rebuild would key them on a table about to be dropped.
             self._migrate_labels(conn)
+            self._index_channels(conn)
             self._verify_or_init_meta(conn)
             conn.execute(
                 "CREATE VIRTUAL TABLE IF NOT EXISTS vec_records "
@@ -1250,6 +1281,26 @@ class SqliteMemoryStore:
         conn.execute("DROP TABLE records")
         conn.execute("ALTER TABLE records_walkable RENAME TO records")
 
+    @staticmethod
+    def _index_channels(conn: sqlite3.Connection) -> None:
+        """Create the two indexes ADR-0283's reads are served from, inside ``_setup``.
+
+        ``records_by_channel`` orders a channel's rows by number, so
+        :meth:`channel_episodes` and :meth:`channel_episode_ids` read one index range
+        in number order rather than scanning the table (§1). ``records_by_parking``
+        is an expression index over the binding an episode's own step parked, so
+        :meth:`episode_parking` is a lookup rather than a scan decoding every row's
+        JSON; SQLite maintains it with every write, a re-embedding's included.
+        """
+        conn.execute(
+            "CREATE INDEX IF NOT EXISTS records_by_channel "
+            "ON records(channel_type, channel_instance, rowid)"
+        )
+        conn.execute(
+            "CREATE INDEX IF NOT EXISTS records_by_parking ON records("
+            f"{_PARKS_EXECUTION}, {_PARKS_STEP})"
+        )
+
     def _micros_from_json(self, data: str, key: str, *, nested: str | None = None) -> int | None:
         """Read a stored ISO instant from a record's JSON, as a µs epoch or None.
 
@@ -1516,6 +1567,14 @@ class SqliteMemoryStore:
         # right value: a record carrying no ``occurred_at`` is reached by no window
         # (§6), and ``NULL`` fails the ``IS NOT NULL`` the restriction leads with.
         occurred_at = _to_micros(record.occurred_at) if isinstance(record, EpisodicMemory) else None
+        # ADR-0283 §1's channel columns, from the same record the blob is. An upsert
+        # rewrites them with every other column, and that cannot move an episode
+        # between channels: a stored processing record is immutable (refused
+        # below), so the only rewrite is from ``NULL`` on an episode that carried
+        # none. The number is the ``rowid``, which the update branch keeps.
+        channel = channel_of(record)
+        channel_type = None if channel is None else channel.channel_type
+        channel_instance = None if channel is None else channel.instance_id
         row = conn.execute(
             "SELECT rowid, kind, data FROM records WHERE id = ?", (record.id,)
         ).fetchone()
@@ -1547,8 +1606,8 @@ class SqliteMemoryStore:
             cursor = conn.execute(
                 "INSERT INTO records"
                 "(id, kind, data, expires_at, valid_until, valid_from, about_person, revision, "
-                "occurred_at) "
-                "VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)",
+                "occurred_at, channel_type, channel_instance) "
+                "VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)",
                 (
                     record.id,
                     record.kind,
@@ -1559,6 +1618,8 @@ class SqliteMemoryStore:
                     record.about_person,
                     revision,
                     occurred_at,
+                    channel_type,
+                    channel_instance,
                 ),
             )
             rowid = cursor.lastrowid
@@ -1566,7 +1627,8 @@ class SqliteMemoryStore:
             rowid = row[0]
             conn.execute(
                 "UPDATE records SET kind = ?, data = ?, expires_at = ?, valid_until = ?, "
-                "valid_from = ?, about_person = ?, revision = ?, occurred_at = ? WHERE rowid = ?",
+                "valid_from = ?, about_person = ?, revision = ?, occurred_at = ?, "
+                "channel_type = ?, channel_instance = ? WHERE rowid = ?",
                 (
                     record.kind,
                     data,
@@ -1576,6 +1638,8 @@ class SqliteMemoryStore:
                     record.about_person,
                     revision,
                     occurred_at,
+                    channel_type,
+                    channel_instance,
                     rowid,
                 ),
             )
@@ -2667,6 +2731,170 @@ class SqliteMemoryStore:
         if not isinstance(record, EpisodicMemory):
             return None
         return detail_of(record, version=version, offset=offset, max_bytes=max_bytes)
+
+    async def channel_episodes(
+        self,
+        channel: ChannelIdentity,
+        *,
+        after: int | None = None,
+        limit: int,
+        episode_model_eligible: bool | None = None,
+    ) -> ChannelEpisodePage:
+        """Read a channel's live episodes in number order (ADR-0283 §3:1, §3:2).
+
+        One lock acquisition, one clock reading and one deferred read transaction
+        for the page and its ``total``, so the two answer from one state of the
+        store. The channel and the number are columns with an index of their own
+        (§1); the eligibility axis reads the blob, as ``search``'s does, and binds
+        in the same ``WHERE`` as the channel, so it applies before the ``LIMIT``.
+
+        Raises:
+            ValueError: An argument outside the bounds the Protocol states, refused
+                before the lock is taken.
+            MemoryStoreError: If the store cannot be read, or a stored record is
+                corrupt.
+        """
+        check_channel_page(after, limit)
+        check_eligibility(episode_model_eligible)
+        async with self._lock:
+            rows, total = await _run_to_completion(
+                self._channel_episodes_sync,
+                channel,
+                after,
+                limit,
+                episode_model_eligible,
+                self._now_micros(),
+            )
+        entries: list[ChannelEpisode] = []
+        for number, data, revision in rows:
+            record = self._decoded_at(data, revision)
+            if not isinstance(record, EpisodicMemory):
+                msg = "a channel index row holds a non-episodic record"
+                raise MemoryStoreError(msg)
+            entries.append(
+                ChannelEpisode(number=number, record=record.model_copy(update={"score": None}))
+            )
+        return ChannelEpisodePage(entries=tuple(entries), total=total)
+
+    def _channel_episodes_sync(
+        self,
+        channel: ChannelIdentity,
+        after: int | None,
+        limit: int,
+        eligible: bool | None,
+        now: int,
+    ) -> tuple[list[tuple[int, str, int]], int]:
+        where = f"channel_type = ? AND channel_instance = ? AND kind = 'episodic' AND {_LIVE}"
+        params: list[object] = [channel.channel_type, channel.instance_id, now, now, now]
+        if eligible is not None:
+            # ADR-0275's axis as ``search`` spells it: an episode with no processing
+            # record is eligible, though none on a channel lacks one.
+            where += (
+                " AND COALESCE(json_extract(data, '$.processing_record.model_eligible'), 1) = ?"
+            )
+            params.append(int(eligible))
+        count_sql = f"SELECT COUNT(*) FROM records WHERE {where}"  # noqa: S608 — module literals; every value is bound
+        if after is None:
+            # The newest ``limit``, read from the top of the range and put back in
+            # ascending order.
+            page_sql = (
+                f"SELECT rowid, data, revision FROM records WHERE {where} "  # noqa: S608 — as above
+                "ORDER BY rowid DESC LIMIT ?"
+            )
+            page_params = [*params, limit]
+        else:
+            # A number above any a store can issue matches nothing, which is the
+            # answer for it; clamping keeps the bind in SQLite's range.
+            page_sql = (
+                f"SELECT rowid, data, revision FROM records WHERE {where} AND rowid > ? "  # noqa: S608 — as above
+                "ORDER BY rowid LIMIT ?"
+            )
+            page_params = [*params, min(after, MAX_EPISODE_NUMBER), limit]
+        with self._transaction("read a channel's episodes", immediate=False) as conn:
+            (total,) = conn.execute(count_sql, params).fetchone()
+            rows = [
+                (int(row[0]), str(row[1]), int(row[2]))
+                for row in conn.execute(page_sql, page_params)
+            ]
+        if after is None:
+            rows.reverse()
+        return rows, int(total)
+
+    async def episode_parking(self, binding: ParkedBinding) -> EpisodicMemory | None:
+        """Return the lowest-numbered live episode whose step parked ``binding`` (§3:3).
+
+        Served from the ``records_by_parking`` expression index rather than a scan.
+
+        Raises:
+            MemoryStoreError: If the store cannot be read, or a stored record is
+                corrupt.
+        """
+        async with self._lock:
+            row = await _run_to_completion(
+                self._episode_parking_sync,
+                binding.execution_id,
+                binding.step_id,
+                self._now_micros(),
+            )
+        if row is None:
+            return None
+        record = self._decoded_at(*row)
+        if not isinstance(record, EpisodicMemory):
+            msg = "a parking index row holds a non-episodic record"
+            raise MemoryStoreError(msg)
+        return record
+
+    def _episode_parking_sync(
+        self, execution_id: str, step_id: str, now: int
+    ) -> tuple[str, int] | None:
+        sql = (
+            f"SELECT data, revision FROM records WHERE {_PARKS_EXECUTION} = ? "  # noqa: S608 — module literals; every value is bound
+            f"AND {_PARKS_STEP} = ? AND kind = 'episodic' AND {_LIVE} ORDER BY rowid LIMIT 1"
+        )
+        try:
+            row = self._conn.execute(sql, (execution_id, step_id, now, now, now)).fetchone()
+        except sqlite3.Error as exc:
+            msg = "failed to find the episode that parked a binding"
+            raise MemoryStoreError(msg) from exc
+        return None if row is None else (str(row[0]), int(row[1]))
+
+    async def channel_episode_ids(
+        self,
+        channel: ChannelIdentity,
+        *,
+        after: int | None = None,
+        limit: int,
+    ) -> tuple[ChannelEpisodeId, ...]:
+        """Enumerate every episode held on ``channel``, whatever its liveness (§3:5).
+
+        Reads the channel index alone — no lifecycle, window or eligibility
+        predicate and no blob — so it returns exactly what the table holds.
+
+        Raises:
+            ValueError: An argument outside the bounds the Protocol states, refused
+                before the lock is taken.
+            MemoryStoreError: If the store cannot be read.
+        """
+        check_channel_page(after, limit)
+        async with self._lock:
+            rows = await _run_to_completion(self._channel_episode_ids_sync, channel, after, limit)
+        return tuple(ChannelEpisodeId(number=number, episode_id=rid) for number, rid in rows)
+
+    def _channel_episode_ids_sync(
+        self, channel: ChannelIdentity, after: int | None, limit: int
+    ) -> list[tuple[int, str]]:
+        sql = "SELECT rowid, id FROM records WHERE channel_type = ? AND channel_instance = ?"
+        params: list[object] = [channel.channel_type, channel.instance_id]
+        if after is not None:
+            sql += " AND rowid > ?"
+            params.append(min(after, MAX_EPISODE_NUMBER))
+        sql += " ORDER BY rowid LIMIT ?"
+        params.append(limit)
+        try:
+            return [(int(row[0]), str(row[1])) for row in self._conn.execute(sql, params)]
+        except sqlite3.Error as exc:
+            msg = "failed to enumerate a channel's episodes"
+            raise MemoryStoreError(msg) from exc
 
     async def list_beliefs(
         self,
