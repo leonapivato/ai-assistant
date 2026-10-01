@@ -1054,13 +1054,12 @@ async def _supplied_episode(
     Args:
         store: The conversation index the turn's membership is read from.
         conversation_id: The conversation to record the episode against, or ``None`` to
-            record it against none at all — the shape ``turn_of_episode`` answers
-            ``None`` for.
+            record it against none at all.
     """
     episode_id = "episode-unrecorded"
     if conversation_id is not None:
-        turn = await store.append(conversation_id, occurred_at=_NOW)
-        episode_id = turn.episode_id
+        episode_id = "activation:act-porto"  # ADR-0283 §2's address
+        await store.record_turn(conversation_id, episode_id=episode_id, occurred_at=_NOW)
     memory = FakeMemoryStore(now=_clock)
     await memory.add(_belief("belief-porto", "the bell tower in Porto is worth the climb"))
     await memory.add(
@@ -1110,12 +1109,10 @@ async def _supplemented(
 async def test_an_episode_of_this_conversation_outside_the_tail_stays_closed_loop() -> None:
     """§15 Arm 1b for the conversation the tail can no longer answer for.
 
-    ADR-0074 §9 bounds ``turns`` to the store's configured replay window, so a long
-    conversation's own earlier episode reaches a later turn through ADR-0158 §3's
-    **supplement** rather than through the tail. §2's population is "episodes of this
-    conversation", not "episodes the tail carried", and ADR-0074 §10 puts that fact in
-    the index — "the store owes both directions of the membership relation" — so
-    ``turn_of_episode`` is what decides it and the arm is closed-loop.
+    The tail is bounded to a replay window, so a long conversation's own earlier
+    episode reaches a later turn through ADR-0158 §3's **supplement** rather than
+    through the tail. §2's population is "episodes of this conversation", not
+    "episodes the tail carried", and the arm is closed-loop.
 
     **What the membership answer still decides is the supply and nothing else** (ADR-0247
     §4, §5): the binding reads the kind and the configuration, and the conversation's
@@ -1376,12 +1373,11 @@ async def test_a_narrowed_record_reaches_a_supply_by_every_route(
     # Route 2 — ADR-0158 §3's episodic supplement, for a conversation whose own earlier
     # turn has fallen out of ADR-0074 §9's replay window.
     conversations, mine, _ = await _two_conversations()
-    turn = await conversations.append(mine, occurred_at=_NOW)
+    episode_id = "activation:act-porto"  # ADR-0283 §2's address
+    await conversations.record_turn(mine, episode_id=episode_id, occurred_at=_NOW)
     supplemented = FakeMemoryStore(now=_clock)
     await supplemented.add(_belief("belief-porto", "the bell tower in Porto is worth the climb"))
-    await supplemented.add(
-        _derived_episode(turn.episode_id).model_copy(update={"placement": placement})
-    )
+    await supplemented.add(_derived_episode(episode_id).model_copy(update={"placement": placement}))
     footing = _footing(conversation_id=mine)
 
     with structlog.testing.capture_logs() as captured:
@@ -1395,7 +1391,7 @@ async def test_a_narrowed_record_reaches_a_supply_by_every_route(
             episodic_limit=5,
         ).respond(_ASK, narrow=_bounded())
 
-    assert turn.episode_id in {record.id for record in responded.turn.memories}, (
+    assert episode_id in {record.id for record in responded.turn.memories}, (
         "the supplement put it in front of the turn, so there was something to admit"
     )
     assert _serviced(captured, 0)["withheld"] == 0, "the supplement's route refuses no more"

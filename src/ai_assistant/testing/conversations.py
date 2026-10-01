@@ -4,12 +4,14 @@ The shared test double for the ``ConversationStore`` contract (ADR-0074 §9), so
 subsystem that depends on conversations — `orchestration`'s capture stage above
 all — can test against a real, contract-correct store *without importing a
 subsystem's internals* (CLAUDE.md golden rule 1). It is deliberately minimal: two
-dicts, an injected clock and an injected id factory.
+dicts, an injected clock and an injected id factory. Like the store it doubles for,
+it holds no history — a conversation's turns are the episodes on its channel in the
+``MemoryStore`` (ADR-0283 §1, §4).
 
 It honours the whole contract, including the parts a dict gets for free only if
-they are written down: the per-conversation mutation exclusion, the ordinal
-invariant, the reserved episode-id namespace, and the tombstone's asymmetric
-visibility (hidden from every presenting read, still enumerable by the sweeps).
+they are written down: the per-conversation mutation exclusion, the stamped-once
+delivery rows, and the tombstone's asymmetric visibility (hidden from every
+presenting read, still enumerable by the sweeps).
 
 **Its critical sections really suspend.** Each mutation yields to the event loop
 inside its exclusion, before reading the state it is about to change. Without
@@ -49,7 +51,6 @@ from ai_assistant.core.types import (
     FIRST_TURN_ORDINAL,
     Conversation,
     ConversationExport,
-    ConversationTurn,
     Identifier,
     SpokenDeliveryState,
     UtcInstant,
@@ -61,7 +62,7 @@ if TYPE_CHECKING:
     from collections.abc import AsyncIterator, Callable, Mapping
 
     from ai_assistant.core.clock import Clock
-    from ai_assistant.core.types import ParkedBinding, SpokenDelivery
+    from ai_assistant.core.types import SpokenDelivery
     from ai_assistant.testing.cancellation import LoopSuspension, ResourceLog
 
 #: One past the largest value a paging argument accepts — the signed 64-bit
@@ -71,12 +72,8 @@ if TYPE_CHECKING:
 #: looser than the contract would certify consumers a real store rejects.
 _PAGE_BOUND = 2**63
 
-#: The store's configured replay window: what :meth:`FakeConversationStore.turns`
-#: returns to a caller that names no ``limit`` (ADR-0074 §9.3). Finite, and the
-#: same value every caller gets by saying nothing.
-_DEFAULT_TAIL_LIMIT = 20
-
-#: The batch :meth:`FakeConversationStore.episodes_to_purge` yields by default.
+#: The batch :meth:`FakeConversationStore.stamped_conversation_ids` yields by
+#: default (ADR-0076 §2).
 _DEFAULT_PURGE_BATCH = 100
 
 #: The retention horizon a conversation record is judged against when nobody
@@ -88,16 +85,12 @@ _DEFAULT_EPISODE_RETENTION = timedelta(days=30)
 
 #: How long a tombstone outlives the deletion that stamped it (ADR-0074 §8).
 #: Positive and finite, with no ``None`` spelling: an unbounded grace keeps every
-#: deleted conversation's index forever, and a zero or negative one drops it
+#: deleted conversation's record forever, and a zero or negative one drops it
 #: immediately, which is the orphaned late write the tombstone exists to catch.
 _DEFAULT_TOMBSTONE_GRACE = timedelta(hours=1)
 
 #: How many times :meth:`FakeConversationStore.start` re-mints before giving up.
 _START_RETRY_BUDGET = 8
-
-#: The reserved namespace a captured turn's episode id is minted into (ADR-0074
-#: §3). Structurally recognisable, and no other producer may mint into it.
-_EPISODE_NAMESPACE = "conv"
 
 #: The most episode ids one :meth:`FakeConversationStore.deliveries` call takes
 #: (ADR-0283 §6:5). Duplicated from the production store rather than shared, for
@@ -232,15 +225,6 @@ def _by_last_activity(conversations: list[Conversation]) -> list[Conversation]:
     return sorted(by_id, key=lambda one: one.last_active_at, reverse=True)
 
 
-def _by_least_activity(conversations: list[Conversation]) -> list[Conversation]:
-    """ADR-0212 §3's candidate order: ``last_active_at`` **ascending**, ``id`` ascending.
-
-    The one conversation listing on this contract that runs the other way, and the
-    only place a composite key works: both halves ascend, so one sort does it.
-    """
-    return sorted(conversations, key=lambda one: (one.last_active_at, one.id))
-
-
 class FakeConversationStore:
     """A non-persistent ``ConversationStore`` test double backed by dicts.
 
@@ -248,14 +232,13 @@ class FakeConversationStore:
     :class:`~ai_assistant.core.protocols.ConversationStore`.
     """
 
-    def __init__(  # noqa: PLR0913 — one keyword per injected seam the contract names
+    def __init__(
         self,
         *,
         now: Clock = _utcnow,
         new_id: Callable[[], str] = _random_id,
         retention: timedelta | None = _DEFAULT_EPISODE_RETENTION,
         tombstone_grace: timedelta = _DEFAULT_TOMBSTONE_GRACE,
-        tail_limit: int = _DEFAULT_TAIL_LIMIT,
         purge_batch: int = _DEFAULT_PURGE_BATCH,
     ) -> None:
         """Create an empty store.
@@ -272,15 +255,15 @@ class FakeConversationStore:
                 (ADR-0074 §1).
             retention: The horizon an idle conversation is reclaimed against;
                 ``None`` disables reclaim entirely (ADR-0074 §7).
-            tombstone_grace: How long a stamped conversation's index survives the
+            tombstone_grace: How long a stamped conversation's record survives the
                 stamp (ADR-0074 §8).
-            tail_limit: The configured replay window :meth:`turns` uses by default.
-            purge_batch: The batch size :meth:`episodes_to_purge` uses by default.
+            purge_batch: The batch size :meth:`stamped_conversation_ids` uses by
+                default.
 
         Raises:
             ValueError: If ``tombstone_grace`` is not strictly positive, if
-                ``retention`` is set and not strictly positive, or if either
-                default page size is outside ``[0, 2**63)``. Both durations are
+                ``retention`` is set and not strictly positive, or if the default
+                batch size is outside ``[0, 2**63)``. Both durations are
                 refused here rather than clamped for ADR-0074 §8's reason: a zero
                 or negative grace and an unbounded one break the deletion protocol
                 in opposite directions.
@@ -298,18 +281,13 @@ class FakeConversationStore:
             described = describe_untrusted(retention)
             msg = f"retention must be a strictly positive timedelta or None, got {described}"
             raise ValueError(msg)
-        _check_page_bound("tail_limit", tail_limit)
         _check_page_bound("purge_batch", purge_batch)
         self._clock = checked_clock(now, owner="FakeConversationStore")
         self._new_id = new_id
         self._retention = retention
         self._grace = tombstone_grace
-        self._tail_limit = tail_limit
         self._purge_batch = purge_batch
         self._conversations: dict[str, Conversation] = {}
-        self._turns: dict[str, list[ConversationTurn]] = {}
-        self._by_episode: dict[str, ConversationTurn] = {}
-        self._by_binding: dict[ParkedBinding, ConversationTurn] = {}
         #: ADR-0283 §6's delivery rows: per conversation, episode id to delivery.
         self._deliveries: dict[str, dict[str, SpokenDelivery]] = {}
         #: One entry per conversation currently being mutated, and only those:
@@ -368,13 +346,13 @@ class FakeConversationStore:
         The suspension is deliberate and load-bearing (see the module docstring):
         it hands the loop back *inside* the exclusion and before the body reads
         anything, so a second mutation of the same conversation really has to
-        queue. Remove the lock and the shared suite's ordinal, serialisation and
+        queue. Remove the lock and the shared suite's serialisation and
         reclaim-race cases fail here rather than passing vacuously.
 
         **The lock is taken before the body checks whether the id names anything**,
         and that ordering is the reason a lock cannot simply be created on demand
         and dropped on the way out: it is what stops a concurrent ``stamp_deleted``
-        and ``append`` both observing the conversation as live. So the entry is
+        and ``record_turn`` both observing the conversation as live. So the entry is
         reference-counted instead, and discarded only once nobody is left between
         entering here and leaving (#453) — otherwise a long-running or fuzzing
         process grows ``_locks`` for every id it was ever *asked* about, dropped
@@ -418,59 +396,10 @@ class FakeConversationStore:
             raise UnknownConversationError(msg)
         return conversation
 
-    def _known(self, conversation_id: str) -> Conversation:
-        """Return a conversation whether or not it is stamped, or raise.
-
-        What the sweeps need: :meth:`episodes_to_purge` reads a stamped
-        conversation's index precisely *because* it is stamped (ADR-0074 §8).
-
-        Raises:
-            UnknownConversationError: If the id names nothing.
-        """
-        conversation = self._conversations.get(conversation_id)
-        if conversation is None:
-            msg = f"no such conversation: {describe_untrusted(conversation_id)}"
-            raise UnknownConversationError(msg)
-        return conversation
-
-    def _episode_id(self, conversation_id: str, ordinal: int) -> str:
-        """Derive a turn's episode id from the two values the store proved unique.
-
-        Reserved to captured conversation turns (ADR-0074 §3): no other producer
-        mints into this namespace, so a collision inside it is a broken invariant
-        rather than bad luck.
-        """
-        return f"{_EPISODE_NAMESPACE}:{conversation_id}:{ordinal}"
-
-    def _highest_ordinal(self, conversation_id: str) -> int | None:
-        """The conversation's highest turn ordinal, or ``None`` where it holds none.
-
-        Ordinals are dense and monotonic, so the last row's is the highest and no
-        scan is owed.
-        """
-        rows = self._turns.get(conversation_id, [])
-        return rows[-1].ordinal if rows else None
-
     # ADR-0212 §7's read-side discard has no limb this double can reach. ADR-0283 §6:6
     # leaves only "not a positive integer", and a frozen pydantic model cannot hold
     # such a value, so a dict-backed store has nowhere to keep one; the ``sqlite3``
-    # store's own cases cover what a file can carry. The upper limb — a watermark
-    # above the highest ordinal — is gone, because the watermark is now an episode
-    # number this store cannot see.
-
-    def _visible_turn(self, turn: ConversationTurn | None) -> ConversationTurn | None:
-        """Hide a turn whose conversation is stamped (ADR-0074 §9).
-
-        The reverse lookups are otherwise a way around the front door: a caller
-        holding an episode id or a binding from before the deletion would receive
-        exactly the metadata every presenting read withholds.
-        """
-        if turn is None:
-            return None
-        conversation = self._conversations.get(turn.conversation_id)
-        if conversation is None or conversation.deleted_at is not None:
-            return None
-        return turn
+    # store's own cases cover what a file can carry.
 
     # --- the contract --------------------------------------------------------
 
@@ -505,7 +434,6 @@ class FakeConversationStore:
                 if conversation.id in self._conversations:
                     continue
                 self._conversations[conversation.id] = conversation
-                self._turns[conversation.id] = []
                 self._deliveries[conversation.id] = {}
                 return conversation
         msg = (
@@ -554,9 +482,7 @@ class FakeConversationStore:
         here the writer's deletion verification (§7:2): a ``stamp_deleted`` or a
         ``drop_if_eligible`` lands wholly before or wholly after it. The delivery
         row is written only where none exists, so a retried capture cannot reset a
-        stamped delivery; where this conversation's turn row already carries the
-        episode's delivery, the new row inherits that value instead of ``delivery``
-        (ADR-0205 §1).
+        stamped delivery (ADR-0205 §1).
 
         The argument checks are before the exclusion is taken and before anything
         is read, which is "locally, before any I/O" (§6:3).
@@ -573,79 +499,17 @@ class FakeConversationStore:
             recorded = conversation.model_copy(update={"last_turn_at": checked_at})
             self._conversations[conversation_id] = recorded
             if delivery is not None:
-                # ADR-0205 §1: inherit a delivery this conversation's turn row already
-                # carries for the episode, so a stamp made there is not reset here.
-                inherited = next(
-                    (
-                        turn.delivery
-                        for turn in self._turns[conversation_id]
-                        if turn.episode_id == checked_id and turn.delivery is not None
-                    ),
-                    delivery,
-                )
-                self._deliveries[conversation_id].setdefault(checked_id, inherited)
+                # ADR-0205 §1: a row already held for the episode stands as it is.
+                self._deliveries[conversation_id].setdefault(checked_id, delivery)
             return recorded
-
-    async def append(
-        self,
-        conversation_id: str,
-        *,
-        occurred_at: datetime,
-        parked: ParkedBinding | None = None,
-        delivery: SpokenDelivery | None = None,
-        model_eligible: bool = True,
-    ) -> ConversationTurn:
-        """Allocate the ordinal, derive the episode id, and record the turn.
-
-        The duplicate-binding check runs *before* anything is allocated, so a
-        refusal consumes no ordinal and leaves no row behind (ADR-0074 §9.1).
-
-        ``model_eligible`` (ADR-0275) is immutable, stored atomically with this
-        index row, and preserved by delivery updates and all unfiltered reads.
-
-        Raises:
-            UnknownConversationError: If the id names nothing or names a stamped
-                conversation.
-            ConversationStoreError: If ``parked`` duplicates a binding already
-                claimed.
-            ValueError: If ``occurred_at`` is not a timezone-aware instant.
-        """
-        async with self._exclusive(conversation_id):
-            conversation = self._live(conversation_id)
-            if parked is not None and parked in self._by_binding:
-                msg = (
-                    f"a turn already parked on execution {parked.execution_id!r} "
-                    f"step {parked.step_id!r}"
-                )
-                raise ConversationStoreError(msg)
-            existing = self._turns[conversation_id]
-            ordinal = existing[-1].ordinal + 1 if existing else FIRST_TURN_ORDINAL
-            turn = ConversationTurn(
-                conversation_id=conversation_id,
-                ordinal=ordinal,
-                episode_id=self._episode_id(conversation_id, ordinal),
-                occurred_at=occurred_at,
-                parked=parked,
-                delivery=delivery,
-                model_eligible=model_eligible,
-            )
-            existing.append(turn)
-            self._by_episode[turn.episode_id] = turn
-            if parked is not None:
-                self._by_binding[parked] = turn
-            self._conversations[conversation_id] = conversation.model_copy(
-                update={"last_turn_at": turn.occurred_at}
-            )
-            return turn
 
     async def record_delivery(
         self, conversation_id: str, *, episode_id: str, delivery: SpokenDelivery
     ) -> bool:
-        """Stamp the episode's delivery row — or its turn row — if it is still ``UNKNOWN``.
+        """Stamp the episode's delivery row if it is still ``UNKNOWN`` (ADR-0283 §6:4).
 
-        The delivery row where the conversation holds one for ``episode_id``, and the
-        turn row otherwise (ADR-0283 §6:4, §14 lane 2). **Read and write inside the
-        one exclusion** (ADR-0205 §3), which is what the suite's two-reports-racing
+        **Read and write inside the one exclusion** (ADR-0205 §3), which is what the
+        suite's two-reports-racing
         cases are asserting against: the exclusion hands the loop back before this
         reads anything, so a second report really has to queue and really does find
         the state the first left.
@@ -661,43 +525,20 @@ class FakeConversationStore:
         if delivery.state is SpokenDeliveryState.UNKNOWN:
             msg = (
                 "record_delivery does not carry an UNKNOWN delivery: that value is written "
-                "by capture through append, and a device that does not know reports nothing "
-                "(ADR-0205 §2, §3)"
+                "by capture through record_turn, and a device that does not know reports "
+                "nothing (ADR-0205 §2, §3)"
             )
             raise ValueError(msg)
         async with self._exclusive(conversation_id):
             self._live(conversation_id)
             held = self._deliveries[conversation_id]
-            if episode_id in held:
-                # A delivery row is the only row this call may stamp where one exists;
-                # the turn row is the fallback, never a second target.
-                if held[episode_id].state is not SpokenDeliveryState.UNKNOWN:
-                    return False
-                held[episode_id] = delivery
-                return True
-            rows = self._turns[conversation_id]
-            found = next(
-                (
-                    (at, turn)
-                    for at, turn in enumerate(rows)
-                    if turn.episode_id == episode_id
-                    and turn.delivery is not None
-                    and turn.delivery.state is SpokenDeliveryState.UNKNOWN
-                ),
-                None,
-            )
-            if found is None:
-                # Any of ADR-0205 §3's three conditions failing: the episode belongs
-                # to another conversation or to nothing, or the row already carries a
-                # stamp, or it carries no delivery at all — a turn that did not run on
-                # ``converse_spoken``, which this operation is not a way to give one.
+            current = held.get(episode_id)
+            if current is None or current.state is not SpokenDeliveryState.UNKNOWN:
+                # Any of ADR-0205 §3's conditions failing: the episode belongs to
+                # another conversation or to nothing, or its row already carries a
+                # stamp. An episode with no row is not given one by this operation.
                 return False
-            at, turn = found
-            stamped = turn.model_copy(update={"delivery": delivery})
-            rows[at] = stamped
-            self._by_episode[stamped.episode_id] = stamped
-            if stamped.parked is not None:
-                self._by_binding[stamped.parked] = stamped
+            held[episode_id] = delivery
             return True
 
     async def deliveries(
@@ -724,7 +565,7 @@ class FakeConversationStore:
             return {one: held[one] for one in ids if one in held}
 
     async def record_observed(
-        self, conversation_id: str, *, through_ordinal: int
+        self, conversation_id: str, *, through_episode: int
     ) -> Conversation | None:
         """Advance the watermark if it moves forward (ADR-0212 §8, ADR-0283 §6:6).
 
@@ -739,140 +580,21 @@ class FakeConversationStore:
         read, which is "locally, before any I/O".
 
         Raises:
-            ValueError: If ``through_ordinal`` is outside ``[1, 2**63)``.
+            ValueError: If ``through_episode`` is outside ``[1, 2**63)``.
             UnknownConversationError: If the id names nothing or names a stamped
                 conversation.
         """
-        _check_page_bound("through_ordinal", through_ordinal, floor=FIRST_TURN_ORDINAL)
+        _check_page_bound("through_episode", through_episode, floor=FIRST_TURN_ORDINAL)
         async with self._exclusive(conversation_id):
             conversation = self._live(conversation_id)
             recorded = conversation.observed_through
-            if recorded is not None and through_ordinal <= recorded:
+            if recorded is not None and through_episode <= recorded:
                 # An attempt that loses is an attempt whose position already stands:
                 # nothing is written and nothing is raised, `record_delivery`'s shape.
                 return None
-            stamped = conversation.model_copy(update={"observed_through": through_ordinal})
+            stamped = conversation.model_copy(update={"observed_through": through_episode})
             self._conversations[conversation_id] = stamped
             return stamped
-
-    async def turns_after(
-        self,
-        conversation_id: str,
-        *,
-        after_ordinal: int | None = None,
-        limit: int | None = None,
-    ) -> list[ConversationTurn]:
-        """Return the lowest page of turns above ``after_ordinal``, ordinal ascending.
-
-        Raises:
-            ValueError: If ``limit`` or ``after_ordinal`` is out of range.
-            UnknownConversationError: If the id names nothing or names a stamped
-                conversation.
-        """
-        page = self._tail_limit if limit is None else limit
-        _check_page_bound("limit", page)
-        if after_ordinal is not None:
-            _check_page_bound("after_ordinal", after_ordinal, floor=FIRST_TURN_ORDINAL)
-        async with self._resource.held():  # a locked read on the durable store (#492)
-            self._live(conversation_id)
-            rows = self._turns[conversation_id]
-            if after_ordinal is not None:
-                rows = [turn for turn in rows if turn.ordinal > after_ordinal]
-            # The *head* of what is above the floor, where `turns` takes the tail of
-            # what is below the ceiling. Both hand the page back oldest-first.
-            return list(rows[:page]) if page else []
-
-    async def conversations_with_unobserved_turns(self, *, limit: int = 50) -> list[Conversation]:
-        """List candidates for observation, least recently active first (ADR-0212 §3).
-
-        Raises:
-            ValueError: If ``limit`` is outside ``[0, 2**63)``.
-        """
-        _check_page_bound("limit", limit)
-        if limit == 0:
-            return []
-        async with self._resource.held():  # a locked read on the durable store (#492)
-            candidates = []
-            for one in self._conversations.values():
-                if one.deleted_at is not None:
-                    continue
-                highest = self._highest_ordinal(one.id)
-                if highest is None:
-                    # A conversation with no turn is never a candidate: there is
-                    # nothing above any watermark it could hold.
-                    continue
-                watermark = one.observed_through
-                if watermark is None or highest > watermark:
-                    candidates.append(one)
-        return _by_least_activity(candidates)[:limit]
-
-    async def turns(
-        self,
-        conversation_id: str,
-        *,
-        limit: int | None = None,
-        before_ordinal: int | None = None,
-        model_eligible_only: bool = False,
-    ) -> list[ConversationTurn]:
-        """Return a page of turns, ordinal ascending, ending below ``before_ordinal``.
-
-        With ``model_eligible_only=True`` (ADR-0275), filter before selecting
-        the tail window. Returned ordinals remain ordered but may contain gaps.
-        Deletion and turns_after remain unfiltered.
-
-        Raises:
-            ValueError: If ``limit`` or ``before_ordinal`` is out of range.
-            UnknownConversationError: If the id names nothing or names a stamped
-                conversation.
-        """
-        page = self._tail_limit if limit is None else limit
-        _check_page_bound("limit", page)
-        if before_ordinal is not None:
-            _check_page_bound("before_ordinal", before_ordinal, floor=FIRST_TURN_ORDINAL)
-        async with self._resource.held():  # a locked read on the durable store (#492)
-            self._live(conversation_id)
-            rows = self._turns[conversation_id]
-            if model_eligible_only:
-                rows = [turn for turn in rows if turn.model_eligible]
-            if before_ordinal is not None:
-                rows = [turn for turn in rows if turn.ordinal < before_ordinal]
-            return list(rows[-page:]) if page else []
-
-    async def episodes_to_purge(
-        self,
-        conversation_id: str,
-        *,
-        limit: int | None = None,
-        after_id: str | None = None,
-    ) -> list[str]:
-        """Return the next batch of this conversation's episode ids, in ordinal order.
-
-        Reads nothing but ids, and removes nothing: the rows are the intent log
-        and they go only when :meth:`drop_if_eligible` succeeds (ADR-0074 §9).
-
-        Raises:
-            ValueError: If ``limit`` is out of range, or ``after_id`` is not an
-                episode id of this conversation.
-            UnknownConversationError: If the id names nothing.
-        """
-        batch = self._purge_batch if limit is None else limit
-        _check_page_bound("limit", batch)
-        async with self._resource.held():  # a locked read on the durable store (#492)
-            self._known(conversation_id)
-            rows = self._turns[conversation_id]
-            start = 0
-            if after_id is not None:
-                positions = [
-                    index for index, turn in enumerate(rows) if turn.episode_id == after_id
-                ]
-                if not positions:
-                    msg = (
-                        f"after_id {describe_untrusted(after_id)} is not an episode id of this "
-                        f"conversation"
-                    )
-                    raise ValueError(msg)
-                start = positions[0] + 1
-            return [turn.episode_id for turn in rows[start : start + batch]]
 
     async def stamped_conversation_ids(
         self,
@@ -916,22 +638,6 @@ class FakeConversationStore:
             live = [one for one in self._conversations.values() if one.deleted_at is None]
         return _by_last_activity(live)[offset : offset + limit]
 
-    async def turn_of_episode(self, episode_id: str) -> ConversationTurn | None:
-        """Return the turn an episode records, or ``None`` if absent or stamped (#492)."""
-        async with self._resource.held():
-            return self._visible_turn(self._by_episode.get(episode_id))
-
-    async def turn_of_binding(self, binding: ParkedBinding) -> ConversationTurn | None:
-        """Return the turn that parked on ``binding``, or ``None`` if absent or stamped.
-
-        The index is read *inside* the modelled resource, so the resource entry is
-        this method's first ``await`` and lands before ``binding`` is observed —
-        which is what lets the suite's input-observation case (ADR-0065, ADR-0074
-        §9.5) position a caller's mutation where a late read would see it.
-        """
-        async with self._resource.held():
-            return self._visible_turn(self._by_binding.get(binding))
-
     async def stamp_deleted(self, conversation_id: str) -> bool:
         """Stamp the conversation deleted, returning whether this call did it."""
         async with self._exclusive(conversation_id):
@@ -944,7 +650,7 @@ class FakeConversationStore:
             return True
 
     async def drop_if_eligible(self, conversation_id: str) -> bool:
-        """Remove the record and its index if it is still eligible, under the exclusion.
+        """Remove the record and its delivery rows if still eligible, under the exclusion.
 
         Re-checks eligibility here rather than trusting the caller's earlier
         reading, which is what stops a reclaim destroying a conversation the user
@@ -968,31 +674,21 @@ class FakeConversationStore:
             if not eligible:
                 return False
             self._deliveries.pop(conversation_id, None)  # ADR-0283 §6:7
-            for turn in self._turns.pop(conversation_id, []):
-                self._by_episode.pop(turn.episode_id, None)
-                if turn.parked is not None:
-                    self._by_binding.pop(turn.parked, None)
             del self._conversations[conversation_id]
             return True
 
     async def export(self) -> ConversationExport:
-        """Return the store's own snapshot: unstamped conversations and their turns.
+        """Return the store's own snapshot: its unstamped conversations (ADR-0283 §4:3).
 
         No liveness filtering — this store cannot ask the ``MemoryStore`` whether
-        an episode still resolves, and the user-facing export is composed in
-        `orchestration` (ADR-0074 §9).
+        a conversation's channel still holds an episode, and the user-facing export
+        is composed in `orchestration` (ADR-0074 §9).
         """
         async with self._resource.held():  # a locked read on the durable store (#492)
             live = _by_last_activity(
                 [one for one in self._conversations.values() if one.deleted_at is None]
             )
-            turns = [
-                turn
-                for conversation_id in sorted(one.id for one in live)
-                for turn in self._turns[conversation_id]
-            ]
             return ConversationExport(
                 exported_at=self._now(),
                 conversations=tuple(live),
-                turns=tuple(turns),
             )

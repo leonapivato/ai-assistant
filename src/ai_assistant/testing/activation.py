@@ -205,16 +205,18 @@ class FakeActivation:
         )
 
     def report(self) -> EpisodeCaptureReport:
-        """Reserve a complete receipt until the fake's index assigns the address."""
+        """Reserve a complete receipt at the address capture writes (ADR-0283 §2).
+
+        Every episode's id is ``activation:<activation_id>``, fixed at admission, so
+        the reservation is sized at that address whether or not the activation runs
+        on a conversation — what the real engine's ``ActivationState.reserved_report``
+        reserves — and no placeholder is sized.
+        """
         if self.activation_id is None:
             return EpisodeCaptureReport(activation_id=None, episode_id=None, state="degraded")
         address = self.episode_id
         if address is None:
-            address = (
-                f"activation:{self.activation_id}"
-                if self.conversation_id is None
-                else f"conv:{self.conversation_id}:{2**63 - 1}"
-            )
+            address = f"activation:{self.activation_id}"
         return EpisodeCaptureReport(
             activation_id=self.activation_id, episode_id=address, state="degraded"
         )

@@ -319,10 +319,10 @@ class _WatchedConversations(FakeConversationStore):
         return await super().recent(limit=limit, offset=offset)
 
     async def record_observed(
-        self, conversation_id: str, *, through_ordinal: int
+        self, conversation_id: str, *, through_episode: int
     ) -> Conversation | None:
         """Record the advance asked for, hold it if the case wants to, then perform it."""
-        self.advances.append((conversation_id, through_ordinal))
+        self.advances.append((conversation_id, through_episode))
         index = len(self.advances)
         if index in self.hold_advance:
             self.reached[index].set()
@@ -333,7 +333,7 @@ class _WatchedConversations(FakeConversationStore):
             raise ConversationStoreError(msg)
         if self.stamp_before_advance:
             await super().stamp_deleted(conversation_id)
-        stamped = await super().record_observed(conversation_id, through_ordinal=through_ordinal)
+        stamped = await super().record_observed(conversation_id, through_episode=through_episode)
         if self.cancel_after_advance:
             raise asyncio.CancelledError
         return stamped
@@ -2093,7 +2093,7 @@ async def test_the_page_read_to_decide_is_the_page_the_pass_reads() -> None:
     # A watermark a pass really left, through the seam that leaves one: the first
     # episode is behind it, so the forward page is the next two and the full arm binds.
     first = await harness.number(conversation, 1)
-    await harness.conversations.record_observed(conversation, through_ordinal=first)
+    await harness.conversations.record_observed(conversation, through_episode=first)
     memory.pages_read.clear()
 
     report = await harness.stage.run()
@@ -2311,7 +2311,7 @@ async def test_a_run_drains_one_conversation_across_passes_until_it_leaves_the_s
     # conversation with **no** watermark drains in one pass whatever its length,
     # because ADR-0212 §4 starts it at the tail and passes over the prefix.
     await harness.conversations.record_observed(
-        conversation, through_ordinal=await harness.number(conversation, 1)
+        conversation, through_episode=await harness.number(conversation, 1)
     )
     harness.conversations.advances.clear()
 
