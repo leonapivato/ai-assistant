@@ -12,7 +12,7 @@
 - **Partially supersedes** [ADR-0212](0212-the-observation-cursor-is-a-per-conversation-watermark-on-the-conversation-index.md), [ADR-0218](0218-a-conversation-is-observed-once-it-goes-quiet-and-a-max-age-backstop-bounds-the-wait.md) and [ADR-0220](0220-the-watermark-driven-observation-walk-tiles-contiguously-and-forgoes-the-window-overlap.md) — **one scope each.** **Every clause, in so far as it names a turn ordinal, `ConversationStore.turns`, `turns_after` or `conversations_with_unobserved_turns`, or bounds the watermark by the conversation's highest ordinal**: §11 below substitutes an episode number, `MemoryStore.channel_episodes` and the conversations `recent` lists, and drops the upper bound. Every other clause stands, and parity with their behaviour is not a deliverable (§11 below).
 - **Partially supersedes** [ADR-0225](0225-a-transcript-archive-keeps-the-exchange-as-text-and-nothing-but-the-user-reads-it.md) — **six scopes.** **§1:2's ordinal and §10:13 entire**: an entry carries no ordinal. **§2:1's order**: the episode first, then the archive entry, then the verification. **§2:4**: the verification runs when the episode landed, since the archive is not written otherwise. **§2:5's *address the store allocated for that turn* and §3:1's second sentence**: the address is the episode's `activation:<activation_id>`. **§5:1's and §5:4's index**: the reclaim and the deletion sweep are of the conversation's channel. **§7:6's last sentence and §10:12's ordinal clause**: a conversation's own read is by instant, then address. Every other clause stands.
 - **Partially supersedes** [ADR-0244](0244-a-confirm-on-a-search-parks-as-a-durable-question-and-the-answer-runs-that-exact-read-once.md) — **one scope.** **§8:5's *"appends to the conversation"***: the resumed turn's episode is written on the conversation's channel (§7 below). Every other clause stands.
-- **Partially supersedes** [ADR-0275](0275-an-episode-records-one-activation-after-processing-ends.md) — **nineteen scopes.** **§4:5's last sentence**: a conversational channel names the conversation the episode was written for. **§4:6's last sentence, in its *existing durable association* part**: the association is the parking episode's `links.parks` (§5 below). **§4's record shapes, in the addition alone**: `ActivationLinks.parks`. **§4:9's last sentence**: `occurred_at` is the reading `record_turn` also receives. **§6:2's first sentence**: every episode's address is `activation:<activation_id>`. **§6:3, in its *index* and *append* parts**: finalization writes on that conversation's channel and `record_turn` validates it. **§6:6's first two sentences**: deletion enumerates the conversation's channel, unfiltered, and `record_turn` is the verification. **§7:5 entire** and **§7:6 entire**: the flag lives on the episode alone, and history filters there (§4 below). **§7:7's first sentence**: §11 below. **§7:8, in its *index row* part**: the delivery row. **§7:9**: `ConversationExport` carries no turns, at version 4. **§8:2's sequence**: §7 below. **§8:3, in its *index address* and *intent row* parts**, **§8:4 entire** and **§8:9's *final index-ID overhead***: the address is known from admission. **§8:6's *indexed instant***: the reading `record_turn` receives. **§8:8's *index-row address***: `SpokenTurn.episode_id` is the episode's id. **§9:1's *index* write** and **§9:3's *same conversational addresses***: the episode's address. **§12:3's *eligibility field***: the conversation schema is recognised by the format marker. Every other clause stands, §6:6's rule that a filtered history query never becomes the deletion enumeration and §11:6's included.
+- **Partially supersedes** [ADR-0275](0275-an-episode-records-one-activation-after-processing-ends.md) — **nineteen scopes.** **§4:5's last sentence**: a conversational channel names the conversation the episode was written for. **§4:6's last sentence, in its *existing durable association* part**: the association is the parking episode's `links.parks` (§5 below). **§4's record shapes, in the addition alone**: `ActivationLinks.parks`. **§4:9's last sentence**: `occurred_at` is the reading `record_turn` also receives. **§6:2's first sentence**: every episode's address is `activation:<activation_id>`. **§6:3, in its *index* and *append* parts**: finalization writes on that conversation's channel and `record_turn` validates it. **§6:6's first two sentences**: deletion enumerates what the store holds on the conversation's channel through `channel_episode_ids`, and `record_turn` is the verification. **§7:5 entire** and **§7:6 entire**: the flag lives on the episode alone, and history filters there (§4 below). **§7:7's first sentence**: §11 below. **§7:8, in its *index row* part**: the delivery row. **§7:9**: `ConversationExport` carries no turns, at version 4. **§8:2's sequence**: §7 below. **§8:3, in its *index address* and *intent row* parts**, **§8:4 entire** and **§8:9's *final index-ID overhead***: the address is known from admission. **§8:6's *indexed instant***: the reading `record_turn` receives. **§8:8's *index-row address***: `SpokenTurn.episode_id` is the episode's id. **§9:1's *index* write** and **§9:3's *same conversational addresses***: the episode's address. **§12:3's *eligibility field***: the conversation schema is recognised by the format marker. Every other clause stands, §6:6's rule that a filtered history query never becomes the deletion enumeration and §11:6's included.
 
 ## Context
 
@@ -84,7 +84,7 @@ store's `rowid` already has the counter's properties.
 > report, `SpokenTurn.episode_id` and `ActivationLinks.predecessor_episode_id`
 > carry it, and no placeholder address is sized or reported.
 
-### 3. Two memory-store reads
+### 3. Three memory-store reads
 
 > **Normative.** `MemoryStore` gains `channel_episodes(channel: ChannelIdentity, *,
 > after: int | None = None, limit: int, episode_model_eligible: bool | None = None)
@@ -108,8 +108,17 @@ store's `rowid` already has the counter's properties.
 > parked binding. `ActivationLinks.parked` keeps its meaning, the binding a resumed
 > activation continues.
 
-> **Normative.** Both reads, the two page types and `ActivationLinks.parks` are a
-> breaking Protocol change, shipped as a triad: the Protocol, the memory-store
+> **Normative.** `MemoryStore` gains `channel_episode_ids(channel: ChannelIdentity,
+> *, after: int | None = None, limit: int) -> tuple[ChannelEpisodeId, ...]`, the
+> enumeration of what the store physically holds on a channel: the number and id of
+> every episodic record whose channel is `channel`, expired, not yet valid or
+> ineligible included, the lowest `limit` numbered above `after` (or from the start
+> where `after` is `None`), in number order. It returns identifiers alone, never a
+> record's content; `limit` and `after` are bounded as `channel_episodes` bounds
+> them.
+
+> **Normative.** The three reads, their result types and `ActivationLinks.parks`
+> are a breaking Protocol change, shipped as a triad: the Protocol, the memory-store
 > conformance suite and the canonical fake together.
 
 ### 4. History, digest and export read episodes
@@ -185,8 +194,15 @@ store's `rowid` already has the counter's properties.
 > `None`, the writer deletes the episode, discards the archive entry, and reports
 > the capture degraded; ADR-0275 §8:11's drain applies to this path.
 
-> **Normative.** Where the episode write fails, the writer writes no archive entry
-> and calls no `record_turn`, and reports the capture degraded.
+> **Normative.** Where the episode write fails with an outcome known not to have
+> committed, the writer writes no archive entry and calls no `record_turn`, and
+> reports the capture degraded.
+
+> **Normative.** Where the episode write's outcome is indeterminate, cancellation
+> and timeout included (ADR-0060 §1), the writer writes no archive entry, re-reads
+> the conversation, and deletes the episode by its id where the conversation is
+> stamped or absent; it reports the capture degraded, and ADR-0275 §8:11's drain
+> applies to this path.
 
 > **Normative.** A conversational pass that ends before capture still writes its
 > episode on the conversation's channel, with `model_eligible=False`, where a turn
@@ -195,13 +211,15 @@ store's `rowid` already has the counter's properties.
 ### 8. Deletion and reclaim sweep the channel
 
 > **Normative.** Deleting a conversation stamps it, discards its archive entries,
-> drops its parked reads, then deletes every episode an unfiltered
-> `channel_episodes` read of its channel returns, page by page until a read is
-> empty, then calls `drop_if_eligible`. Recovery repeats the same steps for every
+> drops its parked reads, then deletes every episode `channel_episode_ids` returns
+> for its channel, page by page until a read is empty, then calls
+> `drop_if_eligible`. No read filtered by liveness, validity or eligibility is the
+> deletion enumeration. Recovery repeats the same steps for every
 > stamped conversation, at start and on schedule, as today.
 
-> **Normative.** Reclaim drops a conversation idle past the horizon only where an
-> unfiltered `channel_episodes` read of its channel has `total` zero.
+> **Normative.** Reclaim drops a conversation idle past the horizon only where
+> `channel_episode_ids` returns nothing for its channel, so an expired episode not
+> yet purged, or one not yet valid, delays it.
 
 ### 9. The archive is addressed by episode id
 
@@ -270,7 +288,7 @@ store's `rowid` already has the counter's properties.
 > implementation ships as separate PRs in this order:
 >
 > 1. **`core` with `memory`, the `MemoryStore` contract**: §1's numbers and
->    columns, §3's reads, types and `ActivationLinks.parks`, their conformance
+>    columns, §3's three reads, types and `ActivationLinks.parks`, their conformance
 >    suite and canonical fake, the sqlite and in-memory stores, and format 5.
 > 2. **`core` with `memory`, the `ConversationStore` contract, additive**:
 >    `record_turn`, `deliveries` and the delivery rows, with `record_delivery`
@@ -293,7 +311,9 @@ store's `rowid` already has the counter's properties.
 > order within the replay bound; a pass that ends before capture is on the channel
 > and absent from history; a resume finds its conversation through the parking
 > episode, and degrades where none is live; deleting a conversation deletes every
-> episode on its channel, eligible or not; a conversation deleted while a pass runs
+> episode on its channel, eligible or not, expired but unpurged, or not yet valid;
+> an episode write that commits and then propagates cancellation, on a conversation
+> deleted meanwhile, leaves no episode; a conversation deleted while a pass runs
 > ends with neither that pass's episode nor its archive entry, and a degraded
 > capture; reclaim keeps a conversation whose channel holds a live episode; and the
 > digest counts the channel's episodes.
