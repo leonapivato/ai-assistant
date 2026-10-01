@@ -291,15 +291,13 @@ class _WatchedConversations(FakeConversationStore):
         self.tails_read: list[str] = []
 
     def plant_watermark(self, conversation_id: str, ordinal: int) -> None:
-        """Write a watermark the contract itself has no way to write (ADR-0212 §7).
+        """Write a watermark directly, without ``record_observed``'s monotonicity.
 
-        ``record_observed`` refuses an ordinal above the conversation's highest, so a
-        watermark this store must *discard* is unreachable through the seam — which
-        is the whole point of §7's clause and the reason it has to be planted here.
-        Only that limb is expressible against a dict-backed store: a value that is
-        not an integer, or one below the first ordinal, cannot be held by a frozen
-        pydantic model at all, and the ``sqlite3`` store's own cases carry the limbs
-        a *file* can hold.
+        Since ADR-0283 §6:6 the store no longer bounds a watermark by the
+        conversation's turns and discards only a value that is not a positive
+        integer — which a frozen pydantic model cannot hold, so no planted value here
+        is ever discarded. The ``sqlite3`` store's own cases carry the limbs a *file*
+        can hold.
         """
         stored = self._conversations[conversation_id]
         self._conversations[conversation_id] = stored.model_copy(
@@ -1484,28 +1482,22 @@ async def test_under_a_stopped_clock_a_busy_candidate_stays_first() -> None:
     assert await harness.watermark(idle) is None, "the idle conversation is not reached"
 
 
-async def test_a_watermark_the_store_discards_is_recovered_by_the_next_pass() -> None:
-    """§7 end to end: a discarded watermark is read as absent, and §4 then governs.
+async def test_a_watermark_above_every_turn_is_kept_and_not_a_candidate() -> None:
+    """ADR-0283 §6:6: the store no longer discards a watermark above the turns.
 
-    Written as one scenario rather than as two, because the failure it guards against
-    is an implementation that coerces the value on one read and filters it wrongly on
-    another — which would leave the conversation permanently unreachable: absent from
-    the candidate listing because its stored watermark is above every turn, and
-    unstampable because nothing selects it. The recovery is a *tail* read and not a
-    walk from the first turn, since a discarded watermark is an absent one (§4).
+    ADR-0212 §7's upper limb is gone — the watermark is an episode number, which the
+    conversation store cannot see — so a planted value above every turn is a usable
+    position: it reads back as written, and the conversation stays out of the
+    candidate listing until a turn lands above it.
     """
     harness = Harness(batch_size=2)
     conversation = await harness.conversation_with(3)
     harness.conversations.plant_watermark(conversation, 99)
 
     candidates = await harness.conversations.conversations_with_unobserved_turns()
-    report = await harness.stage.observe(conversation)
 
-    assert [one.id for one in candidates] == [conversation]
-    assert [one.observed_through for one in candidates] == [None]
-    assert _ordinals(harness.fake.batches[-1]) == [2, 3]
-    assert report.episodes_read == 2
-    assert await harness.watermark(conversation) == 3
+    assert candidates == []
+    assert await harness.watermark(conversation) == 99
 
 
 # --- construction guards -------------------------------------------------
