@@ -1,6 +1,6 @@
 # 76. A stamped conversation is enumerable, so a crashed deletion can be finished
 
-- Status: Accepted
+- Status: Partially superseded by ADR-0283 (§1's and §4's naming of `turns`, the two reverse lookups and `episodes_to_purge`; §2's sweep over `episodes_to_purge`)
 - Date: 2026-07-28
 - **This ADR partially supersedes ADR-0074**, in the scope named in §1: §9's
   `ConversationStore` obligation set, and the reach of its stamped-conversation
@@ -35,6 +35,7 @@
   suite obligations as the next lane's); ADR-0004 §6 (the deletion right this
   protects); `CONTRIBUTING.md` ("Adding a Protocol" — "the triad is what a
   Protocol *change* is measured against too"); #447 (the gap this closes).
+- Partially superseded: 2026-10-01 by ADR-0283 — two scopes. §1 and §4 lose the operations ADR-0283 removes, and §2's sweep pages the conversation's channel instead of `episodes_to_purge`. `stamped_conversation_ids` and every other clause stand. These scoped replacements take effect on ratification of ADR-0283. This reciprocal header record accompanies the numbered draft under ADR-0070 and ADR-0082; the ratified body below is preserved.
 
 ## Context
 

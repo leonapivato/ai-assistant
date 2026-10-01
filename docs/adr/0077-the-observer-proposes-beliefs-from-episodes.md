@@ -1,6 +1,6 @@
 # 77. The observer proposes beliefs from episodes, through the gate, on a named route
 
-- Status: Partially superseded by ADR-0084 (§10 item 7's placement of the façade's observation result outside contract surface, and the header's restatement of that premise) and ADR-0156 (§3's sentence enumerating what the observation prompt's payload carries) and ADR-0162 (§2's warrant bar, as it reaches an episode recording what the user said to the assistant; and the proposal bound's value of 5 together with the sentence grounding it) and ADR-0163 (§3's payload-enumerating sentence again, in the scope of an episode's principal-participant marker) and ADR-0212 (§8's selection sentence and its durable-cursor sentence) and ADR-0218 (§8's third reason, the consent argument for an explicit trigger)
+- Status: Partially superseded by ADR-0084 (§10 item 7's placement of the façade's observation result outside contract surface, and the header's restatement of that premise) and ADR-0156 (§3's sentence enumerating what the observation prompt's payload carries) and ADR-0162 (§2's warrant bar, as it reaches an episode recording what the user said to the assistant; and the proposal bound's value of 5 together with the sentence grounding it) and ADR-0163 (§3's payload-enumerating sentence again, in the scope of an episode's principal-participant marker) and ADR-0212 (§8's selection sentence and its durable-cursor sentence) and ADR-0218 (§8's third reason, the consent argument for an explicit trigger) and ADR-0283 (§1's batch read through `ConversationStore.turns`; §8's index-entry premise)
 - Date: 2026-07-28
 - Partially superseded: 2026-07-31 by ADR-0084 — **§10 item 7's claim that the
   façade's observation result is an `orchestration` type and not contract surface
@@ -600,6 +600,7 @@
   per ADR-0070 §1: no text below is rewritten, and §8's sentences stand exactly as
   written. The pair and this note land in the same change as ADR-0218 itself, which is
   the existence condition ADR-0082 §7 states. Refs #1737, #1782.
+- Partially superseded: 2026-10-01 by ADR-0283 — two scopes. The observer reads the conversation's episodes by number, not through `ConversationStore.turns`, and §8's premise that the index entry is durable and the episode best-effort no longer holds. Every other clause stands. These scoped replacements take effect on ratification of ADR-0283. This reciprocal header record accompanies the numbered draft under ADR-0070 and ADR-0082; the ratified body below is preserved.
 
 ## Context
 

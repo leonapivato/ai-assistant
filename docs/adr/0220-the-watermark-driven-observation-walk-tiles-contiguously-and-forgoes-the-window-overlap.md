@@ -1,6 +1,6 @@
 # 220. The watermark-driven observation walk tiles contiguously, and forgoes ADR-0162 §7's window overlap
 
-- Status: Accepted
+- Status: Partially superseded by ADR-0283 (every clause, where it names a turn ordinal, `ConversationStore.turns`, `turns_after` or `conversations_with_unobserved_turns`, or bounds the watermark by the conversation's highest ordinal)
 - Date: 2026-08-29
 - **Partially supersedes:**
   [ADR-0162](0162-what-the-user-tells-the-assistant-is-recorded-and-selectivity-moves-to-retrieval-and-forgetting.md)
@@ -31,6 +31,7 @@
   ADR's base, `0fddb9e7`, and not of its text on any later day.
 - Refs #1237, #1789, #1782, #1829, #1210, #1029, ADR-0162, ADR-0212, ADR-0111,
   ADR-0077, ADR-0074, ADR-0070, ADR-0082
+- Partially superseded: 2026-10-01 by ADR-0283 — one scope, read across the ADR. Where a clause names a turn ordinal, `ConversationStore.turns`, `turns_after` or `conversations_with_unobserved_turns`, read an episode number, `MemoryStore.channel_episodes` and the conversations `recent` lists; the watermark is no longer bounded by the conversation's highest ordinal. Parity with this ADR's behaviour beyond that substitution is not owed. These scoped replacements take effect on ratification of ADR-0283. This reciprocal header record accompanies the numbered draft under ADR-0070 and ADR-0082; the ratified body below is preserved.
 
 ## Context
 

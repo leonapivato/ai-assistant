@@ -1,6 +1,6 @@
 # 205. A spoken answer's delivery is a fact the device reports, and an unreported answer is never assumed heard
 
-- Status: Partially superseded by ADR-0275 (§1 and §4's spoken-turn capture timing and episode-address reporting for newly captured no-turn endings)
+- Status: Partially superseded by ADR-0275 (§1 and §4's spoken-turn capture timing and episode-address reporting for newly captured no-turn endings) and ADR-0283 (§1:3, §1:6, §1:9, §3:1, §3:3–§3:7, §3:10, §3:11, §4:1, §4:2 and §5:4, where they place the delivery on a turn row, write it through `append` or read it off `turns`)
 - Date: 2026-08-28
 - Partially superseded: 2026-09-18 by ADR-0275 — Preserve real spoken-turn index
   addresses and delivery semantics while allowing a later post-processing capture; new
@@ -12,6 +12,7 @@
   replacements recorded by the ADR-0275 note above took effect then; that note's
   "which remains Proposed" was true when written and is stale. The Status line above
   is unchanged (#2555).
+- Partially superseded: 2026-10-01 by ADR-0283 — one scope across fourteen clauses. The delivery is a row the conversation store keys by episode id, written `UNKNOWN` by `record_turn`, stamped by `record_delivery`, which returns whether it stamped, and read by `deliveries` in one further call on the history path. The stamped-once rule, the refusals and every other clause stand. These scoped replacements take effect on ratification of ADR-0283. This reciprocal header record accompanies the numbered draft under ADR-0070 and ADR-0082; the ratified body below is preserved.
 
 ## Context
 

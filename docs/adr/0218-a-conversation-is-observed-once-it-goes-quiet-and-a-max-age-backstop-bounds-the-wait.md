@@ -1,6 +1,6 @@
 # 218. A conversation is observed once it goes quiet, a max-age backstop bounds the wait, and the job ships armed
 
-- Status: Accepted
+- Status: Partially superseded by ADR-0283 (every clause, where it names a turn ordinal, `ConversationStore.turns`, `turns_after` or `conversations_with_unobserved_turns`, or bounds the watermark by the conversation's highest ordinal)
 - Date: 2026-08-29
 - **Partially supersedes**
   [ADR-0083](0083-the-hub-is-a-resident-process.md) — §7's job-table row for
@@ -48,6 +48,7 @@
   merges ahead of anything implementing against it (ADR-0015 §5).
 - **No implementation lands with it.** No `src/`, no `tests/`. §10 states what the
   implementing lane owes.
+- Partially superseded: 2026-10-01 by ADR-0283 — one scope, read across the ADR. Where a clause names a turn ordinal, `ConversationStore.turns`, `turns_after` or `conversations_with_unobserved_turns`, read an episode number, `MemoryStore.channel_episodes` and the conversations `recent` lists; the watermark is no longer bounded by the conversation's highest ordinal. Parity with this ADR's behaviour beyond that substitution is not owed. These scoped replacements take effect on ratification of ADR-0283. This reciprocal header record accompanies the numbered draft under ADR-0070 and ADR-0082; the ratified body below is preserved.
 
 ## Context
 
