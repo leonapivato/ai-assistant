@@ -646,9 +646,7 @@ class ConversationLifecycle:
 
         return await self._verify(turn, wrote_episode=True, wrote_entry=archived, degraded=degraded)
 
-    async def record_delivery(
-        self, conversation_id: str, report: SpokenDeliveryReport
-    ) -> ConversationTurn | None:
+    async def record_delivery(self, conversation_id: str, report: SpokenDeliveryReport) -> bool:
         """Apply one device's report to the turn it names (ADR-0205 §1, §3).
 
         **One store call and no sequence**, which is why this is short: the store
@@ -660,7 +658,7 @@ class ConversationLifecycle:
         **A benign miss is discarded rather than raised** (§1). A report naming a
         turn this conversation does not carry — an index entry deleted or reclaimed,
         an id belonging to another conversation, a turn already stamped — performs
-        nothing and returns ``None``, and the call that carried it goes on: a benign
+        nothing and returns ``False``, and the call that carried it goes on: a benign
         state must not cost the owner the turn they just spoke.
 
         **A store fault degrades it too, and that is this stage's judgement rather
@@ -679,7 +677,8 @@ class ConversationLifecycle:
             report: The device's report, naming its turn by episode id.
 
         Returns:
-            The turn as stamped, or ``None`` where nothing was stamped.
+            Whether a row was stamped — the store's own answer, relayed
+            (ADR-0283 §6:4) — and ``False`` where a store fault was degraded.
 
         Raises:
             UnknownConversationError: If the conversation is absent or stamped
@@ -693,7 +692,7 @@ class ConversationLifecycle:
             raise
         except ConversationStoreError:
             _log.warning("spoken_delivery_unrecorded", stage="record_delivery", exc_info=True)
-            return None
+            return False
 
     def _archive_owed(self, disposition: ExchangeDisposition | None) -> bool:
         """Whether this capture owes the archive an entry at all (ADR-0225 §6, §10).

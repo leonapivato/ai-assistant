@@ -218,19 +218,15 @@ async def test_the_fake_refuses_a_clock_that_is_not_a_conforming_reading() -> No
         await store.start()
 
 
-async def test_the_fake_discards_a_watermark_its_own_turns_do_not_reach() -> None:
-    """ADR-0212 §7's discard is the *store's*, so this fake owes it too.
+async def test_the_fake_keeps_a_watermark_its_own_turns_do_not_reach() -> None:
+    """ADR-0283 §6:6: the fake no longer discards a watermark above its turns.
 
-    Only one of §7's three limbs is expressible against a dict-backed store — a
-    value that is not an integer, or one below ``FIRST_TURN_ORDINAL``, cannot be
-    held by a frozen pydantic model at all — and the ``sqlite3`` store's own cases
-    carry the limbs a file can hold. This is the limb that is: a perfectly good
-    watermark whose turns went away underneath it, which a ``forget`` that took a
-    turn row or a partial recovery produces.
-
-    A fake that skipped the coercion would certify a consumer against behaviour the
-    real store does not have (ADR-0026 §7): the conversation reads back stamped,
-    stays out of the candidate listing, and its remaining turns are never observed.
+    ADR-0212 §7's upper limb is gone — the watermark is an episode number, which this
+    store cannot see — and the limbs that remain ("not a positive integer") cannot be
+    held by a frozen pydantic model at all, so a dict-backed store has none to apply.
+    A fake that kept the old discard would certify a consumer against behaviour the
+    real store no longer has (ADR-0026 §7): every episode number the observation stage
+    records would read back absent, and the walk would restart from the tail forever.
     """
     store = FakeConversationStore(now=_fixed_now)
     conversation = await store.start()
@@ -244,12 +240,8 @@ async def test_the_fake_discards_a_watermark_its_own_turns_do_not_reach() -> Non
     read = await store.get(conversation.id)
 
     assert read is not None
-    assert read.observed_through is None
-    assert [one.observed_through for one in await store.recent()] == [None]
-    assert [one.observed_through for one in (await store.export()).conversations] == [None]
-    assert [one.id for one in await store.conversations_with_unobserved_turns()] == [
-        conversation.id
-    ]
-    stamped = await store.record_observed(conversation.id, through_ordinal=1)
-    assert stamped is not None
-    assert stamped.observed_through == 1
+    assert read.observed_through == 2
+    assert [one.observed_through for one in await store.recent()] == [2]
+    assert [one.observed_through for one in (await store.export()).conversations] == [2]
+    assert await store.conversations_with_unobserved_turns() == []
+    assert await store.record_observed(conversation.id, through_ordinal=1) is None
