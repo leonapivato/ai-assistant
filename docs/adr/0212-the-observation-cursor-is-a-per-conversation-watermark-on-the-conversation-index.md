@@ -1,6 +1,6 @@
 # 212. The observation cursor is a per-conversation watermark on the conversation index, and a pass advances it once
 
-- Status: Partially superseded by ADR-0218 (§6's classification of the deletion race as a failed pass: the raise is caught, is not logged as a job failure, and does not halt a run of many passes) and ADR-0275 (§3–§6's observer treatment of inspection-only rows and §8's conversation export version)
+- Status: Partially superseded by ADR-0218 (§6's classification of the deletion race as a failed pass: the raise is caught, is not logged as a job failure, and does not halt a run of many passes) and ADR-0275 (§3–§6's observer treatment of inspection-only rows and §8's conversation export version) and ADR-0283 (every clause, where it names a turn ordinal, `ConversationStore.turns`, `turns_after` or `conversations_with_unobserved_turns`, or bounds the watermark by the conversation's highest ordinal)
 - Date: 2026-08-29
 - **Partially supersedes:**
   [ADR-0077](0077-the-observer-proposes-beliefs-from-episodes.md) — §8's selection
@@ -121,6 +121,7 @@
   replacements recorded by the ADR-0275 note above took effect then; that note's
   "which remains Proposed" was true when written and is stale. The Status line above
   is unchanged (#2562).
+- Partially superseded: 2026-10-01 by ADR-0283 — one scope, read across the ADR. Where a clause names a turn ordinal, `ConversationStore.turns`, `turns_after` or `conversations_with_unobserved_turns`, read an episode number, `MemoryStore.channel_episodes` and the conversations `recent` lists; the watermark is no longer bounded by the conversation's highest ordinal. Parity with this ADR's behaviour beyond that substitution is not owed. These scoped replacements take effect on ratification of ADR-0283. This reciprocal header record accompanies the numbered draft under ADR-0070 and ADR-0082; the ratified body below is preserved.
 
 ## Context
 
