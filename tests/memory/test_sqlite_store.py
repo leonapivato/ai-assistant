@@ -30,7 +30,13 @@ from aged_store import (
     install,
     plant,
 )
-from memory_store_contract import _BEYOND_MARGIN, MemoryStoreContract, _activation_episode
+from memory_store_contract import (
+    _BEYOND_MARGIN,
+    _CHANNEL_A,
+    MemoryStoreContract,
+    _activation_episode,
+    _on_channel,
+)
 from pydantic import ValidationError
 
 from ai_assistant.core.errors import (
@@ -61,7 +67,12 @@ from ai_assistant.core.types import (
 )
 from ai_assistant.memory import SqliteMemoryStore
 from ai_assistant.memory._walk import mint_position
-from ai_assistant.memory.sqlite_store import _VEC_KNN_MAX_K, _run_to_completion
+from ai_assistant.memory.sqlite_store import (
+    _PARKS_EXECUTION,
+    _PARKS_STEP,
+    _VEC_KNN_MAX_K,
+    _run_to_completion,
+)
 from ai_assistant.models import HashingEmbedder
 from ai_assistant.testing import FakeTraceSink
 from ai_assistant.testing.cancellation import (
@@ -3011,7 +3022,7 @@ async def test_pre_m36_stores_are_refused_without_modification(tmp_path: Path, s
     assert db.stat().st_mode == mode
 
 
-@pytest.mark.parametrize("marker", [None, 1, 2, 3, 5, 0])
+@pytest.mark.parametrize("marker", [None, 1, 2, 3, 4, 6, 0])
 def test_current_shape_with_missing_or_unsupported_marker_is_refused(
     tmp_path: Path, marker: int | None
 ) -> None:
@@ -3047,5 +3058,87 @@ async def test_processing_record_and_inspection_survive_reopen(tmp_path: Path) -
         assert await reopened.episode_chunk("activation") == before
         assert len((await reopened.episodes()).items) == 1
         assert (await reopened.search("coffee", episode_model_eligible=True)).records == ()
+    finally:
+        reopened.close()
+
+
+def _plan(store: SqliteMemoryStore, sql: str, params: Sequence[object]) -> str:
+    """SQLite's query plan for ``sql``, flattened to one string."""
+    rows = store._conn.execute(f"EXPLAIN QUERY PLAN {sql}", params).fetchall()
+    return " | ".join(str(row[-1]) for row in rows)
+
+
+async def test_a_channel_is_two_indexed_columns_written_with_the_record(tmp_path: Path) -> None:
+    """ADR-0283 §1: channel type, instance and number are columns, and reads use the index.
+
+    The reads' own statements are planned against the live schema, so a read that
+    reached into the blob for the channel — or scanned the table for a parked
+    binding — would show it here rather than as slowness at scale.
+    """
+    store = SqliteMemoryStore(
+        traces_sink=FakeTraceSink(),
+        path=tmp_path / "memory.db",
+        embedder=HashingEmbedder(dimensions=8),
+        now=_fixed_now,
+    )
+    try:
+        await store.add(_on_channel("on-a"))
+        await store.add(_on_channel("nowhere", channel=None))
+        await store.add(_activation_episode("other", eligible=True))
+        rows = store._conn.execute(
+            "SELECT id, channel_type, channel_instance, rowid FROM records ORDER BY rowid"
+        ).fetchall()
+        assert [row[:3] for row in rows] == [
+            ("on-a", _CHANNEL_A.channel_type, _CHANNEL_A.instance_id),
+            ("nowhere", None, None),
+            ("other", "informational_event", "source"),
+        ]
+        assert (await store.channel_episode_ids(_CHANNEL_A, limit=10))[0].number == rows[0][3]
+
+        channel_plan = _plan(
+            store,
+            "SELECT rowid, id FROM records WHERE channel_type = ? AND channel_instance = ? "
+            "AND rowid > ? ORDER BY rowid LIMIT ?",
+            ("informational_event", "a", 0, 10),
+        )
+        assert "records_by_channel" in channel_plan
+        assert "TEMP B-TREE" not in channel_plan  # the index already orders by number
+        parking_plan = _plan(
+            store,
+            f"SELECT data FROM records WHERE {_PARKS_EXECUTION} = ? AND {_PARKS_STEP} = ? "  # noqa: S608 — module literals; values bound
+            "ORDER BY rowid LIMIT 1",
+            ("execution", "step"),
+        )
+        assert "records_by_parking" in parking_plan
+    finally:
+        store.close()
+
+
+async def test_episode_numbers_survive_a_reopen_and_are_never_reissued(tmp_path: Path) -> None:
+    """ADR-0283 §1: a durable store's counter outlives the process that issued it.
+
+    The highest-numbered episode is deleted before the close, so a counter rebuilt
+    from the rows present would hand its number out again after the reopen.
+    """
+    path = tmp_path / "memory.db"
+    embedder = HashingEmbedder(dimensions=8)
+    store = SqliteMemoryStore(
+        traces_sink=FakeTraceSink(), path=path, embedder=embedder, now=_fixed_now
+    )
+    try:
+        for record_id in ("first", "second", "third"):
+            await store.add(_on_channel(record_id))
+        top = (await store.channel_episode_ids(_CHANNEL_A, limit=10))[-1].number
+        await store.delete("third")
+    finally:
+        store.close()
+    reopened = SqliteMemoryStore(
+        traces_sink=FakeTraceSink(), path=path, embedder=embedder, now=_fixed_now
+    )
+    try:
+        await reopened.add(_on_channel("fourth"))
+        held = await reopened.channel_episode_ids(_CHANNEL_A, limit=10)
+        assert [entry.episode_id for entry in held] == ["first", "second", "fourth"]
+        assert held[-1].number > top
     finally:
         reopened.close()

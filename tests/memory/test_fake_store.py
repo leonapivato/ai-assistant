@@ -17,9 +17,11 @@ from pydantic import ValidationError
 
 from ai_assistant.core.errors import MemoryStoreError, MemoryStoreStaleError
 from ai_assistant.core.types import (
+    ChannelIdentity,
     MemorySource,
     MemoryWrite,
     MemoryWriteMode,
+    ParkedBinding,
     Provenance,
     SemanticMemory,
 )
@@ -243,6 +245,9 @@ async def test_exported_records_cannot_be_mutated_to_reach_stored_state() -> Non
 # the configured retrieval failure (issue #105)                               #
 # --------------------------------------------------------------------------- #
 
+#: The channel the ADR-0283 reads below are asked about; nothing is stored on it.
+_CHANNEL = ChannelIdentity(channel_type="informational_event", instance_id="a")
+
 #: The message the fake is configured to fail with, so each case asserts that the
 #: caller's own text came back rather than some generic store error.
 _BROKEN = "fake: retrieval is unavailable"
@@ -260,6 +265,16 @@ def _broken_store() -> FakeMemoryStore:
         pytest.param(lambda store: store.search("coffee"), id="search"),
         pytest.param(lambda store: store.list_beliefs(), id="list_beliefs"),
         pytest.param(lambda store: store.walk_records("nightly", limit=1), id="walk_records"),
+        pytest.param(
+            lambda store: store.channel_episodes(_CHANNEL, limit=1), id="channel_episodes"
+        ),
+        pytest.param(
+            lambda store: store.episode_parking(ParkedBinding(execution_id="e", step_id="s")),
+            id="episode_parking",
+        ),
+        pytest.param(
+            lambda store: store.channel_episode_ids(_CHANNEL, limit=1), id="channel_episode_ids"
+        ),
     ],
 )
 async def test_every_read_raises_the_configured_failure(
@@ -339,6 +354,14 @@ async def test_an_argument_the_store_would_refuse_is_still_refused_first() -> No
         await store.walk_records("   ", limit=1)
     with pytest.raises(ValueError, match=r"limit must be in \[0, 2\*\*63\)"):
         await store.list_beliefs(limit=-1)
+    with pytest.raises(ValueError, match="limit"):
+        await store.channel_episodes(_CHANNEL, limit=0)
+    with pytest.raises(ValueError, match="after"):
+        await store.channel_episodes(_CHANNEL, after=0, limit=1)
+    with pytest.raises(ValueError, match="episode_model_eligible"):
+        await store.channel_episodes(_CHANNEL, limit=1, episode_model_eligible=1)  # type: ignore[arg-type] # the point
+    with pytest.raises(ValueError, match="limit"):
+        await store.channel_episode_ids(_CHANNEL, limit=1001)
 
     assert store.resource_log.visits == 0
 
