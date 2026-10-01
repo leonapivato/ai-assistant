@@ -60,6 +60,7 @@ from ai_assistant.core.errors import (
     MemoryStoreError,
 )
 from ai_assistant.core.types import EpisodicMemory
+from ai_assistant.memory._channel_reads import channel_of
 from ai_assistant.memory._episode_format import check_format, inspect_existing
 from ai_assistant.memory._transactions import transaction
 from ai_assistant.memory.sqlite_store import (
@@ -143,7 +144,7 @@ _LEGACY_SOURCE_COLUMNS: Final = "rowid, id, kind, data, NULL"
 #: so the two cannot come to disagree about what a rebuilt row carries.
 _DESTINATION_COLUMNS: Final = (
     "rowid, id, kind, data, expires_at, valid_until, valid_from, about_person, revision, "
-    "occurred_at"
+    "occurred_at, channel_type, channel_instance"
 )
 
 #: The named columns of :data:`_DESTINATION_COLUMNS` — ``rowid`` is implicit and is
@@ -428,8 +429,8 @@ def _decode(data: str, record_id: object) -> MemoryRecord:
 
 def _derived(
     record: MemoryRecord,
-) -> tuple[int | None, int | None, int | None, str | None, int | None]:
-    """The lifecycle, window, subject and instant columns, as the write path derives them.
+) -> tuple[int | None, int | None, int | None, str | None, int | None, str | None, str | None]:
+    """The lifecycle, window, subject, instant and channel columns, as the write path does.
 
     Kept in this shape — read off the decoded model, not re-parsed from the JSON —
     so it cannot drift from ``SqliteMemoryStore._persist_record``, which is the
@@ -451,6 +452,12 @@ def _derived(
     round-tripped intact — the same quiet failure as ``valid_from``'s, in the other
     direction. The label index ``record_labels`` is the same hazard once more and is
     written by :func:`_insert` and checked by :func:`_verify` beside these.
+
+    **The channel pair is here for the same reason again** (ADR-0283 §1): a channel's
+    reads and its deletion enumeration are served from those two columns alone, so a
+    rebuild that left them ``NULL`` would put every episode on no channel — history
+    empty and a deletion that finds nothing to delete — while every record
+    round-tripped intact.
     """
     expires = _to_micros(record.expires_at) if record.expires_at is not None else None
     valid_until = (
@@ -460,7 +467,16 @@ def _derived(
         _to_micros(record.validity.valid_from) if record.validity.valid_from is not None else None
     )
     occurred_at = _to_micros(record.occurred_at) if isinstance(record, EpisodicMemory) else None
-    return expires, valid_until, valid_from, record.about_person, occurred_at
+    channel = channel_of(record)
+    return (
+        expires,
+        valid_until,
+        valid_from,
+        record.about_person,
+        occurred_at,
+        None if channel is None else channel.channel_type,
+        None if channel is None else channel.instance_id,
+    )
 
 
 def _discard(path: Path) -> None:
@@ -905,7 +921,15 @@ class Reembedder:
         issuing (a legacy source, whose rows are stamped here) is never walked back.
         A source with no issuer at all is a store written before this column existed
         and has none to carry.
+
+        **The record counter comes across on the same reasoning** (ADR-0283 §1). The
+        ``rowid`` is an episode's number, never reissued; copying the rows sets the
+        work store's ``AUTOINCREMENT`` mark to the largest ``rowid`` *present*, and a
+        number a deleted top row took would then be issued again — to an episode an
+        observer's watermark already stands above. So the source's mark is carried,
+        raised to and never walked back.
         """
+        issued = _numbers_issued(source)
         with transaction(work, "finish a re-embedding", error=MemoryStoreError):
             work.execute(
                 "DELETE FROM meta WHERE key IN (?, ?)",
@@ -915,6 +939,11 @@ class Reembedder:
                 "UPDATE revision_issuer SET issued = MAX(issued, ?) WHERE singleton = 0",
                 (_issued_through(source),),
             )
+            if issued > _numbers_issued(work):
+                work.execute("DELETE FROM sqlite_sequence WHERE name = 'records'")
+                work.execute(
+                    "INSERT INTO sqlite_sequence(name, seq) VALUES ('records', ?)", (issued,)
+                )
 
     def _swap(self, started: str) -> bool:
         """Re-check the source, retain it, then move the verified store into place.
@@ -1065,6 +1094,23 @@ def _issued_through(conn: sqlite3.Connection) -> int:
     return 0 if row is None else int(row[0])
 
 
+def _numbers_issued(conn: sqlite3.Connection) -> int:
+    """The largest ``rowid`` — episode number — this store has ever issued, or ``0``.
+
+    ``AUTOINCREMENT``'s high-water mark in ``sqlite_sequence``, which carries no row
+    for ``records`` until its first insert (ADR-0283 §1, ADR-0114 §1).
+
+    Raises:
+        MemoryStoreError: If the mark cannot be read.
+    """
+    try:
+        row = conn.execute("SELECT seq FROM sqlite_sequence WHERE name = 'records'").fetchone()
+    except sqlite3.Error as exc:
+        msg = f"failed to read the record counter: {exc}"
+        raise MemoryStoreError(msg) from exc
+    return 0 if row is None else int(row[0])
+
+
 def _chunk(source: sqlite3.Connection, cursor: int | None, size: int, columns: str) -> list[_Row]:
     """Read the next ``size`` source rows past ``cursor``, in ``rowid`` order.
 
@@ -1113,12 +1159,12 @@ def _insert(
     if stamp is None or int(stamp) == 0:
         work.execute("UPDATE revision_issuer SET issued = issued + 1 WHERE singleton = 0")
         (stamp,) = work.execute("SELECT issued FROM revision_issuer WHERE singleton = 0").fetchone()
-    expires, valid_until, valid_from, about_person, occurred_at = _derived(record)
+    expires, valid_until, valid_from, about_person, occurred_at, channel_type, instance = _derived(
+        record
+    )
     work.execute(
-        "INSERT INTO records"
-        "(rowid, id, kind, data, expires_at, valid_until, valid_from, about_person, revision, "
-        "occurred_at) "
-        "VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?)",
+        f"INSERT INTO records({_DESTINATION_COLUMNS}) "  # noqa: S608 — a module-level literal, never caller data
+        "VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)",
         (
             rowid,
             record_id,
@@ -1130,6 +1176,8 @@ def _insert(
             about_person,
             stamp,
             occurred_at,
+            channel_type,
+            instance,
         ),
     )
     work.execute(
@@ -1321,11 +1369,16 @@ def _verify(
         if left[:4] != right[:4]:
             _fail(f"row {right[0]!r} differs from the live store's row {left[0]!r}")
         record = _decode(str(right[3]), right[1])
-        if (*right[4:8], right[9]) != _derived(record):
+        if (*right[4:8], *right[9:12]) != _derived(record):
             _fail(f"row {right[0]!r} has columns that disagree with the record stored in it")
         labels.update((int(right[0]), axis, value) for axis, value in _labels_of(record))
         highest = max(highest, _verified_stamp(left, right))
     _verify_issuer(source, work, highest)
+    if _numbers_issued(work) < _numbers_issued(source):
+        _fail(
+            f"its record counter stands at {_numbers_issued(work)}, below the "
+            f"{_numbers_issued(source)} the live store has already issued"
+        )
     _verify_labels(work, labels, str(plan.work))
 
     record_rowids = _rowids(work, "records", str(plan.work))

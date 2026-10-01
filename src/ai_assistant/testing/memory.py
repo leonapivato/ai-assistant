@@ -52,6 +52,9 @@ from ai_assistant.core.errors import (
     MemoryStoreStaleError,
 )
 from ai_assistant.core.types import (
+    ChannelEpisode,
+    ChannelEpisodeId,
+    ChannelEpisodePage,
     ChannelIdentity,
     EpisodeChunk,
     EpisodeCursor,
@@ -78,6 +81,7 @@ if TYPE_CHECKING:
         MemoryKind,
         MemoryRecord,
         MemoryWrite,
+        ParkedBinding,
         TimeWindow,
     )
     from ai_assistant.testing.cancellation import LoopSuspension, ResourceLog
@@ -105,6 +109,44 @@ def _check_page_bounds(limit: int, offset: int) -> None:
         if not 0 <= value < _PAGE_BOUND:
             msg = f"{name} must be in [0, 2**63), got {value}"
             raise ValueError(msg)
+
+
+# --- the channel reads' checks (ADR-0283 §3) ---------------------------------
+# Duplicated from ``ai_assistant.memory._channel_reads`` for ``_check_page_bounds``'s
+# reason: ``ai_assistant.testing`` may not import a subsystem (golden rule 1). The
+# shared suite runs the same cases against all three stores.
+
+#: The largest page either channel read serves (ADR-0283 §3:2).
+_MAX_CHANNEL_PAGE: Final = 1000
+
+
+def _check_channel_page(after: object, limit: object) -> None:
+    """Refuse a channel read's ``after`` or ``limit`` before any I/O (ADR-0283 §3:2).
+
+    Raises:
+        ValueError: ``limit`` is not a strict integer in ``[1, 1000]``, or ``after``
+            is neither ``None`` nor a strict positive integer.
+    """
+    if type(limit) is not int or not 1 <= limit <= _MAX_CHANNEL_PAGE:
+        msg = f"a channel read's limit must be a strict integer in [1, {_MAX_CHANNEL_PAGE}]"
+        raise ValueError(msg)
+    if after is not None and (type(after) is not int or after < 1):
+        msg = "a channel read's after must be None or a strict positive integer"
+        raise ValueError(msg)
+
+
+def _channel_of(record: MemoryRecord) -> ChannelIdentity | None:
+    """The channel ``record`` is on — its processing record's ``trigger.channel``."""
+    if not isinstance(record, EpisodicMemory) or record.processing_record is None:
+        return None
+    return record.processing_record.trigger.channel
+
+
+def _parks_of(record: MemoryRecord) -> ParkedBinding | None:
+    """The binding ``record``'s own step parked (``links.parks``), or ``None``."""
+    if not isinstance(record, EpisodicMemory) or record.processing_record is None:
+        return None
+    return record.processing_record.links.parks
 
 
 # --- the walk surface's checks and its opaque token (ADR-0114) ---------------
@@ -1098,6 +1140,101 @@ class FakeMemoryStore:
         if not isinstance(record, EpisodicMemory):
             return None
         return detail_of(record, version=version, offset=offset, max_bytes=max_bytes)
+
+    async def channel_episodes(
+        self,
+        channel: ChannelIdentity,
+        *,
+        after: int | None = None,
+        limit: int,
+        episode_model_eligible: bool | None = None,
+    ) -> ChannelEpisodePage:
+        """Read a channel's live episodes in number order (ADR-0283 §3:1, §3:2).
+
+        The number is the record's walk key, issued once when it is inserted and
+        never reissued — ADR-0283 §1's counter. Routed through the modelled
+        resource, like every other read (#397).
+
+        Raises:
+            ValueError: An argument outside the bounds the Protocol states, checked
+                before the resource is held.
+            MemoryStoreError: The fake was constructed with a ``failure``, or the
+                injected clock's reading is not a conforming one.
+        """
+        _check_channel_page(after, limit)
+        check_eligibility(episode_model_eligible)
+        async with self._resource.held():
+            self._refuse_read()
+            now = self._now_utc()  # one reading for the page and its total
+            matching = [
+                (key, record)
+                for rid, key in self._keys.items()
+                if _channel_of(record := self._records[rid]) == channel
+                and self._is_readable(record, now)
+                and admits_model_eligibility(record, episode_model_eligible)
+            ]
+            page = (
+                matching[-limit:]
+                if after is None
+                else [entry for entry in matching if entry[0] > after][:limit]
+            )
+            return ChannelEpisodePage(
+                entries=tuple(
+                    ChannelEpisode(
+                        number=key, record=record.model_copy(deep=True, update={"score": None})
+                    )
+                    for key, record in page
+                    if isinstance(record, EpisodicMemory)
+                ),
+                total=len(matching),
+            )
+
+    async def episode_parking(self, binding: ParkedBinding) -> EpisodicMemory | None:
+        """Return the lowest-numbered live episode whose step parked ``binding`` (§3:3).
+
+        Raises:
+            MemoryStoreError: The fake was constructed with a ``failure``, or the
+                injected clock's reading is not a conforming one.
+        """
+        async with self._resource.held():
+            self._refuse_read()
+            now = self._now_utc()
+            for rid in self._keys:
+                record = self._records[rid]
+                if (
+                    isinstance(record, EpisodicMemory)
+                    and _parks_of(record) == binding
+                    and self._is_readable(record, now)
+                ):
+                    return record.model_copy(deep=True)
+            return None
+
+    async def channel_episode_ids(
+        self,
+        channel: ChannelIdentity,
+        *,
+        after: int | None = None,
+        limit: int,
+    ) -> tuple[ChannelEpisodeId, ...]:
+        """Enumerate every episode held on ``channel``, whatever its liveness (§3:5).
+
+        Raises:
+            ValueError: An argument outside the bounds the Protocol states, checked
+                before the resource is held.
+            MemoryStoreError: The fake was constructed with a ``failure``.
+        """
+        _check_channel_page(after, limit)
+        async with self._resource.held():
+            self._refuse_read()
+            held: list[ChannelEpisodeId] = []
+            for rid, key in self._keys.items():
+                if after is not None and key <= after:
+                    continue
+                if _channel_of(self._records[rid]) == channel:
+                    held.append(ChannelEpisodeId(number=key, episode_id=rid))
+                    if len(held) == limit:
+                        break
+            return tuple(held)
 
     async def list_beliefs(
         self,

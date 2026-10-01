@@ -3243,7 +3243,16 @@ RecordedActivationTrigger = Annotated[
 
 
 class ActivationLinks(BaseModel):
-    """Only relationships established by processing, carrying no authority."""
+    """Only relationships established by processing, carrying no authority.
+
+    Attributes:
+        parked: The binding a resumed activation continues (ADR-0275 §4).
+        parks: The binding the activation's own step parked (ADR-0283 §3:4). It is
+            what :meth:`~ai_assistant.core.protocols.MemoryStore.episode_parking`
+            matches, and it is a field of its own rather than a second meaning of
+            ``parked``, so the parking episode and the episodes resuming it stay
+            distinguishable.
+    """
 
     model_config = ConfigDict(frozen=True, extra="forbid")
     predecessor_episode_id: Identifier | None = None
@@ -3252,6 +3261,7 @@ class ActivationLinks(BaseModel):
     parked: ParkedBinding | None = None
     goal_id: Identifier | None = None
     attempt_id: Identifier | None = None
+    parks: ParkedBinding | None = None
 
 
 # --- activation understanding (ADR-0276) -------------------------------------
@@ -3867,6 +3877,59 @@ MemoryRecord = Annotated[
     Field(discriminator="kind"),
 ]
 """A unit of long-term memory: one of the four typed kinds, tagged by ``kind``."""
+
+
+# --- memory: a channel's episodes, in number order (ADR-0283 §1, §3) ---------
+
+#: One past the largest episode number a store can issue: the signed 64-bit
+#: ceiling a SQLite ``rowid`` tops out at (ADR-0283 §1).
+_EPISODE_NUMBER_BOUND: Final = 2**63
+
+
+class ChannelEpisode(BaseModel):
+    """One live episode on a channel, with the number its store gave it (ADR-0283 §3:2).
+
+    Attributes:
+        number: The store-wide number the episode was given when it was inserted —
+            positive, greater than every number issued before it, never reissued and
+            never changed (§1). A channel's order is its episodes' numbers.
+        record: The episode, a detached snapshot like every ``MemoryStore`` read.
+    """
+
+    model_config = ConfigDict(frozen=True, extra="forbid")
+    number: int = Field(strict=True, ge=1, lt=_EPISODE_NUMBER_BOUND)
+    record: EpisodicMemory
+
+
+class ChannelEpisodePage(BaseModel):
+    """What one :meth:`~ai_assistant.core.protocols.MemoryStore.channel_episodes` returned.
+
+    Attributes:
+        entries: The page's episodes in number order, ascending (ADR-0283 §3:1).
+        total: The count of live episodes on the channel matching the call's
+            eligibility axis — every one of them, not the page's (§3:2).
+    """
+
+    model_config = ConfigDict(frozen=True, extra="forbid")
+    entries: tuple[ChannelEpisode, ...]
+    total: int = Field(strict=True, ge=0, lt=_EPISODE_NUMBER_BOUND)
+
+
+class ChannelEpisodeId(BaseModel):
+    """The number and id of one episode a store physically holds on a channel (ADR-0283 §3:5).
+
+    Identifiers alone, never a record's content: it is what
+    :meth:`~ai_assistant.core.protocols.MemoryStore.channel_episode_ids` returns, the
+    enumeration a deletion walks.
+
+    Attributes:
+        number: The episode's store-wide number (§1).
+        episode_id: The episode's id, its exact stored characters.
+    """
+
+    model_config = ConfigDict(frozen=True, extra="forbid")
+    number: int = Field(strict=True, ge=1, lt=_EPISODE_NUMBER_BOUND)
+    episode_id: EncodableText
 
 
 # --- memory: what one relevance read returned (ADR-0128 §2) ------------------
