@@ -1,6 +1,6 @@
 # 283. A channel's history is its episodes, and the turn index is retired
 
-- Status: Proposed
+- Status: Accepted
 - Date: 2026-10-01
 - Scope: [M36](https://github.com/leonapivato/ai-assistant/milestone/2), reopened 2026-09-30 for [#2613](https://github.com/leonapivato/ai-assistant/issues/2613); the first of three steps, the channel.
 - Dependency: ADR-0275, ADR-0276, ADR-0280, ADR-0281 and ADR-0282, all implemented at `5d872812`.
