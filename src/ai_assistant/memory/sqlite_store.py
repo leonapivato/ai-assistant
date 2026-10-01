@@ -1577,10 +1577,11 @@ class SqliteMemoryStore:
         # (§6), and ``NULL`` fails the ``IS NOT NULL`` the restriction leads with.
         occurred_at = _to_micros(record.occurred_at) if isinstance(record, EpisodicMemory) else None
         # ADR-0283 §1's channel columns, from the same record the blob is. An upsert
-        # rewrites them with every other column, and that cannot move an episode
-        # between channels: a stored processing record is immutable (refused
-        # below), so the only rewrite is from ``NULL`` on an episode that carried
-        # none. The number is the ``rowid``, which the update branch keeps.
+        # rewrites them with every other column, and never to a different value: a
+        # write that would move a stored record's channel — ``NULL`` to a channel
+        # included — is refused below, because the number stays with the id and a
+        # channel gained at a low number would sit below a reader's watermark. The
+        # number is the ``rowid``, which the update branch keeps.
         channel = channel_of(record)
         channel_type = None if channel is None else channel.channel_type
         channel_instance = None if channel is None else channel.instance_id
@@ -1605,6 +1606,9 @@ class SqliteMemoryStore:
                 )
             ):
                 msg = "recorded processing and response are immutable"
+                raise MemoryStoreError(msg)
+            if channel_of(stored) != channel:
+                msg = "an episode's channel is immutable: it is written once, with the record"
                 raise MemoryStoreError(msg)
         # One stamp per write that stores a row, taken from the issuer inside the
         # caller's transaction (ADR-0219 §1). Taken on both branches and after the

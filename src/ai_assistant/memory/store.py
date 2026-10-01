@@ -437,7 +437,7 @@ class InMemoryMemoryStore:
 
         Raises:
             MemoryStoreError: ``record.id`` names a stored record of a different
-                ``kind``.
+                ``kind``, or one on a different channel (ADR-0283 §1).
         """
         stored = self._records.get(record.id)
         if (
@@ -456,6 +456,9 @@ class InMemoryMemoryStore:
                 f"cannot write {record.id!r} as a {record.kind} record: "
                 f"a {stored.kind} record is already stored under that id"
             )
+            raise MemoryStoreError(msg)
+        if stored is not None and channel_of(stored) != channel_of(record):
+            msg = "an episode's channel is immutable: it is written once, with the record"
             raise MemoryStoreError(msg)
 
     async def write_atomic(self, writes: Sequence[MemoryWrite]) -> Sequence[str]:

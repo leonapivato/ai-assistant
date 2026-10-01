@@ -6021,3 +6021,49 @@ class MemoryStoreContract:
         for after in (1, 2**63, 2**70):
             await store.channel_episodes(_CHANNEL_A, after=after, limit=1)
             await store.channel_episode_ids(_CHANNEL_A, after=after, limit=1)
+
+    async def test_an_upsert_may_not_move_a_stored_records_channel(
+        self, store: MemoryStore
+    ) -> None:
+        """§1: the channel is written with the record and never changed — not even from none.
+
+        ``early`` is stored on no channel, numbered below ``later``. Were an upsert
+        allowed to put ``early`` on the channel, it would keep its low number and sit
+        under any watermark taken at ``later``, unread by every read above it. So every
+        replacing door refuses, and a refused batch commits nothing.
+        """
+        await store.add(_episode("early"))
+        await store.add(_on_channel("later"))
+        before = await _numbers(store, _CHANNEL_A)
+        stored = await store.get("early")
+        assert stored is not None
+        moved = _on_channel("early")
+
+        with pytest.raises(MemoryStoreError, match="channel"):
+            await store.add(moved)
+        with pytest.raises(MemoryStoreError, match="channel"):
+            await store.write_atomic(
+                [
+                    MemoryWrite(record=_semantic("bystander", "alpha")),
+                    MemoryWrite(record=moved, mode=MemoryWriteMode.UPSERT),
+                ]
+            )
+        with pytest.raises(MemoryStoreError, match="channel"):
+            await store.write_atomic(
+                [
+                    MemoryWrite(
+                        record=moved,
+                        mode=MemoryWriteMode.IF_UNCHANGED,
+                        expected_revision=stored.revision,
+                    )
+                ]
+            )
+        # A recorded processing record is immutable already, which refuses this one
+        # on that ground first; the obligation is the refusal, not its wording.
+        with pytest.raises(MemoryStoreError):
+            await store.add(_on_channel("later", channel=_CHANNEL_B))
+
+        assert await store.get("bystander") is None
+        assert _unstamped_or_none(await store.get("early")) == _episode("early")
+        assert await _numbers(store, _CHANNEL_A) == before
+        assert await store.channel_episode_ids(_CHANNEL_B, limit=10) == ()
