@@ -1346,6 +1346,13 @@ def test_the_promoted_surface_and_the_protocol_version_are_both_pinned() -> None
     a **seventh** consecutive entry. §8 fixes no numeral either — *"The integer is chosen
     at P1's own base"* — and this lane was written **52** at a base holding 51.
 
+    **65 is ADR-0283 §3:4's lane 1, under the second limb alone, on one ground.**
+    ``ActivationLinks`` gains ``parks``, defaulted ``None`` and emitted on every
+    wire-carried ``EpisodeProcessingRecord``, which a client at 64 fails with
+    ``extra_forbidden``. The three ``MemoryStore`` reads and their result types reach no
+    frame. **The method set does not move and stays at 67**: the lane adds no
+    ``AssistantEngine`` member and no gateway route.
+
     **ADR-0124 §9 decides no mechanical check and creates none**, saying one is
     owed and leaving its shape open. This is not that check — it is a *pin*, and
     a deliberately crude one: it fails when either number moves, which is the

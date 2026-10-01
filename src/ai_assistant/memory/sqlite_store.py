@@ -162,9 +162,18 @@ _PAGE_BOUND = 2**63
 #: The two halves of the binding an episode's own step parked, as the expression
 #: ``records_by_parking`` indexes and :meth:`SqliteMemoryStore.episode_parking`
 #: compares — one spelling, because SQLite uses an expression index only for a
-#: query naming the identical expression (ADR-0283 §3:3).
-_PARKS_EXECUTION: Final = "json_extract(data, '$.processing_record.links.parks.execution_id')"
-_PARKS_STEP: Final = "json_extract(data, '$.processing_record.links.parks.step_id')"
+#: query naming the identical expression (ADR-0283 §3:3). Guarded by ``json_valid``
+#: because SQLite evaluates an indexed expression on every write and delete of a
+#: row: a bare ``json_extract`` would make a corrupt blob refuse its own deletion,
+#: where guarded it indexes as ``NULL`` and the reads report it as they always have.
+_PARKS_EXECUTION: Final = (
+    "CASE WHEN json_valid(data) "
+    "THEN json_extract(data, '$.processing_record.links.parks.execution_id') END"
+)
+_PARKS_STEP: Final = (
+    "CASE WHEN json_valid(data) "
+    "THEN json_extract(data, '$.processing_record.links.parks.step_id') END"
+)
 #: The read-time liveness predicate over the lifecycle and window columns, as
 #: ``get`` applies it — expiry and both window ends — taking ``now`` three times.
 _LIVE: Final = (

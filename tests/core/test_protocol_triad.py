@@ -764,6 +764,7 @@ class _ARealMemoryStore:
     walk_records = advance_walk = select = episodes = episode_chunk = staticmethod(
         lambda *a, **k: None
     )
+    channel_episodes = episode_parking = channel_episode_ids = staticmethod(lambda *a, **k: None)
 
 
 class _DecoyFixture:
