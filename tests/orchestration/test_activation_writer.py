@@ -227,7 +227,6 @@ async def test_an_ended_exchange_is_written_at_its_activation_address_on_its_cha
     assert episode.outcome == "the complete reply"
     entry = wiring.archive.recorded[_ADDRESS]
     assert entry.asked == "exact request"
-    assert entry.ordinal is None
     assert entry.occurred_at == _AT
 
 

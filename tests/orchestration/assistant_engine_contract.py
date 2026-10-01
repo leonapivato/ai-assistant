@@ -1245,20 +1245,19 @@ def seeded_transcript_archive() -> FakeTranscriptArchive:
     """
     archive = FakeTranscriptArchive(retention=None, now=lambda: _ARCHIVED_AT)
     archive.hold(
-        _archived("c1:1", conversation="c1", ordinal=1, at=_ARCHIVED_AT - timedelta(days=3)),
-        _archived("c1:2", conversation="c1", ordinal=2, at=_ARCHIVED_AT - timedelta(days=2)),
-        _archived("c1:3", conversation="c1", ordinal=3, at=_ARCHIVED_AT - timedelta(days=1)),
-        _archived("c2:1", conversation="c2", ordinal=1, at=_ARCHIVED_AT - timedelta(days=1)),
+        _archived("c1:1", conversation="c1", at=_ARCHIVED_AT - timedelta(days=3)),
+        _archived("c1:2", conversation="c1", at=_ARCHIVED_AT - timedelta(days=2)),
+        _archived("c1:3", conversation="c1", at=_ARCHIVED_AT - timedelta(days=1)),
+        _archived("c2:1", conversation="c2", at=_ARCHIVED_AT - timedelta(days=1)),
     )
     return archive
 
 
-def _archived(address: str, *, conversation: str, ordinal: int, at: datetime) -> TranscriptEntry:
+def _archived(address: str, *, conversation: str, at: datetime) -> TranscriptEntry:
     """One seeded turn, with both halves present and a disposition that is not a park."""
     return TranscriptEntry(
         address=address,
         conversation_id=conversation,
-        ordinal=ordinal,
         occurred_at=at,
         asked="where did I say that",
         replied="you said it on Tuesday",
@@ -5669,7 +5668,7 @@ class AssistantEngineContract(ChannelReceiverContract, EpisodeInspectionContract
     async def test_a_conversation_comes_back_in_the_order_it_was_said(
         self, transcripts: TranscriptSubject
     ) -> None:
-        """ADR-0225 §7: ordinal order, which is the one read here that is not newest first.
+        """ADR-0283 §9: instant, then address — the one read here that is not newest first.
 
         Asserted as the exact sequence rather than as a set, because the whole of the
         clause is the direction: "a transcript's order is the order it was said in",
@@ -5678,7 +5677,7 @@ class AssistantEngineContract(ChannelReceiverContract, EpisodeInspectionContract
         """
         page = await transcripts.engine.transcript_conversation("c1")
 
-        assert [entry.ordinal for entry in page] == [1, 2, 3]
+        assert [entry.address for entry in page] == ["c1:1", "c1:2", "c1:3"]
 
     async def test_an_entry_comes_back_whole_and_an_unknown_address_comes_back_absent(
         self, transcripts: TranscriptSubject

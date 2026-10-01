@@ -176,10 +176,8 @@ async def test_stored_bytes_measures_the_files_and_not_the_entry_lengths(
     path = tmp_path / "transcripts.db"
     archive = _at_now(path=path)
     try:
-        for ordinal in range(1, 40):
-            await archive.append(
-                entry(f"c1:{ordinal}", ordinal=ordinal, asked="x" * 3000, replied="y" * 3000)
-            )
+        for n in range(1, 40):
+            await archive.append(entry(f"c1:{n}", asked="x" * 3000, replied="y" * 3000))
 
         reported = (await archive.size()).stored_bytes
         # The blocking `stat` calls are on a synchronous helper for the reason
@@ -283,8 +281,8 @@ async def test_the_archive_owns_its_database_and_nothing_but_the_named_sidecars(
     path = tmp_path / "transcripts.db"
     archive = _at_now(path=path)
     try:
-        for ordinal in range(1, 30):
-            await archive.append(entry(f"c1:{ordinal}", ordinal=ordinal, asked="x" * 4000))
+        for n in range(1, 30):
+            await archive.append(entry(f"c1:{n}", asked="x" * 4000))
         await archive.search("x", limit=5)
         await archive.entries(limit=5)
         await archive.conversation("c1", limit=5)
@@ -415,9 +413,9 @@ def test_a_second_writer_of_the_same_address_is_refused_across_connections(
         conn = sqlite3.connect(path)
         try:
             conn.execute(
-                "INSERT INTO entries(address, conversation_id, ordinal, occurred_at_us, "
+                "INSERT INTO entries(address, conversation_id, occurred_at_us, "
                 "asked, replied, asked_folded, replied_folded, disposition) "
-                "VALUES ('c1:1', 'c1', 1, 0, NULL, NULL, NULL, NULL, 'no_action_needed')"
+                "VALUES ('c1:1', 'c1', 0, NULL, NULL, NULL, NULL, 'no_action_needed')"
             )
             conn.commit()
         finally:
@@ -429,16 +427,14 @@ def test_a_second_writer_of_the_same_address_is_refused_across_connections(
         archive.close()
 
 
-#: The table and the conversation index as a file created before ADR-0283 §9 holds
-#: them: ``ordinal`` refuses ``NULL``, and the conversation read's index is ordered
-#: by it. Spelled out rather than derived, because the point is a file this version
-#: of the store did not create.
+#: The table as a file created before ADR-0283 §9 holds it: an ``ordinal`` column
+#: refusing ``NULL``, which this store no longer writes. Spelled out rather than
+#: derived, because the point is a file this version of the store did not create.
 _LEGACY_SCHEMA = (
     "CREATE TABLE entries("
     "address TEXT PRIMARY KEY NOT NULL, conversation_id TEXT NOT NULL, "
     "ordinal INTEGER NOT NULL, occurred_at_us INTEGER NOT NULL, asked TEXT, "
     "replied TEXT, asked_folded TEXT, replied_folded TEXT, disposition TEXT NOT NULL)",
-    "CREATE INDEX entries_by_conversation ON entries(conversation_id, ordinal, address)",
 )
 
 
@@ -468,37 +464,32 @@ def _index_names(path: Path) -> set[str]:
 def test_the_conversation_index_follows_the_instant_order(tmp_path: Path) -> None:
     """ADR-0283 §9: the index the conversation read uses is ordered as the read is.
 
-    And the ordinal-ordered index a file created before that decision carries is
-    dropped on open rather than left standing: no read uses it, and it would cost
-    every write and count against ``stored_bytes``.
+    Exactly the two indexes the reads use, so no index ordered by a removed column
+    is left costing every write and counting against ``stored_bytes``.
     """
-    fresh = tmp_path / "fresh.db"
-    _at_now(path=fresh).close()
-    legacy = tmp_path / "legacy.db"
-    _legacy_file(legacy)
-    _at_now(path=legacy).close()
+    path = tmp_path / "transcripts.db"
+    _at_now(path=path).close()
 
-    expected = {"entries_by_conversation_instant", "entries_by_instant"}
-    assert _index_names(fresh) == expected
-    assert _index_names(legacy) == expected
+    assert _index_names(path) == {"entries_by_conversation_instant", "entries_by_instant"}
 
 
-async def test_a_legacy_file_refusing_an_absent_ordinal_is_not_reported_as_a_collision(
+async def test_a_legacy_file_refusing_an_entry_is_not_reported_as_a_collision(
     tmp_path: Path,
 ) -> None:
     """A file created before ADR-0283 §9 keeps its ``NOT NULL`` ordinal column.
 
     ``CREATE TABLE IF NOT EXISTS`` rewrites no table and §12 owes no migration — the
-    hub moves to a fresh data directory — so such a file refuses an entry without an
-    ordinal. What it must not do is say an entry already stands at that address:
-    nothing does, and that message names a fault of a different class.
+    hub moves to a fresh data directory — so such a file refuses every entry, since
+    this store writes no ordinal. What it must not do is say an entry already stands
+    at that address: nothing does, and that message names a fault of a different
+    class.
     """
     path = tmp_path / "transcripts.db"
     _legacy_file(path)
     archive = _at_now(path=path)
     try:
         with pytest.raises(TranscriptArchiveError) as refused:
-            await archive.append(entry("activation:a1", ordinal=None, asked=_PRIVATE))
+            await archive.append(entry("activation:a1", asked=_PRIVATE))
 
         assert "already stands" not in str(refused.value)
         assert "activation:a1" in str(refused.value)
@@ -654,12 +645,8 @@ def test_keeping_forever_is_admitted(tmp_path: Path) -> None:
 
 @pytest.mark.parametrize(
     ("column", "value"),
-    # `2**63` is deliberately absent: a SQLite INTEGER tops out one below it, so an
-    # ordinal past `TranscriptEntry`'s ceiling cannot reach a row at all — the driver
-    # refuses the bind. The ceiling is asserted where it *is* reachable, on the model
-    # itself (`tests/core/test_transcript_types.py`).
-    [("disposition", "not-a-member"), ("ordinal", 0), ("occurred_at_us", -(2**62))],
-    ids=["a-foreign-disposition", "an-ordinal-below-the-floor", "an-instant-off-the-calendar"],
+    [("disposition", "not-a-member"), ("occurred_at_us", -(2**62))],
+    ids=["a-foreign-disposition", "an-instant-off-the-calendar"],
 )
 async def test_a_row_this_store_cannot_rebuild_raises_this_seams_own_error(
     tmp_path: Path, column: str, value: object
@@ -747,14 +734,12 @@ def _damage(path: Path, column: str, value: object) -> None:
         ("asked", _BINARY),
         ("replied", _BINARY),
         ("disposition", b"no_action_needed"),
-        ("ordinal", 1.5),
         ("occurred_at_us", 1.5),
     ],
     ids=[
         "a-blob-where-the-users-words-go",
         "a-blob-where-the-reply-goes",
         "a-blob-disposition",
-        "a-real-ordinal",
         "a-real-instant",
     ],
 )

@@ -56,7 +56,6 @@ def entry(  # noqa: PLR0913 — one keyword per field of the model this builds, 
     address: str = "c1:1",
     *,
     conversation: str = "c1",
-    ordinal: int | None = 1,
     at: datetime | None = None,
     asked: str | None = "where did I say that",
     replied: str | None = "you said it on Tuesday",
@@ -66,7 +65,6 @@ def entry(  # noqa: PLR0913 — one keyword per field of the model this builds, 
     return TranscriptEntry(
         address=address,
         conversation_id=conversation,
-        ordinal=ordinal,
         occurred_at=NOW if at is None else at,
         asked=asked,
         replied=replied,
@@ -139,30 +137,11 @@ class TranscriptArchiveWriterContract:
         self, writer: TranscriptArchiveWriter
     ) -> None:
         """What was handed in is what is held: no field is derived or dropped."""
-        written = entry(at=NOW - DAY, ordinal=7, disposition=ExchangeDisposition.STEP_EXECUTED)
+        written = entry(at=NOW - DAY, disposition=ExchangeDisposition.STEP_EXECUTED)
 
         await writer.append(written)
 
         assert (await self.held(writer))["c1:1"] == written
-
-    async def test_an_entry_with_no_ordinal_is_stored_and_read_back(
-        self, writer: TranscriptArchiveWriter
-    ) -> None:
-        """ADR-0283 §9: an entry carries no ordinal, and the archive holds it as such.
-
-        Addressed by the episode's own id and carrying ``None`` where an ordinal
-        was, which is what the writer supplies once it no longer allocates one
-        (ADR-0283 §14). A store that refused it, or that read it back as some
-        default number, would make the archive unwritable or would invent a
-        position nobody recorded.
-        """
-        written = entry("activation:a1", ordinal=None)
-
-        await writer.append(written)
-
-        held = (await self.held(writer))["activation:a1"]
-        assert held == written
-        assert held.ordinal is None
 
     async def test_an_absent_half_survives_as_absent(self, writer: TranscriptArchiveWriter) -> None:
         """``None`` is a fact about the pass, not a value to normalise to ``""``.
@@ -182,12 +161,12 @@ class TranscriptArchiveWriterContract:
     async def test_an_address_already_taken_is_refused_loudly(
         self, writer: TranscriptArchiveWriter
     ) -> None:
-        """ADR-0225 §2: a fault of ADR-0074 §3's class, failed rather than resolved.
+        """ADR-0225 §2: a colliding episode id, failed rather than resolved.
 
-        An address is derived from a unique conversation and a store-proved ordinal,
-        so a collision means a broken ordinal invariant or a foreign producer in the
-        reserved namespace. Neither is a race and a retry answers neither, so the
-        first entry stands and the second is refused.
+        An address is the episode's own id, ``activation:<activation_id>`` (ADR-0283
+        §2, §9), so a collision means a reissued activation id or a foreign producer
+        in the reserved namespace. Neither is a race and a retry answers neither, so
+        the first entry stands and the second is refused.
         """
         await writer.append(entry(asked="the first"))
 
@@ -234,8 +213,8 @@ class TranscriptArchiveWriterContract:
         self, writer: TranscriptArchiveWriter
     ) -> None:
         """One address, one entry — never the conversation it belongs to."""
-        await writer.append(entry("c1:1", ordinal=1))
-        await writer.append(entry("c1:2", ordinal=2))
+        await writer.append(entry("c1:1"))
+        await writer.append(entry("c1:2"))
 
         assert await writer.discard("c1:1") is True
 
@@ -245,9 +224,9 @@ class TranscriptArchiveWriterContract:
         self, writer: TranscriptArchiveWriter
     ) -> None:
         """The conversation-scoped destroy, resolved inside the archive (§5)."""
-        await writer.append(entry("c1:1", conversation="c1", ordinal=1))
-        await writer.append(entry("c1:2", conversation="c1", ordinal=2))
-        await writer.append(entry("c2:1", conversation="c2", ordinal=1))
+        await writer.append(entry("c1:1", conversation="c1"))
+        await writer.append(entry("c1:2", conversation="c1"))
+        await writer.append(entry("c2:1", conversation="c2"))
 
         assert await writer.discard_conversation("c1") == 2
 
@@ -371,7 +350,7 @@ class TranscriptArchiveContract:
         self, archive: TranscriptArchive
     ) -> None:
         """The base case, and "whole" is the substance: nothing is elided here."""
-        written = entry(at=NOW - DAY, ordinal=4)
+        written = entry(at=NOW - DAY)
         await self.store(archive, written)
 
         assert await archive.entry("c1:1") == written
@@ -398,9 +377,9 @@ class TranscriptArchiveContract:
         """§7's total order over the read that is ADR-0004 §6's export."""
         await self.store(
             archive,
-            entry("c1:1", at=NOW - 2 * DAY, ordinal=1),
-            entry("c1:2", at=NOW - DAY, ordinal=2),
-            entry("c2:1", conversation="c2", at=NOW, ordinal=1),
+            entry("c1:1", at=NOW - 2 * DAY),
+            entry("c1:2", at=NOW - DAY),
+            entry("c2:1", conversation="c2", at=NOW),
         )
 
         assert [one.address for one in await archive.entries()] == ["c2:1", "c1:2", "c1:1"]
@@ -416,8 +395,8 @@ class TranscriptArchiveContract:
         """
         await self.store(
             archive,
-            entry("c1:2", at=NOW, ordinal=2),
-            entry("c1:1", at=NOW, ordinal=1),
+            entry("c1:2", at=NOW),
+            entry("c1:1", at=NOW),
         )
 
         assert [one.address for one in await archive.entries()] == ["c1:1", "c1:2"]
@@ -426,9 +405,9 @@ class TranscriptArchiveContract:
         """A page is cut out of the total order, so the pages compose into it."""
         await self.store(
             archive,
-            entry("c1:1", at=NOW - 2 * DAY, ordinal=1),
-            entry("c1:2", at=NOW - DAY, ordinal=2),
-            entry("c1:3", at=NOW, ordinal=3),
+            entry("c1:1", at=NOW - 2 * DAY),
+            entry("c1:2", at=NOW - DAY),
+            entry("c1:3", at=NOW),
         )
 
         first = await archive.entries(limit=2)
@@ -444,45 +423,20 @@ class TranscriptArchiveContract:
         """ADR-0283 §9: a conversation's own read is by instant, then address.
 
         The one read whose order is **not** the newest-first total order. The
-        ordinals and the addresses below are each deliberately out of step with the
-        instants, and the entries are stored in neither order, so an implementation
-        that still sorted by ordinal, sorted by address, or returned insertion order
-        fails rather than coincidentally passing.
+        addresses below are deliberately out of step with the instants, and the
+        entries are stored in neither order, so an implementation that sorted by
+        address or returned insertion order fails rather than coincidentally passing.
         """
         await self.store(
             archive,
-            entry("c1:b", at=NOW - DAY, ordinal=2),
-            entry("c1:a", at=NOW, ordinal=1),
-            entry("c1:c", at=NOW - 2 * DAY, ordinal=3),
+            entry("c1:b", at=NOW - DAY),
+            entry("c1:a", at=NOW),
+            entry("c1:c", at=NOW - 2 * DAY),
         )
 
         read = await archive.conversation("c1")
 
         assert [one.address for one in read] == ["c1:c", "c1:b", "c1:a"]
-
-    async def test_a_conversation_orders_entries_without_an_ordinal_by_instant(
-        self, archive: TranscriptArchive
-    ) -> None:
-        """No ordinal is no position: an entry without one sorts by its instant alone.
-
-        A conversation whose older turns were archived with an ordinal and whose
-        newer ones without (ADR-0283 §14 retires the ordinal mid-life) still reads
-        in the order it was said. An implementation that ordered on the ordinal
-        first would put the entries without one together at one end — SQLite sorts
-        ``NULL`` first — rather than where they were said.
-        """
-        await self.store(
-            archive,
-            entry("c1:1", at=NOW - 3 * DAY, ordinal=1),
-            entry("activation:z", at=NOW - 2 * DAY, ordinal=None),
-            entry("c1:2", at=NOW - DAY, ordinal=2),
-            entry("activation:a", at=NOW, ordinal=None),
-        )
-
-        read = await archive.conversation("c1")
-
-        assert [one.address for one in read] == ["c1:1", "activation:z", "c1:2", "activation:a"]
-        assert [one.ordinal for one in read] == [1, None, 2, None]
 
     async def test_a_conversation_breaks_a_shared_instant_by_address(
         self, archive: TranscriptArchive
@@ -493,14 +447,13 @@ class TranscriptArchiveContract:
         share one. Ordering on it alone leaves that pair to insertion order in one
         implementation and to the query plan in another — the divergence between two
         conforming implementations ADR-0225 §7's totality clause is written to
-        forbid. The pair is stored out of address order and carries ordinals in the
-        opposite order, so an implementation returning it as it arrived, or by
-        ordinal, fails.
+        forbid. The pair is stored out of address order, so an implementation
+        returning it as it arrived fails.
         """
         await self.store(
             archive,
-            entry("c1:b", at=NOW, ordinal=1),
-            entry("c1:a", at=NOW, ordinal=2),
+            entry("c1:b", at=NOW),
+            entry("c1:a", at=NOW),
         )
 
         read = await archive.conversation("c1")
@@ -519,9 +472,9 @@ class TranscriptArchiveContract:
         """
         await self.store(
             archive,
-            entry("c1:b", ordinal=2),
-            entry("c1:c", ordinal=1),
-            entry("c1:a", ordinal=3),
+            entry("c1:b"),
+            entry("c1:c"),
+            entry("c1:a"),
         )
 
         first = await archive.conversation("c1", limit=2)
@@ -535,8 +488,8 @@ class TranscriptArchiveContract:
         """The grouping is a filter over one key and never a second scheme (§3)."""
         await self.store(
             archive,
-            entry("c1:1", conversation="c1", ordinal=1),
-            entry("c2:1", conversation="c2", ordinal=1),
+            entry("c1:1", conversation="c1"),
+            entry("c2:1", conversation="c2"),
         )
 
         assert [one.address for one in await archive.conversation("c2")] == ["c2:1"]
@@ -692,8 +645,8 @@ class TranscriptArchiveContract:
         """The same total order the enumerating reads use, with no ranking on top."""
         await self.store(
             archive,
-            entry("c1:1", at=NOW - DAY, ordinal=1, asked="Ravensworth twice Ravensworth"),
-            entry("c1:2", at=NOW, ordinal=2, asked="Ravensworth once"),
+            entry("c1:1", at=NOW - DAY, asked="Ravensworth twice Ravensworth"),
+            entry("c1:2", at=NOW, asked="Ravensworth once"),
         )
 
         assert [hit.address for hit in await archive.search("Ravensworth")] == ["c1:2", "c1:1"]
@@ -712,9 +665,9 @@ class TranscriptArchiveContract:
         """The page is cut out of the order, as it is for the other two reads."""
         await self.store(
             archive,
-            entry("c1:1", at=NOW - 2 * DAY, ordinal=1, asked="Ravensworth"),
-            entry("c1:2", at=NOW - DAY, ordinal=2, asked="Ravensworth"),
-            entry("c1:3", at=NOW, ordinal=3, asked="Ravensworth"),
+            entry("c1:1", at=NOW - 2 * DAY, asked="Ravensworth"),
+            entry("c1:2", at=NOW - DAY, asked="Ravensworth"),
+            entry("c1:3", at=NOW, asked="Ravensworth"),
         )
 
         first = await archive.search("Ravensworth", limit=2)
@@ -843,9 +796,9 @@ class TranscriptArchiveContract:
         """
         await self.store(
             archive,
-            entry("c1:1", conversation="c1", ordinal=1),
-            entry("c1:2", conversation="c1", ordinal=2),
-            entry("c2:1", conversation="c2", ordinal=1),
+            entry("c1:1", conversation="c1"),
+            entry("c1:2", conversation="c1"),
+            entry("c2:1", conversation="c2"),
         )
 
         assert await archive.discard("c1:1") is True
@@ -902,11 +855,10 @@ class TranscriptArchiveContract:
         """
         await self.store(
             archive,
-            entry("c1:1", at=NOW - 3 * DAY, ordinal=1, asked="Ravensworth"),
+            entry("c1:1", at=NOW - 3 * DAY, asked="Ravensworth"),
             entry(
                 "c1:2",
                 at=NOW - 3 * DAY - timedelta(microseconds=1),
-                ordinal=2,
                 asked="Ravensworth",
             ),
         )
@@ -927,8 +879,8 @@ class TranscriptArchiveContract:
         """§6: the predicate is evaluated against the setting in force at the read."""
         await self.store(
             archive,
-            entry("c1:1", at=NOW - DAY, ordinal=1),
-            entry("c1:2", at=NOW - 5 * DAY, ordinal=2),
+            entry("c1:1", at=NOW - DAY),
+            entry("c1:2", at=NOW - 5 * DAY),
         )
 
         assert len(await self.reopened(archive, 10 * DAY).entries()) == 2
@@ -945,8 +897,8 @@ class TranscriptArchiveContract:
         """
         await self.store(
             archive,
-            entry("c1:1", conversation="c1", at=NOW - 10 * DAY, ordinal=1),
-            entry("c2:1", conversation="c2", at=NOW - 10 * DAY, ordinal=1),
+            entry("c1:1", conversation="c1", at=NOW - 10 * DAY),
+            entry("c2:1", conversation="c2", at=NOW - 10 * DAY),
         )
         aged = self.reopened(archive, DAY)
 
@@ -975,11 +927,11 @@ class TranscriptArchiveContract:
         await self.store(
             archive,
             # Live, and the older of the two live entries.
-            entry("c1:1", at=NOW - 5 * DAY, ordinal=1, asked="Ravensworth"),
+            entry("c1:1", at=NOW - 5 * DAY, asked="Ravensworth"),
             # The oldest of the three, hidden by the horizon below.
-            entry("c1:2", at=NOW - 20 * DAY, ordinal=2, asked="Ravensworth"),
+            entry("c1:2", at=NOW - 20 * DAY, asked="Ravensworth"),
             # Newest, live.
-            entry("c1:3", at=NOW - DAY, ordinal=3, asked="Ravensworth"),
+            entry("c1:3", at=NOW - DAY, asked="Ravensworth"),
         )
         aged = self.reopened(archive, 10 * DAY)
 
@@ -1006,8 +958,8 @@ class TranscriptArchiveContract:
         """
         await self.store(
             archive,
-            entry("c1:1", at=NOW - 20 * DAY, ordinal=1),
-            entry("c1:2", at=NOW - DAY, ordinal=2),
+            entry("c1:1", at=NOW - 20 * DAY),
+            entry("c1:2", at=NOW - DAY),
         )
         aged = self.reopened(archive, 10 * DAY)
 
@@ -1025,9 +977,9 @@ class TranscriptArchiveContract:
         """§6: ``entries`` is what the reads would return."""
         await self.store(
             archive,
-            entry("c1:1", conversation="c1", ordinal=1),
-            entry("c1:2", conversation="c1", ordinal=2),
-            entry("c2:1", conversation="c2", ordinal=1),
+            entry("c1:1", conversation="c1"),
+            entry("c1:2", conversation="c1"),
+            entry("c2:1", conversation="c2"),
         )
         assert (await archive.size()).entries == 3
 
@@ -1054,15 +1006,12 @@ class TranscriptArchiveContract:
         self, archive: TranscriptArchive
     ) -> None:
         """It measures the storage, which is the figure the deferred cap turns on."""
-        await self.store(archive, entry("c1:1", ordinal=1))
+        await self.store(archive, entry("c1:1"))
         before = (await archive.size()).stored_bytes
 
         await self.store(
             archive,
-            *(
-                entry(f"c1:{n}", ordinal=n, asked="x" * 2000, replied="y" * 2000)
-                for n in range(2, 60)
-            ),
+            *(entry(f"c1:{n}", asked="x" * 2000, replied="y" * 2000) for n in range(2, 60)),
         )
 
         assert (await archive.size()).stored_bytes > before

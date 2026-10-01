@@ -31978,17 +31978,15 @@ class TranscriptEntry(BaseModel):
     confirmation line, not the tool line.
 
     **Keyed by ``address`` alone; a conversation is something an entry belongs
-    *to*** (§1, §3). ``conversation_id`` and ``ordinal`` are grouping fields and
-    never the key, so no implementation makes an entry's identity, storage or
-    retrieval depend on it having a conversation. A later ADR admitting a producer
-    of episodes belonging to no conversation may widen the two — making them
-    optional, or adding a second grouping beside them — and supersedes no clause of
-    ADR-0225 by doing it (§15).
+    *to*** (§1, §3). ``conversation_id`` is a grouping field and never the key, so
+    no implementation makes an entry's identity, storage or retrieval depend on it
+    having a conversation. A later ADR admitting a producer of episodes belonging
+    to no conversation may widen it — making it optional, or adding a second
+    grouping beside it — and supersedes no clause of ADR-0225 by doing it (§15).
 
-    **``ordinal`` is optional and orders nothing** (ADR-0283 §9): a conversation's
-    own read is by instant, then address, and an entry carries no ordinal once its
-    writer addresses it by the episode's id. The field remains, defaulting to
-    ``None``, only until nothing writes it (ADR-0283 §14, lane 7).
+    **It carries no ordinal** (ADR-0283 §9): a conversation's own read is by
+    instant ascending, then address, so nothing about an entry's position in its
+    conversation is a field of its own.
 
     **The address is the episode's own id** (§3), whatever produced that episode:
     the archive mints no identifier, derives none and predicts none. It is
@@ -32022,24 +32020,6 @@ class TranscriptEntry(BaseModel):
     )
     conversation_id: Identifier = Field(
         description="The conversation this turn belongs to — a grouping, never the key."
-    )
-    # Optional, and on its way out (ADR-0283 §9, §14 lane 3): an entry carries no
-    # ordinal once the writer addresses it by the episode's id, so `None` is what a
-    # writer that no longer allocates one supplies, and lane 7 removes the field once
-    # nothing writes it. Where a value *is* given it keeps `ConversationTurn.ordinal`'s
-    # own domain and not a second statement of it (ADR-0225 §10): the floor is that
-    # model's own shared constant, and the ceiling is the bound `ConversationStore`'s
-    # refusals are stated over throughout `core/protocols.py`
-    # (`[FIRST_TURN_ORDINAL, 2**63)`). No read orders by it: a conversation's own read
-    # is by instant, then address (ADR-0283 §9).
-    ordinal: int | None = Field(
-        default=None,
-        ge=FIRST_TURN_ORDINAL,
-        lt=2**63,
-        description=(
-            "The turn's position in its conversation, ConversationTurn's own domain; "
-            "None where the writer allocated none. Orders no read (ADR-0283 §9)."
-        ),
     )
     occurred_at: UtcInstant = Field(description="When the exchange this entry records happened.")
     asked: EncodableText | None = Field(

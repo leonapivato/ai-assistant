@@ -52,22 +52,15 @@ def _entry(  # noqa: PLR0913 — one keyword per field of the model this builds,
     address: str = "c1:1",
     *,
     conversation: str = "c1",
-    ordinal: int | None = None,
     at: datetime | None = None,
     asked: str | None = "where did I put the lease",
     replied: str | None = "in the blue folder, you said",
     disposition: ExchangeDisposition = ExchangeDisposition.NO_ACTION_NEEDED,
 ) -> TranscriptEntry:
-    """One archived turn, with every field defaulted to something a case can vary.
-
-    ``ordinal`` defaults to ``None``, the entry the writer produces once it addresses
-    a turn by its episode's id (ADR-0283 §9); a case passes one only to show that a
-    legacy entry still carrying it does not have it rendered.
-    """
+    """One archived turn, with every field defaulted to something a case can vary."""
     return TranscriptEntry(
         address=address,
         conversation_id=conversation,
-        ordinal=ordinal,
         occurred_at=_AT if at is None else at,
         asked=asked,
         replied=replied,
@@ -414,9 +407,8 @@ def test_an_entry_is_placed_in_its_conversation_by_its_instant(
     """ADR-0283 §9:2: "The CLI renders a transcript entry's instant where it rendered
     its ordinal."
 
-    Over an entry whose ordinal is ``None`` — what the writer produces once it
-    addresses a turn by its episode's id — and over every command that renders an
-    entry whole, the destroys' previews included. The instant sits on the
+    Over every command that renders an entry whole, the destroys' previews
+    included. The instant sits on the
     conversation line, in the ordinal's place, and no ``turn`` position is printed
     there.
     """
@@ -426,25 +418,6 @@ def test_an_entry_is_placed_in_its_conversation_by_its_instant(
 
     assert "Conversation: c1 at 2026-03-01 09:00:07.250000 UTC · no_action_needed" in screen
     assert "turn None" not in screen
-
-
-def test_a_legacy_entry_s_ordinal_is_not_rendered(
-    output: StringIO, monkeypatch: pytest.MonkeyPatch
-) -> None:
-    """ADR-0283 §9:1: an entry carries no ordinal, so one an older writer left is not
-    shown.
-
-    Until the field is removed (§14, lane 7) an archive can still hand over an entry
-    carrying one. Rendering it would put a position on the screen that orders nothing
-    — the conversation's read is by instant, then address — so a reader would be
-    shown a sequence the page is not in.
-    """
-    legacy = _entry(ordinal=4242)
-
-    _, screen = _run(output, monkeypatch, _engine(legacy), ["transcript", "show", "c1:1"])
-
-    assert "4242" not in screen
-    assert "Conversation: c1 at 2026-03-01 09:00:00.000000 UTC" in screen
 
 
 def test_two_turns_in_one_minute_render_two_instants(
