@@ -6913,9 +6913,7 @@ class Engine:
             RuntimeError: If the engine is shutting down.
             MemoryStoreError: If memory cannot be written.
             TranscriptArchiveError: If the transcript entry could not be destroyed.
-                Where the first discard failed, the memory record is left standing,
-                deliberately (ADR-0225 §5); where the closing one did, the entry is
-                left for a second ``forget`` of the same id to reach.
+                The memory record is left standing, deliberately (ADR-0225 §5).
         """
         self._reject_if_closing()
         named = identifier(record_id, name="record_id")
@@ -6923,24 +6921,20 @@ class Engine:
         return await self._tracked(self._forgotten(named), "forget", checked=True)
 
     async def _forgotten(self, record_id: str) -> bool:
-        """Discard the transcript entry, destroy the record, then discard again (ADR-0225 §5).
+        """Discard the transcript entry, then destroy the record (ADR-0225 §5).
 
-        One coroutine rather than two tracked calls, so the sequence is a single unit
-        of in-flight work: a shutdown drain that let the discard land and cancelled the
+        One coroutine rather than two tracked calls, so the pair is a single unit of
+        in-flight work: a shutdown drain that let the discard land and cancelled the
         deletion would produce exactly the residue §5 orders the sequence to avoid.
 
-        **The second discard closes a window ADR-0283 §7:1 opens.** A capture writes
-        its episode before its archive entry, so an entry can land after the first
-        discard here and before the episode is deleted. The capture reads its episode
-        back before ``record_turn`` and discards an entry whose episode is gone; this
-        discard covers the entry that landed before that read. A failure of it leaves
-        the entry where a second ``forget`` of the same id reaches it, since the first
-        discard is attempted whether or not a record stands.
+        **A capture in flight at this address is told first.** ADR-0283 §7:1 writes
+        the episode before its archive entry, so an entry could otherwise land after
+        this discard for a record this call destroyed;
+        ``ActivationWriter.forgetting`` makes that capture destroy its own writes.
         """
+        self._conversations.activation_writer.forgetting(record_id)
         await self._archive.discard(record_id)
-        destroyed = await self._memory.delete(record_id)
-        await self._archive.discard(record_id)
-        return destroyed
+        return await self._memory.delete(record_id)
 
     async def guard(self, record_id: Identifier) -> Placement | None:
         """Keep the record ``record_id`` names for the owner alone (ADR-0217 §7).

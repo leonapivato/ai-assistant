@@ -50,7 +50,6 @@ from ai_assistant.core.errors import (
     GrantError,
     InvalidGrantError,
     InvalidRecipientGrantError,
-    MemoryStoreConflictError,
     NotificationBudgetError,
     OversizedValueError,
     PlanningError,
@@ -1373,7 +1372,8 @@ class FakeAssistantEngine:
         if activation.output_failure is not None:
             raise activation.output_failure
         assert result is not None  # noqa: S101 — a successful dispatch returned a value
-        return captured_result(result, report, episode_id=activation.episode_id)
+        self._commit_episode(activation, report)
+        return captured_result(result, report, episode_id=_turn_episode(activation, report))
 
     def _validate_legacy_channel(
         self,
@@ -1541,7 +1541,8 @@ class FakeAssistantEngine:
         for value in values[:-1]:
             assert isinstance(value, ReplyChunk)  # noqa: S101 — stream prefix
             yield value
-        yield captured_result(result, report, episode_id=activation.episode_id)
+        self._commit_episode(activation, report)
+        yield captured_result(result, report, episode_id=_turn_episode(activation, report))
 
     def _fit_channel_stream(
         self,
@@ -1869,27 +1870,31 @@ class FakeAssistantEngine:
             "converse_spoken",
         )
 
-    def _allocate_episode(self, conversation_id: str, activation: FakeActivation) -> str:
-        """Record the activation's episode in its conversation (ADR-0283 §2, §7).
+    @staticmethod
+    def _allocate_episode(conversation_id: str, activation: FakeActivation) -> str:
+        """The address the activation's episode is written at (ADR-0283 §2).
 
         The id is the activation's own, ``activation:<activation_id>`` — the same value
-        on every channel, so nothing here derives it from the conversation or a count —
-        and membership is retained explicitly, standing in for the conversation's
-        channel.
-
-        **An address this double already holds is refused before anything moves**,
-        as the insert-if-absent write refuses it in production (§7:3): a colliding
-        activation id must not transfer the standing episode's membership, digest or
-        delivery to the second conversation.
-
-        Raises:
-            MemoryStoreConflictError: If the address already names an episode of a
-                conversation this double holds. The capture degrades.
+        on every channel, so nothing here derives it from the conversation or a count.
+        Nothing is recorded yet: :meth:`_commit_episode` does that once the insert has
+        landed.
         """
-        episode = f"activation:{activation.activation_id}"
-        if episode in self._episode_conversations:
-            msg = "an existing episode holds this address"
-            raise MemoryStoreConflictError(msg)
+        del conversation_id
+        return f"activation:{activation.activation_id}"
+
+    def _commit_episode(self, activation: FakeActivation, report: EpisodeCaptureReport) -> None:
+        """Record a landed conversational episode in its conversation (ADR-0283 §7).
+
+        **Only after the insert committed**, as ``record_turn`` follows the episode in
+        production: a capture that degraded — a colliding address the insert-if-absent
+        write refused (§7:3) among them — moves no membership, digest or delivery, so
+        forgetting its conversation cannot take another's episode. Membership is
+        retained explicitly, standing in for the conversation's channel.
+        """
+        conversation_id = activation.conversation_id
+        episode = report.episode_id
+        if report.state != "recorded" or conversation_id is None or episode is None:
+            return
         self._episode_conversations[episode] = conversation_id
         digest = self.conversations_held[conversation_id]
         self.conversations_held[conversation_id] = digest.model_copy(
@@ -1904,7 +1909,6 @@ class FakeAssistantEngine:
             and activation.outcome is not None
         ):
             self.deliveries[episode] = SpokenDelivery(state=SpokenDeliveryState.UNKNOWN)
-        return episode
 
     def _record_delivery(self, conversation_id: str, report: SpokenDeliveryReport) -> None:
         """Stamp the turn the report names, if it is this conversation's and unstamped.
@@ -2010,6 +2014,7 @@ class FakeAssistantEngine:
                 failure=failure,
                 check_output=lambda: self._checked(result, "resume"),
             )
+            self._commit_episode(admitted, report)
             if result is not None:
                 result = result.model_copy(
                     update={
@@ -5010,6 +5015,15 @@ class FakeAssistantEngine:
         page_argument(offset, name="offset")
         check_arguments(method, max_bytes=self._max_payload_bytes, limit=limit, offset=offset)
         self.calls.append((method, {"limit": limit, "offset": offset}))
+
+
+def _turn_episode(activation: FakeActivation, report: EpisodeCaptureReport) -> str | None:
+    """The episode a spoken turn discloses: the one recorded, and ``None`` otherwise.
+
+    ADR-0205 §1 as ADR-0283 §2 restates it: the id is carried exactly when a turn was
+    recorded, so a capture that degraded discloses none.
+    """
+    return activation.episode_id if report.state == "recorded" else None
 
 
 def _reserved_report(activation: FakeActivation) -> EpisodeCaptureReport:
