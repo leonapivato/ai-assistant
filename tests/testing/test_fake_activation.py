@@ -17,11 +17,13 @@ from ai_assistant.core.types import (
     ProcessingStatus,
     RecordedChannelTrigger,
     RecordedSpeechInput,
+    ReplyChunk,
     SpeechChannelPayload,
     SpokenAudio,
     SpokenAudioFormat,
     SpokenChannelResult,
     SpokenReply,
+    StreamingTextReply,
     TextChannelPayload,
     TextChannelResult,
     WholeTextReply,
@@ -198,3 +200,33 @@ async def test_a_conversation_colliding_with_a_standalone_episode_cannot_claim_i
     assert digest.recorded_turns == 0
     assert await engine.forget_conversation(conversation) is True
     assert await engine.episode_memory.get(address) is not None
+
+
+@pytest.mark.parametrize("abandon", [True, False])
+async def test_a_streamed_episode_is_in_its_conversation_from_the_first_chunk(
+    abandon: bool,
+) -> None:
+    """ADR-0283 §7, §8: a consumer that stops early, or a deletion between chunks,
+    still leaves the landed episode inside its conversation's deletion."""
+    engine = FakeAssistantEngine()
+    engine.start_conversation("room")
+    stream = engine.receive_streaming(
+        ChannelInput(
+            target=ChannelIdentity(channel_type="conversation", instance_id="room"),
+            payload=TextChannelPayload(text="hello there"),
+        ),
+        reply=StreamingTextReply(),
+        timeout=_BUDGET,
+    )
+    first = await anext(stream)
+    assert isinstance(first, ReplyChunk)
+    held = [record.id for record in await engine.episode_memory.export()]
+    assert len(held) == 1
+    if abandon:
+        await stream.aclose()  # type: ignore[attr-defined]  # the contract's own clause
+        assert await engine.forget_conversation("room") is True
+    else:
+        assert await engine.forget_conversation("room") is True
+        rest = [value async for value in stream]
+        assert rest
+    assert await engine.episode_memory.get(held[0]) is None
