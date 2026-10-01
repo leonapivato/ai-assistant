@@ -594,7 +594,9 @@ asyncio_mode = "auto"
 # continues. The slowest test takes about 40s under `just test-fast`, so the
 # default leaves roughly three times that much headroom; a test that legitimately
 # needs longer says so with `@pytest.mark.timeout(seconds)`. The `signal` method
-# fails only the one test; `thread` would exit the whole worker.
+# fails only the one test; `thread` would exit the whole worker. Its alarm is
+# one-shot, so a teardown that itself cannot finish (a leftover task that
+# swallows cancellation) still hangs, as it did before this deadline existed.
 timeout = 120
 timeout_method = "signal"
 markers = [
