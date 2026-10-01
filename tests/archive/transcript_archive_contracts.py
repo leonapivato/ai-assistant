@@ -56,7 +56,7 @@ def entry(  # noqa: PLR0913 — one keyword per field of the model this builds, 
     address: str = "c1:1",
     *,
     conversation: str = "c1",
-    ordinal: int = 1,
+    ordinal: int | None = 1,
     at: datetime | None = None,
     asked: str | None = "where did I say that",
     replied: str | None = "you said it on Tuesday",
@@ -144,6 +144,25 @@ class TranscriptArchiveWriterContract:
         await writer.append(written)
 
         assert (await self.held(writer))["c1:1"] == written
+
+    async def test_an_entry_with_no_ordinal_is_stored_and_read_back(
+        self, writer: TranscriptArchiveWriter
+    ) -> None:
+        """ADR-0283 §9: an entry carries no ordinal, and the archive holds it as such.
+
+        Addressed by the episode's own id and carrying ``None`` where an ordinal
+        was, which is what the writer supplies once it no longer allocates one
+        (ADR-0283 §14). A store that refused it, or that read it back as some
+        default number, would make the archive unwritable or would invent a
+        position nobody recorded.
+        """
+        written = entry("activation:a1", ordinal=None)
+
+        await writer.append(written)
+
+        held = (await self.held(writer))["activation:a1"]
+        assert held == written
+        assert held.ordinal is None
 
     async def test_an_absent_half_survives_as_absent(self, writer: TranscriptArchiveWriter) -> None:
         """``None`` is a fact about the pass, not a value to normalise to ``""``.
@@ -419,48 +438,76 @@ class TranscriptArchiveContract:
 
     # --- one conversation's own read (§7) -----------------------------------
 
-    async def test_a_conversation_reads_in_ordinal_order(self, archive: TranscriptArchive) -> None:
-        """ADR-0225 §7: a transcript's order is the order it was said in.
+    async def test_a_conversation_reads_by_instant_ascending(
+        self, archive: TranscriptArchive
+    ) -> None:
+        """ADR-0283 §9: a conversation's own read is by instant, then address.
 
-        The one read whose order is **not** the newest-first total order, and the
-        instants below are deliberately out of step with the ordinals so an
-        implementation that sorted by instant here fails rather than coincidentally
-        passing.
+        The one read whose order is **not** the newest-first total order. The
+        ordinals and the addresses below are each deliberately out of step with the
+        instants, and the entries are stored in neither order, so an implementation
+        that still sorted by ordinal, sorted by address, or returned insertion order
+        fails rather than coincidentally passing.
         """
         await self.store(
             archive,
-            entry("c1:2", at=NOW, ordinal=2),
-            entry("c1:1", at=NOW - DAY, ordinal=1),
-            entry("c1:3", at=NOW - 2 * DAY, ordinal=3),
+            entry("c1:b", at=NOW - DAY, ordinal=2),
+            entry("c1:a", at=NOW, ordinal=1),
+            entry("c1:c", at=NOW - 2 * DAY, ordinal=3),
         )
 
         read = await archive.conversation("c1")
 
-        assert [one.ordinal for one in read] == [1, 2, 3]
+        assert [one.address for one in read] == ["c1:c", "c1:b", "c1:a"]
 
-    async def test_a_conversation_breaks_a_shared_ordinal_by_address(
+    async def test_a_conversation_orders_entries_without_an_ordinal_by_instant(
         self, archive: TranscriptArchive
     ) -> None:
-        """ADR-0225 §7's order is **total**, and the ordinal alone does not make it so.
+        """No ordinal is no position: an entry without one sorts by its instant alone.
 
-        Nothing in §1, §3 or any schema this decision obliges makes an ordinal unique
-        within a conversation, so two entries can share one. Ordering on it alone
-        leaves that pair to insertion order in one implementation and to the query
-        plan in another — the divergence between two conforming implementations §7's
-        totality clause is written to forbid. The pair is stored out of address
-        order, so an implementation returning it in the order it arrived fails.
+        A conversation whose older turns were archived with an ordinal and whose
+        newer ones without (ADR-0283 §14 retires the ordinal mid-life) still reads
+        in the order it was said. An implementation that ordered on the ordinal
+        first would put the entries without one together at one end — SQLite sorts
+        ``NULL`` first — rather than where they were said.
+        """
+        await self.store(
+            archive,
+            entry("c1:1", at=NOW - 3 * DAY, ordinal=1),
+            entry("activation:z", at=NOW - 2 * DAY, ordinal=None),
+            entry("c1:2", at=NOW - DAY, ordinal=2),
+            entry("activation:a", at=NOW, ordinal=None),
+        )
+
+        read = await archive.conversation("c1")
+
+        assert [one.address for one in read] == ["c1:1", "activation:z", "c1:2", "activation:a"]
+        assert [one.ordinal for one in read] == [1, None, 2, None]
+
+    async def test_a_conversation_breaks_a_shared_instant_by_address(
+        self, archive: TranscriptArchive
+    ) -> None:
+        """The order is **total**, and the instant alone does not make it so.
+
+        Nothing makes an instant unique within a conversation, so two entries can
+        share one. Ordering on it alone leaves that pair to insertion order in one
+        implementation and to the query plan in another — the divergence between two
+        conforming implementations ADR-0225 §7's totality clause is written to
+        forbid. The pair is stored out of address order and carries ordinals in the
+        opposite order, so an implementation returning it as it arrived, or by
+        ordinal, fails.
         """
         await self.store(
             archive,
             entry("c1:b", at=NOW, ordinal=1),
-            entry("c1:a", at=NOW - DAY, ordinal=1),
+            entry("c1:a", at=NOW, ordinal=2),
         )
 
         read = await archive.conversation("c1")
 
         assert [one.address for one in read] == ["c1:a", "c1:b"]
 
-    async def test_a_conversation_pages_through_a_shared_ordinal_without_loss(
+    async def test_a_conversation_pages_through_a_shared_instant_without_loss(
         self, archive: TranscriptArchive
     ) -> None:
         """What the tie-break is *for*: pages that compose into the whole transcript.
@@ -472,9 +519,9 @@ class TranscriptArchiveContract:
         """
         await self.store(
             archive,
-            entry("c1:b", ordinal=1),
-            entry("c1:a", ordinal=1),
-            entry("c1:c", ordinal=2),
+            entry("c1:b", ordinal=2),
+            entry("c1:c", ordinal=1),
+            entry("c1:a", ordinal=3),
         )
 
         first = await archive.conversation("c1", limit=2)
@@ -921,16 +968,17 @@ class TranscriptArchiveContract:
         the shape that separates the implementations is a hidden entry in the
         **middle** of the order — paging first takes the newest two, drops one, and
         answers a short page where the contract owes two. A conversation's own read
-        is ordered by *ordinal*, which age does not determine, so §13's literal shape
-        is reachable there and the case below asserts it.
+        is oldest first (ADR-0283 §9), so there the hidden entry sorts *ahead* of
+        both live ones, and paging first takes it and one live entry, drops it, and
+        answers one where two are owed.
         """
         await self.store(
             archive,
-            # Ordinal 1, oldest, live: the entry a page-then-filter never reaches.
+            # Live, and the older of the two live entries.
             entry("c1:1", at=NOW - 5 * DAY, ordinal=1, asked="Ravensworth"),
-            # Ordinal 2, in the middle by instant, hidden by the horizon below.
+            # The oldest of the three, hidden by the horizon below.
             entry("c1:2", at=NOW - 20 * DAY, ordinal=2, asked="Ravensworth"),
-            # Ordinal 3, newest, live.
+            # Newest, live.
             entry("c1:3", at=NOW - DAY, ordinal=3, asked="Ravensworth"),
         )
         aged = self.reopened(archive, 10 * DAY)
@@ -940,15 +988,18 @@ class TranscriptArchiveContract:
             "c1:3",
             "c1:1",
         ]
-        assert [one.ordinal for one in await aged.conversation("c1", limit=2)] == [1, 3]
+        assert [one.address for one in await aged.conversation("c1", limit=2)] == [
+            "c1:1",
+            "c1:3",
+        ]
 
     async def test_a_hidden_entry_does_not_empty_a_conversations_first_page(
         self, archive: TranscriptArchive
     ) -> None:
         """§13 item 8's literal shape, on the read where it is reachable.
 
-        A conversation's read is ordered by ordinal, which the horizon does not
-        determine, so a hidden entry really can sort *ahead* of a live one — and an
+        A conversation's read is oldest first (ADR-0283 §9), so a hidden entry — the
+        horizon hides the oldest — sorts *ahead* of every live one, and an
         implementation that paged before it filtered answers ``limit=1`` with an
         empty first page, leaving the live entry unreachable through the ordinary
         read.
@@ -960,7 +1011,7 @@ class TranscriptArchiveContract:
         )
         aged = self.reopened(archive, 10 * DAY)
 
-        assert [one.ordinal for one in await aged.conversation("c1", limit=1)] == [2]
+        assert [one.address for one in await aged.conversation("c1", limit=1)] == ["c1:2"]
 
     # --- the size report (§6, §13 item 17) ----------------------------------
 

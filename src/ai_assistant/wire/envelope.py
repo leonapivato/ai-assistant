@@ -2393,7 +2393,8 @@ from ai_assistant.wire.errors import (
 #: 62: ADR-0281 adds the recall result, the recall stage and rule, and the memory referent.
 #: 63: ADR-0281 moves EpisodeProcessingRecord to schema_version 4 with its no-recall-on-resume rule.
 #: 64: ADR-0282 adds the windows stage and its rule to the wire-carried stage record.
-PROTOCOL_VERSION: Final[int] = 64
+#: 65: ADR-0283 makes the wire-carried TranscriptEntry.ordinal optional (None admitted).
+PROTOCOL_VERSION: Final[int] = 65
 
 #: ADR-0085 §8a: "The correlation id is a UUID string and is at most 36 bytes.
 #: Bounding it is what makes the reserve a constant rather than an aspiration; a

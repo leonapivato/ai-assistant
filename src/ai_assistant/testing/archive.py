@@ -493,7 +493,7 @@ class FakeTranscriptArchive:
     async def conversation(
         self, conversation_id: str, *, limit: int = 50, offset: int = 0
     ) -> list[TranscriptEntry]:
-        """One conversation's entries, in ordinal order (§7).
+        """One conversation's entries, by instant ascending, then address (ADR-0283 §9).
 
         Args:
             conversation_id: The conversation to read.
@@ -511,14 +511,16 @@ class FakeTranscriptArchive:
         named = _check_named(conversation_id, name="conversation_id")
         _check_page(limit, offset)
         self._refuse("read a conversation's transcript")
-        # `(ordinal, address)` and not `ordinal` alone: §7's order is **total**, and
-        # nothing makes an ordinal unique within a conversation. Sorting on the
-        # ordinal alone would leave two entries sharing one in *insertion* order
-        # here and in query-plan order in the durable store — the divergence
-        # between two conforming implementations this suite exists to prevent.
+        # `(occurred_at, address)` and not the instant alone (ADR-0283 §9): §7's
+        # order is **total**, and nothing makes an instant unique within a
+        # conversation. Sorting on the instant alone would leave two entries sharing
+        # one in *insertion* order here and in query-plan order in the durable
+        # store — the divergence between two conforming implementations this suite
+        # exists to prevent. The instant is compared as the aware `datetime` it is,
+        # never as a float `timestamp()`, for `_newest_first`'s precision reason.
         rows = sorted(
             (row for row in self._live() if row.conversation_id == named),
-            key=lambda row: (row.ordinal, row.address),
+            key=lambda row: (row.occurred_at, row.address),
         )
         return rows[offset : offset + limit]
 

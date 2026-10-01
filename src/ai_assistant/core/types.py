@@ -31922,6 +31922,11 @@ class TranscriptEntry(BaseModel):
     optional, or adding a second grouping beside them — and supersedes no clause of
     ADR-0225 by doing it (§15).
 
+    **``ordinal`` is optional and orders nothing** (ADR-0283 §9): a conversation's
+    own read is by instant, then address, and an entry carries no ordinal once its
+    writer addresses it by the episode's id. The field remains, defaulting to
+    ``None``, only until nothing writes it (ADR-0283 §14, lane 7).
+
     **The address is the episode's own id** (§3), whatever produced that episode:
     the archive mints no identifier, derives none and predicts none. It is
     *stable* — never changed, never reissued — and stays a valid name for this entry
@@ -31955,16 +31960,23 @@ class TranscriptEntry(BaseModel):
     conversation_id: Identifier = Field(
         description="The conversation this turn belongs to — a grouping, never the key."
     )
-    # `ConversationTurn.ordinal`'s own domain and not a second statement of it
-    # (ADR-0225 §10): the floor is that model's own shared constant, and the ceiling
-    # is the bound `ConversationStore`'s refusals are stated over throughout
-    # `core/protocols.py` (`[FIRST_TURN_ORDINAL, 2**63)`). Written as the ratified
-    # shape spells it rather than as a constant of the archive's own, which §10
-    # forbids in terms.
-    ordinal: int = Field(
+    # Optional, and on its way out (ADR-0283 §9, §14 lane 3): an entry carries no
+    # ordinal once the writer addresses it by the episode's id, so `None` is what a
+    # writer that no longer allocates one supplies, and lane 7 removes the field once
+    # nothing writes it. Where a value *is* given it keeps `ConversationTurn.ordinal`'s
+    # own domain and not a second statement of it (ADR-0225 §10): the floor is that
+    # model's own shared constant, and the ceiling is the bound `ConversationStore`'s
+    # refusals are stated over throughout `core/protocols.py`
+    # (`[FIRST_TURN_ORDINAL, 2**63)`). No read orders by it: a conversation's own read
+    # is by instant, then address (ADR-0283 §9).
+    ordinal: int | None = Field(
+        default=None,
         ge=FIRST_TURN_ORDINAL,
         lt=2**63,
-        description="The turn's position in its conversation; ConversationTurn's own domain.",
+        description=(
+            "The turn's position in its conversation, ConversationTurn's own domain; "
+            "None where the writer allocated none. Orders no read (ADR-0283 §9)."
+        ),
     )
     occurred_at: UtcInstant = Field(description="When the exchange this entry records happened.")
     asked: EncodableText | None = Field(
