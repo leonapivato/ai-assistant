@@ -132,6 +132,15 @@ class ActivationWriter:
         episode may have landed and the conversation was not verified standing, so a
         cancellation of this call cannot strand an episode on a conversation the user
         deleted.
+
+        **An entry whose episode the user forgot meanwhile is discarded** (ADR-0225
+        §5). §7:1 writes the episode before the archive entry, so a record-scoped
+        ``forget`` landing between the two finds no entry to discard and deletes the
+        episode, and the entry would then be written for a record the user was told
+        was gone. So once an entry may have been written, the episode is read back
+        before ``record_turn``: where it is gone, ``record_turn`` is not called and the
+        fence discards the entry. ``forget`` discards again after its delete, which
+        covers an entry landing after its first discard and before this read.
         """
         if isinstance(state.trigger, RecordedResumeTrigger) and state.conversation_id is None:
             capture_loss("association", "unresolved")
@@ -165,7 +174,8 @@ class ActivationWriter:
             if conversation_id is not None and writes.episode_confirmed:
                 if owed:
                     await self._archive_once(state, conversation_id, episode, writes)
-                await self._record_turn(state, conversation_id, episode, writes)
+                if not writes.archive_possible or await self._held(address):
+                    await self._record_turn(state, conversation_id, episode, writes)
         finally:
             if (
                 conversation_id is not None
@@ -249,6 +259,18 @@ class ActivationWriter:
         writes.verified = True
         state.recorded_episode_id = episode.id
 
+    async def _held(self, address: str) -> bool:
+        """Whether the episode this capture wrote still stands (ADR-0225 §5).
+
+        An unreadable store answers ``True``: the ordinary case is that it stands, and
+        a ``record_turn`` withheld on a guess would cost the turn its delivery row.
+        """
+        try:
+            return await self._memory.get(address) is not None
+        except Exception:
+            capture_loss("verify_episode", "uncertain")
+            return True
+
     async def _fence(self, conversation_id: str, address: str, writes: _Writes) -> None:
         """Destroy what this capture wrote where its conversation is gone (§7:2, §7:4).
 
@@ -260,6 +282,9 @@ class ActivationWriter:
 
         **The archive entry goes first**, on ADR-0225 §5's rule that the residue of a
         partial failure must be one the user can still reach and destroy.
+
+        **Where the conversation stands, an entry is still discarded if its episode is
+        gone**, because the user forgot the record while this capture ran (ADR-0225 §5).
         """
         if not writes.gone:
             try:
@@ -268,20 +293,27 @@ class ActivationWriter:
                 capture_loss("verify", "uncertain")
                 return
             if standing is not None:
+                if writes.archive_possible and not await self._held(address):
+                    await self._discard(address)
                 return
-        if writes.archive_possible:
-            try:
-                await self._archive.discard(address)
-            except Exception:
-                capture_loss("compensate_archive", "failed")
-                # Keep the memory record reachable until archive destruction
-                # succeeds, as on the existing explicit-forget path.
-                return
+        if writes.archive_possible and not await self._discard(address):
+            # Keep the memory record reachable until archive destruction succeeds,
+            # as on the existing explicit-forget path.
+            return
         if writes.episode_possible:
             try:
                 await self._memory.delete(address)
             except Exception:
                 capture_loss("compensate_episode", "failed")
+
+    async def _discard(self, address: str) -> bool:
+        """Discard this capture's archive entry, answering whether that succeeded."""
+        try:
+            await self._archive.discard(address)
+        except Exception:
+            capture_loss("compensate_archive", "failed")
+            return False
+        return True
 
     def _bounded(
         self,

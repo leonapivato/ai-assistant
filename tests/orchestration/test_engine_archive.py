@@ -245,6 +245,32 @@ async def test_forget_discards_the_transcript_before_it_destroys_the_record() ->
     assert await harness.memory.get(entry.address) is None
 
 
+async def test_forget_discards_an_entry_that_lands_between_its_discard_and_its_delete(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """ADR-0225 §5 under ADR-0283 §7:1: a capture writes its entry after its episode.
+
+    So an entry can land after ``forget``'s first discard and before the record is
+    destroyed; the closing discard is what keeps it from outliving the record.
+    """
+    harness = Harness(tools=(tool(),))
+    await harness.engine.converse("where did I say that", timeout=PATIENT)
+    (entry,) = await harness.archive.entries()
+    original = harness.memory.delete
+
+    async def delete(record_id: str) -> bool:
+        # A concurrent capture's append, landing between the two halves of forget.
+        await harness.archive.writer().append(entry)
+        return await original(record_id)
+
+    monkeypatch.setattr(harness.memory, "delete", delete)
+
+    assert await harness.engine.forget(entry.address) is True
+
+    assert await harness.archive.entry(entry.address) is None
+    assert await harness.memory.get(entry.address) is None
+
+
 async def test_forget_reaches_the_transcript_of_a_record_that_is_already_gone() -> None:
     """ADR-0225 §5: it attempts the discard whether or not a live record stands there.
 

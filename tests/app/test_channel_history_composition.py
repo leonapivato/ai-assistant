@@ -385,29 +385,36 @@ async def test_deleting_a_conversation_deletes_every_episode_on_its_channel(
 async def test_an_episode_write_that_commits_then_cancels_on_a_deleted_conversation_leaves_none(
     composed: Composed, monkeypatch: pytest.MonkeyPatch
 ) -> None:
-    """§7: the conversation is deleted meanwhile; the drain's compensation removes it."""
+    """§7:4: the deletion sweep finishes first, then the episode lands, then cancels.
+
+    The conversation's deletion runs to completion before the delayed write commits,
+    so the sweep cannot have taken the episode: what removes it is the writer's
+    compensation, run through the drain (ADR-0275 §8:11).
+    """
     first = await composed.say("hello")
     conversation_id = _conversation(first)
     memory = composed.memory
     original = memory.write_atomic
-    cancelled: list[str] = []
+    landed: list[str] = []
 
     async def write_atomic(writes: Sequence[MemoryWrite]) -> Sequence[str]:
-        written = await original(writes)
         episode = [write.record.id for write in writes if write.record.id.startswith("activation:")]
-        if episode and episode[0] != first.capture.episode_id and not cancelled:
-            cancelled.append(episode[0])
-            await composed.engine.forget_conversation(conversation_id)
-            raise asyncio.CancelledError
-        return written
+        if not episode or episode[0] == first.capture.episode_id or landed:
+            return await original(writes)
+        assert await composed.engine.forget_conversation(conversation_id) is True
+        assert await composed.held(conversation_id) == [], "the sweep has finished"
+        await original(writes)
+        assert await memory.get(episode[0]) is not None, "the episode landed after the sweep"
+        landed.append(episode[0])
+        raise asyncio.CancelledError
 
     monkeypatch.setattr(memory, "write_atomic", write_atomic)
 
     with pytest.raises(asyncio.CancelledError):
         await asyncio.ensure_future(composed.say("and again", conversation_id))
 
-    assert cancelled, "the second episode's write committed and then cancelled"
-    assert await memory.get(cancelled[0]) is None
+    assert landed, "the second episode's write committed and then cancelled"
+    assert await memory.get(landed[0]) is None
     assert await composed.held(conversation_id) == []
 
 

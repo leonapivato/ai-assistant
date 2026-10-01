@@ -130,3 +130,36 @@ async def test_recovered_control_degrades_and_replay_does_not_capture() -> None:
     second = await engine.resume(confirmation.token, approved=False, timeout=_BUDGET)
     assert not second.capture_degraded
     assert await engine.episode_memory.export() == []
+
+
+async def test_a_colliding_activation_id_moves_no_episode_to_the_second_conversation() -> None:
+    """ADR-0283 §2, §7:3: insert-if-absent refuses the second write, and nothing moves.
+
+    Forgetting the second conversation must not take the first one's episode with it.
+    """
+    engine = FakeAssistantEngine()
+    engine.activation_id_factory = lambda: "00000000-0000-4000-8000-0000000000aa"
+
+    async def new_conversation() -> tuple[str, str]:
+        result = await engine.receive(
+            ChannelInput(target=NewConversation(), payload=TextChannelPayload(text="hello")),
+            reply=WholeTextReply(),
+            timeout=_BUDGET,
+        )
+        assert result.channel is not None
+        return result.channel.instance_id, result.capture.state
+
+    first, first_state = await new_conversation()
+    second, second_state = await new_conversation()
+    address = "activation:00000000-0000-4000-8000-0000000000aa"
+
+    assert first != second
+    assert (first_state, second_state) == ("recorded", "degraded")
+    second_digest = await engine.conversation(second)
+    assert second_digest is not None
+    assert second_digest.recorded_turns == 0
+    assert await engine.forget_conversation(second) is True
+    assert await engine.episode_memory.get(address) is not None
+    first_digest = await engine.conversation(first)
+    assert first_digest is not None
+    assert first_digest.recorded_turns == 1
