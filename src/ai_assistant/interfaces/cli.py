@@ -9985,6 +9985,19 @@ def _render_transcript_entries(
 def _render_transcript_entry(entry: TranscriptEntry) -> None:
     """Render one turn whole: its address, when it was, and both halves (ADR-0225 §1).
 
+    **The turn is placed in its conversation by its instant, never by an ordinal**
+    (ADR-0283 §9). The instant is rendered where the ordinal was, and the ordinal is
+    not rendered at all: an entry carries none once the writer addresses it by its
+    episode's id, and a conversation's own read orders by instant, then address.
+
+    **At the microsecond, through** :func:`_decided_at` **rather than**
+    :func:`_when`, because the instant is now the key the conversation's read is
+    ordered by. Two turns of one exchange are routinely seconds apart, so at minute
+    precision a page would render several turns at one instant — an order the reader
+    is shown and cannot account for, which is the reason ``_decided_at`` gives for a
+    record's instant. It is rendered once: a second, minute-grained ``When:`` line
+    beside it would show one value at two precisions.
+
     **An absent half is stated rather than skipped**, because the two absences mean
     different things and a reader can act on both: no user words is a turn the system
     drove on its own — a parked step's resolution, whose utterance was archived at its
@@ -9994,10 +10007,9 @@ def _render_transcript_entry(entry: TranscriptEntry) -> None:
     parked reads in the transcript as a question nobody answered".
     """
     _print(f"\n  [bold cyan]{_safe(entry.address)}[/]")
-    _print(f"  [dim]When:[/] {_when(entry.occurred_at)}")
     _print(
         f"  [dim]Conversation:[/] {_safe(entry.conversation_id)} "
-        f"[dim]turn[/] {entry.ordinal} [dim]·[/] {_safe(entry.disposition.value)}"
+        f"[dim]at[/] {_decided_at(entry.occurred_at)} [dim]·[/] {_safe(entry.disposition.value)}"
     )
     if entry.asked is None:
         _print("  [dim]You said nothing on this turn.[/]")
