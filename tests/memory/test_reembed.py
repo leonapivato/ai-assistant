@@ -23,7 +23,7 @@ from typing import TYPE_CHECKING
 
 import pytest
 import sqlite_vec
-from memory_store_contract import _activation_episode
+from memory_store_contract import _CHANNEL_A, _activation_episode, _on_channel
 
 from ai_assistant.core.errors import (
     EmbeddingDeadlineExpiredError,
@@ -1260,7 +1260,7 @@ async def test_reembedding_preserves_processing_record_marker_and_digest(tmp_pat
     assert before is not None
     outcome = await Reembedder(store=path, embedder=HashingEmbedder(dimensions=_NEW)).run()
     assert outcome.swapped
-    assert _read(path, "SELECT version FROM episode_record_format") == [(4,)]
+    assert _read(path, "SELECT version FROM episode_record_format") == [(5,)]
     opened = SqliteMemoryStore(
         traces_sink=FakeTraceSink(), path=path, embedder=HashingEmbedder(dimensions=_NEW)
     )
@@ -1279,4 +1279,70 @@ async def test_reembed_reports_a_corrupt_format_marker_as_a_store_error(tmp_path
     before = path.read_bytes()
     with pytest.raises(MemoryStoreError, match="cannot read episode record format"):
         await Reembedder(store=path, embedder=HashingEmbedder(dimensions=_NEW)).run()
+    assert path.read_bytes() == before
+
+
+def _channel_store(path: Path, dimensions: int) -> SqliteMemoryStore:
+    return SqliteMemoryStore(
+        traces_sink=FakeTraceSink(), path=path, embedder=HashingEmbedder(dimensions=dimensions)
+    )
+
+
+async def test_reembedding_keeps_channels_and_never_reissues_a_number(tmp_path: Path) -> None:
+    """ADR-0283 §1 across a build-and-swap: the channel columns and the counter come along.
+
+    The top-numbered episode is deleted before the run, so a swapped store whose
+    ``AUTOINCREMENT`` mark was rebuilt from the rows it was given would issue that
+    number again; and a copy that left the channel columns ``NULL`` would read the
+    channel as empty while every record round-tripped intact.
+    """
+    path = tmp_path / "memory.db"
+    await _seed(path, [_on_channel(f"a{index}") for index in range(3)])
+    original = _channel_store(path, _OLD)
+    try:
+        held = await original.channel_episode_ids(_CHANNEL_A, limit=10)
+        await original.delete("a2")
+    finally:
+        original.close()
+
+    outcome = await Reembedder(store=path, embedder=HashingEmbedder(dimensions=_NEW)).run()
+
+    assert outcome.swapped
+    opened = _channel_store(path, _NEW)
+    try:
+        page = await opened.channel_episodes(_CHANNEL_A, limit=10)
+        assert [(entry.record.id, entry.number) for entry in page.entries] == [
+            (entry.episode_id, entry.number) for entry in held[:2]
+        ]
+        await opened.add(_on_channel("after"))
+        (after,) = await opened.channel_episode_ids(_CHANNEL_A, after=held[1].number, limit=10)
+        assert after.episode_id == "after"
+        assert after.number > held[2].number
+    finally:
+        opened.close()
+
+
+async def test_reembedding_refuses_a_store_whose_counter_fell_back(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """The verification catches a swapped store standing below the live one's counter."""
+    path = tmp_path / "memory.db"
+    await _seed(path, [_on_channel(f"a{index}") for index in range(3)])
+    original = _channel_store(path, _OLD)
+    try:
+        await original.delete("a2")
+    finally:
+        original.close()
+    finalise = Reembedder._finalise
+
+    def _forgetful(self: Reembedder, source: sqlite3.Connection, work: sqlite3.Connection) -> None:
+        finalise(self, source, work)
+        work.execute("UPDATE sqlite_sequence SET seq = 1 WHERE name = 'records'")
+
+    monkeypatch.setattr(Reembedder, "_finalise", _forgetful)
+    before = path.read_bytes()
+
+    with pytest.raises(MemoryStoreError, match="record counter"):
+        await Reembedder(store=path, embedder=HashingEmbedder(dimensions=_NEW)).run()
+
     assert path.read_bytes() == before

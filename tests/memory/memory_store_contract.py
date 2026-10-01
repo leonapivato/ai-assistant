@@ -47,6 +47,7 @@ if TYPE_CHECKING:
 from ai_assistant.core.types import (
     MAX_EVIDENCE_CITATIONS,
     MAX_TOPICS_PER_RECORD,
+    ActivationLinks,
     ActivationRecall,
     ActivationUnderstanding,
     Attestation,
@@ -67,6 +68,7 @@ from ai_assistant.core.types import (
     MemoryWrite,
     MemoryWriteMode,
     Modality,
+    ParkedBinding,
     Placement,
     PlacementReach,
     PlacementSetter,
@@ -903,6 +905,48 @@ class _AdvanceWalkOp:
         assert (await store.walk_records("cancel-b", limit=5)).position is None
 
 
+class _ChannelEpisodesOp(_ReadOp):
+    """``channel_episodes`` — ADR-0283 §3:1's read, its own lock site."""
+
+    name = "channel_episodes"
+
+    def first(self, store: MemoryStore) -> Coroutine[Any, Any, object]:
+        """Read channel A — the call that is cancelled."""
+        return store.channel_episodes(_CHANNEL_A, limit=5)
+
+    def second(self, store: MemoryStore) -> Coroutine[Any, Any, object]:
+        """Read channel B concurrently."""
+        return store.channel_episodes(_CHANNEL_B, limit=5)
+
+
+class _EpisodeParkingOp(_ReadOp):
+    """``episode_parking`` — ADR-0283 §3:3's lookup, its own lock site."""
+
+    name = "episode_parking"
+
+    def first(self, store: MemoryStore) -> Coroutine[Any, Any, object]:
+        """Look one binding up — the call that is cancelled."""
+        return store.episode_parking(ParkedBinding(execution_id="cancel", step_id="a"))
+
+    def second(self, store: MemoryStore) -> Coroutine[Any, Any, object]:
+        """Look another binding up concurrently."""
+        return store.episode_parking(ParkedBinding(execution_id="cancel", step_id="b"))
+
+
+class _ChannelEpisodeIdsOp(_ReadOp):
+    """``channel_episode_ids`` — ADR-0283 §3:5's enumeration, its own lock site."""
+
+    name = "channel_episode_ids"
+
+    def first(self, store: MemoryStore) -> Coroutine[Any, Any, object]:
+        """Enumerate channel A — the call that is cancelled."""
+        return store.channel_episode_ids(_CHANNEL_A, limit=5)
+
+    def second(self, store: MemoryStore) -> Coroutine[Any, Any, object]:
+        """Enumerate channel B concurrently."""
+        return store.channel_episode_ids(_CHANNEL_B, limit=5)
+
+
 #: Every locked ``MemoryStore`` operation ADR-0060's case is run against: each is a
 #: distinct ``async with self._lock`` site with its own ``_run_to_completion``. The
 #: writes came first (#370); the reads are the same invariant on the other half of
@@ -923,6 +967,9 @@ _CANCELLATION_OPS: tuple[Callable[[], _CancellationOp], ...] = (
     _ExportOp,
     _WalkRecordsOp,
     _AdvanceWalkOp,
+    _ChannelEpisodesOp,
+    _EpisodeParkingOp,
+    _ChannelEpisodeIdsOp,
 )
 
 
@@ -953,6 +1000,62 @@ def _activation_episode(record_id: str, *, eligible: bool) -> EpisodicMemory:
             stages=ended_pass(_IN_WINDOW),
         ),
     )
+
+
+#: The channels ADR-0283's cases read. Two instances of one type, so a store that
+#: matched on the type alone, or on the instance alone, reads the wrong episodes.
+_CHANNEL_A = ChannelIdentity(channel_type="informational_event", instance_id="a")
+_CHANNEL_B = ChannelIdentity(channel_type="informational_event", instance_id="b")
+#: The same instance under another type, carried by a resume trigger, which admits
+#: any channel.
+_CONVERSATION_A = ChannelIdentity(channel_type="conversation", instance_id="a")
+
+
+def _on_channel(  # noqa: PLR0913 — one keyword per ADR-0283 axis a case may need to vary
+    record_id: str,
+    *,
+    channel: ChannelIdentity | None = _CHANNEL_A,
+    eligible: bool = True,
+    parks: ParkedBinding | None = None,
+    parked: ParkedBinding | None = None,
+    expires_at: datetime | None = None,
+    validity: Validity | None = None,
+) -> EpisodicMemory:
+    """An activation episode on ``channel``, as ADR-0283 §3 reads one.
+
+    An ``informational_event`` channel rides a channel trigger; any other channel,
+    and ``None`` (an episode on no channel), ride a resume trigger, which is the one
+    trigger admitting an arbitrary channel.
+    """
+    base = _activation_episode(record_id, eligible=eligible)
+    assert base.processing_record is not None
+    record = base.processing_record.model_copy(
+        update={"links": ActivationLinks(parks=parks, parked=parked)}
+    )
+    if channel is None or channel.channel_type != "informational_event":
+        record = record.model_copy(
+            update={
+                "trigger": RecordedResumeTrigger(channel=channel, approved=True),
+                "stages": (),
+            }
+        )
+    else:
+        assert isinstance(record.trigger, RecordedChannelTrigger)
+        trigger = record.trigger.model_copy(update={"target": channel, "channel": channel})
+        record = record.model_copy(update={"trigger": trigger})
+    return base.model_copy(
+        update={
+            "processing_record": record,
+            "expires_at": expires_at,
+            "validity": validity or Validity(),
+        }
+    )
+
+
+async def _numbers(store: MemoryStore, channel: ChannelIdentity) -> dict[str, int]:
+    """Every episode ``store`` holds on ``channel``, id to number, in number order."""
+    held = await store.channel_episode_ids(channel, limit=1000)
+    return {entry.episode_id: entry.number for entry in held}
 
 
 class MemoryStoreContract:
@@ -5640,3 +5743,281 @@ class MemoryStoreContract:
 
         assert await store.walk_records("named", limit=9) == kept_named
         assert await store.walk_records("sibling", limit=9) == kept_sibling
+
+    # --- ADR-0283 §1, §3: a channel's episodes, by number ---------------------
+
+    async def test_episodes_are_numbered_by_one_counter_that_never_reissues(
+        self, store: MemoryStore
+    ) -> None:
+        """§1: positive, increasing on insertion, kept by an upsert, released by nothing.
+
+        A deletion, ``purge_expired`` and ``clear`` each remove the highest-numbered
+        record before the next insertion, because that is the record whose number a
+        store reusing "one more than the largest present" would hand out again. A
+        deleted id written back is an insertion, so it takes a fresh number too.
+        """
+        await store.add(_on_channel("first"))
+        await store.add(_semantic("between", "alpha"))
+        await store.add(_on_channel("second"))
+        await store.add(_on_channel("third"))
+        numbers = await _numbers(store, _CHANNEL_A)
+        assert list(numbers) == ["first", "second", "third"]
+        assert numbers["first"] >= 1
+        assert numbers["first"] < numbers["second"] < numbers["third"]
+
+        await store.add(_on_channel("second").model_copy(update={"content": "revised"}))
+        assert await _numbers(store, _CHANNEL_A) == numbers
+
+        await store.delete("third")
+        await store.add(_on_channel("fourth"))
+        after_delete = await _numbers(store, _CHANNEL_A)
+        assert list(after_delete) == ["first", "second", "fourth"]
+        assert after_delete["fourth"] > numbers["third"]
+
+        await store.delete("first")
+        await store.add(_on_channel("first"))
+        rewritten = await _numbers(store, _CHANNEL_A)
+        assert list(rewritten) == ["second", "fourth", "first"]
+        assert rewritten["first"] > after_delete["fourth"]
+
+        await store.add(_on_channel("expired", expires_at=_LONG_AGO))
+        expired = (await _numbers(store, _CHANNEL_A))["expired"]
+        await store.purge_expired()
+        await store.add(_on_channel("after-purge"))
+        assert (await _numbers(store, _CHANNEL_A))["after-purge"] > expired
+
+        top = max((await _numbers(store, _CHANNEL_A)).values())
+        await store.clear()
+        await store.add(_on_channel("after-clear"))
+        assert (await _numbers(store, _CHANNEL_A))["after-clear"] > top
+
+    async def test_channel_episodes_reads_the_newest_limit_in_number_order(
+        self, store: MemoryStore
+    ) -> None:
+        """§3:1, §3:2: the tail mode, ascending, with ``total`` over the whole channel.
+
+        The other channels' episodes are interleaved, so a page that took rows by
+        number alone would carry them; an episode with no processing record and one
+        whose resume trigger names no channel are on no channel at all.
+        """
+        for index in range(5):
+            await store.add(_on_channel(f"a{index}"))
+            await store.add(_on_channel(f"b{index}", channel=_CHANNEL_B))
+        await store.add(_on_channel("same-instance-other-type", channel=_CONVERSATION_A))
+        await store.add(_on_channel("no-channel", channel=None))
+        await store.add(_episode("no-processing-record"))
+
+        page = await store.channel_episodes(_CHANNEL_A, limit=3)
+
+        assert [entry.record.id for entry in page.entries] == ["a2", "a3", "a4"]
+        assert page.total == 5
+        numbers = await _numbers(store, _CHANNEL_A)
+        assert [entry.number for entry in page.entries] == [
+            numbers["a2"],
+            numbers["a3"],
+            numbers["a4"],
+        ]
+        whole = await store.channel_episodes(_CHANNEL_A, limit=1000)
+        assert [(entry.record.id, entry.number) for entry in whole.entries] == list(numbers.items())
+        assert whole.total == 5
+        other = await store.channel_episodes(_CONVERSATION_A, limit=10)
+        assert [entry.record.id for entry in other.entries] == ["same-instance-other-type"]
+        assert other.total == 1
+
+    async def test_channel_episodes_reads_the_oldest_limit_above_after(
+        self, store: MemoryStore
+    ) -> None:
+        """§3:1: the ``after`` mode, and ``total`` independent of it.
+
+        ``after`` need not be a number on the channel — the observer's watermark is
+        any number — and a number above every one issued answers an empty page.
+        """
+        for index in range(5):
+            await store.add(_on_channel(f"a{index}"))
+        await store.add(_on_channel("b", channel=_CHANNEL_B))
+        await store.add(_on_channel("a5"))
+        numbers = await _numbers(store, _CHANNEL_A)
+        b_number = (await _numbers(store, _CHANNEL_B))["b"]
+
+        page = await store.channel_episodes(_CHANNEL_A, after=numbers["a1"], limit=2)
+        assert [entry.record.id for entry in page.entries] == ["a2", "a3"]
+        assert page.total == 6
+        page = await store.channel_episodes(_CHANNEL_A, after=b_number, limit=10)
+        assert [entry.record.id for entry in page.entries] == ["a5"]
+        assert page.total == 6
+        for beyond in (numbers["a5"], 2**70):
+            page = await store.channel_episodes(_CHANNEL_A, after=beyond, limit=10)
+            assert page.entries == ()
+            assert page.total == 6
+
+    async def test_channel_episodes_applies_eligibility_before_the_limit(
+        self, store: MemoryStore
+    ) -> None:
+        """§3:1: the axis binds as ``search``'s does, so an ineligible run never fills a page.
+
+        The eligible episode is the oldest, under four ineligible ones: a store that
+        cut the newest ``limit`` first and filtered afterwards returns nothing.
+        """
+        await store.add(_on_channel("eligible"))
+        for index in range(4):
+            await store.add(_on_channel(f"ineligible{index}", eligible=False))
+        numbers = await _numbers(store, _CHANNEL_A)
+
+        page = await store.channel_episodes(_CHANNEL_A, limit=1, episode_model_eligible=True)
+        assert [entry.record.id for entry in page.entries] == ["eligible"]
+        assert page.total == 1
+        page = await store.channel_episodes(_CHANNEL_A, limit=2, episode_model_eligible=False)
+        assert [entry.record.id for entry in page.entries] == ["ineligible2", "ineligible3"]
+        assert page.total == 4
+        page = await store.channel_episodes(_CHANNEL_A, limit=1)
+        assert [entry.record.id for entry in page.entries] == ["ineligible3"]
+        assert page.total == 5
+        page = await store.channel_episodes(
+            _CHANNEL_A, after=numbers["eligible"], limit=10, episode_model_eligible=False
+        )
+        assert [entry.record.id for entry in page.entries] == [f"ineligible{i}" for i in range(4)]
+        assert page.total == 4
+
+    async def test_liveness_bounds_channel_episodes_and_not_the_enumeration(
+        self, store: MemoryStore
+    ) -> None:
+        """§3:1 reads live episodes; §3:5 enumerates every one the store holds.
+
+        Expired-but-unpurged, window-closed and not-yet-valid episodes are off the
+        history read and its ``total``, and all on the enumeration a deletion walks,
+        with the ineligible one — which the unfiltered history read does include.
+        """
+        await store.add(_on_channel("live"))
+        await store.add(_on_channel("expired", expires_at=_LONG_AGO))
+        await store.add(_on_channel("closed", validity=Validity(valid_until=_LONG_AGO)))
+        await store.add(_on_channel("future", validity=Validity(valid_from=_FAR_FUTURE)))
+        await store.add(_on_channel("ineligible", eligible=False))
+
+        page = await store.channel_episodes(_CHANNEL_A, limit=10)
+        assert [entry.record.id for entry in page.entries] == ["live", "ineligible"]
+        assert page.total == 2
+        held = await store.channel_episode_ids(_CHANNEL_A, limit=10)
+        assert [entry.episode_id for entry in held] == [
+            "live",
+            "expired",
+            "closed",
+            "future",
+            "ineligible",
+        ]
+
+    async def test_channel_episode_ids_pages_one_channel_in_number_order(
+        self, store: MemoryStore
+    ) -> None:
+        """§3:5: the lowest ``limit`` above ``after``, from the start where it is ``None``.
+
+        Paged until a read is empty, as §8's deletion walks it, it yields each of the
+        channel's episodes once and nothing of another channel's.
+        """
+        for index in range(5):
+            await store.add(_on_channel(f"a{index}"))
+            await store.add(_on_channel(f"b{index}", channel=_CHANNEL_B))
+        await store.add(_on_channel("other-type", channel=_CONVERSATION_A))
+
+        walked: list[str] = []
+        after: int | None = None
+        while page := await store.channel_episode_ids(_CHANNEL_A, after=after, limit=2):
+            assert len(page) <= 2
+            assert [entry.number for entry in page] == sorted(entry.number for entry in page)
+            walked.extend(entry.episode_id for entry in page)
+            after = page[-1].number
+        assert walked == [f"a{index}" for index in range(5)]
+        other = await store.channel_episode_ids(_CHANNEL_B, limit=10)
+        assert [entry.episode_id for entry in other] == [f"b{index}" for index in range(5)]
+        unused = ChannelIdentity(channel_type="informational_event", instance_id="unused")
+        assert await store.channel_episode_ids(unused, limit=10) == ()
+        assert await store.channel_episode_ids(_CHANNEL_A, after=2**70, limit=10) == ()
+
+    async def test_channel_episodes_returns_the_stored_record_unscored(
+        self, store: MemoryStore
+    ) -> None:
+        """Each entry is the stored episode, stamped, with ``score`` cleared on the copy.
+
+        Cleared because the read ranks nothing, as ``select`` and ``list_beliefs``
+        clear it; the stored record keeps what it was given.
+        """
+        stored = _on_channel("a").model_copy(update={"score": 0.5})
+        await store.add(stored)
+
+        (entry,) = (await store.channel_episodes(_CHANNEL_A, limit=1)).entries
+
+        assert entry.record.revision > 0
+        assert entry.record.score is None
+        assert _unstamped(entry.record) == stored.model_copy(update={"score": None})
+        kept = await store.get("a")
+        assert kept is not None
+        assert kept.score == 0.5
+
+    async def test_episode_parking_finds_the_lowest_numbered_live_parker(
+        self, store: MemoryStore
+    ) -> None:
+        """§3:3: ``links.parks`` equal to the binding, live, lowest number first.
+
+        The lowest-numbered carrier is expired, so it is passed over; an episode
+        carrying the binding as ``parked`` — a resumption — is never a match (§3:4);
+        both halves of the binding must match, so swapping them finds nothing.
+        """
+        binding = ParkedBinding(execution_id="execution", step_id="step")
+        await store.add(_on_channel("expired-parker", parks=binding, expires_at=_LONG_AGO))
+        await store.add(_on_channel("resumer", parked=binding))
+        await store.add(_on_channel("parker", parks=binding))
+        await store.add(_on_channel("later-parker", channel=_CHANNEL_B, parks=binding))
+        await store.add(
+            _on_channel("other", parks=ParkedBinding(execution_id="execution", step_id="other"))
+        )
+
+        found = await store.episode_parking(binding)
+
+        assert found is not None
+        assert found.revision > 0
+        assert _unstamped(found) == _on_channel("parker", parks=binding)
+        swapped = ParkedBinding(execution_id="step", step_id="execution")
+        assert await store.episode_parking(swapped) is None
+        absent = ParkedBinding(execution_id="nothing", step_id="step")
+        assert await store.episode_parking(absent) is None
+        await store.delete("parker")
+        later = await store.episode_parking(binding)
+        assert later is not None
+        assert later.id == "later-parker"
+
+    @pytest.mark.parametrize("limit", [0, 1001, -1, True, 1.0, "1", None])
+    async def test_channel_reads_refuse_a_limit_outside_their_bounds(
+        self, store: MemoryStore, limit: Any
+    ) -> None:
+        """§3:2: ``limit`` is a strict integer in ``[1, 1000]`` — ``bool`` is not one."""
+        with pytest.raises(ValueError, match="limit"):
+            await store.channel_episodes(_CHANNEL_A, limit=limit)
+        with pytest.raises(ValueError, match="limit"):
+            await store.channel_episode_ids(_CHANNEL_A, limit=limit)
+
+    @pytest.mark.parametrize("after", [0, -1, True, False, 1.0, "1"])
+    async def test_channel_reads_refuse_an_after_that_is_not_a_strict_positive_integer(
+        self, store: MemoryStore, after: Any
+    ) -> None:
+        """§3:2: ``after`` is ``None`` or a strict positive integer."""
+        with pytest.raises(ValueError, match="after"):
+            await store.channel_episodes(_CHANNEL_A, after=after, limit=1)
+        with pytest.raises(ValueError, match="after"):
+            await store.channel_episode_ids(_CHANNEL_A, after=after, limit=1)
+
+    @pytest.mark.parametrize("eligible", [0, 1, "true"])
+    async def test_channel_episodes_refuses_a_non_boolean_eligibility(
+        self, store: MemoryStore, eligible: Any
+    ) -> None:
+        """The eligibility axis is ``None`` or a boolean, as ``search`` refuses it."""
+        with pytest.raises(ValueError, match="episode_model_eligible"):
+            await store.channel_episodes(_CHANNEL_A, limit=1, episode_model_eligible=eligible)
+
+    async def test_channel_reads_accept_the_ends_of_their_bounds(self, store: MemoryStore) -> None:
+        """``limit`` 1 and 1000, ``after`` 1 and far beyond any number, are all served."""
+        await store.add(_on_channel("a"))
+        for limit in (1, 1000):
+            assert len((await store.channel_episodes(_CHANNEL_A, limit=limit)).entries) == 1
+            assert len(await store.channel_episode_ids(_CHANNEL_A, limit=limit)) == 1
+        for after in (1, 2**63, 2**70):
+            await store.channel_episodes(_CHANNEL_A, after=after, limit=1)
+            await store.channel_episode_ids(_CHANNEL_A, after=after, limit=1)
