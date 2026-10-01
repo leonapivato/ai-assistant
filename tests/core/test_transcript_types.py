@@ -3,8 +3,8 @@
 What is contract here is the **shape as this ADR ships it**: §10 fixes the fields
 each model carries and no other, and a later ADR may widen any of them by an
 additive, defaulted field — so what these cases pin is the frozen-ness, the
-required-ness, and the two domains an implementation could otherwise let a forged
-value past.
+required-ness, the domains an implementation could otherwise let a forged value
+past, and the ordinal ADR-0283 §9 removed.
 
 The reads, the ordering, the predicate and the excerpt bound are the *archive's*
 obligations and live in ``tests/archive/transcript_archive_contracts.py``, where
@@ -20,7 +20,6 @@ import pytest
 from pydantic import ValidationError
 
 from ai_assistant.core.types import (
-    FIRST_TURN_ORDINAL,
     TRANSCRIPT_EXCERPT_BYTES,
     ExchangeDisposition,
     TranscriptArchiveSize,
@@ -35,7 +34,6 @@ def _entry(**overrides: object) -> TranscriptEntry:
     fields: dict[str, object] = {
         "address": "c1:1",
         "conversation_id": "c1",
-        "ordinal": FIRST_TURN_ORDINAL,
         "occurred_at": AT,
         "asked": "where did I say that",
         "replied": "on Tuesday",
@@ -87,50 +85,19 @@ def test_a_size_report_refuses_mutation() -> None:
         size.entries = 99
 
 
-# --- the ordinal's domain (§10, §13 item 12) --------------------------------
+# --- an entry carries no ordinal (ADR-0283 §9) -----------------------------
 
 
-@pytest.mark.parametrize("ordinal", [0, -1, 2**63, 2**64])
-def test_an_ordinal_outside_conversation_turns_domain_is_refused(ordinal: int) -> None:
-    """ADR-0225 §10: refused at validation rather than merely documented.
+@pytest.mark.parametrize("ordinal", [1, None])
+def test_an_entry_carrying_an_ordinal_is_refused(ordinal: object) -> None:
+    """ADR-0283 §9: "``TranscriptEntry`` carries no ordinal."
 
-    The domain is ``ConversationTurn.ordinal``'s own — ``[FIRST_TURN_ORDINAL,
-    2**63)``, the range ``ConversationStore``'s refusals are stated over. A forged
-    entry below the first ordinal would sort **ahead of a real first turn** in a
-    conversation's read, which is a fabricated opening line in a record whose whole
-    value is that it is what was said.
+    The field is gone rather than defaulted, so a value naming one — an integer, or
+    the ``null`` a peer at an earlier protocol version sent — is an extra field the
+    model forbids, not one it quietly drops.
     """
     with pytest.raises(ValidationError):
         _entry(ordinal=ordinal)
-
-
-def test_the_first_turn_ordinal_is_admitted() -> None:
-    """The floor is inclusive, so a conversation's first turn is archivable."""
-    assert _entry(ordinal=FIRST_TURN_ORDINAL).ordinal == FIRST_TURN_ORDINAL
-
-
-# --- the ordinal is optional (ADR-0283 §9, §14 lane 3) ----------------------
-
-
-def test_an_entry_with_no_ordinal_is_admitted_and_defaults_to_none() -> None:
-    """ADR-0283 §9: an entry carries no ordinal once its writer addresses it by episode.
-
-    Both spellings of "no ordinal" construct, and both read back as ``None``: a
-    writer that no longer allocates one omits it, and a decoded frame from a peer
-    that sent ``null`` carries it explicitly. The domain check above still binds a
-    value that *is* given.
-    """
-    fields: dict[str, object] = {
-        "address": "activation:a1",
-        "conversation_id": "c1",
-        "occurred_at": AT,
-        "asked": None,
-        "replied": None,
-        "disposition": ExchangeDisposition.NO_ACTION_NEEDED,
-    }
-
-    assert TranscriptEntry.model_validate(fields).ordinal is None
-    assert _entry(ordinal=None).ordinal is None
 
 
 # --- the disposition is required (§10, §13 item 15) -------------------------
@@ -152,7 +119,6 @@ def test_an_entry_with_no_disposition_is_refused(supplied: object) -> None:
     fields: dict[str, object] = {
         "address": "c1:1",
         "conversation_id": "c1",
-        "ordinal": 1,
         "occurred_at": AT,
         "asked": None,
         "replied": None,
@@ -184,7 +150,6 @@ def test_both_halves_may_be_absent_and_are_stated_rather_than_defaulted() -> Non
             {
                 "address": "c1:1",
                 "conversation_id": "c1",
-                "ordinal": 1,
                 "occurred_at": AT,
                 "disposition": ExchangeDisposition.NO_ACTION_NEEDED,
             }
@@ -209,9 +174,9 @@ def test_a_negative_figure_is_refused_at_validation(entries: int, stored_bytes: 
 def test_neither_figure_carries_an_upper_bound() -> None:
     """Decided rather than overlooked (§10).
 
-    ``ordinal``'s ceiling is anchored in ``ConversationStore``'s own refusals; there
-    is no store-side refusal to anchor one on a count or a byte total, and inventing
-    a number would be exactly what §6 declines to do for the cap itself.
+    There is no store-side refusal to anchor a ceiling on a count or a byte total,
+    and inventing a number would be exactly what §6 declines to do for the cap
+    itself.
     """
     huge = TranscriptArchiveSize(entries=2**70, stored_bytes=2**70)
 
@@ -232,7 +197,6 @@ def test_each_model_carries_exactly_the_ratified_fields() -> None:
     assert set(TranscriptEntry.model_fields) == {
         "address",
         "conversation_id",
-        "ordinal",
         "occurred_at",
         "asked",
         "replied",
@@ -269,8 +233,8 @@ def test_no_transcript_model_carries_a_modality_a_capture_or_a_provenance() -> N
 def test_the_excerpt_bound_is_named_and_is_in_bytes() -> None:
     """ADR-0094 §8: a bound with no figure is two conforming implementations diverging.
 
-    Public for :data:`FIRST_TURN_ORDINAL`'s reason — every implementation and the
-    shared conformance suite need the same one — and in *bytes* because what it
-    bounds is a response that crosses the local API.
+    Public because every implementation and the shared conformance suite need the
+    same one, and in *bytes* because what it bounds is a response that crosses the
+    local API.
     """
     assert TRANSCRIPT_EXCERPT_BYTES == 512

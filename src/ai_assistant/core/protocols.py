@@ -17478,9 +17478,10 @@ class AssistantEngine(Protocol):
     ) -> tuple[TranscriptEntry, ...]:
         """Read one conversation's transcript, in the order it was said (§7).
 
-        **Ordinal order, ascending**, because a transcript's order is the order it
-        was said in — the one read on this surface that is not newest-first, and the
-        difference is the decision rather than an inconsistency.
+        **By instant ascending, then address** (ADR-0283 §9), because a transcript's
+        order is the order it was said in — the one read on this surface that is not
+        newest-first, and the difference is the decision rather than an
+        inconsistency. The address breaks a shared instant, so paging is stable.
 
         **It needs neither the conversation index nor the conversation record to
         still exist** (§5). ADR-0074 §7 reclaims an emptied conversation's index and
@@ -17498,8 +17499,9 @@ class AssistantEngine(Protocol):
             offset: How many ordered entries to skip before the page begins.
 
         Returns:
-            The page, in ordinal order. Empty where the conversation has no
-            surviving entries, which is not distinguished from never having had any.
+            The page, by instant ascending, then address. Empty where the
+            conversation has no surviving entries, which is not distinguished from
+            never having had any.
 
         Raises:
             RuntimeError: If the engine is shutting down.
@@ -18719,13 +18721,13 @@ class TranscriptArchiveWriter(Protocol):
         """Write ``entry`` at its own address (ADR-0225 §1, §2, §3).
 
         **The archive mints nothing.** ``entry.address`` is the id of the episode the
-        entry derives from, derived and returned by ``ConversationStore.append`` on
-        the turn (ADR-0074 §3); an implementation stores it and predicts none of it.
+        entry derives from, ``activation:<activation_id>`` (ADR-0283 §2, §9); an
+        implementation stores it and predicts none of it.
 
         **An entry already present at that address is a fault, failed loudly** (§2).
-        It is the same class ADR-0074 §3 names for a colliding episode id — a broken
-        ordinal invariant, or a foreign producer in the reserved namespace — and no
-        implementation resolves it by overwriting, by merging or by retrying.
+        It is the class a colliding episode id falls in — a reissued activation id,
+        or a foreign producer in the reserved namespace — and no implementation
+        resolves it by overwriting, by merging or by retrying.
 
         Args:
             entry: The turn to record, whole. An implementation stores what it is
@@ -18933,8 +18935,7 @@ class TranscriptArchive(Protocol):
         order is the order it was said in — the one read whose order is not the
         newest-first total order the other three use. The address breaks a shared
         instant, so the order is total and a paged read neither repeats nor loses an
-        entry. No entry's ``ordinal`` orders it; the field is optional and on its way
-        out.
+        entry. An entry carries no ordinal to order it by.
 
         It resolves inside the archive, so a conversation whose index and record
         ADR-0074 §7's reclaim has already dropped still yields its transcript. That

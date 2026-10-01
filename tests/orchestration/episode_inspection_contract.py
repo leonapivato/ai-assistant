@@ -295,7 +295,6 @@ class EpisodeInspectionContract:
             TranscriptEntry(
                 address="record",
                 conversation_id="conversation",
-                ordinal=1,
                 occurred_at=INSPECTION_AT,
                 asked="archived request",
                 replied="archived reply",

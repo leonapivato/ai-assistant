@@ -2395,7 +2395,8 @@ from ai_assistant.wire.errors import (
 #: 64: ADR-0282 adds the windows stage and its rule to the wire-carried stage record.
 #: 65: ADR-0283 makes the wire-carried TranscriptEntry.ordinal optional (None admitted).
 #: 66: ADR-0283 §3:4 adds ``ActivationLinks.parks`` to the wire-carried EpisodeProcessingRecord.
-PROTOCOL_VERSION: Final[int] = 66
+#: 67: ADR-0283 §9 removes ``TranscriptEntry.ordinal`` from the wire-carried transcript entry.
+PROTOCOL_VERSION: Final[int] = 67
 
 #: ADR-0085 §8a: "The correlation id is a UUID string and is at most 36 bytes.
 #: Bounding it is what makes the reserve a constant rather than an aspiration; a

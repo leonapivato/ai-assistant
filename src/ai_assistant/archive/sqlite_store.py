@@ -101,9 +101,6 @@ _CREATE_TABLE = (
     "CREATE TABLE IF NOT EXISTS entries("
     "address TEXT PRIMARY KEY NOT NULL, "
     "conversation_id TEXT NOT NULL, "
-    # Nullable since ADR-0283 §9: an entry carries no ordinal once its writer
-    # addresses it by the episode's id, and no read orders by this column.
-    "ordinal INTEGER, "
     "occurred_at_us INTEGER NOT NULL, "
     "asked TEXT, "
     "replied TEXT, "
@@ -116,10 +113,6 @@ _CREATE_TABLE = (
 #: set closed: an index is not a second on-disk artifact, so every byte
 #: ``stored_bytes`` counts is a byte ADR-0225 §9's ``0600`` protects.
 _INDEXES = (
-    # The index the conversation read used while it ordered by ordinal. Dropped
-    # rather than left standing in a file created before ADR-0283 §9: no read uses
-    # it any more, and it would only cost writes and bytes `stored_bytes` counts.
-    "DROP INDEX IF EXISTS entries_by_conversation",
     "CREATE INDEX IF NOT EXISTS entries_by_conversation_instant ON entries("
     # Carries the tie-break column for the reason the instant index does: the
     # conversation read's order is `(occurred_at_us, address)` (ADR-0283 §9), and an
@@ -131,12 +124,12 @@ _INDEXES = (
 
 _INSERT = (
     "INSERT INTO entries("
-    "address, conversation_id, ordinal, occurred_at_us, "
+    "address, conversation_id, occurred_at_us, "
     "asked, replied, asked_folded, replied_folded, disposition) "
-    "VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)"
+    "VALUES (?, ?, ?, ?, ?, ?, ?, ?)"
 )
 
-_COLUMNS = "address, conversation_id, ordinal, occurred_at_us, asked, replied, disposition"
+_COLUMNS = "address, conversation_id, occurred_at_us, asked, replied, disposition"
 
 
 def _utcnow() -> datetime:
@@ -583,7 +576,6 @@ class SqliteTranscriptArchive:
         row = (
             entry.address,
             entry.conversation_id,
-            entry.ordinal,
             _to_micros(entry.occurred_at),
             entry.asked,
             entry.replied,
@@ -600,22 +592,22 @@ class SqliteTranscriptArchive:
                 conn.execute(_INSERT, row)
             except sqlite3.IntegrityError as exc:
                 if exc.sqlite_errorname != "SQLITE_CONSTRAINT_PRIMARYKEY":
-                    # Not a collision, so not reported as one. The case this names
-                    # is a file created before ADR-0283 §9, whose `ordinal` column
-                    # still refuses `NULL`: `CREATE TABLE IF NOT EXISTS` does not
-                    # rewrite a table, and §12 moves the hub to a fresh data
-                    # directory rather than owing a migration.
+                    # Not a collision, so not reported as one: every column this
+                    # store's schema constrains is one `append` always supplies, so a
+                    # refusal on any other constraint is a file whose schema this store
+                    # did not create — `CREATE TABLE IF NOT EXISTS` rewrites no table,
+                    # and ADR-0283 §12 moves the hub to a fresh data directory rather
+                    # than owing a migration.
                     msg = (
                         f"the transcript archive refused the entry at address {row[0]!r} "
                         f"({exc.sqlite_errorname})"
                     )
                     raise TranscriptArchiveError(msg) from exc
-                # The address is the episode's own id, derived from a unique
-                # conversation and a store-proved ordinal, so a collision means a
-                # broken ordinal invariant or a foreign producer in the reserved
-                # namespace (ADR-0074 §3, ADR-0225 §2). Neither is a race, a retry
-                # answers neither, and the message names the address and never the
-                # text (ADR-0004 §5).
+                # The address is the episode's own id, `activation:<activation_id>`
+                # (ADR-0283 §2, §9), so a collision means a reissued activation id or
+                # a foreign producer in the reserved namespace (ADR-0225 §2). Neither
+                # is a race, a retry answers neither, and the message names the
+                # address and never the text (ADR-0004 §5).
                 msg = f"a transcript entry already stands at address {row[0]!r}"
                 raise TranscriptArchiveError(msg) from exc
 
@@ -910,8 +902,8 @@ def _integer(value: object) -> int:
     """The value of an ``INTEGER`` column, refusing any other storage class.
 
     ``int()`` would coerce a float and a numeric string alike, and both would land in
-    a domain the model then judges — an ordinal or an instant read off a value that
-    was never one. ``bool`` is excluded although it is an ``int`` subclass: the driver
+    a domain the model then judges — an instant read off a value that was never one.
+    ``bool`` is excluded although it is an ``int`` subclass: the driver
     stores none, so one here is a value something else put there.
 
     Raises:
@@ -921,15 +913,6 @@ def _integer(value: object) -> int:
         msg = f"expected an INTEGER column, found {type(value).__name__}"
         raise TypeError(msg)
     return value
-
-
-def _optional_integer(value: object) -> int | None:
-    """:func:`_integer`, admitting ``NULL`` — an entry whose writer gave no ordinal.
-
-    ADR-0283 §9 makes ``TranscriptEntry.ordinal`` optional, so ``None`` is what that
-    column legitimately holds and is the one non-``int`` this admits.
-    """
-    return None if value is None else _integer(value)
 
 
 def _unreadable(address: object, fault: Exception) -> TranscriptArchiveError:
@@ -1023,12 +1006,11 @@ def _entry_of(row: tuple[Any, ...]) -> TranscriptEntry:
         TranscriptArchiveError: If the row cannot be rebuilt — see :func:`_unreadable`
             for why that is raised rather than skipped, and why nothing is chained.
     """
-    address, conversation_id, ordinal, occurred_at_us, asked, replied, disposition = row
+    address, conversation_id, occurred_at_us, asked, replied, disposition = row
     try:
         return TranscriptEntry(
             address=_text(address),
             conversation_id=_text(conversation_id),
-            ordinal=_optional_integer(ordinal),
             occurred_at=_from_micros(_integer(occurred_at_us)),
             asked=_optional_text(asked),
             replied=_optional_text(replied),
@@ -1036,12 +1018,12 @@ def _entry_of(row: tuple[Any, ...]) -> TranscriptEntry:
         )
     except (ValidationError, ValueError, OverflowError, TypeError) as fault:
         # Every arm is reachable from a row this store did not write: a disposition
-        # outside the vocabulary and an ordinal outside its domain are `ValueError`
-        # and `ValidationError`, an `occurred_at_us` outside the calendar is
-        # `OverflowError`, and a column holding the wrong storage class is the
-        # `TypeError` the three accessors above raise. `ValidationError` is named
-        # first because it is a `ValueError` and the ordering would otherwise be
-        # silent about which one is meant.
+        # outside the vocabulary is a `ValueError`, an `occurred_at_us` outside the
+        # calendar is `OverflowError`, a value the model refuses is a
+        # `ValidationError`, and a column holding the wrong storage class is the
+        # `TypeError` the accessors above raise. `ValidationError` is named first
+        # because it is a `ValueError` and the ordering would otherwise be silent
+        # about which one is meant.
         raise _unreadable(address, fault) from None
 
 

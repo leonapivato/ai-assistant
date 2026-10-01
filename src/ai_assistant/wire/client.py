@@ -1071,7 +1071,7 @@ class HubClient:
         limit: int = DEFAULT_PAGE_SIZE,
         offset: int = 0,
     ) -> tuple[TranscriptEntry, ...]:
-        """One page of a conversation's transcript, in ordinal order.
+        """One page of a conversation's transcript, by instant, then address.
 
         Args:
             conversation_id: Which conversation.
