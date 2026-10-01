@@ -348,7 +348,7 @@ async def test_a_store_fault_on_the_report_does_not_cost_the_owner_the_turn() ->
     class Faulting(FakeConversationStore):
         async def record_delivery(
             self, conversation_id: str, *, episode_id: str, delivery: SpokenDelivery
-        ) -> ConversationTurn | None:
+        ) -> bool:
             msg = "the index is unwritable"
             raise ConversationStoreError(msg)
 
@@ -454,8 +454,8 @@ async def test_the_disclosed_episode_id_is_the_one_record_delivery_accepts_back(
         episode_id=str(first.episode_id),
         delivery=_COMPLETE,
     )
-    assert stamped is not None
-    assert stamped.delivery == _COMPLETE
+    assert stamped is True
+    assert [one.delivery for one in await _rows(harness, conversation)] == [_COMPLETE]
 
 
 async def test_the_episode_id_is_absent_exactly_where_no_turn_was_recorded() -> None:
@@ -605,7 +605,7 @@ async def test_a_withheld_turns_delivery_does_not_reach_the_stage_either() -> No
         episode_id=str(first.episode_id),
         delivery=_INTERRUPTED,
     )
-    assert stamped is not None, "turn 1 is stamped in the index"
+    assert stamped is True, "turn 1 is stamped in the index"
 
     second = await _spoken(harness, conversation_id=conversation)
 

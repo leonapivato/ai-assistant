@@ -69,6 +69,9 @@ _SYNC_METHODS = {
     "stamp_deleted": "_stamp_deleted_sync",
     "drop_if_eligible": "_drop_if_eligible_sync",
     "record_observed": "_record_observed_sync",
+    "record_turn": "_record_turn_sync",
+    "record_delivery": "_record_delivery_sync",
+    "deliveries": "_deliveries_sync",
     "get": "_get_sync",
     "turns": "_turns_sync",
     "turns_after": "_turns_after_sync",
@@ -1394,6 +1397,157 @@ async def test_a_delivery_duration_this_store_cannot_hold_is_this_seams_error(
         store.close()
 
 
+async def test_a_delivery_row_duration_this_store_cannot_hold_is_this_seams_error(
+    tmp_path: Path,
+) -> None:
+    """The same bound on ADR-0283 §6's delivery rows, which share the encoding.
+
+    The delivery-row branch of ``record_delivery`` renders through the same
+    ``_delivery_row``, so the refusal and its class carry over; asserted rather than
+    assumed, because the branch is a second ``UPDATE`` a later edit could give its
+    own rendering.
+    """
+    store = SqliteConversationStore(path=str(tmp_path / "conversations.db"), now=_fixed_now)
+    try:
+        conversation = await store.start()
+        unstamped = SpokenDelivery(state=SpokenDeliveryState.UNKNOWN)
+        await store.record_turn(
+            conversation.id, episode_id="activation:a", occurred_at=_NOW, delivery=unstamped
+        )
+
+        with pytest.raises(ConversationStoreError, match="outside the range"):
+            await store.record_delivery(
+                conversation.id,
+                episode_id="activation:a",
+                delivery=SpokenDelivery(
+                    state=SpokenDeliveryState.COMPLETE,
+                    played=timedelta.max,
+                    rendered=timedelta.max,
+                ),
+            )
+
+        assert await store.deliveries(conversation.id, episode_ids=["activation:a"]) == {
+            "activation:a": unstamped
+        }, "the refusal wrote nothing, so a report that fits still lands"
+    finally:
+        store.close()
+
+
+def _delivery_rows(database: Path) -> list[tuple[Any, ...]]:
+    """Every row the ``deliveries`` table holds, read through a raw connection."""
+    raw = sqlite3.connect(database, isolation_level=None)
+    try:
+        return [tuple(row) for row in raw.execute("SELECT * FROM deliveries")]
+    finally:
+        raw.close()
+
+
+async def test_a_dropped_conversation_leaves_no_delivery_row_behind(tmp_path: Path) -> None:
+    """ADR-0283 §6:7 against the table itself, which the contract can only infer.
+
+    Deleted explicitly rather than left to the cascade, for the reason the turns are:
+    ``PRAGMA foreign_keys`` is per connection, and a drop that relied on it would leave
+    the rows behind on any connection that had not enabled it.
+    """
+    path = tmp_path / "conversations.db"
+    clock = [_NOW]
+    store = SqliteConversationStore(path=path, now=lambda: clock[0])
+    try:
+        conversation = await store.start()
+        kept = await store.start()
+        unstamped = SpokenDelivery(state=SpokenDeliveryState.UNKNOWN)
+        for one in (conversation, kept):
+            await store.record_turn(
+                one.id, episode_id=f"activation:{one.id}", occurred_at=_NOW, delivery=unstamped
+            )
+        assert await store.stamp_deleted(conversation.id) is True
+        clock[0] = _NOW + timedelta(days=1)
+
+        assert await store.drop_if_eligible(conversation.id) is True
+
+        assert [row[0] for row in _delivery_rows(path)] == [kept.id]
+    finally:
+        store.close()
+
+
+async def test_delivery_rows_survive_a_reopen(tmp_path: Path) -> None:
+    """They are durable state, which is the whole reason they are a table."""
+    path = tmp_path / "conversations.db"
+    unstamped = SpokenDelivery(state=SpokenDeliveryState.UNKNOWN)
+    first = SqliteConversationStore(path=path, now=_fixed_now)
+    try:
+        conversation = await first.start()
+        await first.record_turn(
+            conversation.id, episode_id="activation:a", occurred_at=_NOW, delivery=unstamped
+        )
+        await first.record_turn(
+            conversation.id, episode_id="activation:b", occurred_at=_NOW, delivery=unstamped
+        )
+        complete = SpokenDelivery(
+            state=SpokenDeliveryState.COMPLETE,
+            played=timedelta(seconds=4),
+            rendered=timedelta(seconds=4),
+        )
+        assert await first.record_delivery(
+            conversation.id, episode_id="activation:b", delivery=complete
+        )
+    finally:
+        first.close()
+
+    reopened = SqliteConversationStore(path=path, now=_fixed_now)
+    try:
+        assert await reopened.deliveries(
+            conversation.id, episode_ids=["activation:a", "activation:b"]
+        ) == {"activation:a": unstamped, "activation:b": complete}
+    finally:
+        reopened.close()
+
+
+async def test_the_schema_refuses_a_delivery_row_that_names_no_conversation(
+    tmp_path: Path,
+) -> None:
+    """The ``deliveries`` table carries the turns' cascading key (#452, ADR-0283 §6)."""
+    path = tmp_path / "conversations.db"
+    store = SqliteConversationStore(path=path, now=_fixed_now)
+    try:
+        with pytest.raises(sqlite3.IntegrityError):
+            store._conn.execute(
+                "INSERT INTO deliveries(conversation_id, episode_id, delivery_state) "
+                "VALUES ('nobody', 'activation:a', 'unknown')"
+            )
+    finally:
+        store.close()
+
+
+@pytest.mark.parametrize(
+    ("state", "played"),
+    [("not-a-state", None), ("complete", "four seconds")],
+    ids=["unknown-state", "non-integer-duration"],
+)
+async def test_a_corrupt_delivery_row_is_a_store_fault_on_the_read(
+    tmp_path: Path, state: str, played: object
+) -> None:
+    """A row the store cannot decode is this seam's error, never a guessed delivery."""
+    path = tmp_path / "conversations.db"
+    store = SqliteConversationStore(path=path, now=_fixed_now)
+    try:
+        conversation = await store.start()
+        raw = sqlite3.connect(path, isolation_level=None)
+        try:
+            raw.execute(
+                "INSERT INTO deliveries(conversation_id, episode_id, delivery_state, "
+                "delivery_played, delivery_rendered) VALUES (?, 'activation:a', ?, ?, NULL)",
+                (conversation.id, state, played),
+            )
+        finally:
+            raw.close()
+
+        with pytest.raises(ConversationStoreError):
+            await store.deliveries(conversation.id, episode_ids=["activation:a"])
+    finally:
+        store.close()
+
+
 async def test_a_base_exception_from_the_worker_reaches_the_caller() -> None:
     """ADR-0054's relay carries every failure, not only the ``Exception`` half (#680).
 
@@ -1603,11 +1757,10 @@ def _write_watermark(database: Path, conversation_id: str, value: object) -> Non
     """Put an arbitrary value in the watermark column, through a raw connection.
 
     The only writer that can: ``record_observed`` refuses everything outside
-    ``[FIRST_TURN_ORDINAL, 2**63)`` before any I/O and everything above the
-    conversation's highest ordinal under its exclusion, so a value the store has to
+    ``[FIRST_TURN_ORDINAL, 2**63)`` before any I/O, so a value the store has to
     *discard* is unreachable through the seam. That is the point of ADR-0212 §7 —
     what it governs is a store state reached from an operator's hand edit, a partial
-    recovery, a migration, or a downgrade that dropped rows.
+    recovery, a migration, or a downgrade.
     """
     raw = sqlite3.connect(database, isolation_level=None)
     try:
@@ -1657,9 +1810,8 @@ async def test_an_insert_naming_only_the_older_columns_still_succeeds(tmp_path: 
     [
         ("not-an-ordinal", "not an integer"),
         (2.5, "not an integer"),
-        (0, "below the first ordinal"),
-        (-1, "below the first ordinal"),
-        (99, "above the conversation's highest ordinal"),
+        (0, "not positive"),
+        (-1, "not positive"),
     ],
 )
 async def test_an_unusable_watermark_reads_as_absent_and_no_read_raises(
@@ -1673,7 +1825,8 @@ async def test_an_unusable_watermark_reads_as_absent_and_no_read_raises(
     ``ConversationStoreError`` on ``get``, ``recent``, ``turns`` and ``export`` for
     that conversation: a conversation the user can no longer read because a
     bookkeeping column is wrong, which is the outcome §7 forbids arriving through a
-    different door.
+    different door. ADR-0283 §6:6 leaves exactly these limbs: "a stored watermark
+    that is not a positive integer is discarded on read".
     """
     path = tmp_path / "conversations.db"
     store = SqliteConversationStore(path=path, now=_fixed_now)
@@ -1695,7 +1848,7 @@ async def test_an_unusable_watermark_reads_as_absent_and_no_read_raises(
         store.close()
 
 
-@pytest.mark.parametrize("value", ["not-an-ordinal", 2.5, 0, -1, 99])
+@pytest.mark.parametrize("value", ["not-an-ordinal", 2.5, 0, -1])
 async def test_a_conversation_carrying_an_unusable_watermark_is_recovered(
     tmp_path: Path, value: object
 ) -> None:
@@ -1728,18 +1881,17 @@ async def test_a_conversation_carrying_an_unusable_watermark_is_recovered(
         store.close()
 
 
-async def test_a_watermark_naming_an_ordinal_the_turns_do_not_reach_is_re_observed(
+async def test_a_watermark_above_every_turn_is_kept_and_not_re_observed(
     tmp_path: Path,
 ) -> None:
-    """§7's disagreement case, exercised by writing the **row** rather than a document.
+    """ADR-0283 §6:6: the upper limb of ADR-0212 §7's discard is gone.
 
-    ADR-0111 §7's second clause — "a store whose recorded cursor and recorded
-    progress disagree is treated as damaged in the same way" — reaches this contract
-    as a *store* state and not as a restore: ``ConversationStore`` offers ``export``
-    and no import, so nothing here reads such a document back. What produces it is a
-    ``forget`` that took a turn row, a partial recovery, a migration, or a downgrade
-    that dropped rows — modelled here by deleting the turns underneath a watermark
-    that was perfectly good when it was written.
+    The watermark is an episode number, which this store cannot see and which runs
+    far above any ordinal, so a value above the conversation's highest turn is a
+    usable position: every read carries it, and the candidate listing leaves the
+    conversation out until a turn lands above it. Written through the raw column as
+    well as through the seam, so the decode and the listing's predicate are both
+    held to it.
     """
     path = tmp_path / "conversations.db"
     store = SqliteConversationStore(path=path, now=_fixed_now)
@@ -1747,23 +1899,16 @@ async def test_a_watermark_naming_an_ordinal_the_turns_do_not_reach_is_re_observ
         conversation = await store.start()
         await store.append(conversation.id, occurred_at=_NOW)
         await store.append(conversation.id, occurred_at=_NOW)
-        assert await store.record_observed(conversation.id, through_ordinal=2) is not None
-
-        raw = sqlite3.connect(path, isolation_level=None)
-        try:
-            raw.execute(
-                "DELETE FROM turns WHERE ordinal = 2 AND conversation_id = ?", (conversation.id,)
-            )
-        finally:
-            raw.close()
+        assert await store.record_observed(conversation.id, through_ordinal=40) is not None
+        _write_watermark(path, conversation.id, 99)
 
         read = await store.get(conversation.id)
 
         assert read is not None
-        assert read.observed_through is None, "the recorded position leads the turns that remain"
-        assert [one.id for one in await store.conversations_with_unobserved_turns()] == [
-            conversation.id
-        ]
+        assert read.observed_through == 99
+        assert [one.observed_through for one in await store.recent()] == [99]
+        assert await store.conversations_with_unobserved_turns() == []
+        assert await store.record_observed(conversation.id, through_ordinal=50) is None
     finally:
         store.close()
 
