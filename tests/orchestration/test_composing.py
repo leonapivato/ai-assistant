@@ -22,6 +22,7 @@ from ai_assistant.core.episode_encoding import episode_content
 from ai_assistant.core.errors import ModelError, ModelTimeoutError, ModelUnavailableError
 from ai_assistant.core.types import (
     ActionPlan,
+    ActivationUnderstanding,
     AttemptOutcome,
     Attestation,
     BeliefBand,
@@ -63,7 +64,9 @@ from ai_assistant.core.types import (
     TimeOfDay,
     ToolFailureKind,
     TurnResult,
+    UnderstandingGround,
     UnderstandingOmission,
+    UnderstandingProducer,
     WholeTextReply,
     band_of,
 )
@@ -2509,3 +2512,38 @@ async def test_stream_timeout_preserves_partial_text_and_specific_failure(
     assert report.text == ("".join(deltas) or None)
     assert report.degraded
     assert report.timed_out
+
+
+async def test_an_episodes_stored_understanding_never_reaches_the_composer() -> None:
+    """No stored understanding version is rendered on the composer's record line.
+
+    ADR-0284 §8:6 owes the status, the reason and the verdict phrases. The composer runs
+    on spoken turns too, where ADR-0276 §4 — standing — lets no earlier understanding
+    reach any stage; and an understanding is derived from the understanding stage's
+    windows, which the episode's placement does not account for.
+    """
+    episode = _exchange(outcome=_REPLY, step=Disposition.EXECUTED)
+    assert episode.processing_record is not None
+    understood = episode.model_copy(
+        update={
+            "processing_record": episode.processing_record.model_copy(
+                update={
+                    "understanding": (
+                        ActivationUnderstanding(
+                            version=1,
+                            recorded_at=AT,
+                            producer=UnderstandingProducer.INTERPRETATION,
+                            meaning="UNDERSTOOD-THEN-SENTINEL",
+                            meaning_ground=UnderstandingGround.STATED,
+                        ),
+                    ),
+                    "understanding_omitted": None,
+                }
+            )
+        }
+    )
+
+    prompt = await _rendered(understood)
+
+    assert "UNDERSTOOD-THEN-SENTINEL" not in prompt
+    assert composing._render_record(understood) == composing._render_record(episode)

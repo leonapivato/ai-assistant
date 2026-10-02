@@ -2387,11 +2387,19 @@ def _render_episode(record: EpisodicMemory) -> str:
 
     **Every line is a part of the projection** (§8:3): where and when the episode
     arrived, the user's input where its origin is ``user`` (an outside input's text
-    is not admitted here, §8:5), what was understood then, the phrase for each stage
-    verdict and the status and reason processing ended with (§8:6). An episode with
-    no processing record shows its ``content`` as its input, the one path §8:2
-    allows. The response is never on the bullet: the caller adds it, for the records
-    ADR-0222 §1 and ADR-0227 §1 admit (§8:7).
+    is not admitted here, §8:5), the phrase for each stage verdict and the status and
+    reason processing ended with (§8:6). An episode with no processing record shows
+    its ``content`` as its input, the one path §8:2 allows. The response is never on
+    the bullet: the caller adds it, for the records ADR-0222 §1 and ADR-0227 §1 admit
+    (§8:7).
+
+    **No stored understanding version is rendered here.** §8:6 owes a rendering the
+    status, the reason and the verdict phrases, and nothing more of the projection;
+    this stage composes on every turn, a spoken one included, and ADR-0276 §4 —
+    standing under ADR-0284 — lets no earlier understanding reach any stage of a turn
+    on a channel of unbounded audience. An understanding is derived from whatever the
+    understanding stage's windows held, which the episode's placement does not
+    account for, so it is rendered only where that stage renders it.
 
     **The origin phrase is ADR-0223 §4's**, read off ``derived_from_external`` and
     never off ``origin`` (§8:4): who the input came from and whether processing read
@@ -2431,11 +2439,6 @@ def _render_episode(record: EpisodicMemory) -> str:
             else ""
         )
         lines.append(f"    {said}{cut}: {_quoted_span(projection.input.text)}")
-    if projection.meaning is not None:
-        lines.append(
-            f"    what the assistant understood then (provisional): "
-            f"{_quoted_span(projection.meaning)}"
-        )
     lines.extend(
         f"    how it turned out: {_quoted_span(STEP_DISPOSITION_PHRASES[member])}"
         for member in projection.step_dispositions

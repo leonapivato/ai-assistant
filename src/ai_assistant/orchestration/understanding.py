@@ -719,14 +719,22 @@ class _ChannelItem:
     episode: EpisodicMemory | None = None
 
     def rendering(self, label: str, also: bool, *, excerpt_chars: int) -> dict[str, object]:
-        """The item under its label, marked where it is also in the episode window."""
+        """The item under its label, marked where it is also in the episode window.
+
+        **A stored understanding version rides only on an item also in the episode
+        window** — what that window would have added about it. On its own the channel
+        window renders a tail record's two halves, its status and its verdicts, and no
+        understanding version: ADR-0276 §4 makes that the whole of what a turn on a
+        channel of unbounded audience is shown of its tail, which takes no episode
+        window, and ADR-0284 leaves that clause standing.
+        """
         rendered: dict[str, object] = {"label": label, **self.body}
         if self.episode is not None:
             # ADR-0284 §8:5: the channel window does not admit an outside input's text.
             projected = _ProjectedEpisode.of(
                 self.episode, excerpt_chars=excerpt_chars, admit_outside_input=False
             )
-            rendered.update(projected.parts())
+            rendered.update(projected.parts(understood=also))
         if also:
             # §3: one exchange, rendered once, here; what the episode window would have
             # added about it — its status and what was understood then — rides here too.
@@ -839,11 +847,14 @@ class _ProjectedEpisode:
             **self.parts(),
         }
 
-    def parts(self) -> dict[str, object]:
+    def parts(self, *, understood: bool = True) -> dict[str, object]:
         """Its time, input, response, status and reason, understanding and verdicts.
 
         ADR-0284 §8:6: a rendering states the episode's status and reason, and the
-        phrase for each verdict it carries.
+        phrase for each verdict it carries. ``understood`` is whether the latest
+        understanding version is shown: the episode window and the recalled section
+        show it (ADR-0276 §4, ADR-0281 §7), and a channel-window item shows it only
+        where it is also in the episode window.
         """
         projection = self.projection
         rendered: dict[str, object] = {
@@ -858,7 +869,7 @@ class _ProjectedEpisode:
         if projection.status is not None and projection.reason is not None:
             rendered["status"] = projection.status.value
             rendered["reason"] = projection.reason.value
-        if projection.meaning is not None and projection.meaning_ground is not None:
+        if understood and projection.meaning is not None and projection.meaning_ground is not None:
             rendered["understood_then"] = {
                 "provisional": "what the assistant understood then, not an established fact",
                 "meaning": projection.meaning,
