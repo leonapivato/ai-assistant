@@ -26,6 +26,7 @@ from understanding_support import STATED_PROPOSAL, recall_stage, understanding_s
 
 from ai_assistant.core.errors import (
     ModelTimeoutError,
+    PlanningError,
     SpeechError,
     TranscriptionFailedError,
     UnderstandingError,
@@ -581,3 +582,49 @@ async def test_a_resume_of_an_approved_route_records_its_routing_compose_and_end
     ]
     assert _verdicts(record) == [(_S.ROUTING, None, resumed.routed.outcome)]
     assert resumed.routed.outcome is RouteOutcome.PERFORMED
+
+
+async def test_a_drive_that_raises_after_its_disposition_still_records_it(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """ADR-0284 §5:2: the verdict is retained the moment the runner returns it.
+
+    Rendering the step is fallible work after the runner has returned; a drive that
+    reached ``executed`` and then raised there records a failed ``drive`` entry that
+    still carries ``executed``, because that is what the step reached.
+    """
+    harness = _harness(tools=(tool(),))
+
+    async def broken(*_args: Any, **_kwargs: Any) -> Any:
+        msg = "rendering the step broke after the runner returned"
+        raise PlanningError(msg)
+
+    monkeypatch.setattr(harness.engine, "_step_outcome", broken)
+    with pytest.raises(PlanningError):
+        await harness.engine.converse("send the note", timeout=_BUDGET)
+
+    record = await _record(harness)
+    (drive,) = [entry for entry in record.stages if entry.stage is _S.DRIVE]
+    assert drive.outcome is StageOutcome.FAILED
+    assert _verdicts(record) == [(_S.DRIVE, Disposition.EXECUTED, None)]
+
+
+async def test_a_routed_pass_that_raises_after_its_outcome_still_records_it(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """ADR-0284 §5:2: the route's outcome is retained before composing and capture."""
+    harness = _routed_harness()
+    await _seed_belief(harness.memory)
+
+    async def broken(*_args: Any, **_kwargs: Any) -> Any:
+        msg = "finishing the route broke after the operation had its outcome"
+        raise PlanningError(msg)
+
+    monkeypatch.setattr(harness.engine, "_finish_route", broken)
+    with pytest.raises(PlanningError):
+        await harness.engine.converse("forget the campsite", timeout=_BUDGET)
+
+    record = await _record(harness)
+    (routing,) = [entry for entry in record.stages if entry.stage is _S.ROUTING]
+    assert routing.outcome is StageOutcome.FAILED
+    assert _verdicts(record) == [(_S.ROUTING, None, RouteOutcome.AWAITING_CONFIRMATION)]
