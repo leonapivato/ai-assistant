@@ -7,7 +7,8 @@ from dataclasses import dataclass, field
 from typing import TYPE_CHECKING
 from uuid import UUID
 
-from ai_assistant.core.episode_encoding import canonical_json
+from ai_assistant.core.channel_validation import input_origin
+from ai_assistant.core.episode_encoding import canonical_json, episode_content
 from ai_assistant.core.errors import (
     AssistantError,
     ChannelProcessingTimeoutError,
@@ -22,6 +23,7 @@ from ai_assistant.core.types import (
     ChannelResult,
     ControllerRule,
     ControllerStage,
+    Disposition,
     EpisodeCaptureReport,
     EpisodeProcessingRecord,
     EpisodeResponseKind,
@@ -133,6 +135,8 @@ class FakeActivation:
                 context=supplied.context,
                 conversation=supplied.conversation,
                 reply=reply,
+                # ADR-0284 §2:2: what the channel declares, fixed at admission.
+                origin=input_origin(supplied.target),
             ),
             at=at,
             conversation_id=(
@@ -264,9 +268,9 @@ class FakeActivation:
             if isinstance(self.trigger, RecordedChannelTrigger)
             else Modality.TEXT
         )
-        return EpisodicMemory(
+        record = EpisodicMemory(
             id=address,
-            content=self.content(),
+            content="",
             outcome=self.response,
             disposition=self.disposition(),
             occurred_at=self.at,
@@ -291,30 +295,75 @@ class FakeActivation:
                 stages=self.stages(failure),
             ),
         )
+        # ADR-0284 §7:1: the one rule, as the engine's writer applies it.
+        return record.model_copy(update={"content": episode_content(record)})
 
     def stages(self, failure: BaseException | None) -> tuple[StageEntry, ...]:
-        """ADR-0280 §7's record shape, over the facts this fake holds.
+        """ADR-0280 §7's record shape, with ADR-0284 §5's verdicts, over this fake's facts.
 
-        The fake runs no controller, so it records no stage entries and only the
-        pass's one end entry, choosing the rule from what it knows: none on a resume,
-        which keeps its legacy path; ``interrupted`` on a cancellation;
-        ``no_text_input`` for speech with no words or a failed transcription;
-        ``stage_failed`` on any other failure; ``route_taken`` for a routed turn; and
-        ``nothing_due`` otherwise.
+        The fake runs no controller. It records the one stage entry that carries a
+        verdict where its scripted result reached one — ``routing`` with the route's
+        outcome, or ``drive`` with the step's disposition (§5:2) — and the pass's one
+        end entry, choosing the rule from what it knows: ``interrupted`` on a
+        cancellation; ``no_text_input`` for speech with no words or a failed
+        transcription; ``stage_failed`` on any other failure; ``route_taken`` for a
+        routed turn; and ``nothing_due`` otherwise.
+
+        **A resume records its stages** (§5:4): the continued stage, due
+        ``park_answered`` with its verdict, then ``compose`` due ``reply_owed`` where
+        it replied, then the end entry. One that continued nothing records the end
+        entry alone.
         """
-        if isinstance(self.trigger, RecordedResumeTrigger):
-            return ()
+        resume = isinstance(self.trigger, RecordedResumeTrigger)
+        outcome = None if failure is not None else self.outcome
+        entries: list[StageEntry] = []
+        if outcome is not None and outcome.routed is not None:
+            entries.append(
+                self._entry(
+                    ControllerStage.ROUTING,
+                    ControllerRule.PARK_ANSWERED if resume else ControllerRule.ROUTE_UNCHECKED,
+                    route_outcome=outcome.routed.outcome,
+                )
+            )
+        elif outcome is not None and outcome.step is not None:
+            entries.append(
+                self._entry(
+                    ControllerStage.DRIVE,
+                    ControllerRule.PARK_ANSWERED if resume else ControllerRule.PLAN_HAS_STEPS,
+                    step_disposition=outcome.step.disposition,
+                )
+            )
+        if resume and outcome is not None and outcome.reply is not None:
+            entries.append(self._entry(ControllerStage.COMPOSE, ControllerRule.REPLY_OWED))
         if isinstance(failure, asyncio.CancelledError):
             rule = ControllerRule.INTERRUPTED
-        elif self.no_words or isinstance(failure, TranscriptionFailedError):
+        elif not resume and (self.no_words or isinstance(failure, TranscriptionFailedError)):
             rule = ControllerRule.NO_TEXT_INPUT
         elif failure is not None:
             rule = ControllerRule.STAGE_FAILED
-        elif self.outcome is not None and self.outcome.routed is not None:
+        elif not resume and outcome is not None and outcome.routed is not None:
             rule = ControllerRule.ROUTE_TAKEN
         else:
             rule = ControllerRule.NOTHING_DUE
-        return ended_pass(self.at, rule)
+        return (*entries, *ended_pass(self.at, rule))
+
+    def _entry(
+        self,
+        stage: ControllerStage,
+        due: ControllerRule,
+        *,
+        step_disposition: Disposition | None = None,
+        route_outcome: RouteOutcome | None = None,
+    ) -> StageEntry:
+        return StageEntry(
+            stage=stage,
+            due=due,
+            started_at=self.at,
+            ended_at=self.at,
+            outcome=StageOutcome.DONE,
+            step_disposition=step_disposition,
+            route_outcome=route_outcome,
+        )
 
     def understanding(self) -> tuple[ActivationUnderstanding, ...]:
         """The one version a pass that reached the stage records, and none otherwise."""
@@ -339,26 +388,6 @@ class FakeActivation:
         if self.outcome is not None and self.outcome.routed is not None:
             return UnderstandingOmission.ROUTED
         return None if self.understood else UnderstandingOmission.NOT_REACHED
-
-    def content(self) -> str:
-        """Render the fake's established conversational facts outside the raw snapshot."""
-        if self.outcome is None:
-            return "Recorded activation; inspect its processing record."
-        lines: list[str] = []
-        if self.outcome.turn is not None:
-            lines.append(f"The user asked: {self.outcome.turn.utterance}")
-            if self.outcome.turn.plan.rationale:
-                lines.append(f"The assistant's plan: {self.outcome.turn.plan.rationale}")
-        elif isinstance(self.trigger, RecordedChannelTrigger):
-            payload = self.trigger.payload
-            text = payload.text if isinstance(payload, RecordedTextInput) else payload.transcript
-            if text is not None:
-                lines.append(f"The user asked: {text}")
-        if isinstance(self.trigger, RecordedResumeTrigger):
-            lines.append("The user answered the confirmation this action was parked on.")
-        if self.outcome.step is not None and self.outcome.step.tool_id is not None:
-            lines.append(f"The action selected the tool {self.outcome.step.tool_id}.")
-        return "\n".join(lines)
 
     def disposition(self) -> ExchangeDisposition | None:
         """Preserve the scripted result's own exchange vocabulary."""

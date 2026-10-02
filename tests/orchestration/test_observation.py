@@ -801,40 +801,35 @@ async def test_the_batch_is_bounded_by_the_configured_size() -> None:
     assert [episode.id for episode in batch] == harness.ids(conversation)[-3:]
 
 
-async def test_an_ineligible_episode_is_skipped_without_backfilling() -> None:
-    """An ineligible episode shortens the batch; it never reaches further back.
+async def test_a_failed_episode_is_read_with_the_rest_of_its_window() -> None:
+    """A failed pass's episode is read like any other, carrying its status.
 
-    ADR-0283 §11:1, keeping ADR-0077 §8's no-backfill rule: backfilling would make
-    the window's *span* depend on how many skipped episodes it contains,
-    so two runs over one conversation would read different stretches of it.
+    ADR-0284 §6:2 retires ADR-0283 §11:1's skip: the window is the channel's episodes
+    above the watermark, every one of them, so a failed episode neither shortens the
+    batch nor is passed over.
     """
     harness = Harness(batch_size=3)
     conversation = await harness.conversation_with(4, captured=2)
 
     report = await harness.stage.observe(conversation)
 
-    assert report.episodes_read == 2  # one short: the window's oldest is ineligible
-    assert report.route == ROUTE  # it still ran
+    assert report.episodes_read == 3
+    assert report.route == ROUTE
     assert harness.fake.call_count == 1
+    assert [episode.id for episode in harness.fake.batches[-1]] == harness.ids(conversation)[-3:]
 
 
-async def test_a_window_holding_no_eligible_episode_reaches_no_model_at_all() -> None:
-    """No provider is called, and the report names **no** route (§9.7).
-
-    Naming one would claim a read that never happened, which is the one thing §3's
-    route reporting exists to make truthful.
-    """
+async def test_a_window_of_failed_episodes_still_reaches_the_observer() -> None:
+    """ADR-0284 §6:2: a window holding only failed episodes is read, not passed over."""
     harness = Harness()
     conversation = await harness.conversation_with(3, captured=0)
 
     report = await harness.stage.observe(conversation)
 
     assert report.conversation_id == conversation
-    assert report.route is None
-    assert report.episodes_read == 0
-    assert report.proposals == ()
-    assert report.discarded == 0
-    assert harness.fake.call_count == 0
+    assert report.route == ROUTE
+    assert report.episodes_read == 3
+    assert harness.fake.call_count == 1
 
 
 # --- the write path, ruling by ruling (ADR-0077 §4) ---------------------
@@ -1183,62 +1178,22 @@ async def test_a_pass_with_no_candidate_at_all_makes_no_advance() -> None:
     assert harness.fake.call_count == 1
 
 
-async def test_a_page_that_resolves_to_nothing_advances_past_it_in_one_pass() -> None:
-    """§5's second branch, and the stall it exists to prevent (ADR-0283 §11:1).
+@pytest.mark.parametrize("captured", [[], [1, 2], [1, 3]])
+async def test_a_page_holding_failed_episodes_is_read_whole_and_advanced_past_once(
+    captured: list[int],
+) -> None:
+    """ADR-0284 §6:2: every episode of the page is read, wherever the failed ones sit.
 
-    A page holding no episode a model may read would, under a rule advancing only to
-    the last episode *handed over*, never move the watermark: the next pass reads the
-    same page and does not move it either, and the conversation is a permanent
-    candidate re-reading one page for as long as it lives.
-
-    **In one pass, not one episode at a time**, which is what the single advance to
-    the page's highest number pins. It costs nothing: the page reached no observer at
-    all.
+    The position is still the page's highest number (ADR-0283 §11:1), so the next
+    pass reads nothing and the observer is called once.
     """
     harness = Harness(batch_size=3)
-    conversation = await harness.conversation_of([], turns=3)
-    top = await harness.number(conversation, 3)
-
-    report = await harness.stage.observe(conversation)
-
-    assert harness.fake.call_count == 0
-    assert report == ObservationReport(conversation_id=conversation)
-    assert harness.conversations.advances == [(conversation, top)]
-    assert await harness.watermark(conversation) == top
-
-
-async def test_a_page_whose_last_episode_is_ineligible_advances_past_it() -> None:
-    """ADR-0283 §11:1: the position is the page's highest number, whatever was skipped.
-
-    The turn index gave a trailing unresolved turn a second reading because its
-    episode might still be in flight. A channel holds only episodes that landed, so
-    an ineligible one is final rather than late, and re-reading it would buy nothing.
-    """
-    harness = Harness(batch_size=3)
-    conversation = await harness.conversation_of([1, 2], turns=3)
+    conversation = await harness.conversation_of(captured, turns=3)
     top = await harness.number(conversation, 3)
 
     await harness.stage.observe(conversation)
 
-    assert _indexes(harness.fake.batches[-1]) == [1, 2]
-    assert await harness.watermark(conversation) == top
-    assert (await harness.stage.observe(conversation)).episodes_read == 0
-    assert harness.fake.call_count == 1
-
-
-async def test_an_ineligible_episode_in_the_middle_of_a_page_is_passed_over() -> None:
-    """ADR-0283 §11:1: an ineligible episode is skipped and the batch is not backfilled.
-
-    The episode itself is unaffected: it stays on the channel, readable by
-    inspection, and expires on its own horizon. What it never reaches is a model.
-    """
-    harness = Harness(batch_size=3)
-    conversation = await harness.conversation_of([1, 3], turns=3)
-    top = await harness.number(conversation, 3)
-
-    await harness.stage.observe(conversation)
-
-    assert _indexes(harness.fake.batches[-1]) == [1, 3]
+    assert _indexes(harness.fake.batches[-1]) == [1, 2, 3]
     assert await harness.watermark(conversation) == top
     assert (await harness.stage.observe(conversation)).episodes_read == 0
     assert harness.fake.call_count == 1

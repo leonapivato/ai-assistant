@@ -289,12 +289,25 @@ def test_a_resume_records_no_input() -> None:
 # --- ADR-0280 §5, §6: the end entry supplied at finalization ----------------------------
 
 
-def test_a_resume_carries_no_stage_record() -> None:
+@pytest.mark.parametrize(
+    ("failure", "rule"),
+    [
+        (None, ControllerRule.NOTHING_DUE),
+        (asyncio.CancelledError(), ControllerRule.INTERRUPTED),
+        (ModelTimeoutError("the composition timed out"), ControllerRule.STAGE_TIMED_OUT),
+        (ChannelProcessingError("it failed outside a stage"), ControllerRule.STAGE_FAILED),
+    ],
+)
+def test_a_resume_that_continued_no_stage_records_the_end_entry_alone(
+    failure: BaseException | None, rule: ControllerRule
+) -> None:
+    """ADR-0284 §5:4: one end entry, last, due the rule that ended the resume."""
     state = admit_resume(
         approved=True, remember_recipients_until=None, clock=lambda: _AT, id_factory=lambda: _ID
     )
-    record = state.processing(_AT, None)
-    assert (record.stages, record.stages_elided) == ((), 0)
+    record = state.processing(_AT, failure)
+    assert [(entry.stage, entry.due) for entry in record.stages] == [(ControllerStage.END, rule)]
+    assert record.stages_elided == 0
 
 
 @pytest.mark.parametrize(

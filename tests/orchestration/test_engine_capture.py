@@ -59,6 +59,7 @@ from test_engine_routing import (
 )
 
 from ai_assistant.core import types as core_types
+from ai_assistant.core.episode_encoding import episode_content
 from ai_assistant.core.errors import ConversationStoreError, MemoryStoreError
 from ai_assistant.core.protocols import SecretStore
 from ai_assistant.core.types import (
@@ -346,10 +347,18 @@ async def test_a_no_reply_record_renders_its_phrase_and_nothing_else_at_all_thre
     assert first.reply is None
     assert first.reply_degraded is True
     (episode,) = await _captured(harness)
-    assert (episode.outcome, episode.disposition) == (
-        None,
-        ExchangeDisposition.STEP_EXECUTED,
-    ), "the shape #1873 is about: a member, and no reply beside it"
+    assert episode.outcome is None, "the shape #1873 is about: no reply beside the verdict"
+    # ADR-0284 §5:2, §2:2: the verdict is on the `drive` entry and the input is the
+    # user's — what every renderer reading the projection needs from capture.
+    assert episode.processing_record is not None
+    assert [
+        entry.step_disposition
+        for entry in episode.processing_record.stages
+        if entry.stage is core_types.ControllerStage.DRIVE
+    ] == [Disposition.EXECUTED]
+    trigger = episode.processing_record.trigger
+    assert isinstance(trigger, core_types.RecordedChannelTrigger)
+    assert trigger.origin is core_types.InputOrigin.USER
 
     await harness.engine.converse(
         "and again", timeout=PATIENT, conversation_id=first.conversation_id
@@ -363,6 +372,10 @@ async def test_a_no_reply_record_renders_its_phrase_and_nothing_else_at_all_thre
     ):
         rendered = _assembled(provider)
         assert phrase in rendered, f"the {name} rendered the member's phrase for this record"
+        # The user's own words reach every site, through the projection's input where
+        # the site reads it (ADR-0284 §8) and through the search text where it does not
+        # yet — the two facts every renderer of this episode emits, whatever its lines.
+        assert "send the note" in rendered, f"the {name} rendered the user's words"
         for line in rendered.splitlines():
             if phrase in line:
                 assert "None" not in line, (
@@ -1019,6 +1032,7 @@ async def test_a_captured_reply_reaches_the_tail_and_the_observation_batch(enric
     assert _SPAN in episode.outcome, "the span is in the store, which is the precondition"
     assert episode.disposition is ExchangeDisposition.STEP_EXECUTED
     private = "raw-activation-material-must-not-reach-a-model"
+    user_words = "what did I do?"
     if enriched:
         channel = core_types.ChannelIdentity(
             channel_type="conversation",
@@ -1028,27 +1042,46 @@ async def test_a_captured_reply_reaches_the_tail_and_the_observation_batch(enric
             activation_id=private,
             started_at=episode.occurred_at,
             ended_at=episode.occurred_at,
+            # ADR-0284 §8:1: a `user` input is the one part of the trigger a model is
+            # shown, so the payload carries the user's words and the private material
+            # rides only where no projection reads — the id and the channel context.
             trigger=core_types.RecordedChannelTrigger(
                 target=channel,
                 channel=channel,
-                payload=core_types.RecordedTextInput(text=private),
+                payload=core_types.RecordedTextInput(text=user_words),
                 context=core_types.ChannelContext(
                     history=(core_types.ChannelContextItem(text=private),),
                 ),
                 conversation=None,
                 reply=core_types.WholeTextReply(),
+                origin=core_types.InputOrigin.USER,
             ),
             status=core_types.ProcessingStatus.COMPLETED,
             reason=core_types.ProcessingReason.RETURNED,
             response_kind=core_types.EpisodeResponseKind.CONVERSATION_REPLY,
             model_eligible=True,
             understanding_omitted=core_types.UnderstandingOmission.NOT_REACHED,
-            stages=ended_pass(episode.occurred_at),
+            # ADR-0284 §5:2: the driven step's verdict is on its `drive` entry.
+            stages=(
+                core_types.StageEntry(
+                    stage=core_types.ControllerStage.DRIVE,
+                    due=core_types.ControllerRule.PLAN_HAS_STEPS,
+                    started_at=episode.occurred_at,
+                    ended_at=episode.occurred_at,
+                    outcome=core_types.StageOutcome.DONE,
+                    step_disposition=Disposition.EXECUTED,
+                ),
+                *ended_pass(episode.occurred_at),
+            ),
         )
         # Processing is immutable once recorded; replace the synthetic fixture
         # explicitly instead of mutating a production capture in place.
         await harness.memory.delete(episode.id)
-        await harness.memory.add(episode.model_copy(update={"processing_record": processing}))
+        enriched_episode = episode.model_copy(update={"processing_record": processing})
+        # ADR-0284 §7:1: the search text is the one rule's, over the replaced record.
+        await harness.memory.add(
+            enriched_episode.model_copy(update={"content": episode_content(enriched_episode)})
+        )
 
     await harness.engine.converse(
         "and what else?", timeout=PATIENT, conversation_id=first.conversation_id
@@ -1069,6 +1102,9 @@ async def test_a_captured_reply_reaches_the_tail_and_the_observation_batch(enric
         "§1: the phrase line is rendered first and the reply never replaces it"
     )
     assert "the selected tool ran" in batch, "§3: the same, over the observation batch"
+    # ADR-0284 §8: the user's own words are the episode's input, at every site.
+    assert user_words in tail
+    assert user_words in batch
 
 
 async def test_no_log_on_the_capture_or_observation_path_carries_the_reply() -> None:

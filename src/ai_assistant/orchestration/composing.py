@@ -80,10 +80,15 @@ from __future__ import annotations
 import json
 from dataclasses import dataclass, field
 from types import MappingProxyType
-from typing import TYPE_CHECKING, Final, NamedTuple, assert_never
+from typing import TYPE_CHECKING, Final, NamedTuple
 
 import structlog
 
+from ai_assistant.core.episode_encoding import (
+    ROUTE_OUTCOME_PHRASES,
+    STEP_DISPOSITION_PHRASES,
+    project_episode,
+)
 from ai_assistant.core.errors import ModelError, ModelTimeoutError
 from ai_assistant.core.streams import closing_stream
 from ai_assistant.core.types import (
@@ -91,7 +96,7 @@ from ai_assistant.core.types import (
     BeliefBand,
     Disposition,
     EpisodicMemory,
-    ExchangeDisposition,
+    InputOrigin,
     Message,
     OutboundReach,
     OutboundStatement,
@@ -2091,9 +2096,9 @@ class _ReplyLines(NamedTuple):
         lines: The continuation line to write under the record's own bullet, or
             nothing where the record is not one §1 admits.
         eligible: ``1`` where the record was eligible to render a reply under
-            ADR-0222 §1 or ADR-0227 §1 — an episode carrying a ``disposition``
-            **and** an ``outcome``, in the conversation tail or reached by this
-            turn's citation hop — and ``0`` otherwise. ADR-0222 §5's denominator, per
+            ADR-0222 §1 or ADR-0227 §1 — an episode carrying a response, read
+            through ADR-0284 §8's projection, in the conversation tail or reached by
+            this turn's citation hop — and ``0`` otherwise. ADR-0222 §5's denominator, per
             record, over the one pair ADR-0227 §5 keeps for both populations.
         elided: ``1`` where §4's ceiling bound on that reply, ``0`` otherwise. §5's
             numerator, per record, and never greater than ``eligible``.
@@ -2158,20 +2163,29 @@ def _reply_lines(record: MemoryRecord) -> _ReplyLines:
     Returns:
         The line to write under its bullet, and §5's two counts for this record.
         ``eligible`` is ``0`` — and the lines empty — for a record neither §1 admits:
-        one that is not an episode, and one carrying no ``disposition`` or no
-        ``outcome``.
+        one that is not an episode, and one carrying no response.
+
+    **The condition reads "carries a response"** (ADR-0284 §8:7, superseding
+    ADR-0222 §1:1's and ADR-0227 §1:1's *"carries both a ``disposition`` and an
+    ``outcome``"*), and the response is the projection's (§8:3): the record's
+    ``outcome`` is read through it and through nothing else. The projection cuts it
+    at :data:`_EPISODE_EXCERPT_CHARS`, which is above this site's ceiling, so a cut
+    projection is always elided here, and the marker's whole length is the length
+    the projection carries.
     """
     if not isinstance(record, EpisodicMemory):  # pragma: no cover — the tail is episodic
         return _ReplyLines([], eligible=0, elided=0)
-    if record.disposition is None or record.outcome is None:
+    response = project_episode(record, excerpt_chars=_EPISODE_EXCERPT_CHARS).response
+    if response is None:
         return _ReplyLines([], eligible=0, elided=0)
-    span, kept = _bounded_reply(record.outcome)
-    if kept is None:
+    span, kept = _bounded_reply(response.text)
+    if kept is None and not response.cut:
         return _ReplyLines([f"    what the assistant replied: {span}"], eligible=1, elided=0)
+    shown = len(response.text) if kept is None else kept
     return _ReplyLines(
         [
             f"    what the assistant replied "
-            f"(first {kept} of {len(record.outcome)} characters): {span}"
+            f"(first {shown} of {response.full_chars} characters): {span}"
         ],
         eligible=1,
         elided=1,
@@ -2322,45 +2336,18 @@ def _render_record(record: MemoryRecord) -> str:
     what a connected source reported") and leaves the authorship to the stance
     clause. ADR-0098 §2's fourth clause leaves this wording to the assembler.
 
-    **And an episode gets a third arm, because both belief phrases are wrong for it
-    in opposite directions** (ADR-0223 §4). A captured episode is ``OBSERVED``, which
-    ``band_of`` places in ``DERIVED``, so a stamped one would otherwise fall into the
-    arm above. But an episode's warrant is not a derivation at all: ADR-0074 §4 makes
-    it "the terminal citation: the thing other records cite", its ``evidence`` is
-    empty by decision, and its warrant is that it happened and was recorded as it
-    happened. There is nothing for it to *rest on*, so predicating the mark of its
-    warrant asserts a derivation the record does not have — and attributing its
-    content to a source would be the ``ATTESTED`` inflation the paragraph above
-    forbids, one record shape over. What the mark actually records about an episode
-    is a fact about the **occasion**: external material was on the desk while this
-    exchange was conducted. So the phrase keeps the authorship where ADR-0074 §4 puts
-    it, adds the mixed-origin fact, and predicates nothing of the warrant. It
-    attributes no part of the episode's content to a connected source and states no
-    external warrant, which are §4's two prohibitions, and it states the fact §4
-    requires. The unstamped episodic bullet is unchanged, byte for byte.
-
-    **The ``ATTESTED`` arm is deliberately left alone.** Capture writes ``OBSERVED``
-    and no other producer makes an episode, so an ``ATTESTED`` episode is not a
-    record this system can produce; ADR-0223 §4 rules the *stamped* episode, which is
-    exactly the second arm, and widening the split into a band this path cannot reach
-    would be this module deciding a case no ADR has.
-
     **A belief states the standing it is held with** (ADR-0072 §6): a derived belief
     reaching a prompt is rendered as a belief, carrying its band and its confidence,
     "never as a bare fact indistinguishable from what the user stated".
 
-    **An episode's outcome line carries the phrase where the record carries a
-    ``disposition``, and ``outcome`` where it does not** (ADR-0221 §3). §1 gives
-    ``outcome`` to the composed reply and §2 puts what became of the exchange in a
-    closed enum, so this line renders :func:`_disposition_phrase` of that member —
-    the very string a record captured before ADR-0221 carries in ``outcome``, byte
-    for byte, so the bullet is identical across the two populations and the reply
-    reaches no model. A record carrying no ``disposition`` — one written before that
-    decision, or a benchmark-harness row — renders its ``outcome`` exactly as it
-    did. The phrase is quoted by :func:`_quoted_span` like every other span here,
-    though it is a constant of this system's own: the transform is applied to the
-    line, not to a judgement about the value.
+    **An episode is rendered through ADR-0284 §8's projection, and only through it**
+    (§8:3, superseding ADR-0221 §3:1 and ADR-0222 §1:3's record line). The belief
+    bullet above reads the record's band, confidence and text; an episode's bullet
+    reads none of them, because none is a field of the projection — see
+    :func:`_render_episode`.
     """
+    if isinstance(record, EpisodicMemory):
+        return _render_episode(record)
     provenance = record.provenance
     band = band_of(provenance.source)
     # Band first, then the predicate: `rests_on_recorded_external_content` is true of
@@ -2370,100 +2357,98 @@ def _render_record(record: MemoryRecord) -> str:
     if band is BeliefBand.ATTESTED:
         origin = "reported by a connected source"
     elif rests_on_recorded_external_content(provenance):
-        # ADR-0223 §4: the record shape decides which of the two tainted phrases is
-        # true, and an episode takes neither belief phrase. Read off `isinstance`,
-        # which is what this function already asks of the same record below.
-        origin = (
-            "recorded by this system, over material that included a connected source's report"
-            if isinstance(record, EpisodicMemory)
-            else "resting on what a connected source reported"
-        )
+        origin = "resting on what a connected source reported"
     else:
         origin = "recorded by this system"
     standing = f"{band.value}, confidence {provenance.confidence:.2f}, {origin}"
     label = f"  - [{record.kind}/{provenance.source.value}]"
-    content = _quoted_span(record.content)
-
-    if isinstance(record, EpisodicMemory):
-        lines = [
-            f"{label} ({standing}) the assistant recorded this exchange at "
-            f"{record.occurred_at.isoformat()}: {content}"
-        ]
-        if record.disposition is not None:
-            phrase = _disposition_phrase(record.disposition)
-            lines.append(f"    how it turned out: {_quoted_span(phrase)}")
-        elif record.outcome is not None:
-            lines.append(f"    how it turned out: {_quoted_span(record.outcome)}")
-        return "\n".join(lines)
-
-    return f"{label} ({standing}) {_STANCE[band]}: {content}"
+    return f"{label} ({standing}) {_STANCE[band]}: {_quoted_span(record.content)}"
 
 
-def _disposition_phrase(disposition: ExchangeDisposition) -> str:  # noqa: C901, PLR0911, PLR0912 — one return per member, so the totality `assert_never` rests on is visible; collapsing them would hide it
-    """ADR-0221 §2's phrase for one disposition, written out at this site.
+#: The bound ADR-0284 §8:1's projection cuts an episode's input and response to, at
+#: this site. **Above** :data:`_REPLY_CEILING` on purpose: the reply line applies that
+#: ceiling — ADR-0222 §4's, which §8:7 keeps — to what the projection carries, so the
+#: projection must never be the tighter of the two. The input line discloses its own
+#: cut.
+_EPISODE_EXCERPT_CHARS: Final = 2000
 
-    **This table is not shared and must not become shared** (ADR-0221 §3). It is one
-    of three copies of the same sixteen strings — the others are in
-    ``learning/observer.py`` and ``planning/planner.py`` — and no implementation
-    extracts them into a shared module, a ``core`` mapping, a method on the enum or
-    a helper any two of the three import. Golden rule 1 is the reason: three
-    subsystems assembling their own prompts do not reach into one another, and what
-    they share is the ADR's table rather than a module. It is the same reason
-    :func:`_split_conversation_tail` is written out here rather than imported from
-    ``planning``.
+#: ADR-0223 §4's episodic origin phrase, rendered from the projection's
+#: ``derived_from_external`` (ADR-0284 §8:4) — the fact about the **occasion**:
+#: external material was on the desk while the exchange was conducted. It attributes
+#: no part of the episode to a connected source and states no external warrant.
+_EPISODE_OVER_EXTERNAL: Final = (
+    "recorded by this system, over material that included a connected source's report"
+)
+_EPISODE_RECORDED: Final = "recorded by this system"
 
-    Total over :class:`~ai_assistant.core.types.ExchangeDisposition` and
-    mechanically so — the wildcard does nothing but ``assert_never`` — so a member
-    added to that enum without a phrase here fails the gate at this site rather than
-    rendering a bullet whose outcome line reads as empty. That is the same shape
-    ``engine._outcome_of`` and ``engine._routed_outcome_of`` already have over the
-    two source vocabularies.
 
-    Args:
-        disposition: The member the episode records.
+def _render_episode(record: EpisodicMemory) -> str:
+    """Render one episode as a prompt bullet, from ADR-0284 §8's projection alone.
 
-    Returns:
-        §2's phrase for it, byte for byte.
+    **Every line is a part of the projection** (§8:3): where and when the episode
+    arrived, the user's input where its origin is ``user`` (an outside input's text
+    is not admitted here, §8:5), what was understood then, the phrase for each stage
+    verdict and the status and reason processing ended with (§8:6). An episode with
+    no processing record shows its ``content`` as its input, the one path §8:2
+    allows. The response is never on the bullet: the caller adds it, for the records
+    ADR-0222 §1 and ADR-0227 §1 admit (§8:7).
+
+    **The origin phrase is ADR-0223 §4's**, read off ``derived_from_external`` and
+    never off ``origin`` (§8:4): who the input came from and whether processing read
+    external material are different facts, and an outside report is said to be one
+    in the bullet's own words rather than by that phrase.
+
+    **No verdict renders no line** — a pass that drove no step and took no route
+    reached none, and its status line says how it ended. ``core``'s phrase tables hold
+    a phrase for each member of ``Disposition`` and of ``RouteOutcome`` and nothing
+    for their absence, so nothing is invented for it.
+
+    **Every span is quoted** (ADR-0098 §2), as on the belief bullet; the status and
+    reason are this system's own closed values.
     """
-    match disposition:
-        case ExchangeDisposition.NO_ACTION_NEEDED:
-            return "no action was needed"
-        case ExchangeDisposition.STEP_EXECUTED:
-            return "the selected tool ran"
-        case ExchangeDisposition.STEP_DENIED:
-            return "the action was refused by the permission policy"
-        case ExchangeDisposition.STEP_AWAITING_CONFIRMATION:
-            return "the action was parked for the user to confirm"
-        case ExchangeDisposition.STEP_NO_CAPABLE_TOOL:
-            return "no tool advertised the capability the step needed"
-        case ExchangeDisposition.STEP_AMBIGUOUS_CAPABILITY:
-            return "several tools advertised the capability, so none was chosen"
-        case ExchangeDisposition.STEP_INVALID_PARAMETERS:
-            return "the step's arguments did not fit the declared schema of any capable tool"
-        case ExchangeDisposition.STEP_EGRESS_UNBINDABLE:
-            return "the outbound call could not be described, so nothing was asked or sent"
-        case ExchangeDisposition.STEP_EFFECT_ALREADY_CLAIMED:
-            return "this goal had already claimed the act, so nothing was dispatched"
-        case ExchangeDisposition.STEP_EFFECT_UNSCOPED:
-            return "the plan did not say which act the step was, so nothing was dispatched"
-        case ExchangeDisposition.ROUTED_PERFORMED:
-            return "the assistant performed the operation the user asked for"
-        case ExchangeDisposition.ROUTED_AWAITING_CONFIRMATION:
-            return "the operation was parked for the user to confirm"
-        case ExchangeDisposition.ROUTED_REFUSED:
-            return "the user declined, so the operation was not performed"
-        case ExchangeDisposition.ROUTED_AMBIGUOUS:
-            return "more than one record matched, so nothing was performed"
-        case ExchangeDisposition.ROUTED_AMBIGUOUS_TRUNCATED:
-            return "more records matched than could be shown, so nothing was performed"
-        case ExchangeDisposition.ROUTED_NOT_FOUND:
-            return "nothing matched, so nothing was performed"
-        case ExchangeDisposition.ROUTED_UNRECORDED:
-            return "the decision could not be recorded, so nothing was performed"
-        case ExchangeDisposition.ROUTED_FAILED:
-            return "the operation was attempted and failed"
-        case _:  # pragma: no cover - exhaustive
-            assert_never(disposition)
+    projection = project_episode(record, excerpt_chars=_EPISODE_EXCERPT_CHARS)
+    origin = _EPISODE_OVER_EXTERNAL if projection.derived_from_external else _EPISODE_RECORDED
+    if projection.channel is not None:
+        where = f"{projection.channel.channel_type}:{projection.channel.instance_id}"
+    elif projection.capture_modality is not None:
+        where = f"capture modality {projection.capture_modality.value}"
+    else:
+        where = "a channel the record does not name"
+    what = (
+        "received a report"
+        if projection.origin is InputOrigin.OUTSIDE
+        else "recorded this exchange"
+    )
+    lines = [
+        f"  - [episode] ({origin}) the assistant {what} at "
+        f"{projection.occurred_at.isoformat()} on {_quoted_span(where)}"
+    ]
+    if projection.input is not None:
+        said = "the user said" if projection.has_processing_record else "the record says"
+        cut = (
+            f" (first {len(projection.input.text)} of {projection.input.full_chars} characters)"
+            if projection.input.cut
+            else ""
+        )
+        lines.append(f"    {said}{cut}: {_quoted_span(projection.input.text)}")
+    if projection.meaning is not None:
+        lines.append(
+            f"    what the assistant understood then (provisional): "
+            f"{_quoted_span(projection.meaning)}"
+        )
+    lines.extend(
+        f"    how it turned out: {_quoted_span(STEP_DISPOSITION_PHRASES[member])}"
+        for member in projection.step_dispositions
+    )
+    lines.extend(
+        f"    how it turned out: {_quoted_span(ROUTE_OUTCOME_PHRASES[member])}"
+        for member in projection.route_outcomes
+    )
+    if projection.status is not None and projection.reason is not None:
+        lines.append(
+            f"    how processing ended: {projection.status.value} ({projection.reason.value})"
+        )
+    return "\n".join(lines)
 
 
 #: What the plan block says about itself on a turn that did not service a search

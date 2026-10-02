@@ -83,7 +83,6 @@ from typing import TYPE_CHECKING, Final
 import structlog
 
 from ai_assistant.core.clock import checked_clock
-from ai_assistant.core.episode_encoding import admits_model_eligibility
 from ai_assistant.core.errors import (
     MemoryStoreError,
     MemoryStoreStaleError,
@@ -187,15 +186,15 @@ def _utcnow() -> datetime:
 
 
 def _resolve(page: Sequence[ChannelEpisode]) -> tuple[tuple[EpisodicMemory, ...], int]:
-    """A page's eligible episodes, and the number the pass advances to (ADR-0283 §11:1).
+    """A page's episodes, and the number the pass advances to (ADR-0283 §11:1).
 
-    Ineligible episodes are skipped (ADR-0275 §7), and the position is the page's
-    highest number, whatever was skipped: the page is number ascending and
-    **non-empty**, since a pass over an empty page names no position and does not
-    reach here.
+    **Every episode of the page** (ADR-0284 §6:2, superseding ADR-0283 §11:1's
+    "skips ineligible episodes"): failed, interrupted and outside episodes are read
+    like any other, each carrying its status. The position is the page's highest
+    number: the page is number ascending and **non-empty**, since a pass over an
+    empty page names no position and does not reach here.
     """
-    episodes = tuple(entry.record for entry in page if admits_model_eligibility(entry.record, True))
-    return episodes, page[-1].number
+    return tuple(entry.record for entry in page), page[-1].number
 
 
 def _check_duration(name: str, value: timedelta) -> None:
@@ -526,8 +525,8 @@ class ObservationStage:
                 lowest that many above its watermark, or its most recent that many
                 where it has none (ADR-0212 §§3, 4; ADR-0283 §11:1), and at most
                 ``channel_episodes``' own bound of 1000. A **maximum, not a quota**:
-                a page holding an ineligible episode yields a shorter batch rather
-                than reaching further forward.
+                a channel holding fewer episodes above the watermark yields a
+                shorter batch.
             route: The ``"provider:model"`` spec the observer reads through,
                 reported on every pass that actually called it (ADR-0013 §6).
             quiet_window: How long a conversation must have been inactive before a
@@ -594,10 +593,8 @@ class ObservationStage:
         turns into one batch, because a batch is a prompt and two interleaved
         transcripts are a different thing to observe.
 
-        **An ineligible episode is skipped, and the batch is not backfilled**
-        (ADR-0283 §11:1). Backfilling would make the page's *span* depend on how many
-        it contains, so two runs over one conversation would read different
-        stretches of it.
+        **Every episode of the page is read** (ADR-0284 §6:2): a failed, interrupted
+        or outside episode reaches the observer with its status, like any other.
 
         **An empty batch reaches no observer.** There is nothing to observe, no
         provider is called, and the report names no route (§9.7).
@@ -615,8 +612,7 @@ class ObservationStage:
         **The advance is one attempt, at the end, and never computed from the page's
         length** (ADR-0212 §5). A pass that read a **non-empty** page makes exactly
         one ``record_observed`` call, after every proposal it produced has been ruled
-        — even where the page held no eligible episode, even where the observer was
-        not called, and even where nothing was proposed. It names the highest number
+        — even where nothing was proposed. It names the highest number
         in the page (ADR-0283 §11:1). A pass that read **no** episodes makes **no**
         attempt and writes nothing: there is no number for it to name.
 
@@ -722,12 +718,6 @@ class ObservationStage:
             # written anywhere (ADR-0212 §5).
             return ObservationReport(conversation_id=target.id)
         episodes, through = _resolve(page)
-        if not episodes:
-            # The page reached no observer, so passing over it passes over nothing
-            # an observer may read — and advancing past it is what stops a
-            # conversation of ineligible episodes re-reading one page for ever.
-            await self._conversations.record_observed(target.id, through_episode=through)
-            return ObservationReport(conversation_id=target.id)
         outcome = await self._observer.observe(episodes)
         # The batch *is* the evidence: every citation is drawn from it by contract,
         # so a proposal's warrant renders out of what was already read, with no
@@ -1170,8 +1160,7 @@ class ObservationStage:
         The conversation's channel read with ``channel_episodes``: above a recorded
         watermark, the **lowest** ``batch_size`` episodes numbered above it; with no
         watermark, the channel's **tail**, its newest ``batch_size`` (ADR-0212 §4).
-        Unfiltered by eligibility, so the advance can pass over an ineligible
-        episode rather than re-reading it.
+        Every episode on the channel, since none is filtered (ADR-0284 §6:2).
         """
         page = await self._memory.channel_episodes(
             conversation_channel(conversation.id),

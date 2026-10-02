@@ -1,4 +1,11 @@
-"""M36 automatic reads keep inspection-only episodes outside model evidence."""
+"""Every read reads every episode: the eligibility axis is retired (ADR-0284 §6:2).
+
+These tests once pinned ADR-0283 §4's filter. ADR-0284 §6 supersedes it — no read
+requests ``episode_model_eligible``, and an episode the old flag marked ineligible is
+read by history, retrieval, both episodic reads, the citation hop and the observer
+exactly as any other is. The flag is still written (lane 6 retires it), so each test
+seeds episodes carrying ``model_eligible=False`` and asserts they are read.
+"""
 
 from __future__ import annotations
 
@@ -74,9 +81,8 @@ def _episode(identifier: str, *, eligible: bool) -> EpisodicMemory:
     )
 
 
-async def test_history_filters_eligibility_before_the_replay_bound() -> None:
-    """ADR-0283 §4:1: the eligibility axis applies before the bound, so a run of
-    inspection-only episodes never consumes the page that eligible ones need."""
+async def test_history_reads_formerly_ineligible_episodes_up_to_the_replay_bound() -> None:
+    """ADR-0284 §6:2: history is the channel's latest episodes, whatever the old flag."""
     conversations = FakeConversationStore(now=lambda: _AT)
     memory = FakeMemoryStore(now=lambda: _AT)
     stage = ConversationLifecycle(
@@ -98,18 +104,24 @@ async def test_history_filters_eligibility_before_the_replay_bound() -> None:
             )
         )
 
-    assert [record.id for record in (await stage.history(conversation.id)).records] == eligible
+    hidden = [f"activation:hidden-{index}" for index in range(HISTORY_REPLAY_BOUND + 5)]
+    assert [record.id for record in (await stage.history(conversation.id)).records] == (
+        eligible + hidden
+    )[-HISTORY_REPLAY_BOUND:]
 
 
-async def test_ineligible_episodes_do_not_displace_retrieval_results() -> None:
+async def test_retrieval_reads_formerly_ineligible_episodes() -> None:
     memory = FakeMemoryStore(now=lambda: _AT)
     for index in range(25):
         await memory.add(_episode(f"hidden-{index}", eligible=False))
     await memory.add(_episode("visible", eligible=True))
 
-    records = await assemble_by_band(memory, "matching", limit=1)
+    records = await assemble_by_band(memory, "matching", limit=30)
 
-    assert [record.id for record in records] == ["visible"]
+    assert {record.id for record in records} == {
+        "visible",
+        *(f"hidden-{index}" for index in range(25)),
+    }
 
 
 async def _crowded_memory() -> FakeMemoryStore:
@@ -129,22 +141,23 @@ async def _crowded_memory() -> FakeMemoryStore:
     return memory
 
 
-async def test_episodic_supplement_filters_before_its_limit_and_model_supply() -> None:
+async def test_episodic_supplement_reads_formerly_ineligible_episodes() -> None:
     memory = await _crowded_memory()
     planner = _Script(None)
-    loop = _loop(memory, planner=planner, episodic_limit=1, now=lambda: _AT)
+    loop = _loop(memory, planner=planner, episodic_limit=READ_BUDGET + 2, now=lambda: _AT)
 
     responded = await loop.respond(
         "boiler", narrow=_bounded(), operation=ConversationalOperation.CONVERSE
     )
 
     assert len(planner.calls) == 1
-    assert [record.id for record in planner.calls[0][0]] == ["belief", "visible"]
-    assert [record.id for record in responded.turn.memories] == ["belief", "visible"]
+    supplied = {record.id for record in planner.calls[0][0]}
+    assert {"belief", "visible", "hidden-0"} <= supplied
+    assert {"belief", "visible", "hidden-0"} <= {record.id for record in responded.turn.memories}
 
 
 @pytest.mark.parametrize("query", [None, "boiler"])
-async def test_structured_read_filters_before_its_limit_and_model_supply(
+async def test_structured_read_reads_formerly_ineligible_episodes(
     query: str | None,
 ) -> None:
     memory = await _crowded_memory()
@@ -157,11 +170,15 @@ async def test_structured_read_filters_before_its_limit_and_model_supply(
 
     assert len(planner.calls) == 2
     assert [record.id for record in planner.calls[0][0]] == ["belief"]
-    assert [record.id for record in planner.calls[1][0]] == ["belief", "visible"]
-    assert [record.id for record in responded.turn.memories] == ["belief", "visible"]
+    read = [record.id for record in planner.calls[1][0]]
+    assert read[0] == "belief"
+    assert any(identifier.startswith("hidden-") for identifier in read), (
+        "a formerly ineligible episode is read like any other"
+    )
+    assert [record.id for record in responded.turn.memories] == read
 
 
-async def test_citation_hops_exclude_ineligible_evidence_and_named_records() -> None:
+async def test_citation_hops_reach_formerly_ineligible_evidence_and_named_records() -> None:
     memory = FakeMemoryStore(now=lambda: _AT)
     hidden = _episode("hidden", eligible=False)
     visible = _episode("visible", eligible=True)
@@ -185,16 +202,16 @@ async def test_citation_hops_exclude_ineligible_evidence_and_named_records() -> 
         supply=(belief,),
         reads=_Reads(),
     )
-    assert [record.id for record in reached.expansion] == ["belief", "visible"]
-    assert [record.id for record in reached.evidence] == ["visible"]
-    refused = await _hop_records(
+    assert [record.id for record in reached.expansion] == ["belief", "hidden", "visible"]
+    assert [record.id for record in reached.evidence] == ["hidden", "visible"]
+    named = await _hop_records(
         memory,
         ReadAsk(kind=ReadKind.CITATION_HOP, labels=("M1",)),
         supply=(hidden,),
         reads=_Reads(),
     )
-    assert refused.expansion == ()
-    assert refused.unresolved == 1
+    assert [record.id for record in named.expansion] == ["hidden"]
+    assert named.unresolved == 0
 
 
 @pytest.mark.parametrize(
@@ -207,11 +224,11 @@ async def test_citation_hops_exclude_ineligible_evidence_and_named_records() -> 
         (False,),
     ],
 )
-async def test_observation_skips_ineligible_episodes_without_stalling_the_watermark(
+async def test_observation_reads_formerly_ineligible_episodes_and_advances_the_watermark(
     flags: tuple[bool, ...],
 ) -> None:
-    """ADR-0283 §11:1: ineligible episodes are skipped, and the pass advances to the
-    page's highest number whatever it skipped, so nothing is read twice."""
+    """ADR-0284 §6:2: the observer reads every episode, whatever the old flag, and the
+    pass advances to the page's highest number, so nothing is read twice."""
     memory = FakeMemoryStore(now=lambda: _AT)
     conversations = FakeConversationStore(now=lambda: _AT)
     observer = FakeObserver()
@@ -237,13 +254,10 @@ async def test_observation_skips_ineligible_episodes_without_stalling_the_waterm
 
     await stage.observe(conversation.id)
 
-    expected = [
-        identifier for identifier, eligible in zip(identifiers, flags, strict=True) if eligible
-    ]
-    assert [record.id for batch in observer.batches for record in batch] == expected
-    assert observer.call_count == int(bool(expected))
+    assert [record.id for batch in observer.batches for record in batch] == identifiers
+    assert observer.call_count == 1
     stored = await conversations.get(conversation.id)
     assert stored is not None
     assert stored.observed_through == numbers[identifiers[-1]]
     await stage.observe(conversation.id)
-    assert observer.call_count == int(bool(expected)), "nothing above the watermark is re-read"
+    assert observer.call_count == 1, "nothing above the watermark is re-read"

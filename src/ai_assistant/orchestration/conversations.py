@@ -9,8 +9,9 @@ whether a conversation still has live episodes would have to reach into memory a
 break golden rule 1, so this stage — the one place that legitimately holds both
 handles by injection — owns the cross-store sequences:
 
-* **history** (ADR-0283 §4, §10) — the conversation's eligible episodes in number
-  order within the replay bound, each paired with its delivery row;
+* **history** (ADR-0283 §4, §10; ADR-0284 §6:2) — every live episode of the
+  conversation in number order within the replay bound, each paired with its
+  delivery row;
 * **resume association** (§5) — a binding resolved through the episode that parked
   it;
 * **deletion** (§8) — stamp, destroy every episode the conversation's channel
@@ -41,7 +42,6 @@ from typing import TYPE_CHECKING, Final
 import structlog
 
 from ai_assistant.core.clock import ClockReadingError, checked_clock
-from ai_assistant.core.episode_encoding import admits_model_eligibility
 from ai_assistant.core.errors import (
     ConversationStoreError,
     MemoryStoreError,
@@ -101,7 +101,7 @@ BELIEF_KINDS: tuple[MemoryKind, ...] = (
 #: How many conversations the retention reclaim shortlists per ``recent`` page.
 _RECLAIM_PAGE = 50
 
-#: The replay bound: how many of a conversation's most recent eligible episodes
+#: The replay bound: how many of a conversation's most recent episodes
 #: :meth:`ConversationLifecycle.history` reads (ADR-0283 §4:1). The value the turn
 #: index's configured replay window had (ADR-0074 §9.3) — finite, and the same for
 #: every caller, because an unbounded replay of a months-old conversation is a
@@ -127,7 +127,7 @@ class AssembledHistory:
     """A conversation's recent episodes, with their delivery facts (ADR-0283 §4, §10).
 
     Attributes:
-        records: The channel's live, eligible episodes, oldest first in number order
+        records: The channel's live episodes, oldest first in number order
             (ADR-0283 §1), within the replay bound. A deleted or expired episode is
             simply not on the channel's live read, so a conversation that lost a turn
             still resumes and never resurrects the deleted one.
@@ -291,10 +291,14 @@ class ConversationLifecycle:
 
         ADR-0283 §4:1: a ``get`` that answers nothing for a stamped or absent
         conversation, then the conversation's channel read with
-        ``MemoryStore.channel_episodes`` — the replay bound as ``limit`` and
-        ``episode_model_eligible=True``, so an ineligible run never consumes the page
-        — and then, by §10, one ``deliveries`` call for the episodes it returned,
-        each paired with its episode. No turn is read from the conversation store.
+        ``MemoryStore.channel_episodes`` with the replay bound as ``limit`` — and
+        then, by §10, one ``deliveries`` call for the episodes it returned, each paired
+        with its episode. No turn is read from the conversation store.
+
+        **Every episode, and no eligibility** (ADR-0284 §6:2, superseding ADR-0283
+        §4:1's ``episode_model_eligible=True``): a failed, interrupted or outside
+        episode is part of the conversation's history like any other, and its
+        renderings state its status.
 
         **The order is the channel's, the episodes' numbers ascending** (§1), never a
         timestamp and never an id. The read already filters by liveness, so a
@@ -309,17 +313,9 @@ class ConversationLifecycle:
             if await self._conversations.get(conversation_id) is None:
                 return AssembledHistory(degraded=True)
             page = await self._memory.channel_episodes(
-                conversation_channel(conversation_id),
-                limit=HISTORY_REPLAY_BOUND,
-                episode_model_eligible=True,
+                conversation_channel(conversation_id), limit=HISTORY_REPLAY_BOUND
             )
-            records: list[MemoryRecord] = [
-                entry.record
-                for entry in page.entries
-                # Belt and braces over the read's own axis: a record the decoder
-                # does not admit as eligible never reaches a prompt (ADR-0275 §7).
-                if admits_model_eligibility(entry.record, True)
-            ]
+            records: list[MemoryRecord] = [entry.record for entry in page.entries]
             delivered = (
                 await self._conversations.deliveries(
                     conversation_id, episode_ids=[record.id for record in records]
