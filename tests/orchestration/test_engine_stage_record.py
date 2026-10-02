@@ -20,6 +20,8 @@ from test_activation_state import _admitted
 from test_channel_receiver import ControlledModel
 from test_engine import AT, Harness, NoStepPlanner, confirmable, tool
 from test_engine_goal_association import _associating, _goal, _seed
+from test_engine_routing import _parked as _routed_park
+from test_engine_routing import _routed_harness, _seed_belief, _token
 from understanding_support import STATED_PROPOSAL, recall_stage, understanding_stage
 
 from ai_assistant.core.errors import (
@@ -555,3 +557,27 @@ async def test_a_resume_whose_drive_raises_ends_on_the_failed_stage() -> None:
         (_S.END, _R.STAGE_FAILED, _DONE),
     ]
     assert record.status is ProcessingStatus.FAILED
+
+
+async def test_a_resume_of_an_approved_route_records_its_routing_compose_and_end() -> None:
+    """ADR-0284 §5:4 at the routed seam: ``routing`` due ``park_answered``, with its outcome.
+
+    The routed park's answer is the continuation stage, and it carries the route's
+    ``RouteOutcome`` as the channel pass's ``routing`` entry does (§5:2); the resume
+    composes, so ``compose`` due ``reply_owed`` follows, and one end entry is last.
+    """
+    harness = _routed_harness()
+    await _seed_belief(harness.memory)
+    outcome = await _routed_park(harness)
+
+    resumed = await harness.engine.resume(_token(outcome), approved=True, timeout=_BUDGET)
+
+    assert resumed.routed is not None
+    record = await _resumed(harness)
+    assert _stages(record) == [
+        (_S.ROUTING, _R.PARK_ANSWERED, _DONE),
+        (_S.COMPOSE, _R.REPLY_OWED, _DONE),
+        (_S.END, _R.NOTHING_DUE, _DONE),
+    ]
+    assert _verdicts(record) == [(_S.ROUTING, None, resumed.routed.outcome)]
+    assert resumed.routed.outcome is RouteOutcome.PERFORMED
