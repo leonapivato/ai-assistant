@@ -137,13 +137,18 @@ import structlog
 from pydantic import TypeAdapter, ValidationError
 
 from ai_assistant.core.clock import ClockReadingError, checked_clock
+from ai_assistant.core.episode_encoding import (
+    ROUTE_OUTCOME_PHRASES,
+    STEP_DISPOSITION_PHRASES,
+    project_episode,
+)
 from ai_assistant.core.errors import PlanningError
 from ai_assistant.core.types import (
     MAX_HOP_LABELS,
     ActionPlan,
     BeliefBand,
     EpisodicMemory,
-    ExchangeDisposition,
+    InputOrigin,
     MemoryKind,
     Message,
     PlannerOutput,
@@ -170,9 +175,11 @@ if TYPE_CHECKING:
         ContextFacet,
         CurrentContext,
         EmailFacet,
+        EpisodeProjection,
         EvidenceDigest,
         GoalBrief,
         MemoryRecord,
+        ProjectedText,
         ReadAskOutcome,
         ShownFile,
     )
@@ -3675,12 +3682,13 @@ def _render_request(  # noqa: PLR0913 — one parameter per block this message i
 ) -> str:
     """Render the request, the brief, the context, the memories and the reads.
 
-    The memories are rendered by :func:`_render_record`, each tagged with its kind,
-    its provenance source, its band and its confidence, because passing the
-    retrieved user model into the prompt is what makes a plan personal rather than
-    generic (ADR-0014 §6). A record is one bullet; an episode that recorded an
-    outcome adds one continuation line under its own bullet, which is why the
-    groups are assembled by joining rendered records rather than counted as lines.
+    The memories are rendered by :func:`_render_record` — a belief tagged with its
+    kind, its provenance source, its band and its confidence, an episode from its
+    projection (ADR-0284 §8:3) — because passing the retrieved user model into the
+    prompt is what makes a plan personal rather than generic (ADR-0014 §6). A belief
+    is one bullet; an episode is a bullet and a continuation line per further part
+    its projection carries, which is why the groups are assembled by joining rendered
+    records rather than counted as lines.
 
     ``memories`` carries two groups (ADR-0074 §5) and they are headed separately,
     because one header calling both "relevant memories" tells the model a
@@ -3693,11 +3701,12 @@ def _render_request(  # noqa: PLR0913 — one parameter per block this message i
     replied** (ADR-0222 §1 and §2). :func:`_reply_lines` is called from the tail loop
     and from nowhere else, so the reply reaches this prompt for a record of the
     conversation the turn is *in* and never for one relevance retrieved: §2 keeps the
-    retrieved group phrase-only on three independent grounds, of which the narrowest
-    is that a record retrieved by content was not retrieved for a reply nothing
-    embedded. It is also the group split that keeps ``benchmarks/`` still, since
-    ``planner._split_conversation_tail`` over the harness's records always returns an
-    empty leading run.
+    retrieved group free of replies on three independent grounds, of which the
+    narrowest is that a record retrieved by content was not retrieved for a reply
+    nothing embedded, and ADR-0284 §8:7 keeps that rule with its condition read as
+    *the record carries a response*. The benchmark harness builds the retrieved group
+    alone, since ``planner._split_conversation_tail`` over its records always returns
+    an empty leading run, so it renders no reply either.
 
     **§5's counter pair is emitted here, once per assembly, and always.** One
     statement carries both integers — the records eligible to render a reply, and how
@@ -4227,16 +4236,25 @@ def _label_lines(record: MemoryRecord) -> list[str]:
 
     **The values that opened an axis are what makes the axis copyable** (§9). A
     ``TopicLabel`` is refused rather than normalised (ADR-0213 §3), so a planner
-    inventing a spelling loses its whole ask under §3 — and ``_render_record`` renders a
-    record's ``content``, its outcome phrase and an episode's ``occurred_at`` and
-    **none of these three**, so two records carrying different canonical topics render
-    identically. An axis offered off a value the model cannot see would be an axis whose
-    spelling the model would have to guess. §9's clause is that "no axis is described to
-    the planner whose values the same call leaves unrendered", and this is the other
-    half of it.
+    inventing a spelling loses its whole ask under §3 — and ``_render_record`` renders an
+    episode from its projection (ADR-0284 §8:3), which carries **none of these three**,
+    so two records carrying different canonical topics render identically. An axis
+    offered off a value the model cannot see would be an axis whose spelling the model
+    would have to guess. §9's clause is that "no axis is described to the planner whose
+    values the same call leaves unrendered", and this is the other half of it.
 
-    **Every span is quoted** (ADR-0098 §2), exactly as ``_render_record`` quotes a
-    record's ``content`` and ``outcome``. A label is a value a producer wrote out of the
+    **These lines are the read axis's vocabulary, not a rendering of the episode, and
+    that is how they sit beside ADR-0284 §8:3.** §8:3 has every rendering of a stored
+    episode read it through the projection and render "no other field of it"; ADR-0284
+    leaves ADR-0240 §9 standing and supersedes no clause of it, and its §1 keeps an
+    index derived from an episode *beside* the episode rather than in it. Participants,
+    topics and the person an episode is about are such an index — the values ADR-0240
+    §4's structured read matches on — so they are printed here, under the bullet, as
+    the spellings an ask may copy, by the assembler that offers the ask and never by
+    :func:`_render_record`.
+
+    **Every span is quoted** (ADR-0098 §2), exactly as ``_render_record`` quotes every
+    text a record's bullet carries. A label is a value a producer wrote out of the
     owner's own records, so it is external content and could otherwise open a bullet,
     forge a label or reopen a heading.
 
@@ -4501,9 +4519,10 @@ def _quoted_span(value: str) -> str:
 #: subsystems rendering their own prompts do not reach across a boundary golden
 #: rule 1 forbids them to cross, so what ``learning/observer.py``,
 #: ``orchestration/composing.py`` and this module share is the ADR's number rather
-#: than a module — exactly as ADR-0221 §3 has them hold three copies of one phrase
-#: table. ADR-0222 §12 defers promoting it to a ``Settings`` field until §5's
-#: counter pair says a deployment wants a different one.
+#: than a module. ADR-0284 §8:7 keeps it that way — "each site keeps its own ceiling
+#: constant" — although the verdict phrases beside it are now one table in ``core``.
+#: ADR-0222 §12 defers promoting it to a ``Settings`` field until §5's counter pair
+#: says a deployment wants a different one.
 #:
 #: **On the quoted rendering, because the expansion is not uniform** (§4). At
 #: ``ensure_ascii=True`` a newline costs two output characters, a BMP code point six
@@ -4536,7 +4555,7 @@ class _BoundedReply(NamedTuple):
     kept: int | None
 
 
-def _bounded_reply(reply: str) -> _BoundedReply:
+def _bounded_reply(reply: ProjectedText) -> _BoundedReply:
     """The longest prefix of ``reply`` whose quoted rendering fits §4's ceiling.
 
     **The cut is taken on the source text although the ceiling is measured on the
@@ -4552,27 +4571,34 @@ def _bounded_reply(reply: str) -> _BoundedReply:
     The quoted length is non-decreasing in the prefix length — each further
     character adds its own escape and nothing is removed — so the predicate is
     monotone. The search's upper bound is ``_REPLY_CEILING - _QUOTE_DELIMITERS``
-    rather than ``len(reply)`` because every character costs at least one output
-    character, so a longer prefix cannot fit whatever it is made of. That keeps this
-    function's cost independent of how long the stored reply is, which matters
-    because :data:`~ai_assistant.core.types.EncodableText` bounds no length.
+    rather than the reply's length because every character costs at least one output
+    character, so a longer prefix cannot fit whatever it is made of.
+
+    **It reads the projection's response, never ``outcome``** (ADR-0284 §8:3), and
+    the projection has already cut that to :data:`_EPISODE_EXCERPT_CHARS`, which is
+    well above anything this ceiling can keep. So the prefix is chosen over
+    :attr:`ProjectedText.text` and "whole" is judged against
+    :attr:`ProjectedText.full_chars` — the one number the projection still carries
+    about the reply as stored — which is what makes §5's marker state the stored
+    reply's length rather than the excerpt's.
 
     Args:
-        reply: The stored reply, verbatim as this system holds it.
+        reply: The episode's response, as :func:`project_episode` carries it.
 
     Returns:
         The span to render, and the prefix length where the ceiling bound —
         ``kept`` is ``None`` exactly when the whole reply is rendered.
     """
+    text = reply.text
     low = 0
-    high = min(len(reply), _REPLY_CEILING - _QUOTE_DELIMITERS)
+    high = min(len(text), _REPLY_CEILING - _QUOTE_DELIMITERS)
     while low < high:
         middle = (low + high + 1) // 2
-        if len(_quoted_span(reply[:middle])) <= _REPLY_CEILING:
+        if len(_quoted_span(text[:middle])) <= _REPLY_CEILING:
             low = middle
         else:
             high = middle - 1
-    return _BoundedReply(_quoted_span(reply[:low]), None if low == len(reply) else low)
+    return _BoundedReply(_quoted_span(text[:low]), None if low == reply.full_chars else low)
 
 
 class _ReplyLines(NamedTuple):
@@ -4587,9 +4613,9 @@ class _ReplyLines(NamedTuple):
         lines: The continuation line to write under the record's own bullet, or
             nothing where the record is not one §1 admits.
         eligible: ``1`` where the record was eligible to render a reply under
-            ADR-0222 §1 — a conversation-tail episode carrying a ``disposition``
-            **and** an ``outcome`` — and ``0`` otherwise. §5's denominator, per
-            record.
+            ADR-0222 §1 as ADR-0284 §8:7 reads its condition — a conversation-tail
+            episode that **carries a response** — and ``0`` otherwise. §5's
+            denominator, per record.
         elided: ``1`` where §4's ceiling bound on that reply, ``0`` otherwise. §5's
             numerator, per record, and never greater than ``eligible``.
     """
@@ -4602,37 +4628,35 @@ class _ReplyLines(NamedTuple):
 def _reply_lines(record: MemoryRecord) -> _ReplyLines:
     """The reply line ADR-0222 §1 adds under one **conversation-tail** record's bullet.
 
-    **Called by the tail assembler and never by :func:`_render_record`, and that is
-    what keeps the benchmark harness still** (§1's third clause). ``benchmarks/
-    memory/answer.py`` imports ``_render_record`` by name and calls it directly, so
-    anything put *inside* that function would reach the harness's prompt whether or
-    not the harness meant to build a tail. Emitting the line from the caller makes
-    §2's "no benchmark result moves" true by construction rather than by a gate the
-    harness would have to keep passing — and it is the shape
-    ``composing._render_delivery`` already has for ADR-0205 §5's delivery fact, which
-    "is written under the turn it is about, and only in the tail".
+    **Its condition is ADR-0284 §8:7's reading of §1's: the record carries a
+    response.** ADR-0222 §1 rendered the reply where a record carried "both a
+    ``disposition`` and an ``outcome``"; §8:7 reads that as *carries a response*, and
+    keeps which records render it, the ceiling, the elision and the counts. So this
+    reads the episode's projection (§8:3) and renders its ``response`` — never
+    ``outcome`` directly, and never ``disposition``, which this module no longer reads.
 
-    **The reply is rendered beside the phrase and never instead of it** (§1). The
-    ``how it turned out:`` line :func:`_render_record` emits is unchanged, is
-    rendered first, and states what became of the pass — a typed fact this system
-    authored about its own pipeline. This line states what the user was actually
-    shown. A reply saying "I've set that up for you" beside a phrase saying the
-    action was parked for confirmation is the pair a model needs; either alone is a
-    half-truth, so no site is permitted to trade one for the other.
+    **Called by the tail assembler and never by :func:`_render_record`**, so the
+    retrieved group renders no response (§8:7) and neither does the benchmark
+    harness, which imports ``_render_record`` by name and builds the retrieved group
+    alone. It is the shape ``composing._render_delivery`` already has for ADR-0205
+    §5's delivery fact, which "is written under the turn it is about, and only in the
+    tail".
 
-    **The retrieved group gets none of this** (§2), which is why this function is
-    called from one arm of :func:`_render_request` and not from both. A retrieved
-    episode was not retrieved *for* its reply — retrieval is content-addressed and
-    ``outcome`` is not embedded — so rendering it there would spend budget on prose
-    no part of the selection ever read.
+    **The reply is rendered beside the record's own lines and never instead of them.**
+    :func:`_render_record` states the episode's status, reason and each verdict's
+    phrase — typed facts this system recorded about its own pipeline — and this line
+    states what the user was actually shown. A reply saying "I've set that up for
+    you" beside a phrase saying the action was parked for confirmation is the pair a
+    model needs; either alone is a half-truth.
 
-    **The marker is held data and sits outside the quoted span** (§5, ADR-0098 §2).
-    A marker written *inside* the quoted reply is a string the reply itself could
-    contain, so a reply ending in this system's own elision wording would render as
-    though it had been cut when it had not. Both numbers come from :func:`len` over
-    held text and the wording is a literal here, so neither is reachable from the
-    reply; an unelided reply carries no marker, and that absence is what says the
-    line carries the reply whole.
+    **The marker is held data and sits outside the quoted span** (ADR-0222 §5,
+    ADR-0098 §2). A marker written *inside* the quoted reply is a string the reply
+    itself could contain, so a reply ending in this system's own elision wording
+    would render as though it had been cut when it had not. Both numbers are held —
+    the prefix length this function kept and the stored reply's length the
+    projection carries — and the wording is a literal here, so neither is reachable
+    from the reply; an unelided reply carries no marker, and that absence is what
+    says the line carries the reply whole.
 
     Args:
         record: One record of the conversation-tail group.
@@ -4642,15 +4666,16 @@ def _reply_lines(record: MemoryRecord) -> _ReplyLines:
     """
     if not isinstance(record, EpisodicMemory):  # pragma: no cover — the tail is episodic
         return _ReplyLines([], eligible=0, elided=0)
-    if record.disposition is None or record.outcome is None:
+    response = _projected(record).response
+    if response is None:
         return _ReplyLines([], eligible=0, elided=0)
-    span, kept = _bounded_reply(record.outcome)
+    span, kept = _bounded_reply(response)
     if kept is None:
         return _ReplyLines([f"    what the assistant replied: {span}"], eligible=1, elided=0)
     return _ReplyLines(
         [
             f"    what the assistant replied "
-            f"(first {kept} of {len(record.outcome)} characters): {span}"
+            f"(first {kept} of {response.full_chars} characters): {span}"
         ],
         eligible=1,
         elided=1,
@@ -4821,78 +4846,52 @@ def _render_files(files: Sequence[ShownFile]) -> list[str]:
 def _render_record(record: MemoryRecord, *, label: str | None = None) -> str:
     """Render one memory record as a prompt bullet, whole and non-forgeably.
 
-    Three obligations meet on this function and are discharged together (#1194,
-    #672), because each of them changes the same line and two of them are about the
-    spans the third adds.
-
     **Every span the record controls is quoted** (ADR-0098 §2, §9). This block's
-    syntax is line-oriented — a two-space indent, a ``-`` bullet, a ``[kind/source]``
-    label, a four-space continuation line, and the two group headings
-    :func:`_render_request` prints above it — and ``content`` and ``outcome`` are
-    :data:`~ai_assistant.core.types.EncodableText`, which validates UTF-8
-    encodability and permits every newline and bracket in between. Left raw, a
-    record whose ``content`` carried a newline and a second bullet wrote a bullet
-    **claiming a source of its choosing**, ``user_asserted`` included — the concrete
-    defect #672 is, and the one ADR-0098 §2's second clause names as
-    non-conformance "whatever labels it emits". :func:`_quoted_span` is the
-    deterministic transform §2 admits, already used one function above for a
-    facet's ``source``; here it is applied to the two spans a record supplies, so
-    no record can open a second bullet, forge a label, or reopen a heading. The
-    label itself stays derived from held data — ``kind``, ``source``, ``band_of``
-    and ``confidence`` — and never from reading the text (§2's third clause).
+    syntax is line-oriented — a two-space indent, a ``-`` bullet, a ``[kind…]`` tag,
+    four-space continuation lines, and the two group headings :func:`_render_request`
+    prints above it — and every text a record carries is
+    :data:`~ai_assistant.core.types.EncodableText` or narrower, which permits every
+    newline and bracket. Left raw, a record whose text carried a newline and a second
+    bullet wrote a bullet **claiming a source of its choosing**, ``user_asserted``
+    included — the concrete defect #672 is. :func:`_quoted_span` is the deterministic
+    transform §2 admits, so no record can open a second bullet, forge a label, or
+    reopen a heading. Everything else on the line is held data — an enum's value, an
+    instant, a length, a phrase from a table — and never read from the text (§2's
+    third clause).
 
     **A belief states the standing it is held with** (ADR-0072 §6). "A derived
     belief that reaches a prompt is rendered as a belief, carrying its band and its
     confidence … never as a bare fact indistinguishable from what the user stated",
-    and §6 leaves the phrasing to this lane. So each bullet opens with the band, the
-    confidence, and a stance clause naming who the record's claim belongs to: the
-    user, this system, or a source the user connected. ``[kind/source]`` alone was
-    the de facto stand-in, and it is a vocabulary a reader has to already know —
-    ``inferred`` and ``observed`` both mean *the assistant worked this out*, and
-    neither says so.
+    so a belief's bullet opens with its ``[kind/source]`` tag, its band, its
+    confidence, and a stance clause naming who the claim belongs to (:data:`_STANCE`).
 
-    **An episode is rendered whole** (#1194). ``occurred_at`` and ``outcome`` are
-    fields capture writes and no prompt has ever shown, so a retrieved episode
-    reached the model as a timeless half-exchange: nothing in the pipeline carried
-    an instant to a model, and the reply to the recorded turn was dropped. Both are
-    rendered here, and the outcome line is labelled *how it turned out* — the words
-    ADR-0074 §4 gives the field — rather than as the assistant's reply. It is the
-    benchmark harness's ingestion that puts the other speaker's turn in ``outcome``;
-    product capture writes a typed disposition beside it. One label has to be true
-    of both, and §4's own is.
+    **An episode is rendered from its projection and from nothing else** (ADR-0284
+    §8:3). :func:`_episode_lines` reads :func:`project_episode`'s value and no field
+    of the record, so ``content`` — the episode's search text since §7 — reaches
+    this prompt only as the projection's input for an episode without a processing
+    record (§8:2), and ``disposition`` not at all. Where the old bullet carried an
+    ``[episodic/source]`` tag, a band and a confidence, an episode's bullet carries
+    ``[episodic]``: the provenance those were read from is not part of the
+    projection, and an episode is not a belief ADR-0072 §6 is about. What the
+    projection says of it instead — that processing rested on external content — is
+    rendered where it is true.
 
-    **The phrase where the record carries a ``disposition``, ``outcome`` where it
-    does not** (ADR-0221 §3). §1 gives ``outcome`` to the composed reply and §2 puts
-    what became of the exchange in a closed enum, so this line renders
-    :func:`_disposition_phrase` of that member — the very string a record captured
-    before ADR-0221 carries in ``outcome``, byte for byte, so the bullet is
-    identical across the two populations and the reply reaches no model. A record
-    carrying no ``disposition`` — one written before that decision, or a harness row
-    — renders its ``outcome`` exactly as it did.
+    **The response is not rendered here** (ADR-0284 §8:7, ADR-0222 §1-§2): the
+    conversation tail renders it under this bullet (:func:`_reply_lines`), and the
+    retrieved group renders none, which is also what the benchmark harness — which
+    imports this function by name and builds the retrieved group alone — shows.
 
-    **The instant is this prompt's own frame, which is UTC** (#1215). ADR-0156 §2's
-    local-calendar clause is scoped in terms to *the observation prompt*, and §3's
-    to resolving a relative expression at
-    distillation; neither reaches ``planning``, which resolves nothing and holds no
-    zone — ``CurrentContext`` carries none, and taking one would be a second
-    timezone source to argue (ADR-0008 §6). What this renderer can be is
-    *consistent*: ``context.now``, a facet's ``read_at``, a goal's ``deadline`` and
-    every other instant in this prompt are ``isoformat()`` with their offset, so an
-    episode's ``occurred_at`` is too, and the model can order it against ``now``
-    without converting anything. Localising this one field beside a UTC ``now``
-    would manufacture, inside a single prompt, the day-boundary error §3 exists to
-    prevent.
+    **The instant is this prompt's own frame, which is UTC** (#1215). ``context.now``,
+    a facet's ``read_at``, a goal's ``deadline`` and every other instant in this
+    prompt are ``isoformat()`` with their offset, so an episode's ``occurred_at`` is
+    too, and the model can order it against ``now`` without converting anything.
 
-    **The label is the caller's, and its default is what keeps the benchmark
-    harness still** (ADR-0226 §3). ``benchmarks/memory/answer.py`` imports this
-    function by name and calls it with no label, so the block it assembles is
-    byte-for-byte what it was: the harness's answering prompt carries no read
-    request, so a label there would be noise the model has no use for and a
-    benchmark result moved for nothing. The product's own assembler
-    (:func:`_render_request`) passes one for every record, which is what §3 asks of
-    a planner — the label is derived by :func:`_label` from the record's position
-    in the sequence the loop passed, and it opens the bullet so that a model
-    naming one is naming the first token it read.
+    **The label is the caller's** (ADR-0226 §3). ``benchmarks/memory/answer.py``
+    calls this with no label, because the harness's answering prompt carries no read
+    request; the product's own assembler (:func:`_render_request`) passes one for
+    every record, derived by :func:`_label` from the record's position in the
+    sequence the loop passed, and it opens the bullet so that a model naming one is
+    naming the first token it read.
 
     Args:
         record: The record to render, verbatim as this system holds it.
@@ -4901,93 +4900,166 @@ def _render_record(record: MemoryRecord, *, label: str | None = None) -> str:
             never anything the record supplied.
 
     Returns:
-        The bullet — one line, plus one continuation line for an episode that
-        recorded an outcome.
+        The bullet — one line for a belief; for an episode, one line plus a
+        continuation line per further part its projection carries.
     """
+    opening = "  - " if label is None else f"  - {label} "
+    if isinstance(record, EpisodicMemory):
+        return "\n".join(_episode_lines(_projected(record), opening=opening))
+
     provenance = record.provenance
     band = band_of(provenance.source)
     standing = f"{band.value}, confidence {provenance.confidence:.2f}"
-    opening = "  - " if label is None else f"  - {label} "
     tag = f"{opening}[{record.kind}/{provenance.source.value}]"
-    content = _quoted_span(record.content)
-
-    if isinstance(record, EpisodicMemory):
-        lines = [
-            f"{tag} ({standing}) the assistant recorded this exchange at "
-            f"{record.occurred_at.isoformat()}: {content}"
-        ]
-        if record.disposition is not None:
-            phrase = _disposition_phrase(record.disposition)
-            lines.append(f"    how it turned out: {_quoted_span(phrase)}")
-        elif record.outcome is not None:
-            lines.append(f"    how it turned out: {_quoted_span(record.outcome)}")
-        return "\n".join(lines)
-
-    return f"{tag} ({standing}) {_STANCE[band]}: {content}"
+    return f"{tag} ({standing}) {_STANCE[band]}: {_quoted_span(record.content)}"
 
 
-def _disposition_phrase(disposition: ExchangeDisposition) -> str:  # noqa: C901, PLR0911, PLR0912 — one return per member, so the totality `assert_never` rests on is visible; collapsing them would hide it
-    """ADR-0221 §2's phrase for one disposition, written out at this site.
+#: The bound, in characters, :func:`project_episode` cuts an episode's input and
+#: response to at this site (ADR-0284 §8:1).
+#:
+#: **Generous, because the input used to be unbounded here.** Before ADR-0284 the
+#: bullet rendered ``content`` whole, and on a conversational turn that held the
+#: user's words whole; a bound well above an ordinary message keeps that, and still
+#: puts a ceiling under a stored text :data:`~ai_assistant.core.types.EncodableText`
+#: bounds nowhere. It is the figure the understanding stage's own episode windows
+#: read with, written out rather than imported because ``app`` is not this module's
+#: to reach.
+#:
+#: **It sits above ADR-0222 §4's reply ceiling, and must.** The reply line takes its
+#: prefix from the projection's already-cut response (:func:`_bounded_reply`), so an
+#: excerpt shorter than :data:`_REPLY_CEILING` would make the reply line keep less
+#: than §4 rules it keeps.
+_EPISODE_EXCERPT_CHARS: Final = 2000
 
-    **This table is not shared and must not become shared** (ADR-0221 §3). It is one
-    of three copies of the same sixteen strings — the others are in
-    ``learning/observer.py`` and ``orchestration/composing.py`` — and no
-    implementation extracts them into a shared module, a ``core`` mapping, a method
-    on the enum or a helper any two of the three import. Golden rule 1 is the
-    reason: three subsystems assembling their own prompts do not reach into one
-    another, and what they share is the ADR's table rather than a module.
 
-    Total over :class:`~ai_assistant.core.types.ExchangeDisposition` and
-    mechanically so — the wildcard does nothing but ``assert_never`` — so a member
-    added to that enum without a phrase here fails the gate at this site rather than
-    rendering a bullet whose outcome line reads as empty.
+def _projected(record: EpisodicMemory) -> EpisodeProjection:
+    """The episode as every rendering of it in this prompt reads it (ADR-0284 §8:3).
+
+    ``admit_outside_input`` is false, stated rather than defaulted: §8:5 admits an
+    outside input's text to the understanding stage's two windows alone, and the
+    planner is neither.
 
     Args:
-        disposition: The member the episode records.
+        record: The stored episode, exactly as held.
 
     Returns:
-        §2's phrase for it, byte for byte. :func:`_render_record` quotes it with
-        :func:`_quoted_span`, exactly as it quotes an ``outcome``.
+        Its projection, input and response cut to :data:`_EPISODE_EXCERPT_CHARS`.
     """
-    match disposition:
-        case ExchangeDisposition.NO_ACTION_NEEDED:
-            return "no action was needed"
-        case ExchangeDisposition.STEP_EXECUTED:
-            return "the selected tool ran"
-        case ExchangeDisposition.STEP_DENIED:
-            return "the action was refused by the permission policy"
-        case ExchangeDisposition.STEP_AWAITING_CONFIRMATION:
-            return "the action was parked for the user to confirm"
-        case ExchangeDisposition.STEP_NO_CAPABLE_TOOL:
-            return "no tool advertised the capability the step needed"
-        case ExchangeDisposition.STEP_AMBIGUOUS_CAPABILITY:
-            return "several tools advertised the capability, so none was chosen"
-        case ExchangeDisposition.STEP_INVALID_PARAMETERS:
-            return "the step's arguments did not fit the declared schema of any capable tool"
-        case ExchangeDisposition.STEP_EGRESS_UNBINDABLE:
-            return "the outbound call could not be described, so nothing was asked or sent"
-        case ExchangeDisposition.STEP_EFFECT_ALREADY_CLAIMED:
-            return "this goal had already claimed the act, so nothing was dispatched"
-        case ExchangeDisposition.STEP_EFFECT_UNSCOPED:
-            return "the plan did not say which act the step was, so nothing was dispatched"
-        case ExchangeDisposition.ROUTED_PERFORMED:
-            return "the assistant performed the operation the user asked for"
-        case ExchangeDisposition.ROUTED_AWAITING_CONFIRMATION:
-            return "the operation was parked for the user to confirm"
-        case ExchangeDisposition.ROUTED_REFUSED:
-            return "the user declined, so the operation was not performed"
-        case ExchangeDisposition.ROUTED_AMBIGUOUS:
-            return "more than one record matched, so nothing was performed"
-        case ExchangeDisposition.ROUTED_AMBIGUOUS_TRUNCATED:
-            return "more records matched than could be shown, so nothing was performed"
-        case ExchangeDisposition.ROUTED_NOT_FOUND:
-            return "nothing matched, so nothing was performed"
-        case ExchangeDisposition.ROUTED_UNRECORDED:
-            return "the decision could not be recorded, so nothing was performed"
-        case ExchangeDisposition.ROUTED_FAILED:
-            return "the operation was attempted and failed"
+    return project_episode(record, excerpt_chars=_EPISODE_EXCERPT_CHARS, admit_outside_input=False)
+
+
+def _episode_lines(projection: EpisodeProjection, *, opening: str) -> list[str]:
+    """An episode's bullet and continuation lines, from its projection alone.
+
+    The bullet opens with the tag, the instant and what arrived
+    (:func:`_episode_input`); then, each on a line of its own and only where the
+    projection carries it, what the assistant understood and how firmly, each matter
+    it left unresolved, the phrase for each verdict a stage reached, how processing
+    ended, and whether it rested on external content.
+
+    **Status, reason and every verdict's phrase are stated** (ADR-0284 §8:6), so a
+    failed or interrupted pass reads as one rather than as an ordinary exchange. The
+    phrases are ``core``'s one table, keyed by the stage's own enum — never a copy
+    held here, which is what ADR-0221 §3:2 kept and §8:6 retires.
+
+    **A record with no verdict renders no verdict line.** A pass that drove no step
+    and routed nothing reached no verdict, and ``core``'s table has no phrase for
+    that absence; ADR-0221's ``no action was needed`` was a member of a
+    conversational enum and not a stage's verdict. The status line already says how
+    the pass ended, so nothing is invented to stand where no verdict is.
+
+    Args:
+        projection: The episode's projection (:func:`_projected`).
+        opening: The bullet's opening — indent, ``-`` and, where the caller passed
+            one, ADR-0226 §3's label.
+
+    Returns:
+        The lines, the bullet first.
+    """
+    lines = [
+        f"{opening}[episodic] at {projection.occurred_at.isoformat()}, {_episode_input(projection)}"
+    ]
+    if projection.meaning is not None and projection.meaning_ground is not None:
+        lines.append(
+            f"    the assistant understood it ({projection.meaning_ground.value}) as: "
+            f"{_quoted_span(projection.meaning)}"
+        )
+    lines += [
+        f"    left unresolved: {_quoted_span(matter.matter)}, which matters because: "
+        f"{_quoted_span(matter.why_it_matters)}"
+        for matter in projection.unresolved
+    ]
+    lines += [
+        f"    how it turned out: {_quoted_span(STEP_DISPOSITION_PHRASES[disposition])}"
+        for disposition in projection.step_dispositions
+    ]
+    lines += [
+        f"    how it turned out: {_quoted_span(ROUTE_OUTCOME_PHRASES[outcome])}"
+        for outcome in projection.route_outcomes
+    ]
+    if projection.status is not None and projection.reason is not None:
+        lines.append(
+            f"    how processing ended: {projection.status.value} "
+            f"(reason: {projection.reason.value})"
+        )
+    if projection.derived_from_external:
+        lines.append("    what processing read rested on external content")
+    return lines
+
+
+#: What a bullet says where the input came from outside (ADR-0284 §2, §8:5).
+_OUTSIDE_INPUT: Final = (
+    "a report arrived from outside, never something the user said; its text is not shown"
+)
+
+
+def _episode_input(projection: EpisodeProjection) -> str:
+    """What arrived, as the bullet's own line states it.
+
+    **Who the input came from is the projection's ``origin`` and nothing else**
+    (ADR-0284 §2:3): the user's words are introduced as the user's, an ``outside``
+    input as a report that is never the user's — its text withheld here, as §8:5
+    withholds it from every rendering but understanding's — and a record with no
+    origin as showing no input. An episode without a processing record shows its
+    ``content`` as what the assistant recorded (§8:2), attributed to no one, because
+    the projection carries no origin for it.
+
+    A cut input says so outside its quoted span, with both lengths held data, on
+    ADR-0222 §5's rule for the reply line: the absence of the marker is what says the
+    span carries the text whole.
+
+    Args:
+        projection: The episode's projection.
+
+    Returns:
+        The clause that follows the bullet's instant.
+    """
+    shown = projection.input
+    if not projection.has_processing_record:
+        return f"the assistant recorded{_cut_marker(shown)}: {_shown_span(shown)}"
+    match projection.origin:
+        case InputOrigin.USER if shown is not None:
+            return f"the user said{_cut_marker(shown)}: {_shown_span(shown)}"
+        case InputOrigin.USER:
+            return "the user spoke, and no words of it were recorded"
+        case InputOrigin.OUTSIDE:
+            return _OUTSIDE_INPUT
+        case None:
+            return "it shows no input"
         case _:  # pragma: no cover - exhaustive
-            assert_never(disposition)
+            assert_never(projection.origin)
+
+
+def _cut_marker(shown: ProjectedText | None) -> str:
+    """`` (first N of M characters)`` where the projection cut ``shown``, else nothing."""
+    if shown is None or not shown.cut:
+        return ""
+    return f" (first {len(shown.text)} of {shown.full_chars} characters)"
+
+
+def _shown_span(shown: ProjectedText | None) -> str:
+    """The quoted text of ``shown``; an absent one is the empty span."""
+    return _quoted_span("" if shown is None else shown.text)
 
 
 def _split_conversation_tail(
