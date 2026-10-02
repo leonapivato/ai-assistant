@@ -3112,6 +3112,222 @@ ReplyCapability = Annotated[
 ]
 
 
+# --- the step's and the route's verdicts (ADR-0037, ADR-0197) ---------------
+#
+# Declared here, ahead of :class:`StageEntry`, because ADR-0284 §5:1 puts each
+# verdict on the stage entry that reached it. They used to sit beside their first
+# consumers far below; the rule above :data:`Identifier` decides the move — a
+# forward reference plus ``model_rebuild`` would have made a `core` type depend on
+# an import-order side effect, so the enums moved instead of the model. Relocating
+# an enum is not redefining it (ADR-0084 §4): nothing about either changed.
+
+
+class Disposition(StrEnum):
+    """What became of one plan step at the runner stage (ADR-0037 §1, §4, §5).
+
+    Seven members, and the four that commit nothing are as much a result as the
+    three that do: a step the stage declines to act on is a fact its caller has to
+    be told, not an error.
+
+    **Relocating an enum is not redefining it** (ADR-0084 §4). It kept its members
+    and everything ADR-0037 ratified about them, ADR-0084 §8's refusal to add a
+    ``FAILED`` member is unaffected by the move, and the ``StrEnum`` base is
+    unchanged so every existing value string is byte-identical on the wire.
+
+    ``INVALID_PARAMETERS`` is ADR-0145 §4's addition and ``EGRESS_UNBINDABLE`` is
+    ADR-0152 §9's, and adding a member is additive on the wire for the same reason
+    (ADR-0084 §4): the values are ``StrEnum`` strings a client reads, and the
+    exposure is bounded by deployment rather than by a compatibility rule, since
+    the hub is loopback-only and ships with its client from one install.
+    """
+
+    EXECUTED = "executed"
+    """The call was authorised and handed to the executor; ``state`` carries the
+    outcome the executor committed."""
+
+    DENIED = "denied"
+    """The policy refused. The step is ``SKIPPED``/``APPROVAL_DENIED``, naming
+    the recorded decision."""
+
+    AWAITING_CONFIRMATION = "awaiting_confirmation"
+    """The policy wants a human answer. The step is durably
+    ``AWAITING_APPROVAL``; ``AssistantEngine.resume`` continues it."""
+
+    NO_CAPABLE_TOOL = "no_capable_tool"
+    """Nothing advertises the step's capability. The step is
+    ``SKIPPED``/``NO_CAPABLE_TOOL`` (ADR-0014 §4)."""
+
+    AMBIGUOUS_CAPABILITY = "ambiguous_capability"
+    """Several tools advertise it and no rule chooses between them (ADR-0037 §1,
+    #241). Nothing is committed and the step stays ``PENDING``."""
+
+    INVALID_PARAMETERS = "invalid_parameters"
+    """The step's parameters were not established as acceptable to any tool that
+    could have run them (ADR-0145 §4).
+
+    **One definition and two causes.** Either the evaluation reported violations
+    for every capable candidate, so ADR-0144 §7's eligibility filter left the set
+    empty; or an evaluation *raised* rather than reporting anything, which ADR-0145
+    §7 makes a refusal of the step rather than of the candidate that raised —
+    continuing to rank over the remainder would be selecting under an unknown. What
+    separates them is what is reported alongside: violations for the first, none
+    for the second. They are one member because the pipeline's answer is identical
+    and both are corrected the same way, by different arguments — which is a
+    different request. A second member would be a distinction a client cannot act
+    on differently.
+
+    **It commits nothing:** no ruling is requested, no audit record is written, no
+    claim is made, and the step stays ``PENDING``. It is terminal for the turn that
+    met it and for nothing beyond it. This is ``AMBIGUOUS_CAPABILITY``'s shape and
+    ADR-0037 §1's argument for it transfers unchanged — no ``SkipReason`` is true
+    of it, because ``NO_CAPABLE_TOOL`` is a lie when the tools were capable and the
+    arguments were not, and writing a falsehood into durable state to tidy a return
+    value is what ADR-0014 §4's legal-skip table exists to prevent. It is likewise
+    not the ``FAILED`` member ADR-0037 refused: it asserts nothing about the step's
+    status and writes nothing."""
+
+    EGRESS_UNBINDABLE = "egress_unbindable"
+    """The egress binding seam refused this call, so no ruling was sought for it
+    (ADR-0152 §9).
+
+    Returned when :class:`~ai_assistant.core.protocols.EgressBinder` raised
+    :class:`~ai_assistant.core.errors.EgressBindingError` — a declaration that
+    cannot describe the call, a destination with no canonical form, a top-level
+    argument the schema never statically named, a reference that is not
+    connectable, a definition unequal to its registered original, or a resumed
+    binding unequal to the one that was approved (ADR-0152 §6, §7, §8).
+
+    **It commits nothing:** no ruling is requested, no audit record is written, no
+    claim is made, and the step stays ``PENDING`` at its stored version. It is
+    terminal for the turn that met it and for nothing beyond it —
+    ``AMBIGUOUS_CAPABILITY``'s and ``INVALID_PARAMETERS``' shape, and ADR-0037 §1's
+    argument for the third time.
+
+    **Not ``INVALID_PARAMETERS``, and this is the choice most worth arguing.**
+    That member has one definition and two causes (ADR-0145 §4), both of them
+    about a schema evaluation over capable candidates — and most of ADR-0152 §6's
+    refusals are not about the parameters at all. Reporting a keyword in the wrong
+    place, a tool registered against no account, or a tampered definition as "the
+    step's parameters were not established as acceptable" writes a falsehood into a
+    returned value, and widening ``INVALID_PARAMETERS`` to a third cause would
+    amend ADR-0145 §4.
+
+    **Not ``DENIED``, and the distinction is the point of minting it.** A ``DENY``
+    means the policy refused, is recorded in the trail, and moves the step to
+    ``SKIPPED``/``APPROVAL_DENIED`` naming a decision. This refusal has no decision
+    to name, because it happens before one exists — so a client that could not tell
+    them apart would report "the assistant declined to send this" for a tool whose
+    declaration is malformed, which is a falsehood about the user's own policy.
+
+    **A store outage is not this.** A :class:`~ai_assistant.core.errors.ConnectionStoreError`
+    is never translated into this member: it asserts nothing about the call, which
+    may be perfectly bindable a second later, and it propagates out of the runner
+    stage instead (ADR-0152 §9)."""
+
+    EFFECT_ALREADY_CLAIMED = "effect_already_claimed"
+    """This goal has already claimed this act, so nothing was dispatched
+    (ADR-0259 §2).
+
+    Returned for a ``COMPLETED_OTHERWISE``, an ``UNCERTAIN`` or a ``HELD``
+    :class:`EffectClaim`, and for a ``COMPLETED`` one whose reuse conditions fail.
+    **Which member produced it is not carried on the disposition**, and what the turn
+    tells the user about it is the reply surface's.
+
+    **It commits nothing:** no call is made, no invocation is claimed, no
+    authorisation is spent, no transition is committed, and the step **keeps the
+    status it was entered at** — ``PENDING`` where ``StepRunner.run`` took the claim,
+    ``AWAITING_APPROVAL`` where ``StepRunner.resume`` did. It is the entry status
+    rather than ``PENDING`` because no transition is committed: naming ``PENDING``
+    for a resumed step would demand a move ADR-0014 §4's table does not admit. **No
+    step is moved to** ``SKIPPED`` **on this ground, with any**
+    :class:`SkipReason`.
+
+    Not ``EFFECT_UNSCOPED``, and the two are two members because they are two
+    different facts about the world — *this goal has already claimed this act*
+    against *this plan cannot say which act this step is* — and a client that could
+    not tell them apart could not tell a user which of the two it was, while the
+    second is a defect in the plan and this is not."""
+
+    EFFECT_UNSCOPED = "effect_unscoped"
+    """A side-effecting call whose step names no intended action, so nothing was
+    dispatched (ADR-0259 §2, ADR-0265 §4).
+
+    ADR-0265 §4 leaves *"whether an effect-bearing dispatch must name one"* to be
+    decided where the effect claim is taken, and it must:
+    :meth:`PlanStore.claim_effect` is **not called**, nothing is committed, the step
+    keeps the status it was entered at and the walk stops. Dispatching there would
+    perform an effect **no row could ever recognise**, so every later plan of the
+    goal would answer ``CLAIMED`` and repeat it — ADR-0255 §7's obligation unmet, and
+    the fail-open direction ADR-0265 §4 refuses for a dropped condition label.
+
+    **A call that is not side-effecting is untouched**: it has no effect key, so it
+    reaches the claim never and is held to nothing by this ground."""
+
+
+class RouteOutcome(StrEnum):
+    """What became of one routed operation (ADR-0197 §8).
+
+    Eight members, and the two a reader is most likely to conflate are the two that
+    matter most: :attr:`FAILED` means the operation was **called and raised**, and the
+    engine asserts nothing about whether it took effect; :attr:`UNRECORDED` means §9's
+    row was not written, so the operation was **never called** and nothing was
+    destroyed. They are separate members because they are opposite statements about
+    the same question — did anything happen — and a surface that rendered them alike
+    would tell a user their belief might be gone when ADR-0197 §9 guarantees it is
+    not.
+
+    **The tag decides which of the eight an operation admits** (§8), stated on
+    :meth:`RoutedOperation._describes_one_route` as a closed set per tag: a read-only
+    operation admits exactly :attr:`PERFORMED`, :attr:`UNRECORDED` and :attr:`FAILED`,
+    and a confirm-owed one admits all eight.
+
+    **This is not the fusion ADR-0084 §8 refused for** :class:`Disposition`. That
+    section could keep ``Disposition`` a gate verdict because ``StepOutcome.state``
+    already carried the step's own status, so a client had a second value to read. A
+    routed operation has no ``ExecutionState`` and no durable step, so splitting this
+    enum would mint a second value whose only job is to be read beside the first, and
+    whose disagreement with it would have no defensible interpretation.
+    """
+
+    PERFORMED = "performed"
+    """The operation was called and returned. On a read-only member the listing it
+    produced rides :attr:`RoutedOperation.listing`."""
+
+    AWAITING_CONFIRMATION = "awaiting_confirmation"
+    """A confirm-owed route parked: nothing was performed, and
+    :attr:`RoutedOperation.confirmation` carries the card and the token to answer it
+    with (ADR-0197 §7)."""
+
+    REFUSED = "refused"
+    """The user answered a routed park ``False``. Nothing was performed, and **no**
+    ``PermissionDeniedError`` is raised — no ``ActionPolicy`` was consulted and no
+    ``PermissionDecision`` recorded, so there is no ruling for a refusal to be
+    (ADR-0197 §7)."""
+
+    AMBIGUOUS = "ambiguous"
+    """§5's lookup resolved to more than one candidate and no more than
+    :data:`DEFAULT_PAGE_SIZE` of them. Nothing was performed, nothing was confirmed,
+    and the candidates ride :attr:`RoutedOperation.listing`."""
+
+    AMBIGUOUS_TRUNCATED = "ambiguous_truncated"
+    """:attr:`AMBIGUOUS`, over a lookup that would have **exceeded** the bound. This
+    member is the whole of what tells the reply the request matched more than can be
+    shown: §6 gives the composing stage no count, so a single ``AMBIGUOUS`` could not
+    distinguish two candidates from a hundred (ADR-0197 §5)."""
+
+    NOT_FOUND = "not_found"
+    """§5's lookup resolved to no candidate. Nothing was performed and nothing was
+    confirmed."""
+
+    UNRECORDED = "unrecorded"
+    """§9's row was not written — the store refused it, or no ``route_id`` could be
+    minted for it — so the operation was **never called**, no park was registered and
+    no token was minted."""
+
+    FAILED = "failed"
+    """The operation was called and raised. Whether it took effect is not asserted."""
+
+
 # --- post-processing activation records (ADR-0275) -------------------------
 
 
@@ -3172,8 +3388,34 @@ RecordedChannelPayload = Annotated[
 ]
 
 
+class InputOrigin(StrEnum):
+    """Who an activation's input came from (ADR-0284 §2:1).
+
+    A **closed** enumeration, **added to and never renamed**. Admission sets it on
+    the recorded trigger from what the channel declares about its input, and the
+    value is fixed on the episode (§2:2). A reader that needs to know who the input
+    came from reads it, and never the channel type (§2:3).
+
+    It is not :attr:`Provenance.derived_from_external`: that says whether processing
+    read material resting on external content, this says who sent the input, and
+    no renderer derives one from the other (§8:4).
+    """
+
+    USER = "user"
+    """The user's own words, typed or spoken."""
+
+    OUTSIDE = "outside"
+    """Something the world reported, never something the user said."""
+
+
 class RecordedChannelTrigger(BaseModel):
-    """One admitted channel envelope after transient audio has been discarded."""
+    """One admitted channel envelope after transient audio has been discarded.
+
+    ``origin`` is who the input came from (ADR-0284 §2), set at admission from the
+    channel's declaration. It is optional until ADR-0284 §11's lane 6 makes it
+    required; a trigger recorded without it carries ``None``, which no reader takes
+    for either member.
+    """
 
     model_config = ConfigDict(frozen=True, extra="forbid")
     kind: Literal["channel_input"] = "channel_input"
@@ -3183,6 +3425,7 @@ class RecordedChannelTrigger(BaseModel):
     context: ChannelContext
     conversation: ConversationInputOptions | None
     reply: ReplyCapability | None
+    origin: InputOrigin | None = None
 
     @model_validator(mode="after")
     def _supported_combination(self) -> Self:
@@ -3494,6 +3737,8 @@ class ControllerRule(StrEnum):
     ENDED_BEFORE_CONTROLLER = "ended_before_controller"
     NOT_RECALLED = "not_recalled"
     WINDOWS_UNASSEMBLED = "windows_unassembled"
+    PARK_ANSWERED = "park_answered"
+    """A resume continues the stage its parked work stopped in (ADR-0284 §5:4)."""
 
 
 #: The rules that end a pass rather than make a stage due (ADR-0280 §4, §5).
@@ -3528,7 +3773,11 @@ class StageEntry(BaseModel):
 
     It names which stage ran, the rule that made it due and how it ended, or, for
     the final :attr:`ControllerStage.END` entry, the rule that ended the pass. It
-    carries no stage result: those stay where the episode already keeps them.
+    carries no stage result but one: the verdict a ``drive`` or a ``routing`` stage
+    reached (ADR-0284 §5:1-§5:2, superseding ADR-0280 §6:3 for those two fields).
+    ``step_disposition`` is admitted on a ``drive`` entry alone and ``route_outcome``
+    on a ``routing`` entry alone; each is ``None`` where the stage reached no verdict.
+    Every other result stays where the episode already keeps it.
     """
 
     model_config = ConfigDict(frozen=True, extra="forbid")
@@ -3537,6 +3786,19 @@ class StageEntry(BaseModel):
     started_at: UtcInstant
     ended_at: UtcInstant
     outcome: StageOutcome
+    step_disposition: Disposition | None = None
+    route_outcome: RouteOutcome | None = None
+
+    @model_validator(mode="after")
+    def _verdict_on_its_own_stage(self) -> Self:
+        # ADR-0284 §5:1: each verdict on the one stage that reaches it.
+        if self.step_disposition is not None and self.stage is not ControllerStage.DRIVE:
+            msg = "a step disposition is recorded on a drive entry alone"
+            raise ValueError(msg)
+        if self.route_outcome is not None and self.stage is not ControllerStage.ROUTING:
+            msg = "a route outcome is recorded on a routing entry alone"
+            raise ValueError(msg)
+        return self
 
     @model_validator(mode="after")
     def _end_entry_is_an_ending(self) -> Self:
@@ -3683,15 +3945,17 @@ class EpisodeProcessingRecord(BaseModel):
     @model_validator(mode="after")
     def _stages_follow_the_trigger(self) -> Self:
         # ADR-0280 §7: a channel activation records its stages ending in exactly one end
-        # entry, last; a resume keeps its legacy path and records none.
-        if isinstance(self.trigger, RecordedResumeTrigger):
-            if self.stages or self.stages_elided:
-                msg = "a resume's processing record carries no stage record"
+        # entry, last. ADR-0284 §5:4-§5:5 holds a resume to the same rule; until §11's
+        # lane 6 a resume may still record none at all, its legacy shape, and a resume
+        # with no stage record elides none.
+        if isinstance(self.trigger, RecordedResumeTrigger) and not self.stages:
+            if self.stages_elided:
+                msg = "a resume with no stage record elides no stage entry"
                 raise ValueError(msg)
             return self
         ends = [entry.stage is ControllerStage.END for entry in self.stages]
         if not ends or not ends[-1] or any(ends[:-1]):
-            msg = "a channel activation's stage record ends in exactly one end entry, last"
+            msg = "a stage record ends in exactly one end entry, last"
             raise ValueError(msg)
         return self
 
@@ -3843,6 +4107,128 @@ class EpisodicMemory(MemoryBase):
             msg = "a recorded response requires nonblank outcome text"
             raise ValueError(msg)
         return self
+
+
+# --- the episode as a model is shown it (ADR-0284 §8) --------------------------
+
+
+class ProjectedText(BaseModel):
+    """A text cut to a projection's excerpt bound, carrying the length it was cut from.
+
+    ADR-0284 §8:1 carries the cut in the projection. It is carried as the whole
+    text's length rather than as a flag, because a site that applies its own, tighter
+    ceiling afterwards (ADR-0222 §4) states how much it kept of how much (§5), and
+    the projection is the only thing that still knows the second number.
+
+    Attributes:
+        text: A prefix of the whole text, at most the projection's ``excerpt_chars``
+            characters long.
+        full_chars: The whole text's length, in characters.
+    """
+
+    model_config = ConfigDict(frozen=True, extra="forbid")
+    text: EncodableText
+    full_chars: int = Field(strict=True, ge=0)
+
+    @model_validator(mode="after")
+    def _a_prefix_of_the_whole(self) -> Self:
+        if len(self.text) > self.full_chars:
+            msg = "a projected text is no longer than the text it was cut from"
+            raise ValueError(msg)
+        return self
+
+    @property
+    def cut(self) -> bool:
+        """Whether the excerpt bound cut the text."""
+        return len(self.text) < self.full_chars
+
+
+class EpisodeProjection(BaseModel):
+    """What every model-facing rendering of a stored episode reads (ADR-0284 §8).
+
+    :func:`~ai_assistant.core.episode_encoding.project_episode` is its one
+    producer, and a renderer shows no other field of the episode it came from
+    (§8:3). It is never stored and crosses no wire.
+
+    **An episode with a processing record** carries its ``channel``, the trigger's
+    ``origin``, its input text where ``origin`` is ``user`` (or ``outside``, for the
+    two renderings that admit it, §8:5), the latest understanding's ``meaning``,
+    ``meaning_ground`` and ``unresolved``, the stage verdicts, its ``status`` and
+    ``reason``. **An episode without one** (§8:2) carries its ``capture_modality``
+    instead of a channel and its ``content`` as its input, and no origin, no
+    understanding, no verdict and no status; ``status`` is ``None`` exactly there.
+    Both carry ``occurred_at``, ``response`` and ``derived_from_external``.
+
+    Attributes:
+        occurred_at: When the episode happened.
+        channel: The channel its trigger names, where it has a processing record.
+        capture_modality: Its capture modality, where it has no processing record.
+        origin: Who the trigger's input came from; ``None`` on a resume, on a
+            trigger recorded without one, and on an episode with no processing record.
+        input: The input text or transcript, cut to the excerpt bound, or ``None``
+            where none is shown.
+        meaning: The latest understanding's meaning, or ``None`` where there is none.
+        meaning_ground: Its ground, present exactly with ``meaning``.
+        unresolved: The latest understanding's unresolved matters.
+        step_dispositions: Each ``drive`` entry's verdict, in stage order.
+        route_outcomes: Each ``routing`` entry's verdict, in stage order.
+        response: What the episode records the assistant sent back (``outcome``),
+            cut to the excerpt bound.
+        status: How processing ended, or ``None`` where there is no processing record.
+        reason: Why, present exactly with ``status``.
+        derived_from_external: Whether processing read material resting on recorded
+            external content, as :func:`rests_on_recorded_external_content` answers
+            it of the episode's provenance (ADR-0106 §2). Not ``origin`` (§8:4).
+    """
+
+    model_config = ConfigDict(frozen=True, extra="forbid")
+    occurred_at: UtcInstant
+    channel: ChannelIdentity | None = None
+    capture_modality: Modality | None = None
+    origin: InputOrigin | None = None
+    input: ProjectedText | None = None
+    meaning: NonBlankEncodableText | None = None
+    meaning_ground: UnderstandingGround | None = None
+    unresolved: tuple[UnresolvedMatter, ...] = ()
+    step_dispositions: tuple[Disposition, ...] = ()
+    route_outcomes: tuple[RouteOutcome, ...] = ()
+    response: ProjectedText | None = None
+    status: ProcessingStatus | None = None
+    reason: ProcessingReason | None = None
+    derived_from_external: bool = False
+
+    @model_validator(mode="after")
+    def _one_of_the_two_shapes(self) -> Self:
+        if (self.status is None) != (self.reason is None):
+            msg = "a projection carries a status exactly with its reason"
+            raise ValueError(msg)
+        if (self.meaning is None) != (self.meaning_ground is None):
+            msg = "a projection carries a meaning exactly with its ground"
+            raise ValueError(msg)
+        if self.meaning is None and self.unresolved:
+            msg = "a projection carries unresolved matters only with a meaning"
+            raise ValueError(msg)
+        if self.status is None:
+            # §8:2: no origin, no understanding, no verdict and no status.
+            if (
+                self.channel is not None
+                or self.capture_modality is None
+                or self.origin is not None
+                or self.meaning is not None
+                or self.step_dispositions
+                or self.route_outcomes
+            ):
+                msg = "a projection without a processing record carries its content alone"
+                raise ValueError(msg)
+        elif self.capture_modality is not None:
+            msg = "a projection with a processing record carries its channel, not a modality"
+            raise ValueError(msg)
+        return self
+
+    @property
+    def has_processing_record(self) -> bool:
+        """Whether the episode had a processing record (§8:2's other path)."""
+        return self.status is not None
 
 
 class SemanticMemory(MemoryBase):
@@ -25184,148 +25570,6 @@ class ReadCancellation(StrEnum):
     general case is deferred by name to issue #2173's L7 obligation."""
 
 
-class Disposition(StrEnum):
-    """What became of one plan step at the runner stage (ADR-0037 §1, §4, §5).
-
-    Seven members, and the four that commit nothing are as much a result as the
-    three that do: a step the stage declines to act on is a fact its caller has to
-    be told, not an error.
-
-    **Relocating an enum is not redefining it** (ADR-0084 §4). It kept its members
-    and everything ADR-0037 ratified about them, ADR-0084 §8's refusal to add a
-    ``FAILED`` member is unaffected by the move, and the ``StrEnum`` base is
-    unchanged so every existing value string is byte-identical on the wire.
-
-    ``INVALID_PARAMETERS`` is ADR-0145 §4's addition and ``EGRESS_UNBINDABLE`` is
-    ADR-0152 §9's, and adding a member is additive on the wire for the same reason
-    (ADR-0084 §4): the values are ``StrEnum`` strings a client reads, and the
-    exposure is bounded by deployment rather than by a compatibility rule, since
-    the hub is loopback-only and ships with its client from one install.
-    """
-
-    EXECUTED = "executed"
-    """The call was authorised and handed to the executor; ``state`` carries the
-    outcome the executor committed."""
-
-    DENIED = "denied"
-    """The policy refused. The step is ``SKIPPED``/``APPROVAL_DENIED``, naming
-    the recorded decision."""
-
-    AWAITING_CONFIRMATION = "awaiting_confirmation"
-    """The policy wants a human answer. The step is durably
-    ``AWAITING_APPROVAL``; ``AssistantEngine.resume`` continues it."""
-
-    NO_CAPABLE_TOOL = "no_capable_tool"
-    """Nothing advertises the step's capability. The step is
-    ``SKIPPED``/``NO_CAPABLE_TOOL`` (ADR-0014 §4)."""
-
-    AMBIGUOUS_CAPABILITY = "ambiguous_capability"
-    """Several tools advertise it and no rule chooses between them (ADR-0037 §1,
-    #241). Nothing is committed and the step stays ``PENDING``."""
-
-    INVALID_PARAMETERS = "invalid_parameters"
-    """The step's parameters were not established as acceptable to any tool that
-    could have run them (ADR-0145 §4).
-
-    **One definition and two causes.** Either the evaluation reported violations
-    for every capable candidate, so ADR-0144 §7's eligibility filter left the set
-    empty; or an evaluation *raised* rather than reporting anything, which ADR-0145
-    §7 makes a refusal of the step rather than of the candidate that raised —
-    continuing to rank over the remainder would be selecting under an unknown. What
-    separates them is what is reported alongside: violations for the first, none
-    for the second. They are one member because the pipeline's answer is identical
-    and both are corrected the same way, by different arguments — which is a
-    different request. A second member would be a distinction a client cannot act
-    on differently.
-
-    **It commits nothing:** no ruling is requested, no audit record is written, no
-    claim is made, and the step stays ``PENDING``. It is terminal for the turn that
-    met it and for nothing beyond it. This is ``AMBIGUOUS_CAPABILITY``'s shape and
-    ADR-0037 §1's argument for it transfers unchanged — no ``SkipReason`` is true
-    of it, because ``NO_CAPABLE_TOOL`` is a lie when the tools were capable and the
-    arguments were not, and writing a falsehood into durable state to tidy a return
-    value is what ADR-0014 §4's legal-skip table exists to prevent. It is likewise
-    not the ``FAILED`` member ADR-0037 refused: it asserts nothing about the step's
-    status and writes nothing."""
-
-    EGRESS_UNBINDABLE = "egress_unbindable"
-    """The egress binding seam refused this call, so no ruling was sought for it
-    (ADR-0152 §9).
-
-    Returned when :class:`~ai_assistant.core.protocols.EgressBinder` raised
-    :class:`~ai_assistant.core.errors.EgressBindingError` — a declaration that
-    cannot describe the call, a destination with no canonical form, a top-level
-    argument the schema never statically named, a reference that is not
-    connectable, a definition unequal to its registered original, or a resumed
-    binding unequal to the one that was approved (ADR-0152 §6, §7, §8).
-
-    **It commits nothing:** no ruling is requested, no audit record is written, no
-    claim is made, and the step stays ``PENDING`` at its stored version. It is
-    terminal for the turn that met it and for nothing beyond it —
-    ``AMBIGUOUS_CAPABILITY``'s and ``INVALID_PARAMETERS``' shape, and ADR-0037 §1's
-    argument for the third time.
-
-    **Not ``INVALID_PARAMETERS``, and this is the choice most worth arguing.**
-    That member has one definition and two causes (ADR-0145 §4), both of them
-    about a schema evaluation over capable candidates — and most of ADR-0152 §6's
-    refusals are not about the parameters at all. Reporting a keyword in the wrong
-    place, a tool registered against no account, or a tampered definition as "the
-    step's parameters were not established as acceptable" writes a falsehood into a
-    returned value, and widening ``INVALID_PARAMETERS`` to a third cause would
-    amend ADR-0145 §4.
-
-    **Not ``DENIED``, and the distinction is the point of minting it.** A ``DENY``
-    means the policy refused, is recorded in the trail, and moves the step to
-    ``SKIPPED``/``APPROVAL_DENIED`` naming a decision. This refusal has no decision
-    to name, because it happens before one exists — so a client that could not tell
-    them apart would report "the assistant declined to send this" for a tool whose
-    declaration is malformed, which is a falsehood about the user's own policy.
-
-    **A store outage is not this.** A :class:`~ai_assistant.core.errors.ConnectionStoreError`
-    is never translated into this member: it asserts nothing about the call, which
-    may be perfectly bindable a second later, and it propagates out of the runner
-    stage instead (ADR-0152 §9)."""
-
-    EFFECT_ALREADY_CLAIMED = "effect_already_claimed"
-    """This goal has already claimed this act, so nothing was dispatched
-    (ADR-0259 §2).
-
-    Returned for a ``COMPLETED_OTHERWISE``, an ``UNCERTAIN`` or a ``HELD``
-    :class:`EffectClaim`, and for a ``COMPLETED`` one whose reuse conditions fail.
-    **Which member produced it is not carried on the disposition**, and what the turn
-    tells the user about it is the reply surface's.
-
-    **It commits nothing:** no call is made, no invocation is claimed, no
-    authorisation is spent, no transition is committed, and the step **keeps the
-    status it was entered at** — ``PENDING`` where ``StepRunner.run`` took the claim,
-    ``AWAITING_APPROVAL`` where ``StepRunner.resume`` did. It is the entry status
-    rather than ``PENDING`` because no transition is committed: naming ``PENDING``
-    for a resumed step would demand a move ADR-0014 §4's table does not admit. **No
-    step is moved to** ``SKIPPED`` **on this ground, with any**
-    :class:`SkipReason`.
-
-    Not ``EFFECT_UNSCOPED``, and the two are two members because they are two
-    different facts about the world — *this goal has already claimed this act*
-    against *this plan cannot say which act this step is* — and a client that could
-    not tell them apart could not tell a user which of the two it was, while the
-    second is a defect in the plan and this is not."""
-
-    EFFECT_UNSCOPED = "effect_unscoped"
-    """A side-effecting call whose step names no intended action, so nothing was
-    dispatched (ADR-0259 §2, ADR-0265 §4).
-
-    ADR-0265 §4 leaves *"whether an effect-bearing dispatch must name one"* to be
-    decided where the effect claim is taken, and it must:
-    :meth:`PlanStore.claim_effect` is **not called**, nothing is committed, the step
-    keeps the status it was entered at and the walk stops. Dispatching there would
-    perform an effect **no row could ever recognise**, so every later plan of the
-    goal would answer ``CLAIMED`` and repeat it — ADR-0255 §7's obligation unmet, and
-    the fail-open direction ADR-0265 §4 refuses for a dropped condition label.
-
-    **A call that is not side-effecting is untouched**: it has no effect key, so it
-    reaches the claim never and is held to nothing by this ground."""
-
-
 class StepOutcome(BaseModel):
     """What became of the one step a turn drove (ADR-0042 §3, §4; ADR-0084 §8).
 
@@ -26675,70 +26919,6 @@ _CONFIRM_OWED_OPERATIONS: Final[frozenset[RoutableOperation]] = frozenset(
         RoutableOperation.UNGUARD,
     }
 )
-
-
-class RouteOutcome(StrEnum):
-    """What became of one routed operation (ADR-0197 §8).
-
-    Eight members, and the two a reader is most likely to conflate are the two that
-    matter most: :attr:`FAILED` means the operation was **called and raised**, and the
-    engine asserts nothing about whether it took effect; :attr:`UNRECORDED` means §9's
-    row was not written, so the operation was **never called** and nothing was
-    destroyed. They are separate members because they are opposite statements about
-    the same question — did anything happen — and a surface that rendered them alike
-    would tell a user their belief might be gone when ADR-0197 §9 guarantees it is
-    not.
-
-    **The tag decides which of the eight an operation admits** (§8), stated on
-    :meth:`RoutedOperation._describes_one_route` as a closed set per tag: a read-only
-    operation admits exactly :attr:`PERFORMED`, :attr:`UNRECORDED` and :attr:`FAILED`,
-    and a confirm-owed one admits all eight.
-
-    **This is not the fusion ADR-0084 §8 refused for** :class:`Disposition`. That
-    section could keep ``Disposition`` a gate verdict because ``StepOutcome.state``
-    already carried the step's own status, so a client had a second value to read. A
-    routed operation has no ``ExecutionState`` and no durable step, so splitting this
-    enum would mint a second value whose only job is to be read beside the first, and
-    whose disagreement with it would have no defensible interpretation.
-    """
-
-    PERFORMED = "performed"
-    """The operation was called and returned. On a read-only member the listing it
-    produced rides :attr:`RoutedOperation.listing`."""
-
-    AWAITING_CONFIRMATION = "awaiting_confirmation"
-    """A confirm-owed route parked: nothing was performed, and
-    :attr:`RoutedOperation.confirmation` carries the card and the token to answer it
-    with (ADR-0197 §7)."""
-
-    REFUSED = "refused"
-    """The user answered a routed park ``False``. Nothing was performed, and **no**
-    ``PermissionDeniedError`` is raised — no ``ActionPolicy`` was consulted and no
-    ``PermissionDecision`` recorded, so there is no ruling for a refusal to be
-    (ADR-0197 §7)."""
-
-    AMBIGUOUS = "ambiguous"
-    """§5's lookup resolved to more than one candidate and no more than
-    :data:`DEFAULT_PAGE_SIZE` of them. Nothing was performed, nothing was confirmed,
-    and the candidates ride :attr:`RoutedOperation.listing`."""
-
-    AMBIGUOUS_TRUNCATED = "ambiguous_truncated"
-    """:attr:`AMBIGUOUS`, over a lookup that would have **exceeded** the bound. This
-    member is the whole of what tells the reply the request matched more than can be
-    shown: §6 gives the composing stage no count, so a single ``AMBIGUOUS`` could not
-    distinguish two candidates from a hundred (ADR-0197 §5)."""
-
-    NOT_FOUND = "not_found"
-    """§5's lookup resolved to no candidate. Nothing was performed and nothing was
-    confirmed."""
-
-    UNRECORDED = "unrecorded"
-    """§9's row was not written — the store refused it, or no ``route_id`` could be
-    minted for it — so the operation was **never called**, no park was registered and
-    no token was minted."""
-
-    FAILED = "failed"
-    """The operation was called and raised. Whether it took effect is not asserted."""
 
 
 #: The outcomes that carry :attr:`RoutedOperation.listing` whatever the operation's
