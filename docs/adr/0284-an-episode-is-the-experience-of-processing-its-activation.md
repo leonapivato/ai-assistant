@@ -1,6 +1,6 @@
 # 284. An episode is the experience of processing its activation
 
-- Status: Proposed
+- Status: Accepted
 - Date: 2026-10-02
 - Scope: [M36](https://github.com/leonapivato/ai-assistant/milestone/2), reopened 2026-09-30 for [#2613](https://github.com/leonapivato/ai-assistant/issues/2613); the second of three steps, the episode's end entry.
 - Dependency: ADR-0283, implemented at `f5993b40`.
