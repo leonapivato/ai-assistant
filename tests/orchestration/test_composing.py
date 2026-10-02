@@ -18,6 +18,7 @@ from typing import TYPE_CHECKING, Any, Final
 import pytest
 import structlog
 
+from ai_assistant.core.episode_encoding import episode_content
 from ai_assistant.core.errors import ModelError, ModelTimeoutError, ModelUnavailableError
 from ai_assistant.core.types import (
     ActionPlan,
@@ -25,8 +26,13 @@ from ai_assistant.core.types import (
     Attestation,
     BeliefBand,
     CalendarFacet,
+    ChannelContext,
+    ControllerRule,
+    ControllerStage,
     CurrentContext,
     Disposition,
+    EpisodeProcessingRecord,
+    EpisodeResponseKind,
     EpisodicMemory,
     ExchangeDisposition,
     ExecutionState,
@@ -34,15 +40,22 @@ from ai_assistant.core.types import (
     GoalBrief,
     GoalInterpretation,
     Ground,
+    InputOrigin,
     MemorySource,
     Message,
     PlanStep,
+    ProcessingReason,
+    ProcessingStatus,
     Provenance,
+    RecordedChannelTrigger,
+    RecordedTextInput,
     Role,
     RoutableOperation,
     RouteOutcome,
     SemanticMemory,
     SkipReason,
+    StageEntry,
+    StageOutcome,
     StepExecution,
     StepFailure,
     StepOutcome,
@@ -50,13 +63,17 @@ from ai_assistant.core.types import (
     TimeOfDay,
     ToolFailureKind,
     TurnResult,
+    UnderstandingOmission,
+    WholeTextReply,
     band_of,
 )
 from ai_assistant.orchestration import composing, payloads
 from ai_assistant.orchestration.composing import ComposingStage
+from ai_assistant.orchestration.conversations import conversation_channel
 from ai_assistant.orchestration.goals import CONTINUES_PROMPT, UNVERIFIED_PROMPT, GoalFacts
 from ai_assistant.planning.planner import ModelBackedPlanner
 from ai_assistant.testing import FakeModelProvider, FakeStreamingCompleter, StreamAttempt
+from ai_assistant.testing.activation import ended_pass
 
 if TYPE_CHECKING:
     from collections.abc import AsyncIterator, Mapping, Sequence
@@ -417,18 +434,19 @@ async def test_the_origin_term_never_names_a_source_as_a_derived_records_author(
 
 
 def _captured_episode(*, marked: bool) -> EpisodicMemory:
-    """One captured episode, stamped or not, otherwise byte-for-byte identical.
+    """One episode with no processing record, stamped or not, otherwise identical.
 
     ``OBSERVED`` because that is what ``ConversationLifecycle._episode`` writes and
     what ADR-0074 §4 fixes, so ``band_of`` places it in ``DERIVED`` and a stamped one
-    would otherwise fall into the belief arm ADR-0223 §4 forbids for it.
+    would otherwise fall into the belief arm ADR-0223 §4 forbids for it. No processing
+    record, which ADR-0275 §4:2 still admits from other producers: ADR-0284 §8:2's one
+    path on which ``content`` is shown, as the projection's input.
     """
     return EpisodicMemory(
         id="rec-9",
         content="asked about the weekend",
         occurred_at=AT - timedelta(days=1),
         outcome=None,
-        disposition=ExchangeDisposition.NO_ACTION_NEEDED,
         provenance=Provenance(
             source=MemorySource.OBSERVED,
             confidence=0.8,
@@ -474,22 +492,43 @@ async def test_a_stamped_episode_renders_neither_belief_phrase() -> None:
     )
 
 
-async def test_an_unstamped_episodes_bullet_is_byte_identical_to_todays() -> None:
-    """ADR-0223 §10's test 7, second half: the population that must not move.
+async def test_an_unstamped_record_less_episodes_bullet_is_the_projections_lines() -> None:
+    """ADR-0223 §4's unstamped phrase, on ADR-0284 §8's record line, pinned as a literal.
 
-    §4's third clause keeps the unstamped episodic phrase unchanged, and this is the
-    guard on it. Pinned against a **literal** rather than against another rendering of
-    the same code, because an implementation that moved both would satisfy any
-    self-referential comparison; the literal is what the renderer emitted before the
-    arm was added.
+    §8:4 keeps the episodic origin phrase — read off the projection's
+    ``derived_from_external`` — and §8:3 replaces the rest of the line: an episode
+    without a processing record shows its ``content`` as its input (§8:2), and carries
+    no understanding, no verdict and no status, so it renders none. Pinned against a
+    **literal** rather than another rendering of the same code, because an
+    implementation that moved both would satisfy any self-referential comparison.
     """
-    quoted = json.dumps("asked about the weekend")
     occurred = (AT - timedelta(days=1)).isoformat()
 
     assert composing._render_record(_captured_episode(marked=False)) == (
-        f"  - [episodic/observed] (derived, confidence 0.80, recorded by this system) "
-        f"the assistant recorded this exchange at {occurred}: {quoted}\n"
-        f'    how it turned out: "no action was needed"'
+        f"  - [episode] (recorded by this system) the assistant recorded this exchange at "
+        f'{occurred} on "capture modality text"\n'
+        f'    the record says: "asked about the weekend"'
+    )
+
+
+async def test_a_processed_episodes_bullet_is_the_projections_lines() -> None:
+    """ADR-0284 §8:3, §8:6: the record line of an episode as capture now writes one.
+
+    Where it arrived and when, the user's own words (``origin`` is ``user``, §8:1), the
+    phrase for the verdict on its ``drive`` entry, and the status and reason processing
+    ended with — every one a part of the projection, and nothing else of the record:
+    not its ``content``, not its ``disposition``, and not its response, which is the
+    caller's line (ADR-0222 §1:3, standing). A literal, for the reason the record-less
+    case above is one.
+    """
+    occurred = (AT - timedelta(days=1)).isoformat()
+
+    assert composing._render_record(_exchange(outcome=_REPLY, step=Disposition.EXECUTED)) == (
+        f"  - [episode] (recorded by this system) the assistant recorded this exchange at "
+        f'{occurred} on "conversation:c-1"\n'
+        f'    the user said: "asked about the weekend"\n'
+        f'    how it turned out: "the selected tool ran"\n'
+        f"    how processing ended: completed (returned)"
     )
 
 
@@ -884,81 +923,98 @@ async def test_a_declines_rationale_cannot_forge_the_assemblers_own_syntax() -> 
 async def test_an_episode_is_rendered_whole_with_its_instant_and_outcome() -> None:
     """A retrieved episode reaches the model with when it happened and how it went."""
     model = FakeModelProvider("answer")
-    episode = EpisodicMemory(
-        id="rec-4",
-        content="asked about the weekend",
-        occurred_at=AT - timedelta(days=1),
-        outcome="the selected tool ran",
-        provenance=Provenance(source=MemorySource.OBSERVED, confidence=0.8, last_updated=AT),
-    )
+    episode = _exchange(outcome=None, step=Disposition.EXECUTED)
 
     await ComposingStage(model=model, streaming=FakeStreamingCompleter()).compose(
         turn=_turn(memories=(episode,)), step=None, undriven=()
     )
 
-    prompt = _prompt(model)
-    assert (AT - timedelta(days=1)).isoformat() in prompt
-    assert "how it turned out" in prompt
+    rows = _prompt(model).splitlines()
+    assert any((AT - timedelta(days=1)).isoformat() in row for row in rows)
+    assert '    how it turned out: "the selected tool ran"' in rows
+    assert "    how processing ended: completed (returned)" in rows
 
 
-# --- ADR-0221 §3: the outcome line at this site ------------------------------
+# --- ADR-0284 §5 and §8: the verdict, from its stage entry ----------------------
 #
-# §11's tests 5, 6 and 7. The three populations a store now holds — captured before
-# the decision, captured after it, and written by the benchmark harness — must reach
-# this prompt as the same bytes for the same fact, and the composed reply a record
-# now carries in ``outcome`` must reach it not at all.
+# ADR-0221 §3 rendered a phrase for ``EpisodicMemory.disposition``; ADR-0284 §5 moves
+# the verdict onto the stage that reached it and §8:6 renders the phrase for each
+# verdict the projection carries, out of one table in ``core``. The cases below build
+# episodes as capture now writes them, with the verdict on a ``drive`` or ``routing``
+# entry.
 
-#: ADR-0221 §2's phrase table, written out here.
+#: ADR-0284 §8:6's phrase tables, written out here.
 #:
-#: **Deliberately a fourth copy** of the strings the three render sites each
-#: hold (§3). A test importing ``composing._disposition_phrase`` would assert that a
-#: function equals itself and would pass on a table with every phrase wrong; written
-#: out, this module pins the values §2 fixes as well as the byte-identity §11's test
-#: 5 asks for. A member added to the enum without an entry here fails rather than
-#: being skipped, because the parametrisation ranges over the enum and looks it up.
-_PHRASES: Final[dict[ExchangeDisposition, str]] = {
-    ExchangeDisposition.NO_ACTION_NEEDED: "no action was needed",
-    ExchangeDisposition.STEP_EXECUTED: "the selected tool ran",
-    ExchangeDisposition.STEP_DENIED: "the action was refused by the permission policy",
-    ExchangeDisposition.STEP_AWAITING_CONFIRMATION: "the action was parked for the user to confirm",
-    ExchangeDisposition.STEP_NO_CAPABLE_TOOL: "no tool advertised the capability the step needed",
-    ExchangeDisposition.STEP_AMBIGUOUS_CAPABILITY: (
+#: **Deliberately a copy** of ``core.episode_encoding``'s two tables. A test importing
+#: them would assert that a table equals itself and would pass on one with every
+#: phrase wrong; written out, this module pins the values as well as the rendering. A
+#: member added to either enum without an entry here fails rather than being skipped,
+#: because the parametrisation ranges over the enums and looks the phrase up.
+_STEP_PHRASES: Final[dict[Disposition, str]] = {
+    Disposition.EXECUTED: "the selected tool ran",
+    Disposition.DENIED: "the action was refused by the permission policy",
+    Disposition.AWAITING_CONFIRMATION: "the action was parked for the user to confirm",
+    Disposition.NO_CAPABLE_TOOL: "no tool advertised the capability the step needed",
+    Disposition.AMBIGUOUS_CAPABILITY: (
         "several tools advertised the capability, so none was chosen"
     ),
-    ExchangeDisposition.STEP_INVALID_PARAMETERS: (
+    Disposition.INVALID_PARAMETERS: (
         "the step's arguments did not fit the declared schema of any capable tool"
     ),
-    ExchangeDisposition.STEP_EGRESS_UNBINDABLE: (
+    Disposition.EGRESS_UNBINDABLE: (
         "the outbound call could not be described, so nothing was asked or sent"
     ),
-    ExchangeDisposition.STEP_EFFECT_ALREADY_CLAIMED: (
+    Disposition.EFFECT_ALREADY_CLAIMED: (
         "this goal had already claimed the act, so nothing was dispatched"
     ),
-    ExchangeDisposition.STEP_EFFECT_UNSCOPED: (
+    Disposition.EFFECT_UNSCOPED: (
         "the plan did not say which act the step was, so nothing was dispatched"
     ),
-    ExchangeDisposition.ROUTED_PERFORMED: (
-        "the assistant performed the operation the user asked for"
-    ),
-    ExchangeDisposition.ROUTED_AWAITING_CONFIRMATION: (
-        "the operation was parked for the user to confirm"
-    ),
-    ExchangeDisposition.ROUTED_REFUSED: "the user declined, so the operation was not performed",
-    ExchangeDisposition.ROUTED_AMBIGUOUS: "more than one record matched, so nothing was performed",
-    ExchangeDisposition.ROUTED_AMBIGUOUS_TRUNCATED: (
+}
+_ROUTE_PHRASES: Final[dict[RouteOutcome, str]] = {
+    RouteOutcome.PERFORMED: "the assistant performed the operation the user asked for",
+    RouteOutcome.AWAITING_CONFIRMATION: "the operation was parked for the user to confirm",
+    RouteOutcome.REFUSED: "the user declined, so the operation was not performed",
+    RouteOutcome.AMBIGUOUS: "more than one record matched, so nothing was performed",
+    RouteOutcome.AMBIGUOUS_TRUNCATED: (
         "more records matched than could be shown, so nothing was performed"
     ),
-    ExchangeDisposition.ROUTED_NOT_FOUND: "nothing matched, so nothing was performed",
-    ExchangeDisposition.ROUTED_UNRECORDED: (
-        "the decision could not be recorded, so nothing was performed"
-    ),
-    ExchangeDisposition.ROUTED_FAILED: "the operation was attempted and failed",
+    RouteOutcome.NOT_FOUND: "nothing matched, so nothing was performed",
+    RouteOutcome.UNRECORDED: "the decision could not be recorded, so nothing was performed",
+    RouteOutcome.FAILED: "the operation was attempted and failed",
 }
+
+#: Every verdict a stage entry can carry: each step disposition, then each route
+#: outcome. Two enums sharing values, kept apart by type.
+_VERDICTS: Final[list[Disposition | RouteOutcome]] = [*Disposition, *RouteOutcome]
+
+
+def _verdict_id(verdict: Disposition | RouteOutcome) -> str:
+    """A parametrisation id naming the enum, since two members share a value."""
+    return f"{type(verdict).__name__}.{verdict.value}"
+
+
+def _phrase(verdict: Disposition | RouteOutcome) -> str:
+    """The phrase ADR-0284 §8:6 renders for ``verdict``."""
+    if isinstance(verdict, Disposition):
+        return _STEP_PHRASES[verdict]
+    return _ROUTE_PHRASES[verdict]
+
+
+def _with(verdict: Disposition | RouteOutcome, *, outcome: str | None) -> EpisodicMemory:
+    """One processed episode whose verdict is ``verdict``, on its own stage's entry."""
+    if isinstance(verdict, Disposition):
+        return _exchange(outcome=outcome, step=verdict)
+    return _exchange(outcome=outcome, route=verdict)
+
 
 #: A composed reply of the shape ADR-0221 §1 gives ``outcome``: prose rather than a
 #: phrase, carrying a span nothing else in these fixtures does, so an assertion that
 #: it reaches no prompt cannot pass by coincidence.
 _REPLY = "The forecast is dry. I would take the Salamander-Kestrel-9 trail either way."
+
+#: The user's own words on every processed episode below, unless a case names others.
+_SAID: Final = "asked about the weekend"
 
 
 async def _rendered(episode: EpisodicMemory) -> str:
@@ -970,68 +1026,169 @@ async def _rendered(episode: EpisodicMemory) -> str:
     return _prompt(model)
 
 
-def _exchange(
-    *, outcome: str | None, disposition: ExchangeDisposition | None = None
+def _exchange(  # noqa: PLR0913 — one knob per fact of the record a case varies
+    record_id: str = "rec-4",
+    *,
+    outcome: str | None,
+    step: Disposition | None = None,
+    route: RouteOutcome | None = None,
+    said: str = _SAID,
+    ago: timedelta = timedelta(days=1),
 ) -> EpisodicMemory:
-    """One captured episode carrying the assistant half under test."""
-    return EpisodicMemory(
-        id="rec-4",
-        content="asked about the weekend",
-        occurred_at=AT - timedelta(days=1),
+    """One episode, shaped as ``Engine._capture`` now writes one (ADR-0284).
+
+    The user's words are the trigger's input with ``origin`` ``user`` (§2), the
+    verdict is on its ``routing`` or ``drive`` entry (§5:2), ``outcome`` is the
+    response (§4) and ``content`` is §7's one rule over the record. ``disposition`` is
+    still written beside the verdict, as capture still writes it for the planner and
+    the observer until they read the projection; this renderer reads it nowhere,
+    which :func:`test_the_stage_verdict_renders_and_a_disagreeing_disposition_does_not`
+    pins.
+
+    **A blank response is the one exception.** ``EpisodicMemory`` refuses a processing
+    record beside blank ``outcome`` text, so capture cannot write one; a ceiling case
+    over a reply of whitespace alone gets an episode with no processing record, which
+    ADR-0275 §4:2 still admits and whose response line is the same line.
+    """
+    at = AT - ago
+    if outcome is not None and not outcome.strip():
+        return EpisodicMemory(
+            id=record_id,
+            content=said,
+            occurred_at=at,
+            outcome=outcome,
+            provenance=Provenance(source=MemorySource.OBSERVED, confidence=0.8, last_updated=AT),
+        )
+    channel = conversation_channel("c-1")
+    entries: list[StageEntry] = []
+    if route is not None:
+        entries.append(
+            StageEntry(
+                stage=ControllerStage.ROUTING,
+                due=ControllerRule.ROUTE_UNCHECKED,
+                started_at=at,
+                ended_at=at,
+                outcome=StageOutcome.DONE,
+                route_outcome=route,
+            )
+        )
+    if step is not None:
+        entries.append(
+            StageEntry(
+                stage=ControllerStage.DRIVE,
+                due=ControllerRule.PLAN_HAS_STEPS,
+                started_at=at,
+                ended_at=at,
+                outcome=StageOutcome.DONE,
+                step_disposition=step,
+            )
+        )
+    if step is not None:
+        disposition = ExchangeDisposition(f"step_{step.value}")
+    elif route is not None:
+        disposition = ExchangeDisposition(f"routed_{route.value}")
+    else:
+        disposition = ExchangeDisposition.NO_ACTION_NEEDED
+    record = EpisodicMemory(
+        id=record_id,
+        content="",
+        occurred_at=at,
         outcome=outcome,
         disposition=disposition,
         provenance=Provenance(source=MemorySource.OBSERVED, confidence=0.8, last_updated=AT),
+        processing_record=EpisodeProcessingRecord(
+            activation_id=record_id,
+            started_at=at,
+            ended_at=at,
+            trigger=RecordedChannelTrigger(
+                target=channel,
+                channel=channel,
+                payload=RecordedTextInput(text=said),
+                context=ChannelContext(),
+                conversation=None,
+                reply=WholeTextReply(),
+                origin=InputOrigin.USER,
+            ),
+            status=ProcessingStatus.COMPLETED,
+            reason=ProcessingReason.RETURNED,
+            response_kind=(
+                EpisodeResponseKind.NONE
+                if outcome is None
+                else EpisodeResponseKind.CONVERSATION_REPLY
+            ),
+            model_eligible=True,
+            understanding_omitted=UnderstandingOmission.NOT_REACHED,
+            stages=(*entries, *ended_pass(at)),
+        ),
     )
+    return record.model_copy(update={"content": episode_content(record)})
 
 
-@pytest.mark.parametrize("disposition", list(ExchangeDisposition), ids=lambda d: d.value)
-async def test_a_typed_disposition_renders_what_the_stored_phrase_used_to(
-    disposition: ExchangeDisposition,
+@pytest.mark.parametrize("verdict", _VERDICTS, ids=_verdict_id)
+async def test_each_verdict_renders_its_phrase_on_the_bullet_and_never_the_reply(
+    verdict: Disposition | RouteOutcome,
 ) -> None:
-    """ADR-0221 §11's test 5 at this site, **as ADR-0222 §8 narrows it**.
+    """ADR-0284 §8:6 at this site, over every member of both enums.
 
-    §8 keeps test 5 binding "unchanged for ``_render_record`` at both request
-    assemblers, for every caller and both groups", and lifts it only from "the tail
-    assemblers' output on such a record" — a record carrying both fields, which now
-    grows a reply line by design. So the identity is asserted on
-    :func:`composing._render_record` itself rather than on the assembled prompt: that
-    is the function both groups share and the exact scope §8 leaves standing.
-
-    A record captured after ADR-0221 carries the reply in ``outcome`` and a member in
-    ``disposition``; one captured before it carries that member's phrase in
-    ``outcome`` and no member. The two must render identically — not similarly — and
-    the reply must not appear in either, because ADR-0222 §1's third clause holds for
-    this site too: the reply line is the tail loop's and never the record renderer's.
+    The phrase is the one table's, rendered once, on the record line; the reply is not
+    on it, because ADR-0222 §1's third clause — the reply line is the caller's and
+    never the record renderer's — stands. So the bullet is the same bytes whether or
+    not the record carries a response.
     """
-    typed = composing._render_record(_exchange(outcome=_REPLY, disposition=disposition))
-    legacy = composing._render_record(_exchange(outcome=_PHRASES[disposition]))
+    typed = composing._render_record(_with(verdict, outcome=_REPLY))
 
-    assert typed == legacy
-    assert f"    how it turned out: {json.dumps(_PHRASES[disposition])}" in typed.splitlines()
+    phrase = f"    how it turned out: {json.dumps(_phrase(verdict))}"
+    assert [row for row in typed.splitlines() if row.startswith("    how it turned out")] == [
+        phrase
+    ]
     assert "Salamander-Kestrel-9" not in typed
+    assert typed == composing._render_record(_with(verdict, outcome=None))
 
 
-async def test_a_member_beside_no_outcome_renders_its_phrase_and_nothing_else() -> None:
-    """Issue #1873: a member beside an ``outcome`` of ``None``, which is a real population.
+async def test_the_stage_verdict_renders_and_a_disagreeing_disposition_does_not() -> None:
+    """ADR-0284 §5:3: no reader of a stored episode reads ``disposition``.
 
-    ADR-0221 §1 gives ``outcome`` five paths on which the pass produced **no reply** —
-    a step parked for confirmation, a routed park, a resume driven from a recovered
-    park, a classified composition failure, and a stream that published nothing — and
-    capture writes ``None`` there while still recording the member. No record of that
-    shape existed before the capture flip: a pre-change episode always carried a phrase
-    and a harness row always carries assistant text, so every case above it renders a
-    record whose ``outcome`` is a string.
-
-    §3's rule reads ``disposition`` **first**, so the fallback is never consulted and
-    the ``None`` never reaches a formatter. That is what this pins, at this site: the
-    phrase renders exactly as it does beside a reply, and no rendering of the absent
-    outcome appears anywhere in the prompt.
+    Capture still writes the field, so a renderer that read it would pass every case
+    whose two agree. Here they disagree, and the phrase is the ``drive`` entry's.
     """
-    prompt = await _rendered(
-        _exchange(outcome=None, disposition=ExchangeDisposition.STEP_AWAITING_CONFIRMATION)
+    episode = _exchange(outcome=_REPLY, step=Disposition.DENIED).model_copy(
+        update={"disposition": ExchangeDisposition.STEP_EXECUTED}
     )
+
+    bullet = composing._render_record(episode)
+
+    assert f"    how it turned out: {json.dumps(_STEP_PHRASES[Disposition.DENIED])}" in (
+        bullet.splitlines()
+    )
+    assert "the selected tool ran" not in bullet
+
+
+async def test_a_pass_that_reached_no_verdict_renders_no_verdict_line() -> None:
+    """A pass that drove no step and took no route renders its status and no phrase.
+
+    ADR-0284 §8:6 renders "the phrase for each verdict it carries", and the tables
+    hold one phrase per member of ``Disposition`` and of ``RouteOutcome`` and none for
+    their absence — so nothing is invented for it, and the status line says how the
+    pass ended.
+    """
+    bullet = composing._render_record(_exchange(outcome=_REPLY))
+
+    rows = bullet.splitlines()
+    assert not [row for row in rows if row.startswith("    how it turned out")]
+    assert rows[-1] == "    how processing ended: completed (returned)"
+
+
+async def test_a_verdict_beside_no_response_renders_its_phrase_and_nothing_else() -> None:
+    """Issue #1873's shape: a verdict beside an ``outcome`` of ``None``.
+
+    ADR-0221 §1 gives ``outcome`` paths on which the pass produced **no reply** — a
+    step parked for confirmation among them — and capture writes ``None`` there while
+    the ``drive`` entry still carries the verdict. The phrase renders exactly as it
+    does beside a reply, and no rendering of the absent response appears anywhere.
+    """
+    prompt = await _rendered(_exchange(outcome=None, step=Disposition.AWAITING_CONFIRMATION))
     beside_a_reply = await _rendered(
-        _exchange(outcome=_REPLY, disposition=ExchangeDisposition.STEP_AWAITING_CONFIRMATION)
+        _exchange(outcome=_REPLY, step=Disposition.AWAITING_CONFIRMATION)
     )
 
     assert (
@@ -1039,9 +1196,8 @@ async def test_a_member_beside_no_outcome_renders_its_phrase_and_nothing_else() 
         in prompt.splitlines()
     )
     assert "None" not in prompt
-    # ADR-0222 §1's second clause: a tail record carrying a member and no `outcome`
-    # "grows no reply line", so the reply line is the whole of what a record carrying
-    # both fields adds, and the two prompts differ by exactly it.
+    # ADR-0284 §8:7: the response line's condition is "carries a response", so the
+    # line is the whole of what the second record adds.
     added = [
         line
         for line in beside_a_reply.splitlines()
@@ -1050,31 +1206,26 @@ async def test_a_member_beside_no_outcome_renders_its_phrase_and_nothing_else() 
     assert added == [f"{_REPLY_LABEL}: {json.dumps(_REPLY)}"]
 
 
-async def test_a_record_written_before_the_decision_renders_its_stored_phrase() -> None:
-    """ADR-0221 §11's test 6 at this site: the legacy population is untouched.
+@pytest.mark.parametrize("outcome", ["the selected tool ran", "Bo: what is her name?"])
+async def test_an_episode_without_a_processing_record_shows_its_content_and_its_response(
+    outcome: str,
+) -> None:
+    """ADR-0284 §8:2: the one path on which a model is shown ``content``.
 
-    Absence of a ``disposition`` is the discriminator (§8), so a record written before
-    the decision — a phrase in ``outcome``, no member beside it — takes the fallback
-    arm and renders exactly the bytes it did before this change.
+    An episode written before the decision, or by the benchmark harness — whose
+    ``exchanges_of`` puts the other speaker's run in ``outcome`` and runs no engine —
+    has no processing record. Its input is its ``content``; it carries no
+    understanding, no verdict and no status, so it renders none; and since it carries
+    a response, a tail record renders that response's line (§8:7).
     """
-    prompt = await _rendered(_exchange(outcome="the selected tool ran"))
+    episode = _captured_episode(marked=False).model_copy(update={"outcome": outcome})
 
-    assert '    how it turned out: "the selected tool ran"' in prompt.splitlines()
+    rows = (await _rendered(episode)).splitlines()
 
-
-async def test_a_harness_row_renders_the_other_speakers_turn() -> None:
-    """ADR-0221 §11's test 7 at this site: the benchmark arm does not move.
-
-    ``benchmarks/memory/ingest.py``'s ``exchanges_of`` pairs a user run with the
-    assistant run that follows it and puts the latter in ``Exchange.outcome``, which
-    ``ConversationLifecycle.capture`` writes to the episode; it runs no engine and
-    writes no disposition. The record is built here rather than imported, because
-    ``benchmarks`` is not this lane's to touch and a test that imported it would be
-    pinning the harness rather than this renderer.
-    """
-    prompt = await _rendered(_exchange(outcome="Bo: what is her name?"))
-
-    assert '    how it turned out: "Bo: what is her name?"' in prompt.splitlines()
+    assert '    the record says: "asked about the weekend"' in rows
+    assert not [row for row in rows if row.startswith("    how it turned out")]
+    assert not [row for row in rows if row.startswith("    how processing ended")]
+    assert f"{_REPLY_LABEL}: {json.dumps(outcome)}" in rows
 
 
 # --- ADR-0222 §1, §2, §4 and §5: the reply, in the tail alone -------------------
@@ -1123,36 +1274,30 @@ def _span_of(line: str) -> str:
 
 async def _tail_line_for(reply: str) -> str:
     """The reply line a tail record carrying ``reply`` renders."""
-    prompt = await _rendered(
-        _exchange(outcome=reply, disposition=ExchangeDisposition.STEP_EXECUTED)
-    )
+    prompt = await _rendered(_exchange(outcome=reply, step=Disposition.EXECUTED))
     return _reply_line_of(prompt)
 
 
-@pytest.mark.parametrize("disposition", list(ExchangeDisposition), ids=lambda d: d.value)
-async def test_the_tail_renders_the_reply_after_the_phrase(
-    disposition: ExchangeDisposition,
+@pytest.mark.parametrize("verdict", _VERDICTS, ids=_verdict_id)
+async def test_the_tail_renders_the_reply_after_the_projections_lines(
+    verdict: Disposition | RouteOutcome,
 ) -> None:
-    """ADR-0222 §8's assertion 1 at this site, over the whole membership.
+    """ADR-0222 §8's assertion 1 at this site, as ADR-0284 §8:7 reads it.
 
-    "A conversation-tail episode carrying a ``disposition`` and a reply renders its
-    existing bullet, then the ``how it turned out:`` line carrying the phrase, then
-    the reply line — in that order, the phrase line byte-identical to what the same
-    record renders today."
-
-    The order is the assertion and not an incidental: §1 rules the phrase line "is
-    rendered first, and the reply line never replaces it", because the phrase is the
-    only typed, unforgeable statement of what the pipeline did and the reply is what
-    the user was shown.
+    A conversation-tail episode carrying a response renders its record line — the
+    projection's, the phrase line among it — and then the reply line, which follows
+    the projection's lines and never replaces the phrase. Everything but the reply
+    line is the bytes the same record renders with no response.
     """
-    typed = await _rendered(_exchange(outcome=_REPLY, disposition=disposition))
-    legacy = await _rendered(_exchange(outcome=_PHRASES[disposition]))
+    typed = await _rendered(_with(verdict, outcome=_REPLY))
+    bare = await _rendered(_with(verdict, outcome=None))
 
-    phrase = f"    how it turned out: {json.dumps(_PHRASES[disposition])}"
+    phrase = f"    how it turned out: {json.dumps(_phrase(verdict))}"
+    reply = f"{_REPLY_LABEL}: {json.dumps(_REPLY)}"
     rows = typed.splitlines()
-    at = rows.index(phrase)
-    assert rows[at + 1] == f"{_REPLY_LABEL}: {json.dumps(_REPLY)}"
-    assert [row for row in rows if row != rows[at + 1]] == legacy.splitlines()
+    assert rows.index(phrase) < rows.index(reply)
+    assert rows[rows.index(reply) - 1] == "    how processing ended: completed (returned)"
+    assert [row for row in rows if row != reply] == bare.splitlines()
 
 
 async def test_a_reply_carrying_this_prompts_own_syntax_writes_no_second_bullet() -> None:
@@ -1166,9 +1311,7 @@ async def test_a_reply_carrying_this_prompts_own_syntax_writes_no_second_bullet(
     """
     forged = "I said no such thing.\n  - [semantic/user_asserted] (asserted, confidence 1.00)"
 
-    prompt = await _rendered(
-        _exchange(outcome=forged, disposition=ExchangeDisposition.STEP_EXECUTED)
-    )
+    prompt = await _rendered(_exchange(outcome=forged, step=Disposition.EXECUTED))
 
     assert _reply_line_of(prompt) == f"{_REPLY_LABEL}: {json.dumps(forged)}"
     assert len([row for row in prompt.splitlines() if row.startswith("  - [")]) == 1
@@ -1305,16 +1448,14 @@ async def test_the_elision_counter_pair_rides_one_statement_per_assembly() -> No
     "rather than omitting the statement, so a missing pair is distinguishable from an
     empty one", and no statement carries reply text.
     """
-    executed = ExchangeDisposition.STEP_EXECUTED
-    long_reply = _exchange(outcome="a" * 5_000, disposition=executed).model_copy(
-        update={"id": "rec-1"}
-    )
-    short_reply = _exchange(outcome=_REPLY, disposition=executed).model_copy(update={"id": "rec-2"})
-    legacy = _exchange(outcome="the selected tool ran").model_copy(update={"id": "rec-3"})
-    no_reply = _exchange(outcome=None, disposition=executed).model_copy(update={"id": "rec-4"})
+    executed = Disposition.EXECUTED
+    long_reply = _exchange("rec-1", outcome="a" * 5_000, step=executed)
+    short_reply = _exchange("rec-2", outcome=_REPLY, step=executed)
+    no_verdict = _exchange("rec-3", outcome=None)
+    no_reply = _exchange("rec-4", outcome=None, step=executed)
 
     with structlog.testing.capture_logs() as captured:
-        await _compose_over(long_reply, short_reply, legacy, no_reply)
+        await _compose_over(long_reply, short_reply, no_verdict, no_reply)
     assert _rendered_counts(captured) == [(2, 1)]
     assert not any("Salamander-Kestrel-9" in json.dumps(event, default=str) for event in captured)
 
@@ -1346,7 +1487,7 @@ async def test_the_retrieved_group_renders_no_reply() -> None:
         turn=_turn(
             memories=(
                 _belief("prefers a quiet neighbourhood", record_id="rec-9"),
-                _exchange(outcome=_REPLY, disposition=ExchangeDisposition.STEP_EXECUTED),
+                _exchange(outcome=_REPLY, step=Disposition.EXECUTED),
             )
         ),
         step=None,
@@ -1385,24 +1526,16 @@ def _hop_episode(
     record_id: str,
     *,
     outcome: str | None = _HOP_REPLY,
-    disposition: ExchangeDisposition | None = ExchangeDisposition.STEP_EXECUTED,
-    content: str = "The user asked: which lender fits my budget?",
+    said: str = "which lender fits my budget?",
 ) -> EpisodicMemory:
     """One captured episode, shaped as ``Engine._capture`` writes one (ADR-0227 §7).
 
-    The user's material and the plan's rationale in ``content``, the composed reply in
-    ``outcome``, and an ``ExchangeDisposition`` in ``disposition`` — "because that is
-    the combination the render rules turn on". A fixture that carries the reply in
-    ``content`` asserts nothing about production, which is the failure #1944 records.
+    The user's words as its input, the composed reply in ``outcome`` and the step's
+    verdict on its ``drive`` entry (ADR-0284 §5:2) — "because that is the combination
+    the render rules turn on". A fixture that carries the reply anywhere but
+    ``outcome`` asserts nothing about production, which is the failure #1944 records.
     """
-    return EpisodicMemory(
-        id=record_id,
-        content=content,
-        occurred_at=AT - timedelta(days=1),
-        outcome=outcome,
-        disposition=disposition,
-        provenance=Provenance(source=MemorySource.OBSERVED, confidence=0.8, last_updated=AT),
-    )
+    return _exchange(record_id, outcome=outcome, step=Disposition.EXECUTED, said=said)
 
 
 async def _hop_prompt(*memories: MemoryRecord, reached: Sequence[str] = ()) -> str:
@@ -1457,8 +1590,9 @@ async def test_a_record_the_hop_reached_renders_its_reply_and_its_neighbours_do_
     assert composing._TAIL_HEADING not in rows, "a belief first means no leading episodic run"
     phrase = '    how it turned out: "the selected tool ran"'
     at = rows.index(phrase)
-    assert rows[at + 1] == f"{_REPLY_LABEL}: {json.dumps(_HOP_REPLY)}"
-    assert _reply_lines_of(prompt) == [rows[at + 1]], "one line, for the one record reached"
+    reply = f"{_REPLY_LABEL}: {json.dumps(_HOP_REPLY)}"
+    assert rows[at + 1 : at + 3] == ["    how processing ended: completed (returned)", reply]
+    assert _reply_lines_of(prompt) == [reply], "one line, for the one record reached"
     assert "Kestrel-Ibis-7" not in prompt
     assert rows.count(phrase) == 2, "both episodes still render their phrase line"
     # ADR-0222 §1's third clause, which ADR-0227 §1 binds word for word and §6 calls
@@ -1477,7 +1611,7 @@ async def test_the_tail_renders_identically_beside_a_serviced_hop() -> None:
     renderer that had folded the new population into the tail loop would move the
     tail's own bytes.
     """
-    tail = _hop_episode("tail-1", outcome=_REPLY, content="The user asked: what is on today?")
+    tail = _hop_episode("tail-1", outcome=_REPLY, said="what is on today?")
     belief = _belief("the user is buying a house", record_id="rec-9")
     hopped = _hop_episode("hop-1")
 
@@ -1503,7 +1637,7 @@ async def test_a_hop_that_reaches_a_tail_record_changes_nothing_about_it() -> No
     record **first** in ADR-0226 §6's order — so a tail record consuming a slot would
     show up as a missing tenth hop line rather than as nothing at all.
     """
-    tail = _hop_episode("tail-1", outcome=_REPLY, content="The user asked: what is on today?")
+    tail = _hop_episode("tail-1", outcome=_REPLY, said="what is on today?")
     belief = _belief("the user is buying a house", record_id="rec-9")
     hopped = [_hop_episode(f"hop-{n}", outcome=f"reply {n}") for n in range(_CAP)]
 
@@ -1670,7 +1804,7 @@ async def test_the_counter_pair_is_one_statement_over_both_populations() -> None
     a hop-reached record with no ``outcome`` is reported nowhere: eligibility is §1's
     condition and not "the hop reached it".
     """
-    tail = _hop_episode("tail-1", outcome=_REPLY, content="The user asked: what is on today?")
+    tail = _hop_episode("tail-1", outcome=_REPLY, said="what is on today?")
     belief = _belief("the user is buying a house", record_id="rec-9")
     long_reply = _hop_episode("hop-1", outcome="a" * 5_000)
     short_reply = _hop_episode("hop-2", outcome=_HOP_REPLY)
@@ -1714,7 +1848,7 @@ async def test_the_planners_assembler_renders_no_reply_line_for_a_hop_reached_re
         utterance="a request",
         context=_context(),
         memories=[
-            _hop_episode("tail-1", outcome=_REPLY, content="The user asked: what is on today?"),
+            _hop_episode("tail-1", outcome=_REPLY, said="what is on today?"),
             _belief("the user is buying a house", record_id="rec-9"),
             _hop_episode("hop-1"),
         ],
@@ -1737,16 +1871,9 @@ async def test_the_planners_assembler_renders_no_reply_line_for_a_hop_reached_re
 # conversation and disclaimed having it in the same reply.
 
 
-def _episode(
-    record_id: str, content: str, *, ago: timedelta = timedelta(minutes=1)
-) -> EpisodicMemory:
-    """One captured turn, as ADR-0074 §3 writes it: an episode in the derived band."""
-    return EpisodicMemory(
-        id=record_id,
-        content=content,
-        occurred_at=AT - ago,
-        provenance=_provenance(MemorySource.OBSERVED),
-    )
+def _episode(record_id: str, said: str, *, ago: timedelta = timedelta(minutes=1)) -> EpisodicMemory:
+    """One captured turn: the user's words, recorded as capture writes an episode."""
+    return _exchange(record_id, outcome=None, said=said, ago=ago)
 
 
 async def test_this_conversations_own_turns_are_headed_apart_from_what_was_retrieved() -> None:
@@ -1901,22 +2028,29 @@ def test_a_deflection_keeps_its_shape_in_the_spoken_register() -> None:
 
 
 def _grouped(prompt: str) -> dict[str, list[str]]:
-    """The record contents the prompt printed, keyed by the heading they fell under.
+    """The records the prompt printed, keyed by the heading they fell under.
 
     Reads the assembled prompt the way the model does — a heading, then the bullets
     below it — so an assertion can say *which* group a record landed in rather than
-    only that its text appears somewhere.
+    only that its text appears somewhere. A belief is named by its quoted text, on its
+    bullet; an episode by its input, on the line ADR-0284 §8's projection puts under
+    its bullet.
     """
     headings = (composing._TAIL_HEADING, composing._RETRIEVED_HEADING)
+    inputs = ("    the user said", "    the record says")
     grouped: dict[str, list[str]] = {}
     current: str | None = None
     for line in prompt.splitlines():
         if line in headings:
             current = line
             grouped[current] = []
-        elif current is not None and line.startswith("  - ["):
+        elif current is None or line.startswith("  - [episode]"):
+            continue
+        elif line.startswith("  - ["):
             grouped[current].append(json.loads(line[line.index('"') :]))
-        elif current is not None and not line.startswith(("  ", "    ")):
+        elif line.startswith(inputs):
+            grouped[current].append(json.loads(line[line.index(': "') + 2 :]))
+        elif not line.startswith("  "):
             current = None
     return grouped
 

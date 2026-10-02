@@ -13,6 +13,8 @@ from typing import TYPE_CHECKING, Any, Final
 import pytest
 from structlog.testing import capture_logs
 
+from ai_assistant.core.channel_validation import input_origin
+from ai_assistant.core.episode_encoding import episode_content
 from ai_assistant.core.errors import ModelError, UnderstandingError
 from ai_assistant.core.types import (
     UNDERSTANDING_REFERENT_EXCERPT_CHARS,
@@ -85,11 +87,15 @@ def _episode(  # noqa: PLR0913 — one knob per projected field a case varies
     placement: Placement | None = None,
     eligible: bool = True,
 ) -> EpisodicMemory:
-    """One captured episode carrying a processing record."""
+    """One captured episode carrying a processing record, as admission and capture write it.
+
+    The trigger's ``origin`` is admission's (ADR-0284 §2:2) and ``content`` is §7's one
+    rule over the record.
+    """
     event = channel.channel_type == "informational_event"
-    return EpisodicMemory(
+    record = EpisodicMemory(
         id=episode_id,
-        content=f"The user asked: {text}",
+        content="",
         occurred_at=at,
         outcome=outcome,
         provenance=Provenance(source=MemorySource.OBSERVED, confidence=0.9, last_updated=at),
@@ -105,6 +111,7 @@ def _episode(  # noqa: PLR0913 — one knob per projected field a case varies
                 context=ChannelContext() if context is None else context,
                 conversation=None,
                 reply=None if event else WholeTextReply(),
+                origin=input_origin(channel),
             ),
             status=ProcessingStatus.COMPLETED,
             reason=ProcessingReason.RETURNED,
@@ -121,6 +128,7 @@ def _episode(  # noqa: PLR0913 — one knob per projected field a case varies
             stages=ended_pass(at),
         ),
     )
+    return record.model_copy(update={"content": episode_content(record)})
 
 
 async def _store(*records: MemoryRecord) -> FakeMemoryStore:
@@ -416,8 +424,10 @@ async def test_a_conversation_tail_renders_both_halves_under_h_labels() -> None:
         _stage(model, await _store()), window=ConversationWindow(CONVERSATION, tail), episodes=False
     )
     (item,) = _sent(model)["channel_window"]
-    assert item["exchange_as_recorded"] == "The user asked: Find a campsite near Riverside."
-    assert item["assistant_reply"] == "Riverside and Pine Flat both have space."
+    # ADR-0284 §8: the projection's input and response, never the record's `content`.
+    assert item["input"] == "Find a campsite near Riverside."
+    assert item["response"] == "Riverside and Pine Flat both have space."
+    assert "exchange_as_recorded" not in item
     (referent,) = understood.meaning_referents
     assert (referent.kind, referent.id, referent.source) == (
         "channel_item",

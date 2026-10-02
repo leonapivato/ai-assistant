@@ -421,11 +421,16 @@ async def test_an_understood_event_is_captured_with_its_meaning_as_content() -> 
     assert "thermostat" not in episode.content
 
 
-async def test_an_event_captured_without_an_understanding_keeps_the_constant() -> None:
+async def test_an_event_captured_without_an_understanding_is_its_status_line() -> None:
+    """ADR-0284 §7:1: no understanding, so a line of its status — and no outside words."""
     harness = Harness(informational_events=InformationalEventStage(FakeModelProvider("Eco.")))
     await harness.engine.receive(event_input(), reply=None, timeout=_BUDGET)
     (episode,) = [r for r in await harness.memory.export() if isinstance(r, EpisodicMemory)]
-    assert episode.content == "Recorded activation; inspect its processing record."
+    assert episode.processing_record is not None
+    status = episode.processing_record.status
+    reason = episode.processing_record.reason
+    assert episode.content == f"status {status.value}, reason {reason.value}"
+    assert "thermostat" not in episode.content
 
 
 # --- §3: capture to recall, over the real store and the real embedder ------------------------
