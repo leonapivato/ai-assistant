@@ -22,6 +22,9 @@ from ai_assistant.core.types import (
     ChannelContext,
     ChannelContextItem,
     ChannelIdentity,
+    ControllerRule,
+    ControllerStage,
+    Disposition,
     EpisodeProcessingRecord,
     EpisodeResponseKind,
     EpisodicMemory,
@@ -37,6 +40,8 @@ from ai_assistant.core.types import (
     RecordedChannelTrigger,
     RecordedTextInput,
     SemanticMemory,
+    StageEntry,
+    StageOutcome,
     UnderstandingGround,
     UnderstandingOmission,
     UnderstandingProducer,
@@ -508,6 +513,69 @@ async def test_the_same_exchange_in_both_windows_is_rendered_once_under_its_h_la
     first, second = understood.relationships
     assert [referent.kind for referent in first.referents] == ["channel_item"]
     assert [referent.kind for referent in second.referents] == ["episode"]
+
+
+async def test_a_supplied_item_naming_a_windowed_episode_carries_its_annotations() -> None:
+    """§3 over a supplied window: the item keeps its text and gains the episode's annotations.
+
+    A supplied item is not a record, so it renders as supplied; where its id names an
+    episode the episode window holds, that episode is rendered once, here, and what the
+    window would have said about it rides on the item — its status and reason, the
+    phrase for each verdict (ADR-0284 §8:6) and what was understood then.
+    """
+    failed = _episode(
+        "activation:e-1",
+        at=AT - timedelta(minutes=5),
+        channel=EVENTS,
+        text="Pine Flat full.",
+        outcome=None,
+        understanding=(
+            ActivationUnderstanding(
+                version=1,
+                recorded_at=AT,
+                producer=UnderstandingProducer.INTERPRETATION,
+                meaning="A campsite filled up.",
+                meaning_ground=UnderstandingGround.STATED,
+            ),
+        ),
+    )
+    assert failed.processing_record is not None
+    failed = failed.model_copy(
+        update={
+            "processing_record": failed.processing_record.model_copy(
+                update={
+                    "status": ProcessingStatus.FAILED,
+                    "reason": ProcessingReason.PROCESSING_FAILED,
+                    "stages": (
+                        StageEntry(
+                            stage=ControllerStage.DRIVE,
+                            due=ControllerRule.PLAN_HAS_STEPS,
+                            started_at=AT,
+                            ended_at=AT,
+                            outcome=StageOutcome.DONE,
+                            step_disposition=Disposition.DENIED,
+                        ),
+                        *ended_pass(AT),
+                    ),
+                }
+            )
+        }
+    )
+    window = SuppliedWindow(
+        ChannelContext(history=(ChannelContextItem(text="A feed line.", item_id=failed.id),))
+    )
+    model = FakeModelProvider.scripted(_proposal())
+    await _understand(
+        _stage(model, await _store(failed)), "Is our trip on?", channel=EVENTS, window=window
+    )
+    sent = _sent(model)
+    (item,) = sent["channel_window"]
+    assert item["text"] == "A feed line."
+    assert item["also_in_episode_window"] is True
+    assert (item["status"], item["reason"]) == ("failed", "processing_failed")
+    assert item["what_became_of_it"] == ["the action was refused by the permission policy"]
+    assert item["understood_then"]["meaning"] == "A campsite filled up."
+    assert sent["episode_window"] == "missing: there are no other recent episodes to show"
 
 
 async def test_an_episode_is_projected_explicitly_and_never_serialized() -> None:

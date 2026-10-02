@@ -606,7 +606,7 @@ class UnderstandingStage:
         rendered_items: list[dict[str, object]] = []
         for index, item in enumerate(items, start=1):
             label = f"H{index}"
-            also = item.identifier is not None and item.identifier in merged
+            also = None if item.identifier is None else merged.get(item.identifier)
             rendered_items.append(item.rendering(label, also, excerpt_chars=self._excerpt_chars))
             labels[label] = item.referent
         rendered_episodes: list[dict[str, object]] = []
@@ -718,8 +718,15 @@ class _ChannelItem:
     referent: UnderstandingReferent
     episode: EpisodicMemory | None = None
 
-    def rendering(self, label: str, also: bool, *, excerpt_chars: int) -> dict[str, object]:
+    def rendering(
+        self, label: str, also: EpisodicMemory | None, *, excerpt_chars: int
+    ) -> dict[str, object]:
         """The item under its label, marked where it is also in the episode window.
+
+        ``also`` is the episode-window record the item names, where it names one: its
+        status, reason, verdicts and understanding ride here, rendered once (§3). A
+        tail record is that episode itself; a supplied item is not a record and keeps
+        its own text, gaining only those annotations.
 
         **A stored understanding version rides only on an item also in the episode
         window** — what that window would have added about it. On its own the channel
@@ -734,8 +741,13 @@ class _ChannelItem:
             projected = _ProjectedEpisode.of(
                 self.episode, excerpt_chars=excerpt_chars, admit_outside_input=False
             )
-            rendered.update(projected.parts(understood=also))
-        if also:
+            rendered.update(projected.parts(understood=also is not None))
+        elif also is not None:
+            projected = _ProjectedEpisode.of(
+                also, excerpt_chars=excerpt_chars, admit_outside_input=False
+            )
+            rendered.update(projected.annotations(understood=True))
+        if also is not None:
             # §3: one exchange, rendered once, here; what the episode window would have
             # added about it — its status and what was understood then — rides here too.
             rendered["also_in_episode_window"] = True
@@ -857,7 +869,7 @@ class _ProjectedEpisode:
         where it is also in the episode window.
         """
         projection = self.projection
-        rendered: dict[str, object] = {
+        return {
             "occurred_at": projection.occurred_at.isoformat(),
             "input": None if projection.input is None else projection.input.text,
             "input_cut_to_first_chars": projection.input is not None and projection.input.cut,
@@ -865,7 +877,17 @@ class _ProjectedEpisode:
             "response_cut_to_first_chars": (
                 projection.response is not None and projection.response.cut
             ),
+            **self.annotations(understood=understood),
         }
+
+    def annotations(self, *, understood: bool) -> dict[str, object]:
+        """Its status and reason, its verdicts' phrases and, where shown, its understanding.
+
+        What a channel-window item gains where it names an episode the episode window
+        holds (§3), and the part of :meth:`parts` that is about processing.
+        """
+        projection = self.projection
+        rendered: dict[str, object] = {}
         if projection.status is not None and projection.reason is not None:
             rendered["status"] = projection.status.value
             rendered["reason"] = projection.reason.value
