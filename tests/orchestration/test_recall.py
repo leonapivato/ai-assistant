@@ -6,10 +6,11 @@ import asyncio
 import math
 from dataclasses import dataclass
 from datetime import UTC, datetime, timedelta
-from typing import TYPE_CHECKING, Any, Final
+from typing import TYPE_CHECKING, Any, Final, Literal
 
 import pytest
 
+from ai_assistant.core.channel_validation import input_origin
 from ai_assistant.core.errors import MemoryStoreError
 from ai_assistant.core.types import (
     UNDERSTANDING_REFERENT_EXCERPT_CHARS,
@@ -21,6 +22,7 @@ from ai_assistant.core.types import (
     EpisodeProcessingRecord,
     EpisodeResponseKind,
     EpisodicMemory,
+    InputOrigin,
     MemoryKind,
     MemorySource,
     MemoryWrite,
@@ -124,7 +126,13 @@ def _processing(
     )
 
 
-def _text_trigger(text: str, channel: ChannelIdentity = CONVERSATION) -> RecordedChannelTrigger:
+def _text_trigger(
+    text: str,
+    channel: ChannelIdentity = CONVERSATION,
+    *,
+    origin: InputOrigin | None | Literal["admitted"] = "admitted",
+) -> RecordedChannelTrigger:
+    """A text trigger whose ``origin`` is admission's for ``channel`` unless named."""
     event = channel.channel_type == "informational_event"
     return RecordedChannelTrigger(
         target=channel,
@@ -133,6 +141,7 @@ def _text_trigger(text: str, channel: ChannelIdentity = CONVERSATION) -> Recorde
         context=ChannelContext(),
         conversation=None,
         reply=None if event else WholeTextReply(),
+        origin=input_origin(channel) if origin == "admitted" else origin,
     )
 
 
@@ -448,6 +457,29 @@ async def test_each_kept_record_carries_its_provenance_and_structured_origin() -
     assert recalled.result.cues == (RecallCue.ACTIVATION_INPUT,)
 
 
+async def test_an_episodes_provenance_and_excerpt_read_its_origin_never_its_channel() -> None:
+    """ADR-0284 §2:3: no reader of a stored episode branches on its channel type.
+
+    Each episode's ``origin`` is set against its channel's declaration here, so a
+    reader testing the channel type would label every one of them the other way. An
+    unrecorded origin is not taken for the user's, by the label or by the excerpt.
+    """
+    records = (
+        _episode("told", processing=_processing(_text_trigger("TOLD", origin=InputOrigin.OUTSIDE))),
+        _episode(
+            "spoke", processing=_processing(_text_trigger("SPOKE", EVENTS, origin=InputOrigin.USER))
+        ),
+        _episode("unknown", processing=_processing(_text_trigger("UNKNOWN", origin=None))),
+    )
+    recalled = await _recall(_stage(await _store(*records), limit=3))
+    items = {item.id: item for item in recalled.result.items}
+    assert {key: (item.provenance, item.excerpt) for key, item in items.items()} == {
+        "told": (RecallProvenance.OUTSIDE, "a report received on conversation:c-1"),
+        "spoke": (RecallProvenance.USER, "SPOKE"),
+        "unknown": (RecallProvenance.OUTSIDE, "a report received on conversation:c-1"),
+    }
+
+
 # --- §6: excerpts ------------------------------------------------------------------------
 
 
@@ -476,6 +508,7 @@ async def test_another_episodes_excerpt_is_its_input_text_or_its_content() -> No
         context=ChannelContext(),
         conversation=None,
         reply=SpokenReply(plays=(SpokenAudioFormat.WEBM_OPUS,)),
+        origin=InputOrigin.USER,
     )
     records = (
         _episode("typed", processing=_processing(_text_trigger("Book the dentist."))),

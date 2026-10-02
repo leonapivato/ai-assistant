@@ -256,13 +256,22 @@ def _provenance_of(record: RecalledRecord) -> RecallProvenance:
     """§4's two-value label, and the only provenance judgment recall makes.
 
     An episode's is read off its trigger's ``origin`` and never off its channel type
-    (ADR-0284 §2:3, superseding ADR-0281 §4:4's test): it is ``outside`` exactly where
-    the input came from outside.
+    (ADR-0284 §2:3, superseding ADR-0281 §4:4's test): a channel activation's episode is
+    ``user`` exactly where its input came from the user, and an input whose origin is
+    not recorded is not taken for the user's — the same reading :func:`_excerpt_of`
+    makes, so the label and the excerpt never disagree. A resume has no input (§2:4)
+    and an episode with no processing record no trigger, and both are ``user``, as
+    ADR-0281 §4:4 labelled them.
     """
     if isinstance(record, SemanticMemory):
         outside = rests_on_recorded_external_content(record.provenance)
     else:
-        outside = _origin_of(record) is InputOrigin.OUTSIDE
+        processing = record.processing_record
+        outside = (
+            processing is not None
+            and isinstance(processing.trigger, RecordedChannelTrigger)
+            and processing.trigger.origin is not InputOrigin.USER
+        )
     return RecallProvenance.OUTSIDE if outside else RecallProvenance.USER
 
 
@@ -298,11 +307,3 @@ def _excerpt_of(record: RecalledRecord) -> str:
                 else f"a report received on {channel.channel_type}:{channel.instance_id}"
             )
     return record.content
-
-
-def _origin_of(record: EpisodicMemory) -> InputOrigin | None:
-    """Who an episode's input came from, as its trigger recorded it (ADR-0284 §2:3)."""
-    processing = record.processing_record
-    if processing is None or not isinstance(processing.trigger, RecordedChannelTrigger):
-        return None
-    return processing.trigger.origin
