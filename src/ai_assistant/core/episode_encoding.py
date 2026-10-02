@@ -1,4 +1,10 @@
-"""Canonical encoding and validation of episode inspection values (ADR-0275)."""
+"""Canonical encoding of episode values: inspection, search text and projection.
+
+Inspection is ADR-0275's. ADR-0284 adds the two derivations every reader of an
+episode shares: :func:`episode_content`, its search text (§7), and
+:func:`project_episode`, what a model is shown of it (§8), with the one table of
+verdict phrases beside it.
+"""
 
 from __future__ import annotations
 
@@ -7,21 +13,36 @@ import binascii
 import json
 import re
 from hashlib import sha256
+from types import MappingProxyType
+from typing import TYPE_CHECKING, Final
 
 from pydantic import BaseModel, TypeAdapter, ValidationError
 
 from ai_assistant.core.errors import MemoryStoreError, StaleEpisodeReadError
 from ai_assistant.core.types import (
     ChannelIdentity,
+    ControllerStage,
+    Disposition,
     EncodableText,
     EpisodeChunk,
     EpisodeCursor,
     EpisodePosition,
+    EpisodeProjection,
     EpisodeSummary,
     EpisodicMemory,
+    InputOrigin,
     MemoryRecord,
     ProcessingStatus,
+    ProjectedText,
+    RecordedActivationTrigger,
+    RecordedChannelTrigger,
+    RecordedTextInput,
+    RouteOutcome,
+    rests_on_recorded_external_content,
 )
+
+if TYPE_CHECKING:
+    from collections.abc import Mapping
 
 _MAX_PAGE = 100
 _MAX_CHUNK = 65536
@@ -162,3 +183,189 @@ def check_eligibility(value: object) -> None:
     if value is not None and type(value) is not bool:
         msg = "episode_model_eligible must be a boolean or None"
         raise ValueError(msg)
+
+
+# --- an episode's search text (ADR-0284 §7) ------------------------------------
+
+
+def episode_content(record: EpisodicMemory) -> str:
+    """The search text of an episode, derived from its processing record (ADR-0284 §7).
+
+    **A recipe, not a ruling** (§7:4). Today it is the latest understanding's
+    ``meaning``, or, where the activation has no understanding, one line of its
+    status and reason; followed, on its own line, by the input text or transcript
+    where the trigger's ``origin`` is ``user``. So a conversational episode is found
+    by its sense and by the exact names and numbers in the user's words, an outside
+    report by its sense alone, and an episode no stage understood by how it ended.
+
+    **What it never includes** is §7:2's invariant: the input text of a trigger whose
+    ``origin`` is ``outside``. An ``origin`` of ``None`` — a trigger recorded without
+    one, or a resume, which has no input — contributes no words either: who sent
+    them is unknown, so they are not taken for the user's.
+
+    **An episode without a processing record** keeps the ``content`` its producer
+    gave it, and this returns it unchanged: §7:1 makes the rule a function of the
+    processing record and sets it on processing-record episodes alone, and ADR-0275
+    §4:2's other producers compose their own. Returning it rather than refusing lets
+    a re-derivation pass (§7:5) call this over every stored episode and rewrite
+    nothing it does not own.
+
+    Args:
+        record: The episode. Its own ``content`` is read only where it has no
+            processing record.
+
+    Returns:
+        The text to store as the episode's ``content``.
+    """
+    processing = record.processing_record
+    if processing is None:
+        return record.content
+    if processing.understanding:
+        lines = [processing.understanding[-1].meaning]
+    else:
+        lines = [f"status {processing.status.value}, reason {processing.reason.value}"]
+    trigger = processing.trigger
+    if isinstance(trigger, RecordedChannelTrigger) and trigger.origin is InputOrigin.USER:
+        words = _input_text(trigger)
+        if words is not None and words.strip():
+            lines.append(words)
+    return "\n".join(lines)
+
+
+# --- the episode a model is shown (ADR-0284 §8) --------------------------------
+
+
+#: ADR-0284 §8:6's phrase for each :class:`~ai_assistant.core.types.Disposition`:
+#: the wording ADR-0221 §2's table gave the matching ``step_*`` member, byte for byte.
+STEP_DISPOSITION_PHRASES: Final[Mapping[Disposition, str]] = MappingProxyType(
+    {
+        Disposition.EXECUTED: "the selected tool ran",
+        Disposition.DENIED: "the action was refused by the permission policy",
+        Disposition.AWAITING_CONFIRMATION: "the action was parked for the user to confirm",
+        Disposition.NO_CAPABLE_TOOL: "no tool advertised the capability the step needed",
+        Disposition.AMBIGUOUS_CAPABILITY: (
+            "several tools advertised the capability, so none was chosen"
+        ),
+        Disposition.INVALID_PARAMETERS: (
+            "the step's arguments did not fit the declared schema of any capable tool"
+        ),
+        Disposition.EGRESS_UNBINDABLE: (
+            "the outbound call could not be described, so nothing was asked or sent"
+        ),
+        Disposition.EFFECT_ALREADY_CLAIMED: (
+            "this goal had already claimed the act, so nothing was dispatched"
+        ),
+        Disposition.EFFECT_UNSCOPED: (
+            "the plan did not say which act the step was, so nothing was dispatched"
+        ),
+    }
+)
+
+#: ADR-0284 §8:6's phrase for each :class:`~ai_assistant.core.types.RouteOutcome`:
+#: the wording ADR-0221 §2's table gave the matching ``routed_*`` member, byte for byte.
+#:
+#: **Two mappings, never one keyed by both enums.** They are ``StrEnum`` s sharing
+#: values — ``awaiting_confirmation`` and ``failed`` are members of each — and a
+#: ``StrEnum`` member hashes and compares as its value, so one mapping would hold a
+#: single phrase for both and render a parked route as a parked step, or the reverse.
+ROUTE_OUTCOME_PHRASES: Final[Mapping[RouteOutcome, str]] = MappingProxyType(
+    {
+        RouteOutcome.PERFORMED: "the assistant performed the operation the user asked for",
+        RouteOutcome.AWAITING_CONFIRMATION: "the operation was parked for the user to confirm",
+        RouteOutcome.REFUSED: "the user declined, so the operation was not performed",
+        RouteOutcome.AMBIGUOUS: "more than one record matched, so nothing was performed",
+        RouteOutcome.AMBIGUOUS_TRUNCATED: (
+            "more records matched than could be shown, so nothing was performed"
+        ),
+        RouteOutcome.NOT_FOUND: "nothing matched, so nothing was performed",
+        RouteOutcome.UNRECORDED: "the decision could not be recorded, so nothing was performed",
+        RouteOutcome.FAILED: "the operation was attempted and failed",
+    }
+)
+
+
+def project_episode(
+    record: EpisodicMemory, *, excerpt_chars: int, admit_outside_input: bool = False
+) -> EpisodeProjection:
+    """Project an episode onto what a model is shown of it (ADR-0284 §8:1-§8:2).
+
+    Every model-facing rendering of a stored episode reads the episode through this
+    and renders no other field of it (§8:3). The input and the response are cut to
+    ``excerpt_chars`` characters and the cut is carried; a site with a tighter
+    ceiling of its own applies it to what this returns (§8:7).
+
+    The input is shown where the trigger's ``origin`` is ``user``, or where it is
+    ``outside`` and ``admit_outside_input`` is set — which the understanding stage's
+    episode window and its recalled episodes alone do (§8:5). An ``origin`` of
+    ``None`` shows none. An episode with no processing record shows its ``content``
+    as its input instead (§8:2), the one path on which a model is shown ``content``.
+
+    Args:
+        record: The stored episode, exactly as held.
+        excerpt_chars: The bound, in characters, on the input and the response.
+        admit_outside_input: Whether an ``outside`` input's text is shown.
+
+    Returns:
+        The projection.
+
+    Raises:
+        ValueError: If ``excerpt_chars`` is not an integer of at least 1.
+    """
+    if type(excerpt_chars) is not int or excerpt_chars < 1:
+        msg = "the episode excerpt bound must be an integer of at least 1"
+        raise ValueError(msg)
+    response = _projected(record.outcome, excerpt_chars)
+    external = rests_on_recorded_external_content(record.provenance)
+    processing = record.processing_record
+    if processing is None:
+        return EpisodeProjection(
+            occurred_at=record.occurred_at,
+            capture_modality=record.capture.modality,
+            input=_projected(record.content, excerpt_chars),
+            response=response,
+            derived_from_external=external,
+        )
+    trigger = processing.trigger
+    origin = trigger.origin if isinstance(trigger, RecordedChannelTrigger) else None
+    shown = origin is InputOrigin.USER or (origin is InputOrigin.OUTSIDE and admit_outside_input)
+    latest = processing.understanding[-1] if processing.understanding else None
+    return EpisodeProjection(
+        occurred_at=record.occurred_at,
+        channel=trigger.channel,
+        origin=origin,
+        input=_projected(_input_text(trigger), excerpt_chars) if shown else None,
+        meaning=None if latest is None else latest.meaning,
+        meaning_ground=None if latest is None else latest.meaning_ground,
+        unresolved=() if latest is None else latest.unresolved,
+        step_dispositions=tuple(
+            entry.step_disposition
+            for entry in processing.stages
+            if entry.stage is ControllerStage.DRIVE and entry.step_disposition is not None
+        ),
+        route_outcomes=tuple(
+            entry.route_outcome
+            for entry in processing.stages
+            if entry.stage is ControllerStage.ROUTING and entry.route_outcome is not None
+        ),
+        response=response,
+        status=processing.status,
+        reason=processing.reason,
+        derived_from_external=external,
+    )
+
+
+def _input_text(trigger: RecordedActivationTrigger) -> str | None:
+    """The trigger's exact payload text or transcript; a resume carries none."""
+    if not isinstance(trigger, RecordedChannelTrigger):
+        return None
+    payload = trigger.payload
+    if isinstance(payload, RecordedTextInput):
+        return payload.text
+    return payload.transcript
+
+
+def _projected(text: str | None, bound: int) -> ProjectedText | None:
+    """A bounded prefix of ``text`` and the length it was cut from."""
+    if text is None:
+        return None
+    return ProjectedText(text=text[:bound], full_chars=len(text))
