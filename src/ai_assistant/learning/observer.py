@@ -34,11 +34,18 @@ These boundaries shape the module:
   no value the model can emit makes a record *more* speakable, an unusable value
   leaves ADR-0217 §6's default standing, and the owner lifts the narrowing in one
   act (§7).
+- **An episode is shown as its projection and nothing else** (ADR-0284 §8).
+  Every episode of the batch is read through
+  :func:`~ai_assistant.core.episode_encoding.project_episode`, and no other field
+  of it reaches the prompt: not its ``content``, which is its search text (§7:3),
+  except as the projection's input for an episode recorded without a processing
+  record (§8:2). The verdict phrases are ``core``'s one table (§8:6).
 - **The prompt is a rendering target, and no span may write its syntax**
-  (ADR-0098 §2). Every span a record controls — its ``content``, and the
-  assistant half of the exchange — goes through :func:`_quoted_span` before it
-  reaches a line of the batch, so no episode can open a second ``[E<n>]`` entry,
-  reopen the header, or write an ``Assistant:`` line of its own. The attribution
+  (ADR-0098 §2). Every span a record controls — the user's words, the
+  understanding, the verdict phrases and the reply — goes through
+  :func:`_quoted_span` before it reaches a line of the batch, so no episode can
+  open a second ``[E<n>]`` entry, reopen the header, or write an ``Assistant:``
+  line of its own. The attribution
   the batch expresses is therefore a function of the batch this module was
   handed and of nothing inside it — which is what the distinct-support count of
   the bullet above actually rests on.
@@ -65,21 +72,27 @@ the planner's.
 from __future__ import annotations
 
 import json
+import sys
 import uuid
 from collections import Counter
 from datetime import UTC, datetime
-from typing import TYPE_CHECKING, Final, NamedTuple, assert_never
+from typing import TYPE_CHECKING, Final, NamedTuple
 from zoneinfo import ZoneInfo, ZoneInfoNotFoundError
 
 import structlog
 from pydantic import TypeAdapter, ValidationError
 
 from ai_assistant.core.clock import checked_clock
+from ai_assistant.core.episode_encoding import (
+    ROUTE_OUTCOME_PHRASES,
+    STEP_DISPOSITION_PHRASES,
+    project_episode,
+)
 from ai_assistant.core.errors import ConfigurationError
 from ai_assistant.core.types import (
     MAX_TOPICS_PER_PROPOSAL,
     EpisodeLabelling,
-    ExchangeDisposition,
+    InputOrigin,
     MemorySource,
     MemoryUpdateProposal,
     Message,
@@ -100,7 +113,12 @@ if TYPE_CHECKING:
 
     from ai_assistant.core.clock import Clock
     from ai_assistant.core.protocols import ModelProvider
-    from ai_assistant.core.types import EpisodicMemory, MemoryRecord
+    from ai_assistant.core.types import (
+        EpisodeProjection,
+        EpisodicMemory,
+        MemoryRecord,
+        ProjectedText,
+    )
 
 _log = structlog.get_logger(__name__)
 
@@ -221,23 +239,39 @@ _INSTANT_UNAVAILABLE: Final = "(recorded time unavailable)"
 #:
 #: **The scope is not in the prompt, and that is ADR-0162 §2 rather than an
 #: omission.** §1's rule reaches only an episode recording what the user told the
-#: assistant, and §2 defers the carrier of that distinction to the ADR introducing
-#: the second class of episode while forbidding anything to enter this payload to
-#: carry it. So this prompt is written for §1's class outright, and the fail-closed
-#: obligation sits on the stage that selects the batch — today the only construction
-#: site for an ``EpisodicMemory`` under ``src/`` is the conversation capture path,
-#: so every episode reaching here is already §1's.
+#: assistant, and §2 forbids anything to enter this payload to carry the
+#: told-versus-sensed distinction. So this prompt is written for §1's class
+#: outright, and the fail-closed obligation sits on the stage that selects the
+#: batch, which reads one conversation's channel (ADR-0283 §11). What keeps an
+#: episode whose input was *not* the user's from reading as told is the projection
+#: rather than a marker: this observer projects with ``admit_outside_input`` false
+#: (ADR-0284 §8:5), so such an episode — and a resume, which has no input — shows
+#: no words at all, only a line saying no words of the user's are shown, and every
+#: line it does show is the assistant's half, which the partition below already
+#: refuses as warrant for a fact about the world or the user.
 #:
 #: **The assistant paragraph partitions by what a record claims** (ADR-0162 §8),
 #: which is the one place this text could most easily have breached §1's own
 #: boundary. An act the episode witnesses — that the assistant was asked something,
-#: answered, did a thing, and when — is supported by the ``outcome`` half alone. The
+#: answered, did a thing, and when — is supported by the assistant's half alone. The
 #: proposition inside that answer is not: adopting it would let the assistant
 #: launder its own assertions into the user's model, a belief citing an episode that
-#: witnesses only the *saying*. The citation clause is in the same paragraph because
-#: the prompt now shows two texts under one label and ADR-0077 §5's floor counts
+#: witnesses only the *saying*. ADR-0222 §3:3 has the paragraph name every line of
+#: that half and apply the partition to each, and since ADR-0284 §8 the half is the
+#: projection's: what the assistant understood the input to mean, one line per
+#: verdict, and the reply. The understanding is named with it because it is the
+#: assistant's reading of the user and not the user's word — the same laundering
+#: route one step earlier. The citation clause is in the same paragraph because
+#: the prompt shows several texts under one label and ADR-0077 §5's floor counts
 #: labels — a split episode would let one episode supply the two distinct supports
 #: an ``INFERRED`` record owes.
+#:
+#: **The status paragraph follows it, because failed and interrupted episodes now
+#: reach this prompt** (ADR-0284 §6:2), each with its status (§8:6). It splits the
+#: episode the same way the partition does: what the user said stands however the
+#: handling ended, so complete intake is not narrowed by a failure; what the
+#: assistant did is read off the status, so a request parked, refused or cut short
+#: is never recorded as a deed.
 #:
 #: **The specificity paragraph is about wording, not about which beliefs**, and the
 #: order is what keeps it so: it opens on "when you do propose a belief", it sits
@@ -356,20 +390,37 @@ One belief states ONE thing. Do not fold several distinct facts or events into a
 single sentence: the unit is the thing a later question could ask about, because \
 that is the unit a search returns.
 
-An episode may also carry what the assistant said back, on two lines beneath it: \
-an "Assistant:" line saying what became of the exchange, and an "Assistant said:" \
-line carrying the words the user was actually shown. Where that second line is too \
-long to show whole it states, before the text and outside the quotes, how many of \
-the reply's characters you are being given and how many there were — read what \
-follows as a beginning and never as the whole answer. BOTH lines are that same \
-half, and every rule in this paragraph governs each of them alike. \
+Each episode's labelled line carries what the user said: their own words after \
+"User said:", or, for an episode recorded without the detail of how it was \
+handled, its recorded text as it stands. Where it says that no words from the \
+user are shown, nothing in that episode is something the user told you.
+
+Beneath it may come the assistant's half of the episode, on three kinds of line: \
+an "Assistant understood:" line saying what the assistant took the user to mean \
+at the time, an "Assistant:" line for each thing that became of the request, and \
+an "Assistant said:" line carrying the words the user was actually shown. Where a \
+line's text is too long to show whole it states, before the text and outside the \
+quotes, how many of its characters you are being given and how many there were — \
+read what follows as a beginning and never as the whole. ALL of those lines are \
+that same half, and every rule in this paragraph governs each of them alike. \
 That half is evidence about what HAPPENED, never about what is TRUE. You may \
 propose a belief about the assistant's own act — that it was asked something, \
 that it answered or did a particular thing, and when. You may NOT take a claim \
-the assistant asserted and record it as a fact about the world or about the user; \
-record such a fact only where the USER stated it, and the assistant's words may \
-then corroborate it but never stand in for it. Either way you cite the episode \
-whole: one episode is one label and one support, whichever half of it you read.
+the assistant asserted, or its reading of what the user meant, and record it as \
+a fact about the world or about the user; record such a fact only where the USER \
+stated it, and the assistant's words may then corroborate it but never stand in \
+for it. Either way you cite the episode whole: one episode is one label and one \
+support, whichever line of it you read.
+
+Where an episode ends on a "Status:" line, that line says how the assistant's \
+handling of it ended and why. Only "completed" means the handling ran to its \
+end; "waiting" means it stopped to ask the user something, and "failed" and \
+"interrupted" mean it broke off. What the user said is what they said however \
+the handling ended, and the rule above records it all the same. What the \
+assistant did is not: from an episode whose status is not "completed", propose \
+nothing the assistant did, answered or settled beyond what that episode's own \
+lines show — a request that was parked, refused or cut short is a request, never \
+a deed.
 
 When you do propose a belief, keep the concrete particulars the belief is about — \
 the proper names, places, organisations and quantities that identify or qualify \
@@ -994,8 +1045,9 @@ def _quoted_span(value: str) -> str:
     **This is ``planning._quoted_span``'s transform and deliberately not its
     function.** Golden rule 1 keeps two subsystems assembling their own prompts out of
     one another's modules; what they share is ADR-0098 §2's admitted construction,
-    exactly as ADR-0221 §3 has three render sites hold three copies of one phrase
-    table rather than import one.
+    exactly as ADR-0222 §4 has each render site write the reply ceiling out rather
+    than import it. What they now share as a module is ``core``'s — the projection
+    and its phrase table (ADR-0284 §8) — which every subsystem may import.
 
     Args:
         value: The held string, verbatim as this system carries it.
@@ -1009,13 +1061,11 @@ def _quoted_span(value: str) -> str:
 #: ADR-0222 §4's ceiling on one rendered reply, counted on the **output** of
 #: :func:`_quoted_span` with its delimiters included.
 #:
-#: **Written out here and not imported**, which is §4's own instruction and
-#: ADR-0221 §3's reason for the phrase table applied to the phrase table's
-#: neighbour: three subsystems rendering their own prompts do not reach across a
-#: boundary golden rule 1 forbids them to cross, so what the three sites share is
-#: this ADR's number rather than a module. ADR-0222 §12 defers promoting it to a
-#: ``Settings`` field until §5's counter pair says a deployment wants a different
-#: one.
+#: **Written out here and not imported**, which is §4's own instruction, and
+#: ADR-0284 §8:7 keeps it so — "each site keeps its own ceiling constant" — while
+#: moving the phrase table beside it into ``core``. ADR-0222 §12 defers promoting it
+#: to a ``Settings`` field until §5's counter pair says a deployment wants a
+#: different one.
 #:
 #: **Counted on the quoted rendering because the expansion is not uniform** (§4).
 #: At ``ensure_ascii=True`` a newline costs two characters, a BMP code point such
@@ -1094,19 +1144,46 @@ def _bounded_reply(reply: str) -> _BoundedReply:
     return _BoundedReply(_quoted_span(reply[:low]), None if low == len(reply) else low)
 
 
+#: The excerpt bound this observer hands :func:`project_episode`, which is chosen to
+#: cut nothing (ADR-0284 §8:1 leaves the bound to each caller).
+#:
+#: **The input is the user's telling, and this prompt has never cut it.** ADR-0162
+#: §1 records completely what the user said, and the batch has carried each
+#: episode's whole text since ADR-0077; a bound here would be a new, unmeasured
+#: budget on exactly the material complete intake exists to keep, which ADR-0222
+#: §4:3 declines to introduce ("No other budget, ceiling or elision is introduced").
+#: **The reply has its own ceiling**, ADR-0222 §4's, applied to what the projection
+#: returns (ADR-0284 §8:7), so cutting it here first would gain nothing.
+#: :data:`sys.maxsize` is the largest length a ``str`` can have, so no projected text
+#: is ever cut by it; the renderer still states a cut wherever the projection
+#: carries one, so a later, smaller bound is legible rather than silent.
+_EXCERPT_CHARS: Final = sys.maxsize
+
+#: The continuation indent, deeper than the label's so an episode's lines read as
+#: one entry rather than as several.
+_INDENT: Final = "       "
+
+#: What an episode's labelled line carries where the projection shows no input:
+#: an outside input this observer does not admit (ADR-0284 §8:5), a resume, which has
+#: none, or a trigger recorded without an origin, whose words are not taken for the
+#: user's. Held data, so no span can write it.
+_NO_USER_WORDS: Final = "(no words from the user are shown)"
+
+
 def _render_batch(batch: Sequence[EpisodicMemory], zone: ZoneInfo | None) -> str:
     """Render the batch as the labelled user turn.
 
     **The payload is the batch and nothing else** (ADR-0077 §3, as partially
-    superseded by ADR-0156): each episode's canonical ``content`` (ADR-0005 §1),
-    the label the model cites it by, that episode's own ``occurred_at`` since
-    ADR-0156 §2, and its ``outcome`` since ADR-0162 §8. Still not the user's
-    existing beliefs, not the profile, not a context facet, not a plan: each of the
-    two added fields is admitted precisely because it is a field of the very
-    records whose ``content`` is already here rather than a second class of data,
-    so ADR-0004 §7's minimisation is satisfied rather than strained and §3's four
-    refusals stand verbatim. De-duplication remains the gate's job,
-    deterministically and locally.
+    superseded by ADR-0156), and since ADR-0284 §8 **each episode of it is its
+    projection and nothing else**: every record is read through
+    :func:`~ai_assistant.core.episode_encoding.project_episode` and no other field of
+    it is rendered — not ``content``, which is the episode's search text (§7:3), save
+    as the projection's input for an episode with no processing record (§8:2), and
+    not ``disposition``, whose verdicts the projection reads off the stage entries
+    (§5). The label the model cites it by and its ``occurred_at`` (ADR-0156 §2) come
+    with it. Still not the user's existing beliefs, not the profile, not a context
+    facet, not a plan: ADR-0077 §3's four refusals stand verbatim, and
+    de-duplication remains the gate's job.
 
     Not the store ids either, and that is the same rule from the other side: the
     model has no use for an id it is not allowed to cite, and an id in the prompt
@@ -1120,51 +1197,38 @@ def _render_batch(batch: Sequence[EpisodicMemory], zone: ZoneInfo | None) -> str
     header says the times are withheld and the lines carry none — the state the
     system prompt's second variant is written against.
 
-    **And the assistant's half is rendered where the episode carries one**
-    (ADR-0162 §8, as ADR-0221 §3 replaces its first clause): the phrase for the
-    episode's ``disposition`` where it records one, and its ``outcome`` where it
-    does not. It has been stored and outside the prompt since the field existed:
-    the harness pairs a user turn with the assistant turn that follows it and puts
-    the latter here, so under the pre-#1184 LoCoMo mapping roughly half the corpus
-    was never visible to distillation at all (#1185). No supersession is owed for
-    admitting it, on ADR-0156 §2's own ground — it is a field of the very records
-    whose ``content`` ADR-0077 §3 already sends, not a second class of data, so
-    §3's four refusals stand verbatim; ADR-0162 §8's four remaining clauses bind
-    unchanged, and :func:`_outcome_lines` is where §3's rule is applied.
+    **The outside input is not admitted** (ADR-0284 §8:5): only the understanding
+    stage's two windows project with ``admit_outside_input``. So an episode whose
+    input came from outside shows no words, and :func:`_episode_lines` says so on its
+    labelled line rather than leaving the line to be read as the user's.
 
-    **Under the same label, on a continuation line, and never as a second entry.**
-    An episode is cited whole (ADR-0162 §8): the model is shown two texts and the
-    evidence floor counts labels, so splitting the halves into two labels would let
-    one episode supply the two *distinct* supports an ``INFERRED`` record owes —
-    the failure ADR-0077 §5's distinct-id counting exists to prevent. The line is
-    prefixed ``Assistant:`` because the system prompt names that word when it
-    partitions what the half supports, and an episode carrying neither a
-    ``disposition`` nor an ``outcome`` grows no such line at all.
+    **One label per episode, every line of it beneath that label** (ADR-0222 §3:2).
+    An episode is cited whole (ADR-0162 §8): the model is shown several texts and
+    the evidence floor counts labels, so splitting them into labels would let one
+    episode supply the two *distinct* supports an ``INFERRED`` record owes — the
+    failure ADR-0077 §5's distinct-id counting exists to prevent.
 
     **And no span may reach that outcome by writing this syntax itself**
     (ADR-0098 §2, §9). Every part of a line that is *not* a span goes on held data
     the batch was handed — the label from this loop's index, the header and the
-    instant from the zone this producer was built with, and ADR-0222 §5's elision
-    marker from :func:`len` over held text — and every part that *is* a span goes
-    through :func:`_quoted_span`. So the line count of this batch is the header plus
-    one line per episode plus one per assistant half plus one per rendered reply,
-    whatever any episode's ``content`` or ``outcome`` says, and the label a model is
-    shown maps to the episode this module read under it. **That invariant never
-    rested on the number two**: it rests on no span being able to write a line, which
-    is the property :func:`_quoted_span` supplies for the reply exactly as for the
-    phrase and the content (ADR-0222 §3). It is the same argument the paragraph above
-    makes about *this module's* rendering choice, closed on the other side: it would
-    be no use declining to split an episode into two labels if an episode could split
-    itself.
+    instant from the zone this producer was built with, the status and reason from
+    ``core``'s closed enumerations, and ADR-0222 §5's elision marker from lengths
+    over held text — and every part that *is* a span goes through
+    :func:`_quoted_span`: the user's words, the understanding, each verdict phrase
+    and the reply. So the line count of this batch is the header, plus one line per
+    episode, plus one per understanding, verdict, rendered reply and status shown,
+    whatever any span says; and the label a model is shown maps to the episode this
+    module read under it. **That invariant never rested on a count of lines**: it
+    rests on no span being able to write a line (ADR-0222 §3).
 
     **§5's counter pair is emitted here, once per assembly, and always** (ADR-0222
     §5). One statement carries both integers — how many episodes were eligible to
-    render a reply and how many §4's ceiling bound on — so the denominator and the
-    numerator of the elision share are observed together and lost together, which is
-    ADR-0141 §6's rule for the duplicate share. A batch with no eligible episode
-    reports ``0`` and ``0`` rather than staying silent, so a missing pair is
-    distinguishable from an empty one. It carries **no reply text**, elided or whole:
-    ADR-0221 §11's test 14 is untouched by this change and ADR-0119's rule that a
+    render a reply, which since ADR-0284 §8:7 is every episode carrying a response,
+    and how many §4's ceiling bound on — so the denominator and the numerator of the
+    elision share are observed together and lost together, which is ADR-0141 §6's
+    rule for the duplicate share. A batch with no eligible episode reports ``0`` and
+    ``0`` rather than staying silent, so a missing pair is distinguishable from an
+    empty one. It carries **no reply text**, elided or whole: ADR-0119's rule that a
     trace never contains Tier 0/1 content is not approached, because this is a log
     and not a trace — ADR-0222 §5 states why the trace cannot carry these two counts
     at all.
@@ -1176,213 +1240,153 @@ def _render_batch(batch: Sequence[EpisodicMemory], zone: ZoneInfo | None) -> str
     ]
     eligible = elided = 0
     for index, record in enumerate(batch):
-        stamp = "" if zone is None else f"{_localised(record.occurred_at, zone)} — "
-        lines.append(f"  [E{index + 1}] {stamp}{_quoted_span(record.content)}")
-        half = _outcome_lines(record)
-        lines.extend(half.lines)
-        eligible += half.eligible
-        elided += half.elided
+        projection = project_episode(
+            record, excerpt_chars=_EXCERPT_CHARS, admit_outside_input=False
+        )
+        stamp = "" if zone is None else f"{_localised(projection.occurred_at, zone)} — "
+        entry = _episode_lines(projection)
+        lines.append(f"  [E{index + 1}] {stamp}{entry.head}")
+        lines.extend(entry.lines)
+        eligible += entry.eligible
+        elided += entry.elided
     _log.info("observation_batch_replies_rendered", eligible=eligible, elided=elided)
     return "\n".join(lines)
 
 
-class _AssistantHalf(NamedTuple):
-    """One episode's assistant-half lines, and ADR-0222 §5's two counts of them.
+class _EpisodeLines(NamedTuple):
+    """One episode's rendering, and ADR-0222 §5's two counts of its reply.
 
     The counts ride out of the renderer rather than being recomputed over the
-    batch, because eligibility and elision are decided *here* — by reading the two
-    fields and by rendering the reply — and a second reading of the same records to
-    count them is a second implementation of §1's and §4's conditions to disagree
+    batch, because eligibility and elision are decided *here* — by reading the
+    projection's response and rendering it — and a second reading of the same
+    records to count them is a second implementation of the condition to disagree
     with the first.
 
     Attributes:
-        lines: The continuation lines to write under the episode's own ``[E<n>]``
-            label. Never more than two, and both sit under that one label
-            (ADR-0222 §3), so ADR-0162 §8's whole-episode citation and ADR-0077
-            §5's distinct-id counting are unchanged.
-        eligible: ``1`` where the episode was eligible to render a reply under
-            ADR-0222 §3 — it carries a ``disposition`` **and** an ``outcome`` —
-            and ``0`` otherwise. §5's denominator, per record.
+        head: What follows the label and the instant on the episode's labelled line.
+        lines: The continuation lines to write under that one label (ADR-0222
+            §3:2), so ADR-0162 §8's whole-episode citation and ADR-0077 §5's
+            distinct-id counting are unchanged.
+        eligible: ``1`` where the episode carries a response (ADR-0284 §8:7's reading
+            of ADR-0222 §3:1's condition), ``0`` otherwise. §5's denominator, per
+            record.
         elided: ``1`` where §4's ceiling bound on that reply, ``0`` otherwise.
             §5's numerator, per record, and never greater than ``eligible``.
     """
 
+    head: str
     lines: list[str]
     eligible: int
     elided: int
 
 
-def _outcome_lines(record: EpisodicMemory) -> _AssistantHalf:
-    """The episode's assistant half as its own continuation line, or nothing.
+def _episode_lines(projection: EpisodeProjection) -> _EpisodeLines:
+    """Render one episode's projection: its labelled line and the lines beneath it.
 
-    **The phrase where the episode records a ``disposition``, its ``outcome`` where
-    it does not** (ADR-0221 §3), which partially supersedes ADR-0162 §8's first
-    clause and replaces it with exactly this rule. The two populations render the
-    same string for the same fact: a record captured before ADR-0221 holds the
-    phrase in ``outcome`` and renders it; one captured after holds the composed
-    reply there and a member of :class:`~ai_assistant.core.types.ExchangeDisposition`
-    beside it, and renders :func:`_disposition_phrase` of that member — which is the
-    phrase the older record carries, byte for byte. A benchmark row holds the other
-    speaker's turn and no disposition, and renders that text exactly as it did.
+    **The labelled line carries what the user said.** For an episode with a
+    processing record that is the trigger's input after ``User said:``, shown where
+    its ``origin`` is ``user`` (ADR-0284 §8:1); anywhere else — an outside input this
+    observer does not admit (§8:5), a resume, or an origin not recorded — the line
+    says that no words from the user are shown, so it cannot be read as the user's.
+    For an episode **without** a processing record it is that episode's ``content``,
+    quoted as it stands, which is the one path on which a model is shown ``content``
+    (§8:2) and the bytes this line carried for such a record before ADR-0284.
 
-    **The reply is rendered too, beside the phrase and never instead of it**
-    (ADR-0222 §3, partially superseding ADR-0221 §3's closing sentence). The two are
-    different facts and neither implies the other: the phrase is a typed statement of
-    what became of the pass, which this system authored about its own pipeline, and
-    the reply is what the user was actually shown. A reply saying "I've set that up
-    for you" beside a phrase saying the action was parked for confirmation is the
-    pair a model needs; either alone is a half-truth. So an episode carrying both
-    fields renders **two** continuation lines under its own label, the phrase line
-    first and byte-identical to what it was, and no arm of this function trades one
-    for the other. An episode carrying a ``disposition`` and no ``outcome`` renders
-    the phrase alone — the population #1873 records, and the reason the second field
-    is tested rather than assumed present beside the first.
+    **Beneath it come, in this order and each only where the projection carries
+    it:** what the assistant understood the input to mean (the latest
+    understanding's ``meaning``); one ``Assistant:`` line per verdict, its phrase from
+    ``core``'s one table (§8:6) — every step disposition, then every route outcome,
+    each in stage order; the reply; and the status with its reason (§8:6), last. An
+    episode with no processing record carries no understanding, verdict or status
+    (§8:2), so it renders its labelled line and, where it has one, its reply.
 
-    ADR-0221 §13 conditioned any reader of this batch on three things. Two of them —
-    "#672's escaping fix **and** newline normalisation" — are discharged by
-    :func:`_quoted_span`, which escapes and normalises every span this function
-    interpolates, the reply included: a quoted reply is one line however many
-    newlines it holds. The third was the render budget none of the three prompts had,
-    and it is the half a transform cannot supply, because a quoted reply is one line
-    but is as long as the reply. :data:`_REPLY_CEILING` and :func:`_bounded_reply`
-    are that budget (ADR-0222 §4), and the marker below is §5's legibility rule for
-    when it binds.
+    **The reply line stands as ADR-0222 §3:1 rules it, with its condition read as
+    "carries a response"** (ADR-0284 §8:7): every episode whose projection carries a
+    response renders it, under §4's ceiling and §5's elision, whatever else it
+    carries. Its full length in the marker is the projection's ``full_chars``, which
+    is the reply's own length in characters — the unit a human can check against the
+    store — and the marker is held data outside the quoted span, so a reply ending in
+    this system's own elision wording cannot pass for a cut one (ADR-0098 §2).
 
-    **The marker is held data and sits outside the quoted span**, which is ADR-0098
-    §2's unforgeability requirement applied to a new part of the line. A marker
-    written *inside* the span is a string the reply itself could contain, so a reply
-    ending in this system's own elision wording would render as though it had been
-    cut when it had not — and an unelided reply could claim to be one. Both numbers
-    come from :func:`len` over text this function was handed and the wording is a
-    literal here, so neither is reachable from the reply. An unelided reply carries
-    no marker at all, and that absence is what says the line carries the reply whole
-    (§5).
-
-    **A prefix, and not a head-and-tail composite** (ADR-0222 §5). This module's own
-    proposal cap is read as a defect when it binds, because it "truncates by position
-    in a model's reply, and position is not a ranking" — but that argument is about a
-    *set* whose members are unordered by value, where dropping the tail drops
-    arbitrary beliefs. A single reply is one ordered text whose beginning is where its
-    thrust is; a composite would need a join marker, which is a second forgeable
-    surface for no measured gain, and dropping the reply past the ceiling would blind
-    the reader to exactly the long replies a reference-back is most likely to be
-    about. What answers the worry here is the same thing that answers it there: the
-    counter, which is why :class:`_AssistantHalf` carries one.
-
-    **Both spans go through :func:`_quoted_span`, and the phrase is not exempt.**
-    ADR-0221 §3 makes the two populations render the same bytes for the same fact,
-    and a phrase interpolated raw beside an ``outcome`` interpolated quoted would
-    break that identity for every one of the sixteen members. The phrase is this
-    system's own text and could not forge anything; it is quoted because the
-    *identity* is the clause, which is the same reason ``planning._render_record``
-    quotes it.
-
-    Empty where the episode carries neither, which is what keeps a corpus with no
-    assistant half — LoCoMo under #1177's framing, where every exchange carries
-    ``outcome=None`` — a batch of one line per episode, as it was before ADR-0162 §8
-    added this function. The indent is deeper than the label's so the texts read as
-    one entry rather than as several.
-
-    **What the model may then do with the reply is ADR-0162 §8, as ratified**
-    (ADR-0222 §7). An episode is cited whole; what the assistant said independently
-    supports a record of the assistant's own act; it never supports a record adopting
-    the proposition it asserted as a fact about the world or the user; and it is never
-    a licence to propose an ``EpisodicMemory``. Those clauses were ratified against a
-    reader that did not exist, and this is the change that makes them live — until now
-    the ``Assistant:`` line carried a phrase from a sixteen-member table, which asserts
-    nothing about the world and gave the third clause nothing to bite on. The system
-    prompt's assistant-half paragraph names both lines and applies the same partition
-    to each, which is where that boundary is actually stated to the model.
+    **What the model may then do with each line is ADR-0162 §8, as ratified**, and
+    the system prompt's assistant paragraph is where it is stated: the understanding,
+    the verdicts and the reply are the assistant's half, which supports a record of
+    the assistant's own act and never one adopting what it asserted — or how it read
+    the user — as a fact about the world or the user. The status paragraph beside it
+    is ADR-0284 §6:2's consequence: a failed or interrupted episode reaches this
+    batch, and its status says that what the assistant set out to do did not finish.
 
     Args:
-        record: The episode whose assistant half is being rendered.
+        projection: The episode as :func:`project_episode` projects it.
 
     Returns:
-        The continuation lines, and ADR-0222 §5's two counts for this one record.
+        The labelled line's text, the continuation lines, and ADR-0222 §5's two
+        counts for this one record.
     """
-    if record.disposition is not None:
-        phrase = f"       Assistant: {_quoted_span(_disposition_phrase(record.disposition))}"
-        if record.outcome is None:
-            return _AssistantHalf([phrase], eligible=0, elided=0)
-        span, kept = _bounded_reply(record.outcome)
-        if kept is None:
-            return _AssistantHalf([phrase, f"       Assistant said: {span}"], eligible=1, elided=0)
-        return _AssistantHalf(
-            [
-                phrase,
-                f"       Assistant said (first {kept} of {len(record.outcome)} characters): {span}",
-            ],
-            eligible=1,
-            elided=1,
-        )
-    if record.outcome is None:
-        return _AssistantHalf([], eligible=0, elided=0)
-    return _AssistantHalf(
-        [f"       Assistant: {_quoted_span(record.outcome)}"], eligible=0, elided=0
+    lines: list[str] = []
+    if projection.meaning is not None:
+        lines.append(f"{_INDENT}Assistant understood: {_quoted_span(projection.meaning)}")
+    lines.extend(
+        f"{_INDENT}Assistant: {_quoted_span(STEP_DISPOSITION_PHRASES[disposition])}"
+        for disposition in projection.step_dispositions
     )
+    lines.extend(
+        f"{_INDENT}Assistant: {_quoted_span(ROUTE_OUTCOME_PHRASES[outcome])}"
+        for outcome in projection.route_outcomes
+    )
+    eligible = elided = 0
+    if projection.response is not None:
+        line, cut = _reply_line(projection.response)
+        lines.append(line)
+        eligible, elided = 1, int(cut)
+    if projection.status is not None and projection.reason is not None:
+        lines.append(
+            f"{_INDENT}Status: {projection.status.value} (reason: {projection.reason.value})"
+        )
+    return _EpisodeLines(_head(projection), lines, eligible, elided)
 
 
-def _disposition_phrase(disposition: ExchangeDisposition) -> str:  # noqa: C901, PLR0911, PLR0912 — one return per member, so the totality `assert_never` rests on is visible; collapsing them would hide it
-    """ADR-0221 §2's phrase for one disposition, written out at this site.
+def _head(projection: EpisodeProjection) -> str:
+    """The labelled line's text: what the user said, or that none of it is shown."""
+    text = projection.input
+    if not projection.has_processing_record:
+        # §8:2: the record's own `content`, as it stands, unattributed as before.
+        return _NO_USER_WORDS if text is None else _marked(None, text)
+    if text is None or projection.origin is not InputOrigin.USER:
+        return _NO_USER_WORDS
+    return _marked("User said", text)
 
-    **This table is not shared and must not become shared** (ADR-0221 §3). It is one
-    of three copies of the same sixteen strings — the others are in
-    ``planning/planner.py`` and ``orchestration/composing.py`` — and no
-    implementation extracts them into a shared module, a ``core`` mapping, a method
-    on the enum or a helper any two of the three import. Golden rule 1 is the
-    reason: three subsystems rendering their own prompts do not reach into one
-    another, and what they share is the ADR's table rather than a module.
 
-    Total over :class:`~ai_assistant.core.types.ExchangeDisposition` and
-    mechanically so — the wildcard does nothing but ``assert_never`` — so a member
-    added to that enum without a phrase here fails the gate at this site rather than
-    rendering an episode whose assistant half reads as empty.
+def _marked(label: str | None, text: ProjectedText) -> str:
+    """A projected text quoted, behind its label and the cut where one was made.
 
-    Args:
-        disposition: The member the episode records.
-
-    Returns:
-        §2's phrase for it, byte for byte.
+    The marker is ADR-0222 §5's wording applied to the projection's own cut
+    (ADR-0284 §8:1): held data outside the span, from lengths over held text. Under
+    :data:`_EXCERPT_CHARS` no input is ever cut, so it is what keeps a later bound
+    legible rather than what any batch today shows.
     """
-    match disposition:
-        case ExchangeDisposition.NO_ACTION_NEEDED:
-            return "no action was needed"
-        case ExchangeDisposition.STEP_EXECUTED:
-            return "the selected tool ran"
-        case ExchangeDisposition.STEP_DENIED:
-            return "the action was refused by the permission policy"
-        case ExchangeDisposition.STEP_AWAITING_CONFIRMATION:
-            return "the action was parked for the user to confirm"
-        case ExchangeDisposition.STEP_NO_CAPABLE_TOOL:
-            return "no tool advertised the capability the step needed"
-        case ExchangeDisposition.STEP_AMBIGUOUS_CAPABILITY:
-            return "several tools advertised the capability, so none was chosen"
-        case ExchangeDisposition.STEP_INVALID_PARAMETERS:
-            return "the step's arguments did not fit the declared schema of any capable tool"
-        case ExchangeDisposition.STEP_EGRESS_UNBINDABLE:
-            return "the outbound call could not be described, so nothing was asked or sent"
-        case ExchangeDisposition.STEP_EFFECT_ALREADY_CLAIMED:
-            return "this goal had already claimed the act, so nothing was dispatched"
-        case ExchangeDisposition.STEP_EFFECT_UNSCOPED:
-            return "the plan did not say which act the step was, so nothing was dispatched"
-        case ExchangeDisposition.ROUTED_PERFORMED:
-            return "the assistant performed the operation the user asked for"
-        case ExchangeDisposition.ROUTED_AWAITING_CONFIRMATION:
-            return "the operation was parked for the user to confirm"
-        case ExchangeDisposition.ROUTED_REFUSED:
-            return "the user declined, so the operation was not performed"
-        case ExchangeDisposition.ROUTED_AMBIGUOUS:
-            return "more than one record matched, so nothing was performed"
-        case ExchangeDisposition.ROUTED_AMBIGUOUS_TRUNCATED:
-            return "more records matched than could be shown, so nothing was performed"
-        case ExchangeDisposition.ROUTED_NOT_FOUND:
-            return "nothing matched, so nothing was performed"
-        case ExchangeDisposition.ROUTED_UNRECORDED:
-            return "the decision could not be recorded, so nothing was performed"
-        case ExchangeDisposition.ROUTED_FAILED:
-            return "the operation was attempted and failed"
-        case _:  # pragma: no cover - exhaustive
-            assert_never(disposition)
+    marker = f"(first {len(text.text)} of {text.full_chars} characters)" if text.cut else None
+    framing = " ".join(part for part in (label, marker) if part is not None)
+    span = _quoted_span(text.text)
+    return f"{framing}: {span}" if framing else span
+
+
+def _reply_line(response: ProjectedText) -> tuple[str, bool]:
+    """The reply line under ADR-0222 §4's ceiling, and whether anything was cut.
+
+    The ceiling is applied to the projection's response (ADR-0284 §8:7). Where the
+    projection cut it first, what is shown is still a prefix and is marked as one,
+    whichever bound did the cutting.
+    """
+    span, kept = _bounded_reply(response.text)
+    if kept is None and response.cut:
+        kept = len(response.text)
+    if kept is None:
+        return f"{_INDENT}Assistant said: {span}", False
+    return (
+        f"{_INDENT}Assistant said (first {kept} of {response.full_chars} characters): {span}",
+        True,
+    )
 
 
 def _step_of(raw: object) -> MemorySource | None:
