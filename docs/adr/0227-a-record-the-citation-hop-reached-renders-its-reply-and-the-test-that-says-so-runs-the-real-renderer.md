@@ -1,6 +1,6 @@
 # 227. A record the citation hop reached renders its reply, and the test that says so runs the real renderer
 
-- Status: Accepted, §§1 and 3 amended by ADR-0229
+- Status: Partially superseded by ADR-0284 (§1:1's and §1:2's condition and phrase line; §1:5's byte rule); §§1 and 3 amended by ADR-0229
 - Date: 2026-09-03
 - **Partially supersedes:**
   [ADR-0222](0222-the-stored-reply-is-read-back-in-the-conversation-tail-and-by-the-observer.md)
@@ -98,6 +98,14 @@
   The `Status` line carries no leading token, so under ADR-0082 §2 the qualifier stays
   on it beside this note. Appended note per ADR-0070 §1; no text below is rewritten.
   Refs #1960, #1945, #1908.
+- Partially superseded: 2026-10-02 by ADR-0284 — two scopes. §1:1 and §1:2, in their
+  condition and their phrase line alone: the condition is *carries a response*, and the
+  line the reply line follows is the projection's. §1:5's byte rule: the record line
+  changes; the reply line is still emitted by the caller. Every other clause, and
+  ADR-0229's amendments, stand. These scoped replacements will take effect on
+  ratification of ADR-0284. This reciprocal header record accompanies the numbered draft
+  under ADR-0070 and ADR-0082; prior supersessions and the ratified body below are
+  preserved.
 
 ## Context
 
