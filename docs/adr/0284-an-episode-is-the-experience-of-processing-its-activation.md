@@ -8,6 +8,7 @@
 - **Partially supersedes** [ADR-0221](0221-an-episode-carries-the-reply-a-typed-disposition-and-how-the-turn-was-captured.md) — **two scopes.** **§2:1's field**, `EpisodicMemory.disposition`: it is removed, and the step's and the route's verdicts are on their stage entries (§5 below); `ExchangeDisposition` stays, for `TranscriptEntry.disposition` alone, and §2:2–§2:5 stand for it. **§3:1 and §3:2 entire**: every model-facing rendering of an episode reads the one projection in `core`, and the verdict phrases are one table there (§8 below). §3:3 and every other clause stand.
 - **Partially supersedes** [ADR-0222](0222-the-stored-reply-is-read-back-in-the-conversation-tail-and-by-the-observer.md) — **three scopes.** **§1:1, §1:2, §2:1 and §3:1, in their condition and their phrase line alone**: *"carries both a `disposition` and an `outcome`"* reads *"carries a response"*, and the line the response line follows is the projection's (§8 below); which records render the response, its ceiling, its elision and its counts stand. **§1:3 entire**: the record line changes. **§2:2 entire**: benchmark prompts change with the planner's record line. Every other clause stands.
 - **Partially supersedes** [ADR-0227](0227-a-record-the-citation-hop-reached-renders-its-reply-and-the-test-that-says-so-runs-the-real-renderer.md) — **two scopes.** **§1:1 and §1:2, in their condition and their phrase line alone**, as for ADR-0222 above. **§1:5's last two sentences' byte rule**: the record line changes; the reply line is still emitted by the caller. Every other clause, and ADR-0229's amendments, stand.
+- **Partially supersedes** [ADR-0223](0223-a-captured-episode-carries-the-externality-of-the-supply-its-turn-ran-over.md) — **one scope.** **§4:3's last sentence**, that no lane extracts the three prompts' phrases into a `core` mapping: the verdict phrases are one table in `core` beside the projection (§8 below). §4:1 and §4:2's episodic origin phrase stand, rendered from the projection, and §4:3's first sentence stands.
 - **Partially supersedes** [ADR-0275](0275-an-episode-records-one-activation-after-processing-ends.md) — **eight scopes.** **§4:1's record shapes**: `EpisodeProcessingRecord` loses `response_kind` and `model_eligible`, renames `reply_degraded` and `spoken_degraded` to `response_degraded` and `output_degraded`, and is `schema_version` 5; `RecordedChannelTrigger` loses `conversation` and gains `origin`; `EpisodeResponseKind` is removed (§2–§4, §6 below). **§4:3 entire**: `outcome` is the response or `None`. **§4:6's first sentence**: admission alone enforces the dispatch table (§3 below). **§7:1–§7:4 entire, and §7:7 in what remains of it**: the eligibility flag and axis are retired (§6 below). **§8:1, in its *rendering/disposition* facts**, and **§8:5 entire**: `content` is derived by one rule (§7 below). **§9:6, for the user's own input alone**: a user's own input text reaches model-facing renderings through the projection, as it reached them through `content` before (§8 below). **§10's `EpisodeSummary.response_kind`**: removed. Every other clause stands.
 - **Partially supersedes** [ADR-0276](0276-an-activation-is-understood-before-it-is-associated-and-the-understanding-is-retained-with-its-episode.md) — **three scopes.** **§3:1's *"on ADR-0221's existing rendering"***: a tail record renders through the projection. **§4:6's projection**: it is the projection in `core`, with the same parts and the stage verdicts added. **§4:8's last sentence, in its test**: an episode is rendered as a report received where its trigger's `origin` is `outside`, not where its channel is an event channel. Every other clause stands.
 - **Partially supersedes** [ADR-0280](0280-an-activation-controller-runs-the-stages-by-rules-and-records-every-choice-with-the-episode.md) — **four scopes.** **§1:4's last sentence** and **§7:1's resume clause**: a resume records the stages it runs (§5 below). **§6:1's field set and `ControllerRule`, in the additions alone**: `StageEntry` gains two verdict fields and `ControllerRule` gains `park_answered`. **§6:3, for those two fields alone**: a `drive` or `routing` entry carries the verdict it reached. Every other clause stands.
@@ -192,17 +193,31 @@ is no longer empty.
 > capture modality where it has no processing record; its `origin`; its input text,
 > where `origin` is `user`, or `outside` and `admit_outside_input` is true; the
 > latest understanding's `meaning`, `meaning_ground` and `unresolved`; the stage
-> verdicts; its response; and its status and reason. Input and response are cut to
+> verdicts; its response; its status and reason; and its
+> `Provenance.derived_from_external`. Input and response are cut to
 > `excerpt_chars`, and the cut is carried in the projection.
+
+> **Normative.** For an episode without a processing record, which ADR-0275 §4:2
+> still admits from other producers, the projection's input is the record's
+> `content`, as ADR-0276 §4:6 already renders it, and it carries no origin, no
+> understanding, no verdict and no status. This is the one path on which a model is
+> shown an episode's `content`.
 
 > **Normative.** Every rendering of a stored episode into a model prompt — the
 > composer's, the planner's, the observer's and the understanding stage's channel
-> and episode windows — reads the episode through `project_episode` and renders no
-> other field of it. None renders `content`.
+> and episode windows and its recalled episodes — reads the episode through
+> `project_episode` and renders no other field of it. None renders `content` other
+> than through the projection's input for an episode without a processing record.
+
+> **Normative.** The composer renders ADR-0223 §4's episodic origin phrase from the
+> projection's `derived_from_external`; ADR-0223 §4:1 and §4:2 stand. `origin` and
+> `derived_from_external` are different facts — who the input came from, and whether
+> processing read material resting on external content — and no renderer derives one
+> from the other.
 
 > **Normative.** `admit_outside_input` is true for the understanding stage's episode
-> window alone, the one consumer ADR-0276 §4:6 admits an outside input's text to,
-> and false for every other caller.
+> window and its recalled episodes alone, the two renderings ADR-0276 §4:6 and
+> ADR-0281 §7:3 admit an outside input's text to, and false for every other caller.
 
 > **Normative.** A rendering states the episode's status and reason, and the phrase
 > for each verdict it carries. The phrases are one table in `core`, beside the
@@ -214,8 +229,8 @@ is no longer empty.
 > render it, under ADR-0222 §4's ceiling, §5's elision and the counts; the retrieved
 > group renders none. Each site keeps its own ceiling constant.
 
-The phrase tables were three because ADR-0221 §3:2 kept each subsystem from
-importing another's. `core` is importable by all three, and a projection every
+The phrase tables were three because ADR-0221 §3:2 and ADR-0223 §4:3 kept each
+subsystem from importing another's. `core` is importable by all three, and a projection every
 reader shares is the point of this section; three copies of a table one projection
 names would be three places for it to drift.
 
@@ -238,6 +253,7 @@ names would be three places for it to drift.
 | Earlier clause | What changes |
 | --- | --- |
 | ADR-0221 §2:1, §3:1, §3:2 | `disposition` leaves the episode; one projection and one phrase table. |
+| ADR-0223 §4:3 | The phrases are one table in `core`. |
 | ADR-0222 §1:1–§1:3, §2:1, §2:2, §3:1 | The condition is *carries a response*; the record line is the projection's. |
 | ADR-0227 §1:1, §1:2, §1:5 | As ADR-0222. |
 | ADR-0275 §4:1, §4:3, §4:6, §7, §8:1, §8:5, §9:6, §10 | The record's shapes; eligibility retired; `content` derived; user input through the projection. |
@@ -254,7 +270,9 @@ names would be three places for it to drift.
 > 1. **`core`, additive**: `InputOrigin` and `RecordedChannelTrigger.origin`,
 >    optional until lane 6; the channel declarations; `StageEntry`'s verdict fields
 >    and validator; `park_answered` and the resume stage rule; `episode_content`;
->    `EpisodeProjection`, `project_episode` and the phrase table.
+>    `EpisodeProjection`, `project_episode` and the phrase table. The record's
+>    validator admits a resume with no stages, as today, or with stages ending in
+>    exactly one end entry.
 > 2. **`orchestration`**: admission sets `origin`; the controller and the resume path
 >    record verdicts, and the resume path its stages; the writer sets `content` from
 >    `episode_content`; recall and understanding read `origin`; the composer and the
@@ -266,7 +284,8 @@ names would be three places for it to drift.
 > 5. **`interfaces`**: the CLI's response label.
 > 6. **Removal, `core` with `memory` and `testing`, and the last producer references
 >    in `orchestration`**: §4's, §5's, §6's and §3's removals and renames; `origin`
->    required; `schema_version` 5 and format 6.
+>    required; a resume's stages required, ending in exactly one end entry;
+>    `schema_version` 5 and format 6.
 >
 > Lanes 2–5 depend on lane 1, and lane 6 on lanes 2–5.
 

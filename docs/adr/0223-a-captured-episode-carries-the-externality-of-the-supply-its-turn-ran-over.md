@@ -1,6 +1,6 @@
 # 223. A captured episode carries the externality of the supply its turn ran over
 
-- Status: Accepted
+- Status: Partially superseded by ADR-0284 (§4:3's last sentence)
 - Date: 2026-09-02
 - **Partially supersedes:**
   [ADR-0221](0221-an-episode-carries-the-reply-a-typed-disposition-and-how-the-turn-was-captured.md)
@@ -12,6 +12,14 @@
   deferral of the mark is discharged rather than superseded. The closing section
   works ADR-0082 §1's test through, clause by clause, for this and for every other
   ADR this decision touches.
+- Partially superseded: 2026-10-02 by ADR-0284 — one scope. §4:3's last sentence, that
+  no lane extracts the three prompts' phrases into a `core` mapping: the verdict phrases
+  are one table in `core` beside the projection every model-facing rendering of an
+  episode reads. §4:1 and §4:2's episodic origin phrase stand, rendered from the
+  projection, and §4:3's first sentence stands. These scoped replacements will take
+  effect on ratification of ADR-0284. This reciprocal header record accompanies the
+  numbered draft under ADR-0070 and ADR-0082; prior supersessions and the ratified body
+  below are preserved.
 
 ## Context
 
