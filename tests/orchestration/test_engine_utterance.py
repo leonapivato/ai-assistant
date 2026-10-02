@@ -16,11 +16,13 @@ would pass against an implementation that read the request off the goal, which i
 the implementation ADR-0248 §1 forbids.
 
 **What "unchanged across the change" is asserted as.** Each capture-path arm pins the
-*literal* the pre-decision tree produced: the archived half is the user's sentence byte
-for byte, and the episode's ``content`` opens ``The user asked: <that sentence>``. Those
-are the bytes ``turn.goal.statement`` produced before ADR-0248 and the bytes
-``turn.utterance`` produces after it, which is §6's byte-equality stated where a reader
-can check it rather than inferred from the two fields agreeing.
+*literal* the pre-decision tree produced for the archive: the archived half is the
+user's sentence byte for byte — the bytes ``turn.goal.statement`` produced before
+ADR-0248 and the bytes ``turn.utterance`` produces after it, which is §6's byte-equality
+stated where a reader can check it rather than inferred from the two fields agreeing.
+The episode's ``content`` is no longer a rendering of the turn: ADR-0284 §7 derives it
+by one rule from the record, and the user's sentence is in it because the trigger
+recorded it as the user's input — which is what the episode arms below assert.
 
 **The store's own arms are not here.** §10's park arms — the round trip, the settlement
 clearing a fourth field, the schema upgrade and the trigger refusals — belong to
@@ -39,6 +41,7 @@ from test_engine_read_envelope import _recorder
 from test_engine_routing import _UTTERANCE, _routed_harness, _seed_belief, _token
 from test_engine_routing import _parked as _routed_park
 
+from ai_assistant.core.episode_encoding import episode_content
 from ai_assistant.core.errors import PlanningError
 from ai_assistant.core.types import EpisodicMemory, ReadAnswerOutcome, Role, TurnResult
 from ai_assistant.orchestration.loop import LearningLoop
@@ -103,9 +106,8 @@ async def test_a_turn_archives_and_renders_the_request_it_received(
     (entry,) = await _entries(harness)
     assert entry.asked == _SAID, "ADR-0225 §1's first case, taken from the turn's own request"
     (episode,) = await _episodes(harness.memory)
-    assert episode.content.startswith(f"The user asked: {_SAID}"), (
-        "ADR-0005 §1's content and ADR-0074 §4's rendering, byte for byte what they were"
-    )
+    assert episode.content == episode_content(episode), "ADR-0284 §7:1's one rule"
+    assert _SAID in episode.content, "§7:1: the user's own words, as the trigger recorded them"
     assert outcome.turn is not None
     assert outcome.turn.utterance == _SAID
     assert outcome.turn.utterance == outcome.turn.goal.outcome, (
@@ -185,7 +187,12 @@ async def test_a_parked_reads_resolution_archives_the_parked_passs_request() -> 
         "— which is what this decision preserves rather than changes (§8, #2265)"
     )
     episodes = await _episodes(wired.memory)
-    assert episodes[-1].content.startswith(f"The user asked: {_ASKED}")
+    parking, resolution = episodes[-2:]
+    assert _ASKED in parking.content, "ADR-0284 §7:1: the parking pass's input was the user's"
+    # A resume has no input (ADR-0284 §2:4), so the resolution's search text is the one
+    # rule over its own record and carries no words; the request is in the archive.
+    assert resolution.content == episode_content(resolution)
+    assert _ASKED not in resolution.content
 
 
 async def test_a_park_written_without_an_utterance_falls_back_to_its_goal_statement() -> None:
@@ -261,7 +268,9 @@ async def test_a_resumption_recovered_from_durable_state_archives_no_user_words(
 
     assert resumed.turn is None, "a recovered resume carries no live turn"
     assert [one.asked for one in await _entries(harness)] == [_SAID, None]
-    assert not (await _episodes(harness.memory))[-1].content.startswith("The user asked:")
+    assert _SAID not in (await _episodes(harness.memory))[-1].content, (
+        "a resume has no input (ADR-0284 §2:4), so its content carries no user words"
+    )
 
 
 async def test_the_resolution_of_a_routed_park_archives_no_user_words() -> None:
@@ -356,7 +365,7 @@ async def test_every_moved_reader_takes_the_request_when_the_goal_says_something
     (entry,) = await _entries(harness)
     assert entry.asked == _SAID, "ADR-0225 §1: the user's own words, unrewritten"
     (episode,) = await _episodes(harness.memory)
-    assert episode.content.startswith(f"The user asked: {_SAID}")
+    assert _SAID in episode.content
     assert _INTERPRETED not in episode.content
     prompt = next(one.content for one in model.calls[0].messages if one.role is Role.USER)
     assert prompt.splitlines()[:2] == [

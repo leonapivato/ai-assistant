@@ -589,20 +589,19 @@ async def test_a_report_about_turn_one_reaches_turn_threes_composing_input() -> 
     # follows, and turn 2's — captured after it and never reported on — is not.
     rows = await _rows(harness, conversation)
     assert rows[0].episode_id == str(first.episode_id), "turn 1's episode is the channel's first"
-    bullets = [line for line in prompt.splitlines() if line.startswith("  - [episodic/")]
-    assert len(bullets) >= 3, "the tail carries the three earlier turns"
     lines = prompt.splitlines()
-    at = lines.index(bullets[0])
-    # Three lines of window rather than two, since ADR-0222 §1: a tail record renders
-    # its bullet, the `how it turned out:` line, and now the reply line, and the
-    # delivery fact is written under all of them — deliberately last, so that "ALL OF
-    # THIS" reads as the text on the line above it.
-    assert any("THE USER DID NOT HEAR ALL OF THIS" in one for one in lines[at + 1 : at + 4]), (
+    starts = [at for at, line in enumerate(lines) if line.startswith("  - [episode]")]
+    assert len(starts) >= 3, "the tail carries the three earlier turns"
+    # Each record's window runs from its bullet to the next one: ADR-0284 §8's
+    # projection lines, then the reply line, and the delivery fact written under all
+    # of them — deliberately last, so that "ALL OF THIS" reads as the text above it.
+    turn_one, turn_two = lines[starts[0] + 1 : starts[1]], lines[starts[1] + 1 : starts[2]]
+    assert any("THE USER DID NOT HEAR ALL OF THIS" in one for one in turn_one), (
         "the fact follows the first turn's bullet, which is the episode it qualifies"
     )
-    assert "THE USER DID NOT HEAR ALL OF THIS" not in "\n".join(
-        lines[lines.index(bullets[1]) : lines.index(bullets[1]) + 2]
-    ), "and never the turn captured after it, which no device reported on"
+    assert not any("THE USER DID NOT HEAR ALL OF THIS" in one for one in turn_two), (
+        "and never the turn captured after it, which no device reported on"
+    )
 
 
 async def test_a_withheld_turns_delivery_does_not_reach_the_stage_either() -> None:

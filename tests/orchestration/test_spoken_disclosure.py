@@ -48,6 +48,7 @@ from test_engine import (
     tool,
 )
 
+from ai_assistant.core.episode_encoding import episode_content
 from ai_assistant.core.errors import MemoryStoreError, SpeechError
 from ai_assistant.core.types import (
     ActionPlan,
@@ -807,9 +808,10 @@ async def test_a_withheld_class_is_not_read_aloud_one_turn_later() -> None:
     assert len(captured) == 1, "one turn, one episode (ADR-0074 §3)"
     assert _WITHHELD_CONTENT not in captured[0].content
     assert "Alice" not in captured[0].content
-    assert _SPEAKABLE_CONTENT in captured[0].content, (
-        "the episode is thinner rather than absent — capture itself is unchanged"
-    )
+    # ADR-0284 §7:1: `content` is the one rule over the record — the understanding's
+    # meaning and the user's words — and no plan rationale is part of it any more, so
+    # no withheld record can reach it through one.
+    assert captured[0].content == episode_content(captured[0])
 
     second = await harness.engine.converse_spoken(
         _RECORDING,
@@ -1122,9 +1124,10 @@ async def test_a_typed_turn_supplied_a_withheld_record_stamps_its_episode() -> N
     captured = _episodes(await harness.memory.export())
     assert len(captured) == 1, "one turn, one episode (ADR-0074 §3)"
     assert captured[0].placement == _derived_at(captured[0])
-    assert _WITHHELD_CONTENT in captured[0].content, (
-        "the episode's content is unchanged — the stamp is what withholds it, not a filter"
-    )
+    # The stamp is what withholds the episode, not a filter on its text: its content is
+    # ADR-0284 §7:1's one rule over the record, whatever the turn was supplied.
+    assert captured[0].content == episode_content(captured[0])
+    assert _ASKED in captured[0].content
 
 
 async def test_a_bounded_turn_supplied_a_guarded_record_keeps_it_and_stamps_its_episode() -> None:
@@ -1639,9 +1642,9 @@ async def test_a_recovered_resumption_and_a_routed_pass_carry_false() -> None:
     assert routed.routed is not None
     episode = _episodes(await routed_harness.memory.export())[-1]
     assert episode.placement == Placement()
-    assert episode.content == "The user asked: forget what I said", (
-        "no goal statement and no plan rationale of any turn — there was no turn"
-    )
+    assert episode.content == episode_content(episode), "ADR-0284 §7:1's one rule"
+    assert "forget what I said" in episode.content, "the user's own words, as recorded"
+    assert "The assistant's plan:" not in episode.content, "there was no turn, so no plan"
 
 
 async def test_a_bounded_turn_supplied_a_stamped_episode_captures_a_stamped_episode() -> None:

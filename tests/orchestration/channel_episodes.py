@@ -60,9 +60,9 @@ def conversation_episode(  # noqa: PLR0913 — one keyword per axis a seeding ca
             may pick any id, since a channel read keys on the channel and not on it.
         content: The episode's text; a default naming the id where omitted.
         occurred_at: The instant the episode records.
-        eligible: Whether the processing record admits model reads (ADR-0275 §7).
-            An ineligible episode is still on the channel — a pass that ended before
-            capture — and is skipped by every model-facing read.
+        eligible: Whether the pass completed. ``False`` records a failed pass carrying
+            the retired ``model_eligible=False`` flag, which no read filters on any
+            more (ADR-0284 §6:2): the episode is on the channel and read like any other.
         parks: The binding the activation's step parked (§3:4), for a resume case.
         **fields: Further ``EpisodicMemory`` fields, applied last (``expires_at``,
             ``validity``, ``placement`` ...).
@@ -105,8 +105,7 @@ def conversation_episode(  # noqa: PLR0913 — one keyword per axis a seeding ca
 async def channel_records(memory: MemoryStore, conversation_id: str) -> list[EpisodicMemory]:
     """Every live episode on ``conversation_id``'s channel, in number order.
 
-    Ineligible episodes included: this is what the store holds, not what a model
-    may read.
+    Every episode the store holds on the channel, failed passes included.
     """
     page = await memory.channel_episodes(conversation_channel(conversation_id), limit=1000)
     return [entry.record for entry in page.entries]

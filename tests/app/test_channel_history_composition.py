@@ -1,4 +1,8 @@
-"""ADR-0283 §14:2: a channel's history is its episodes, through production composition.
+"""ADR-0283 §14:2 and ADR-0284 §11:2, through production composition.
+
+A channel's history is its episodes (ADR-0283), and an episode is the experience of
+processing its activation (ADR-0284): where its input came from, the verdict each
+stage reached, and the search text one rule derives from the record.
 
 Every case builds the engine with :func:`ai_assistant.app.build_engine` over a
 fresh data directory, so the stores are the shipped ``sqlite`` ones, the
@@ -29,16 +33,21 @@ from ai_assistant.core.types import (
     ChannelIdentity,
     ChannelInput,
     ChannelResult,
+    ControllerRule,
+    ControllerStage,
     CostBasis,
+    Disposition,
     EpisodicMemory,
     GoalAssociation,
     Idempotency,
+    InputOrigin,
     NewConversation,
     PlannerOutput,
     PlanStep,
     ProcessingReason,
     ProcessingStatus,
     ProposedAction,
+    RecordedChannelTrigger,
     Reversibility,
     RiskLevel,
     TextChannelPayload,
@@ -108,6 +117,8 @@ class Composed:
     """The engine the root built, and the handles its own stages hold."""
 
     engine: Engine
+    #: The fake every model-facing call reaches, recording what each was handed.
+    model: FakeModelProvider
 
     @property
     def memory(self) -> MemoryStore:
@@ -206,7 +217,7 @@ async def composed(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> AsyncIter
     registry.register(_BOOKING, _book)
     await engine.start()
     try:
-        yield Composed(engine)
+        yield Composed(engine, model)
     finally:
         await engine.aclose()
 
@@ -491,3 +502,131 @@ async def test_the_digest_counts_the_channels_episodes(composed: Composed) -> No
     assert digest is not None
     assert digest.recorded_turns == 3
     assert digest.last_turn_at is not None
+
+
+# --- ADR-0284 §11:2: the experience of processing, through production composition -----
+
+#: An informational event channel, which declares its input ``outside`` (ADR-0284 §2:2).
+_SENSOR = ChannelIdentity(channel_type="informational_event", instance_id="sensor")
+#: The understanding every pass in this module records, as the fake model states it.
+_MEANING = "The input means what it says."
+#: An event's raw text, which no episode's search text may carry (§7:1).
+_REPORTED = "The thermostat entered eco mode."
+
+
+async def _episode(composed: Composed, result: ChannelResult) -> EpisodicMemory:
+    """The episode a pass recorded, with its processing record."""
+    assert result.capture.episode_id is not None
+    episode = await composed.memory.get(result.capture.episode_id)
+    assert isinstance(episode, EpisodicMemory)
+    assert episode.processing_record is not None
+    return episode
+
+
+def _origin(episode: EpisodicMemory) -> InputOrigin | None:
+    """The origin the episode's trigger recorded."""
+    assert episode.processing_record is not None
+    trigger = episode.processing_record.trigger
+    assert isinstance(trigger, RecordedChannelTrigger)
+    return trigger.origin
+
+
+async def _event(composed: Composed) -> ChannelResult:
+    """One informational event, admitted and processed by the root's own stages."""
+    return await composed.engine.receive(
+        ChannelInput(target=_SENSOR, payload=TextChannelPayload(text=_REPORTED)),
+        reply=None,
+        timeout=_BUDGET,
+    )
+
+
+async def test_a_conversational_episode_is_the_users_and_its_content_the_meaning_and_words(
+    composed: Composed,
+) -> None:
+    """ADR-0284 §2:2 and §7:1: admission records ``user``; content is meaning, then words."""
+    episode = await _episode(composed, await composed.say("hello there"))
+
+    assert _origin(episode) is InputOrigin.USER
+    assert episode.content == f"{_MEANING}\nhello there"
+    assert episode.content == episode_content(episode)
+
+
+async def test_an_event_episode_is_outside_and_its_content_the_meaning_alone(
+    composed: Composed,
+) -> None:
+    """ADR-0284 §2:2 and §7:1: admission records ``outside``; the words are not content."""
+    episode = await _episode(composed, await _event(composed))
+
+    assert _origin(episode) is InputOrigin.OUTSIDE
+    assert episode.content == _MEANING
+    assert _REPORTED not in episode.content
+
+
+async def test_a_later_pass_renders_the_event_as_a_report_received(
+    composed: Composed,
+) -> None:
+    """ADR-0284 §2:3 and §8: read by ``origin``, never by the channel type.
+
+    The next conversational pass's understanding stage is shown the event in its
+    episode window as a report received, never as something the user said — and,
+    the episode window being one of the two that admit an outside input's text
+    (§8:5), with the report's own words. Recall's ``outside`` label for the same
+    origin is pinned at the stage, in ``tests/orchestration/test_recall.py``: here
+    the event sits in the episode window, and recall passes over what the windows
+    hold (ADR-0282 §4).
+    """
+    await _event(composed)
+    composed.model.calls.clear()
+
+    await composed.say("is the heating on?")
+
+    understanding = [
+        call.messages[1].content
+        for call in composed.model.calls
+        if _UNDERSTANDING_PROMPT in call.messages[0].content
+    ]
+    assert understanding, "the later pass reached the understanding stage"
+    sent = json.loads(understanding[0])
+    (report,) = [
+        item
+        for item in sent["episode_window"]
+        if "report received on informational_event:sensor" in item["item"]
+    ]
+    assert "never something the user said" in report["item"]
+    assert report["input"] == _REPORTED
+
+
+async def test_a_parked_step_and_its_approved_resume_carry_their_verdicts(
+    composed: Composed,
+) -> None:
+    """ADR-0284 §5:2 and §5:4: the ``drive`` entry carries the step's ``Disposition``.
+
+    The parking pass's ``drive`` entry carries ``awaiting_confirmation``; the resume of
+    the approved step records its own ``drive``, due ``park_answered`` with the step's
+    verdict, and one end entry, last.
+    """
+    conversation_id, parking, token = await _parked(composed)
+    parked = await composed.memory.get(parking)
+    assert isinstance(parked, EpisodicMemory)
+    assert parked.processing_record is not None
+    assert [
+        entry.step_disposition
+        for entry in parked.processing_record.stages
+        if entry.stage is ControllerStage.DRIVE
+    ] == [Disposition.AWAITING_CONFIRMATION]
+
+    await composed.engine.resume(token, approved=True, timeout=_BUDGET)
+
+    held = await composed.held(conversation_id)
+    resolution = await composed.memory.get(held[-1])
+    assert isinstance(resolution, EpisodicMemory)
+    assert resolution.processing_record is not None
+    stages = resolution.processing_record.stages
+    assert [
+        (entry.stage, entry.due) for entry in stages if entry.stage is not ControllerStage.COMPOSE
+    ] == [
+        (ControllerStage.DRIVE, ControllerRule.PARK_ANSWERED),
+        (ControllerStage.END, ControllerRule.NOTHING_DUE),
+    ]
+    assert stages[0].step_disposition is Disposition.EXECUTED
+    assert stages[-1].stage is ControllerStage.END
