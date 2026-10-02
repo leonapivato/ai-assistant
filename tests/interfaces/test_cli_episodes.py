@@ -151,12 +151,12 @@ def test_json_detail_reassembles_exact_stored_record_without_wrapping(
     ("response", "label"),
     [
         (None, "unavailable"),
-        (EpisodeResponseKind.NONE, "no response"),
-        (EpisodeResponseKind.CONVERSATION_REPLY, "conversational reply"),
-        (EpisodeResponseKind.INFORMATIONAL_SUMMARY, "informational summary"),
+        (EpisodeResponseKind.NONE, "none"),
+        (EpisodeResponseKind.CONVERSATION_REPLY, "sent"),
+        (EpisodeResponseKind.INFORMATIONAL_SUMMARY, "sent"),
     ],
 )
-def test_human_detail_names_response_role_and_limits_of_processing_status(
+def test_human_detail_labels_whether_a_response_was_sent(
     monkeypatch: pytest.MonkeyPatch,
     output: StringIO,
     response: EpisodeResponseKind | None,
@@ -202,6 +202,43 @@ def test_listing_relays_filters_and_displays_exact_id_and_next_cursor(
     assert 'Episode " row-9:smile: "' in output.getvalue()
     assert "Next cursor:" in output.getvalue()
     assert "exact private material" not in output.getvalue()
+
+
+@pytest.mark.parametrize("response", list(EpisodeResponseKind))
+def test_detail_label_reads_the_outcome_not_the_response_kind(
+    response: EpisodeResponseKind,
+) -> None:
+    """ADR-0284 §4:3: the label is whether ``outcome`` holds a response, and nothing else.
+
+    The record is built past its validator so that ``response_kind`` contradicts
+    ``outcome`` both ways; a label still reading the field §4:1 removes would follow
+    the kind, and this one follows the text the activation sent.
+    """
+    stored = _record("record", response=response)
+    for outcome, label in ((None, "none"), ("Sent text", "sent")):
+        record = stored.model_copy(update={"outcome": outcome})
+        buffer = StringIO()
+        episode_inspection.render_detail(
+            Console(file=buffer, force_terminal=False, width=200), record
+        )
+        assert f"\nResponse: {label}\n" in buffer.getvalue()
+
+
+def test_listing_rows_carry_no_response_line(
+    monkeypatch: pytest.MonkeyPatch, output: StringIO
+) -> None:
+    """ADR-0284 §4:1 leaves a summary no response fact, so a row states none (§4:3)."""
+    engine = _engine(
+        _record("replied", response=EpisodeResponseKind.CONVERSATION_REPLY),
+        _record("silent", response=EpisodeResponseKind.NONE),
+    )
+    _wire(monkeypatch, engine)
+    result = CliRunner().invoke(cli.app, ["episodes"])
+    assert result.exit_code == 0, result.exception
+    rendered = output.getvalue()
+    assert 'Episode "replied"' in rendered
+    assert 'Episode "silent"' in rendered
+    assert "Response" not in rendered
 
 
 @pytest.mark.parametrize(

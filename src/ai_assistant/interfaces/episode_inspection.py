@@ -64,7 +64,12 @@ async def read_detail(
 
 
 def render_page(console: Console, page: EpisodePage) -> None:
-    """Render the engine's order, exact addresses, and explicit continuation."""
+    """Render the engine's order, exact addresses, and explicit continuation.
+
+    A row carries no response line: ADR-0284 §4:1 removes ``response_kind``, the
+    summary's one fact saying whether its episode sent a response, and §4:3 has the
+    CLI read no field that section removes. The detail view carries the label.
+    """
     if not page.items:
         console.print("No live episodes matched.")
     for item in page.items:
@@ -78,8 +83,7 @@ def render_page(console: Console, page: EpisodePage) -> None:
             f"  Occurred: {item.position.occurred_at.isoformat()}\n"
             f"  Activation: {item.activation_id or 'unavailable'}\n"
             f"  Channel: {channel}; modality: {item.modality.value}\n"
-            f"  Processing: {item.status.value if item.status else 'unavailable'}\n"
-            f"  Response: {_response_label(item.response_kind)}",
+            f"  Processing: {item.status.value if item.status else 'unavailable'}",
             markup=False,
             emoji=False,
             highlight=False,
@@ -91,13 +95,17 @@ def render_page(console: Console, page: EpisodePage) -> None:
     _retention_notice(console)
 
 
-def _response_label(kind: str | None) -> str:
-    return {
-        None: "unavailable",
-        "none": "no response",
-        "conversation_reply": "conversational reply",
-        "informational_summary": "informational summary",
-    }[kind]
+def _response_label(record: EpisodicMemory) -> str:
+    """Label an episode by whether it sent a response (ADR-0284 §4:3).
+
+    On a processing-record episode ``outcome`` is the text the activation sent back
+    on its channel, or ``None`` where it sent none (§4:1). An episode without a
+    processing record is ``unavailable``: its ``outcome`` is not a response sent on a
+    channel, so whether it has one is not something the record states.
+    """
+    if record.processing_record is None:
+        return "unavailable"
+    return "none" if record.outcome is None else "sent"
 
 
 def _retention_notice(console: Console) -> None:
@@ -115,7 +123,7 @@ def render_detail(console: Console, record: EpisodicMemory) -> None:
         f"Activation: {processing.activation_id if processing else 'unavailable'}\n"
         f"Processing: {processing.status.value if processing else 'unavailable'}\n"
         f"Reason: {processing.reason.value if processing else 'unavailable'}\n"
-        f"Response: {_response_label(processing.response_kind if processing else None)}",
+        f"Response: {_response_label(record)}",
         markup=False,
         emoji=False,
         highlight=False,
