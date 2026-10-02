@@ -1,6 +1,6 @@
 # 222. The stored reply is read back, in the conversation tail and by the observer
 
-- Status: Partially superseded by ADR-0227 (§2's first normative clause, in the single respect that a record a turn's citation hop reached renders its `outcome` at `orchestration/composing.py`'s request assembler; and §5's eligibility enumeration, in the single respect that such a rendered reply is counted on the pair §5 already requires. §2's second normative clause — `benchmarks/` untouched and every prompt `render_context` builds byte-identical — binds entire; the retrieved group, the episodic supplement and the records a sighted query serviced all stay phrase-only; §1, §3, §4, §6, §7, §8 and §9 and the rest of §5 stand)
+- Status: Partially superseded by ADR-0227 (§2's first normative clause, in the single respect that a record a turn's citation hop reached renders its `outcome` at `orchestration/composing.py`'s request assembler; and §5's eligibility enumeration, in the single respect that such a rendered reply is counted on the pair §5 already requires. §2's second normative clause — `benchmarks/` untouched and every prompt `render_context` builds byte-identical — binds entire; the retrieved group, the episodic supplement and the records a sighted query serviced all stay phrase-only; §1, §3, §4, §6, §7, §8 and §9 and the rest of §5 stand) and ADR-0284 (§1:1, §1:2, §2:1 and §3:1's condition and phrase line; §1:3; §2:2)
 - Date: 2026-09-01
 - Partially superseded: 2026-09-03 by ADR-0227 — **§2's phrase-only rule no longer
   reaches a record a turn's citation hop reached, and §5's eligible set now counts the
@@ -60,6 +60,15 @@
   which assertions replace them. §3's phrase table rule, its enum-absent fallback,
   its three-populations argument for every *other* rendering, §1, §2, §4, §5, §6,
   §7, §8, §9, §10, §12, §13 and §14 are untouched and bind unchanged.
+- Partially superseded: 2026-10-02 by ADR-0284 — three scopes. §1:1, §1:2, §2:1 and
+  §3:1, in their condition and their phrase line alone: *carries both a `disposition`
+  and an `outcome`* reads *carries a response*, and the line the response line follows
+  is the projection's; which records render the response, its ceiling, its elision and
+  its counts stand. §1:3 entire: the record line changes. §2:2 entire: benchmark prompts
+  change with the planner's record line. Every other clause stands. These scoped
+  replacements will take effect on ratification of ADR-0284. This reciprocal header
+  record accompanies the numbered draft under ADR-0070 and ADR-0082; prior supersessions
+  and the ratified body below are preserved.
 
 ## Context
 

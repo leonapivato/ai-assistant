@@ -1,6 +1,6 @@
 # 221. An episode carries the reply, a typed disposition, and how the turn was captured
 
-- Status: Partially superseded by ADR-0223 (§6's first clause, and within it only its first sentence — *"Capture writes the captured episode's `Provenance.derived_from_external` exactly as it does today — it is not set, and takes its `False` default"*. Capture now stamps that field, from the turn's own selection and threaded to the capture point. The remaining sentence of that clause, the whole of §6's second clause, and every other section of this ADR stand) and ADR-0275 (§1, §2, §5, §8 and §14's episode response role, processing metadata and model-facing eligibility)
+- Status: Partially superseded by ADR-0223 (§6's first clause, and within it only its first sentence — *"Capture writes the captured episode's `Provenance.derived_from_external` exactly as it does today — it is not set, and takes its `False` default"*. Capture now stamps that field, from the turn's own selection and threaded to the capture point. The remaining sentence of that clause, the whole of §6's second clause, and every other section of this ADR stand) and ADR-0275 (§1, §2, §5, §8 and §14's episode response role, processing metadata and model-facing eligibility) and ADR-0284 (§2:1's `EpisodicMemory.disposition` field; §3:1 and §3:2)
 - Date: 2026-09-01
 - Partially superseded: 2026-09-02 by ADR-0223 — **§6's first clause no longer
   holds of capture: `Provenance.derived_from_external` is stamped on the captured
@@ -46,6 +46,15 @@
   replacements recorded by the ADR-0275 note above took effect then; that note's
   "which remains Proposed" was true when written and is stale. The Status line above
   is unchanged (#2555).
+- Partially superseded: 2026-10-02 by ADR-0284 — two scopes. §2:1's
+  `EpisodicMemory.disposition` field is removed: the step's and the route's verdicts are
+  on their stage entries, and `ExchangeDisposition` remains for
+  `TranscriptEntry.disposition` alone. §3:1 and §3:2 entire: every model-facing
+  rendering of an episode reads one projection in `core`, with one table of verdict
+  phrases there. §3:3 and every other clause stand. These scoped replacements will take
+  effect on ratification of ADR-0284. This reciprocal header record accompanies the
+  numbered draft under ADR-0070 and ADR-0082; prior supersessions and the ratified body
+  below are preserved.
 
 ## Context
 

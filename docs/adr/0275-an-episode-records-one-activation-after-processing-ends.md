@@ -1,6 +1,6 @@
 # 275. An episode records one activation after processing ends
 
-- Status: Partially superseded by ADR-0276 (§1's "automatic cross-channel continuity" exclusion; §4's `EpisodeProcessingRecord` field set and `ProcessingReason` values, in the additions alone; §7's eligibility-`True` rule on automatic model-facing reads, for the understanding stage's episode window alone; §9's exclusion of the trigger's raw input text from automatic model inputs, for that window alone) and ADR-0280 (§1's "phase/tool history" exclusion, for the record of stages alone; §4's `EpisodeProcessingRecord` field set, in the additions alone) and ADR-0281 (§8:5's constant `content`, for an inspection-only record carrying an understanding alone; §4's `EpisodeProcessingRecord` field set, in the addition alone; §7:4's eligibility-`True` rule, for recall's read alone; §9:6's exclusion of the trigger's raw input text from automatic model inputs, for the understanding stage's rendering of a recalled episode alone) and ADR-0283 (§4:5's and §4:9's last sentences; §4:6's durable association; §4's record shapes, in the addition alone; §6:2's first sentence; §6:3's index and append; §6:6's first two sentences; §7:5; §7:6; §7:7's first sentence; §7:8's index row; §7:9; §8:2's sequence; §8:3's index address and intent row; §8:4; §8:6's indexed instant; §8:8's index-row address; §8:9's index-ID overhead; §9:1's index write; §9:3's addresses; §12:3's eligibility field)
+- Status: Partially superseded by ADR-0276 (§1's "automatic cross-channel continuity" exclusion; §4's `EpisodeProcessingRecord` field set and `ProcessingReason` values, in the additions alone; §7's eligibility-`True` rule on automatic model-facing reads, for the understanding stage's episode window alone; §9's exclusion of the trigger's raw input text from automatic model inputs, for that window alone) and ADR-0280 (§1's "phase/tool history" exclusion, for the record of stages alone; §4's `EpisodeProcessingRecord` field set, in the additions alone) and ADR-0281 (§8:5's constant `content`, for an inspection-only record carrying an understanding alone; §4's `EpisodeProcessingRecord` field set, in the addition alone; §7:4's eligibility-`True` rule, for recall's read alone; §9:6's exclusion of the trigger's raw input text from automatic model inputs, for the understanding stage's rendering of a recalled episode alone) and ADR-0283 (§4:5's and §4:9's last sentences; §4:6's durable association; §4's record shapes, in the addition alone; §6:2's first sentence; §6:3's index and append; §6:6's first two sentences; §7:5; §7:6; §7:7's first sentence; §7:8's index row; §7:9; §8:2's sequence; §8:3's index address and intent row; §8:4; §8:6's indexed instant; §8:8's index-row address; §8:9's index-ID overhead; §9:1's index write; §9:3's addresses; §12:3's eligibility field) and ADR-0284 (§4:1's record shapes; §4:3; §4:6's first sentence; §7:1–§7:4 and what remains of §7:7; §8:1's rendering/disposition facts; §8:5; §9:6 for the user's own input; §10's `EpisodeSummary.response_kind`)
 - Date: 2026-09-18
 - Scope: [M36](https://github.com/leonapivato/ai-assistant/milestone/2), [#2522](https://github.com/leonapivato/ai-assistant/issues/2522).
 - Dependency: ADR-0274 and [M35](https://github.com/leonapivato/ai-assistant/milestone/1).
@@ -44,6 +44,18 @@
   "which remains Proposed" was true when written and is stale. The Status line above
   is unchanged (#2555).
 - Partially superseded: 2026-10-01 by ADR-0283 — nineteen scopes. The turn index is retired: every episode's address is `activation:<activation_id>`, known from admission; a conversational finalization writes the episode, then the archive entry, then `record_turn`, which is the verification; deletion enumerates what the store holds on the conversation's channel through `channel_episode_ids`; `model_eligible` lives on the episode alone; the delivery is a row keyed by episode id; `ConversationExport` carries no turns, at version 4; `ActivationLinks` gains `parks`; the conversation schema is recognised by the format marker. §6:6's rule that a filtered history query never becomes the deletion enumeration, §11:6 and every other clause stand. These scoped replacements take effect on ratification of ADR-0283. This reciprocal header record accompanies the numbered draft under ADR-0070 and ADR-0082; the ratified body below is preserved.
+- Partially superseded: 2026-10-02 by ADR-0284 — eight scopes. §4:1's record shapes:
+  `response_kind` and `model_eligible` leave `EpisodeProcessingRecord`, its degraded
+  flags are renamed, `RecordedChannelTrigger` loses `conversation` and gains `origin`,
+  and `EpisodeResponseKind` is removed. §4:3 entire. §4:6's first sentence: admission
+  alone enforces the dispatch table. §7:1–§7:4 entire, and §7:7 in what remains of it:
+  the eligibility flag and axis are retired. §8:1's rendering/disposition facts and §8:5
+  entire: `content` is derived by one rule. §9:6, for the user's own input alone: it
+  reaches model-facing renderings through the projection. §10's
+  `EpisodeSummary.response_kind`: removed. Every other clause stands. These scoped
+  replacements will take effect on ratification of ADR-0284. This reciprocal header
+  record accompanies the numbered draft under ADR-0070 and ADR-0082; prior supersessions
+  and the ratified body below are preserved.
 
 ## Context
 
