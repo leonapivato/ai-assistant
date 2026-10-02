@@ -464,9 +464,8 @@ async def test_the_answer_reads_only_retrieved_context(tmp_path: Path) -> None:
     Since #1189 the block is the product's own bullets rather than a dump of each
     record's JSON, so the witness is read off the rendered line instead of off a
     parsed record — the property is the same one and the text it is read from is the
-    text the model was actually shown. Since #1194 a second corpus turn reaches it
-    legitimately as well: an episode's ``outcome``, which the product's renderer now
-    shows on the bullet's continuation line."""
+    text the model was actually shown. An episode's ``outcome`` does not reach it:
+    the retrieved group renders no response (ADR-0284 §8:7)."""
     settings = _settings(tmp_path)
     model = FakeModelProvider("a dog")
     plan = plan_run(LOCOMO, (_case(),), batch_size=BATCH, max_proposals=PROPOSALS)
@@ -495,19 +494,12 @@ async def test_the_answer_reads_only_retrieved_context(tmp_path: Path) -> None:
         "a corpus turn reached the prompt outside the retrieved records"
     )
     # And the *other* speaker's turn, which corpus ingestion stores as that episode's
-    # `outcome`. It used to be asserted absent, because `planner._render_record`
-    # rendered `content` alone and the withholding was `planning`'s rather than this
-    # harness's (#1194). The renderer shows it now, so the assertion flips — and the
-    # property under test does not: it still reaches the model only inside a rendered
-    # record, on the continuation line under that record's own bullet.
+    # `outcome`. It is absent again: `planner._render_record` renders an episode
+    # through its projection, and the retrieved group — the only group this block is
+    # — renders no response (ADR-0284 §8:7). The withholding is `planning`'s rather
+    # than this harness's, exactly as it was before #1194.
     reply = "Bo: Lovely name."
-    outcomes = [line for line in block.splitlines() if line.startswith("    how it turned out:")]
-    assert any(reply in line for line in outcomes), (
-        "an episode's outcome did not reach the prompt, which the product's renderer shows"
-    )
-    assert reply not in sent.replace(block, ""), (
-        "a corpus turn reached the prompt outside the retrieved records"
-    )
+    assert reply not in sent, "the retrieved group renders no response (ADR-0284 §8:7)"
     for withheld in ("No such information", "D1:1", "Did Ada adopt a cat?"):
         assert withheld not in sent, f"{withheld!r} is corpus material no record carries"
     assert "Question: What did Ada adopt?" in sent

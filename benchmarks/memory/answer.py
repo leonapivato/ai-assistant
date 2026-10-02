@@ -56,13 +56,17 @@ for somebody to notice. So this module imports the product's renderer and its he
 and calls them. Nothing in ``planning`` was made public for that — the names are read
 privately, knowingly, which is what the equivalence test was already doing.
 
-**What an episode shows is the product's answer, not this harness's.** Since #1194 the
-product's bullet carries an episode's ``occurred_at`` and its ``outcome``, so this
-prompt carries them too — and it carries them because the shipped renderer does,
-which is the only ground on which the harness may show a field at all. The previous
-run withheld both, and #1029's P2 was measured against a prompt with no instant in it
-anywhere; that measurement is of the older renderer and is not comparable to this one
-field by field.
+**What an episode shows is the product's answer, not this harness's.** Since ADR-0284
+§8 the product renders an episode through its projection: the instant, what arrived,
+what processing understood, each verdict's phrase and how processing ended. A harness
+row has no processing record, so its ``content`` is the projection's input and its
+``outcome`` the projection's response (§8:2) — and the retrieved group, the only group
+this block is, renders no response (§8:7). So this prompt carries a row's instant and
+its ``content`` and **not** its ``outcome``, the other speaker's turn, because the
+shipped renderer does exactly that; it is the only ground on which the harness may show
+a field at all. ADR-0284 supersedes ADR-0222 §2:2's byte-identity for these prompts, so
+a run under this renderer is not comparable field by field to one under the #1194
+renderer, which showed ``outcome``, nor to the run before it, which withheld the instant.
 
 **Which of ADR-0158 §4's rules are live in the harness, and which are vacuous.** The
 loop composes ``recent + retrieved + supplement``; this harness has no continuity tail
@@ -480,10 +484,10 @@ def render_context(records: Sequence[MemoryRecord]) -> str:
     provenance, validity window and scores is a prompt the product never assembles, so
     a benchmark scored under it scores a system nobody ships.
 
-    **A record is not always one line.** Since #1194 an episode that recorded an
-    outcome renders a continuation line under its own bullet, so this joins rendered
-    *records* rather than counting lines, and a reader of the block must not assume
-    one line per record either.
+    **A record is not always one line.** An episode renders a continuation line under
+    its own bullet for each further part its projection carries (ADR-0284 §8), so this
+    joins rendered *records* rather than counting lines, and a reader of the block must
+    not assume one line per record either.
 
     **The supplement needs nothing here**, which is a finding rather than an omission.
     ADR-0158 §4's groups are carried by *position*, and the product's own renderer
