@@ -34,11 +34,18 @@ if TYPE_CHECKING:
     from datetime import datetime
 
     from ai_assistant.core.clock import Clock
+    from ai_assistant.core.types import Disposition, RouteOutcome
 
 #: The classified timeouts a stage can end in (§5). Each is already the row
 #: ``terminal_status`` files under ``TIMEOUT``, and the bare ``TimeoutError`` is what
 #: an ``asyncio.timeout`` around a stage raises.
 _TIMEOUTS = (ModelTimeoutError, ChannelProcessingTimeoutError, SpeechTimeoutError, TimeoutError)
+
+
+def stage_timed_out(error: BaseException) -> bool:
+    """Whether a stage's raise is classified ``timed_out`` rather than ``failed`` (§5)."""
+    return isinstance(error, _TIMEOUTS)
+
 
 #: The stage record's bound where nothing wires one (§6). The composition root wires
 #: its own ``STAGE_RECORD_LIMIT``; this is the value a directly constructed engine or
@@ -250,11 +257,33 @@ ACTIVATION_RULES: Final[tuple[Rule, ...]] = (
 
 
 @dataclass(frozen=True)
+class Verdict:
+    """The verdict a ``drive`` or a ``routing`` stage reached (ADR-0284 §5:1-§5:2).
+
+    Each is ``None`` where the stage reached none: a drive whose claim was withheld,
+    a routing stage that declined, a stage that raised before deciding.
+
+    Attributes:
+        step_disposition: The driven step's :class:`~ai_assistant.core.types.Disposition`.
+        route_outcome: The taken route's :class:`~ai_assistant.core.types.RouteOutcome`.
+    """
+
+    step_disposition: Disposition | None = None
+    route_outcome: RouteOutcome | None = None
+
+
+#: A stage that reaches no verdict.
+NO_VERDICT: Final = Verdict()
+
+
+@dataclass(frozen=True)
 class StageResult:
     """How one stage ended, and the error it carried where it did not end ``done``.
 
-    Only the outcome enters the stage's :class:`StageEntry`; the error never does
-    (§5). It is carried here so the controller can end the pass and re-raise it.
+    The outcome and the verdict enter the stage's :class:`StageEntry`; the error never
+    does (§5). It is carried here so the controller can end the pass and re-raise it.
+    The verdict is ADR-0284 §5:2's: what a ``drive`` or a ``routing`` stage concluded,
+    read off the working set once the stage returned.
 
     ``tolerated`` is set only by a failure-tolerant stage (ADR-0281 §5) returning a
     ``failed`` or ``timed_out`` it caught and handled, after recording its decision.
@@ -265,6 +294,7 @@ class StageResult:
     outcome: StageOutcome
     error: Exception | None = None
     tolerated: bool = False
+    verdict: Verdict = NO_VERDICT
 
 
 class ControllerStageRun[P](Protocol):
@@ -290,11 +320,17 @@ class Stage[P]:
     it answers the classified deadline error, or ``None`` while there is time. A
     stage whose deadline had passed when it was due is not entered — its body does
     no I/O at all — and yields ``timed_out`` carrying that error (§5).
+
+    ``verdict`` is how a ``drive`` or a ``routing`` stage hands the controller the
+    verdict it reached (ADR-0284 §5:2), read off the working set once the body
+    ended, however it ended: the body records its decision there, and a stage that
+    raised before deciding has none to read.
     """
 
     name: ControllerStage
     body: Callable[[P], Awaitable[None]]
     expired: Callable[[P], Exception | None] | None = None
+    verdict: Callable[[P], Verdict] | None = None
 
     async def run(self, state: P) -> StageResult:
         """Run the body, unless its deadline already passed, and classify how it ended."""
@@ -303,10 +339,13 @@ class Stage[P]:
         try:
             await self.body(state)
         except _TIMEOUTS as exc:
-            return StageResult(StageOutcome.TIMED_OUT, exc)
+            return StageResult(StageOutcome.TIMED_OUT, exc, verdict=self._verdict(state))
         except Exception as exc:
-            return StageResult(StageOutcome.FAILED, exc)
-        return StageResult(StageOutcome.DONE)
+            return StageResult(StageOutcome.FAILED, exc, verdict=self._verdict(state))
+        return StageResult(StageOutcome.DONE, verdict=self._verdict(state))
+
+    def _verdict(self, state: P) -> Verdict:
+        return NO_VERDICT if self.verdict is None else self.verdict(state)
 
 
 @dataclass(frozen=True)
@@ -350,7 +389,8 @@ class StageRecord:
     """The entries a pass accumulates, readable while it runs (§6).
 
     Written once, at capture, by :meth:`bounded`. Exactly one end entry is ever
-    appended, and it is last.
+    appended, and it is last. The controller appends to it, and so does the resume
+    path, which the controller does not run (ADR-0284 §5:5).
     """
 
     entries: list[StageEntry] = field(default_factory=list)
@@ -421,6 +461,85 @@ class StageRecord:
         return (*entries[:head], *entries[-tail:]), len(entries) - limit
 
 
+async def run_recorded[T](  # noqa: PLR0913 — where to record, which stage and why, the clock, the body and its verdict
+    record: Callable[[], StageRecord | None],
+    stage: ControllerStage,
+    due: ControllerRule,
+    *,
+    clock: Clock,
+    body: Callable[[], Awaitable[T]],
+    verdict: Callable[[T], Verdict] | None = None,
+) -> T:
+    """Run one stage the controller does not run, and record it (ADR-0284 §5:4-§5:5).
+
+    The resume path is not run by the controller; it records the stages it runs
+    through the controller's own :class:`StageRecord`, on the same terms. The entry
+    is appended once the body ends: ``done`` carrying the verdict ``verdict`` reads
+    off what the body returned, or ``timed_out`` or ``failed`` classified as
+    :class:`Stage` classifies a raise — and then the end entry, due
+    ``stage_timed_out`` or ``stage_failed``, and the error re-raised. A cancellation
+    is not an outcome and propagates, unrecorded, as it does under the controller.
+
+    ``record`` is read once the body ends rather than before it starts, because the
+    resume's activation is admitted at its resolution point, inside the body. Where
+    it answers ``None`` — no activation was admitted — nothing is recorded, as a pass
+    with no admitted activation records into nothing. A record already ended is
+    left alone.
+
+    Args:
+        record: The stage record to append to, read once the body ends.
+        stage: Which stage the body is.
+        due: The rule that made it due.
+        clock: The clock the entry's instants are read from.
+        body: The stage's work.
+        verdict: The verdict the body's result carries, for a ``drive`` or a
+            ``routing`` stage.
+
+    Returns:
+        What the body returned.
+
+    Raises:
+        Exception: Whatever the body raised, once the entry and the end entry are
+            recorded.
+    """
+    started_at = clock()
+    try:
+        result = await body()
+    except Exception as exc:
+        timed_out = stage_timed_out(exc)
+        target = record()
+        if target is not None and not target.ended:
+            target.append(
+                StageEntry(
+                    stage=stage,
+                    due=due,
+                    started_at=started_at,
+                    ended_at=clock(),
+                    outcome=StageOutcome.TIMED_OUT if timed_out else StageOutcome.FAILED,
+                )
+            )
+            target.end(
+                ControllerRule.STAGE_TIMED_OUT if timed_out else ControllerRule.STAGE_FAILED,
+                clock(),
+            )
+        raise
+    target = record()
+    if target is not None and not target.ended:
+        reached = NO_VERDICT if verdict is None else verdict(result)
+        target.append(
+            StageEntry(
+                stage=stage,
+                due=due,
+                started_at=started_at,
+                ended_at=clock(),
+                outcome=StageOutcome.DONE,
+                step_disposition=reached.step_disposition,
+                route_outcome=reached.route_outcome,
+            )
+        )
+    return result
+
+
 class ActivationController[P: PassFacts]:
     """Run a pass's stages by §4's rules and record every choice (ADR-0280 §3)."""
 
@@ -484,6 +603,8 @@ class ActivationController[P: PassFacts]:
                         started_at=started_at,
                         ended_at=self._clock(),
                         outcome=result.outcome,
+                        step_disposition=result.verdict.step_disposition,
+                        route_outcome=result.verdict.route_outcome,
                     )
                 )
                 if result.outcome is StageOutcome.DONE:

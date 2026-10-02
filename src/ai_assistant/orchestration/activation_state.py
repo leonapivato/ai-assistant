@@ -41,7 +41,11 @@ from ai_assistant.core.types import (
     UnderstandingOmission,
     is_live_confirmation_park,
 )
-from ai_assistant.orchestration.controller import DEFAULT_STAGE_RECORD_LIMIT, StageRecord
+from ai_assistant.orchestration.controller import (
+    DEFAULT_STAGE_RECORD_LIMIT,
+    StageRecord,
+    stage_timed_out,
+)
 
 if TYPE_CHECKING:
     from collections.abc import Callable
@@ -66,9 +70,12 @@ _log = structlog.get_logger(__name__)
 
 @dataclass(frozen=True)
 class CaptureFacts:
-    """The canonical rendering and policy facts supplied by an existing capture path."""
+    """The policy facts, and the transcript entry's halves, a capture path supplies.
 
-    content: str
+    The episode's ``content`` is not among them: it is derived from the processing
+    record by one rule at the write (ADR-0284 §7:1).
+    """
+
     asked: str | None
     response: str | None
     disposition: ExchangeDisposition
@@ -248,21 +255,35 @@ class ActivationState:
     def _stage_record(
         self, ended_at: datetime, failure: BaseException | None
     ) -> tuple[tuple[StageEntry, ...], int]:
-        """The stage record as capture writes it (ADR-0280 §5, §6).
+        """The stage record as capture writes it (ADR-0280 §5, §6; ADR-0284 §5:4).
 
-        A resume carries none. A channel activation the controller never ended —
-        cancelled at the admission barrier, or ended at the speech edge — gains its
-        end entry here, at the finalization reading: ``interrupted`` for a
-        cancellation, ``no_text_input`` for speech with no words or whose
-        transcription failed, and ``ended_before_controller`` for any other end
-        ahead of the controller. The state itself is not changed, so a second
-        finalization reading builds the same record, and no exception, status or
-        reason moves.
+        A channel activation the controller never ended — cancelled at the admission
+        barrier, or ended at the speech edge — gains its end entry here, at the
+        finalization reading: ``interrupted`` for a cancellation, ``no_text_input``
+        for speech with no words or whose transcription failed, and
+        ``ended_before_controller`` for any other end ahead of the controller.
+
+        **A resume records the stages it ran and one end entry, last** (ADR-0284
+        §5:4). Its stages are appended by the resume path as each ends; a stage that
+        failed appended the end entry with it. Otherwise the end entry is appended
+        here: ``interrupted`` for a cancellation, ``nothing_due`` for a resume that
+        returned — it continued the parked work and composed where it composes, and
+        nothing further is due — and ``stage_timed_out`` or ``stage_failed`` for one
+        that raised outside a recorded stage, classified as a stage's raise is. A
+        resume that continued no stage records the end entry alone.
+
+        The state itself is not changed, so a second finalization reading builds the
+        same record, and no exception, status or reason moves.
         """
-        if isinstance(self.trigger, RecordedResumeTrigger):
-            return (), 0
         if isinstance(failure, asyncio.CancelledError):
             rule = ControllerRule.INTERRUPTED
+        elif isinstance(self.trigger, RecordedResumeTrigger):
+            if failure is None:
+                rule = ControllerRule.NOTHING_DUE
+            elif stage_timed_out(failure):
+                rule = ControllerRule.STAGE_TIMED_OUT
+            else:
+                rule = ControllerRule.STAGE_FAILED
         elif self.understanding_omitted is UnderstandingOmission.NO_TEXT:
             rule = ControllerRule.NO_TEXT_INPUT
         else:

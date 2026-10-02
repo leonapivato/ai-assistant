@@ -8,7 +8,7 @@ from typing import TYPE_CHECKING
 import structlog
 
 from ai_assistant.core.clock import checked_clock
-from ai_assistant.core.episode_encoding import canonical_json
+from ai_assistant.core.episode_encoding import canonical_json, episode_content
 from ai_assistant.core.errors import MemoryStoreConflictError
 from ai_assistant.core.types import (
     Capture,
@@ -34,26 +34,9 @@ if TYPE_CHECKING:
     from ai_assistant.core.clock import Clock
     from ai_assistant.core.protocols import ConversationStore, MemoryStore, TranscriptArchiveWriter
     from ai_assistant.core.types import EpisodeProcessingRecord
-    from ai_assistant.orchestration.activation_state import ActivationState, CaptureFacts
+    from ai_assistant.orchestration.activation_state import ActivationState
 
 _log = structlog.get_logger(__name__)
-_INSPECTION_CONTENT = "Recorded activation; inspect its processing record."
-
-
-def _content(facts: CaptureFacts | None, processing: EpisodeProcessingRecord) -> str:
-    """What an episode is embedded on: its canonical rendering, or its understanding.
-
-    ADR-0281 §3: an inspection-only record whose activation recorded an understanding
-    is embedded on the latest one's ``meaning`` — the stage's digest of the input,
-    never the raw input — so recall can find it by what it was about. One with none
-    keeps ADR-0275 §8:5's constant. The trigger's input and context are never
-    embedded.
-    """
-    if facts is not None:
-        return facts.content
-    if processing.understanding:
-        return processing.understanding[-1].meaning
-    return _INSPECTION_CONTENT
 
 
 def capture_loss(stage: str, reason: str) -> None:
@@ -350,7 +333,7 @@ class ActivationWriter:
         )
         episode = EpisodicMemory(
             id=address,
-            content=_content(facts, processing),
+            content="",
             occurred_at=now,
             outcome=state.response,
             disposition=None if facts is None else facts.disposition,
@@ -369,6 +352,10 @@ class ActivationWriter:
             ),
             processing_record=processing,
         )
+        # ADR-0284 §7:1: one rule sets every processing-record episode's search text,
+        # on every channel, and nothing else composes it — a pure function of the
+        # processing record just built, so it is derived from the episode itself.
+        episode = episode.model_copy(update={"content": episode_content(episode)})
         if len(canonical_json(episode)) > 8 * payload_limit + 65536:
             raise ValueError("activation record exceeds its capture bound")
         return episode

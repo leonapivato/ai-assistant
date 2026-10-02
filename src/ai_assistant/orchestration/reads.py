@@ -102,7 +102,6 @@ import structlog
 
 from ai_assistant.core.clock import checked_clock
 from ai_assistant.core.correlation import current_correlation
-from ai_assistant.core.episode_encoding import admits_model_eligibility
 from ai_assistant.core.errors import AssistantError, MemoryStoreError, ToolBindingError
 from ai_assistant.core.types import (
     ActionRequest,
@@ -5886,7 +5885,6 @@ async def _serviced_structured(  # noqa: PLR0913 — the store, the ask's two ha
             participants=structure.participants,
             topics=structure.topics,
             about_person=structure.about_person,
-            episode_model_eligible=True,
         )
         if query is None
         else await store.search(
@@ -5897,7 +5895,6 @@ async def _serviced_structured(  # noqa: PLR0913 — the store, the ask's two ha
             participants=structure.participants,
             topics=structure.topics,
             about_person=structure.about_person,
-            episode_model_eligible=True,
         )
     )
     found = result.records
@@ -6416,11 +6413,9 @@ async def _hop_records(
             if identifier not in seen:
                 seen.add(identifier)
                 wanted.append(identifier)
-    resolved = {
-        identifier: record
-        for identifier, record in (await store.get_many(wanted)).items()
-        if admits_model_eligibility(record, True)
-    }
+    # ADR-0284 §6:2: the hop reads every record it reaches, failed, interrupted and
+    # outside episodes included; a reader that should pass over one reads its status.
+    resolved = dict(await store.get_many(wanted))
     reads.note(len(resolved))
 
     expansion: list[MemoryRecord] = []

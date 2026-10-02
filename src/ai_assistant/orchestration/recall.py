@@ -54,6 +54,7 @@ from ai_assistant.core.types import (
     ActivationRecall,
     BeliefBand,
     EpisodicMemory,
+    InputOrigin,
     MemoryKind,
     RecallCue,
     RecalledItem,
@@ -82,9 +83,6 @@ _log = structlog.get_logger(__name__)
 
 #: ADR-0072 §5's consumer-side precedence, the order the bands are searched in (§3).
 _BANDS: Final = (BeliefBand.ASSERTED, BeliefBand.ATTESTED, BeliefBand.DERIVED)
-
-#: The channel type whose input is a report received (ADR-0274 §7, ADR-0281 §4).
-_EVENT_CHANNEL: Final = "informational_event"
 
 #: The one cue recall searches with today (§3).
 _CUES: Final = (RecallCue.ACTIVATION_INPUT,)
@@ -255,44 +253,56 @@ def _item(record: RecalledRecord) -> RecalledItem:
 
 
 def _provenance_of(record: RecalledRecord) -> RecallProvenance:
-    """§4's two-value label, and the only provenance judgment recall makes."""
+    """§4's two-value label, and the only provenance judgment recall makes.
+
+    An episode's is read off its trigger's ``origin`` and never off its channel type
+    (ADR-0284 §2:3, superseding ADR-0281 §4:4's test): it is ``outside`` exactly where
+    the input came from outside.
+    """
     if isinstance(record, SemanticMemory):
         outside = rests_on_recorded_external_content(record.provenance)
     else:
-        outside = _event_channel(record) is not None
+        outside = _origin_of(record) is InputOrigin.OUTSIDE
     return RecallProvenance.OUTSIDE if outside else RecallProvenance.USER
 
 
 def _excerpt_of(record: RecalledRecord) -> str:
     """§6's excerpt, from the stored record and never from this pass's model output.
 
-    **An outside episode's raw input never enters it**: an informational event's
-    episode gives its latest understanding's meaning, or the fixed text that it was a
-    report received on its channel.
+    **An outside episode's raw input never enters it** (ADR-0284 §2:3, superseding
+    ADR-0281 §6:3's channel-type test): an episode whose trigger's ``origin`` is
+    ``outside`` gives its latest understanding's meaning, or the fixed text that it
+    was a report received on its channel. The user's own input is given where the
+    ``origin`` is ``user``; an input whose origin is not recorded is not taken for
+    the user's, and gives what an outside one does.
     """
     if isinstance(record, SemanticMemory):
         return record.fact
-    channel = _event_channel(record)
-    if channel is not None:
-        processing = record.processing_record
-        if processing is not None and processing.understanding:
-            return processing.understanding[-1].meaning
-        return f"a report received on {channel}"
     processing = record.processing_record
-    if processing is not None and isinstance(processing.trigger, RecordedChannelTrigger):
-        payload = processing.trigger.payload
-        text = payload.text if isinstance(payload, RecordedTextInput) else payload.transcript
-        if text is not None:
-            return text
+    if processing is None:
+        return record.content
+    trigger = processing.trigger
+    if isinstance(trigger, RecordedChannelTrigger):
+        if trigger.origin is InputOrigin.USER:
+            payload = trigger.payload
+            text = payload.text if isinstance(payload, RecordedTextInput) else payload.transcript
+            if text is not None:
+                return text
+        elif processing.understanding:
+            return processing.understanding[-1].meaning
+        else:
+            channel = trigger.channel
+            return (
+                "a report received"
+                if channel is None
+                else f"a report received on {channel.channel_type}:{channel.instance_id}"
+            )
     return record.content
 
 
-def _event_channel(record: EpisodicMemory) -> str | None:
-    """The informational event channel an episode's trigger arrived on, if it did."""
+def _origin_of(record: EpisodicMemory) -> InputOrigin | None:
+    """Who an episode's input came from, as its trigger recorded it (ADR-0284 §2:3)."""
     processing = record.processing_record
-    if processing is None:
+    if processing is None or not isinstance(processing.trigger, RecordedChannelTrigger):
         return None
-    channel = processing.trigger.channel
-    if channel is None or channel.channel_type != _EVENT_CHANNEL:
-        return None
-    return f"{channel.channel_type}:{channel.instance_id}"
+    return processing.trigger.origin

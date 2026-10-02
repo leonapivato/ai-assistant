@@ -33,6 +33,7 @@ from ai_assistant.core.types import (
     ChannelInput,
     ControllerRule,
     ControllerStage,
+    Disposition,
     EpisodicMemory,
     Ground,
     NewConversation,
@@ -40,7 +41,9 @@ from ai_assistant.core.types import (
     ProposedElement,
     ProposedQuestion,
     ProposedUnderstanding,
+    RecordedResumeTrigger,
     RoutableOperation,
+    RouteOutcome,
     SpeechChannelPayload,
     SpokenAudio,
     SpokenAudioFormat,
@@ -151,6 +154,20 @@ async def test_a_typed_turn_that_drives_a_step() -> None:
         (_S.DRIVE, _R.PLAN_HAS_STEPS, _DONE),
         *_COMPOSED_AND_ENDED,
     ]
+    # ADR-0284 §5:2: the `drive` entry carries the driven step's disposition, and no
+    # other entry carries a verdict.
+    assert _verdicts(await _record(harness)) == [(_S.DRIVE, Disposition.EXECUTED, None)]
+
+
+def _verdicts(
+    record: EpisodeProcessingRecord,
+) -> list[tuple[ControllerStage, Disposition | None, RouteOutcome | None]]:
+    """Every entry carrying a verdict, as (stage, step disposition, route outcome)."""
+    return [
+        (entry.stage, entry.step_disposition, entry.route_outcome)
+        for entry in record.stages
+        if entry.step_disposition is not None or entry.route_outcome is not None
+    ]
 
 
 class _Asking(NoStepPlanner):
@@ -218,6 +235,9 @@ async def test_a_turn_whose_step_parks_for_confirmation_composes_nothing() -> No
         (_S.DRIVE, _R.PLAN_HAS_STEPS, _DONE),
         (_S.END, _R.NOTHING_DUE, _DONE),
     ]
+    assert _verdicts(await _record(harness)) == [
+        (_S.DRIVE, Disposition.AWAITING_CONFIRMATION, None)
+    ]
 
 
 def _routing(operation: str) -> RoutingStage:
@@ -238,6 +258,8 @@ async def test_a_routed_turn_ends_on_the_taken_route() -> None:
         (_S.ROUTING, _R.ROUTE_UNCHECKED, _DONE),
         (_S.END, _R.ROUTE_TAKEN, _DONE),
     ]
+    # ADR-0284 §5:2: the `routing` entry carries the taken route's outcome.
+    assert _verdicts(await _record(harness)) == [(_S.ROUTING, None, outcome.routed.outcome)]
 
 
 async def test_a_declined_route_is_a_decision_and_the_turn_goes_on() -> None:
@@ -249,6 +271,8 @@ async def test_a_declined_route_is_a_decision_and_the_turn_goes_on() -> None:
         *_TO_THE_LOOP[1:],
         *_COMPOSED_AND_ENDED,
     ]
+    # A declined route reached no route outcome, and the turn drove no step.
+    assert _verdicts(await _record(harness)) == []
 
 
 async def test_a_degraded_composition_is_composed_once_and_the_pass_ends() -> None:
@@ -464,16 +488,70 @@ async def test_a_pass_cancelled_at_the_admission_barrier_ends_interrupted() -> N
 # --- resume -------------------------------------------------------------------------------
 
 
-async def test_a_resume_carries_no_stage_record() -> None:
-    """§1: ``resume`` keeps its legacy path."""
+async def _resumed(harness: Harness) -> EpisodeProcessingRecord:
+    """The resume's processing record: the episode whose trigger is a resume."""
+    (record,) = [
+        r.processing_record
+        for r in await harness.memory.export()
+        if isinstance(r, EpisodicMemory)
+        and r.processing_record is not None
+        and isinstance(r.processing_record.trigger, RecordedResumeTrigger)
+    ]
+    return record
+
+
+async def test_a_resume_of_an_approved_step_records_its_drive_compose_and_end() -> None:
+    """ADR-0284 §5:4: the parked step's ``drive``, due ``park_answered`` with its verdict.
+
+    Then ``compose`` due ``reply_owed``, since the resume composes, and one end entry,
+    last — the shape a channel activation's record has, recorded by the resume path
+    through the controller's own stage record (§5:5).
+    """
     harness = _harness(tools=(confirmable(),))
     outcome = await harness.engine.converse("send the note", timeout=_BUDGET)
     assert outcome.step is not None
     assert outcome.step.confirmation is not None
-    await harness.engine.resume(outcome.step.confirmation.token, approved=True, timeout=_BUDGET)
-    records = [
-        r.processing_record
-        for r in await harness.memory.export()
-        if isinstance(r, EpisodicMemory) and r.processing_record is not None
+    resumed = await harness.engine.resume(
+        outcome.step.confirmation.token, approved=True, timeout=_BUDGET
+    )
+    assert resumed.step is not None
+    record = await _resumed(harness)
+    assert _stages(record) == [
+        (_S.DRIVE, _R.PARK_ANSWERED, _DONE),
+        (_S.COMPOSE, _R.REPLY_OWED, _DONE),
+        (_S.END, _R.NOTHING_DUE, _DONE),
     ]
-    assert [len(record.stages) for record in records] == [8, 0]
+    assert _verdicts(record) == [(_S.DRIVE, resumed.step.disposition, None)]
+    assert resumed.step.disposition is Disposition.EXECUTED
+    assert record.recall is None, "a resume still carries no recall result (ADR-0281 §6:2)"
+
+
+async def test_a_resume_whose_drive_raises_ends_on_the_failed_stage() -> None:
+    """§5:5: a resume is held to the channel rule — the failed stage, then its end entry."""
+    harness = _harness(tools=(confirmable(),))
+    outcome = await harness.engine.converse("send the note", timeout=_BUDGET)
+    assert outcome.step is not None
+    assert outcome.step.confirmation is not None
+    runner = harness.engine._runner
+    original = runner.resume
+
+    async def failing(*args: Any, **kwargs: Any) -> Any:
+        resolving = kwargs["on_resolving"]
+        await resolving()
+        msg = "the drive broke after the answer was taken"
+        raise RuntimeError(msg)
+
+    runner.resume = failing  # type: ignore[method-assign]
+    try:
+        with pytest.raises(RuntimeError):
+            await harness.engine.resume(
+                outcome.step.confirmation.token, approved=True, timeout=_BUDGET
+            )
+    finally:
+        runner.resume = original  # type: ignore[method-assign]
+    record = await _resumed(harness)
+    assert _stages(record) == [
+        (_S.DRIVE, _R.PARK_ANSWERED, StageOutcome.FAILED),
+        (_S.END, _R.STAGE_FAILED, _DONE),
+    ]
+    assert record.status is ProcessingStatus.FAILED

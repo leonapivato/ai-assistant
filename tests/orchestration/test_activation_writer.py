@@ -9,6 +9,7 @@ from typing import TYPE_CHECKING
 import pytest
 from structlog.testing import capture_logs
 
+from ai_assistant.core.episode_encoding import episode_content
 from ai_assistant.core.errors import (
     ConversationStoreError,
     MemoryStoreConflictError,
@@ -169,7 +170,6 @@ class Wiring:
         if eligible:
             assert conversation is not None
             state.facts = CaptureFacts(
-                content="canonical exchange",
                 asked="exact request",
                 response="the complete reply",
                 disposition=ExchangeDisposition.NO_ACTION_NEEDED,
@@ -225,8 +225,13 @@ async def test_an_ended_exchange_is_written_at_its_activation_address_on_its_cha
     assert episode.occurred_at == await wiring.last_turn_at(state) == _AT
     assert episode.expires_at == _AT + timedelta(days=30)
     assert episode.outcome == "the complete reply"
+    # ADR-0284 §7:1: the writer sets `content` by the one rule — here no stage
+    # understood the input, so a line of its status, then the user's own words.
+    assert episode.content == episode_content(episode)
+    assert episode.content == "status completed, reason returned\n  exact request  "
     entry = wiring.archive.recorded[_ADDRESS]
-    assert entry.asked == "exact request"
+    assert entry.asked == "exact request", "the archive's half is threaded, not the content"
+    assert entry.replied == "the complete reply"
     assert entry.occurred_at == _AT
 
 
@@ -350,8 +355,15 @@ async def test_the_archive_switch_off_records_the_episode_and_the_turn_and_no_en
 
 
 @pytest.mark.parametrize("standalone", [False, True])
-async def test_inspection_only_capture_has_no_archive_or_eligible_history(standalone: bool) -> None:
-    """§7:5: a pass that ends before capture is still on its channel, ineligible."""
+async def test_a_capture_with_no_capture_facts_has_no_archive_entry_and_is_in_history(
+    standalone: bool,
+) -> None:
+    """A pass that ends before capture is still on its channel, and in its history.
+
+    ADR-0284 §6:2 retires the eligibility axis (superseding ADR-0283 §7:5): the episode
+    is read by history like any other. Its ``content`` is §7's one rule, as on every
+    other episode, and it owes no transcript entry.
+    """
     wiring = Wiring()
     state = await wiring.state(eligible=False, standalone=standalone)
     report = await wiring.write(state)
@@ -359,17 +371,16 @@ async def test_inspection_only_capture_has_no_archive_or_eligible_history(standa
     assert report.episode_id == _ADDRESS
     episode = await wiring.memory.get(_ADDRESS)
     assert isinstance(episode, EpisodicMemory)
-    assert episode.content == "Recorded activation; inspect its processing record."
+    assert episode.content == episode_content(episode)
     assert episode.disposition is None
     assert episode.processing_record is not None
-    assert not episode.processing_record.model_eligible
     assert wiring.archive.recorded == {}
     if standalone:
         assert await wiring.conversations.recent() == []
         return
     channel = conversation_channel(str(state.conversation_id))
-    eligible = await wiring.memory.channel_episodes(channel, limit=10, episode_model_eligible=True)
-    assert eligible.entries == ()
+    page = await wiring.memory.channel_episodes(channel, limit=10)
+    assert [entry.record.id for entry in page.entries] == [_ADDRESS]
     assert await wiring.on_channel(state) == [_ADDRESS]
 
 

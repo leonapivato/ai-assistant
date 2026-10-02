@@ -211,11 +211,11 @@ async def test_the_order_is_the_episodes_numbers_and_never_their_instants() -> N
     assert [record.id for record in history.records] == [first, second]
 
 
-async def test_history_skips_a_pass_that_ended_before_capture() -> None:
-    """§4:1, ADR-0275 §7: an ineligible episode is on the channel and absent from history.
+async def test_history_reads_a_pass_that_ended_before_capture() -> None:
+    """ADR-0284 §6:2: a pass that ended early is on the channel and in its history.
 
-    The digest still counts it, which is the pair that shows it really is on the
-    channel rather than never written.
+    Superseding ADR-0283 §4:1's eligibility filter: no read requests the old flag, so
+    the episode is replayed in its place with its status, and the digest counts it.
     """
     wiring = Wiring()
     conversation = await wiring.stage.begin(None)
@@ -225,7 +225,7 @@ async def test_history_skips_a_pass_that_ended_before_capture() -> None:
 
     history = await wiring.stage.history(conversation.id)
 
-    assert [record.id for record in history.records] == [kept, last]
+    assert [record.id for record in history.records] == [kept, "activation:ended-early", last]
     assert await channel_ids(wiring.memory, conversation.id) == [
         kept,
         "activation:ended-early",
@@ -258,12 +258,12 @@ async def test_history_reads_the_newest_episodes_within_the_replay_bound() -> No
     assert [record.id for record in history.records] == episodes[-HISTORY_REPLAY_BOUND:]
 
 
-async def test_an_ineligible_run_never_consumes_the_replay_page() -> None:
-    """§4:1: eligibility is applied by the read, before its limit.
+async def test_a_run_of_failed_passes_takes_its_place_in_the_replay_page() -> None:
+    """ADR-0284 §6:2: the page is the channel's newest episodes, failed ones included.
 
-    Twenty eligible episodes followed by five a pass ended early left: filtering
-    after the limit would hand the planner fifteen and lose the five oldest turns
-    the conversation actually has.
+    A bound's worth of completed episodes followed by five a pass ended early left:
+    the five are the newest the conversation has, so they are in the page and the
+    five oldest are not.
     """
     wiring = Wiring()
     conversation_id, episodes = await _seed_turns(wiring, HISTORY_REPLAY_BOUND)
@@ -272,7 +272,8 @@ async def test_an_ineligible_run_never_consumes_the_replay_page() -> None:
 
     history = await wiring.stage.history(conversation_id)
 
-    assert [record.id for record in history.records] == episodes
+    ended = [f"activation:ended-{index}" for index in range(5)]
+    assert [record.id for record in history.records] == (episodes + ended)[-HISTORY_REPLAY_BOUND:]
 
 
 async def test_history_pairs_each_episode_with_its_delivery() -> None:

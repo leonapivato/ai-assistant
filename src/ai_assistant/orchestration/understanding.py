@@ -65,17 +65,22 @@ from typing import TYPE_CHECKING, Final
 import structlog
 from pydantic import ValidationError
 
+from ai_assistant.core.channel_validation import input_origin
+from ai_assistant.core.episode_encoding import (
+    ROUTE_OUTCOME_PHRASES,
+    STEP_DISPOSITION_PHRASES,
+    project_episode,
+)
 from ai_assistant.core.errors import UnderstandingError
 from ai_assistant.core.types import (
     UNDERSTANDING_REFERENT_EXCERPT_CHARS,
     ActivationUnderstanding,
     BeliefBand,
     EpisodicMemory,
+    InputOrigin,
     Message,
     ProposedActivationUnderstanding,
     RecallOutcome,
-    RecordedChannelTrigger,
-    RecordedTextInput,
     Role,
     SemanticMemory,
     UnderstandingGround,
@@ -97,8 +102,8 @@ if TYPE_CHECKING:
         ChannelContext,
         ChannelContextItem,
         ChannelIdentity,
+        EpisodeProjection,
         MemoryRecord,
-        RecordedActivationTrigger,
     )
     from ai_assistant.orchestration.disclosure import TurnSupply
 
@@ -112,10 +117,6 @@ __all__ = [
 ]
 
 _log = structlog.get_logger(__name__)
-
-#: The channel types whose input is a **report received**, never something the user
-#: said or the assistant did (ADR-0276 §4, ADR-0274 §7).
-_EVENT_CHANNEL: Final = "informational_event"
 
 #: The page bound :meth:`~ai_assistant.core.protocols.MemoryStore.episodes` admits.
 _MAX_PAGE: Final = 100
@@ -605,15 +606,19 @@ class UnderstandingStage:
         rendered_items: list[dict[str, object]] = []
         for index, item in enumerate(items, start=1):
             label = f"H{index}"
-            also = merged.get(item.identifier) if item.identifier is not None else None
+            also = item.identifier is not None and item.identifier in merged
             rendered_items.append(item.rendering(label, also, excerpt_chars=self._excerpt_chars))
             labels[label] = item.referent
         rendered_episodes: list[dict[str, object]] = []
         for record in (record for record in window_episodes if record.id not in shared):
             label = f"P{len(rendered_episodes) + 1}"
-            projection = _EpisodeProjection.of(record, excerpt_chars=self._excerpt_chars)
-            rendered_episodes.append(projection.rendering(label))
-            labels[label] = projection.referent()
+            # ADR-0284 §8:5: the episode window is one of the two renderings that
+            # admit an outside input's text.
+            projected = _ProjectedEpisode.of(
+                record, excerpt_chars=self._excerpt_chars, admit_outside_input=True
+            )
+            rendered_episodes.append(projected.rendering(label))
+            labels[label] = projected.referent()
         payload = {
             "input": _input_rendering(text, channel),
             "channel_window": rendered_items
@@ -656,9 +661,13 @@ class UnderstandingStage:
         for record in (record for record in recalled if record.id not in rendered):
             label = f"M{len(section) + 1}"
             if isinstance(record, EpisodicMemory):
-                projection = _EpisodeProjection.of(record, excerpt_chars=self._excerpt_chars)
-                section.append(projection.rendering(label))
-                labels[label] = projection.referent()
+                # ADR-0284 §8:5: recalled episodes are the other rendering that admits
+                # an outside input's text.
+                projected = _ProjectedEpisode.of(
+                    record, excerpt_chars=self._excerpt_chars, admit_outside_input=True
+                )
+                section.append(projected.rendering(label))
+                labels[label] = projected.referent()
             else:
                 memory = _RecalledFact.of(record, excerpt_chars=self._excerpt_chars)
                 section.append(memory.rendering(label))
@@ -696,23 +705,32 @@ class _Problem:
 
 @dataclass(frozen=True, slots=True)
 class _ChannelItem:
-    """One item of the channel window, with the referent its label resolves to."""
+    """One item of the channel window, with the referent its label resolves to.
+
+    ``episode`` is set exactly where the item is a recorded episode of the
+    conversation's tail, which renders through the projection (ADR-0284 §8:3,
+    superseding ADR-0276 §3:1's *"on ADR-0221's existing rendering"*); ``body`` is
+    what any other item renders.
+    """
 
     identifier: str | None
     body: dict[str, object]
     referent: UnderstandingReferent
+    episode: EpisodicMemory | None = None
 
-    def rendering(
-        self, label: str, also: EpisodicMemory | None, *, excerpt_chars: int
-    ) -> dict[str, object]:
-        """The item under its label, annotated where it is also in the episode window."""
+    def rendering(self, label: str, also: bool, *, excerpt_chars: int) -> dict[str, object]:
+        """The item under its label, marked where it is also in the episode window."""
         rendered: dict[str, object] = {"label": label, **self.body}
-        if also is not None:
-            # §3: one exchange, rendered once. What the episode window would have
-            # added about it — its status and what was understood then — rides here.
+        if self.episode is not None:
+            # ADR-0284 §8:5: the channel window does not admit an outside input's text.
+            projected = _ProjectedEpisode.of(
+                self.episode, excerpt_chars=excerpt_chars, admit_outside_input=False
+            )
+            rendered.update(projected.parts())
+        if also:
+            # §3: one exchange, rendered once, here; what the episode window would have
+            # added about it — its status and what was understood then — rides here too.
             rendered["also_in_episode_window"] = True
-            projection = _EpisodeProjection.of(also, excerpt_chars=excerpt_chars)
-            rendered.update(projection.annotations())
         return rendered
 
 
@@ -744,21 +762,29 @@ def _supplied_item(item: ChannelContextItem, role: str) -> _ChannelItem:
     )
 
 
+_TAIL_ITEM: Final = "an earlier exchange of this conversation, as the assistant recorded it"
+
+
 def _tail_item(record: MemoryRecord, source: str) -> _ChannelItem:
-    """One recorded exchange of this conversation, its two halves on ADR-0221's rendering."""
-    body: dict[str, object] = {
-        "item": "an earlier exchange of this conversation, as the assistant recorded it",
-        "exchange_as_recorded": record.content,
-    }
-    if isinstance(record, EpisodicMemory):
-        body["occurred_at"] = record.occurred_at.isoformat()
-        body["assistant_reply"] = record.outcome
+    """One recorded exchange of this conversation, rendered through the projection."""
+    if not isinstance(record, EpisodicMemory):  # pragma: no cover — the tail is episodic
+        return _ChannelItem(
+            identifier=record.id,
+            body={"item": _TAIL_ITEM, "record": record.content},
+            referent=UnderstandingReferent(
+                kind="channel_item", id=record.id, source=source, excerpt=_excerpt(record.content)
+            ),
+        )
+    excerpt = _ProjectedEpisode.of(
+        record, excerpt_chars=UNDERSTANDING_REFERENT_EXCERPT_CHARS, admit_outside_input=False
+    ).excerpt()
     return _ChannelItem(
         identifier=record.id,
-        body=body,
+        body={"item": _TAIL_ITEM},
         referent=UnderstandingReferent(
-            kind="channel_item", id=record.id, source=source, excerpt=_excerpt(record.content)
+            kind="channel_item", id=record.id, source=source, excerpt=excerpt
         ),
+        episode=record,
     )
 
 
@@ -766,90 +792,99 @@ def _tail_item(record: MemoryRecord, source: str) -> _ChannelItem:
 
 
 @dataclass(frozen=True, slots=True)
-class _EpisodeProjection:
-    """§4's explicit projection of one episode — never a serialization of the record."""
+class _ProjectedEpisode:
+    """One episode as ADR-0284 §8's projection shows it — never a serialization of it.
 
-    record: EpisodicMemory
-    source: str
-    report: bool
-    input_text: str | None
-    input_cut: bool
-    response: str | None
-    response_cut: bool
+    Every field rendered is a field of the projection, and no other field of the
+    stored episode is read (§8:3). Who the input came from is the projection's
+    ``origin``, never the episode's channel type (§2:3, superseding ADR-0276 §4:8's
+    test): an episode whose input came from outside is rendered as a report received.
+    """
+
+    episode_id: str
+    projection: EpisodeProjection
 
     @classmethod
-    def of(cls, record: EpisodicMemory, *, excerpt_chars: int) -> _EpisodeProjection:
-        """Project the fields §4 admits, and nothing else."""
-        processing = record.processing_record
-        channel = None
-        text: str | None = record.content
-        if processing is not None:
-            channel = processing.trigger.channel
-            text = _trigger_text(processing.trigger)
-        source = (
-            _channel_text(channel)
-            if channel is not None
-            else f"capture modality {record.capture.modality.value}"
-        )
-        input_text, input_cut = _cut(text, excerpt_chars)
-        response, response_cut = _cut(record.outcome, excerpt_chars)
+    def of(
+        cls, record: EpisodicMemory, *, excerpt_chars: int, admit_outside_input: bool
+    ) -> _ProjectedEpisode:
+        """Project the episode through ``core``'s one projection (§8:1)."""
         return cls(
-            record=record,
-            source=source,
-            report=channel is not None and channel.channel_type == _EVENT_CHANNEL,
-            input_text=input_text,
-            input_cut=input_cut,
-            response=response,
-            response_cut=response_cut,
+            episode_id=record.id,
+            projection=project_episode(
+                record, excerpt_chars=excerpt_chars, admit_outside_input=admit_outside_input
+            ),
         )
 
+    @property
+    def source(self) -> str:
+        """Where the episode arrived: its channel, or its capture modality (§8:1)."""
+        projection = self.projection
+        if projection.channel is not None:
+            return _channel_text(projection.channel)
+        if projection.capture_modality is not None:
+            return f"capture modality {projection.capture_modality.value}"
+        return "a channel the record does not name"
+
     def rendering(self, label: str) -> dict[str, object]:
-        """The episode under its ``P`` label, attributed from the record (§4)."""
-        rendered: dict[str, object] = {
+        """The episode under its label, attributed from its origin (§4, ADR-0284 §2:3)."""
+        report = self.projection.origin is InputOrigin.OUTSIDE
+        return {
             "label": label,
             "item": (
                 f"a report received on {self.source}, never something the user said"
-                if self.report
+                if report
                 else f"an earlier exchange on {self.source}"
             ),
-            "occurred_at": self.record.occurred_at.isoformat(),
-            "input": self.input_text,
-            "input_cut_to_first_chars": self.input_cut,
-            "response": self.response,
-            "response_cut_to_first_chars": self.response_cut,
+            **self.parts(),
         }
-        rendered.update(self.annotations())
-        return rendered
 
-    def annotations(self) -> dict[str, object]:
-        """Its processing status and reason, and the latest understanding, provisional."""
-        processing = self.record.processing_record
-        if processing is None:
-            return {}
+    def parts(self) -> dict[str, object]:
+        """Its time, input, response, status and reason, understanding and verdicts.
+
+        ADR-0284 §8:6: a rendering states the episode's status and reason, and the
+        phrase for each verdict it carries.
+        """
+        projection = self.projection
         rendered: dict[str, object] = {
-            "status": processing.status.value,
-            "reason": processing.reason.value,
+            "occurred_at": projection.occurred_at.isoformat(),
+            "input": None if projection.input is None else projection.input.text,
+            "input_cut_to_first_chars": projection.input is not None and projection.input.cut,
+            "response": None if projection.response is None else projection.response.text,
+            "response_cut_to_first_chars": (
+                projection.response is not None and projection.response.cut
+            ),
         }
-        if processing.understanding:
-            latest = processing.understanding[-1]
+        if projection.status is not None and projection.reason is not None:
+            rendered["status"] = projection.status.value
+            rendered["reason"] = projection.reason.value
+        if projection.meaning is not None and projection.meaning_ground is not None:
             rendered["understood_then"] = {
                 "provisional": "what the assistant understood then, not an established fact",
-                "meaning": latest.meaning,
-                "meaning_ground": latest.meaning_ground.value,
+                "meaning": projection.meaning,
+                "meaning_ground": projection.meaning_ground.value,
                 "unresolved": [
                     {"matter": matter.matter, "why_it_matters": matter.why_it_matters}
-                    for matter in latest.unresolved
+                    for matter in projection.unresolved
                 ],
             }
+        verdicts = [STEP_DISPOSITION_PHRASES[member] for member in projection.step_dispositions]
+        verdicts += [ROUTE_OUTCOME_PHRASES[member] for member in projection.route_outcomes]
+        if verdicts:
+            rendered["what_became_of_it"] = verdicts
         return rendered
+
+    def excerpt(self) -> str:
+        """ADR-0276 §2's referent excerpt: the input shown, else what was understood."""
+        projection = self.projection
+        if projection.input is not None:
+            return _excerpt(projection.input.text)
+        return _excerpt(projection.meaning or "")
 
     def referent(self) -> UnderstandingReferent:
         """The episode's stored id **exactly as stored**, and the rendering of its channel."""
         return UnderstandingReferent(
-            kind="episode",
-            id=self.record.id,
-            source=self.source,
-            excerpt=_excerpt(self.input_text or ""),
+            kind="episode", id=self.episode_id, source=self.source, excerpt=self.excerpt()
         )
 
 
@@ -886,16 +921,6 @@ class _RecalledFact:
         return UnderstandingReferent(
             kind="memory", id=self.record.id, source="semantic memory", excerpt=_excerpt(self.fact)
         )
-
-
-def _trigger_text(trigger: RecordedActivationTrigger) -> str | None:
-    """The trigger's exact payload text or transcript; a resume carries none (§4)."""
-    if not isinstance(trigger, RecordedChannelTrigger):
-        return None
-    payload = trigger.payload
-    if isinstance(payload, RecordedTextInput):
-        return payload.text
-    return payload.transcript
 
 
 # --- validation and resolution ---------------------------------------------------
@@ -1074,13 +1099,16 @@ def _within(deadline: float) -> None:
 
 
 def _input_rendering(text: str, channel: ChannelIdentity) -> dict[str, object]:
-    """The input, attributed from its channel and never from its text (ADR-0098 §2)."""
-    if channel.channel_type == _EVENT_CHANNEL:
+    """The input, attributed from where it came from and never from its text (ADR-0098 §2).
+
+    Who it came from is the origin its channel declares (ADR-0284 §2:2) — the very
+    declaration admission recorded on the trigger — and never a test of the channel
+    type, so a second outside channel is attributed as a report too (§2:3).
+    """
+    if input_origin(channel) is InputOrigin.OUTSIDE:
         received = f"a report received on {_channel_text(channel)}, never something the user said"
-    elif channel.channel_type == "conversation":
-        received = "the message the user just sent in this conversation"
     else:
-        received = f"an input received on {_channel_text(channel)}"
+        received = f"the message the user just sent on {_channel_text(channel)}"
     return {"received_as": received, "text": text}
 
 

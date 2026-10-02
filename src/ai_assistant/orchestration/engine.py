@@ -143,6 +143,7 @@ from ai_assistant.core.types import (
     Confirmation,
     ConfirmationEgress,
     ContinuationToken,
+    ControllerRule,
     ControllerStage,
     ConversationInputOptions,
     ConversationSummary,
@@ -196,6 +197,7 @@ from ai_assistant.core.types import (
     ReadCancellation,
     ReadKind,
     RecallOutcome,
+    RecordedResumeTrigger,
     ReferenceOutcome,
     ReplyCapability,
     ReplyChunk,
@@ -254,6 +256,7 @@ from ai_assistant.orchestration.channels import (
 from ai_assistant.orchestration.composing import ComposedReply
 from ai_assistant.orchestration.controller import (
     DEFAULT_STAGE_RECORD_LIMIT,
+    NO_VERDICT,
     ActivationController,
     ControllerStageRun,
     PassFacts,
@@ -261,6 +264,8 @@ from ai_assistant.orchestration.controller import (
     StageRecord,
     StageResult,
     TolerantStage,
+    Verdict,
+    run_recorded,
 )
 from ai_assistant.orchestration.disclosure import (
     BoundedAudienceSupply,
@@ -1936,37 +1941,6 @@ def _reference_outcome(disposition: GoalQuestionDisposition) -> ReferenceOutcome
     return ReferenceOutcome.ALREADY_SETTLED
 
 
-def _exchange_of(turn: TurnResult | None, step: StepOutcome | None, *, resumed: bool) -> str:
-    """The canonical text rendering of one exchange (ADR-0005 §1, ADR-0074 §4).
-
-    What was asked and how it turned out, in the store's own ``content`` field —
-    which is what makes the episode citable and retrievable without a second,
-    verbatim transcript store holding the same Tier 1 text under a second retention
-    rule (ADR-0074 §3).
-
-    ``turn`` is ``None`` only on a resumption recovered from durable state, where
-    ``resumed`` is necessarily ``True``, so the rendering is never empty.
-
-    **The user's half is the turn's own request and not its goal statement** (ADR-0248
-    §4, partially superseding ADR-0225 §1's fourth clause in its first limb). ADR-0005
-    §1's ``content`` and ADR-0074 §4's *"what was asked, and how it turned out"* are
-    **fulfilled** by that rather than changed — neither text ever identified the goal
-    statement as the source — and at ADR-0248 the two are byte-equal (§6), so this
-    rendering does not move. What it buys is that the episode keeps quoting the user
-    once the goal comes to mean the assistant's reading of them.
-    """
-    lines: list[str] = []
-    if turn is not None:
-        lines.append(f"The user asked: {turn.utterance}")
-        if turn.plan.rationale:
-            lines.append(f"The assistant's plan: {turn.plan.rationale}")
-    if resumed:
-        lines.append("The user answered the confirmation this action was parked on.")
-    if step is not None and step.tool_id is not None:
-        lines.append(f"The action selected the tool {step.tool_id}.")
-    return "\n".join(lines)
-
-
 def _routed_outcome_of(outcome: RouteOutcome) -> ExchangeDisposition:  # noqa: PLR0911 — one return per RouteOutcome member; collapsing them would hide the totality `assert_never` rests on
     """What became of a routed exchange, as its episode's ``disposition`` (§10, ADR-0221 §2).
 
@@ -2012,28 +1986,6 @@ def _routed_outcome_of(outcome: RouteOutcome) -> ExchangeDisposition:  # noqa: P
             return ExchangeDisposition.ROUTED_FAILED
         case _:  # pragma: no cover - exhaustive
             assert_never(outcome)
-
-
-def _routed_exchange_of(utterance: str | None, *, resumed: bool) -> str:
-    """The canonical text rendering of a routed exchange (ADR-0074 §4, ADR-0197 §10).
-
-    **The utterance is threaded here rather than read off a turn**, because a routed
-    pass produces no ``TurnResult`` — which is the one obligation ADR-0197 §10 warns a
-    lane will discover the hard way: ``Engine._capture`` builds its episode content from
-    the turn, so a lane that wired routing without threading the utterance would produce
-    a captured exchange with the user's own sentence missing from it, a silent hole in
-    the conversation record visible only to the next person to resume that conversation.
-
-    A resume answering a routed park has no utterance of its own — the adapter relays an
-    opaque token and a boolean — so its episode says what it is, exactly as a resumed
-    step's does.
-    """
-    lines: list[str] = []
-    if utterance is not None:
-        lines.append(f"The user asked: {utterance}")
-    if resumed:
-        lines.append("The user answered the confirmation this operation was parked on.")
-    return "\n".join(lines)
 
 
 #: How a routed pass composes its answer: the whole routed account, and the
@@ -2356,6 +2308,21 @@ class _WithheldResumption:
     #: What the drive that raised established: ADR-0264 §2's contribution, and ADR-0235
     #: §2's establishing pair where the resolution collected one.
     outbound: DriveObservation
+
+
+def _resumed_drive_verdict(driven: StepDisposition | _WithheldResumption) -> Verdict:
+    """ADR-0284 §5:4: what a resumed step reached, on its ``drive`` entry.
+
+    A withheld claim (ADR-0261 §7) reached no disposition.
+    """
+    if isinstance(driven, _WithheldResumption):
+        return NO_VERDICT
+    return Verdict(step_disposition=driven.disposition)
+
+
+def _resumed_route_verdict(routed: RoutedOperation) -> Verdict:
+    """ADR-0284 §5:4: what an answered routed park reached, on its ``routing`` entry."""
+    return Verdict(route_outcome=routed.outcome)
 
 
 def _paired_deliveries(
@@ -2793,6 +2760,26 @@ def _windows_expired(working: _ActivationPass) -> Exception | None:
     if isinstance(working, _EventPass):
         return ChannelProcessingTimeoutError("informational event processing timed out")
     return ModelTimeoutError(_WINDOWS_EXPIRED)
+
+
+def _drive_verdict(working: _TurnPass) -> Verdict:
+    """ADR-0284 §5:2: the ``Disposition`` the driven step reached, on its ``drive`` entry.
+
+    ``None`` where the drive reached none — a claim withheld under ADR-0261 §7, or a
+    drive that raised before the runner returned.
+    """
+    step = None if working.driven is None else working.driven.step
+    return Verdict(step_disposition=None if step is None else step.disposition)
+
+
+def _route_verdict(working: _TurnPass) -> Verdict:
+    """ADR-0284 §5:2: the ``RouteOutcome`` the taken route reached, on its ``routing`` entry.
+
+    ``None`` where routing declined, or where the routed pass raised before producing
+    its outcome: a taken route's outcome is what the stage leaves on the working set.
+    """
+    routed = None if working.outcome is None else working.outcome.routed
+    return Verdict(route_outcome=None if routed is None else routed.outcome)
 
 
 #: What a recall decision makes of its stage's entry (ADR-0281 §5).
@@ -10094,6 +10081,38 @@ class Engine:
         """
         return self._checked(await coro, method)
 
+    async def _resumed_compose[T](
+        self, compose: Callable[[], Awaitable[T]], *, composes: bool = True
+    ) -> T:
+        """Compose a resume's reply, recording the ``compose`` stage where it composes.
+
+        ADR-0284 §5:4: an entry for ``compose``, due ``reply_owed``, where the resume
+        composes. A resumed step whose parked turn did not survive a restart composes
+        nothing (ADR-0052 §3), and then no entry is recorded.
+        """
+        if not composes:
+            return await compose()
+        return await run_recorded(
+            self._resume_record,
+            ControllerStage.COMPOSE,
+            ControllerRule.REPLY_OWED,
+            clock=self._clock,
+            body=compose,
+        )
+
+    def _resume_record(self) -> StageRecord | None:
+        """The stage record a resume appends to, once its activation is admitted.
+
+        ADR-0284 §5:5: the resume path is not run by the controller and records its
+        stages through the controller's own record. ``None`` where no resume was
+        admitted — an internal call, or a resolution that never reached its
+        resolution point — and then nothing is recorded.
+        """
+        state = active_state()
+        if state is None or not isinstance(state.trigger, RecordedResumeTrigger):
+            return None
+        return state.stages
+
     def _reject_if_closing(self) -> None:
         """Refuse new work once shutdown has begun (ADR-0042 §2 stops accepting).
 
@@ -10478,7 +10497,6 @@ class Engine:
             conversation,
             turn=None,
             step=None,
-            resumed=False,
             composed=ComposedReply(text=disambiguation_reply(disambiguation), degraded=False),
             asked=asked,
             # This pass assembled no supply at all, so ADR-0204 §2's evaluation had
@@ -12709,7 +12727,7 @@ class Engine:
             working,
             (
                 Stage(ControllerStage.BEGIN_CONVERSATION, self._begin_conversation_stage),
-                Stage(ControllerStage.ROUTING, self._routing_stage),
+                Stage(ControllerStage.ROUTING, self._routing_stage, verdict=_route_verdict),
                 Stage(ControllerStage.WINDOWS, self._windows_stage, expired=_windows_expired),
                 TolerantStage(ControllerStage.RECALL, self._recall_stage, expired=_recall_expired),
                 Stage(
@@ -12719,7 +12737,7 @@ class Engine:
                 Stage(ControllerStage.ASK_DISAMBIGUATION, self._disambiguation_stage),
                 Stage(ControllerStage.RECONCILE, self._reconcile_stage),
                 Stage(ControllerStage.TURN_LOOP, self._turn_loop_stage),
-                Stage(ControllerStage.DRIVE, self._drive_stage),
+                Stage(ControllerStage.DRIVE, self._drive_stage, verdict=_drive_verdict),
                 Stage(ControllerStage.COMPOSE, self._compose_stage),
             ),
         )
@@ -13395,7 +13413,6 @@ class Engine:
             _resolved_turn(working).channel.instance_id,
             turn=planned.turn,
             step=None if driven is None else driven.step,
-            resumed=False,
             parked=None if driven is None else driven.parked,
             composed=None if composition is None else composition.composed,
             # ADR-0225 §1's first case: the pass carried a turn, so the user's own
@@ -13870,7 +13887,17 @@ class Engine:
                 remember_recipients_until=remember_recipients_until,
                 conversation_id=park.conversation_id,
             )
-            return park, await self._resume_routed(park, approved=approved)
+            # ADR-0284 §5:4: the resume continues the routed operation that parked, so
+            # it records a `routing` entry due `park_answered`, carrying the outcome.
+            routed = await run_recorded(
+                self._resume_record,
+                ControllerStage.ROUTING,
+                ControllerRule.PARK_ANSWERED,
+                clock=self._clock,
+                body=lambda: self._resume_routed(park, approved=approved),
+                verdict=_resumed_route_verdict,
+            )
+            return park, routed
 
     async def _resume_routed(self, park: _RoutedPark, *, approved: bool) -> RoutedOperation:
         """Record the answer and perform what it authorised, still under the lock (§7, §9).
@@ -13931,15 +13958,16 @@ class Engine:
         park's own, recovered from the entry rather than passed by the adapter: a
         ``resume`` is handed an opaque token and nothing else.
         """
-        composed = await self._composing.compose_routed(
-            operation=routed.operation, outcome=routed.outcome
+        composed = await self._resumed_compose(
+            lambda: self._composing.compose_routed(
+                operation=routed.operation, outcome=routed.outcome
+            )
         )
         _produced(composed)
         return await self._capture(
             park.conversation_id,
             turn=None,
             step=None,
-            resumed=True,
             composed=composed,
             routed=routed,
             # ADR-0225 §1's third case: this pass received no user words at all — it
@@ -13997,10 +14025,8 @@ class Engine:
             conversation,
             turn=None,
             step=None,
-            resumed=False,
             composed=composed,
             routed=routed,
-            utterance=utterance,
             spoken=spoken,
             # ADR-0225 §1's second case: a routed pass threads its utterance, which
             # is the user's own words for an episode that has no turn to read them
@@ -14691,8 +14717,10 @@ class Engine:
                 approved=approved,
                 remember_recipients_until=remember_recipients_until,
             )
-            composed = await self._compose(
-                resolution.parked.turn, None, deliveries={}, outbound=withheld_outbound
+            parked_turn = resolution.parked.turn
+            composed = await self._resumed_compose(
+                lambda: self._compose(parked_turn, None, deliveries={}, outbound=withheld_outbound),
+                composes=parked_turn is not None,
             )
             return await self._capture_resumption(
                 resolution.parked,
@@ -14760,14 +14788,17 @@ class Engine:
         verified = (
             None if allowed_by is None else await self._compared(await self._attempt_of(step.state))
         )
-        composed = await self._compose(
-            parked.turn,
-            step,
-            deliveries={},
-            outbound=outbound,
-            # ADR-0262 §6's two values, given to the stage exactly as they are on a
-            # turn's own two branches.
-            goal=_GoalPass(facts=self._pass_to_composing(verified, GoalFacts())),
+        composed = await self._resumed_compose(
+            lambda: self._compose(
+                parked.turn,
+                step,
+                deliveries={},
+                outbound=outbound,
+                # ADR-0262 §6's two values, given to the stage exactly as they are on a
+                # turn's own two branches.
+                goal=_GoalPass(facts=self._pass_to_composing(verified, GoalFacts())),
+            ),
+            composes=parked.turn is not None,
         )
         # `resumed_from` is read above the resolution, so the ledger counts this pass's
         # own work and not the interval the park spent waiting for the user (§5).
@@ -15015,24 +15046,25 @@ class Engine:
             records=resumed.admitted,
             composes=True,
         )
-        composed = await self._compose(
-            turn,
-            None,
-            deliveries=_paired_deliveries(history.deliveries, turn.memories),
-            # ADR-0244 §8: "where the dispatched read yielded no records … the turn
-            # still composes, and ADR-0242 §6's carrier gives the composing stage its
-            # member exactly as it does on any other turn". The member is the one the
-            # dispatch computed, by value and never a second computation.
-            search_not_serviced=answered.not_serviced,
-            # ADR-0264 §6's fragment on this pass exactly as on any other unrouted one:
-            # it composes, so it is given one.
-            outbound=outbound,
+        composed = await self._resumed_compose(
+            lambda: self._compose(
+                turn,
+                None,
+                deliveries=_paired_deliveries(history.deliveries, turn.memories),
+                # ADR-0244 §8: "where the dispatched read yielded no records … the turn
+                # still composes, and ADR-0242 §6's carrier gives the composing stage its
+                # member exactly as it does on any other turn". The member is the one
+                # the dispatch computed, by value and never a second computation.
+                search_not_serviced=answered.not_serviced,
+                # ADR-0264 §6's fragment on this pass exactly as on any other unrouted
+                # one: it composes, so it is given one.
+                outbound=outbound,
+            )
         )
         return await self._capture(
             park.conversation_id,
             turn=turn,
             step=None,
-            resumed=True,
             composed=composed,
             # ADR-0225 §1's first case as ADR-0248 §4 states it: the pass carried a
             # turn, so the user's own words are that turn's own `utterance` — the
@@ -15220,42 +15252,61 @@ class Engine:
                 )
 
             observed = DriveObservation()
-            try:
-                disposition = await self._runner.resume(
-                    state,
-                    parked.step_id,
-                    confirmation_id=parked.confirmation_id,
-                    attempt_id=owner.id,
-                    approved=approved,
-                    timeout=timeout,
-                    remember_recipients_until=remember_recipients_until,
-                    on_ruled=ruled,
-                    on_resolving=resolving,
-                    outbound=observed,
-                )
-            except ClaimRefused:
-                # ADR-0261 §7 on the resumption, which is the case it is most likely to
-                # be met in: a user parks a step, changes their mind about the goal, and
-                # then answers the confirmation. This resolution's own
-                # ``AWAITING_APPROVAL → RUNNING`` claim is the ``commit_transition`` call
-                # *"its own claim made"*, and the two raisers of this class are liveness
-                # conjuncts the store evaluates on a ``→ RUNNING`` transition alone — so
-                # it is the only call under this ``await`` that can produce one.
-                #
-                # **What the park becomes is already decided and is not this decision's**
-                # (ADR-0198 §1, §3). The settled record is installed *"only where the
-                # answer was recorded, the runner returned and the park was evicted"*,
-                # and the runner did not return: so the park stands exactly where a
-                # resolution that raised leaves it, nothing is evicted and nothing is
-                # retained. What changes is only what the caller is **told** — a composed
-                # outcome naming where the goal stands, rather than an exception.
-                #
-                # **A refusal the read cannot explain propagates**, as does every other
-                # class, exactly as on the turn path.
-                withheld = await self._withheld_state(state, attempt_id=owner.id)
-                if withheld is None:
-                    raise
-                return _WithheldResumption(parked=parked, withheld=withheld, outbound=observed)
+
+            async def drive() -> StepDisposition | _WithheldResumption:
+                try:
+                    return await self._runner.resume(
+                        state,
+                        parked.step_id,
+                        confirmation_id=parked.confirmation_id,
+                        attempt_id=owner.id,
+                        approved=approved,
+                        timeout=timeout,
+                        remember_recipients_until=remember_recipients_until,
+                        on_ruled=ruled,
+                        on_resolving=resolving,
+                        outbound=observed,
+                    )
+                except ClaimRefused:
+                    # ADR-0261 §7 on the resumption, which is the case it is most likely to
+                    # be met in: a user parks a step, changes their mind about the goal, and
+                    # then answers the confirmation. This resolution's own
+                    # ``AWAITING_APPROVAL → RUNNING`` claim is the ``commit_transition`` call
+                    # *"its own claim made"*, and the two raisers of this class are liveness
+                    # conjuncts the store evaluates on a ``→ RUNNING`` transition alone — so
+                    # it is the only call under this ``await`` that can produce one.
+                    #
+                    # **What the park becomes is already decided and is not this decision's**
+                    # (ADR-0198 §1, §3). The settled record is installed *"only where the
+                    # answer was recorded, the runner returned and the park was evicted"*,
+                    # and the runner did not return: so the park stands exactly where a
+                    # resolution that raised leaves it, nothing is evicted and nothing is
+                    # retained. What changes is only what the caller is **told** — a composed
+                    # outcome naming where the goal stands, rather than an exception.
+                    #
+                    # **A refusal the read cannot explain propagates**, as does every other
+                    # class, exactly as on the turn path.
+                    withheld = await self._withheld_state(state, attempt_id=owner.id)
+                    if withheld is None:
+                        raise
+                    return _WithheldResumption(parked=parked, withheld=withheld, outbound=observed)
+
+            # ADR-0284 §5:4: the resume continues the stage its step parked in, so it
+            # records a `drive` entry due `park_answered`, carrying the disposition the
+            # step reached — none where the claim was withheld. The activation is
+            # admitted at the resolution point, inside the drive, which is why the
+            # record is read once the drive ends.
+            driven = await run_recorded(
+                self._resume_record,
+                ControllerStage.DRIVE,
+                ControllerRule.PARK_ANSWERED,
+                clock=self._clock,
+                body=drive,
+                verdict=_resumed_drive_verdict,
+            )
+            if isinstance(driven, _WithheldResumption):
+                return driven
+            disposition = driven
             # A resolving disposition is EXECUTED or DENIED, never AWAITING_CONFIRMATION,
             # so no new handle is needed here.
             step = await self._step_outcome(
@@ -15496,7 +15547,6 @@ class Engine:
             origin.conversation_id,
             turn=parked.turn,
             step=step,
-            resumed=True,
             composed=composed,
             # ADR-0261 §7's field, carried by value from the resolution that met the
             # refusal — `None` on every resolution that drove.
@@ -15549,13 +15599,12 @@ class Engine:
             attempt_report=attempt_report,
         )
 
-    async def _capture(  # noqa: PLR0913 — the capture point's five inputs plus the parked binding, the routed account, the utterance a routed pass has no turn to carry, the user's own words the transcript archive keeps, the turn's disclosure evaluation, its origin mark and its spoken capture; every one is a distinct fact about the pass
+    async def _capture(  # noqa: PLR0913 — the capture point's five inputs plus the parked binding, the routed account, the user's own words the transcript archive keeps, the turn's disclosure evaluation, its origin mark and its spoken capture; every one is a distinct fact about the pass
         self,
         conversation_id: str,
         *,
         turn: TurnResult | None,
         step: StepOutcome | None,
-        resumed: bool,
         composed: ComposedReply | None,
         asked: str | None,
         supplied_withheld: bool,
@@ -15563,7 +15612,6 @@ class Engine:
         derived_from_external: bool,
         parked: ParkedBinding | None = None,
         routed: RoutedOperation | None = None,
-        utterance: str | None = None,
         spoken: _SpokenCapture | None = None,
         recipient_grant: RecipientGrantOutcome | None = None,
         search_not_serviced: SearchNotServiced | None = None,
@@ -15609,24 +15657,19 @@ class Engine:
         ``reply_degraded``'s to report and is reported there; §1 adds no field saying
         a stored reply was cut short.
 
-        **What became of the pass goes into ``disposition``, as a member** (ADR-0221
-        §2) — :func:`_outcome_of` on a driven or undriven step, :func:`_routed_outcome_of`
-        on a routed pass — where until ADR-0221 the phrase for it went into ``outcome``.
-        The three render sites produce that phrase from ``disposition``, so no prompt
-        moves and the reply reaches no model (§3).
+        **What became of the pass is the transcript entry's ``disposition``**
+        (ADR-0221 §2, as ADR-0284 §5:3 keeps it) — :func:`_outcome_of` on a driven or
+        undriven step, :func:`_routed_outcome_of` on a routed pass. The episode's own
+        record of it is the verdict on its ``drive`` or ``routing`` stage entry
+        (ADR-0284 §5:2), and no renderer reads the episode's ``disposition`` field,
+        which ADR-0284 §11's lane 6 removes.
 
-        **A routed pass is captured too, and its content is threaded rather than read off
-        a turn it does not have** (ADR-0197 §10). ``utterance`` is that thread: a lane that
-        wired routing without it would produce a captured exchange with the user's own
-        sentence missing from it, a silent hole in the conversation record visible only to
-        the next person to resume that conversation. What the episode carries is the
-        utterance and a phrase for the route's outcome, and **no part of the routed
-        account** — not the listing, not the display subject, not the scalar argument, and
-        not the candidates. That is §6's second sentence made mechanical: a conversation's
-        recent turns are retrieved into the next turn's prompt (ADR-0074 §5, ADR-0158 §5),
-        so a capture that folded a routed listing into the episode would deliver the routed
-        result to a model one turn later, satisfying every same-pass clause of §6 while
-        breaking §6.
+        **The episode's ``content`` is not composed here** (ADR-0284 §7:1). The writer
+        derives it from the processing record by one rule, on every channel, so a
+        routed pass is searchable by its understanding or its status and by the user's
+        own words as its trigger recorded them, and **no part of the routed account** —
+        not the listing, not the display subject, not the scalar argument, and not the
+        candidates — reaches it, since none of those is on the record (ADR-0197 §6, §10).
 
         **``supplied_withheld`` is a property of the turn whose rendering the
         episode carries, and it is passed at every call site** (ADR-0204 §2, whose
@@ -15634,18 +15677,17 @@ class Engine:
         ``placement``). This
         method neither computes nor defaults it: the turn passes its own evaluation, a
         resumption passes the parked turn's, and a routed pass passes ``False`` —
-        which is true of what its episode holds rather than a fallback, because
-        ``_routed_exchange_of`` renders the utterance and a phrase for the route's
-        outcome with no goal statement and no plan rationale of any turn in it.
+        which is true of what its episode holds rather than a fallback, because a
+        routed pass carries no goal statement and no plan rationale of any turn.
 
         **``asked`` is the user's own words, passed at every call site, and this
         method neither computes nor derives it** (ADR-0225 §1) — a fourth field with
         the shape ``supplied_withheld``, ``modality`` and ``derived_from_external``
         already have. It is what the *transcript archive* keeps as the user's half of
         the exchange, and it is threaded rather than read off ``content`` for the
-        reason §1 gives: ``content`` is ``_exchange_of``'s rendering, built for the
-        observer and for retrieval, and the user's sentence is recoverable from it —
-        if at all — only by parsing a prefix this system is free to change.
+        reason §1 gives: ``content`` is the episode's search text (ADR-0284 §7), and
+        the user's sentence is recoverable from it — if at all — only by parsing a
+        derivation this system is free to change.
 
         Its three cases are ADR-0221 §5's three capture cases and no other partition
         is introduced. :meth:`_run_turn` passes ``turn.utterance`` on both its
@@ -15701,11 +15743,6 @@ class Engine:
         state = active_state()
         if state is not None:
             state.facts = CaptureFacts(
-                content=(
-                    _exchange_of(turn, step, resumed=resumed)
-                    if routed is None
-                    else _routed_exchange_of(utterance, resumed=resumed)
-                ),
                 asked=asked,
                 response=None if composed is None else composed.text,
                 disposition=(

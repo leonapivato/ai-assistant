@@ -22,6 +22,7 @@ import pytest
 
 from ai_assistant.app import build_engine
 from ai_assistant.core.config import EmbedderKind, Settings
+from ai_assistant.core.episode_encoding import episode_content
 from ai_assistant.core.types import (
     ActionPlan,
     AssociationVerdict,
@@ -233,14 +234,14 @@ async def test_a_conversational_episode_is_named_for_its_activation_on_its_chann
     assert await composed.held(conversation_id) == [result.capture.episode_id]
 
 
-async def test_history_returns_the_channels_eligible_episodes_in_number_order_within_the_bound(
+async def test_history_returns_the_channels_newest_episodes_in_number_order_within_the_bound(
     composed: Composed,
 ) -> None:
-    """§4:1: the newest ``HISTORY_REPLAY_BOUND`` eligible episodes, number ascending.
+    """§4:1: the newest ``HISTORY_REPLAY_BOUND`` episodes, number ascending.
 
     The channel is filled past the bound with copies of a real episode, and the
-    newest of them is made ineligible: it is on the channel, and it consumes no
-    place in the page.
+    newest of them is a failed pass carrying the retired ineligible flag: ADR-0284
+    §6:2 reads it like any other, so it takes the newest place in the page.
     """
     first = await composed.say("hello")
     conversation_id = _conversation(first)
@@ -272,15 +273,20 @@ async def test_history_returns_the_channels_eligible_episodes_in_number_order_wi
 
     assert history.degraded is False
     assert [record.id for record in history.records] == [
-        copy.id for copy in copies[-HISTORY_REPLAY_BOUND:]
+        *(copy.id for copy in copies[-(HISTORY_REPLAY_BOUND - 1) :]),
+        "activation:ineligible",
     ]
     assert "activation:ineligible" in await composed.held(conversation_id)
 
 
-async def test_a_pass_that_ends_before_capture_is_on_the_channel_and_absent_from_history(
+async def test_a_failed_pass_on_a_conversation_appears_in_its_history_with_its_status(
     composed: Composed,
 ) -> None:
-    """§4:1 with ADR-0275 §7: the failed pass is recorded, ineligible, and never replayed."""
+    """ADR-0284 §11:2, §6:2: the failed pass is recorded and replayed, carrying its status.
+
+    Through production composition: the episode is on the conversation's channel, its
+    history reads it in its place, and its record says how processing ended.
+    """
     first = await composed.say("hello")
     conversation_id = _conversation(first)
 
@@ -290,11 +296,16 @@ async def test_a_pass_that_ends_before_capture_is_on_the_channel_and_absent_from
     episode = await composed.memory.get(failed)
     assert isinstance(episode, EpisodicMemory)
     assert episode.processing_record is not None
-    assert episode.processing_record.model_eligible is False
+    assert episode.processing_record.status is ProcessingStatus.FAILED
     assert episode.processing_record.trigger.channel == conversation_channel(conversation_id)
     assert await composed.held(conversation_id) == [first.capture.episode_id, failed]
     history = await composed.engine._conversations.history(conversation_id)
-    assert [record.id for record in history.records] == [first.capture.episode_id]
+    assert [record.id for record in history.records] == [first.capture.episode_id, failed]
+    (replayed,) = [record for record in history.records if record.id == failed]
+    assert isinstance(replayed, EpisodicMemory)
+    assert replayed.processing_record is not None
+    assert replayed.processing_record.status is ProcessingStatus.FAILED
+    assert replayed.content == episode_content(replayed), "§7:1: the one rule, failed or not"
 
 
 async def _parked(composed: Composed) -> tuple[str, str, Any]:
