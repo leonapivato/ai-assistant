@@ -4953,10 +4953,18 @@ def _episode_lines(projection: EpisodeProjection, *, opening: str) -> list[str]:
     """An episode's bullet and continuation lines, from its projection alone.
 
     The bullet opens with the tag, the instant and what arrived
-    (:func:`_episode_input`); then, each on a line of its own and only where the
-    projection carries it, what the assistant understood and how firmly, each matter
-    it left unresolved, the phrase for each verdict a stage reached, and how
-    processing ended.
+    (:func:`_episode_input`); then, each on a line of its own, the phrase for each
+    verdict a stage reached, and how processing ended.
+
+    **No stored understanding version is rendered** — not the meaning, its ground or
+    an unresolved matter. ADR-0276 §4:13, standing under ADR-0284, lets no earlier
+    understanding reach any stage of a turn on a channel of unbounded audience, and
+    an understanding is derived from whatever the understanding stage's windows held,
+    which the episode's placement does not account for. The planner is handed no
+    audience (``Planner.plan`` carries none, and adding one is a Protocol change), so
+    it renders none on any turn — what ``orchestration/composing.py`` does for the
+    same reason. §8:6 owes the status, the reason and the verdict phrases, and
+    nothing more of the projection.
 
     **Status, reason and every verdict's phrase are stated** (ADR-0284 §8:6), so a
     failed or interrupted pass reads as one rather than as an ordinary exchange. The
@@ -4979,16 +4987,6 @@ def _episode_lines(projection: EpisodeProjection, *, opening: str) -> list[str]:
     """
     lines = [
         f"{opening}[episodic] at {projection.occurred_at.isoformat()}, {_episode_input(projection)}"
-    ]
-    if projection.meaning is not None and projection.meaning_ground is not None:
-        lines.append(
-            f"    the assistant understood it ({projection.meaning_ground.value}) as: "
-            f"{_quoted_span(projection.meaning)}"
-        )
-    lines += [
-        f"    left unresolved: {_quoted_span(matter.matter)}, which matters because: "
-        f"{_quoted_span(matter.why_it_matters)}"
-        for matter in projection.unresolved
     ]
     lines += [
         f"    how it turned out: {_quoted_span(STEP_DISPOSITION_PHRASES[disposition])}"
