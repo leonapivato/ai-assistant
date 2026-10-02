@@ -436,6 +436,34 @@ async def test_a_conversation_tail_renders_both_halves_under_h_labels() -> None:
     )
 
 
+async def test_a_tail_record_alone_in_the_channel_window_shows_no_understanding_version() -> None:
+    """ADR-0276 §4, standing under ADR-0284: the channel window renders no stored understanding.
+
+    A turn on a channel of unbounded audience takes no episode window and is shown its
+    tail through the channel window alone, so a tail record there carries its two
+    halves, its status and its verdicts — and no earlier understanding, which was
+    derived from whatever that pass's windows held. Only a record also in the episode
+    window carries one, on the turns that have that window.
+    """
+    understood = ActivationUnderstanding(
+        version=1,
+        recorded_at=AT,
+        producer=UnderstandingProducer.INTERPRETATION,
+        meaning="UNDERSTOOD-THEN-SENTINEL",
+        meaning_ground=UnderstandingGround.STATED,
+    )
+    tail = (_episode("conv:c-1:1", at=AT - timedelta(minutes=2), understanding=(understood,)),)
+    model = FakeModelProvider.scripted(_proposal())
+    await _understand(
+        _stage(model, await _store()), window=ConversationWindow(CONVERSATION, tail), episodes=False
+    )
+    (item,) = _sent(model)["channel_window"]
+    assert item["input"] == "Find a campsite near Riverside."
+    assert item["status"] == "completed"
+    assert "understood_then" not in item
+    assert "UNDERSTOOD-THEN-SENTINEL" not in model.calls[0].messages[1].content
+
+
 # --- the episode window -----------------------------------------------------------------
 
 
