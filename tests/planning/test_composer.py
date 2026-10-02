@@ -33,14 +33,33 @@ from query_composer_contract import (
 from ai_assistant import planning
 from ai_assistant.core.config import Settings
 from ai_assistant.core.types import (
+    ActivationUnderstanding,
+    ChannelContext,
+    ChannelIdentity,
+    ControllerRule,
+    ControllerStage,
+    EpisodeProcessingRecord,
+    EpisodeResponseKind,
+    EpisodicMemory,
+    InputOrigin,
     MemorySource,
     Message,
     Placement,
+    ProcessingReason,
+    ProcessingStatus,
     Provenance,
     QueryRefusal,
+    RecordedChannelTrigger,
+    RecordedTextInput,
     Role,
     SearchSupply,
     SemanticMemory,
+    StageEntry,
+    StageOutcome,
+    UnderstandingGround,
+    UnderstandingOmission,
+    UnderstandingProducer,
+    WholeTextReply,
     encodable_text,
 )
 from ai_assistant.planning.composer import (
@@ -61,6 +80,7 @@ from ai_assistant.testing.cancellation import SuspendableResource
 if TYPE_CHECKING:
     from collections.abc import Sequence
 
+    from ai_assistant.core.types import MemoryRecord
     from ai_assistant.testing.cancellation import LoopSuspension
 
 #: A small bound, so the boundary cases compose a handful of characters.
@@ -966,3 +986,150 @@ async def test_a_cancelled_composition_leaves_no_outcome_behind() -> None:
 def test_the_composer_is_reachable_through_the_package() -> None:
     """``app/composition.py`` wires it from here in a later lane (ADR-0231 §17)."""
     assert planning.ModelBackedQueryComposer is ModelBackedQueryComposer
+
+
+# --- ADR-0284 §8 at this prompt (#2640) ----------------------------------------
+# A stored episode reaches the composer through its projection: the user's own input,
+# or a recordless episode's `content`, and nothing else of it — no meaning, which also
+# keeps ADR-0276 §4:13's spoken-turn guard, and never a processed episode's `content`.
+
+_EPISODE_AT: Final = datetime(2026, 1, 1, tzinfo=UTC)
+
+#: A processed episode's ``content``: its search text, which no model is shown (§8:3).
+_SEARCH_TEXT: Final = "Quokka-Lantern-7: the user asked about the Clerigos tower"
+
+
+def _episode(
+    record_id: str,
+    words: str,
+    *,
+    origin: InputOrigin | None = InputOrigin.USER,
+    meaning: str | None = "the user asked about the Clerigos tower",
+) -> EpisodicMemory:
+    """An episode with a processing record, as the activation writer stores one."""
+    target = ChannelIdentity(
+        channel_type="informational_event" if origin is InputOrigin.OUTSIDE else "conversation",
+        instance_id="c1",
+    )
+    understanding = (
+        ()
+        if meaning is None
+        else (
+            ActivationUnderstanding(
+                version=1,
+                recorded_at=_EPISODE_AT,
+                producer=UnderstandingProducer.INTERPRETATION,
+                meaning=meaning,
+                meaning_ground=UnderstandingGround.STATED,
+            ),
+        )
+    )
+    processing = EpisodeProcessingRecord(
+        activation_id=f"activation-{record_id}",
+        started_at=_EPISODE_AT,
+        ended_at=_EPISODE_AT,
+        trigger=RecordedChannelTrigger(
+            target=target,
+            channel=target,
+            payload=RecordedTextInput(text=words),
+            context=ChannelContext(),
+            conversation=None,
+            reply=None if origin is InputOrigin.OUTSIDE else WholeTextReply(),
+            origin=origin,
+        ),
+        status=ProcessingStatus.FAILED,
+        reason=ProcessingReason.COMPOSITION_FAILED,
+        response_kind=EpisodeResponseKind.NONE,
+        model_eligible=True,
+        understanding=understanding,
+        understanding_omitted=None if understanding else UnderstandingOmission.NOT_REACHED,
+        stages=(
+            StageEntry(
+                stage=ControllerStage.END,
+                due=ControllerRule.NOTHING_DUE,
+                started_at=_EPISODE_AT,
+                ended_at=_EPISODE_AT,
+                outcome=StageOutcome.DONE,
+            ),
+        ),
+    )
+    return EpisodicMemory(
+        id=record_id,
+        content=_SEARCH_TEXT,
+        occurred_at=_EPISODE_AT,
+        provenance=Provenance(
+            source=MemorySource.OBSERVED, confidence=0.9, last_updated=_EPISODE_AT
+        ),
+        processing_record=processing,
+    )
+
+
+async def _records_lines(*records: MemoryRecord) -> list[str] | None:
+    """The records message's notes, or ``None`` where no records message was built."""
+    model = FakeModelProvider(json.dumps({"query": "porto"}))
+    await _over(model).compose(
+        SearchSupply(utterance=encodable_text("find more about that"), records=records)
+    )
+    if len(model.last_messages) == 2:
+        return None
+    return model.last_messages[-1].content.splitlines()[1:]
+
+
+async def test_an_episode_is_shown_as_the_users_words_and_nothing_else() -> None:
+    """§8:3 and ADR-0238 §2: the projection's input, never ``content`` or the meaning.
+
+    The meaning is withheld on every turn: ADR-0276 §4:13 forbids an earlier
+    understanding on a turn of unbounded audience, and this module is handed no
+    audience. A failed episode is the shape ADR-0284 §6 now lets reach a supply.
+    """
+    notes = await _records_lines(_episode("e1", "what is that tower in Porto?"))
+
+    assert notes == [f"  {json.dumps('what is that tower in Porto?')}"]
+    prompt = "\n".join(notes or ())
+    assert "Quokka-Lantern-7" not in prompt
+    assert "Clerigos" not in prompt
+
+
+async def test_an_episode_with_no_input_to_show_is_skipped_in_order() -> None:
+    """An outside report's text is never admitted (§8:5), and an unknown origin shows none.
+
+    Such an episode has nothing ADR-0238 §2 admits, so it is not rendered — no
+    placeholder a model could read as a note — and the rest keep their order. A supply
+    of such episodes alone builds no records message at all.
+    """
+    report = "The clinic moved the appointment"
+    outside = _episode("e2", report, origin=InputOrigin.OUTSIDE)
+    unknown = _episode("e3", "who said this?", origin=None)
+
+    notes = await _records_lines(
+        _belief("b1", "the Douro flows past Porto"), outside, unknown, _episode("e4", "and that?")
+    )
+
+    assert notes == [
+        f"  {json.dumps('the Douro flows past Porto')}",
+        f"  {json.dumps('and that?')}",
+    ]
+    assert await _records_lines(outside, unknown) is None
+
+
+async def test_a_recordless_episode_is_shown_as_its_content() -> None:
+    """ADR-0284 §8:2: the one path on which ``content`` is a model's to see."""
+    recordless = EpisodicMemory(
+        id="r1",
+        content="the user asked about the Clerigos tower",
+        occurred_at=_EPISODE_AT,
+        provenance=Provenance(
+            source=MemorySource.OBSERVED, confidence=0.9, last_updated=_EPISODE_AT
+        ),
+    )
+
+    assert await _records_lines(recordless) == [
+        f"  {json.dumps('the user asked about the Clerigos tower')}"
+    ]
+
+
+async def test_a_long_input_states_its_cut_outside_the_span() -> None:
+    """§8:1 carries the cut; the note says so after its quoted span, never inside it."""
+    notes = await _records_lines(_episode("e1", "a" * 2_500))
+
+    assert notes == [f"  {json.dumps('a' * 2_000)} (first 2000 of 2500 characters)"]

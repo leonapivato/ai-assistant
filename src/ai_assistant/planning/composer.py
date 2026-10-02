@@ -72,12 +72,20 @@ from __future__ import annotations
 import json
 from typing import TYPE_CHECKING, Final
 
+from ai_assistant.core.episode_encoding import project_episode
 from ai_assistant.core.errors import ModelError
-from ai_assistant.core.types import Message, QueryOutcome, QueryRefusal, Role, encodable_text
+from ai_assistant.core.types import (
+    EpisodicMemory,
+    Message,
+    QueryOutcome,
+    QueryRefusal,
+    Role,
+    encodable_text,
+)
 
 if TYPE_CHECKING:
     from ai_assistant.core.protocols import ModelProvider
-    from ai_assistant.core.types import SearchSupply
+    from ai_assistant.core.types import MemoryRecord, SearchSupply
 
 #: ADR-0231 §5's named default for ``search_query_max_chars``, written out here as
 #: ``readers/files.py`` writes ADR-0230 §6's five: a concrete implementation states
@@ -306,6 +314,56 @@ _RECORDS_HEADING: Final = (
 )
 
 
+#: The bound, in characters, :func:`project_episode` cuts an episode's input to here
+#: (ADR-0284 §8:1). The planner's figure, written out rather than imported because
+#: this module shares no code with :mod:`ai_assistant.planning.planner`.
+_EPISODE_EXCERPT_CHARS: Final = 2000
+
+
+def _note(record: MemoryRecord) -> str | None:
+    """One supply record as the line it is shown as, or ``None`` where nothing is shown.
+
+    **A belief or a minted search record is its ``content``**, quoted, exactly as
+    before (ADR-0238 §2).
+
+    **A stored episode is its projection's input and nothing else** (ADR-0284 §8:3,
+    §8:5; #2640). Since §7 an episode's ``content`` is its search text — the latest
+    understanding's meaning followed by the user's words — and §8:3 shows no model
+    ``content`` as the episode. ADR-0238 §2 admits a record to this prompt for
+    resolving what the request refers to and nothing more, so of the projection only
+    the input is rendered: the user's own words where the trigger's origin is
+    ``user`` (an outside input is not admitted, ``admit_outside_input=False``), or an
+    episode without a processing record's ``content`` (§8:2). **No understanding
+    version is rendered**, so ADR-0276 §4:13 — no earlier understanding reaches any
+    stage of a turn on a channel of unbounded audience — holds here whatever turn
+    the servicing runs on, and this module needs no audience it is not handed. An
+    episode with no input to show — an outside report, a resume, speech with no
+    transcript — is skipped rather than shown as a placeholder a model could read as
+    a note, and the order of the rest is kept.
+
+    A cut input states the cut after its quoted span, with both lengths held data, so
+    the span never claims to be the whole text.
+
+    Args:
+        record: One record of the supply, as the servicing site selected it.
+
+    Returns:
+        The rendered note, or ``None`` for an episode with no input to show.
+    """
+    if not isinstance(record, EpisodicMemory):
+        return _quoted_span(record.content)
+    shown = project_episode(
+        record, excerpt_chars=_EPISODE_EXCERPT_CHARS, admit_outside_input=False
+    ).input
+    if shown is None:
+        return None
+    if shown.cut:
+        return (
+            f"{_quoted_span(shown.text)} (first {len(shown.text)} of {shown.full_chars} characters)"
+        )
+    return _quoted_span(shown.text)
+
+
 def _quoted_span(value: str) -> str:
     """``value`` as one printable ASCII span a prompt's syntax cannot be escaped from.
 
@@ -525,9 +583,14 @@ class ModelBackedQueryComposer:
         re-ranks or annotates a query after the composer is the same discipline read
         one seam earlier.
 
+        **A stored episode is rendered through its projection** (ADR-0284 §8:3,
+        :func:`_note`): its input where the projection shows one, and nothing else of it.
+
         **A supply with no records builds no second message at all**, rather than an
         empty heading — so the utterance-only prompt is byte-identical to the one
         ADR-0231 §3 ratified, and a destination reading ``UNCHOSEN`` gets exactly that.
+        A supply whose every record is an episode with no input to show builds none
+        either.
 
         Each of the four refusals is **returned** and none is raised, so a non-yield
         is a value the audit can count and the turn can ignore.
@@ -562,8 +625,9 @@ class ModelBackedQueryComposer:
                 content=f"{_UTTERANCE_HEADING}\n{_quoted_span(supply.utterance)}",
             ),
         ]
-        if supply.records:
-            rendered = "\n".join(f"  {_quoted_span(record.content)}" for record in supply.records)
+        notes = [note for note in map(_note, supply.records) if note is not None]
+        if notes:
+            rendered = "\n".join(f"  {note}" for note in notes)
             conversation.append(Message(role=Role.USER, content=f"{_RECORDS_HEADING}\n{rendered}"))
         try:
             reply = await self._model.complete(conversation)
