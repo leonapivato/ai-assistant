@@ -38,9 +38,7 @@ from ai_assistant.core.types import (
     ControllerStage,
     Disposition,
     EpisodeProcessingRecord,
-    EpisodeResponseKind,
     EpisodicMemory,
-    ExchangeDisposition,
     InputOrigin,
     MemoryKind,
     Message,
@@ -1021,7 +1019,7 @@ def _routing(outcome: RouteOutcome) -> StageEntry:
 def _recorded(  # noqa: PLR0913 — one keyword per part of the record a case varies
     episode_id: str = "e1",
     *,
-    origin: InputOrigin | None = InputOrigin.USER,
+    origin: InputOrigin = InputOrigin.USER,
     words: str = _USER_WORDS,
     meaning: str | None = _MEANING,
     stages: tuple[StageEntry, ...] = (),
@@ -1029,14 +1027,10 @@ def _recorded(  # noqa: PLR0913 — one keyword per part of the record a case va
     status: ProcessingStatus = ProcessingStatus.COMPLETED,
     reason: ProcessingReason = ProcessingReason.RETURNED,
     resume: bool = False,
-    disposition: ExchangeDisposition | None = None,
 ) -> EpisodicMemory:
     """One episode with a processing record, as the activation writer records it.
 
-    ``stages`` are the entries before the one end entry every record ends in. A
-    ``disposition`` is set only to show that this renderer does not read it: the
-    field leaves the episode with ADR-0284 §11's lane 6, and until then a
-    projection reads the verdict off the stage entries alone (§5).
+    ``stages`` are the entries before the one end entry every record ends in.
     """
     trigger: RecordedActivationTrigger
     if resume:
@@ -1047,7 +1041,6 @@ def _recorded(  # noqa: PLR0913 — one keyword per part of the record a case va
             channel=_EVENTS,
             payload=RecordedTextInput(text=words),
             context=ChannelContext(),
-            conversation=None,
             reply=None,
             origin=origin,
         )
@@ -1057,7 +1050,6 @@ def _recorded(  # noqa: PLR0913 — one keyword per part of the record a case va
             channel=_CONVERSATION,
             payload=RecordedTextInput(text=words),
             context=ChannelContext(),
-            conversation=None,
             reply=WholeTextReply(),
             origin=origin,
         )
@@ -1084,10 +1076,6 @@ def _recorded(  # noqa: PLR0913 — one keyword per part of the record a case va
         trigger=trigger,
         status=status,
         reason=reason,
-        response_kind=(
-            EpisodeResponseKind.NONE if outcome is None else EpisodeResponseKind.CONVERSATION_REPLY
-        ),
-        model_eligible=True,
         understanding=understanding,
         understanding_omitted=omitted,
         stages=(*stages, _END),
@@ -1099,7 +1087,6 @@ def _recorded(  # noqa: PLR0913 — one keyword per part of the record a case va
             **dict(episode(episode_id, content=_SEARCH_TEXT)),
             "outcome": outcome,
             "processing_record": processing,
-            "disposition": disposition,
         }
     )
 
@@ -1152,30 +1139,6 @@ async def test_a_recorded_episodes_search_text_never_reaches_the_prompt() -> Non
     _, batch = _prompt_of(provider)
     assert "Salamander" not in batch
     assert _USER_WORDS in batch
-
-
-async def test_the_episodes_own_disposition_field_is_never_rendered() -> None:
-    """§8:3: no field but the projection's — and ``disposition`` is not one of them.
-
-    Until lane 6 removes it, an episode may still carry ``disposition`` (ADR-0221
-    §2:1, superseded by ADR-0284 §5:3). The projection reads the verdict off the
-    stage entries alone, so an episode carrying the field and no ``drive`` verdict
-    renders no phrase line, and a recordless episode carrying it renders only its
-    content — on neither path does the old phrase table's wording appear.
-    """
-    observer, provider = _observer(_envelope())
-    recordless = _told("e2", content="I asked which route").model_copy(
-        update={"disposition": ExchangeDisposition.STEP_DENIED}
-    )
-
-    await observer.observe(
-        [_recorded(disposition=ExchangeDisposition.STEP_DENIED), recordless],
-    )
-
-    _, batch = _prompt_of(provider)
-    assert "refused by the permission policy" not in batch
-    assert "Assistant:" not in batch
-    assert '  [E2] "I asked which route"' in batch.splitlines()
 
 
 @pytest.mark.parametrize("disposition", list(Disposition), ids=lambda d: d.value)
@@ -1284,27 +1247,6 @@ async def test_an_outside_input_never_reaches_the_observer() -> None:
         "Episodes (recorded times withheld: no local calendar is configured):",
         "  [E1] (no words from the user are shown)",
         '       Assistant understood: "the clinic moved the dentist appointment to Wednesday"',
-        "       Status: completed (reason: returned)",
-    ]
-
-
-async def test_an_input_whose_origin_was_not_recorded_is_not_taken_for_the_users() -> None:
-    """A trigger recorded without an ``origin`` shows no input (§8:1, lane 1's rule).
-
-    ``origin`` is optional until lane 6 makes it required, and a projection shows the
-    input only where it is ``user`` (or ``outside`` and admitted). So such an
-    episode's words are not shown, and the labelled line says so rather than leaving
-    an empty line a model could read as the user having said nothing.
-    """
-    observer, provider = _observer(_envelope())
-
-    await observer.observe([_recorded(origin=None, meaning=None)])
-
-    _, batch = _prompt_of(provider)
-    assert _USER_WORDS not in batch
-    assert batch.splitlines() == [
-        "Episodes (recorded times withheld: no local calendar is configured):",
-        "  [E1] (no words from the user are shown)",
         "       Status: completed (reason: returned)",
     ]
 

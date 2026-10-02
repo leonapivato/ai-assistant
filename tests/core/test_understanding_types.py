@@ -13,7 +13,7 @@ from ai_assistant.core.types import (
     ActivationUnderstanding,
     ChannelContext,
     EpisodeProcessingRecord,
-    EpisodeResponseKind,
+    InputOrigin,
     NewConversation,
     ProcessingReason,
     ProcessingStatus,
@@ -62,13 +62,11 @@ def _record(**overrides: object) -> EpisodeProcessingRecord:
             channel=None,
             payload=RecordedTextInput(text="book the dentist"),
             context=ChannelContext(),
-            conversation=None,
             reply=WholeTextReply(),
+            origin=InputOrigin.USER,
         ),
         "status": ProcessingStatus.COMPLETED,
         "reason": ProcessingReason.RETURNED,
-        "response_kind": EpisodeResponseKind.NONE,
-        "model_eligible": True,
         "understanding_omitted": UnderstandingOmission.NOT_REACHED,
         "stages": ended_pass(_NOW),
     }
@@ -287,7 +285,7 @@ def test_recorded_understanding_round_trips_through_its_dump() -> None:
 def test_the_record_carries_three_understanding_fields_at_the_current_schema_version() -> None:
     """§7's three fields; the literal is ADR-0280 §7's ``3``, which superseded §7's ``2``."""
     record = _record()
-    assert record.schema_version == 4
+    assert record.schema_version == 5
     assert record.understanding == ()
     assert record.understanding_omitted is UnderstandingOmission.NOT_REACHED
     assert record.understanding_elided == 0

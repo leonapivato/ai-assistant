@@ -24,7 +24,6 @@ from ai_assistant.core.types import (
     Disposition,
     EpisodeProcessingRecord,
     EpisodeProjection,
-    EpisodeResponseKind,
     EpisodicMemory,
     InputOrigin,
     MemorySource,
@@ -59,14 +58,13 @@ _USER_WORDS = "book the dentist for Tuesday at 3"
 _REPORT = "Dentist appointment moved to Wednesday 10:00 by the clinic"
 
 
-def _trigger(origin: InputOrigin | None, *, text: str = _USER_WORDS) -> RecordedChannelTrigger:
+def _trigger(origin: InputOrigin, *, text: str = _USER_WORDS) -> RecordedChannelTrigger:
     if origin is InputOrigin.OUTSIDE:
         return RecordedChannelTrigger(
             target=_EVENTS,
             channel=_EVENTS,
             payload=RecordedTextInput(text=text),
             context=ChannelContext(),
-            conversation=None,
             reply=None,
             origin=origin,
         )
@@ -75,7 +73,6 @@ def _trigger(origin: InputOrigin | None, *, text: str = _USER_WORDS) -> Recorded
         channel=_CONVERSATION,
         payload=RecordedTextInput(text=text),
         context=ChannelContext(),
-        conversation=None,
         reply=WholeTextReply(),
         origin=origin,
     )
@@ -140,10 +137,6 @@ def _episode(  # noqa: PLR0913 — one keyword per part of the record a test var
         trigger=trigger,
         status=status,
         reason=reason,
-        response_kind=(
-            EpisodeResponseKind.NONE if outcome is None else EpisodeResponseKind.CONVERSATION_REPLY
-        ),
-        model_eligible=True,
         understanding=understanding,
         understanding_omitted=omitted,
         stages=stages,
@@ -178,10 +171,6 @@ _RESUME = RecordedResumeTrigger(channel=_CONVERSATION, approved=True)
 
 def test_the_origin_enumeration_is_user_and_outside() -> None:
     assert [member.value for member in InputOrigin] == ["user", "outside"]
-
-
-def test_a_recorded_trigger_carries_no_origin_until_admission_sets_one() -> None:
-    assert _trigger(None).origin is None
 
 
 @pytest.mark.parametrize("origin", list(InputOrigin))
@@ -252,11 +241,6 @@ def test_an_outside_episode_no_stage_understood_never_carries_the_report() -> No
     assert episode_content(record) == "status failed, reason understanding_failed"
 
 
-def test_an_input_of_unknown_origin_contributes_no_words() -> None:
-    record = _episode(_trigger(None), understanding=(_understanding("a dentist booking"),))
-    assert episode_content(record) == "a dentist booking"
-
-
 def test_an_episode_with_no_understanding_is_found_by_how_it_ended() -> None:
     record = _episode(
         _trigger(InputOrigin.USER),
@@ -272,7 +256,6 @@ def test_a_users_transcript_is_their_words() -> None:
         channel=_CONVERSATION,
         payload=RecordedSpeechInput(media_type=SpokenAudioFormat.WEBM_OPUS, transcript="call mum"),
         context=ChannelContext(),
-        conversation=None,
         reply=SpokenReply(plays=(SpokenAudioFormat.WEBM_OPUS,)),
         origin=InputOrigin.USER,
     )
@@ -287,7 +270,6 @@ def test_speech_with_no_words_adds_none(transcript: str | None) -> None:
         channel=_CONVERSATION,
         payload=RecordedSpeechInput(media_type=SpokenAudioFormat.WEBM_OPUS, transcript=transcript),
         context=ChannelContext(),
-        conversation=None,
         reply=SpokenReply(plays=(SpokenAudioFormat.WEBM_OPUS,)),
         origin=InputOrigin.USER,
     )
@@ -354,14 +336,6 @@ def test_an_outside_input_is_withheld_unless_admitted() -> None:
     assert withheld.meaning == "the appointment moved"
     admitted = project_episode(record, excerpt_chars=1000, admit_outside_input=True)
     assert admitted.input == ProjectedText(text=_REPORT, full_chars=len(_REPORT))
-
-
-@pytest.mark.parametrize("admit", [False, True])
-def test_an_input_of_unknown_origin_is_never_shown(admit: bool) -> None:
-    projection = project_episode(
-        _episode(_trigger(None)), excerpt_chars=1000, admit_outside_input=admit
-    )
-    assert (projection.origin, projection.input) == (None, None)
 
 
 def test_the_input_and_the_response_are_cut_and_the_cut_is_carried() -> None:

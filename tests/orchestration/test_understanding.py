@@ -26,7 +26,6 @@ from ai_assistant.core.types import (
     ControllerStage,
     Disposition,
     EpisodeProcessingRecord,
-    EpisodeResponseKind,
     EpisodicMemory,
     MemorySource,
     MemoryWrite,
@@ -90,7 +89,7 @@ def _episode(  # noqa: PLR0913 — one knob per projected field a case varies
     context: ChannelContext | None = None,
     understanding: tuple[ActivationUnderstanding, ...] = (),
     placement: Placement | None = None,
-    eligible: bool = True,
+    completed: bool = True,
 ) -> EpisodicMemory:
     """One captured episode carrying a processing record, as admission and capture write it.
 
@@ -114,20 +113,11 @@ def _episode(  # noqa: PLR0913 — one knob per projected field a case varies
                 channel=channel,
                 payload=RecordedTextInput(text=text),
                 context=ChannelContext() if context is None else context,
-                conversation=None,
                 reply=None if event else WholeTextReply(),
                 origin=input_origin(channel),
             ),
-            status=ProcessingStatus.COMPLETED,
-            reason=ProcessingReason.RETURNED,
-            response_kind=(
-                EpisodeResponseKind.NONE
-                if outcome is None
-                else EpisodeResponseKind.INFORMATIONAL_SUMMARY
-                if event
-                else EpisodeResponseKind.CONVERSATION_REPLY
-            ),
-            model_eligible=eligible,
+            status=ProcessingStatus.COMPLETED if completed else ProcessingStatus.FAILED,
+            reason=ProcessingReason.RETURNED if completed else ProcessingReason.PROCESSING_FAILED,
             understanding=understanding,
             understanding_omitted=None if understanding else UnderstandingOmission.NOT_REACHED,
             stages=ended_pass(at),
@@ -596,7 +586,6 @@ async def test_an_episode_is_projected_explicitly_and_never_serialized() -> None
         outcome=None,
         context=attached,
         understanding=(earlier,),
-        eligible=False,
     )
     model = FakeModelProvider.scripted(_proposal(meaning_ground="supplied", meaning_labels=["P1"]))
     understood = await _understand(
@@ -686,10 +675,10 @@ async def test_a_bounded_audience_withholds_nothing_and_latches_nothing() -> Non
 # --- the initial selector ------------------------------------------------------------------
 
 
-async def test_recent_episodes_is_recency_across_channels_and_blind_to_eligibility() -> None:
-    """§4: most recent by (occurred_at, id), every channel, ineligible episodes included."""
+async def test_recent_episodes_is_recency_across_channels_and_blind_to_status() -> None:
+    """§4: most recent by (occurred_at, id), every channel, failed episodes included."""
     records = [
-        _episode(f"e-{n}", at=AT - timedelta(minutes=n), eligible=n % 2 == 0) for n in range(6)
+        _episode(f"e-{n}", at=AT - timedelta(minutes=n), completed=n % 2 == 0) for n in range(6)
     ]
     records.append(_episode("event", at=AT - timedelta(minutes=2), channel=EVENTS))
     belief = SemanticMemory(

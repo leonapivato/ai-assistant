@@ -37,9 +37,7 @@ from pydantic import TypeAdapter, ValidationError
 
 from ai_assistant.core.clock import ClockReadingError, checked_clock
 from ai_assistant.core.episode_encoding import (
-    admits_model_eligibility,
     check_detail,
-    check_eligibility,
     check_list,
     detail_of,
     encode_cursor,
@@ -858,7 +856,6 @@ class FakeMemoryStore:
         participants: Sequence[str] | None = None,
         topics: Sequence[TopicLabel] | None = None,
         about_person: Sequence[str] | None = None,
-        episode_model_eligible: bool | None = None,
     ) -> MemorySearchResult:
         """Return live records matching ``query`` by lexical overlap, best first.
 
@@ -907,7 +904,6 @@ class FakeMemoryStore:
                 terms, a non-positive ``limit``, or an axis selecting nothing is
                 answered without reaching either.
         """
-        check_eligibility(episode_model_eligible)
         wanted = None if kinds is None else frozenset(str(kind) for kind in kinds)
         wanted_bands = None if bands is None else frozenset(bands)
         wanted_people = None if participants is None else _person_keys("participants", participants)
@@ -944,8 +940,6 @@ class FakeMemoryStore:
                     subjects=wanted_subjects,
                 ):
                     continue
-                if not admits_model_eligibility(record, episode_model_eligible):
-                    continue
                 content = record.content.lower()
                 hits = sum(1 for term in query_terms if term in content)
                 if hits:
@@ -965,7 +959,6 @@ class FakeMemoryStore:
         participants: Sequence[str] | None = None,
         topics: Sequence[TopicLabel] | None = None,
         about_person: Sequence[str] | None = None,
-        episode_model_eligible: bool | None = None,
     ) -> MemorySearchResult:
         """Return the records the criteria select, newest write first (ADR-0237 §4).
 
@@ -1004,12 +997,6 @@ class FakeMemoryStore:
             about_person: Subject labels compared by the same fold; a record
                 stating no subject is matched by none. ``()`` selects nothing.
 
-            episode_model_eligible: Optional episode eligibility filter (ADR-0275).
-
-        ADR-0275: ``episode_model_eligible`` filters episodes before ranking and
-        limits; non-episodic records are unaffected. An episode without a
-        processing record is eligible. ``None`` applies no eligibility filter.
-
         Returns:
             A :class:`~ai_assistant.core.types.MemorySearchResult` holding the
             eligible records in that order, cut to ``limit``, each with ``score``
@@ -1024,7 +1011,6 @@ class FakeMemoryStore:
                 ``limit``, or an axis selecting nothing, is answered without
                 reaching either.
         """
-        check_eligibility(episode_model_eligible)
         wanted_kinds = None if kinds is None else frozenset(str(kind) for kind in kinds)
         wanted_bands = None if bands is None else frozenset(bands)
         wanted_people = None if participants is None else _person_keys("participants", participants)
@@ -1040,7 +1026,6 @@ class FakeMemoryStore:
                 participants,
                 topics,
                 about_person,
-                episode_model_eligible,
             )
         )
         if limit <= 0 or _selects_nothing(
@@ -1054,8 +1039,7 @@ class FakeMemoryStore:
             matched = [
                 record
                 for record in self._records.values()
-                if admits_model_eligibility(record, episode_model_eligible)
-                and self._is_readable(record, now)
+                if self._is_readable(record, now)
                 and (wanted_kinds is None or record.kind in wanted_kinds)
                 and (wanted_bands is None or band_of(record.provenance.source) in wanted_bands)
                 and _admits(
@@ -1150,7 +1134,6 @@ class FakeMemoryStore:
         *,
         after: int | None = None,
         limit: int,
-        episode_model_eligible: bool | None = None,
     ) -> ChannelEpisodePage:
         """Read a channel's live episodes in number order (ADR-0283 §3:1, §3:2).
 
@@ -1165,7 +1148,6 @@ class FakeMemoryStore:
                 injected clock's reading is not a conforming one.
         """
         _check_channel_page(after, limit)
-        check_eligibility(episode_model_eligible)
         async with self._resource.held():
             self._refuse_read()
             now = self._now_utc()  # one reading for the page and its total
@@ -1174,7 +1156,6 @@ class FakeMemoryStore:
                 for rid, key in self._keys.items()
                 if _channel_of(record := self._records[rid]) == channel
                 and self._is_readable(record, now)
-                and admits_model_eligibility(record, episode_model_eligible)
             ]
             page = (
                 matching[-limit:]

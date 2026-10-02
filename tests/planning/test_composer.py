@@ -39,7 +39,6 @@ from ai_assistant.core.types import (
     ControllerRule,
     ControllerStage,
     EpisodeProcessingRecord,
-    EpisodeResponseKind,
     EpisodicMemory,
     InputOrigin,
     MemorySource,
@@ -1003,7 +1002,7 @@ def _episode(
     record_id: str,
     words: str,
     *,
-    origin: InputOrigin | None = InputOrigin.USER,
+    origin: InputOrigin = InputOrigin.USER,
     meaning: str | None = "the user asked about the Clerigos tower",
 ) -> EpisodicMemory:
     """An episode with a processing record, as the activation writer stores one."""
@@ -1033,14 +1032,11 @@ def _episode(
             channel=target,
             payload=RecordedTextInput(text=words),
             context=ChannelContext(),
-            conversation=None,
             reply=None if origin is InputOrigin.OUTSIDE else WholeTextReply(),
             origin=origin,
         ),
         status=ProcessingStatus.FAILED,
         reason=ProcessingReason.COMPOSITION_FAILED,
-        response_kind=EpisodeResponseKind.NONE,
-        model_eligible=True,
         understanding=understanding,
         understanding_omitted=None if understanding else UnderstandingOmission.NOT_REACHED,
         stages=(
@@ -1091,7 +1087,7 @@ async def test_an_episode_is_shown_as_the_users_words_and_nothing_else() -> None
 
 
 async def test_an_episode_with_no_input_to_show_is_skipped_in_order() -> None:
-    """An outside report's text is never admitted (§8:5), and an unknown origin shows none.
+    """An outside report's text is never admitted (§8:5), so it shows no input.
 
     Such an episode has nothing ADR-0238 §2 admits, so it is not rendered — no
     placeholder a model could read as a note — and the rest keep their order. A supply
@@ -1099,17 +1095,16 @@ async def test_an_episode_with_no_input_to_show_is_skipped_in_order() -> None:
     """
     report = "The clinic moved the appointment"
     outside = _episode("e2", report, origin=InputOrigin.OUTSIDE)
-    unknown = _episode("e3", "who said this?", origin=None)
 
     notes = await _records_lines(
-        _belief("b1", "the Douro flows past Porto"), outside, unknown, _episode("e4", "and that?")
+        _belief("b1", "the Douro flows past Porto"), outside, _episode("e4", "and that?")
     )
 
     assert notes == [
         f"  {json.dumps('the Douro flows past Porto')}",
         f"  {json.dumps('and that?')}",
     ]
-    assert await _records_lines(outside, unknown) is None
+    assert await _records_lines(outside) is None
 
 
 async def test_a_recordless_episode_is_shown_as_its_content() -> None:

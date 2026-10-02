@@ -21,9 +21,7 @@ from pydantic import TypeAdapter, ValidationError
 
 from ai_assistant.core.clock import ClockReadingError, checked_clock
 from ai_assistant.core.episode_encoding import (
-    admits_model_eligibility,
     check_detail,
-    check_eligibility,
     check_list,
     detail_of,
     encode_cursor,
@@ -606,7 +604,6 @@ class InMemoryMemoryStore:
         participants: Sequence[str] | None = None,
         topics: Sequence[TopicLabel] | None = None,
         about_person: Sequence[str] | None = None,
-        episode_model_eligible: bool | None = None,
     ) -> MemorySearchResult:
         """Return the records most relevant to ``query``, best first.
 
@@ -651,12 +648,6 @@ class InMemoryMemoryStore:
                 caseless-equal to; a record stating no subject is matched by none
                 of them. ``None`` is every record and ``()`` none.
 
-            episode_model_eligible: Optional episode eligibility filter (ADR-0275).
-
-        ADR-0275: ``episode_model_eligible`` filters episodes before ranking and
-        limits; non-episodic records are unaffected. An episode without a
-        processing record is eligible. ``None`` applies no eligibility filter.
-
         Returns:
             A :class:`~ai_assistant.core.types.MemorySearchResult` holding the
             matching records, highest score first, each carrying its relevance
@@ -674,7 +665,6 @@ class InMemoryMemoryStore:
             shape and keeps the discharge from resting on the absence of a
             suspension point a later revision could add (#436).
         """
-        check_eligibility(episode_model_eligible)
         wanted = None if kinds is None else frozenset(str(kind) for kind in kinds)
         wanted_bands = None if bands is None else frozenset(bands)
         wanted_people = None if participants is None else _person_keys("participants", participants)
@@ -697,8 +687,7 @@ class InMemoryMemoryStore:
         scored = [
             record.model_copy(update={"score": score}, deep=True)
             for record in self._records.values()
-            if admits_model_eligibility(record, episode_model_eligible)
-            and self._is_readable(record, now)
+            if self._is_readable(record, now)
             and (wanted is None or record.kind in wanted)
             and (wanted_bands is None or band_of(record.provenance.source) in wanted_bands)
             and _admits(
@@ -723,7 +712,6 @@ class InMemoryMemoryStore:
         participants: Sequence[str] | None = None,
         topics: Sequence[TopicLabel] | None = None,
         about_person: Sequence[str] | None = None,
-        episode_model_eligible: bool | None = None,
     ) -> MemorySearchResult:
         """Return the records the criteria select, newest write first (ADR-0237 §4).
 
@@ -762,12 +750,6 @@ class InMemoryMemoryStore:
             about_person: Subject labels compared by the same fold; a record
                 stating no subject is matched by none. ``()`` selects nothing.
 
-            episode_model_eligible: Optional episode eligibility filter (ADR-0275).
-
-        ADR-0275: ``episode_model_eligible`` filters episodes before ranking and
-        limits; non-episodic records are unaffected. An episode without a
-        processing record is eligible. ``None`` applies no eligibility filter.
-
         Returns:
             A :class:`~ai_assistant.core.types.MemorySearchResult` holding the
             eligible records in that order, cut to ``limit``, each with ``score``
@@ -778,7 +760,6 @@ class InMemoryMemoryStore:
                 or ``about_person`` value is blank (ADR-0237 §§2, 4).
             MemoryStoreError: If the injected clock's reading is not conforming.
         """
-        check_eligibility(episode_model_eligible)
         wanted_kinds = None if kinds is None else frozenset(str(kind) for kind in kinds)
         wanted_bands = None if bands is None else frozenset(bands)
         wanted_people = None if participants is None else _person_keys("participants", participants)
@@ -794,7 +775,6 @@ class InMemoryMemoryStore:
                 participants,
                 topics,
                 about_person,
-                episode_model_eligible,
             )
         )
         if limit <= 0 or _selects_nothing(
@@ -806,8 +786,7 @@ class InMemoryMemoryStore:
         matched = [
             record
             for record in self._records.values()
-            if admits_model_eligibility(record, episode_model_eligible)
-            and self._is_readable(record, now)
+            if self._is_readable(record, now)
             and (wanted_kinds is None or record.kind in wanted_kinds)
             and (wanted_bands is None or band_of(record.provenance.source) in wanted_bands)
             and _admits(
@@ -900,7 +879,6 @@ class InMemoryMemoryStore:
         *,
         after: int | None = None,
         limit: int,
-        episode_model_eligible: bool | None = None,
     ) -> ChannelEpisodePage:
         """Read a channel's live episodes in number order (ADR-0283 §3:1, §3:2).
 
@@ -913,14 +891,12 @@ class InMemoryMemoryStore:
             MemoryStoreError: If the injected clock's reading is not a conforming one.
         """
         check_channel_page(after, limit)
-        check_eligibility(episode_model_eligible)
         now = self._now_utc()  # one reading for the page and its total
         matching = [
             (key, record)
             for rid, key in self._keys.items()
             if channel_of(record := self._records[rid]) == channel
             and self._is_readable(record, now)
-            and admits_model_eligibility(record, episode_model_eligible)
         ]
         page = (
             matching[-limit:]

@@ -20,8 +20,8 @@ from ai_assistant.core.types import (
     ActivationLinks,
     ChannelContext,
     EpisodeProcessingRecord,
-    EpisodeResponseKind,
     EpisodicMemory,
+    InputOrigin,
     MemorySource,
     ProcessingReason,
     ProcessingStatus,
@@ -48,7 +48,7 @@ def conversation_episode(  # noqa: PLR0913 — one keyword per axis a seeding ca
     *,
     content: str | None = None,
     occurred_at: datetime = SEEDED_AT,
-    eligible: bool = True,
+    completed: bool = True,
     parks: ParkedBinding | None = None,
     **fields: Any,
 ) -> EpisodicMemory:
@@ -60,9 +60,9 @@ def conversation_episode(  # noqa: PLR0913 — one keyword per axis a seeding ca
             may pick any id, since a channel read keys on the channel and not on it.
         content: The episode's text; a default naming the id where omitted.
         occurred_at: The instant the episode records.
-        eligible: Whether the pass completed. ``False`` records a failed pass carrying
-            the retired ``model_eligible=False`` flag, which no read filters on any
-            more (ADR-0284 §6:2): the episode is on the channel and read like any other.
+        completed: Whether the pass completed. ``False`` records a failed pass, which
+            no read filters out (ADR-0284 §6:2): the episode is on the channel and read
+            like any other.
         parks: The binding the activation's step parked (§3:4), for a resume case.
         **fields: Further ``EpisodicMemory`` fields, applied last (``expires_at``,
             ``validity``, ``placement`` ...).
@@ -87,13 +87,11 @@ def conversation_episode(  # noqa: PLR0913 — one keyword per axis a seeding ca
                 channel=channel,
                 payload=RecordedTextInput(text="exact input"),
                 context=ChannelContext(),
-                conversation=None,
                 reply=WholeTextReply(),
+                origin=InputOrigin.USER,
             ),
-            status=ProcessingStatus.COMPLETED if eligible else ProcessingStatus.FAILED,
-            reason=ProcessingReason.RETURNED if eligible else ProcessingReason.PROCESSING_FAILED,
-            response_kind=EpisodeResponseKind.NONE,
-            model_eligible=eligible,
+            status=ProcessingStatus.COMPLETED if completed else ProcessingStatus.FAILED,
+            reason=ProcessingReason.RETURNED if completed else ProcessingReason.PROCESSING_FAILED,
             understanding_omitted=UnderstandingOmission.NOT_REACHED,
             stages=ended_pass(occurred_at),
             links=ActivationLinks(parks=parks),

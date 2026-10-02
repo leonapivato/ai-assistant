@@ -1520,7 +1520,9 @@ async def test_an_insert_naming_only_the_pre_decision_columns_still_succeeds(
 
 
 @pytest.mark.integration
-@pytest.mark.parametrize("shape", ["unmarked", "m36", "m37", "m38", "m39", "newer", "malformed"])
+@pytest.mark.parametrize(
+    "shape", ["unmarked", "m36", "m37", "m38", "m39", "format5", "newer", "malformed"]
+)
 def test_incompatible_conversation_state_is_refused_without_mutation(
     tmp_path: Path, shape: str
 ) -> None:
@@ -1538,8 +1540,10 @@ def test_incompatible_conversation_state_is_refused_without_mutation(
             raw.execute("UPDATE episode_record_format SET version = 3")
         elif shape == "m39":
             raw.execute("UPDATE episode_record_format SET version = 4")
+        elif shape == "format5":
+            raw.execute("UPDATE episode_record_format SET version = 5")
         elif shape == "newer":
-            raw.execute("UPDATE episode_record_format SET version = 6")
+            raw.execute("UPDATE episode_record_format SET version = 7")
         else:
             raw.execute("ALTER TABLE episode_record_format RENAME COLUMN version TO invalid")
     path.chmod(0o644)
@@ -1590,4 +1594,4 @@ def test_fresh_conversation_initialization_rolls_back_and_can_retry(
         assert raw.execute("SELECT name FROM sqlite_master WHERE type='table'").fetchall() == []
     SqliteConversationStore(path=path, now=_fixed_now).close()
     with sqlite3.connect(path) as raw:
-        assert raw.execute("SELECT version FROM episode_record_format").fetchall() == [(5,)]
+        assert raw.execute("SELECT version FROM episode_record_format").fetchall() == [(6,)]

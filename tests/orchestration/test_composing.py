@@ -33,9 +33,7 @@ from ai_assistant.core.types import (
     CurrentContext,
     Disposition,
     EpisodeProcessingRecord,
-    EpisodeResponseKind,
     EpisodicMemory,
-    ExchangeDisposition,
     ExecutionState,
     Goal,
     GoalBrief,
@@ -1086,18 +1084,11 @@ def _exchange(  # noqa: PLR0913 — one knob per fact of the record a case varie
                 step_disposition=step,
             )
         )
-    if step is not None:
-        disposition = ExchangeDisposition(f"step_{step.value}")
-    elif route is not None:
-        disposition = ExchangeDisposition(f"routed_{route.value}")
-    else:
-        disposition = ExchangeDisposition.NO_ACTION_NEEDED
     record = EpisodicMemory(
         id=record_id,
         content="",
         occurred_at=at,
         outcome=outcome,
-        disposition=disposition,
         provenance=Provenance(source=MemorySource.OBSERVED, confidence=0.8, last_updated=AT),
         processing_record=EpisodeProcessingRecord(
             activation_id=record_id,
@@ -1108,18 +1099,11 @@ def _exchange(  # noqa: PLR0913 — one knob per fact of the record a case varie
                 channel=channel,
                 payload=RecordedTextInput(text=said),
                 context=ChannelContext(),
-                conversation=None,
                 reply=WholeTextReply(),
                 origin=InputOrigin.USER,
             ),
             status=ProcessingStatus.COMPLETED,
             reason=ProcessingReason.RETURNED,
-            response_kind=(
-                EpisodeResponseKind.NONE
-                if outcome is None
-                else EpisodeResponseKind.CONVERSATION_REPLY
-            ),
-            model_eligible=True,
             understanding_omitted=UnderstandingOmission.NOT_REACHED,
             stages=(*entries, *ended_pass(at)),
         ),
@@ -1146,24 +1130,6 @@ async def test_each_verdict_renders_its_phrase_on_the_bullet_and_never_the_reply
     ]
     assert "Salamander-Kestrel-9" not in typed
     assert typed == composing._render_record(_with(verdict, outcome=None))
-
-
-async def test_the_stage_verdict_renders_and_a_disagreeing_disposition_does_not() -> None:
-    """ADR-0284 §5:3: no reader of a stored episode reads ``disposition``.
-
-    Capture still writes the field, so a renderer that read it would pass every case
-    whose two agree. Here they disagree, and the phrase is the ``drive`` entry's.
-    """
-    episode = _exchange(outcome=_REPLY, step=Disposition.DENIED).model_copy(
-        update={"disposition": ExchangeDisposition.STEP_EXECUTED}
-    )
-
-    bullet = composing._render_record(episode)
-
-    assert f"    how it turned out: {json.dumps(_STEP_PHRASES[Disposition.DENIED])}" in (
-        bullet.splitlines()
-    )
-    assert "the selected tool ran" not in bullet
 
 
 async def test_a_pass_that_reached_no_verdict_renders_no_verdict_line() -> None:

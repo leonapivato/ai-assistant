@@ -1181,7 +1181,7 @@ class MemoryWriterContract:
         policy = FakeMemoryPolicy(MemoryDecisionKind.ACCEPT)
         writer = make_writer(store, policy)
         with pytest.raises(MemoryStoreError, match="processing records cannot be supplied"):
-            await writer.ingest(_proposal(_activation_episode("supplied", eligible=False)))
+            await writer.ingest(_proposal(_activation_episode("supplied", completed=False)))
         assert policy.calls == []
 
     def test_conforms_to_protocol(self, writer: MemoryWriter) -> None:

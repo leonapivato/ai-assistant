@@ -9,6 +9,8 @@ from test_engine_parked_reads import _ASKED, _wired
 from ai_assistant.core.errors import UnknownContinuationError
 from ai_assistant.core.types import (
     ContinuationToken,
+    ControllerRule,
+    ControllerStage,
     EpisodicMemory,
     ProcessingReason,
     ProcessingStatus,
@@ -48,7 +50,8 @@ async def test_step_resolution_records_new_control_and_replay_preserves_both(
     assert processing.links.attempt_id is not None
     assert token.handle not in processing.model_dump_json()
     assert "send it" not in processing.model_dump_json()
-    assert processing.model_eligible
+    # ADR-0284 §5:4: a resume records its stages, ending in one end entry.
+    assert processing.stages[-1].stage is ControllerStage.END
 
     before = await harness.memory.export()
     await harness.engine.resume(token, approved=not approved, timeout=PATIENT)
@@ -85,7 +88,7 @@ async def test_denied_read_records_inspection_only_control_without_replaying_utt
     control = controls[0]
     processing = control.processing_record
     assert processing is not None
-    assert not processing.model_eligible
+    assert processing.stages[-1].stage is ControllerStage.END
     assert processing.reason is ProcessingReason.RETURNED
     assert processing.links.read_park_id is not None
     assert control.outcome is None
@@ -123,5 +126,5 @@ async def test_policy_failure_after_control_admission_preserves_original_and_rec
     assert len(controls) == 1
     assert controls[0].processing_record is not None
     assert controls[0].processing_record.reason is ProcessingReason.INTERNAL_ERROR
-    assert not controls[0].processing_record.model_eligible
+    assert controls[0].processing_record.stages[-1].due is ControllerRule.STAGE_FAILED
     assert str(failure) not in controls[0].model_dump_json()

@@ -84,7 +84,6 @@ def test_record_preserves_exact_admitted_material_and_reversed_wall_clock() -> N
     assert record.trigger.context.history[0].text == "quoted input"
     assert record.trigger.channel is None
     assert record.status is ProcessingStatus.COMPLETED
-    assert not record.model_eligible
 
 
 @pytest.mark.parametrize("transcript", [None, "", "  \n", "  exact transcript\n"])

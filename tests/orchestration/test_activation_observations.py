@@ -36,11 +36,10 @@ async def test_composition_survives_a_later_result_construction_failure(
     assert episode.outcome == (None if degraded else answer)
     record = episode.processing_record
     assert record is not None
-    assert record.reply_degraded is degraded
+    assert record.response_degraded is degraded
     assert record.reason is (
         ProcessingReason.COMPOSITION_FAILED if degraded else ProcessingReason.INTERNAL_ERROR
     )
-    assert not record.model_eligible
     assert record.links.goal_id is not None
     assert record.links.attempt_id is not None
     assert await harness.plans.get_goal(record.links.goal_id) is not None

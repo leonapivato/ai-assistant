@@ -3022,7 +3022,7 @@ async def test_pre_m36_stores_are_refused_without_modification(tmp_path: Path, s
     assert db.stat().st_mode == mode
 
 
-@pytest.mark.parametrize("marker", [None, 1, 2, 3, 4, 6, 0])
+@pytest.mark.parametrize("marker", [None, 1, 2, 3, 4, 5, 7, 0])
 def test_current_shape_with_missing_or_unsupported_marker_is_refused(
     tmp_path: Path, marker: int | None
 ) -> None:
@@ -3047,7 +3047,7 @@ async def test_processing_record_and_inspection_survive_reopen(tmp_path: Path) -
         traces_sink=FakeTraceSink(), path=db, embedder=embedder, now=_fixed_now
     )
     try:
-        await store.add(_activation_episode("activation", eligible=False))
+        await store.add(_activation_episode("activation", completed=False))
         before = await store.episode_chunk("activation")
     finally:
         store.close()
@@ -3057,7 +3057,8 @@ async def test_processing_record_and_inspection_survive_reopen(tmp_path: Path) -
     try:
         assert await reopened.episode_chunk("activation") == before
         assert len((await reopened.episodes()).items) == 1
-        assert (await reopened.search("coffee", episode_model_eligible=True)).records == ()
+        # ADR-0284 §6:1: the failed episode is read like any other.
+        assert [record.id for record in (await reopened.search("coffee")).records] == ["activation"]
     finally:
         reopened.close()
 
@@ -3084,7 +3085,7 @@ async def test_a_channel_is_two_indexed_columns_written_with_the_record(tmp_path
     try:
         await store.add(_on_channel("on-a"))
         await store.add(_on_channel("nowhere", channel=None))
-        await store.add(_activation_episode("other", eligible=True))
+        await store.add(_activation_episode("other"))
         rows = store._conn.execute(
             "SELECT id, channel_type, channel_instance, rowid FROM records ORDER BY rowid"
         ).fetchall()

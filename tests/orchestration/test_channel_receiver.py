@@ -115,7 +115,6 @@ async def test_event_quotes_material_and_records_only_an_inspection_episode() ->
     assert episode.outcome == result.result.summary
     assert episode.processing_record is not None
     assert episode.processing_record.status is ProcessingStatus.COMPLETED
-    assert not episode.processing_record.model_eligible
     assert await harness.engine.goals() == before_goals
 
 

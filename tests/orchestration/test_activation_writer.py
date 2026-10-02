@@ -20,7 +20,6 @@ from ai_assistant.core.types import (
     ChannelContext,
     ChannelIdentity,
     ChannelInput,
-    EpisodeResponseKind,
     EpisodicMemory,
     ExchangeDisposition,
     Modality,
@@ -148,7 +147,7 @@ class Wiring:
     async def state(
         self,
         *,
-        eligible: bool = True,
+        captured: bool = True,
         standalone: bool = False,
         parked: ParkedBinding | None = None,
         delivery: SpokenDelivery | None = None,
@@ -167,7 +166,7 @@ class Wiring:
             clock=lambda: _AT,
             id_factory=lambda: _UUID,
         )
-        if eligible:
+        if captured:
             assert conversation is not None
             state.facts = CaptureFacts(
                 asked="exact request",
@@ -180,7 +179,6 @@ class Wiring:
                 delivery=delivery,
             )
             state.response = "the complete reply"
-            state.response_kind = EpisodeResponseKind.CONVERSATION_REPLY
         return state
 
     async def write(self, state: ActivationState, *, limit: int = 1024) -> EpisodeCaptureReport:
@@ -362,17 +360,17 @@ async def test_a_capture_with_no_capture_facts_has_no_archive_entry_and_is_in_hi
 
     ADR-0284 §6:2 retires the eligibility axis (superseding ADR-0283 §7:5): the episode
     is read by history like any other. Its ``content`` is §7's one rule, as on every
-    other episode, and it owes no transcript entry.
+    other episode, it carries no ``disposition`` (§5:3), and it owes no transcript entry.
     """
     wiring = Wiring()
-    state = await wiring.state(eligible=False, standalone=standalone)
+    state = await wiring.state(captured=False, standalone=standalone)
     report = await wiring.write(state)
     assert report.state == "recorded"
     assert report.episode_id == _ADDRESS
     episode = await wiring.memory.get(_ADDRESS)
     assert isinstance(episode, EpisodicMemory)
     assert episode.content == episode_content(episode)
-    assert episode.disposition is None
+    assert "disposition" not in episode.model_dump()
     assert episode.processing_record is not None
     assert wiring.archive.recorded == {}
     if standalone:
@@ -524,11 +522,11 @@ async def test_a_spoken_capture_writes_its_unknown_delivery_row() -> None:
 
 async def test_standalone_collision_preserves_existing_record_and_does_not_retry() -> None:
     wiring = Wiring()
-    first = await wiring.state(eligible=False, standalone=True)
+    first = await wiring.state(captured=False, standalone=True)
     report = await wiring.write(first)
     assert report.episode_id is not None
     before = await wiring.memory.get(report.episode_id)
-    repeated = await wiring.state(eligible=False, standalone=True)
+    repeated = await wiring.state(captured=False, standalone=True)
     assert (await wiring.write(repeated)).state == "degraded"
     assert await wiring.memory.get(report.episode_id) == before
     assert len(await wiring.memory.export()) == 1

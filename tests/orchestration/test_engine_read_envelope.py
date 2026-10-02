@@ -249,7 +249,6 @@ def _episode(
         content=content,
         occurred_at=AT,
         outcome=outcome,
-        disposition=disposition,
         provenance=Provenance(source=MemorySource.OBSERVED, confidence=0.9, last_updated=AT),
     )
 

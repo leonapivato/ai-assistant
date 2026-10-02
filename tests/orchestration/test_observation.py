@@ -397,13 +397,10 @@ class _WatchedMemory(FakeMemoryStore):
         *,
         after: int | None = None,
         limit: int,
-        episode_model_eligible: bool | None = None,
     ) -> ChannelEpisodePage:
         """Read a channel's page, recording that the read happened."""
         self.pages_read.append((channel.instance_id, after))
-        return await super().channel_episodes(
-            channel, after=after, limit=limit, episode_model_eligible=episode_model_eligible
-        )
+        return await super().channel_episodes(channel, after=after, limit=limit)
 
     async def write_atomic(self, writes: Sequence[MemoryWrite]) -> Sequence[str]:
         """Apply the batch, recording it and honouring whichever refusal is scripted."""
@@ -540,7 +537,7 @@ class Harness:
         self,
         conversation_id: str,
         *,
-        eligible: bool = True,
+        completed: bool = True,
         occurred_at: datetime = AT,
         placement: Placement | None = None,
     ) -> str:
@@ -551,13 +548,13 @@ class Harness:
         conversation and its 1-based position in this harness's seeding, so a
         batch's ids say which episodes a pass read (:func:`_indexes`).
 
-        ``eligible=False`` is an inspection-only episode — a pass that ended before
-        capture — which is on the channel and which no model-facing read admits.
+        ``completed=False`` is a failed pass's episode, which is on the channel and
+        read like any other (ADR-0284 §6:2).
         """
         index = len(self.episode_ids[conversation_id]) + 1
         episode_id = f"activation:{conversation_id}-{index}"
         episode = conversation_episode(
-            conversation_id, episode_id, occurred_at=occurred_at, eligible=eligible
+            conversation_id, episode_id, occurred_at=occurred_at, completed=completed
         )
         if placement is not None:
             episode = episode.model_copy(update={"placement": placement})
@@ -583,27 +580,27 @@ class Harness:
         return numbers[self.episode_ids[conversation_id][index - 1]]
 
     async def conversation_with(self, turns: int, *, captured: int | None = None) -> str:
-        """Start a conversation with ``turns`` episodes, ``captured`` of them eligible.
+        """Start a conversation with ``turns`` episodes, ``captured`` of them completed.
 
-        The default makes every episode eligible. A lower ``captured`` makes the
-        *oldest* episodes inspection-only, which every model-facing read skips.
+        The default completes every episode. A lower ``captured`` makes the *oldest*
+        episodes failed passes, which every read still reads (ADR-0284 §6:2).
         """
         recorded = turns if captured is None else captured
         conversation = await self.conversations.start()
         for index in range(turns):
-            await self.seed(conversation.id, eligible=index >= turns - recorded)
+            await self.seed(conversation.id, completed=index >= turns - recorded)
         return conversation.id
 
-    async def conversation_of(self, eligible: Sequence[int], *, turns: int) -> str:
-        """Start a conversation of ``turns`` episodes, only the named (1-based) eligible.
+    async def conversation_of(self, completed: Sequence[int], *, turns: int) -> str:
+        """Start a conversation of ``turns`` episodes, only the named (1-based) completed.
 
-        The general form of :meth:`conversation_with`, for the cases where *which*
-        episodes a model may read is the point — at the end of a page, in its
-        middle, or nowhere at all (ADR-0283 §11:1).
+        The general form of :meth:`conversation_with`, for the cases where *where* the
+        failed episodes sit is the point — at the end of a page, in its middle, or
+        everywhere.
         """
         conversation = await self.conversations.start()
         for index in range(1, turns + 1):
-            await self.seed(conversation.id, eligible=index in eligible)
+            await self.seed(conversation.id, completed=index in completed)
         return conversation.id
 
     async def append_turns(
@@ -611,7 +608,7 @@ class Harness:
     ) -> None:
         """Land ``count`` further episodes on an existing conversation."""
         for _ in range(count):
-            await self.seed(conversation_id, eligible=captured)
+            await self.seed(conversation_id, completed=captured)
 
     async def conversation_stamped(
         self,
@@ -633,7 +630,7 @@ class Harness:
         self.store_clock.at = active_at
         conversation = await self.conversations.start()
         for stamp in stamps:
-            await self.seed(conversation.id, eligible=captured, occurred_at=stamp)
+            await self.seed(conversation.id, completed=captured, occurred_at=stamp)
         return conversation.id
 
     async def mark_active_at(self, conversation_id: str, at: datetime) -> None:
@@ -2384,7 +2381,7 @@ async def _labelled_harness(
     after — see :meth:`Harness.swap_observer`.
 
     Args:
-        turns: How many episodes the conversation holds, every one eligible.
+        turns: How many episodes the conversation holds, every one completed.
         labels: ``(index into the page, topics, participants)`` per labelling.
         memory: The store to wire, for a case that watches it.
         gate: Held at the observer's first ``await``, for a case that moves the
@@ -2439,7 +2436,6 @@ async def test_a_labelling_lands_on_the_episodes_own_id_and_moves_two_fields() -
     assert after.content == before.content
     assert after.occurred_at == before.occurred_at
     assert after.outcome == before.outcome
-    assert after.disposition == before.disposition
     assert after.capture == before.capture
     assert after.importance == before.importance
     assert after.about_person == before.about_person

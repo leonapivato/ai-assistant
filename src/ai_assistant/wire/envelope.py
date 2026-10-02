@@ -2398,7 +2398,13 @@ from ai_assistant.wire.errors import (
 #: 67: ADR-0283 §9 removes ``TranscriptEntry.ordinal`` from the wire-carried transcript entry.
 #: 68: ADR-0284 §11 lane 1 adds ``RecordedChannelTrigger.origin``, ``StageEntry``'s verdict
 #:     fields and ``ControllerRule.park_answered`` to the wire-carried EpisodeProcessingRecord.
-PROTOCOL_VERSION: Final[int] = 68
+#: 69: ADR-0284 §11 lane 6 moves EpisodeProcessingRecord to schema_version 5: it drops
+#:     ``response_kind`` and ``model_eligible``, renames ``reply_degraded`` and
+#:     ``spoken_degraded`` to ``response_degraded`` and ``output_degraded``, requires
+#:     ``RecordedChannelTrigger.origin`` and drops its ``conversation``, and requires a
+#:     resume's stages; ``EpisodicMemory.disposition`` and ``EpisodeSummary.response_kind``
+#:     are removed, and ``EpisodeResponseKind`` with them.
+PROTOCOL_VERSION: Final[int] = 69
 
 #: ADR-0085 §8a: "The correlation id is a UUID string and is at most 36 bytes.
 #: Bounding it is what makes the reserve a constant rather than an aspiration; a

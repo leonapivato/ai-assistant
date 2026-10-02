@@ -16,7 +16,6 @@ from ai_assistant.core.types import (
     ChannelContext,
     ChannelContextItem,
     ChannelInput,
-    EpisodeResponseKind,
     EpisodicMemory,
     NewConversation,
     ProcessingReason,
@@ -62,8 +61,6 @@ async def test_text_receipt_names_the_only_record_with_exact_input_context_and_r
     assert processing is not None
     assert processing.activation_id == result.capture.activation_id
     assert processing.status is ProcessingStatus.COMPLETED
-    assert processing.model_eligible
-    assert processing.response_kind is EpisodeResponseKind.CONVERSATION_REPLY
     assert isinstance(processing.trigger, RecordedChannelTrigger)
     assert processing.trigger.target == supplied.target
     assert processing.trigger.channel == result.channel
@@ -98,7 +95,6 @@ async def test_event_failure_or_cancellation_records_once_after_model_cleanup(
         ProcessingStatus.INTERRUPTED if cancelled else ProcessingStatus.FAILED
     )
     assert episode.outcome is None
-    assert not episode.processing_record.model_eligible
     assert "private diagnostic" not in episode.model_dump_json()
 
 
@@ -115,7 +111,6 @@ async def test_oversized_event_keeps_the_complete_summary_and_output_failure() -
     assert episode.outcome == answer
     assert episode.processing_record is not None
     assert episode.processing_record.reason is ProcessingReason.OUTPUT_OVERSIZED
-    assert episode.processing_record.response_kind is EpisodeResponseKind.INFORMATIONAL_SUMMARY
 
 
 async def test_invalid_activation_metadata_degrades_capture_without_losing_answer(

@@ -142,7 +142,6 @@ async def test_a_blank_transcript_is_four_absences_and_no_turn(blank: str) -> No
     processing = episode.processing_record
     assert processing is not None
     assert processing.reason is ProcessingReason.NO_CONTENT
-    assert not processing.model_eligible
     assert isinstance(processing.trigger, RecordedChannelTrigger)
     assert isinstance(processing.trigger.payload, RecordedSpeechInput)
     assert processing.trigger.payload.transcript == blank

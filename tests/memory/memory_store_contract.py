@@ -57,10 +57,10 @@ from ai_assistant.core.types import (
     ChannelIdentity,
     ControllerRule,
     ControllerStage,
+    Disposition,
     EpisodeProcessingRecord,
-    EpisodeResponseKind,
     EpisodicMemory,
-    ExchangeDisposition,
+    InputOrigin,
     MemoryKind,
     MemoryRecord,
     MemorySearchResult,
@@ -973,7 +973,7 @@ _CANCELLATION_OPS: tuple[Callable[[], _CancellationOp], ...] = (
 )
 
 
-def _activation_episode(record_id: str, *, eligible: bool) -> EpisodicMemory:
+def _activation_episode(record_id: str, *, completed: bool = True) -> EpisodicMemory:
     channel = ChannelIdentity(channel_type="informational_event", instance_id="source")
     return EpisodicMemory(
         id=record_id,
@@ -989,13 +989,11 @@ def _activation_episode(record_id: str, *, eligible: bool) -> EpisodicMemory:
                 channel=channel,
                 payload=RecordedTextInput(text="exact input"),
                 context=ChannelContext(),
-                conversation=None,
                 reply=None,
+                origin=InputOrigin.OUTSIDE,
             ),
-            status=ProcessingStatus.COMPLETED if eligible else ProcessingStatus.FAILED,
-            reason=ProcessingReason.RETURNED if eligible else ProcessingReason.PROCESSING_FAILED,
-            response_kind=EpisodeResponseKind.NONE,
-            model_eligible=eligible,
+            status=ProcessingStatus.COMPLETED if completed else ProcessingStatus.FAILED,
+            reason=ProcessingReason.RETURNED if completed else ProcessingReason.PROCESSING_FAILED,
             understanding_omitted=UnderstandingOmission.NOT_REACHED,
             stages=ended_pass(_IN_WINDOW),
         ),
@@ -1015,7 +1013,7 @@ def _on_channel(  # noqa: PLR0913 — one keyword per ADR-0283 axis a case may n
     record_id: str,
     *,
     channel: ChannelIdentity | None = _CHANNEL_A,
-    eligible: bool = True,
+    completed: bool = True,
     parks: ParkedBinding | None = None,
     parked: ParkedBinding | None = None,
     expires_at: datetime | None = None,
@@ -1027,17 +1025,14 @@ def _on_channel(  # noqa: PLR0913 — one keyword per ADR-0283 axis a case may n
     and ``None`` (an episode on no channel), ride a resume trigger, which is the one
     trigger admitting an arbitrary channel.
     """
-    base = _activation_episode(record_id, eligible=eligible)
+    base = _activation_episode(record_id, completed=completed)
     assert base.processing_record is not None
     record = base.processing_record.model_copy(
         update={"links": ActivationLinks(parks=parks, parked=parked)}
     )
     if channel is None or channel.channel_type != "informational_event":
         record = record.model_copy(
-            update={
-                "trigger": RecordedResumeTrigger(channel=channel, approved=True),
-                "stages": (),
-            }
+            update={"trigger": RecordedResumeTrigger(channel=channel, approved=True)}
         )
     else:
         assert isinstance(record.trigger, RecordedChannelTrigger)
@@ -1107,30 +1102,41 @@ class MemoryStoreContract:
         assert [item.position.episode_id for item in rest.items] == [" a ", ""]
         assert rest.next_cursor is None
 
-    async def test_episode_eligibility_filters_before_limits(self, store: MemoryStore) -> None:
+    async def test_every_episode_is_read_failed_and_outside_ones_included(
+        self, store: MemoryStore
+    ) -> None:
+        """ADR-0284 §6:1-§6:2: the eligibility axis is gone, and no read filters on status.
+
+        Fifteen failed outside episodes — every one of which the retired flag marked
+        ineligible — sit beside a completed one, an episode with no processing record
+        and a belief. Every read returns all of them that its axes select.
+        """
         for i in range(15):
-            await store.add(_activation_episode(f"hidden-{i}", eligible=False))
-        await store.add(_activation_episode("visible", eligible=True))
+            await store.add(_activation_episode(f"failed-{i}", completed=False))
+        await store.add(_activation_episode("completed"))
         await store.add(_episode("producer"))
         await store.add(_preference("belief", _ANY))
-        for read in (
-            store.search(_ANY, limit=3, episode_model_eligible=True),
-            store.select(limit=3, episode_model_eligible=True),
-        ):
-            result = await read
-            assert {record.id for record in result.records} == {"visible", "producer", "belief"}
-        hidden = {f"hidden-{i}" for i in range(15)}
+        failed = {f"failed-{i}" for i in range(15)}
         for kinds, expected in (
-            (None, hidden | {"belief"}),
-            ([MemoryKind.EPISODIC], hidden),
+            (
+                [MemoryKind.EPISODIC, MemoryKind.PREFERENCE],
+                failed | {"completed", "producer", "belief"},
+            ),
+            ([MemoryKind.EPISODIC], failed | {"completed", "producer"}),
             ([MemoryKind.PREFERENCE], {"belief"}),
         ):
             for read in (
-                store.search(_ANY, limit=16, kinds=kinds, episode_model_eligible=False),
-                store.select(limit=16, kinds=kinds, episode_model_eligible=False),
+                store.search(_ANY, limit=18, kinds=kinds),
+                store.select(limit=18, kinds=kinds),
             ):
                 result = await read
                 assert {record.id for record in result.records} == expected
+        everything = await store.search(_ANY, limit=18)
+        assert {record.id for record in everything.records} == failed | {
+            "completed",
+            "producer",
+            "belief",
+        }
         inspected = await store.episodes(status=ProcessingStatus.FAILED)
         assert len(inspected.items) == 15
         channel = ChannelIdentity(channel_type="informational_event", instance_id="source")
@@ -1140,9 +1146,7 @@ class MemoryStoreContract:
     async def test_episode_detail_reassembles_and_changes_invalidate_version(
         self, store: MemoryStore
     ) -> None:
-        await store.add(
-            _activation_episode("", eligible=True).model_copy(update={"content": 'café 🍵\\"'})
-        )
+        await store.add(_activation_episode("").model_copy(update={"content": 'café 🍵\\"'}))
         first = await store.episode_chunk("", max_bytes=17)
         assert first is not None
         chunks = [first.text]
@@ -1219,16 +1223,7 @@ class MemoryStoreContract:
     async def test_recorded_processing_is_immutable_and_refusal_is_atomic(
         self, store: MemoryStore, change: str, method: str
     ) -> None:
-        original = _activation_episode("captured", eligible=True)
-        assert original.processing_record is not None
-        original = original.model_copy(
-            update={
-                "outcome": "original",
-                "processing_record": original.processing_record.model_copy(
-                    update={"response_kind": EpisodeResponseKind.INFORMATIONAL_SUMMARY}
-                ),
-            }
-        )
+        original = _activation_episode("captured").model_copy(update={"outcome": "original"})
         await store.add(original)
         record = original.processing_record
         assert record is not None
@@ -1350,7 +1345,7 @@ class MemoryStoreContract:
         §2 carries an episode address **exactly as stored**, and a store that
         normalised it would rewrite what the understanding pointed at.
         """
-        understood = _activation_episode("understood", eligible=True)
+        understood = _activation_episode("understood")
         assert understood.processing_record is not None
         version = ActivationUnderstanding(
             version=1,
@@ -1372,12 +1367,12 @@ class MemoryStoreContract:
             }
         )
         await store.add(understood.model_copy(update={"processing_record": record}))
-        await store.add(_activation_episode("omitted", eligible=True))
+        await store.add(_activation_episode("omitted"))
 
         got = await store.get("understood")
         assert isinstance(got, EpisodicMemory)
         assert got.processing_record is not None
-        assert got.processing_record.schema_version == 4
+        assert got.processing_record.schema_version == 5
         assert got.processing_record.understanding == (version,)
         assert got.processing_record.understanding[0].meaning_referents[0].id == " "
         assert got.processing_record.understanding_omitted is None
@@ -1391,15 +1386,15 @@ class MemoryStoreContract:
     async def test_a_processing_records_stage_record_survives_the_round_trip(
         self, store: MemoryStore
     ) -> None:
-        """ADR-0280 §7: the schema-3 record carries its stage record whole.
+        """ADR-0280 §7: the record carries its stage record whole.
 
-        Pinned in both shapes §7 admits — a channel activation whose entries end in
-        exactly one ``end`` entry, with an elided count, and a resume with no stage
-        record — because a store that dropped or reordered entries would not fail on
+        Pinned on a channel activation whose entries end in exactly one ``end`` entry,
+        with an elided count, and on a resume whose stages carry a verdict (ADR-0284
+        §5:4) — because a store that dropped or reordered entries would not fail on
         write: the record's own validator would refuse what it read back, so the loss
         would surface as a read error on a record that was written whole.
         """
-        channel = _activation_episode("channel", eligible=True)
+        channel = _activation_episode("channel")
         assert channel.processing_record is not None
         entries = (
             StageEntry(
@@ -1414,10 +1409,21 @@ class MemoryStoreContract:
         channel_record = channel.processing_record.model_copy(
             update={"stages": entries, "stages_elided": 2}
         )
+        resumed_entries = (
+            StageEntry(
+                stage=ControllerStage.DRIVE,
+                due=ControllerRule.PARK_ANSWERED,
+                started_at=_STORE_NOW,
+                ended_at=_IN_WINDOW,
+                outcome=StageOutcome.DONE,
+                step_disposition=Disposition.EXECUTED,
+            ),
+            *ended_pass(_IN_WINDOW),
+        )
         resume_record = channel.processing_record.model_copy(
             update={
                 "trigger": RecordedResumeTrigger(channel=None, approved=True),
-                "stages": (),
+                "stages": resumed_entries,
             }
         )
         await store.add(channel.model_copy(update={"processing_record": channel_record}))
@@ -1433,7 +1439,7 @@ class MemoryStoreContract:
         assert isinstance(resumed, EpisodicMemory)
         assert resumed.processing_record is not None
         assert (resumed.processing_record.stages, resumed.processing_record.stages_elided) == (
-            (),
+            resumed_entries,
             0,
         )
 
@@ -1446,7 +1452,7 @@ class MemoryStoreContract:
         id **exactly as stored**, and its structured origin in full, because ADR-0189
         §1 has the projection shown to the owner carry it as the record held it.
         """
-        channel = _activation_episode("recalled", eligible=True)
+        channel = _activation_episode("recalled")
         assert channel.processing_record is not None
         recall = ActivationRecall(
             outcome=RecallOutcome.FOUND,
@@ -1473,29 +1479,19 @@ class MemoryStoreContract:
         assert got.processing_record.recall == recall
         assert got.processing_record.recall.items[0].id == " fact "
 
-    async def test_an_episodes_disposition_and_capture_survive_the_round_trip(
-        self, store: MemoryStore
-    ) -> None:
+    async def test_an_episodes_capture_survives_the_round_trip(self, store: MemoryStore) -> None:
         """ADR-0221 §12.5, on the contract rather than on one store.
 
         The suite's other two round-trip arms pin fields a *withholding* or a
-        *deletion* reads; this pins two whose loss is silent in a different and
-        worse way. ADR-0221 §8 makes the **absence** of ``disposition`` the
-        discriminator between a record written before that decision and one written
-        after it, and forbids inferring the population from the record's text, its
-        length, its instant or its store. So an implementation that dropped the field
-        would not merely lose a value: every record it had ever stored would read as
-        pre-change, and §3's render rule would put a phrase where the reply is — for
-        as long as the store held anything, with no error anywhere and nothing else
-        left to tell the two populations apart.
+        *deletion* reads; this pins one whose loss is silent in a different and
+        worse way. ``capture`` is the one field on this record that is a fact about
+        the world rather than about this system (§5): a store that dropped it would
+        answer ``TEXT`` for a transcript, which is the value that says the material
+        was *not* derived from speech. That is the wrong direction of the two,
+        exactly as the disclosure stamp's is. (ADR-0221 §2's ``disposition`` was
+        pinned here beside it until ADR-0284 §5:3 removed it from the episode.)
 
-        ``capture`` is pinned beside it because it is the one field on this record
-        that is a fact about the world rather than about this system (§5): a store
-        that dropped it would answer ``TEXT`` for a transcript, which is the value
-        that says the material was *not* derived from speech. That is the wrong
-        direction of the two, exactly as the disclosure stamp's is.
-
-        Both are pinned in both states — stated, and left at their defaults — for the
+        It is pinned in both states — stated, and left at its default — for the
         reason the arms above pin both: an implementation that invented a value would
         be as wrong as one that dropped it, and only the second-state assertion
         catches it.
@@ -1504,7 +1500,6 @@ class MemoryStoreContract:
         await store.add(
             spoken.model_copy(
                 update={
-                    "disposition": ExchangeDisposition.ROUTED_AMBIGUOUS_TRUNCATED,
                     "capture": Capture(modality=Modality.SPEECH),
                     "outcome": "More records matched than I can show you here.",
                 }
@@ -1514,12 +1509,10 @@ class MemoryStoreContract:
 
         got = await store.get("spoken")
         assert isinstance(got, EpisodicMemory)
-        assert got.disposition is ExchangeDisposition.ROUTED_AMBIGUOUS_TRUNCATED
         assert got.capture == Capture(modality=Modality.SPEECH)
         assert got.outcome == "More records matched than I can show you here."
         plain = await store.get("legacy")
         assert isinstance(plain, EpisodicMemory)
-        assert plain.disposition is None
         assert plain.capture == Capture()
 
     async def test_a_captured_reply_survives_the_round_trip_whole(self, store: MemoryStore) -> None:
@@ -1551,17 +1544,13 @@ class MemoryStoreContract:
         )
         await store.add(
             _episodic("answered", "the user asked whether to book the flight").model_copy(
-                update={
-                    "outcome": reply,
-                    "disposition": ExchangeDisposition.NO_ACTION_NEEDED,
-                }
+                update={"outcome": reply}
             )
         )
 
         got = await store.get("answered")
         assert isinstance(got, EpisodicMemory)
         assert got.outcome == reply
-        assert got.disposition is ExchangeDisposition.NO_ACTION_NEEDED
 
     async def test_add_overwrites_same_id_with_full_replacement(self, store: MemoryStore) -> None:
         # Upsert is a full replacement, not a merge: re-adding an id must leave no
@@ -5850,33 +5839,43 @@ class MemoryStoreContract:
             assert page.entries == ()
             assert page.total == 6
 
-    async def test_channel_episodes_applies_eligibility_before_the_limit(
+    async def test_channel_episodes_reads_and_counts_every_live_episode(
         self, store: MemoryStore
     ) -> None:
-        """§3:1: the axis binds as ``search``'s does, so an ineligible run never fills a page.
+        """ADR-0284 §6:1: no eligibility axis — ``total`` counts every live episode.
 
-        The eligible episode is the oldest, under four ineligible ones: a store that
-        cut the newest ``limit`` first and filtered afterwards returns nothing.
+        The completed episode is the oldest, under four failed ones that the retired
+        flag marked ineligible: each page is cut from all five, and ``total`` is five
+        whatever the page.
         """
-        await store.add(_on_channel("eligible"))
+        await store.add(_on_channel("completed"))
         for index in range(4):
-            await store.add(_on_channel(f"ineligible{index}", eligible=False))
+            await store.add(_on_channel(f"failed{index}", completed=False))
         numbers = await _numbers(store, _CHANNEL_A)
 
-        page = await store.channel_episodes(_CHANNEL_A, limit=1, episode_model_eligible=True)
-        assert [entry.record.id for entry in page.entries] == ["eligible"]
-        assert page.total == 1
-        page = await store.channel_episodes(_CHANNEL_A, limit=2, episode_model_eligible=False)
-        assert [entry.record.id for entry in page.entries] == ["ineligible2", "ineligible3"]
-        assert page.total == 4
         page = await store.channel_episodes(_CHANNEL_A, limit=1)
-        assert [entry.record.id for entry in page.entries] == ["ineligible3"]
+        assert [entry.record.id for entry in page.entries] == ["failed3"]
         assert page.total == 5
-        page = await store.channel_episodes(
-            _CHANNEL_A, after=numbers["eligible"], limit=10, episode_model_eligible=False
-        )
-        assert [entry.record.id for entry in page.entries] == [f"ineligible{i}" for i in range(4)]
-        assert page.total == 4
+        page = await store.channel_episodes(_CHANNEL_A, limit=5)
+        assert [entry.record.id for entry in page.entries] == [
+            "completed",
+            *(f"failed{i}" for i in range(4)),
+        ]
+        assert page.total == 5
+        page = await store.channel_episodes(_CHANNEL_A, after=numbers["completed"], limit=10)
+        assert [entry.record.id for entry in page.entries] == [f"failed{i}" for i in range(4)]
+        assert page.total == 5
+
+    async def test_the_reads_take_no_eligibility_axis(self, store: MemoryStore) -> None:
+        """ADR-0284 §6:1: ``search``, ``select`` and ``channel_episodes`` lose the axis."""
+        with pytest.raises(TypeError):
+            await store.search(_ANY, episode_model_eligible=True)  # type: ignore[call-arg]
+        with pytest.raises(TypeError):
+            await store.select(limit=1, episode_model_eligible=True)  # type: ignore[call-arg]
+        with pytest.raises(TypeError):
+            await store.channel_episodes(  # type: ignore[call-arg]
+                _CHANNEL_A, limit=1, episode_model_eligible=True
+            )
 
     async def test_liveness_bounds_channel_episodes_and_not_the_enumeration(
         self, store: MemoryStore
@@ -5885,16 +5884,16 @@ class MemoryStoreContract:
 
         Expired-but-unpurged, window-closed and not-yet-valid episodes are off the
         history read and its ``total``, and all on the enumeration a deletion walks,
-        with the ineligible one — which the unfiltered history read does include.
+        with the failed one — which the history read includes too (ADR-0284 §6:1).
         """
         await store.add(_on_channel("live"))
         await store.add(_on_channel("expired", expires_at=_LONG_AGO))
         await store.add(_on_channel("closed", validity=Validity(valid_until=_LONG_AGO)))
         await store.add(_on_channel("future", validity=Validity(valid_from=_FAR_FUTURE)))
-        await store.add(_on_channel("ineligible", eligible=False))
+        await store.add(_on_channel("failed", completed=False))
 
         page = await store.channel_episodes(_CHANNEL_A, limit=10)
-        assert [entry.record.id for entry in page.entries] == ["live", "ineligible"]
+        assert [entry.record.id for entry in page.entries] == ["live", "failed"]
         assert page.total == 2
         held = await store.channel_episode_ids(_CHANNEL_A, limit=10)
         assert [entry.episode_id for entry in held] == [
@@ -5902,7 +5901,7 @@ class MemoryStoreContract:
             "expired",
             "closed",
             "future",
-            "ineligible",
+            "failed",
         ]
 
     async def test_channel_episode_ids_pages_one_channel_in_number_order(
@@ -6003,14 +6002,6 @@ class MemoryStoreContract:
             await store.channel_episodes(_CHANNEL_A, after=after, limit=1)
         with pytest.raises(ValueError, match="after"):
             await store.channel_episode_ids(_CHANNEL_A, after=after, limit=1)
-
-    @pytest.mark.parametrize("eligible", [0, 1, "true"])
-    async def test_channel_episodes_refuses_a_non_boolean_eligibility(
-        self, store: MemoryStore, eligible: Any
-    ) -> None:
-        """The eligibility axis is ``None`` or a boolean, as ``search`` refuses it."""
-        with pytest.raises(ValueError, match="episode_model_eligible"):
-            await store.channel_episodes(_CHANNEL_A, limit=1, episode_model_eligible=eligible)
 
     async def test_channel_reads_accept_the_ends_of_their_bounds(self, store: MemoryStore) -> None:
         """``limit`` 1 and 1000, ``after`` 1 and far beyond any number, are all served."""

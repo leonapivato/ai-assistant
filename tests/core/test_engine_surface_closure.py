@@ -280,6 +280,10 @@ _NAMESPACE: Final = {
 #: enumeration is already named above. And **``ClaimRefused`` is not here and is not an
 #: omission** — it is an error class, which crosses as ADR-0085 §10a's payload rather
 #: than as a field of any promoted type, so no walk of these signatures reaches it.
+#:
+#: **``EpisodeResponseKind`` left this roster with ADR-0284 §4:1**, which removes it
+#: together with the two fields that carried it — ``EpisodeProcessingRecord.response_kind``
+#: and ``EpisodeSummary.response_kind`` — so the walk no longer reaches it.
 PROMOTED: Final[frozenset[str]] = frozenset(
     {
         "EpisodeCaptureReport",
@@ -287,7 +291,6 @@ PROMOTED: Final[frozenset[str]] = frozenset(
         "EpisodeSummary",
         "EpisodePosition",
         "EpisodeChunk",
-        "EpisodeResponseKind",
         "ProcessingStatus",
         "ChannelIdentity",
         "NewConversation",
@@ -1368,6 +1371,16 @@ def test_the_promoted_surface_and_the_protocol_version_are_both_pinned() -> None
     not move and stays at 67**: the lane adds no ``AssistantEngine`` member and no
     gateway route.
 
+    **69 is ADR-0284 §11's lane 6, under the second limb alone, on three grounds.**
+    ``EpisodeProcessingRecord`` moves to ``schema_version`` 5 and loses
+    ``response_kind`` and ``model_eligible``, renaming ``reply_degraded`` and
+    ``spoken_degraded``; ``RecordedChannelTrigger`` loses ``conversation`` and its
+    ``origin`` is required; and ``EpisodeSummary`` loses ``response_kind``, with
+    ``EpisodeResponseKind`` gone from the surface. A record a hub at 68 emits fails a
+    client at 69 with ``extra_forbidden`` and the reverse, so the handshake has to
+    refuse the pairing. **The method set does not move and stays at 67**: the lane
+    adds no ``AssistantEngine`` member and no gateway route.
+
     **ADR-0124 §9 decides no mechanical check and creates none**, saying one is
     owed and leaving its shape open. This is not that check — it is a *pin*, and
     a deliberately crude one: it fails when either number moves, which is the
@@ -1376,7 +1389,7 @@ def test_the_promoted_surface_and_the_protocol_version_are_both_pinned() -> None
     """
     from ai_assistant.wire.envelope import PROTOCOL_VERSION  # noqa: PLC0415 — asserted about
 
-    assert (len(_method_names()), PROTOCOL_VERSION) == (67, 68), (
+    assert (len(_method_names()), PROTOCOL_VERSION) == (67, 69), (
         "the promoted method set and the protocol version are pinned together "
         "(ADR-0124 §9); move either and this pin makes you name the limb you are "
         "under — the method set, or a wire-carried core type"

@@ -31,7 +31,6 @@ from ai_assistant.core.types import (
     EpisodeSummary,
     EpisodicMemory,
     InputOrigin,
-    MemoryRecord,
     ProcessingStatus,
     ProjectedText,
     RecordedActivationTrigger,
@@ -134,7 +133,6 @@ def summary_of(record: EpisodicMemory) -> EpisodeSummary:
         channel=None if processing is None else processing.trigger.channel,
         modality=record.capture.modality,
         status=None if processing is None else processing.status,
-        response_kind=None if processing is None else processing.response_kind,
         has_processing_record=processing is not None,
     )
 
@@ -170,21 +168,6 @@ def detail_of(
     )
 
 
-def admits_model_eligibility(record: MemoryRecord, requested: bool | None) -> bool:
-    """Apply the declared eligibility axis, leaving non-episodic values unchanged."""
-    if requested is None or not isinstance(record, EpisodicMemory):
-        return True
-    effective = record.processing_record is None or record.processing_record.model_eligible
-    return effective == requested
-
-
-def check_eligibility(value: object) -> None:
-    """Refuse coercible values on the optional boolean query axis."""
-    if value is not None and type(value) is not bool:
-        msg = "episode_model_eligible must be a boolean or None"
-        raise ValueError(msg)
-
-
 # --- an episode's search text (ADR-0284 §7) ------------------------------------
 
 
@@ -199,9 +182,8 @@ def episode_content(record: EpisodicMemory) -> str:
     report by its sense alone, and an episode no stage understood by how it ended.
 
     **What it never includes** is §7:2's invariant: the input text of a trigger whose
-    ``origin`` is ``outside``. An ``origin`` of ``None`` — a trigger recorded without
-    one, or a resume, which has no input — contributes no words either: who sent
-    them is unknown, so they are not taken for the user's.
+    ``origin`` is ``outside``. A resume carries no origin and no input (§2:4), so it
+    contributes no words either.
 
     **An episode without a processing record** keeps the ``content`` its producer
     gave it, and this returns it unchanged: §7:1 makes the rule a function of the
@@ -296,8 +278,8 @@ def project_episode(
 
     The input is shown where the trigger's ``origin`` is ``user``, or where it is
     ``outside`` and ``admit_outside_input`` is set — which the understanding stage's
-    episode window and its recalled episodes alone do (§8:5). An ``origin`` of
-    ``None`` shows none. An episode with no processing record shows its ``content``
+    episode window and its recalled episodes alone do (§8:5). A resume carries no
+    origin and shows no input (§2:4). An episode with no processing record shows its ``content``
     as its input instead (§8:2), the one path on which a model is shown ``content``.
 
     Args:

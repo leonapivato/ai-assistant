@@ -7,7 +7,7 @@ import hashlib
 import json
 from datetime import UTC, datetime, timedelta
 from io import StringIO
-from typing import TYPE_CHECKING, get_args
+from typing import TYPE_CHECKING, Literal, get_args
 
 import pytest
 from rich.console import Console
@@ -25,8 +25,8 @@ from ai_assistant.core.types import (
     ControllerStage,
     EpisodeChunk,
     EpisodeProcessingRecord,
-    EpisodeResponseKind,
     EpisodicMemory,
+    InputOrigin,
     MemoryKind,
     MemorySource,
     ProcessingReason,
@@ -37,7 +37,6 @@ from ai_assistant.core.types import (
     RecallOutcome,
     RecallProvenance,
     RecordedChannelTrigger,
-    RecordedResumeTrigger,
     RecordedTextInput,
     StageEntry,
     StageOutcome,
@@ -61,10 +60,15 @@ _CHANNEL = ChannelIdentity(channel_type="informational_event", instance_id="sour
 _CONTENT = ":smile: " + 'exact private material café 🍵\\" '
 
 
+#: Whether a processed episode sent a response (ADR-0284 §4:1); ``None`` builds an
+#: episode with no processing record at all.
+_Response = Literal["none", "sent"]
+
+
 def _record(
     record_id: str,
     *,
-    response: EpisodeResponseKind | None = None,
+    response: _Response | None = None,
     understanding: tuple[ActivationUnderstanding, ...] = (),
     omitted: UnderstandingOmission | None = UnderstandingOmission.NOT_REACHED,
     elided: int = 0,
@@ -72,7 +76,7 @@ def _record(
     return EpisodicMemory(
         id=record_id,
         content=_CONTENT * 100,
-        outcome=None if response in (None, EpisodeResponseKind.NONE) else "Recorded response",
+        outcome="Recorded response" if response == "sent" else None,
         occurred_at=_AT,
         provenance=Provenance(source=MemorySource.OBSERVED, confidence=0.9, last_updated=_AT),
         processing_record=(
@@ -87,13 +91,11 @@ def _record(
                     channel=_CHANNEL,
                     payload=RecordedTextInput(text=" exact input "),
                     context=ChannelContext(),
-                    conversation=None,
                     reply=None,
+                    origin=InputOrigin.OUTSIDE,
                 ),
                 status=ProcessingStatus.COMPLETED,
                 reason=ProcessingReason.RETURNED,
-                response_kind=response,
-                model_eligible=False,
                 understanding=understanding,
                 understanding_omitted=None if understanding else omitted,
                 understanding_elided=elided,
@@ -132,7 +134,7 @@ def _engine(*records: EpisodicMemory) -> FakeAssistantEngine:
 def test_json_detail_reassembles_exact_stored_record_without_wrapping(
     monkeypatch: pytest.MonkeyPatch, output: StringIO, record_id: str
 ) -> None:
-    engine = _engine(_record(record_id, response=EpisodeResponseKind.INFORMATIONAL_SUMMARY))
+    engine = _engine(_record(record_id, response="sent"))
     _wire(monkeypatch, engine)
     result = CliRunner().invoke(cli.app, ["episode", record_id, "--json"])
     assert result.exit_code == 0, result.exception
@@ -151,15 +153,14 @@ def test_json_detail_reassembles_exact_stored_record_without_wrapping(
     ("response", "label"),
     [
         (None, "unavailable"),
-        (EpisodeResponseKind.NONE, "none"),
-        (EpisodeResponseKind.CONVERSATION_REPLY, "sent"),
-        (EpisodeResponseKind.INFORMATIONAL_SUMMARY, "sent"),
+        ("none", "none"),
+        ("sent", "sent"),
     ],
 )
 def test_human_detail_labels_whether_a_response_was_sent(
     monkeypatch: pytest.MonkeyPatch,
     output: StringIO,
-    response: EpisodeResponseKind | None,
+    response: _Response | None,
     label: str,
 ) -> None:
     _wire(monkeypatch, _engine(_record(":smile:", response=response)))
@@ -176,9 +177,7 @@ def test_human_detail_labels_whether_a_response_was_sent(
 def test_listing_relays_filters_and_displays_exact_id_and_next_cursor(
     monkeypatch: pytest.MonkeyPatch, output: StringIO
 ) -> None:
-    engine = _engine(
-        *(_record(f" row-{n}:smile: ", response=EpisodeResponseKind.NONE) for n in range(10))
-    )
+    engine = _engine(*(_record(f" row-{n}:smile: ", response="none") for n in range(10)))
     _wire(monkeypatch, engine)
     result = CliRunner().invoke(
         cli.app,
@@ -204,15 +203,12 @@ def test_listing_relays_filters_and_displays_exact_id_and_next_cursor(
     assert "exact private material" not in output.getvalue()
 
 
-@pytest.mark.parametrize("response", list(EpisodeResponseKind))
-def test_detail_label_reads_the_outcome_not_the_response_kind(
-    response: EpisodeResponseKind,
-) -> None:
+@pytest.mark.parametrize("response", ["none", "sent"])
+def test_detail_label_reads_the_outcome(response: _Response) -> None:
     """ADR-0284 §4:3: the label is whether ``outcome`` holds a response, and nothing else.
 
-    The record is built past its validator so that ``response_kind`` contradicts
-    ``outcome`` both ways; a label still reading the field §4:1 removes would follow
-    the kind, and this one follows the text the activation sent.
+    The record is rebuilt with each ``outcome`` whatever it was stored with, so the
+    label can follow nothing but the text the activation sent.
     """
     stored = _record("record", response=response)
     for outcome, label in ((None, "none"), ("Sent text", "sent")):
@@ -229,8 +225,8 @@ def test_listing_rows_carry_no_response_line(
 ) -> None:
     """ADR-0284 §4:1 leaves a summary no response fact, so a row states none (§4:3)."""
     engine = _engine(
-        _record("replied", response=EpisodeResponseKind.CONVERSATION_REPLY),
-        _record("silent", response=EpisodeResponseKind.NONE),
+        _record("replied", response="sent"),
+        _record("silent", response="none"),
     )
     _wire(monkeypatch, engine)
     result = CliRunner().invoke(cli.app, ["episodes"])
@@ -414,7 +410,7 @@ def test_json_detail_carries_every_retained_version_complete(
             ),
         ),
     )
-    record = _record("record", response=EpisodeResponseKind.NONE, understanding=versions, elided=2)
+    record = _record("record", response="none", understanding=versions, elided=2)
     engine = _engine(record)
     _wire(monkeypatch, engine)
     result = CliRunner().invoke(cli.app, ["episode", "record", "--json"])
@@ -436,7 +432,7 @@ def test_json_detail_carries_every_retained_version_complete(
 def test_human_detail_names_every_omission_value(omission: str) -> None:
     record = _record(
         "record",
-        response=EpisodeResponseKind.NONE,
+        response="none",
         omitted=UnderstandingOmission(omission),
     )
     assert _understanding_section(record) == [f"Understanding: not recorded ({omission})"]
@@ -460,9 +456,7 @@ def test_human_detail_names_every_ground_of_meaning_and_relationship(ground: str
             ),
         ),
     )
-    section = _understanding_section(
-        _record("record", response=EpisodeResponseKind.NONE, understanding=(version,))
-    )
+    section = _understanding_section(_record("record", response="none", understanding=(version,)))
     assert section == [
         "Understanding v1 (interpretation)",
         f'  Meaning ({ground}): "compare the two quotes"',
@@ -473,7 +467,7 @@ def test_human_detail_names_every_ground_of_meaning_and_relationship(ground: str
 def test_human_detail_names_the_elided_count_before_the_retained_versions() -> None:
     record = _record(
         "record",
-        response=EpisodeResponseKind.NONE,
+        response="none",
         understanding=(_version(1), _version(9, meaning="the latest reading")),
         elided=7,
     )
@@ -514,9 +508,7 @@ def test_human_detail_renders_every_field_of_a_full_version_and_no_referent_deta
             UnresolvedMatter(matter="café 🍵 deadline", why_it_matters="nothing says"),
         ),
     )
-    section = _understanding_section(
-        _record("record", response=EpisodeResponseKind.NONE, understanding=(version,))
-    )
+    section = _understanding_section(_record("record", response="none", understanding=(version,)))
     assert section == [
         "Understanding v3 (interpretation)",
         '  Meaning (inferred): "compare [bold]both[/bold] :smile: quotes\\n'
@@ -540,9 +532,7 @@ def test_human_detail_renders_every_field_of_a_full_version_and_no_referent_deta
 def test_cli_human_detail_carries_the_understanding_section(
     monkeypatch: pytest.MonkeyPatch, output: StringIO
 ) -> None:
-    record = _record(
-        "record", response=EpisodeResponseKind.CONVERSATION_REPLY, understanding=(_version(1),)
-    )
+    record = _record("record", response="sent", understanding=(_version(1),))
     _wire(monkeypatch, _engine(record))
     result = CliRunner().invoke(cli.app, ["episode", "record"])
     assert result.exit_code == 0, result.exception
@@ -598,7 +588,7 @@ def test_human_detail_shows_each_stage_entry_in_order() -> None:
         ),
         *ended_pass(_AT, ControllerRule.STAGE_TIMED_OUT),
     )
-    record = _staged(_record("record", response=EpisodeResponseKind.NONE), stages=stages)
+    record = _staged(_record("record", response="none"), stages=stages)
     assert _stage_section(record) == [
         "Stages:",
         "  understanding (due: not_understood): timed_out, 1.250s",
@@ -617,7 +607,7 @@ def test_human_detail_shows_the_elided_count_at_the_gap() -> None:
         for n in range(3)
     )
     record = _staged(
-        _record("record", response=EpisodeResponseKind.NONE),
+        _record("record", response="none"),
         stages=(*kept, *ended_pass(_AT, ControllerRule.STAGE_REPEATED)),
         stages_elided=7,
     )
@@ -631,14 +621,10 @@ def test_human_detail_shows_the_elided_count_at_the_gap() -> None:
     ]
 
 
-def test_human_detail_labels_a_missing_or_empty_stage_record() -> None:
+def test_human_detail_labels_a_missing_stage_record() -> None:
+    # ADR-0284 §5:5 requires every processing record's stages, a resume's included, so
+    # a record with a processing record and no stages is no longer constructible.
     assert _stage_section(_record("record")) == ["Stages: unavailable"]
-    resume = _staged(
-        _record("record", response=EpisodeResponseKind.NONE),
-        trigger=RecordedResumeTrigger(channel=None, approved=True),
-        stages=(),
-    )
-    assert _stage_section(resume) == ["Stages: none recorded"]
 
 
 def _recall_section(record: EpisodicMemory) -> list[str]:
@@ -676,7 +662,7 @@ def test_human_detail_shows_the_recall_outcome_and_each_items_kind_provenance_an
             ),
         ),
     )
-    record = _staged(_record("record", response=EpisodeResponseKind.NONE), recall=recall)
+    record = _staged(_record("record", response="none"), recall=recall)
     assert _recall_section(record) == [
         "Recall: found",
         '  semantic (user): "The dentist is Dr Rao."',
@@ -689,15 +675,13 @@ def test_human_detail_shows_the_recall_outcome_and_each_items_kind_provenance_an
 )
 def test_human_detail_shows_a_recall_that_kept_nothing(outcome: RecallOutcome) -> None:
     recall = ActivationRecall(outcome=outcome, cues=(RecallCue.ACTIVATION_INPUT,))
-    record = _staged(_record("record", response=EpisodeResponseKind.NONE), recall=recall)
+    record = _staged(_record("record", response="none"), recall=recall)
     assert _recall_section(record) == [f"Recall: {outcome.value}"]
 
 
 def test_human_detail_labels_a_missing_or_absent_recall_result() -> None:
     assert _recall_section(_record("record")) == ["Recall: unavailable"]
-    assert _recall_section(_record("record", response=EpisodeResponseKind.NONE)) == [
-        "Recall: none recorded"
-    ]
+    assert _recall_section(_record("record", response="none")) == ["Recall: none recorded"]
 
 
 def test_json_detail_carries_the_recall_result_with_each_items_id_and_structured_origin(
@@ -708,7 +692,7 @@ def test_json_detail_carries_the_recall_result_with_each_items_id_and_structured
         cues=(RecallCue.ACTIVATION_INPUT,),
         items=(_recalled(MemoryKind.SEMANTIC, RecallProvenance.USER, "The dentist is Dr Rao."),),
     )
-    record = _staged(_record("record", response=EpisodeResponseKind.NONE), recall=recall)
+    record = _staged(_record("record", response="none"), recall=recall)
     _wire(monkeypatch, _engine(record))
     result = CliRunner().invoke(cli.app, ["episode", "record", "--json"])
     assert result.exit_code == 0, result.exception

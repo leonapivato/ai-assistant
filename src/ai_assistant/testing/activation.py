@@ -26,9 +26,7 @@ from ai_assistant.core.types import (
     Disposition,
     EpisodeCaptureReport,
     EpisodeProcessingRecord,
-    EpisodeResponseKind,
     EpisodicMemory,
-    ExchangeDisposition,
     InformationalEventResult,
     MemorySource,
     MemoryWrite,
@@ -104,7 +102,6 @@ class FakeActivation:
     episode_id: str | None = None
     outcome: TurnOutcome | None = None
     response: str | None = None
-    response_kind: EpisodeResponseKind = EpisodeResponseKind.NONE
     spoken_degraded: bool = False
     no_words: bool = False
     links: ActivationLinks = field(default_factory=ActivationLinks)
@@ -133,7 +130,6 @@ class FakeActivation:
                 else None,
                 payload=payload,
                 context=supplied.context,
-                conversation=supplied.conversation,
                 reply=reply,
                 # ADR-0284 §2:2: what the channel declares, fixed at admission.
                 origin=input_origin(supplied.target),
@@ -192,7 +188,6 @@ class FakeActivation:
         if isinstance(result, ChannelResult):
             if isinstance(result.result, InformationalEventResult):
                 self.response = result.result.summary
-                self.response_kind = EpisodeResponseKind.INFORMATIONAL_SUMMARY
                 return
             result = result.result.outcome
         if isinstance(result, SpokenTurn):
@@ -202,11 +197,6 @@ class FakeActivation:
             result = result.outcome
         self.outcome = result
         self.response = result.reply
-        self.response_kind = (
-            EpisodeResponseKind.NONE
-            if result.reply is None
-            else EpisodeResponseKind.CONVERSATION_REPLY
-        )
 
     def report(self) -> EpisodeCaptureReport:
         """Reserve a complete receipt at the address capture writes (ADR-0283 §2).
@@ -262,7 +252,6 @@ class FakeActivation:
         """Build a structured fake record with no raw fields in its embedding text."""
         assert self.activation_id is not None  # noqa: S101 — incomplete envelopes never persist
         status, reason = self.status(failure)
-        eligible = self.outcome is not None
         modality = (
             self.trigger.payload.modality
             if isinstance(self.trigger, RecordedChannelTrigger)
@@ -272,7 +261,6 @@ class FakeActivation:
             id=address,
             content="",
             outcome=self.response,
-            disposition=self.disposition(),
             occurred_at=self.at,
             capture=Capture(modality=modality),
             provenance=Provenance(
@@ -285,10 +273,8 @@ class FakeActivation:
                 trigger=self.trigger,
                 status=status,
                 reason=reason,
-                response_kind=self.response_kind,
-                model_eligible=eligible,
-                reply_degraded=self.outcome is not None and self.outcome.reply_degraded,
-                spoken_degraded=self.spoken_degraded,
+                response_degraded=self.outcome is not None and self.outcome.reply_degraded,
+                output_degraded=self.spoken_degraded,
                 links=self.links,
                 understanding=self.understanding(),
                 understanding_omitted=self.omission(),
@@ -388,16 +374,6 @@ class FakeActivation:
         if self.outcome is not None and self.outcome.routed is not None:
             return UnderstandingOmission.ROUTED
         return None if self.understood else UnderstandingOmission.NOT_REACHED
-
-    def disposition(self) -> ExchangeDisposition | None:
-        """Preserve the scripted result's own exchange vocabulary."""
-        if self.outcome is None:
-            return None
-        if self.outcome.step is not None:
-            return ExchangeDisposition(f"step_{self.outcome.step.disposition.value}")
-        if self.outcome.routed is not None:
-            return ExchangeDisposition(f"routed_{self.outcome.routed.outcome.value}")
-        return ExchangeDisposition.NO_ACTION_NEEDED
 
     async def finish(  # noqa: C901, PLR0911, PLR0913 — bounded capture stages and truthful early-loss returns
         self,

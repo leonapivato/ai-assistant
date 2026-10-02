@@ -1218,7 +1218,6 @@ class MemoryStore(Protocol):
         participants: Sequence[NonBlankEncodableText] | None = None,
         topics: Sequence[TopicLabel] | None = None,
         about_person: Sequence[NonBlankEncodableText] | None = None,
-        episode_model_eligible: bool | None = None,
     ) -> MemorySearchResult:
         """Return the records most relevant to ``query``, best first.
 
@@ -1483,11 +1482,9 @@ class MemoryStore(Protocol):
                 §2), and no value spells "unstated". An **empty sequence selects
                 nothing**; duplicates are set semantics.
 
-            episode_model_eligible: Optional episode eligibility filter (ADR-0275).
-
-        ADR-0275: ``episode_model_eligible`` filters episodes before ranking and
-        limits; non-episodic records are unaffected. An episode without a
-        processing record is eligible. ``None`` applies no eligibility filter.
+        Every episode the axes select is returned, failed, interrupted and outside
+        episodes included (ADR-0284 §6:2): a reader that should pass over an
+        unfinished or failed episode reads its status.
 
         Returns:
             A :class:`~ai_assistant.core.types.MemorySearchResult`: the matching
@@ -1522,7 +1519,6 @@ class MemoryStore(Protocol):
         participants: Sequence[NonBlankEncodableText] | None = None,
         topics: Sequence[TopicLabel] | None = None,
         about_person: Sequence[NonBlankEncodableText] | None = None,
-        episode_model_eligible: bool | None = None,
     ) -> MemorySearchResult:
         """Return the records the given criteria select, newest write first (ADR-0237 §4).
 
@@ -1709,11 +1705,9 @@ class MemoryStore(Protocol):
         one axis the values compose by **disjunction**: a record is eligible on
         that axis when it matches at least one of the values given.
 
-            episode_model_eligible: Optional episode eligibility filter (ADR-0275).
-
-        ADR-0275: ``episode_model_eligible`` filters episodes before ranking and
-        limits; non-episodic records are unaffected. An episode without a
-        processing record is eligible. ``None`` applies no eligibility filter.
+        Every episode the axes select is returned, failed, interrupted and outside
+        episodes included (ADR-0284 §6:2): a reader that should pass over an
+        unfinished or failed episode reads its status.
 
         Returns:
             A :class:`~ai_assistant.core.types.MemorySearchResult`: the eligible
@@ -1753,8 +1747,7 @@ class MemoryStore(Protocol):
         Filter by exact channel and status, then order by ``(occurred_at, id)``
         descending and take ``limit`` (a strict integer in [1, 100]). Unknown
         activation facts do not match a supplied filter. Addresses retain their
-        exact stored characters, including blank values. Eligibility for model
-        retrieval is not a condition of this owner inspection.
+        exact stored characters, including blank values.
 
         Cursors are canonical unpadded URL-safe base64 EpisodeCursor values,
         bound to these filters. Continue strictly below their position. A next
@@ -1802,7 +1795,6 @@ class MemoryStore(Protocol):
         *,
         after: int | None = None,
         limit: int,
-        episode_model_eligible: bool | None = None,
     ) -> ChannelEpisodePage:
         """Read a channel's live episodes in number order (ADR-0283 §3:1, §3:2).
 
@@ -1817,21 +1809,20 @@ class MemoryStore(Protocol):
         closed and one whose window is not yet open are not read, both ends of the
         window enforced (ADR-0007, ADR-0045 §6).
 
-        **The eligibility axis is applied as** :meth:`search` **applies it, before
-        any limit**: ``None`` applies no eligibility filter, and a boolean selects the
-        episodes whose ``model_eligible`` equals it, so an ineligible run never
-        consumes the page an eligible read asked for.
+        **Every live episode on the channel is read** (ADR-0284 §6:1-§6:2), failed,
+        interrupted and outside episodes included: the read takes no eligibility
+        axis, and a reader that should pass over an unfinished or failed episode
+        reads its status.
 
         It returns, in number order ascending, **the newest** ``limit`` of the
         matching episodes when ``after`` is ``None``, or **the oldest** ``limit``
         numbered above ``after`` otherwise. A short page is the whole remainder in
-        that mode. ``total`` is the count of the channel's live episodes matching
-        the eligibility axis — every one of them, whatever ``after`` and ``limit``
-        are — so a page and its ``total`` answer from one read instant and one
-        state of the store.
+        that mode. ``total`` is the count of every live episode on the channel,
+        whatever ``after`` and ``limit`` are — so a page and its ``total`` answer
+        from one read instant and one state of the store.
 
-        This is not the enumeration a deletion walks: it filters by liveness and
-        may filter by eligibility, and :meth:`channel_episode_ids` is that
+        This is not the enumeration a deletion walks: it filters by liveness, and
+        :meth:`channel_episode_ids` is that
         enumeration (ADR-0283 §8). Each record is a detached snapshot carrying its
         stored ``revision``, with ``score`` cleared to ``None`` because this read
         ranks nothing.
@@ -1842,15 +1833,13 @@ class MemoryStore(Protocol):
                 above. A number no store has issued yet is a valid value and
                 answers an empty page.
             limit: The page size.
-            episode_model_eligible: Optional episode eligibility filter (ADR-0275).
 
         Returns:
-            The page and the channel's matching ``total``.
+            The page and the channel's ``total``.
 
         Raises:
-            ValueError: ``limit`` is not a strict integer in ``[1, 1000]``, ``after``
-                is neither ``None`` nor a strict positive integer, or
-                ``episode_model_eligible`` is neither ``None`` nor a boolean —
+            ValueError: ``limit`` is not a strict integer in ``[1, 1000]``, or
+                ``after`` is neither ``None`` nor a strict positive integer —
                 ``bool`` is not a strict integer here. Refused before any I/O.
             MemoryStoreError: If the store cannot be read, or a stored record is
                 corrupt.
