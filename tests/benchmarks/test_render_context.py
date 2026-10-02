@@ -14,9 +14,10 @@ same records go through both, and the harness's whole block has to appear verbat
 the prompt the product would build.
 
 Three further properties are pinned because each is a way the mirror could be right in
-form and wrong in effect: the record machinery is gone, an episode's ``occurred_at``
-and ``outcome`` are *present* because since #1194 the product shows them, and the block
-is the retrieved group's rather than the conversation tail's.
+form and wrong in effect: the record machinery is gone, an episode's ``occurred_at`` is
+*present* and its ``outcome`` absent because the product's projection-based bullet
+shows the one and the retrieved group renders no response (ADR-0284 §8:7), and the
+block is the retrieved group's rather than the conversation tail's.
 
 **Since #1181 the harness calls the product's renderer rather than copying it**, so the
 first test below is no longer catching a copy going stale — it is catching the harness
@@ -230,30 +231,30 @@ def test_a_belief_carries_the_band_and_confidence_the_product_renders() -> None:
     assert BELIEF.provenance.confidence == 0.72
 
 
-def test_an_episode_shows_its_instant_and_its_outcome() -> None:
-    """Because since #1194 ``planner._render_record`` shows both, and the mirror is
-    the point.
+def test_an_episode_shows_its_instant_and_its_content_and_not_its_outcome() -> None:
+    """Because ``planner._render_record`` shows what the projection carries, and the
+    mirror is the point.
 
-    This used to be the one omission that cost the harness something: #1029's P2 is a
-    prediction about temporal reasoning and no instant reached the prompt at all, so
-    the category was being measured against a renderer that withheld its input. Both
-    fields are here now for the only admissible reason — the shipped renderer emits
-    them — and the assertion runs the other way so that a regression in ``planning``
-    is caught here rather than only in the score.
+    A harness row has no processing record, so ADR-0284 §8:2 makes its ``content`` the
+    projection's input and its ``outcome`` the projection's response; the bullet shows
+    the first beside its instant, and the retrieved group — the only group this block
+    is — renders no response (§8:7). So the other speaker's turn, which ingestion puts
+    in ``outcome``, is not in the harness's prompt. The assertion runs both ways so
+    that a regression in ``planning`` is caught here rather than only in the score.
     """
     block = render_context([EPISODE])
-    bullet, outcome_line = block.splitlines()[1:3]
+    (bullet,) = block.splitlines()[1:]
 
     assert EPISODE.content in bullet
     assert EPISODE.occurred_at.isoformat() in bullet
     assert EPISODE.outcome is not None
-    assert EPISODE.outcome in outcome_line
-    assert outcome_line.startswith("    how it turned out:")
-    # The lines and not the block: an episode arriving *alone* is a leading episodic
-    # run, so the planner heads it as the conversation tail. That state is unreachable
-    # from `answer_question` — §4's separator rule drops a supplement with no belief
-    # before it — so what is compared here is the record's own rendering.
-    assert f"{bullet}\n{outcome_line}" in _unlabelled(_product_prompt(EPISODE))
+    assert EPISODE.outcome not in block
+    # The line and not the block: an episode arriving *alone* is a leading episodic
+    # run, so the planner heads it as the conversation tail — where the response does
+    # render, under the bullet. That state is unreachable from `answer_question` —
+    # §4's separator rule drops a supplement with no belief before it — so what is
+    # compared here is the record's own rendering.
+    assert bullet in _unlabelled(_product_prompt(EPISODE)).splitlines()
 
 
 def test_the_block_is_a_fraction_of_the_dump_it_replaced() -> None:
