@@ -10,6 +10,7 @@ from uuid import UUID
 
 import structlog
 
+from ai_assistant.core.channel_validation import input_origin
 from ai_assistant.core.errors import (
     AssistantError,
     ChannelProcessingTimeoutError,
@@ -367,7 +368,14 @@ def admit_channel(
     id_factory: Callable[[], str],
     stage_limit: int = DEFAULT_STAGE_RECORD_LIMIT,
 ) -> ActivationState:
-    """Allocate capture metadata after channel validation, without making it admission policy."""
+    """Allocate capture metadata after channel validation, without making it admission policy.
+
+    The trigger's ``origin`` is what the channel declares about its input (ADR-0284
+    §2:2), read from the one declaration beside the dispatch table and fixed on the
+    episode here. ``input_origin`` refuses a channel type that declares none; the
+    dispatch table has already refused every such type by the time this runs.
+    """
+    origin = input_origin(input.target)
     event = (
         isinstance(input.target, ChannelIdentity)
         and input.target.channel_type == "informational_event"
@@ -386,6 +394,7 @@ def admit_channel(
             context=input.context,
             conversation=input.conversation,
             reply=reply,
+            origin=origin,
         ),
         activation_id=activation_id,
         started_at=started_at,
