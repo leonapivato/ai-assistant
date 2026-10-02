@@ -299,24 +299,31 @@ class FakeActivation:
         ``park_answered`` with its verdict, then ``compose`` due ``reply_owed`` where
         it replied, then the end entry. One that continued nothing records the end
         entry alone.
+
+        **A verdict the pass reached survives a later failure.** The verdict entry reads
+        the observed result whether or not a failure followed it, so a reply refused as
+        oversized after its route performed still records the ``routing`` entry with
+        that outcome — what the engine's controller has already recorded by the time
+        the output is checked, and the one place §5:2 keeps the verdict.
         """
         resume = isinstance(self.trigger, RecordedResumeTrigger)
-        outcome = None if failure is not None else self.outcome
+        reached = self.outcome
+        outcome = None if failure is not None else reached
         entries: list[StageEntry] = []
-        if outcome is not None and outcome.routed is not None:
+        if reached is not None and reached.routed is not None:
             entries.append(
                 self._entry(
                     ControllerStage.ROUTING,
                     ControllerRule.PARK_ANSWERED if resume else ControllerRule.ROUTE_UNCHECKED,
-                    route_outcome=outcome.routed.outcome,
+                    route_outcome=reached.routed.outcome,
                 )
             )
-        elif outcome is not None and outcome.step is not None:
+        elif reached is not None and reached.step is not None:
             entries.append(
                 self._entry(
                     ControllerStage.DRIVE,
                     ControllerRule.PARK_ANSWERED if resume else ControllerRule.PLAN_HAS_STEPS,
-                    step_disposition=outcome.step.disposition,
+                    step_disposition=reached.step.disposition,
                 )
             )
         if resume and outcome is not None and outcome.reply is not None:
