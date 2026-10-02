@@ -404,14 +404,13 @@ async def test_a_zero_bound_makes_no_episodic_read_at_all(tmp_path: Path) -> Non
     asked: list[tuple[MemoryKind, ...]] = []
     real = SqliteMemoryStore.search
 
-    async def _watched(  # noqa: PLR0913 — forwards the tested search arguments
+    async def _watched(
         self: SqliteMemoryStore,
         query: str,
         *,
         limit: int = 10,
         kinds: Sequence[MemoryKind] | None = None,
         bands: Sequence[BeliefBand] | None = None,
-        episode_model_eligible: bool | None = None,
     ) -> MemorySearchResult:
         asked.append(tuple(kinds or ()))
         return await real(
@@ -420,7 +419,6 @@ async def test_a_zero_bound_makes_no_episodic_read_at_all(tmp_path: Path) -> Non
             limit=limit,
             kinds=kinds,
             bands=bands,
-            episode_model_eligible=episode_model_eligible,
         )
 
     try:
@@ -459,14 +457,13 @@ async def test_a_failed_episodic_read_ends_the_run_rather_than_publishing_belief
     asked: list[tuple[MemoryKind, ...]] = []
     real = SqliteMemoryStore.search
 
-    async def _failing(  # noqa: PLR0913 — forwards the tested search arguments
+    async def _failing(
         self: SqliteMemoryStore,
         query: str,
         *,
         limit: int = 10,
         kinds: Sequence[MemoryKind] | None = None,
         bands: Sequence[BeliefBand] | None = None,
-        episode_model_eligible: bool | None = None,
     ) -> MemorySearchResult:
         asked.append(tuple(kinds or ()))
         if tuple(kinds or ()) == tuple(SUPPLEMENT_KINDS) and tuple(bands or ()) == tuple(
@@ -480,7 +477,6 @@ async def test_a_failed_episodic_read_ends_the_run_rather_than_publishing_belief
             limit=limit,
             kinds=kinds,
             bands=bands,
-            episode_model_eligible=episode_model_eligible,
         )
 
     root = tmp_path / "runs"

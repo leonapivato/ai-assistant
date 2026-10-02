@@ -358,8 +358,6 @@ async def test_an_argument_the_store_would_refuse_is_still_refused_first() -> No
         await store.channel_episodes(_CHANNEL, limit=0)
     with pytest.raises(ValueError, match="after"):
         await store.channel_episodes(_CHANNEL, after=0, limit=1)
-    with pytest.raises(ValueError, match="episode_model_eligible"):
-        await store.channel_episodes(_CHANNEL, limit=1, episode_model_eligible=1)  # type: ignore[arg-type] # the point
     with pytest.raises(ValueError, match="limit"):
         await store.channel_episode_ids(_CHANNEL, limit=1001)
 

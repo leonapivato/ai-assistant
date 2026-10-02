@@ -15,7 +15,7 @@ from ai_assistant.core.types import (
     ControllerStage,
     Disposition,
     EpisodeProcessingRecord,
-    EpisodeResponseKind,
+    InputOrigin,
     NewConversation,
     ProcessingReason,
     ProcessingStatus,
@@ -61,13 +61,11 @@ def _record(**overrides: object) -> EpisodeProcessingRecord:
             channel=None,
             payload=RecordedTextInput(text="book the dentist"),
             context=ChannelContext(),
-            conversation=None,
             reply=WholeTextReply(),
+            origin=InputOrigin.USER,
         ),
         "status": ProcessingStatus.COMPLETED,
         "reason": ProcessingReason.RETURNED,
-        "response_kind": EpisodeResponseKind.NONE,
-        "model_eligible": True,
         "understanding_omitted": UnderstandingOmission.NOT_REACHED,
         "stages": (_end(),),
     }
@@ -197,10 +195,10 @@ def test_the_end_entry_records_done_at_one_instant() -> None:
 # --- §7: the record fields and the schema-3 shape rule ----------------------------
 
 
-def test_the_record_is_schema_version_three_and_refuses_any_other() -> None:
-    assert _record().schema_version == 4
+def test_the_record_is_schema_version_five_and_refuses_any_other() -> None:
+    assert _record().schema_version == 5
     with pytest.raises(ValidationError):
-        _record(schema_version=2)
+        _record(schema_version=4)
 
 
 @pytest.mark.parametrize(
@@ -222,15 +220,10 @@ def test_a_channel_record_must_end_in_exactly_one_end_entry_last(
 _RESUME = RecordedResumeTrigger(channel=None, approved=True)
 
 
-def test_a_resume_record_may_still_carry_no_stage_record() -> None:
-    # ADR-0284 §11:1: the legacy shape stays admitted until lane 6 removes it.
-    record = _record(trigger=_RESUME, stages=())
-    assert (record.stages, record.stages_elided) == ((), 0)
-
-
-def test_a_resume_record_with_no_stage_record_elides_none() -> None:
-    with pytest.raises(ValidationError, match="elides no stage entry"):
-        _record(trigger=_RESUME, stages=(), stages_elided=1)
+def test_a_resume_record_must_carry_a_stage_record() -> None:
+    # ADR-0284 §5:5, lane 6: the stageless legacy shape is no longer admitted.
+    with pytest.raises(ValidationError, match="exactly one end entry"):
+        _record(trigger=_RESUME, stages=())
 
 
 def test_the_record_carries_a_stage_record_and_round_trips() -> None:

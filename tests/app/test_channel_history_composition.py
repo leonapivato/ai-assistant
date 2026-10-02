@@ -251,7 +251,7 @@ async def test_history_returns_the_channels_newest_episodes_in_number_order_with
     """§4:1: the newest ``HISTORY_REPLAY_BOUND`` episodes, number ascending.
 
     The channel is filled past the bound with copies of a real episode, and the
-    newest of them is a failed pass carrying the retired ineligible flag: ADR-0284
+    newest of them is a failed pass: ADR-0284
     §6:2 reads it like any other, so it takes the newest place in the page.
     """
     first = await composed.say("hello")
@@ -266,28 +266,27 @@ async def test_history_returns_the_channels_newest_episodes_in_number_order_with
     for copy in copies:
         await composed.memory.add(copy)
     assert template.processing_record is not None
-    ineligible = template.model_copy(
+    failed = template.model_copy(
         update={
-            "id": "activation:ineligible",
+            "id": "activation:failed",
             "processing_record": template.processing_record.model_copy(
                 update={
                     "status": ProcessingStatus.FAILED,
                     "reason": ProcessingReason.PROCESSING_FAILED,
-                    "model_eligible": False,
                 }
             ),
         }
     )
-    await composed.memory.add(ineligible)
+    await composed.memory.add(failed)
 
     history = await composed.engine._conversations.history(conversation_id)
 
     assert history.degraded is False
     assert [record.id for record in history.records] == [
         *(copy.id for copy in copies[-(HISTORY_REPLAY_BOUND - 1) :]),
-        "activation:ineligible",
+        "activation:failed",
     ]
-    assert "activation:ineligible" in await composed.held(conversation_id)
+    assert "activation:failed" in await composed.held(conversation_id)
 
 
 async def test_a_failed_pass_on_a_conversation_appears_in_its_history_with_its_status(
@@ -371,7 +370,7 @@ async def test_a_resume_whose_parking_episode_is_gone_degrades(composed: Compose
 async def test_deleting_a_conversation_deletes_every_episode_on_its_channel(
     composed: Composed,
 ) -> None:
-    """§8:1: eligible or not, expired but unpurged, or not yet valid — all of it goes."""
+    """§8:1: failed or not, expired but unpurged, or not yet valid — all of it goes."""
     first = await composed.say("hello")
     conversation_id = _conversation(first)
     failed = await composed.fail(conversation_id)
@@ -491,7 +490,7 @@ async def test_reclaim_keeps_a_conversation_whose_channel_holds_a_live_episode(
 
 
 async def test_the_digest_counts_the_channels_episodes(composed: Composed) -> None:
-    """§4:2: every live episode on the channel, eligible or not."""
+    """§4:2: every live episode on the channel, failed ones included (ADR-0284 §6:2)."""
     first = await composed.say("hello")
     conversation_id = _conversation(first)
     await composed.say("again", conversation_id)

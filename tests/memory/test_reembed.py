@@ -1249,7 +1249,7 @@ async def test_the_stamps_and_the_issuer_survive_the_swap(tmp_path: Path) -> Non
 
 async def test_reembedding_preserves_processing_record_marker_and_digest(tmp_path: Path) -> None:
     path = tmp_path / "memory.db"
-    await _seed(path, [_activation_episode("activation", eligible=False)])
+    await _seed(path, [_activation_episode("activation", completed=False)])
     original = SqliteMemoryStore(
         traces_sink=FakeTraceSink(), path=path, embedder=HashingEmbedder(dimensions=_OLD)
     )
@@ -1260,13 +1260,14 @@ async def test_reembedding_preserves_processing_record_marker_and_digest(tmp_pat
     assert before is not None
     outcome = await Reembedder(store=path, embedder=HashingEmbedder(dimensions=_NEW)).run()
     assert outcome.swapped
-    assert _read(path, "SELECT version FROM episode_record_format") == [(5,)]
+    assert _read(path, "SELECT version FROM episode_record_format") == [(6,)]
     opened = SqliteMemoryStore(
         traces_sink=FakeTraceSink(), path=path, embedder=HashingEmbedder(dimensions=_NEW)
     )
     try:
         assert await opened.episode_chunk("activation") == before
-        assert (await opened.search("coffee", episode_model_eligible=True)).records == ()
+        # ADR-0284 §6:1: the failed episode is read like any other.
+        assert [record.id for record in (await opened.search("coffee")).records] == ["activation"]
     finally:
         opened.close()
 

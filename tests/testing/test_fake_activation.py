@@ -73,7 +73,6 @@ async def test_empty_speech_keeps_exact_transcript_and_never_falls_back(target: 
     assert processing is not None
     assert processing.status is ProcessingStatus.COMPLETED
     assert processing.reason is ProcessingReason.NO_CONTENT
-    assert not processing.model_eligible
     assert isinstance(processing.trigger, RecordedChannelTrigger)
     assert isinstance(processing.trigger.payload, RecordedSpeechInput)
     assert processing.trigger.payload.transcript == " \t\n"

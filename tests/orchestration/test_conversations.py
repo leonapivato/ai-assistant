@@ -136,7 +136,7 @@ class Wiring:
         conversation_id: str,
         episode_id: str,
         *,
-        eligible: bool = True,
+        completed: bool = True,
         delivery: SpokenDelivery | None = None,
         occurred_at: datetime | None = None,
         parks: ParkedBinding | None = None,
@@ -159,7 +159,7 @@ class Wiring:
                 conversation_id,
                 episode_id,
                 occurred_at=at,
-                eligible=eligible,
+                completed=completed,
                 parks=parks,
                 expires_at=expires_at,
                 validity=validity or Validity(),
@@ -172,7 +172,7 @@ class Wiring:
 
 
 async def _seed_turns(wiring: Wiring, count: int) -> tuple[str, list[str]]:
-    """Start a conversation and put ``count`` eligible episodes on its channel."""
+    """Start a conversation and put ``count`` completed episodes on its channel."""
     conversation = await wiring.stage.begin(None)
     episodes = [
         await wiring.seed(conversation.id, f"activation:{conversation.id}-{index}")
@@ -214,13 +214,13 @@ async def test_the_order_is_the_episodes_numbers_and_never_their_instants() -> N
 async def test_history_reads_a_pass_that_ended_before_capture() -> None:
     """ADR-0284 §6:2: a pass that ended early is on the channel and in its history.
 
-    Superseding ADR-0283 §4:1's eligibility filter: no read requests the old flag, so
+    Superseding ADR-0283 §4:1's eligibility filter: no read filters on status, so
     the episode is replayed in its place with its status, and the digest counts it.
     """
     wiring = Wiring()
     conversation = await wiring.stage.begin(None)
     kept = await wiring.seed(conversation.id, "activation:kept")
-    await wiring.seed(conversation.id, "activation:ended-early", eligible=False)
+    await wiring.seed(conversation.id, "activation:ended-early", completed=False)
     last = await wiring.seed(conversation.id, "activation:last")
 
     history = await wiring.stage.history(conversation.id)
@@ -268,7 +268,7 @@ async def test_a_run_of_failed_passes_takes_its_place_in_the_replay_page() -> No
     wiring = Wiring()
     conversation_id, episodes = await _seed_turns(wiring, HISTORY_REPLAY_BOUND)
     for index in range(5):
-        await wiring.seed(conversation_id, f"activation:ended-{index}", eligible=False)
+        await wiring.seed(conversation_id, f"activation:ended-{index}", completed=False)
 
     history = await wiring.stage.history(conversation_id)
 
@@ -365,12 +365,9 @@ async def test_history_of_a_stamped_conversation_is_degraded_and_reads_no_channe
             *,
             after: int | None = None,
             limit: int,
-            episode_model_eligible: bool | None = None,
         ) -> ChannelEpisodePage:
             self.reads += 1
-            return await super().channel_episodes(
-                channel, after=after, limit=limit, episode_model_eligible=episode_model_eligible
-            )
+            return await super().channel_episodes(channel, after=after, limit=limit)
 
     clock = MovableClock()
     memory = Watching(now=clock)
@@ -403,14 +400,11 @@ async def test_history_degrades_rather_than_failing_the_turn(failing: str) -> No
             *,
             after: int | None = None,
             limit: int,
-            episode_model_eligible: bool | None = None,
         ) -> ChannelEpisodePage:
             if self.fail:
                 msg = "the store would not read"
                 raise MemoryStoreError(msg)
-            return await super().channel_episodes(
-                channel, after=after, limit=limit, episode_model_eligible=episode_model_eligible
-            )
+            return await super().channel_episodes(channel, after=after, limit=limit)
 
     class FaultingConversations(FakeConversationStore):
         fail = False
@@ -443,10 +437,10 @@ async def test_history_degrades_rather_than_failing_the_turn(failing: str) -> No
 
 
 async def test_the_digest_counts_every_episode_on_the_channel() -> None:
-    """§4:2: the count is the channel's, eligible or not, and no other conversation's."""
+    """§4:2: the count is the channel's, completed or not, and no other conversation's."""
     wiring = Wiring()
     conversation_id, _ = await _seed_turns(wiring, 2)
-    await wiring.seed(conversation_id, "activation:ended-early", eligible=False)
+    await wiring.seed(conversation_id, "activation:ended-early", completed=False)
     other_id, _ = await _seed_turns(wiring, 4)
 
     digest = await wiring.stage.digest(conversation_id)
@@ -587,17 +581,17 @@ async def test_deletion_runs_its_steps_in_the_ratified_order(
 
 
 async def test_deleting_a_conversation_deletes_every_episode_on_its_channel() -> None:
-    """§8:1: eligible or not, expired but unpurged, or not yet valid.
+    """§8:1: completed or not, expired but unpurged, or not yet valid.
 
-    The enumeration is what the store physically holds; a read filtered by liveness,
-    validity or eligibility in its place would leave each of the last three behind
-    (ADR-0275 §6:6). Another conversation's episodes are untouched.
+    The enumeration is what the store physically holds; a read filtered by liveness
+    or validity in its place would leave the last two behind (ADR-0275 §6:6).
+    Another conversation's episodes are untouched.
     """
     clock = MovableClock()
     wiring = Wiring(clock=clock)
     conversation = await wiring.stage.begin(None)
-    await wiring.seed(conversation.id, "activation:eligible")
-    await wiring.seed(conversation.id, "activation:ineligible", eligible=False)
+    await wiring.seed(conversation.id, "activation:completed")
+    await wiring.seed(conversation.id, "activation:failed", completed=False)
     await wiring.seed(conversation.id, "activation:expired", expires_at=AT + MINUTE)
     await wiring.seed(
         conversation.id, "activation:not-yet-valid", validity=Validity(valid_from=AT + DAY)

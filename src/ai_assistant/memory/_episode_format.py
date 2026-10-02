@@ -1,4 +1,7 @@
-"""Fresh-state memory format boundary for ADR-0275 §12, advanced by ADRs 0276, 0280, 0281, 0283."""
+"""Fresh-state memory format boundary for ADR-0275 §12.
+
+Advanced by ADRs 0276, 0280, 0281, 0283 and 0284.
+"""
 
 from __future__ import annotations
 
@@ -20,7 +23,11 @@ from ai_assistant.core.errors import IncompatibleStateError, MemoryStoreError
 #: schema_version-4 record, on the same terms. ADR-0283 §12 advances it to 5 for the
 #: numbered, channel-indexed memory store and ``ActivationLinks.parks``, in the memory
 #: store and the conversation store alike, again with no migration or version-4 read.
-EPISODE_RECORD_FORMAT: Final[int] = 5
+#: ADR-0284 §9 advances it to 6 for the schema_version-5 record, which loses
+#: ``response_kind``, ``model_eligible``, the trigger's ``conversation`` and the episode's
+#: ``disposition``, and requires ``origin`` and a resume's stages — with no migration or
+#: earlier read path, so the hub moves to a fresh data directory.
+EPISODE_RECORD_FORMAT: Final[int] = 6
 
 
 def check_format(conn: sqlite3.Connection, *, allow_empty: bool = False) -> bool:

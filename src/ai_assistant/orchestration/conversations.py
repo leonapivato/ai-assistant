@@ -525,8 +525,8 @@ class ConversationLifecycle:
         reads' drop, then **every episode ``channel_episode_ids`` returns for the
         conversation's channel**, page by page until a read is empty, then
         ``drop_if_eligible``. That enumeration is what the store physically holds —
-        expired but unpurged, not yet valid and ineligible episodes included — and no
-        read filtered by liveness, validity or eligibility is used in its place
+        expired but unpurged and not yet valid episodes included — and no read
+        filtered by liveness or validity is used in its place
         (ADR-0275 §6:6). Idempotent by re-walking: a run that dies part-way is re-run
         from the beginning, and the episodes it already deleted are no longer on the
         channel.

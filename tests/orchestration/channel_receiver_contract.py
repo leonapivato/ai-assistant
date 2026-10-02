@@ -21,9 +21,9 @@ from ai_assistant.core.types import (
     ChannelResult,
     ControllerStage,
     ConversationInputOptions,
-    EpisodeResponseKind,
     EpisodicMemory,
     InformationalEventResult,
+    InputOrigin,
     NewConversation,
     ProcessingReason,
     ProcessingStatus,
@@ -82,7 +82,7 @@ async def captured_episode(engine: AssistantEngine, result: ChannelResult) -> Ep
 def assert_a_channel_stage_record(episode: EpisodicMemory) -> None:
     """ADR-0280 §7: a channel pass's record ends in exactly one ``end`` entry, last."""
     assert episode.processing_record is not None
-    assert episode.processing_record.schema_version == 4
+    assert episode.processing_record.schema_version == 5
     stages = [entry.stage for entry in episode.processing_record.stages]
     assert stages
     assert stages[-1] is ControllerStage.END
@@ -177,7 +177,7 @@ class ChannelReceiverContract:
         assert processing.trigger.channel == result.channel
         assert processing.links.predecessor_episode_id is None
         assert episode.outcome == result.result.outcome.reply
-        assert processing.model_eligible
+        assert processing.trigger.origin is InputOrigin.USER
 
     async def test_channel_stream_ends_in_its_authoritative_wrapper(
         self, engine: AssistantEngine
@@ -240,15 +240,13 @@ class ChannelReceiverContract:
         assert episode.outcome == result.result.summary
         processing = episode.processing_record
         assert processing is not None
-        assert not processing.model_eligible
         assert processing.status is ProcessingStatus.COMPLETED
         assert processing.reason is ProcessingReason.RETURNED
-        assert processing.response_kind is EpisodeResponseKind.INFORMATIONAL_SUMMARY
         assert isinstance(processing.trigger, RecordedChannelTrigger)
         assert processing.trigger.context == event_input().context
         assert isinstance(processing.trigger.payload, RecordedTextInput)
         assert processing.trigger.payload.text == "The thermostat entered eco mode at 18:00."
-        assert episode.disposition is None
+        assert processing.trigger.origin is InputOrigin.OUTSIDE
 
     @pytest.mark.parametrize("budget", [timedelta(0), timedelta(seconds=-1)])
     async def test_channel_event_nonpositive_budget_is_a_typed_failure(

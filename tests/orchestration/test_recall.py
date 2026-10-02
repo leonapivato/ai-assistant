@@ -20,7 +20,6 @@ from ai_assistant.core.types import (
     ChannelContext,
     ChannelIdentity,
     EpisodeProcessingRecord,
-    EpisodeResponseKind,
     EpisodicMemory,
     InputOrigin,
     MemoryKind,
@@ -110,7 +109,6 @@ def _processing(
     understanding: tuple[ActivationUnderstanding, ...] = (),
     failed: bool = False,
 ) -> EpisodeProcessingRecord:
-    resumed = isinstance(trigger, RecordedResumeTrigger)
     return EpisodeProcessingRecord(
         activation_id="4f1d7c0e-1a2b-4c3d-8e9f-0a1b2c3d4e5f",
         started_at=AT,
@@ -118,11 +116,9 @@ def _processing(
         trigger=trigger,
         status=ProcessingStatus.FAILED if failed else ProcessingStatus.COMPLETED,
         reason=ProcessingReason.TRANSCRIPTION_FAILED if failed else ProcessingReason.RETURNED,
-        response_kind=EpisodeResponseKind.NONE,
-        model_eligible=not failed,
         understanding=understanding,
         understanding_omitted=None if understanding else UnderstandingOmission.NOT_REACHED,
-        stages=() if resumed else ended_pass(AT),
+        stages=ended_pass(AT),
     )
 
 
@@ -130,7 +126,7 @@ def _text_trigger(
     text: str,
     channel: ChannelIdentity = CONVERSATION,
     *,
-    origin: InputOrigin | None | Literal["admitted"] = "admitted",
+    origin: InputOrigin | Literal["admitted"] = "admitted",
 ) -> RecordedChannelTrigger:
     """A text trigger whose ``origin`` is admission's for ``channel`` unless named."""
     event = channel.channel_type == "informational_event"
@@ -139,7 +135,6 @@ def _text_trigger(
         channel=channel,
         payload=RecordedTextInput(text=text),
         context=ChannelContext(),
-        conversation=None,
         reply=None if event else WholeTextReply(),
         origin=input_origin(channel) if origin == "admitted" else origin,
     )
@@ -178,7 +173,6 @@ class _Search:
     limit: int
     kinds: tuple[MemoryKind, ...] | None
     bands: tuple[BeliefBand, ...] | None
-    eligible: bool | None
 
 
 class _Recording(FakeMemoryStore):
@@ -195,7 +189,6 @@ class _Recording(FakeMemoryStore):
         limit: int = 10,
         kinds: Sequence[MemoryKind] | None = None,
         bands: Sequence[BeliefBand] | None = None,
-        episode_model_eligible: bool | None = None,
         **axes: Any,
     ) -> MemorySearchResult:
         self.searches.append(
@@ -204,7 +197,6 @@ class _Recording(FakeMemoryStore):
                 limit,
                 None if kinds is None else tuple(kinds),
                 None if bands is None else tuple(bands),
-                episode_model_eligible,
             )
         )
         return await super().search(
@@ -212,7 +204,6 @@ class _Recording(FakeMemoryStore):
             limit=limit,
             kinds=kinds,
             bands=bands,
-            episode_model_eligible=episode_model_eligible,
             **axes,
         )
 
@@ -307,7 +298,7 @@ async def test_it_searches_each_band_in_precedence_order_with_the_input_alone() 
     await _recall(_stage(memory), "the dentist, as before")
     both = (MemoryKind.EPISODIC, MemoryKind.SEMANTIC)
     assert memory.searches == [
-        _Search("the dentist, as before", 3, both, (band,), None)
+        _Search("the dentist, as before", 3, both, (band,))
         for band in (BeliefBand.ASSERTED, BeliefBand.ATTESTED, BeliefBand.DERIVED)
     ]
 
@@ -374,14 +365,15 @@ async def test_a_record_rewritten_into_a_later_band_is_kept_once() -> None:
     assert _ids(recalled) == ["first", "second"]
 
 
-async def test_it_requests_no_eligibility_so_an_ineligible_episode_is_reached() -> None:
-    ineligible = _episode(
+async def test_a_failed_outside_episode_is_reached() -> None:
+    """ADR-0284 §6:2: recall reads every episode its search returns, whatever its status."""
+    failed = _episode(
         "event",
         processing=_processing(
-            _text_trigger("parks", EVENTS), understanding=(_understood("closed"),)
-        ).model_copy(update={"model_eligible": False}),
+            _text_trigger("parks", EVENTS), understanding=(_understood("closed"),), failed=True
+        ),
     )
-    recalled = await _recall(_stage(await _store(ineligible)))
+    recalled = await _recall(_stage(await _store(failed)))
     assert _ids(recalled) == ["event"]
 
 
@@ -461,22 +453,19 @@ async def test_an_episodes_provenance_and_excerpt_read_its_origin_never_its_chan
     """ADR-0284 §2:3: no reader of a stored episode branches on its channel type.
 
     Each episode's ``origin`` is set against its channel's declaration here, so a
-    reader testing the channel type would label every one of them the other way. An
-    unrecorded origin is not taken for the user's, by the label or by the excerpt.
+    reader testing the channel type would label every one of them the other way.
     """
     records = (
         _episode("told", processing=_processing(_text_trigger("TOLD", origin=InputOrigin.OUTSIDE))),
         _episode(
             "spoke", processing=_processing(_text_trigger("SPOKE", EVENTS, origin=InputOrigin.USER))
         ),
-        _episode("unknown", processing=_processing(_text_trigger("UNKNOWN", origin=None))),
     )
     recalled = await _recall(_stage(await _store(*records), limit=3))
     items = {item.id: item for item in recalled.result.items}
     assert {key: (item.provenance, item.excerpt) for key, item in items.items()} == {
         "told": (RecallProvenance.OUTSIDE, "a report received on conversation:c-1"),
         "spoke": (RecallProvenance.USER, "SPOKE"),
-        "unknown": (RecallProvenance.OUTSIDE, "a report received on conversation:c-1"),
     }
 
 
@@ -506,7 +495,6 @@ async def test_another_episodes_excerpt_is_its_input_text_or_its_content() -> No
         channel=None,
         payload=RecordedSpeechInput(media_type=SpokenAudioFormat.WEBM_OPUS, transcript=None),
         context=ChannelContext(),
-        conversation=None,
         reply=SpokenReply(plays=(SpokenAudioFormat.WEBM_OPUS,)),
         origin=InputOrigin.USER,
     )

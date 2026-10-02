@@ -1,10 +1,10 @@
-"""Every read reads every episode: the eligibility axis is retired (ADR-0284 §6:2).
+"""Every read reads every episode, failed and outside ones included (ADR-0284 §6:2).
 
-These tests once pinned ADR-0283 §4's filter. ADR-0284 §6 supersedes it — no read
-requests ``episode_model_eligible``, and an episode the old flag marked ineligible is
-read by history, retrieval, both episodic reads, the citation hop and the observer
-exactly as any other is. The flag is still written (lane 6 retires it), so each test
-seeds episodes carrying ``model_eligible=False`` and asserts they are read.
+These tests once pinned ADR-0283 §4's eligibility filter. ADR-0284 §6 retires the
+flag and the axis: history, retrieval, both episodic reads, the citation hop and the
+observer read every episode their reads return. Each test seeds failed episodes —
+the passes the retired flag marked ineligible — beside completed ones, and asserts
+they are read.
 """
 
 from __future__ import annotations
@@ -20,8 +20,8 @@ from ai_assistant.core.types import (
     ChannelContext,
     ChannelIdentity,
     EpisodeProcessingRecord,
-    EpisodeResponseKind,
     EpisodicMemory,
+    InputOrigin,
     MemorySource,
     ProcessingReason,
     ProcessingStatus,
@@ -52,7 +52,7 @@ from ai_assistant.testing.activation import ended_pass
 _AT = datetime(2026, 9, 18, tzinfo=UTC)
 
 
-def _episode(identifier: str, *, eligible: bool) -> EpisodicMemory:
+def _episode(identifier: str, *, completed: bool) -> EpisodicMemory:
     channel = ChannelIdentity(channel_type="informational_event", instance_id="source")
     return EpisodicMemory(
         id=identifier,
@@ -68,21 +68,19 @@ def _episode(identifier: str, *, eligible: bool) -> EpisodicMemory:
                 target=channel,
                 payload=RecordedTextInput(text="raw event"),
                 context=ChannelContext(),
-                conversation=None,
                 reply=None,
+                origin=InputOrigin.OUTSIDE,
             ),
-            status=ProcessingStatus.COMPLETED,
-            reason=ProcessingReason.RETURNED,
-            response_kind=EpisodeResponseKind.NONE,
-            model_eligible=eligible,
+            status=ProcessingStatus.COMPLETED if completed else ProcessingStatus.FAILED,
+            reason=ProcessingReason.RETURNED if completed else ProcessingReason.PROCESSING_FAILED,
             understanding_omitted=UnderstandingOmission.NOT_REACHED,
             stages=ended_pass(_AT),
         ),
     )
 
 
-async def test_history_reads_formerly_ineligible_episodes_up_to_the_replay_bound() -> None:
-    """ADR-0284 §6:2: history is the channel's latest episodes, whatever the old flag."""
+async def test_history_reads_failed_episodes_up_to_the_replay_bound() -> None:
+    """ADR-0284 §6:2: history is the channel's latest episodes, whatever their status."""
     conversations = FakeConversationStore(now=lambda: _AT)
     memory = FakeMemoryStore(now=lambda: _AT)
     stage = ConversationLifecycle(
@@ -94,27 +92,27 @@ async def test_history_reads_formerly_ineligible_episodes_up_to_the_replay_bound
         now=lambda: _AT,
     )
     conversation = await conversations.start()
-    eligible = [f"activation:eligible-{index}" for index in range(2)]
-    for identifier in eligible:
+    completed = [f"activation:completed-{index}" for index in range(2)]
+    for identifier in completed:
         await memory.add(conversation_episode(conversation.id, identifier, occurred_at=_AT))
     for index in range(HISTORY_REPLAY_BOUND + 5):
         await memory.add(
             conversation_episode(
-                conversation.id, f"activation:hidden-{index}", occurred_at=_AT, eligible=False
+                conversation.id, f"activation:failed-{index}", occurred_at=_AT, completed=False
             )
         )
 
-    hidden = [f"activation:hidden-{index}" for index in range(HISTORY_REPLAY_BOUND + 5)]
+    failed = [f"activation:failed-{index}" for index in range(HISTORY_REPLAY_BOUND + 5)]
     assert [record.id for record in (await stage.history(conversation.id)).records] == (
-        eligible + hidden
+        completed + failed
     )[-HISTORY_REPLAY_BOUND:]
 
 
-async def test_retrieval_reads_formerly_ineligible_episodes() -> None:
+async def test_retrieval_reads_failed_episodes() -> None:
     memory = FakeMemoryStore(now=lambda: _AT)
     for index in range(25):
-        await memory.add(_episode(f"hidden-{index}", eligible=False))
-    await memory.add(_episode("visible", eligible=True))
+        await memory.add(_episode(f"hidden-{index}", completed=False))
+    await memory.add(_episode("visible", completed=True))
 
     records = await assemble_by_band(memory, "matching", limit=30)
 
@@ -129,19 +127,19 @@ async def _crowded_memory() -> FakeMemoryStore:
     await memory.add(_belief("belief", "boiler"))
     for index in range(READ_BUDGET + 1):
         await memory.add(
-            _episode(f"hidden-{index}", eligible=False).model_copy(
+            _episode(f"hidden-{index}", completed=False).model_copy(
                 update={"content": "boiler", "topics": ("boiler",)}
             )
         )
     await memory.add(
-        _episode("visible", eligible=True).model_copy(
+        _episode("visible", completed=True).model_copy(
             update={"content": "boiler", "topics": ("boiler",)}
         )
     )
     return memory
 
 
-async def test_episodic_supplement_reads_formerly_ineligible_episodes() -> None:
+async def test_episodic_supplement_reads_failed_episodes() -> None:
     memory = await _crowded_memory()
     planner = _Script(None)
     loop = _loop(memory, planner=planner, episodic_limit=READ_BUDGET + 2, now=lambda: _AT)
@@ -157,7 +155,7 @@ async def test_episodic_supplement_reads_formerly_ineligible_episodes() -> None:
 
 
 @pytest.mark.parametrize("query", [None, "boiler"])
-async def test_structured_read_reads_formerly_ineligible_episodes(
+async def test_structured_read_reads_failed_episodes(
     query: str | None,
 ) -> None:
     memory = await _crowded_memory()
@@ -173,15 +171,15 @@ async def test_structured_read_reads_formerly_ineligible_episodes(
     read = [record.id for record in planner.calls[1][0]]
     assert read[0] == "belief"
     assert any(identifier.startswith("hidden-") for identifier in read), (
-        "a formerly ineligible episode is read like any other"
+        "a failed episode is read like any other"
     )
     assert [record.id for record in responded.turn.memories] == read
 
 
-async def test_citation_hops_reach_formerly_ineligible_evidence_and_named_records() -> None:
+async def test_citation_hops_reach_failed_evidence_and_named_records() -> None:
     memory = FakeMemoryStore(now=lambda: _AT)
-    hidden = _episode("hidden", eligible=False)
-    visible = _episode("visible", eligible=True)
+    hidden = _episode("hidden", completed=False)
+    visible = _episode("visible", completed=True)
     belief = SemanticMemory(
         id="belief",
         content="a supported fact",
@@ -224,10 +222,10 @@ async def test_citation_hops_reach_formerly_ineligible_evidence_and_named_record
         (False,),
     ],
 )
-async def test_observation_reads_formerly_ineligible_episodes_and_advances_the_watermark(
+async def test_observation_reads_failed_episodes_and_advances_the_watermark(
     flags: tuple[bool, ...],
 ) -> None:
-    """ADR-0284 §6:2: the observer reads every episode, whatever the old flag, and the
+    """ADR-0284 §6:2: the observer reads every episode, whatever its status, and the
     pass advances to the page's highest number, so nothing is read twice."""
     memory = FakeMemoryStore(now=lambda: _AT)
     conversations = FakeConversationStore(now=lambda: _AT)
@@ -246,9 +244,9 @@ async def test_observation_reads_formerly_ineligible_episodes_and_advances_the_w
     )
     conversation = await conversations.start()
     identifiers = [f"activation:{index}" for index in range(len(flags))]
-    for identifier, eligible in zip(identifiers, flags, strict=True):
+    for identifier, completed in zip(identifiers, flags, strict=True):
         await memory.add(
-            conversation_episode(conversation.id, identifier, occurred_at=_AT, eligible=eligible)
+            conversation_episode(conversation.id, identifier, occurred_at=_AT, completed=completed)
         )
     numbers = await channel_numbers(memory, conversation.id)
 

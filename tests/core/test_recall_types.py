@@ -17,7 +17,7 @@ from ai_assistant.core.types import (
     ControllerRule,
     ControllerStage,
     EpisodeProcessingRecord,
-    EpisodeResponseKind,
+    InputOrigin,
     MemoryKind,
     NewConversation,
     ProcessingReason,
@@ -74,13 +74,11 @@ def _record(**overrides: object) -> EpisodeProcessingRecord:
             channel=None,
             payload=RecordedTextInput(text="book the dentist"),
             context=ChannelContext(),
-            conversation=None,
             reply=WholeTextReply(),
+            origin=InputOrigin.USER,
         ),
         "status": ProcessingStatus.COMPLETED,
         "reason": ProcessingReason.RETURNED,
-        "response_kind": EpisodeResponseKind.NONE,
-        "model_eligible": True,
         "understanding_omitted": UnderstandingOmission.NOT_REACHED,
         "stages": (
             StageEntry(
@@ -221,10 +219,10 @@ def test_a_recall_is_bounded_by_the_types_ceiling() -> None:
 # --- §6: the record field, and the schema-4 rule --------------------------------------
 
 
-def test_the_record_defaults_to_no_recall_at_schema_version_4() -> None:
+def test_the_record_defaults_to_no_recall_at_schema_version_5() -> None:
     record = _record()
     assert record.recall is None
-    assert record.schema_version == 4
+    assert record.schema_version == 5
 
 
 def test_a_schema_3_record_is_refused() -> None:
@@ -236,9 +234,9 @@ _RESUME = RecordedResumeTrigger(channel=None, approved=True)
 
 
 def test_a_resume_carries_no_recall_result() -> None:
-    assert _record(trigger=_RESUME, stages=()).recall is None
+    assert _record(trigger=_RESUME).recall is None
     with pytest.raises(ValidationError, match="carries no recall result"):
-        _record(trigger=_RESUME, stages=(), recall=_recall())
+        _record(trigger=_RESUME, recall=_recall())
 
 
 def test_the_record_carries_a_recall_result() -> None:

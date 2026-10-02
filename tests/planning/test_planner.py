@@ -45,12 +45,10 @@ from ai_assistant.core.types import (
     Disposition,
     EmailFacet,
     EpisodeProcessingRecord,
-    EpisodeResponseKind,
     EpisodicMemory,
     EvidenceBasis,
     EvidenceDigest,
     EvidenceStanding,
-    ExchangeDisposition,
     Goal,
     GoalBrief,
     GoalInterpretation,
@@ -267,7 +265,7 @@ def _processed(  # noqa: PLR0913 — one keyword per part of the record a test v
     record_id: str,
     words: str | None = "Ada: I adopted a dog.",
     *,
-    origin: InputOrigin | None = InputOrigin.USER,
+    origin: InputOrigin = InputOrigin.USER,
     outcome: str | None = None,
     meaning: str | None = None,
     unresolved: tuple[UnresolvedMatter, ...] = (),
@@ -275,7 +273,6 @@ def _processed(  # noqa: PLR0913 — one keyword per part of the record a test v
     route: RouteOutcome | None = None,
     status: ProcessingStatus = ProcessingStatus.COMPLETED,
     reason: ProcessingReason = ProcessingReason.RETURNED,
-    disposition: ExchangeDisposition | None = None,
     provenance: Provenance | None = None,
     occurred_at: datetime = _WHEN,
 ) -> EpisodicMemory:
@@ -284,11 +281,6 @@ def _processed(  # noqa: PLR0913 — one keyword per part of the record a test v
     ``words`` is the trigger's text, or a speech trigger with no transcript where it is
     ``None``; ``origin`` is what admission set on it (ADR-0284 §2). ``step`` and
     ``route`` put a verdict on a ``drive`` or a ``routing`` entry (§5).
-    ``disposition`` sets the field ADR-0284 §5 removes in lane 6, which this renderer
-    no longer reads — so a test can give it a value no rendering may show.
-
-    The two fields ADR-0284 retires from the processing record (``response_kind``,
-    ``model_eligible``) are filled here and nowhere else in this module.
     """
     target = _EVENTS if origin is InputOrigin.OUTSIDE else _CONVERSATION
     payload: RecordedTextInput | RecordedSpeechInput = (
@@ -301,7 +293,6 @@ def _processed(  # noqa: PLR0913 — one keyword per part of the record a test v
         channel=target,
         payload=payload,
         context=ChannelContext(),
-        conversation=None,
         reply=(
             None
             if origin is InputOrigin.OUTSIDE
@@ -341,10 +332,6 @@ def _processed(  # noqa: PLR0913 — one keyword per part of the record a test v
         trigger=trigger,
         status=status,
         reason=reason,
-        response_kind=(
-            EpisodeResponseKind.NONE if outcome is None else EpisodeResponseKind.CONVERSATION_REPLY
-        ),
-        model_eligible=True,
         understanding=understanding,
         understanding_omitted=None if understanding else UnderstandingOmission.NOT_REACHED,
         stages=(*stages, _END_ENTRY),
@@ -354,7 +341,6 @@ def _processed(  # noqa: PLR0913 — one keyword per part of the record a test v
         content=_SEARCH_TEXT,
         occurred_at=occurred_at,
         outcome=outcome,
-        disposition=disposition,
         provenance=provenance
         or Provenance(source=MemorySource.OBSERVED, confidence=0.9, last_updated=_WHEN),
         processing_record=processing,
@@ -1171,25 +1157,6 @@ async def test_a_record_with_no_verdict_renders_no_verdict_line() -> None:
     ]
 
 
-async def test_the_retired_disposition_field_is_not_read() -> None:
-    """``EpisodicMemory.disposition`` still exists until lane 6, and is read by nothing here.
-
-    The field says the step was refused and the ``drive`` entry says it ran: the
-    projection carries the stage's verdict, so the bullet states that one and never the
-    field's.
-    """
-    record = _processed(
-        "e1",
-        step=Disposition.EXECUTED,
-        disposition=ExchangeDisposition.STEP_DENIED,
-    )
-
-    rendered = "\n".join(await _bullets_for(record))
-
-    assert STEP_DISPOSITION_PHRASES[Disposition.EXECUTED] in rendered
-    assert STEP_DISPOSITION_PHRASES[Disposition.DENIED] not in rendered
-
-
 async def test_a_processed_episodes_content_reaches_no_rendering() -> None:
     """§8:3: "None renders ``content`` other than through the projection's input for an
     episode without a processing record."
@@ -1283,18 +1250,6 @@ async def test_an_outside_inputs_text_never_reaches_the_planner() -> None:
         "something the user said; its text is not shown"
     )
     assert "the dentist moved the visit" not in "\n".join(lines)
-
-
-async def test_an_input_of_no_recorded_origin_is_not_taken_for_the_users() -> None:
-    """A trigger recorded without an ``origin`` (before lane 6 requires one) shows no input.
-
-    Who sent the words is unknown, so the projection shows none, and the bullet says so
-    rather than attributing them to anyone.
-    """
-    lines = _record_lines(await _bullets_for(_processed("e1", "who said this?", origin=None)))
-
-    assert lines[0] == f"  - M1 [episodic] at {_WHEN.isoformat()}, it shows no input"
-    assert "who said this?" not in "\n".join(lines)
 
 
 async def test_speech_with_no_transcript_is_stated_as_such() -> None:

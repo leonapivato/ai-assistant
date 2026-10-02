@@ -2484,7 +2484,12 @@ class MemoryBase(BaseModel):
 
 
 class ExchangeDisposition(StrEnum):
-    """What became of the exchange one captured episode records (ADR-0221 §2).
+    """What became of the exchange one transcript entry records (ADR-0221 §2).
+
+    **It is** :attr:`TranscriptEntry.disposition`'s **alone** (ADR-0284 §5:3). The
+    episode no longer carries it: what became of a step or a route is on the
+    ``drive`` or ``routing`` stage entry that reached it (§5:2), and this enum
+    leaves with the archive.
 
     **One member per member of** :class:`Disposition`, one for the no-step case, and
     one per member of :class:`RouteOutcome` — a shape rather than a count, because
@@ -2518,27 +2523,17 @@ class ExchangeDisposition(StrEnum):
 
     **Every serialised value is fixed by §2's table and none of them changes.** A
     ``StrEnum`` serialises its *value*, not its member name, and
-    :class:`EpisodicMemory` is wire-carried as well as persisted, so two conforming
+    :class:`TranscriptEntry` is wire-carried as well as persisted, so two conforming
     implementations emitting ``step_executed`` and ``STEP_EXECUTED`` for one fact
     would leave every record written under the loser undecodable. No implementation,
     migration or later lane changes a value once ADR-0221 merged; no member is given
     a second spelling, an alias or a numeric encoding; and **a member added later
     takes a value of the same form, the member name lower-cased**.
 
-    **The phrase each member stands for is not written down here** (§3). §2's table
-    fixes one phrase per member, and §3 puts the table at each of the three render
-    sites — ``learning/observer.py``, ``planning/planner.py`` and
-    ``orchestration/composing.py`` — while forbidding a shared module, a ``core``
-    mapping, a method on this enum or a helper any two of the three import. A copy
-    in this docstring would be the fourth table a later lane reads instead of
-    writing its own, so each member below says what it *denotes* and which source
-    member it mirrors, and a reader wanting the rendered string reads §2 or a render
-    site.
-
-    **Absence, not a member, is the discriminator** (§8). A record written before
-    ADR-0221 carries no member of this enum at all, and
-    :attr:`EpisodicMemory.disposition` is ``None`` there; nothing infers the
-    population from the record's text, its length, its instant or its store.
+    **The phrase each member stands for is not written down here.** ADR-0284 §8:6
+    makes the verdict phrases one table in ``core``, beside the episode projection,
+    keyed by :class:`Disposition` and :class:`RouteOutcome` rather than by this enum,
+    so each member below says what it *denotes* and which source member it mirrors.
     """
 
     NO_ACTION_NEEDED = "no_action_needed"
@@ -3358,14 +3353,6 @@ class ProcessingReason(StrEnum):
     CANCELLED = "cancelled"
 
 
-class EpisodeResponseKind(StrEnum):
-    """The role of an episode's sole response-text field, ``outcome``."""
-
-    NONE = "none"
-    CONVERSATION_REPLY = "conversation_reply"
-    INFORMATIONAL_SUMMARY = "informational_summary"
-
-
 class RecordedTextInput(BaseModel):
     """Exact admitted text, separate from its processing rendering."""
 
@@ -3411,10 +3398,16 @@ class InputOrigin(StrEnum):
 class RecordedChannelTrigger(BaseModel):
     """One admitted channel envelope after transient audio has been discarded.
 
-    ``origin`` is who the input came from (ADR-0284 §2), set at admission from the
-    channel's declaration. It is optional until ADR-0284 §11's lane 6 makes it
-    required; a trigger recorded without it carries ``None``, which no reader takes
-    for either member.
+    It records how the input arrived (ADR-0284 §3): the target, the channel it
+    resolved to, the payload, its context, the reply capability it was offered, and
+    ``origin``, who the input came from (§2), set at admission from the channel's
+    declaration and fixed on the episode.
+
+    **It checks no combination per channel type** (§3:2). Which payloads, reply
+    shapes and options a channel accepts is checked at admission, by
+    :mod:`ai_assistant.core.channel_validation`'s one dispatch table; the trigger
+    holds only that, where its target is a :class:`ChannelIdentity` and its
+    ``channel`` is set, the two are equal.
     """
 
     model_config = ConfigDict(frozen=True, extra="forbid")
@@ -3423,50 +3416,18 @@ class RecordedChannelTrigger(BaseModel):
     channel: ChannelIdentity | None
     payload: RecordedChannelPayload
     context: ChannelContext
-    conversation: ConversationInputOptions | None
     reply: ReplyCapability | None
-    origin: InputOrigin | None = None
+    origin: InputOrigin
 
     @model_validator(mode="after")
-    def _supported_combination(self) -> Self:
-        kind = (
-            "conversation" if isinstance(self.target, NewConversation) else self.target.channel_type
-        )
-        options = self.conversation or ConversationInputOptions()
-        valid = False
-        if kind == "informational_event":
-            valid = (
-                isinstance(self.payload, RecordedTextInput)
-                and self.reply is None
-                and self.conversation is None
-                and self.channel == self.target
-            )
-        elif kind == "conversation":
-            valid = (
-                isinstance(self.payload, RecordedTextInput)
-                and isinstance(self.reply, WholeTextReply | StreamingTextReply)
-                and options.delivery is None
-            ) or (
-                isinstance(self.payload, RecordedSpeechInput)
-                and isinstance(self.reply, SpokenReply)
-                and options.reference is None
-                and (
-                    options.delivery is None
-                    or (
-                        not isinstance(self.target, NewConversation)
-                        and options.delivery.delivery.state is not SpokenDeliveryState.UNKNOWN
-                    )
-                )
-            )
-            valid = valid and (
-                self.channel is None
-                or (
-                    self.channel.channel_type == "conversation"
-                    and (isinstance(self.target, NewConversation) or self.channel == self.target)
-                )
-            )
-        if not valid:
-            msg = "unsupported recorded channel combination"
+    def _channel_is_the_target(self) -> Self:
+        # ADR-0284 §3:2: the one rule the trigger itself holds.
+        if (
+            isinstance(self.target, ChannelIdentity)
+            and self.channel is not None
+            and self.channel != self.target
+        ):
+            msg = "a recorded trigger's channel is its target where the target names one"
             raise ValueError(msg)
         return self
 
@@ -3915,17 +3876,15 @@ class EpisodeProcessingRecord(BaseModel):
     """Immutable facts about one activation, written after its processing ends."""
 
     model_config = ConfigDict(frozen=True, extra="forbid")
-    schema_version: Literal[4] = 4
+    schema_version: Literal[5] = 5
     activation_id: Identifier
     started_at: UtcInstant
     ended_at: UtcInstant
     trigger: RecordedActivationTrigger
     status: ProcessingStatus
     reason: ProcessingReason
-    response_kind: EpisodeResponseKind
-    reply_degraded: bool = False
-    spoken_degraded: bool = False
-    model_eligible: bool
+    response_degraded: bool = False
+    output_degraded: bool = False
     links: ActivationLinks = Field(default_factory=ActivationLinks)
     understanding: tuple[ActivationUnderstanding, ...] = ()
     understanding_omitted: UnderstandingOmission | None = None
@@ -3945,14 +3904,7 @@ class EpisodeProcessingRecord(BaseModel):
     @model_validator(mode="after")
     def _stages_follow_the_trigger(self) -> Self:
         # ADR-0280 §7: a channel activation records its stages ending in exactly one end
-        # entry, last. ADR-0284 §5:4-§5:5 holds a resume to the same rule; until §11's
-        # lane 6 a resume may still record none at all, its legacy shape, and a resume
-        # with no stage record elides none.
-        if isinstance(self.trigger, RecordedResumeTrigger) and not self.stages:
-            if self.stages_elided:
-                msg = "a resume with no stage record elides no stage entry"
-                raise ValueError(msg)
-            return self
+        # entry, last, and ADR-0284 §5:4-§5:5 holds a resume to the same rule.
         ends = [entry.stage is ControllerStage.END for entry in self.stages]
         if not ends or not ends[-1] or any(ends[:-1]):
             msg = "a stage record ends in exactly one end entry, last"
@@ -4011,7 +3963,6 @@ class EpisodeSummary(BaseModel):
     channel: ChannelIdentity | None
     modality: Modality
     status: ProcessingStatus | None
-    response_kind: EpisodeResponseKind | None
     has_processing_record: bool
 
 
@@ -4038,17 +3989,15 @@ class EpisodeChunk(BaseModel):
 class EpisodicMemory(MemoryBase):
     """Something that happened: an event, with who and how it turned out.
 
-    **Three fields divide the exchange between them** (ADR-0221). ``content``
-    renders what the user asked, ``outcome`` carries what the assistant said, and
-    ``disposition`` states what became of the pass. Before ADR-0221 the middle field
-    held the last of those as one of sixteen constant phrases and the reply was
-    stored nowhere at all; §1 gives ``outcome`` to the reply and §2 puts the fact in
-    its own typed field.
+    ``processing_record`` (ADR-0275) records an activation after processing ends:
+    the experience of processing it (ADR-0284). Its absence supports other current
+    producers. Fresh-state startup does not import historical records.
 
-    ``processing_record`` (ADR-0275) records an activation after processing ends.
-    Its absence supports other current producers. Fresh-state startup does not
-    import historical records. With processing metadata, ``outcome`` is the sole
-    response text and its role is declared by ``response_kind``.
+    With a processing record, ``outcome`` is the response — the text the activation
+    sent back on its channel, nonblank, or ``None`` where it sent none (ADR-0284
+    §4:1) — ``content`` is the search text one rule derives from the record (§7),
+    and what became of a step or a route is on the stage entry that reached it
+    (§5:2). ADR-0221 §2's ``disposition`` field is removed (§5:3).
     """
 
     kind: Literal["episodic"] = "episodic"
@@ -4060,24 +4009,11 @@ class EpisodicMemory(MemoryBase):
             "What the assistant said, on a record this system captured after "
             "ADR-0221 §1: the composed reply, whole. No implementation, setting or "
             "later lane stores a prefix, a summary, an elision or any other lossy "
-            "rendering of it here. None where the pass produced no reply at all. A "
-            "record carrying a disposition carries the reply here; a record "
-            "carrying none carries something else — one of ADR-0221 §2's sixteen "
-            "constant phrases, on an episode captured before that decision, or an "
-            "assistant text a benchmark harness supplied, on a row it built (§3)."
-        ),
-    )
-    disposition: ExchangeDisposition | None = Field(
-        default=None,
-        description=(
-            "What became of the exchange this episode captures (ADR-0221 §2): one "
-            "member per Disposition member, one for the no-step case, and one per "
-            "RouteOutcome member. None on a record written "
-            "before that decision and on a harness-supplied row, and that absence "
-            "is the discriminator between those populations and one captured after "
-            "it (§8) — nothing infers the population from the record's text, its "
-            "length, its instant or its store. No read returning records is "
-            "filtered on it (§14)."
+            "rendering of it here. On a record carrying a processing record it is "
+            "the response the activation sent back on its channel, nonblank, or "
+            "None where it sent none (ADR-0284 §4:1). A record carrying none may "
+            "carry an assistant text a benchmark harness supplied, on a row it "
+            "built (ADR-0221 §3)."
         ),
     )
     capture: Capture = Field(
@@ -4096,14 +4032,12 @@ class EpisodicMemory(MemoryBase):
 
     @model_validator(mode="after")
     def _processing_response(self) -> Self:
-        record = self.processing_record
-        if record is None:
-            return self
-        if record.response_kind is EpisodeResponseKind.NONE:
-            if self.outcome is not None:
-                msg = "an episode with no response has no outcome text"
-                raise ValueError(msg)
-        elif self.outcome is None or not self.outcome.strip():
+        # ADR-0284 §4:1: the response is nonblank, or there is none.
+        if (
+            self.processing_record is not None
+            and self.outcome is not None
+            and not self.outcome.strip()
+        ):
             msg = "a recorded response requires nonblank outcome text"
             raise ValueError(msg)
         return self
@@ -4163,8 +4097,8 @@ class EpisodeProjection(BaseModel):
         occurred_at: When the episode happened.
         channel: The channel its trigger names, where it has a processing record.
         capture_modality: Its capture modality, where it has no processing record.
-        origin: Who the trigger's input came from; ``None`` on a resume, on a
-            trigger recorded without one, and on an episode with no processing record.
+        origin: Who the trigger's input came from; ``None`` on a resume and on an
+            episode with no processing record.
         input: The input text or transcript, cut to the excerpt bound, or ``None``
             where none is shown.
         meaning: The latest understanding's meaning, or ``None`` where there is none.
@@ -4293,8 +4227,8 @@ class ChannelEpisodePage(BaseModel):
 
     Attributes:
         entries: The page's episodes in number order, ascending (ADR-0283 §3:1).
-        total: The count of live episodes on the channel matching the call's
-            eligibility axis — every one of them, not the page's (§3:2).
+        total: The count of every live episode on the channel, not the page's
+            (§3:2; ADR-0284 §6:1).
     """
 
     model_config = ConfigDict(frozen=True, extra="forbid")

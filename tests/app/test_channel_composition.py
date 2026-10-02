@@ -326,7 +326,6 @@ def _assert_captured_result(result: ChannelResult, encoded: str, context: Channe
         assert spoken.spoken.content not in encoded
     else:
         assert episode.outcome == result.result.summary
-        assert not processing.model_eligible
         assert processing.trigger.context == context
 
 
@@ -459,7 +458,6 @@ async def test_composed_concurrent_activations_keep_records_isolated_when_finish
         )
         processing = episode.processing_record
         assert processing is not None
-        assert processing.model_eligible
         assert isinstance(processing.trigger, RecordedChannelTrigger)
         assert isinstance(processing.trigger.payload, RecordedTextInput)
         assert isinstance(supplied.payload, TextChannelPayload)

@@ -2,14 +2,16 @@
 
 Three facts move at the capture point and this module is where each is pinned.
 ``outcome`` stops carrying one of sixteen constant phrases and carries **the
-composed reply, whole** (§1); ``disposition`` carries what became of the pass as a
-member of §2's closed vocabulary; and ``capture.modality`` carries how the user
-material the episode renders reached this system (§5).
+composed reply, whole** (§1); what became of the pass is recorded; and
+``capture.modality`` carries how the user material the episode renders reached this
+system (§5). Since ADR-0284 §5 the second fact is the verdict on the ``drive`` or
+``routing`` stage entry that reached it, and the episode carries no ``disposition``
+(§5:3), so each case reads the verdicts off the stage record (:func:`_verdicts`).
 
 ADR-0221 §11's tests 1, 2, 3, 10, 11, 12, 13, 14 and 15 live here, each named in the
-case that discharges it, plus issue #1873's population — a record carrying a
-``disposition`` beside an ``outcome`` of ``None``, which this flip is the first
-thing in the system to write.
+case that discharges it, plus issue #1873's population — a record carrying a verdict
+beside an ``outcome`` of ``None``, which this flip is the first thing in the system
+to write.
 
 **§11's test 4 has been deleted, and this is where it was.** It asserted that a
 distinctive span in a captured reply reached no prompt the observer, the planner or
@@ -66,7 +68,6 @@ from ai_assistant.core.types import (
     Capture,
     Disposition,
     EpisodicMemory,
-    ExchangeDisposition,
     Modality,
     RoutableOperation,
     RouteOutcome,
@@ -151,6 +152,22 @@ def _streaming(*deltas: str, fails: bool = False) -> ComposingStage:
     )
 
 
+def _verdicts(
+    episode: EpisodicMemory,
+) -> tuple[tuple[Disposition, ...], tuple[RouteOutcome, ...]]:
+    """The verdicts an episode's stage record carries (ADR-0284 §5:2), in stage order.
+
+    Each ``drive`` entry's step disposition and each ``routing`` entry's route
+    outcome; a pass that drove no step and took no route carries neither.
+    """
+    record = episode.processing_record
+    assert record is not None
+    return (
+        tuple(entry.step_disposition for entry in record.stages if entry.step_disposition),
+        tuple(entry.route_outcome for entry in record.stages if entry.route_outcome),
+    )
+
+
 async def _drain(stream: AsyncIterator[ReplyChunk | TurnOutcome]) -> TurnOutcome:
     """Read one streamed turn whole and return its terminal outcome."""
     outcome: TurnOutcome | None = None
@@ -188,7 +205,7 @@ async def test_the_captured_episode_carries_the_composed_reply_whole() -> None:
     (episode,) = await _captured(harness)
     assert episode.outcome == _LONG_REPLY, "the whole reply, byte for byte (§1)"
     assert "\n" in episode.outcome, "several lines, so a joiner fails here rather than silently"
-    assert episode.disposition is ExchangeDisposition.NO_ACTION_NEEDED
+    assert _verdicts(episode) == ((), ()), "no step driven and no route taken"
 
 
 # --- §11 test 2: the five no-reply paths, and #1873's population --------------
@@ -199,9 +216,9 @@ async def test_a_step_parked_for_confirmation_captures_no_reply() -> None:
 
     ADR-0170 §4: what the user must answer is the ``Confirmation``, and a second
     model-written account of the same pending action beside it is where the two can
-    disagree. The episode still records **what became of the pass**, which is the
-    whole point of §2's field: a record whose ``outcome`` is ``None`` used to be
-    unreadable and now states its own disposition.
+    disagree. The episode still records **what became of the pass** — on its
+    ``drive`` entry since ADR-0284 §5:2: a record whose ``outcome`` is ``None`` used to
+    be unreadable and now states its own verdict.
     """
     harness = Harness(tools=(confirmable(),), planner=OneStepPlanner())
 
@@ -212,7 +229,7 @@ async def test_a_step_parked_for_confirmation_captures_no_reply() -> None:
     assert parked.reply is None
     (episode,) = await _captured(harness)
     assert episode.outcome is None
-    assert episode.disposition is ExchangeDisposition.STEP_AWAITING_CONFIRMATION
+    assert _verdicts(episode) == ((Disposition.AWAITING_CONFIRMATION,), ())
 
 
 async def test_a_routed_park_captures_no_reply() -> None:
@@ -231,7 +248,7 @@ async def test_a_routed_park_captures_no_reply() -> None:
     assert parked.reply is None
     (episode,) = await _captured(harness)
     assert episode.outcome is None
-    assert episode.disposition is ExchangeDisposition.ROUTED_AWAITING_CONFIRMATION
+    assert _verdicts(episode) == ((), (RouteOutcome.AWAITING_CONFIRMATION,))
 
 
 async def test_a_resume_driven_from_a_recovered_park_captures_no_reply() -> None:
@@ -253,7 +270,7 @@ async def test_a_resume_driven_from_a_recovered_park_captures_no_reply() -> None
     assert recovered.reply is None
     resumption = (await _captured(harness))[-1]
     assert resumption.outcome is None
-    assert resumption.disposition is ExchangeDisposition.STEP_EXECUTED
+    assert _verdicts(resumption) == ((Disposition.EXECUTED,), ())
 
 
 async def test_a_classified_composition_failure_captures_no_reply() -> None:
@@ -271,7 +288,7 @@ async def test_a_classified_composition_failure_captures_no_reply() -> None:
     assert outcome.reply_degraded is True
     (episode,) = await _captured(harness)
     assert episode.outcome is None
-    assert episode.disposition is ExchangeDisposition.NO_ACTION_NEEDED
+    assert _verdicts(episode) == ((), ())
 
 
 async def test_a_stream_that_published_nothing_captures_no_reply() -> None:
@@ -289,16 +306,16 @@ async def test_a_stream_that_published_nothing_captures_no_reply() -> None:
     assert outcome.reply_degraded is True
     (episode,) = await _captured(harness)
     assert episode.outcome is None
-    assert episode.disposition is ExchangeDisposition.NO_ACTION_NEEDED
+    assert _verdicts(episode) == ((), ())
 
 
 async def test_a_no_reply_record_renders_its_phrase_and_nothing_else_at_all_three_sites() -> None:
     """Issue #1873: the population this flip is the first to write.
 
-    A record carrying a ``disposition`` beside an ``outcome`` of ``None`` did not exist
-    before ADR-0221 — a pre-change episode always carried a phrase and a harness row
-    always carries assistant text — so no render-site case covered it. §3's rule reads
-    ``disposition`` **first**, so the fallback is never consulted and the ``None`` never
+    A record carrying a verdict beside an ``outcome`` of ``None`` did not exist before
+    ADR-0221 — a pre-change episode always carried a phrase and a harness row always
+    carries assistant text — so no render-site case covered it. Each site renders the
+    verdict's phrase from the projection (ADR-0284 §8:6), so the absent response never
     reaches a formatter.
 
     Driven end to end over a record the **engine captured**, because that is the half
@@ -404,7 +421,7 @@ async def test_a_stream_cut_by_a_mid_stream_failure_stores_what_it_published() -
     assert outcome.reply_degraded is True
     (episode,) = await _captured(harness)
     assert episode.outcome == "You prefer"
-    assert episode.model_fields_set >= {"outcome", "disposition"}
+    assert "outcome" in episode.model_fields_set
     assert not hasattr(episode, "reply_cut_short"), (
         "§1: no field is added recording that a stored reply was cut short — whether "
         "the pass completed is the TurnOutcome's to report, and it reports it"
@@ -457,7 +474,7 @@ async def test_a_routed_passs_episode_carries_a_routed_member_and_its_reply() ->
     assert resumed.routed is not None
     assert resumed.routed.outcome is RouteOutcome.PERFORMED
     resolution = (await _captured(harness))[-1]
-    assert resolution.disposition is ExchangeDisposition.ROUTED_PERFORMED
+    assert _verdicts(resolution) == ((), (RouteOutcome.PERFORMED,))
     assert resolution.outcome == reply
     for account in (_QUERY, _BELIEF, "the user likes jazz"):
         assert account not in resolution.content, "ADR-0197 §10: no part of the routed account"
@@ -530,8 +547,7 @@ async def test_a_spoken_pass_that_routed_still_carries_speech() -> None:
     assert spoken.outcome.routed is not None
     (episode,) = await _captured(harness)
     assert episode.capture.modality is Modality.SPEECH
-    assert episode.disposition is not None
-    assert episode.disposition.value.startswith("routed_")
+    assert _verdicts(episode)[1], "the routing entry carries the route's outcome"
 
 
 async def test_a_step_parks_resolution_carries_the_parked_turns_modality() -> None:
@@ -561,7 +577,7 @@ async def test_a_step_parks_resolution_carries_the_parked_turns_modality() -> No
     park, resolution = await _captured(harness)
     assert park.capture.modality is Modality.SPEECH
     assert resolution.capture.modality is Modality.SPEECH, "the parked turn's own value (§5)"
-    assert resolution.disposition is ExchangeDisposition.STEP_EXECUTED
+    assert _verdicts(resolution) == ((Disposition.EXECUTED,), ())
 
 
 async def test_a_routed_parks_resolution_carries_text_even_where_the_parking_pass_spoke() -> None:
@@ -856,6 +872,10 @@ def test_the_composing_stages_supply_is_enumerated_so_a_new_field_must_be_judged
     graph already reaches through ``SemanticMemory`` and ``EpisodicMemory``. **Every
     ``recall`` is ``None`` on every record this tree captures**, its producer being
     ADR-0281 §8's step 3.
+
+    **``ConversationInputOptions``, ``TurnReference`` and ``SpokenDeliveryReport`` left
+    it with ADR-0284 §3:1**, because ``RecordedChannelTrigger`` lost ``conversation``,
+    the one path by which the composing stage's graph reached them.
     """
     # ADR-0275: processing metadata joins the in-process record graph. Its
     # fields are identifiers, closed values, clocks and caller-supplied Tier 1
@@ -871,7 +891,6 @@ def test_the_composing_stages_supply_is_enumerated_so_a_new_field_must_be_judged
         "ChannelContext",
         "ChannelContextItem",
         "ChannelIdentity",
-        "ConversationInputOptions",
         "EpisodeProcessingRecord",
         "NewConversation",
         "ParkedBinding",
@@ -879,10 +898,8 @@ def test_the_composing_stages_supply_is_enumerated_so_a_new_field_must_be_judged
         "RecordedResumeTrigger",
         "RecordedSpeechInput",
         "RecordedTextInput",
-        "SpokenDeliveryReport",
         "SpokenReply",
         "StreamingTextReply",
-        "TurnReference",
         "WholeTextReply",
         "ActionPlan",
         "Attestation",
@@ -1030,7 +1047,7 @@ async def test_a_captured_reply_reaches_the_tail_and_the_observation_batch(enric
     (episode,) = await _captured(harness)
     assert episode.outcome is not None
     assert _SPAN in episode.outcome, "the span is in the store, which is the precondition"
-    assert episode.disposition is ExchangeDisposition.STEP_EXECUTED
+    assert _verdicts(episode) == ((Disposition.EXECUTED,), ())
     private = "raw-activation-material-must-not-reach-a-model"
     user_words = "what did I do?"
     if enriched:
@@ -1052,14 +1069,11 @@ async def test_a_captured_reply_reaches_the_tail_and_the_observation_batch(enric
                 context=core_types.ChannelContext(
                     history=(core_types.ChannelContextItem(text=private),),
                 ),
-                conversation=None,
                 reply=core_types.WholeTextReply(),
                 origin=core_types.InputOrigin.USER,
             ),
             status=core_types.ProcessingStatus.COMPLETED,
             reason=core_types.ProcessingReason.RETURNED,
-            response_kind=core_types.EpisodeResponseKind.CONVERSATION_REPLY,
-            model_eligible=True,
             understanding_omitted=core_types.UnderstandingOmission.NOT_REACHED,
             # ADR-0284 §5:2: the driven step's verdict is on its `drive` entry.
             stages=(

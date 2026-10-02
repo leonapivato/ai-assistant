@@ -2,24 +2,26 @@
 
 Test 8 — *every enum value is pinned* — is asserted **over the whole membership**
 rather than member by member, and that is the whole point of it. §2 fixes each
-member's serialised value because a ``StrEnum`` serialises its value and
-:class:`~ai_assistant.core.types.EpisodicMemory` is wire-carried as well as
-persisted, so two conforming implementations emitting ``step_executed`` and
-``STEP_EXECUTED`` for one fact would leave every record written under the loser
-undecodable — on the field §8 makes the migration's discriminator. A per-member
-assertion would pass while a *seventeenth* member arrived spelled any way at all,
-which is exactly the drift §2's closing clause forbids: "a member added later takes
-a value of the same form — the member name lower-cased". So both halves are
-asserted: the exact roster of sixteen, and the form rule that outlives it.
+member's serialised value because a ``StrEnum`` serialises its value and the record
+carrying it is wire-carried as well as persisted, so two conforming implementations
+emitting ``step_executed`` and ``STEP_EXECUTED`` for one fact would leave every
+record written under the loser undecodable. A per-member assertion would pass while
+a *seventeenth* member arrived spelled any way at all, which is exactly the drift
+§2's closing clause forbids: "a member added later takes a value of the same form —
+the member name lower-cased". So both halves are asserted: the exact roster of
+sixteen, and the form rule that outlives it.
 
-Test 9 — *a record constructed with neither new field* — is the migration §8 calls
-self-clearing, read from the record's side. Both fields are additive with defaults
+Since ADR-0284 §5:3 the enum is :class:`~ai_assistant.core.types.TranscriptEntry`'s
+alone — the episode carries no ``disposition``, and what became of a step or a route
+is on the stage entry that reached it — so the round trip is the transcript entry's.
+
+Test 9 — *a record constructed with no capture stated* — is the migration §8 calls
+self-clearing, read from the record's side: ``capture`` is additive with a default
 on a model that does not set ``extra="forbid"``, so a record already in a store
-deserialises unchanged, and the **absence** of ``disposition`` is the discriminator
-between a record written before ADR-0221 and one written after it. Nothing else in
-the tree asserts that: the store suite proves a record the store was *given* comes
-back whole (``tests/memory/memory_store_contract.py``), and this proves a payload
-written before the fields existed decodes at all.
+deserialises unchanged. Nothing else in the tree asserts that: the store suite
+proves a record the store was *given* comes back whole
+(``tests/memory/memory_store_contract.py``), and this proves a payload written
+before the field existed decodes at all.
 
 Scoped to ``core``. What each render site does with a disposition is ADR-0221 §3's
 and Lane D's; what capture writes into either field is §5's and Lane E's. Neither is
@@ -44,6 +46,7 @@ from ai_assistant.core.types import (
     Modality,
     Provenance,
     RouteOutcome,
+    TranscriptEntry,
 )
 
 if TYPE_CHECKING:
@@ -88,7 +91,7 @@ def _provenance() -> Provenance:
 
 
 def _episode(**overrides: Any) -> EpisodicMemory:
-    """An episode with neither new field stated unless a case states one."""
+    """An episode with no capture stated unless a case states one."""
     return EpisodicMemory(
         id="e1",
         content="The user asked: where did we land on the flights?",
@@ -150,12 +153,21 @@ def test_a_record_round_trips_carrying_the_same_disposition_back(
 
     Through JSON rather than through ``model_dump()`` alone, because the claim §2
     rests on is about what a *peer* decodes: the value that leaves this system as
-    text is the value that comes back as this member.
+    text is the value that comes back as this member. The record is the transcript
+    entry, the enum's one carrier since ADR-0284 §5:3.
     """
-    encoded = json.loads(_episode(disposition=member).model_dump_json())
+    entry = TranscriptEntry(
+        address="e1",
+        conversation_id="c1",
+        occurred_at=_WHEN,
+        asked="where did we land on the flights?",
+        replied="Tuesday.",
+        disposition=member,
+    )
+    encoded = json.loads(entry.model_dump_json())
 
     assert encoded["disposition"] == member.value
-    assert EpisodicMemory.model_validate(encoded).disposition is member
+    assert TranscriptEntry.model_validate(encoded).disposition is member
 
 
 @pytest.mark.parametrize("member", list(Modality), ids=lambda m: m.value)
@@ -183,36 +195,32 @@ def test_capture_is_frozen_and_carries_modality_alone() -> None:
 # --- §11.9: neither field stated, and a record written before they landed -----
 
 
-def test_a_record_constructed_with_neither_field_carries_the_defaults() -> None:
-    """§11.9's first half: ``disposition`` of ``None`` and ``modality`` of ``TEXT``.
+def test_a_record_constructed_with_no_capture_carries_the_default() -> None:
+    """§11.9's first half: ``modality`` of ``TEXT``.
 
-    ``None`` is the discriminator §8 makes it — a record this system captured after
-    ADR-0221 carries a member — and ``TEXT`` is true of what such a record holds
-    rather than a value fallen back on: §5 makes it the value for a typed turn and
-    for an episode carrying no user material at all.
+    ``TEXT`` is true of what such a record holds rather than a value fallen back on:
+    §5 makes it the value for a typed turn and for an episode carrying no user
+    material at all.
     """
     record = _episode()
 
-    assert record.disposition is None
     assert record.capture == Capture()
     assert record.capture.modality is Modality.TEXT
 
 
-def test_a_record_written_before_the_fields_landed_decodes_to_the_same() -> None:
+def test_a_record_written_before_the_field_landed_decodes_to_the_same() -> None:
     """§11.9's second half, and the whole of §8's no-migration claim.
 
-    The payload is built by *removing* both keys from a current record's encoding,
-    which is what a row written before ADR-0221 is: the same document without them.
+    The payload is built by *removing* the key from a current record's encoding,
+    which is what a row written before ADR-0221 is: the same document without it.
     Building one by hand would pin this module's idea of the old shape instead of the
     store's.
     """
     written_before = json.loads(_episode().model_dump_json())
-    del written_before["disposition"]
     del written_before["capture"]
 
     decoded = EpisodicMemory.model_validate(written_before)
 
-    assert decoded.disposition is None
     assert decoded.capture == Capture()
     assert decoded.capture.modality is Modality.TEXT
     assert decoded == _episode()

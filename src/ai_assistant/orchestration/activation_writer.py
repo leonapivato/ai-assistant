@@ -336,7 +336,6 @@ class ActivationWriter:
             content="",
             occurred_at=now,
             outcome=state.response,
-            disposition=None if facts is None else facts.disposition,
             capture=Capture(modality=modality if facts is None else facts.modality),
             expires_at=None if self._retention is None else now + self._retention,
             provenance=Provenance(

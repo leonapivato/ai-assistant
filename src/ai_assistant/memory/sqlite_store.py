@@ -39,9 +39,7 @@ from pydantic import TypeAdapter, ValidationError
 
 from ai_assistant.core.clock import ClockReadingError, checked_clock
 from ai_assistant.core.episode_encoding import (
-    admits_model_eligibility,
     check_detail,
-    check_eligibility,
     check_list,
     detail_of,
     encode_cursor,
@@ -1989,7 +1987,6 @@ class SqliteMemoryStore:
         participants: Sequence[str] | None = None,
         topics: Sequence[TopicLabel] | None = None,
         about_person: Sequence[str] | None = None,
-        episode_model_eligible: bool | None = None,
     ) -> MemorySearchResult:
         """Return the records most relevant to ``query`` by vector similarity.
 
@@ -2052,12 +2049,6 @@ class SqliteMemoryStore:
         no failure to record one reaches this method's caller, and a fault path
         still emits, carrying the ``limit`` it was asked for and omitting the
         counts it never reached (§3's observation rule).
-
-            episode_model_eligible: Optional episode eligibility filter (ADR-0275).
-
-        ADR-0275: ``episode_model_eligible`` filters episodes before ranking and
-        limits; non-episodic records are unaffected. An episode without a
-        processing record is eligible. ``None`` applies no eligibility filter.
 
         Returns:
             A :class:`~ai_assistant.core.types.MemorySearchResult`: matching
@@ -2139,7 +2130,6 @@ class SqliteMemoryStore:
                 named_people,
                 named_topics,
                 named_subjects,
-                episode_model_eligible,
             ),
             _retrieval_reading,
             entry=entry,
@@ -2156,7 +2146,6 @@ class SqliteMemoryStore:
         named_people: tuple[str, ...] | None,
         named_topics: tuple[str, ...] | None,
         named_subjects: tuple[str, ...] | None,
-        episode_model_eligible: bool | None,
     ) -> _Retrieved:
         """The read itself, returning its records **and** what only it can count.
 
@@ -2191,7 +2180,6 @@ class SqliteMemoryStore:
                 already copied; ``None`` where not applied.
             named_topics: The ``topics`` restriction as the caller named it,
                 already copied; ``None`` where not applied.
-            episode_model_eligible: Optional episode eligibility filter.
             named_subjects: The ``about_person`` restriction as the caller named
                 it, already copied; ``None`` where not applied.
 
@@ -2208,7 +2196,6 @@ class SqliteMemoryStore:
                 ``TopicLabel``'s canonical form (ADR-0237 §2). Raised inside the
                 traced region on purpose — see above.
         """
-        check_eligibility(episode_model_eligible)
         wanted_people = None if named_people is None else _person_keys("participants", named_people)
         wanted_topics = None if named_topics is None else _topic_keys(named_topics)
         wanted_subjects = (
@@ -2233,7 +2220,6 @@ class SqliteMemoryStore:
                 wanted_people,
                 wanted_topics,
                 wanted_subjects,
-                episode_model_eligible,
                 self._now_micros(),
             )
         return _Retrieved(
@@ -2255,7 +2241,6 @@ class SqliteMemoryStore:
         wanted_people: frozenset[str] | None,
         wanted_topics: frozenset[str] | None,
         wanted_subjects: frozenset[str] | None,
-        episode_model_eligible: bool | None,
         now: int,
     ) -> tuple[list[tuple[str, int, float]], bool, dict[str, int]]:
         """Run the KNN with every eligibility predicate bound into it.
@@ -2373,12 +2358,6 @@ class SqliteMemoryStore:
             topics=wanted_topics,
             subjects=wanted_subjects,
         )
-        if episode_model_eligible is not None:
-            eligible.append(
-                "(kind != 'episodic' OR "
-                "COALESCE(json_extract(data, '$.processing_record.model_eligible'), 1) = ?)"
-            )
-            restriction.append(int(episode_model_eligible))
         sql = (
             "SELECT r.data, r.revision, v.distance FROM vec_records v "  # noqa: S608 — bound above
             "JOIN records r ON r.rowid = v.rowid "
@@ -2481,7 +2460,6 @@ class SqliteMemoryStore:
         participants: Sequence[str] | None = None,
         topics: Sequence[TopicLabel] | None = None,
         about_person: Sequence[str] | None = None,
-        episode_model_eligible: bool | None = None,
     ) -> MemorySearchResult:
         """Return the records the criteria select, newest write first (ADR-0237 §4).
 
@@ -2537,12 +2515,6 @@ class SqliteMemoryStore:
             about_person: Subject labels compared by the same fold; a record
                 stating no subject is matched by none. ``()`` selects nothing.
 
-            episode_model_eligible: Optional episode eligibility filter (ADR-0275).
-
-        ADR-0275: ``episode_model_eligible`` filters episodes before ranking and
-        limits; non-episodic records are unaffected. An episode without a
-        processing record is eligible. ``None`` applies no eligibility filter.
-
         Returns:
             A :class:`~ai_assistant.core.types.MemorySearchResult` holding the
             eligible records ordered by ``provenance.last_updated`` descending,
@@ -2555,7 +2527,6 @@ class SqliteMemoryStore:
             MemoryStoreError: If the store cannot be read, a stored record is
                 corrupt, or the injected clock's reading is not conforming.
         """
-        check_eligibility(episode_model_eligible)
         wanted_kinds = None if kinds is None else frozenset(str(kind) for kind in kinds)
         wanted_bands = None if bands is None else frozenset(bands)
         wanted_people = None if participants is None else _person_keys("participants", participants)
@@ -2572,7 +2543,6 @@ class SqliteMemoryStore:
                 participants,
                 topics,
                 about_person,
-                episode_model_eligible,
             )
         )
         if limit <= 0 or _selects_nothing(
@@ -2594,8 +2564,7 @@ class SqliteMemoryStore:
         matched = [
             record
             for record in (self._decoded_at(data, revision) for data, revision in rows)
-            if admits_model_eligibility(record, episode_model_eligible)
-            and record.validity.live_at(now)
+            if record.validity.live_at(now)
             and (wanted_bands is None or band_of(record.provenance.source) in wanted_bands)
         ]
         page = _newest_revision_first(matched)[:limit]
@@ -2658,7 +2627,7 @@ class SqliteMemoryStore:
         cursor: str | None = None,
         limit: int = 50,
     ) -> EpisodePage:
-        """Inspect a bounded page of live episodes, irrespective of model eligibility."""
+        """Inspect a bounded page of live episodes."""
         channel, status, after = check_list(channel, status, cursor, limit)
         async with self._lock:
             rows = await _run_to_completion(
@@ -2751,15 +2720,13 @@ class SqliteMemoryStore:
         *,
         after: int | None = None,
         limit: int,
-        episode_model_eligible: bool | None = None,
     ) -> ChannelEpisodePage:
         """Read a channel's live episodes in number order (ADR-0283 §3:1, §3:2).
 
         One lock acquisition, one clock reading and one deferred read transaction
         for the page and its ``total``, so the two answer from one state of the
         store. The channel and the number are columns with an index of their own
-        (§1); the eligibility axis reads the blob, as ``search``'s does, and binds
-        in the same ``WHERE`` as the channel, so it applies before the ``LIMIT``.
+        (§1). Every live episode on the channel is read and counted (ADR-0284 §6:1).
 
         Raises:
             ValueError: An argument outside the bounds the Protocol states, refused
@@ -2768,14 +2735,12 @@ class SqliteMemoryStore:
                 corrupt.
         """
         check_channel_page(after, limit)
-        check_eligibility(episode_model_eligible)
         async with self._lock:
             rows, total = await _run_to_completion(
                 self._channel_episodes_sync,
                 channel,
                 after,
                 limit,
-                episode_model_eligible,
                 self._now_micros(),
             )
         entries: list[ChannelEpisode] = []
@@ -2794,18 +2759,10 @@ class SqliteMemoryStore:
         channel: ChannelIdentity,
         after: int | None,
         limit: int,
-        eligible: bool | None,
         now: int,
     ) -> tuple[list[tuple[int, str, int]], int]:
         where = f"channel_type = ? AND channel_instance = ? AND kind = 'episodic' AND {_LIVE}"
         params: list[object] = [channel.channel_type, channel.instance_id, now, now, now]
-        if eligible is not None:
-            # ADR-0275's axis as ``search`` spells it: an episode with no processing
-            # record is eligible, though none on a channel lacks one.
-            where += (
-                " AND COALESCE(json_extract(data, '$.processing_record.model_eligible'), 1) = ?"
-            )
-            params.append(int(eligible))
         count_sql = f"SELECT COUNT(*) FROM records WHERE {where}"  # noqa: S608 — module literals; every value is bound
         if after is None:
             # The newest ``limit``, read from the top of the range and put back in

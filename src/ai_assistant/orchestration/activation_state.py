@@ -26,7 +26,6 @@ from ai_assistant.core.types import (
     ControllerRule,
     EpisodeCaptureReport,
     EpisodeProcessingRecord,
-    EpisodeResponseKind,
     ProcessingReason,
     ProcessingStatus,
     RecordedChannelTrigger,
@@ -97,7 +96,6 @@ class ActivationState:
     facts: CaptureFacts | None = None
     outcome: TurnOutcome | None = None
     response: str | None = None
-    response_kind: EpisodeResponseKind = EpisodeResponseKind.NONE
     links: ActivationLinks = field(default_factory=ActivationLinks)
     composition_timed_out: bool = False
     reply_degraded: bool = False
@@ -208,18 +206,10 @@ class ActivationState:
         if outcome is not None:
             self.outcome = outcome
             self.response = outcome.reply
-            self.response_kind = (
-                EpisodeResponseKind.NONE
-                if outcome.reply is None
-                else EpisodeResponseKind.CONVERSATION_REPLY
-            )
 
     def composition(self, text: str | None, *, degraded: bool, timed_out: bool) -> None:
         """Retain the completed composition before later bookkeeping can fail."""
         self.response = text
-        self.response_kind = (
-            EpisodeResponseKind.NONE if text is None else EpisodeResponseKind.CONVERSATION_REPLY
-        )
         self.reply_degraded = degraded
         self.composition_timed_out = timed_out
 
@@ -238,11 +228,9 @@ class ActivationState:
             trigger=self.trigger,
             status=status,
             reason=reason,
-            response_kind=self.response_kind,
-            reply_degraded=self.reply_degraded
+            response_degraded=self.reply_degraded
             or (self.outcome is not None and self.outcome.reply_degraded),
-            spoken_degraded=self.spoken_degraded,
-            model_eligible=self.facts is not None,
+            output_degraded=self.spoken_degraded,
             links=self.links,
             understanding=self.understanding,
             understanding_omitted=self._omission(),
@@ -351,12 +339,10 @@ class ActivationState:
     def summary(self, text: str) -> None:
         """Observe a produced summary before the stage's final deadline check."""
         self.response = text
-        self.response_kind = EpisodeResponseKind.INFORMATIONAL_SUMMARY
 
     def published(self, text: str) -> None:
         """Retain exactly the stream chunks actually published by this worker."""
         self.response = (self.response or "") + text
-        self.response_kind = EpisodeResponseKind.CONVERSATION_REPLY
 
     def degraded_report(self) -> EpisodeCaptureReport:
         """Name the episode only where its conversation recorded it, never claiming more."""
@@ -413,7 +399,6 @@ def admit_channel(
             channel=input.target if event and isinstance(input.target, ChannelIdentity) else None,
             payload=payload,
             context=input.context,
-            conversation=input.conversation,
             reply=reply,
             origin=origin,
         ),

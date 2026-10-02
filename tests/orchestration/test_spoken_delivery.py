@@ -41,6 +41,7 @@ from ai_assistant.core.errors import (
 from ai_assistant.core.types import (
     EpisodicMemory,
     MemorySource,
+    ProcessingReason,
     Provenance,
     Role,
     SemanticMemory,
@@ -121,7 +122,7 @@ class _Row:
 
     episode_id: str
     delivery: SpokenDelivery | None
-    model_eligible: bool
+    reason: ProcessingReason | None
 
 
 async def _rows(harness: Harness, conversation_id: str) -> list[_Row]:
@@ -139,7 +140,7 @@ async def _rows(harness: Harness, conversation_id: str) -> list[_Row]:
         _Row(
             one.id,
             held.get(one.id),
-            one.processing_record is None or one.processing_record.model_eligible,
+            None if one.processing_record is None else one.processing_record.reason,
         )
         for one in records
     ]
@@ -325,7 +326,7 @@ async def test_the_report_is_recorded_even_where_the_recording_carried_no_words(
     assert second.outcome is None, "the recording carried no words"
     rows = await _rows(harness, conversation)
     assert [one.delivery for one in rows] == [_INTERRUPTED, None], "the report still landed"
-    assert [one.model_eligible for one in rows] == [True, False]
+    assert [one.reason for one in rows] == [ProcessingReason.RETURNED, ProcessingReason.NO_CONTENT]
 
 
 async def test_the_report_is_recorded_even_where_transcription_failed() -> None:
@@ -349,7 +350,10 @@ async def test_the_report_is_recorded_even_where_transcription_failed() -> None:
 
     rows = await _rows(harness, conversation)
     assert [one.delivery for one in rows] == [_INTERRUPTED, None], "turn 1 survived"
-    assert [one.model_eligible for one in rows] == [True, False]
+    assert [one.reason for one in rows] == [
+        ProcessingReason.RETURNED,
+        ProcessingReason.TRANSCRIPTION_FAILED,
+    ]
 
 
 async def test_a_report_against_an_unknown_conversation_is_refused() -> None:
