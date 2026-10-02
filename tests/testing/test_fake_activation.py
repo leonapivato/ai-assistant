@@ -2,30 +2,46 @@
 
 from __future__ import annotations
 
-from datetime import timedelta
+from datetime import UTC, datetime, timedelta
 from typing import TYPE_CHECKING
 
 import pytest
 
 from ai_assistant.core.errors import MemoryStoreError, OversizedValueError
 from ai_assistant.core.types import (
+    ActionPlan,
     ChannelIdentity,
     ChannelInput,
+    CurrentContext,
+    Disposition,
     EpisodicMemory,
+    ExecutionState,
+    GoalBrief,
+    GoalStatus,
+    Ground,
     NewConversation,
     ProcessingReason,
     ProcessingStatus,
     RecordedChannelTrigger,
     RecordedSpeechInput,
     ReplyChunk,
+    RoutableOperation,
+    RoutedOperation,
+    RouteOutcome,
     SpeechChannelPayload,
     SpokenAudio,
     SpokenAudioFormat,
     SpokenChannelResult,
     SpokenReply,
+    StepExecution,
+    StepOutcome,
+    StepStatus,
     StreamingTextReply,
     TextChannelPayload,
     TextChannelResult,
+    TimeOfDay,
+    TurnOutcome,
+    TurnResult,
     WholeTextReply,
 )
 from ai_assistant.testing import FakeAssistantEngine, FakeMemoryStore
@@ -36,6 +52,7 @@ if TYPE_CHECKING:
     from ai_assistant.core.types import MemoryWrite
 
 _BUDGET = timedelta(seconds=10)
+_AT = datetime(2026, 3, 1, 9, 0, tzinfo=UTC)
 _AUDIO = SpokenAudio(content="YXVkaW8=", media_type=SpokenAudioFormat.MP4)
 
 
@@ -229,3 +246,74 @@ async def test_a_streamed_episode_is_in_its_conversation_from_the_first_chunk(
         rest = [value async for value in stream]
         assert rest
     assert await engine.episode_memory.get(held[0]) is None
+
+
+def _driven(disposition: Disposition) -> StepOutcome:
+    """A step the pass drove to ``disposition``, over a one-step execution state."""
+    return StepOutcome(
+        disposition=disposition,
+        step_id="s-1",
+        state=ExecutionState(
+            id="exec-1",
+            plan_id="p-1",
+            steps=(StepExecution(step_id="s-1", status=StepStatus.PENDING),),
+            updated_at=_AT,
+        ),
+    )
+
+
+def _turn() -> TurnResult:
+    """A turn a reply can be composed over (``TurnOutcome`` refuses prose without one)."""
+    return TurnResult(
+        utterance="do it",
+        goal=GoalBrief(
+            goal_id="g-1",
+            outcome="get it done",
+            outcome_ground=Ground.USER_STATED,
+            status=GoalStatus.ACTIVE,
+        ),
+        context=CurrentContext(
+            now=_AT, time_of_day=TimeOfDay.MORNING, within_working_hours=True, is_weekend=False
+        ),
+        memories=(),
+        plan=ActionPlan(id="p-1", goal_id="g-1", steps=(), created_at=_AT, targets_revision=1),
+    )
+
+
+@pytest.mark.parametrize("verdict", ["routed", "driven"])
+async def test_a_verdict_reached_before_the_output_was_refused_is_recorded(verdict: str) -> None:
+    """ADR-0284 §5:2: the verdict lives on its stage entry, and a later failure keeps it.
+
+    The reply is refused as oversized only after the route performed or the step ran,
+    so the failed episode still carries that verdict — nothing else on the record says
+    what the pass did.
+    """
+    engine = FakeAssistantEngine(max_payload_bytes=2048)
+    expected: tuple[Disposition | None, RouteOutcome | None]
+    if verdict == "routed":
+        engine.turn_outcome = TurnOutcome(
+            turn=None,
+            routed=RoutedOperation(
+                operation=RoutableOperation.FORGET, outcome=RouteOutcome.PERFORMED
+            ),
+            reply="x" * 3000,
+        )
+        expected = (None, RouteOutcome.PERFORMED)
+    else:
+        engine.turn_outcome = TurnOutcome(
+            turn=_turn(), step=_driven(Disposition.EXECUTED), reply="x" * 3000
+        )
+        expected = (Disposition.EXECUTED, None)
+    with pytest.raises(OversizedValueError):
+        await engine.converse("hello", timeout=_BUDGET)
+    (episode,) = await engine.episode_memory.export()
+    assert isinstance(episode, EpisodicMemory)
+    processing = episode.processing_record
+    assert processing is not None
+    assert processing.reason is ProcessingReason.OUTPUT_OVERSIZED
+    verdicts = [
+        (entry.step_disposition, entry.route_outcome)
+        for entry in processing.stages
+        if entry.step_disposition is not None or entry.route_outcome is not None
+    ]
+    assert verdicts == [expected]
