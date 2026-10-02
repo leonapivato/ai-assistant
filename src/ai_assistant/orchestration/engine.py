@@ -2573,6 +2573,11 @@ class _TurnPass(_ActivationPass):
     driven: _Driven | None = None
     composition: _Composition | None = None
     outcome: TurnOutcome | None = None
+    #: ADR-0284 §5:2's verdicts, retained the moment each is reached — the runner's
+    #: return, the routed operation's — so a stage that raises in the fallible work
+    #: after it still records what it reached.
+    step_reached: Disposition | None = None
+    route_reached: RouteOutcome | None = None
 
     @property
     def text(self) -> str:
@@ -2765,21 +2770,23 @@ def _windows_expired(working: _ActivationPass) -> Exception | None:
 def _drive_verdict(working: _TurnPass) -> Verdict:
     """ADR-0284 §5:2: the ``Disposition`` the driven step reached, on its ``drive`` entry.
 
-    ``None`` where the drive reached none — a claim withheld under ADR-0261 §7, or a
-    drive that raised before the runner returned.
+    Read from what the stage retained when the runner returned, so a drive that
+    reached a disposition and then raised in the bookkeeping after it — moving the
+    attempt, rendering the step — still records it. ``None`` where the drive reached
+    none: a claim withheld under ADR-0261 §7, or a drive that raised before the runner
+    returned.
     """
-    step = None if working.driven is None else working.driven.step
-    return Verdict(step_disposition=None if step is None else step.disposition)
+    return Verdict(step_disposition=working.step_reached)
 
 
 def _route_verdict(working: _TurnPass) -> Verdict:
     """ADR-0284 §5:2: the ``RouteOutcome`` the taken route reached, on its ``routing`` entry.
 
-    ``None`` where routing declined, or where the routed pass raised before producing
-    its outcome: a taken route's outcome is what the stage leaves on the working set.
+    Read from what the routed pass retained once its operation had an outcome, so a
+    pass that then raised composing or capturing still records it. ``None`` where
+    routing declined, or where the routed pass raised before reaching an outcome.
     """
-    routed = None if working.outcome is None else working.outcome.routed
-    return Verdict(route_outcome=None if routed is None else routed.outcome)
+    return Verdict(route_outcome=working.route_reached)
 
 
 #: What a recall decision makes of its stage's entry (ADR-0281 §5).
@@ -12781,12 +12788,19 @@ class Engine:
         # stage, and the record says so rather than that the stage was not reached.
         if (activation := active_state()) is not None:
             activation.omit(UnderstandingOmission.ROUTED)
+
+        def reached(outcome: RouteOutcome) -> None:
+            # ADR-0284 §5:2: retained as soon as the operation has an outcome, so the
+            # `routing` entry carries it even where composing or capture then raise.
+            working.route_reached = outcome
+
         working.outcome = await self._routed_pass(
             working.utterance,
             route,
             conversation=conversation,
             compose=working.compose_routed,
             spoken=working.spoken,
+            reached=reached,
         )
 
     async def _turn_history(self, working: _TurnPass) -> AssembledHistory:
@@ -13197,6 +13211,9 @@ class Engine:
                     on_ruled=ruled,
                     outbound=observed,
                 )
+                # ADR-0284 §5:2: retained before any further fallible work, so the
+                # `drive` entry carries what the step reached even where that raises.
+                working.step_reached = disposition.disposition
             except ClaimRefused:
                 # ADR-0261 §7: **a refused claim ends the walk**, and it is not a sixth
                 # member of ADR-0255 §2's stop list — that list is "what a disposal
@@ -13466,7 +13483,7 @@ class Engine:
 
     # --- ADR-0197's routing stage, driven --------------------------------
 
-    async def _routed_pass(
+    async def _routed_pass(  # noqa: PLR0913 — the utterance, the route, its conversation, composer and spoken capture, and the verdict carrier; each a distinct fact of the pass
         self,
         utterance: str,
         route: RoutedRoute,
@@ -13474,8 +13491,12 @@ class Engine:
         conversation: str,
         compose: _RoutedComposer,
         spoken: _SpokenCapture | None = None,
+        reached: Callable[[RouteOutcome], None] | None = None,
     ) -> TurnOutcome:
         """Drive one taken route to its end (ADR-0197 §1, §5, §7, §9).
+
+        ``reached`` is told the operation's outcome the moment it has one, ahead of
+        composing and capture (ADR-0284 §5:2).
 
         **A taken route ends the pipeline here.** No goal is minted, no context is
         assembled, no memories are retrieved, no plan is made or persisted, no step is
@@ -13499,6 +13520,8 @@ class Engine:
             # §9's retry budget exhausted: nothing reserved, nothing parked, no row
             # written, no token minted and the operation never called.
             _log.warning("route_unrecorded", reason="no_route_id", operation=operation.value)
+            if reached is not None:
+                reached(RouteOutcome.UNRECORDED)
             return await self._finish_route(
                 conversation,
                 utterance,
@@ -13511,6 +13534,8 @@ class Engine:
             outcome = await self._drive_route(
                 route, conversation=conversation, reservation=reservation
             )
+            if reached is not None:
+                reached(outcome.outcome)
             registered = outcome.outcome is RouteOutcome.AWAITING_CONFIRMATION
             if registered:
                 # §10: a routed park is not composed for. The confirmation is what the
