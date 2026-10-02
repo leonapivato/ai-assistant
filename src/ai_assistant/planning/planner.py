@@ -4872,9 +4872,10 @@ def _render_record(record: MemoryRecord, *, label: str | None = None) -> str:
     record (§8:2), and ``disposition`` not at all. Where the old bullet carried an
     ``[episodic/source]`` tag, a band and a confidence, an episode's bullet carries
     ``[episodic]``: the provenance those were read from is not part of the
-    projection, and an episode is not a belief ADR-0072 §6 is about. What the
-    projection says of it instead — that processing rested on external content — is
-    rendered where it is true.
+    projection, and an episode is not a belief ADR-0072 §6 is about. The projection's
+    ``derived_from_external`` is **not** rendered here: ADR-0284 §8:4 gives the
+    episodic origin phrase to the composer, and ADR-0223 §4:2, which stands, gives the
+    planner's rendering none — a stamped and an unstamped episode render alike.
 
     **The response is not rendered here** (ADR-0284 §8:7, ADR-0222 §1-§2): the
     conversation tail renders it under this bullet (:func:`_reply_lines`), and the
@@ -4954,8 +4955,8 @@ def _episode_lines(projection: EpisodeProjection, *, opening: str) -> list[str]:
     The bullet opens with the tag, the instant and what arrived
     (:func:`_episode_input`); then, each on a line of its own and only where the
     projection carries it, what the assistant understood and how firmly, each matter
-    it left unresolved, the phrase for each verdict a stage reached, how processing
-    ended, and whether it rested on external content.
+    it left unresolved, the phrase for each verdict a stage reached, and how
+    processing ended.
 
     **Status, reason and every verdict's phrase are stated** (ADR-0284 §8:6), so a
     failed or interrupted pass reads as one rather than as an ordinary exchange. The
@@ -5002,8 +5003,6 @@ def _episode_lines(projection: EpisodeProjection, *, opening: str) -> list[str]:
             f"    how processing ended: {projection.status.value} "
             f"(reason: {projection.reason.value})"
         )
-    if projection.derived_from_external:
-        lines.append("    what processing read rested on external content")
     return lines
 
 

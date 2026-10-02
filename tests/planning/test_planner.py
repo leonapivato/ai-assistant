@@ -1288,13 +1288,15 @@ async def test_a_long_input_says_how_much_of_it_is_shown() -> None:
     )
 
 
-async def test_an_episode_carries_no_provenance_tag_and_states_external_reading() -> None:
+async def test_an_episode_carries_no_provenance_tag_and_no_origin_phrase() -> None:
     """§8:3: the bullet renders the projection and no other field.
 
     A belief's ``[kind/source]`` tag, band and confidence are read from its
     provenance, which is not part of an episode's projection, so an episode is tagged
-    ``[episodic]`` alone. What the projection does say of the provenance —
-    ``derived_from_external`` — is stated where it is true.
+    ``[episodic]`` alone. And the projection's ``derived_from_external`` is not
+    rendered either: §8:4 gives the episodic origin phrase to the composer, and
+    ADR-0223 §4:2 gives the planner's rendering none, so an episode resting on external
+    content renders exactly as one that does not.
     """
     external = Provenance(
         source=MemorySource.EXTERNAL,
@@ -1303,13 +1305,12 @@ async def test_an_episode_carries_no_provenance_tag_and_states_external_reading(
         attestation=Attestation(reported_by="calendar", reported_at=_WHEN),
     )
 
-    plain = _record_lines(await _bullets_for(_processed("e1")))
-    read_external = _record_lines(await _bullets_for(_processed("e1", provenance=external)))
+    plain = await _bullets_for(_processed("e1"))
+    read_external = await _bullets_for(_processed("e1", provenance=external))
 
-    assert plain[0].startswith("  - M1 [episodic] at ")
-    assert "confidence" not in "\n".join(plain + read_external)
-    assert "    what processing read rested on external content" not in plain
-    assert read_external[-1] == "    what processing read rested on external content"
+    assert _record_lines(plain)[0].startswith("  - M1 [episodic] at ")
+    assert "confidence" not in "\n".join(_record_lines(plain))
+    assert read_external == plain
 
 
 # --- ADR-0222 §1, §2, §4 and §5: the reply, in the tail alone -------------------
