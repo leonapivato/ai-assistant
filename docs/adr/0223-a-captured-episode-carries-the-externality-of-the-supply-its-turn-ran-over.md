@@ -23,11 +23,12 @@
 - Partially superseded: 2026-10-03 by ADR-0286 — one scope. §3:1's partition, in the
   addition alone: an episode a restart closes is a fourth capture site. It keeps the
   `Provenance.derived_from_external` its stored episode carries, which the writer
-  carries into each append from the pass's latest computed §1:2 value, or `False` where
-  the pass computed none; nothing is recomputed or defaulted at the close (ADR-0286 §4,
-  §7). Every other clause stands. These replacements take effect on ratification of
-  ADR-0286. This reciprocal header record accompanies the numbered draft under ADR-0070
-  and ADR-0082; prior supersessions and the ratified body below are preserved.
+  carries into each append from the latest value the pass holds under §3:2 or §3:3, or
+  `False` where the pass held none; nothing is recomputed or defaulted at the close
+  (ADR-0286 §4, §7). Every other clause stands. These replacements take effect on
+  ratification of ADR-0286. This reciprocal header record accompanies the numbered draft
+  under ADR-0070 and ADR-0082; prior supersessions and the ratified body below are
+  preserved.
 
 ## Context
 
