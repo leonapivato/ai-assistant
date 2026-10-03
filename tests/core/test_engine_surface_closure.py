@@ -747,8 +747,12 @@ def test_the_surface_carries_the_methods_the_adrs_fixed() -> None:
     §1's enumeration too, and ADR-0254's own ``- Status:`` line does not yet record it:
     that is issue #2274's shape one decision later, and the reciprocal header record is
     ADR-0254's to make rather than the implementing lane's.
+
+    **ADR-0285 §2 removes one**, ``observe`` — one of ADR-0085 §1's fifteen — with the
+    observation stage it delegated to, so the count falls to sixty-six. The scheduled
+    ``observe_due`` was never on the Protocol and moves nothing here.
     """
-    assert len(_method_names()) == 67
+    assert len(_method_names()) == 66
 
 
 def test_a_streaming_method_declares_its_union_chunk_first_terminal_last() -> None:
