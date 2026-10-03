@@ -26,7 +26,7 @@ import pytest
 from ai_assistant.app import build_engine
 from ai_assistant.core.config import EmbedderKind, Settings
 from ai_assistant.core.episode_encoding import episode_content
-from ai_assistant.core.errors import ChannelProcessingTimeoutError
+from ai_assistant.core.errors import ChannelProcessingTimeoutError, TranscriptionFailedError
 from ai_assistant.core.types import (
     ActionPlan,
     ActivationLinks,
@@ -57,6 +57,7 @@ from ai_assistant.core.types import (
     Reversibility,
     RiskLevel,
     SpeechChannelPayload,
+    SpeechFailure,
     SpokenAudio,
     SpokenAudioFormat,
     SpokenReply,
@@ -462,18 +463,7 @@ async def test_the_admission_write_runs_inside_the_calls_deadline(
     """ADR-0274 §7, ADR-0286 §2:1: an event's budget starts at receiver admission, so an
     admission insert the store never answers is cut off there; the event times out as
     its kind classifies the expiry, and the insert that never landed leaves nothing."""
-    addresses: list[str] = []
-    original = composed.memory.write_atomic
-
-    async def write_atomic(writes: Sequence[MemoryWrite]) -> Sequence[str]:
-        if not addresses and any(
-            write.mode is MemoryWriteMode.INSERT_IF_ABSENT for write in writes
-        ):
-            addresses.append(writes[0].record.id)
-            await asyncio.Event().wait()
-        return await original(writes)
-
-    monkeypatch.setattr(composed.memory, "write_atomic", write_atomic)
+    addresses = _admission_never_answers(monkeypatch, composed)
 
     with pytest.raises(ChannelProcessingTimeoutError):
         await asyncio.wait_for(
@@ -488,6 +478,54 @@ async def test_the_admission_write_runs_inside_the_calls_deadline(
     (address,) = addresses
     assert await composed.stored(address) is None
     assert not composed.writer.holds(address)
+
+
+async def test_a_spoken_turn_is_handed_only_what_its_admission_write_left_of_the_budget(
+    composed: Composed, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """ADR-0274 §6, ADR-0200 §3: the whole speech-call budget starts at receiver
+    admission, so an admission write that spends all of it leaves the transcription an
+    exhausted budget — its own expiry, with the seam never called."""
+    addresses = _admission_never_answers(monkeypatch, composed)
+    transcriber = composed.engine._transcriber
+    assert isinstance(transcriber, FakeSpeechTranscriber)
+
+    with pytest.raises(TranscriptionFailedError) as refused:
+        await asyncio.wait_for(
+            composed.engine.receive(
+                ChannelInput(
+                    target=NewConversation(),
+                    payload=SpeechChannelPayload(
+                        audio=SpokenAudio(content="YXVkaW8=", media_type=SpokenAudioFormat.MP4)
+                    ),
+                ),
+                reply=SpokenReply(plays=(SpokenAudioFormat.MP4,)),
+                timeout=timedelta(milliseconds=300),
+            ),
+            timeout=5,
+        )
+
+    assert refused.value.failure is SpeechFailure.TIMED_OUT
+    assert transcriber.calls == []
+    (address,) = addresses
+    assert await composed.stored(address) is None
+
+
+def _admission_never_answers(monkeypatch: pytest.MonkeyPatch, composed: Composed) -> list[str]:
+    """Make the store never answer the first admission insert; record its address."""
+    addresses: list[str] = []
+    original = composed.memory.write_atomic
+
+    async def write_atomic(writes: Sequence[MemoryWrite]) -> Sequence[str]:
+        if not addresses and any(
+            write.mode is MemoryWriteMode.INSERT_IF_ABSENT for write in writes
+        ):
+            addresses.append(writes[0].record.id)
+            await asyncio.Event().wait()
+        return await original(writes)
+
+    monkeypatch.setattr(composed.memory, "write_atomic", write_atomic)
+    return addresses
 
 
 async def _parked(composed: Composed) -> tuple[str, str, Any]:
