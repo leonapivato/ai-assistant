@@ -85,8 +85,8 @@ holds.
 
 ### 2. Admission writes the episode
 
-> **Normative.** Once an activation is admitted (ADR-0275 §2:1), and before its first
-> stage runs, the writer inserts its episode at `activation:<activation_id>` with
+> **Normative.** Once an activation is admitted (ADR-0275 §2:1), and before any of its
+> processing runs (ADR-0275 §2:3), the writer inserts its episode at `activation:<activation_id>` with
 > `MemoryWriteMode.INSERT_IF_ABSENT`. The record carries what admission holds: the
 > trigger as admitted, `started_at`, the links already established, and no stage
 > entry.
@@ -140,6 +140,10 @@ end would have stored.
 > after a write whose outcome it does not know, exactly the record that write carried.
 > Anything else, no record included, is a mismatch (§5).
 
+> **Normative.** Where the freezing write's outcome is not known, the writer makes the
+> same read once, before the archive entry: a stored record carrying exactly the
+> freezing revision confirms the freeze, and anything else is a mismatch.
+
 > **Normative.** ADR-0275 §9:1's bound is measured before every write of the episode,
 > on the whole record that write would store. An append that would exceed it is a
 > capture failure (§5). No bound is set on one stage's append beyond it.
@@ -173,18 +177,23 @@ per-stage bound could only refuse what the whole bound refuses, or cut what ADR-
 These fields are not judged by `episode_extends`, which reads the processing record
 and `outcome` alone; what bounds them on an open episode is §1's validator, and the
 freezing write is what lifts it. The response is `outcome`, as ADR-0284 §4:1 defines
-it, appended by the stage that produces it or by the freezing write. Delivery stays a row the conversation store keeps
-(ADR-0283 §6), and annotates the episode without writing it.
+it, appended by the stage that produces it or by the freezing write. Delivery stays a
+row the conversation store keeps (ADR-0283 §6), and annotates the episode without
+writing it.
 
 ### 5. A capture failure ends capture
 
 > **Normative.** A mismatch is a capture failure, logged with code-owned vocabulary
 > alone (ADR-0275 §8:12). The writer does not retry the write.
 
-> **Normative.** Any capture failure after the admission write ends capture for the
-> activation: the writer makes no further append, writes no archive entry, calls no
-> `record_turn`, deletes the episode by its id through ADR-0275 §8:11's drain, and
-> reports the capture degraded.
+> **Normative.** Any capture failure after the admission write and before the freeze is
+> confirmed ends capture for the activation: the writer makes no further append,
+> writes no archive entry, calls no `record_turn`, deletes the episode by its id
+> through a drain as ADR-0275 §8:11's, and reports the capture degraded.
+
+> **Normative.** Once the freeze is confirmed, a failure of the archive entry or of
+> `record_turn` is handled as ADR-0275 §8:7 and ADR-0283 §7:2 handle it today, and does
+> not delete a frozen episode on a conversation that stands.
 
 Nothing else writes an open episode: the owner's placement acts decline a `DERIVED`
 setter, and the observer's labelling is retired (ADR-0285). What does reach one is a
@@ -248,9 +257,10 @@ reach anyone the finished episode would not.
 > clock reading as `ended_at` and as both of the entry's readings.
 
 > **Normative.** The close is the freezing write for that episode, with three
-> differences: the placement stays reach `OWNER`, setter `DERIVED`, because the
-> evaluation that could widen it died with the process; no archive entry is written,
-> because no capture facts survive; and `record_turn` is called, with no delivery,
+> differences. The placement stays reach `OWNER`, setter `DERIVED`, and
+> `Provenance.derived_from_external` is set true, because the evaluation and the
+> selection that would set them died with the process. No archive entry is written,
+> because no capture facts survive. And `record_turn` is called, with no delivery,
 > only where the episode is on a conversation's channel, and a `None` from it deletes
 > the episode as ADR-0283 §7:2 rules.
 
@@ -446,8 +456,9 @@ And in the system:
   deletion after a capture failure holds it until the next restart closes that
   episode; the capture loss is in the log.
 - A conversation's digest counts its frozen episodes, not the one in progress.
-- An episode the restart closes stays owner-only, even where the finished pass would
-  have been placed for anyone.
+- An episode the restart closes stays owner-only and is marked as resting on external
+  content, even where the finished pass would have been placed for anyone and read
+  nothing external.
 - What follows: step 3b, episodes kept until forgotten and the archive retired; then
   effects written into the open episode as they happen (#2584), and other activations'
   open episodes made visible once activations run concurrently.
