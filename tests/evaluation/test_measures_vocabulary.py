@@ -14,11 +14,18 @@ reads like a quiet system rather than like a broken instrument.
 
 from __future__ import annotations
 
+import ast
+from pathlib import Path
+
+from ai_assistant import evaluation
 from ai_assistant.core.types import DROP_CONDITIONS, INTERRUPT_CONDITIONS, NotificationCondition
 from ai_assistant.evaluation import _vocabulary as vocabulary
 from ai_assistant.memory import notification_traces as ruling_emitter
 from ai_assistant.memory import traces as emitters
 from ai_assistant.orchestration.engine import Engine
+
+#: The two seams ADR-0285 §2 removed from the engine and §7 from the sets.
+_RETIRED_OBSERVATION_SEAMS = frozenset({"observe", "observe_due"})
 
 
 class TestMetricKeys:
@@ -58,19 +65,9 @@ class TestSeamSets:
     """§3's two allowlists, and the subset relation the direct set stands in."""
 
     def test_every_named_seam_is_a_public_engine_operation(self) -> None:
-        """``Engine._tracked`` labels each trace with the public method's own name.
-
-        **Less the two ADR-0285 §2 removed from the engine**, ``observe`` and
-        ``observe_due``. Their classification leaves the sets under §7, in that
-        ADR's evaluation lane (§11 item 6), which lands after the engine lane and
-        removes this exemption with them. Until then both are asserted *absent* from
-        the engine, so the exemption cannot outlive the methods it excuses.
-        """
-        retired = {"observe", "observe_due"}
-        for seam in (vocabulary.USER_SEAMS | vocabulary.MACHINE_SEAMS) - retired:
+        """``Engine._tracked`` labels each trace with the public method's own name."""
+        for seam in vocabulary.USER_SEAMS | vocabulary.MACHINE_SEAMS:
             assert hasattr(Engine, seam), seam
-        for seam in retired:
-            assert not hasattr(Engine, seam), seam
 
     def test_the_two_sets_are_disjoint(self) -> None:
         """A seam on both lists would put one write in two causes."""
@@ -80,29 +77,33 @@ class TestSeamSets:
         """§3 says so in as many words, and §6's population depends on it."""
         assert vocabulary.DIRECT_SEAMS < vocabulary.USER_SEAMS
 
-    def test_observe_is_a_user_seam_and_not_a_direct_one(self) -> None:
-        """The content originates with the user; the act is the observation stage's."""
-        assert vocabulary.OBSERVE_SEAM in vocabulary.USER_SEAMS
-        assert vocabulary.OBSERVE_SEAM not in vocabulary.DIRECT_SEAMS
+    def test_neither_observation_seam_is_on_any_set(self) -> None:
+        """ADR-0285 §7:1: ``observe`` and ``observe_due`` leave the seam sets."""
+        for seam in _RETIRED_OBSERVATION_SEAMS:
+            assert seam not in vocabulary.USER_SEAMS, seam
+            assert seam not in vocabulary.MACHINE_SEAMS, seam
+            assert seam not in vocabulary.DIRECT_SEAMS, seam
 
-    def test_the_scheduled_run_is_a_machine_seam_and_the_hand_run_pass_is_not(self) -> None:
-        """ADR-0218 §6, which is the whole reason the run is a second operation.
+    def test_no_evaluation_module_names_either_observation_seam(self) -> None:
+        """ADR-0285 §7:2's last clause: "No reader special-cases either name."
 
-        Two of §3's grounds pull opposite ways for a scheduled observation — the
-        content originates with the user, and the run writes on its own initiative
-        — and §3's stated purpose decides it: "A correction rate that counted those
-        would rise on the day of the arming, and the rise would be a fact about the
-        scheduler rather than about the user model." ADR-0218 arms this job, so a
-        lane that put ``observe_due`` in the user set would produce that confound
-        with the very act §3 was written about.
-
-        Asserted in **both** directions, because a lane that moved ``observe``
-        across instead would satisfy the first half alone while breaking every
-        measure over a hand-run pass.
+        Checked over every string literal of every module in the package, because a
+        special case needs the name as a value to compare a seam against — and a
+        comparison against a constant defined elsewhere would need the constant
+        here too. Prose naming the seams (a docstring that says why they are gone)
+        is a literal that is never *equal* to either name, so it passes.
         """
-        assert "observe_due" in vocabulary.MACHINE_SEAMS
-        assert "observe_due" not in vocabulary.USER_SEAMS
-        assert vocabulary.OBSERVE_SEAM not in vocabulary.MACHINE_SEAMS
+        package = Path(evaluation.__file__).parent
+        modules = sorted(package.rglob("*.py"))
+        assert modules
+        for module in modules:
+            tree = ast.parse(module.read_text(encoding="utf-8"), filename=str(module))
+            literals = {
+                node.value
+                for node in ast.walk(tree)
+                if isinstance(node, ast.Constant) and isinstance(node.value, str)
+            }
+            assert not literals & _RETIRED_OBSERVATION_SEAMS, module.name
 
 
 class TestNotificationLiterals:

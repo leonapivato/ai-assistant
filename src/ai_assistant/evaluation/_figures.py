@@ -310,11 +310,11 @@ class Part:
     """Every measure ADR-0120 defines, over one window or one part of one.
 
     §8 requires each of them "for each part as well as for ``W`` whole", and the
-    diagnostics §4, §5 and §6 attach to a measure travel with it — the machine
-    overturn rate beside precision, beliefs-per-correction beside the correction
-    rate, and the ``observe`` reinforcement share beside the repeated-explanation
-    rate. §7's three are stated over the whole window only, which is where §7
-    defines them.
+    diagnostics §4 and §5 attach to a measure travel with it — the machine
+    overturn rate beside precision and beliefs-per-correction beside the correction
+    rate. §6's diagnostic left the report with the seam it was stated over
+    (ADR-0285 §7). §7's three are stated over the whole window only, which is
+    where §7 defines them.
 
     Attributes:
         start: The part's inclusive start.
@@ -328,8 +328,6 @@ class Part:
         repeated_explanation: §6's rate, over direct user acts only. A **lower
             bound** under ADR-0121 §7, which :data:`_REPEATED_EXPLANATION_LIMIT`
             states on the page beside it.
-        observe_share: §6's diagnostic, "labelled as the observation stage's
-            re-mining overlap" and never a substitute for the rate above.
     """
 
     start: datetime
@@ -339,7 +337,6 @@ class Part:
     correction: Rate
     beliefs_per_correction: Rate
     repeated_explanation: Rate
-    observe_share: Rate
 
 
 @dataclass(frozen=True, slots=True)
@@ -721,10 +718,9 @@ def _part_lines(part: Part, label: str) -> list[str]:
     """One block of measures, headed by which window it is over.
 
     Each figure whose ADR states a limit on it carries that limit on the lines
-    directly under it — ADR-0121 §7's lower bound on the repeated-explanation rate,
-    and ADR-0120 §6's labelling of the ``observe`` share as re-mining overlap rather
-    than a repeated explanation — so that no figure can be read off the page without
-    the caveat its own ADR attaches to it.
+    directly under it — ADR-0121 §7's lower bound on the repeated-explanation rate —
+    so that no figure can be read off the page without the caveat its own ADR
+    attaches to it.
     """
     return [
         f"{label}  [{part.start:%Y-%m-%dT%H:%M:%S%z}, {part.end:%Y-%m-%dT%H:%M:%S%z})",
@@ -734,8 +730,6 @@ def _part_lines(part: Part, label: str) -> list[str]:
         f"  beliefs per correction (§5)    {part.beliefs_per_correction.rendered()}",
         f"  repeated-explanation rate (§6) {part.repeated_explanation.rendered()}",
         *_REPEATED_EXPLANATION_LIMIT,
-        f"  observe reinforcement share    {part.observe_share.rendered()}",
-        "    — the observation stage's re-mining overlap, not a repeated explanation",
     ]
 
 
