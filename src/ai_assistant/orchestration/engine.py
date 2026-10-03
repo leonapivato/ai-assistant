@@ -228,6 +228,7 @@ from ai_assistant.orchestration.activation_coordinator import ActivationCoordina
 from ai_assistant.orchestration.activation_state import (
     CURRENT_ACTIVATION,
     ActivationScope,
+    ActivationState,
     CaptureFacts,
     active_state,
     admit_channel,
@@ -4008,7 +4009,7 @@ class Engine:
             if self._open_episodes_closed:
                 return
             await self._conversations.activation_writer.close_open(
-                stage_limit=self._stage_record_limit
+                stage_limit=self._stage_record_limit, payload_limit=self._max_payload_bytes
             )
             self._open_episodes_closed = True
 
@@ -4609,6 +4610,7 @@ class Engine:
                 max_bytes=self._max_payload_bytes,
                 subject=f"the result of {projection.method}()",
             ),
+            deadline=deadline,
         )
         result, report = await task if event else await asyncio.shield(task)
         assert report is not None  # noqa: S101 — channel admission always creates state
@@ -4969,6 +4971,7 @@ class Engine:
                 max_bytes=self._max_payload_bytes,
                 subject=f"the result of {projection.method}()",
             ),
+            deadline=asyncio.get_running_loop().time() + timeout.total_seconds(),
         )
         # A turn nobody reads still fails legibly rather than as asyncio's
         # "Task exception was never retrieved" on the next collection: §9 makes an
@@ -5921,6 +5924,21 @@ class Engine:
         if derived_from_external is not None:
             state.holds_external(value=derived_from_external)
         await self._activation_coordinator.admit(state)
+
+    async def _episode_admitted(self, state: ActivationState, deadline: float | None) -> None:
+        """Write the open episode at admission, inside the call's deadline where it has one.
+
+        An admission write the deadline cuts short is dropped rather than raised
+        (:meth:`_activation_task`).
+        """
+        if deadline is None:
+            await self._activation_coordinator.admit(state)
+            return
+        try:
+            async with asyncio.timeout_at(deadline):
+                await self._activation_coordinator.admit(state)
+        except TimeoutError:
+            return
 
     async def _episode_appended(self) -> None:
         """Extend this worker's open episode as a stage ends (ADR-0286 §3, §9).
@@ -9652,6 +9670,7 @@ class Engine:
         *,
         seam: str,
         check_output: Callable[[T], None],
+        deadline: float | None = None,
     ) -> asyncio.Task[tuple[T, EpisodeCaptureReport | None]]:
         """Enter cleanup before cancellation is possible, register, then release work.
 
@@ -9664,6 +9683,12 @@ class Engine:
         before any of its processing runs** (ADR-0286 §2:1). A resume's is written
         at its resolution point instead (:meth:`_admit_control`), which is where its
         activation is admitted.
+
+        ``deadline`` is the budget the call was handed, read at receiver admission
+        on the running loop's clock (ADR-0274 §7). The admission write runs inside
+        it, and one it cuts short is dropped: the work then meets the deadline
+        itself and is classified as its kind classifies the expiry, and the freeze's
+        read settles whether the cut-off insert landed (ADR-0286 §3:4).
         """
         self._reject_if_closing()
         admitted = asyncio.Event()
@@ -9677,7 +9702,7 @@ class Engine:
                 try:
                     await admitted.wait()
                     if scope.state is not None:
-                        await self._activation_coordinator.admit(scope.state)
+                        await self._episode_admitted(scope.state, deadline)
                     value = await work()
                 except BaseException as exc:
                     failure = exc
