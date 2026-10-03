@@ -1,6 +1,6 @@
 # 275. An episode records one activation after processing ends
 
-- Status: Partially superseded by ADR-0276 (§1's "automatic cross-channel continuity" exclusion; §4's `EpisodeProcessingRecord` field set and `ProcessingReason` values, in the additions alone; §7's eligibility-`True` rule on automatic model-facing reads, for the understanding stage's episode window alone; §9's exclusion of the trigger's raw input text from automatic model inputs, for that window alone) and ADR-0280 (§1's "phase/tool history" exclusion, for the record of stages alone; §4's `EpisodeProcessingRecord` field set, in the additions alone) and ADR-0281 (§8:5's constant `content`, for an inspection-only record carrying an understanding alone; §4's `EpisodeProcessingRecord` field set, in the addition alone; §7:4's eligibility-`True` rule, for recall's read alone; §9:6's exclusion of the trigger's raw input text from automatic model inputs, for the understanding stage's rendering of a recalled episode alone) and ADR-0283 (§4:5's and §4:9's last sentences; §4:6's durable association; §4's record shapes, in the addition alone; §6:2's first sentence; §6:3's index and append; §6:6's first two sentences; §7:5; §7:6; §7:7's first sentence; §7:8's index row; §7:9; §8:2's sequence; §8:3's index address and intent row; §8:4; §8:6's indexed instant; §8:8's index-row address; §8:9's index-ID overhead; §9:1's index write; §9:3's addresses; §12:3's eligibility field) and ADR-0284 (§4:1's record shapes; §4:3; §4:6's first sentence; §7:1–§7:4 and what remains of §7:7; §8:1's rendering/disposition facts; §8:5; §9:6 for the user's own input; §10's `EpisodeSummary.response_kind`)
+- Status: Partially superseded by ADR-0276 (§1's "automatic cross-channel continuity" exclusion; §4's `EpisodeProcessingRecord` field set and `ProcessingReason` values, in the additions alone; §7's eligibility-`True` rule on automatic model-facing reads, for the understanding stage's episode window alone; §9's exclusion of the trigger's raw input text from automatic model inputs, for that window alone) and ADR-0280 (§1's "phase/tool history" exclusion, for the record of stages alone; §4's `EpisodeProcessingRecord` field set, in the additions alone) and ADR-0281 (§8:5's constant `content`, for an inspection-only record carrying an understanding alone; §4's `EpisodeProcessingRecord` field set, in the addition alone; §7:4's eligibility-`True` rule, for recall's read alone; §9:6's exclusion of the trigger's raw input text from automatic model inputs, for the understanding stage's rendering of a recalled episode alone) and ADR-0283 (§4:5's and §4:9's last sentences; §4:6's durable association; §4's record shapes, in the addition alone; §6:2's first sentence; §6:3's index and append; §6:6's first two sentences; §7:5; §7:6; §7:7's first sentence; §7:8's index row; §7:9; §8:2's sequence; §8:3's index address and intent row; §8:4; §8:6's indexed instant; §8:8's index-row address; §8:9's index-ID overhead; §9:1's index write; §9:3's addresses; §12:3's eligibility field) and ADR-0284 (§4:1's record shapes; §4:3; §4:6's first sentence; §7:1–§7:4 and what remains of §7:7; §8:1's rendering/disposition facts; §8:5; §9:6 for the user's own input; §10's `EpisodeSummary.response_kind`) and ADR-0286 (§1:4's live activation log; §2:2's durable start row; §4:1's record shapes, in the changes alone; §5:3's table, in the addition alone; §8:2's sequence and its in-place rule; §8:4's last sentence; §8:6's timestamp, in when it is taken; §8:13's interrupted member; §9:4, §11:5's unavailable label and §12:6's immutability, for an open episode alone)
 - Date: 2026-09-18
 - Scope: [M36](https://github.com/leonapivato/ai-assistant/milestone/2), [#2522](https://github.com/leonapivato/ai-assistant/issues/2522).
 - Dependency: ADR-0274 and [M35](https://github.com/leonapivato/ai-assistant/milestone/1).
@@ -56,6 +56,23 @@
   replacements will take effect on ratification of ADR-0284. This reciprocal header
   record accompanies the numbered draft under ADR-0070 and ADR-0082; prior supersessions
   and the ratified body below are preserved.
+- Partially superseded: 2026-10-03 by ADR-0286 — eleven scopes. The episode is written
+  at admission, extended as each stage ends and frozen by its end entry (ADR-0286
+  §2–§4). §1:4's *no live activation log*; §2:2's *with no durable start row*; §4:1's
+  record shapes, in the changes alone: `status`, `reason` and `ended_at` are `None`
+  while a record is open, `ProcessingReason` gains `hub_stopped`, and `schema_version`
+  is 6; §5:3's table, in the addition alone: a restart's close records `interrupted` /
+  `hub_stopped`; §8:2's sequence and its *no captured processing envelope is updated in
+  place afterward*; §8:4's last sentence; §8:6's capture timestamp, in when it is taken:
+  by the admission write; §8:13's first sentence, in its *interrupted* member: a restart
+  closes an episode admission wrote as `interrupted`; and, for an open episode alone,
+  §9:4 (the open state is a ground for `OWNER` / `DERIVED`, and the freezing write may
+  widen it), §11:5's *unavailable* label (its end fields are labelled in progress) and
+  §12:6's immutability (its processing record and response may be replaced by a record
+  that extends them). §2:4's single finalization, §3:4, §6:2's collision rule and §9:1's
+  bound stand. Every other clause stands. These replacements take effect on ratification
+  of ADR-0286. This reciprocal header record accompanies the numbered draft under
+  ADR-0070 and ADR-0082; prior supersessions and the ratified body below are preserved.
 
 ## Context
 

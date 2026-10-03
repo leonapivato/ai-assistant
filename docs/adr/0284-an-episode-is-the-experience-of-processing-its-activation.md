@@ -1,6 +1,6 @@
 # 284. An episode is the experience of processing its activation
 
-- Status: Partially superseded by ADR-0285 (the observer's member of §6:2, §8:3 and §8:7)
+- Status: Partially superseded by ADR-0285 (the observer's member of §6:2, §8:3 and §8:7) and ADR-0286 (§5:5's validator, for an open record; §6:2's last sentence, for an open episode; §7:1's timing of the content; §7:4's pass, for an open episode; §9:1's values)
 - Date: 2026-10-02
 - Scope: [M36](https://github.com/leonapivato/ai-assistant/milestone/2), reopened 2026-09-30 for [#2613](https://github.com/leonapivato/ai-assistant/issues/2613); the second of three steps, the episode's end entry.
 - Dependency: ADR-0283, implemented at `f5993b40`.
@@ -10,6 +10,16 @@
   stands. These replacements take effect on ratification of ADR-0285. This reciprocal
   header record accompanies the numbered draft under ADR-0070 and ADR-0082; prior
   supersessions and the ratified body below are preserved.
+- Partially superseded: 2026-10-03 by ADR-0286 — five scopes. §5:5's validator, for an
+  open record: it carries no end entry (ADR-0286 §1). §6:2's last sentence, for an open
+  episode: the store passes over it on the reads that feed models (ADR-0286 §6). §7:1's
+  *the writer sets every processing-record episode's `content` from it*, in when: at
+  freeze, and an open episode's `content` is empty (ADR-0286 §1, §4). §7:4's pass, for
+  an open episode: the pass leaves it. §9:1's values: `schema_version` is `Literal[6]`
+  and the format 7 (ADR-0286 §13). Every other clause stands. These replacements take
+  effect on ratification of ADR-0286. This reciprocal header record accompanies the
+  numbered draft under ADR-0070 and ADR-0082; prior supersessions and the ratified body
+  below are preserved.
 - **Partially supersedes** [ADR-0221](0221-an-episode-carries-the-reply-a-typed-disposition-and-how-the-turn-was-captured.md) — **two scopes.** **§2:1's field**, `EpisodicMemory.disposition`: it is removed, and the step's and the route's verdicts are on their stage entries (§5 below); `ExchangeDisposition` stays, for `TranscriptEntry.disposition` alone, and §2:2–§2:5 stand for it. **§3:1 and §3:2 entire**: every model-facing rendering of an episode reads the one projection in `core`, and the verdict phrases are one table there (§8 below). §3:3 and every other clause stand.
 - **Partially supersedes** [ADR-0222](0222-the-stored-reply-is-read-back-in-the-conversation-tail-and-by-the-observer.md) — **three scopes.** **§1:1, §1:2, §2:1 and §3:1, in their condition and their phrase line alone**: *"carries both a `disposition` and an `outcome`"* reads *"carries a response"*, and the line the response line follows is the projection's (§8 below); which records render the response, its ceiling, its elision and its counts stand. **§1:3 entire**: the record line changes. **§2:2 entire**: benchmark prompts change with the planner's record line. Every other clause stands.
 - **Partially supersedes** [ADR-0227](0227-a-record-the-citation-hop-reached-renders-its-reply-and-the-test-that-says-so-runs-the-real-renderer.md) — **two scopes.** **§1:1 and §1:2, in their condition and their phrase line alone**, as for ADR-0222 above. **§1:5's last two sentences' byte rule**: the record line changes; the reply line is still emitted by the caller. Every other clause, and ADR-0229's amendments, stand.
