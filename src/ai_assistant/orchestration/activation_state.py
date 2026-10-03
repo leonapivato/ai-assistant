@@ -146,11 +146,11 @@ class ActivationState:
     understanding_elided: int = 0
     understanding_omitted: UnderstandingOmission | None = None
     understanding_unparseable: bool = False
-    #: ADR-0281 §6: recall's decision, held once the stage ends and written once, at
-    #: capture. ``None`` where recall made no decision on the pass.
+    #: ADR-0281 §6: recall's decision, held once the stage ends and written with the
+    #: stage's append (ADR-0286 §3). ``None`` where recall made no decision on the pass.
     recall: ActivationRecall | None = None
     #: ADR-0280 §6: the stages the controller ran, readable while the pass runs and
-    #: written once, at capture, bounded at ``stage_limit`` entries.
+    #: written as each ends (ADR-0286 §3), bounded at ``stage_limit`` entries.
     stages: StageRecord = field(default_factory=StageRecord)
     stage_limit: int = DEFAULT_STAGE_RECORD_LIMIT
     #: ADR-0280 §3: the pass's working set — the decisions its stages made, which
