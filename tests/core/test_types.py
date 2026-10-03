@@ -37,7 +37,6 @@ from ai_assistant.core.types import (
     MemoryWrite,
     MemoryWriteMode,
     Message,
-    ObservationOutcome,
     Placement,
     PlacementReach,
     PlacementSetter,
@@ -519,35 +518,6 @@ def test_no_validator_pins_the_confirming_instant_to_the_two_it_could_be_ordered
     )
     assert disagreeing.attestation is not None
     assert disagreeing.last_confirmed_at != disagreeing.attestation.reported_at
-
-
-# --- what one observation produced (ADR-0077 §9) -----------------------------
-
-
-def test_an_observation_outcome_defaults_to_nothing_seen_and_nothing_lost() -> None:
-    outcome = ObservationOutcome()
-
-    assert outcome.proposals == ()
-    assert outcome.discarded_unusable == 0
-    assert outcome.discarded_over_limit == 0
-
-
-def test_an_observation_outcomes_unusable_count_is_non_negative() -> None:
-    with pytest.raises(ValidationError):
-        ObservationOutcome(discarded_unusable=-1)
-
-
-def test_an_observation_outcomes_over_limit_count_is_non_negative() -> None:
-    with pytest.raises(ValidationError):
-        ObservationOutcome(discarded_over_limit=-1)
-
-
-def test_an_observation_outcome_is_frozen() -> None:
-    """It is a report of what happened, so it must not be editable after the fact."""
-    outcome = ObservationOutcome(discarded_unusable=1)
-
-    with pytest.raises(ValidationError):
-        outcome.discarded_unusable = 0
 
 
 # --- bands: the standing a source places a belief in (ADR-0072 §2) -----------

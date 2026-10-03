@@ -601,7 +601,7 @@ def test_the_spec_pattern_accepts_every_model_name_pydantic_ai_ships() -> None:
     )
 
 
-# --- consolidation's route (ADR-0285 §5), and the observer's two per-call bounds ---
+# --- consolidation's route, and the retired observation settings (ADR-0285 §5) ---
 
 
 def test_consolidation_model_is_unset_by_default() -> None:
@@ -670,72 +670,33 @@ def test_the_old_observer_model_name_has_no_alias(monkeypatch: pytest.MonkeyPatc
     assert field.validation_alias is None
 
 
-def test_the_observation_bounds_have_the_defaults_the_adr_names() -> None:
-    """20 episodes and 40 proposals — named here, not left to the implementation.
+#: The five settings ADR-0285 §5 removes with the observer.
+_RETIRED_OBSERVATION_SETTINGS: Final = (
+    "observation_interval",
+    "observation_quiet_window",
+    "observation_max_unobserved_age",
+    "observation_batch_size",
+    "observation_max_proposals",
+)
 
-    ADR-0074 §9.3's rule applied by ADR-0077 §1: two conforming stages picking 20
-    and 2,000 would send categorically different amounts of Tier 1 data to a model
-    while each believed it conformed.
 
-    **The proposal bound is 40 and its ground is cost, not selectivity** (ADR-0162
-    §6). Five was ADR-0077 §2's warrant bar expressed as a number, and ADR-0162 §1
-    replaces that bar for an episode recording what the user told the assistant — so
-    the figure does not survive its ground. The probe measured 8.7, 9.1 and 9.0
-    proposals per pass at a batch of 20 under a cap of 60 that never bound, and 40 is
-    more than four times that mean. It is pinned here rather than left symbolic
-    because a truncated pass is now a *defect* (§6's fourth clause) rather than the
-    intended steady state, and nothing downstream can tell one from a complete pass
-    without ``discarded_over_limit``.
+def test_the_observation_settings_are_removed(monkeypatch: pytest.MonkeyPatch) -> None:
+    """ADR-0285 §5: the five ``observation_*`` fields leave ``Settings``.
+
+    The environment consequence is §5's: settings are read with ``extra="ignore"``, so
+    a hub environment that still sets an ``ASSISTANT_OBSERVATION_*`` variable starts
+    without an error and the variable configures nothing. Pinned with a value each
+    field would have **refused** at load, so a field revived under its old name fails
+    here rather than reading the variable again.
     """
-    settings = Settings()
-    assert settings.observation_batch_size == 20
-    assert settings.observation_max_proposals == 40
+    for name in _RETIRED_OBSERVATION_SETTINGS:
+        monkeypatch.setenv(f"ASSISTANT_{name.upper()}", "0")
 
-
-@pytest.mark.parametrize("value", [0, -1])
-def test_a_non_positive_observation_batch_size_is_rejected(value: int) -> None:
-    """A zero batch observes nothing while reporting health (ADR-0077 §1)."""
-    with pytest.raises(ValidationError):
-        Settings(observation_batch_size=value)
-
-
-def test_an_observation_batch_size_at_the_stores_range_bound_is_rejected() -> None:
-    """``2**63`` would load cleanly and make every observation raise (ADR-0077 §1).
-
-    The batch is read through ``ConversationStore.turns``, whose ``limit`` outside
-    ``[0, 2**63)`` is a ``ValueError`` by its own contract. A setting the store would
-    refuse must fail at load, not at the first observation — which is what
-    ``load_settings`` promises for every other value here.
-    """
-    with pytest.raises(ValidationError):
-        Settings(observation_batch_size=2**63)
-
-
-@pytest.mark.parametrize("value", [0, -1])
-def test_a_non_positive_observation_max_proposals_is_rejected(value: int) -> None:
-    """A zero proposal bound could never propose anything (ADR-0077 §2, ADR-0162 §6)."""
-    with pytest.raises(ValidationError):
-        Settings(observation_max_proposals=value)
-
-
-def test_load_settings_rejects_an_invalid_observation_bound(
-    monkeypatch: pytest.MonkeyPatch,
-) -> None:
-    """It fails at load as a ``ConfigurationError``, like every other bad tuning."""
-    monkeypatch.setenv("ASSISTANT_OBSERVATION_BATCH_SIZE", "0")
-    with pytest.raises(ConfigurationError, match="invalid configuration"):
-        load_settings()
-
-
-def test_the_observation_bounds_parse_from_the_environment(
-    monkeypatch: pytest.MonkeyPatch,
-) -> None:
-    """Both are ordinary integers in the environment, with the ``ASSISTANT_`` prefix."""
-    monkeypatch.setenv("ASSISTANT_OBSERVATION_BATCH_SIZE", "4")
-    monkeypatch.setenv("ASSISTANT_OBSERVATION_MAX_PROPOSALS", "2")
     settings = load_settings()
-    assert settings.observation_batch_size == 4
-    assert settings.observation_max_proposals == 2
+
+    for name in _RETIRED_OBSERVATION_SETTINGS:
+        assert name not in Settings.model_fields
+        assert not hasattr(settings, name)
 
 
 # --- deferred questions: the lifetime and the cap (ADR-0078 §6, §7) ---------
@@ -943,8 +904,6 @@ def test_every_integer_setting_is_discovered() -> None:
         "model_max_attempts",
         "working_hours_start",
         "working_hours_end",
-        "observation_batch_size",
-        "observation_max_proposals",
         "deferral_queue_limit",
         # ADR-0130 §7's cap on actionable held notifications, acknowledged here
         # for `deferral_queue_limit`'s reason and with the same `bool` argument:
@@ -1133,18 +1092,16 @@ def test_every_integer_setting_is_discovered() -> None:
 @pytest.mark.parametrize("name", _INTEGER_FIELDS)
 @pytest.mark.parametrize("value", [True, False])
 def test_every_integer_setting_refuses_a_bool(name: str, value: bool) -> None:
-    """``Settings(observation_batch_size=True)`` is a mistake, not a one-item batch.
+    """``Settings(deferral_queue_limit=True)`` is a mistake, not a queue of one.
 
     Pydantic's non-strict ``int`` coercion accepts ``True`` as ``1`` because
     ``bool`` is an ``int`` subclass, and ``1`` satisfies every bound these fields
     carry — so without this the flag loads as a plausible value and nothing
     downstream can tell. The guards *below* settings already refuse it
-    (``_check_batch_size`` in ``orchestration/observation.py``, ``_check_tuning``
-    in ``orchestration/loop.py``, ``Engine.__init__``, and ``_check_bound`` in
-    ``learning/observer.py``), but ``Settings`` hands them an already-coerced
-    integer, so on the settings path they can never fire. This is the
-    configuration layer stating the rule the four layers under it already state
-    (#471).
+    (``_check_tuning`` in ``orchestration/loop.py`` and ``Engine.__init__``), but
+    ``Settings`` hands them an already-coerced integer, so on the settings path
+    they can never fire. This is the configuration layer stating the rule the
+    layers under it already state (#471).
 
     The message is asserted, not just the refusal: ``False`` and ``True`` land on
     ``0`` and ``1``, which some of these fields' range bounds would reject anyway,
@@ -1167,8 +1124,7 @@ def test_every_integer_setting_refuses_a_bool(name: str, value: bool) -> None:
         numpy.bool_(True),
         numpy.bool_(False),
         # Numerics that convert without being integers. The layers below already
-        # refuse these — `RetryPolicy` checks `type(...) is not int`, and
-        # `_check_batch_size` refuses a float rather than comparing it — so
+        # refuse these — `RetryPolicy` checks `type(...) is not int` — so
         # accepting them here would leave the same one-layer inconsistency #471
         # exists to end, just on a different axis.
         1.0,
@@ -1211,7 +1167,7 @@ def test_a_value_that_cannot_describe_itself_is_still_a_validation_error() -> No
             raise RuntimeError(msg)
 
     with pytest.raises(ValidationError, match="expected an integer"):
-        _settings_with("observation_batch_size", Unprintable())
+        _settings_with("deferral_queue_limit", Unprintable())
 
 
 @pytest.mark.parametrize("name", _INTEGER_FIELDS)
@@ -1229,7 +1185,7 @@ def test_every_integer_setting_still_parses_from_the_environment(
     """The operator-facing path is untouched, and this is what keeps it so.
 
     #471 is reachable only from untyped code constructing ``Settings`` directly —
-    ``ASSISTANT_OBSERVATION_BATCH_SIZE=True`` already fails int parsing at load.
+    ``ASSISTANT_DEFERRAL_QUEUE_LIMIT=True`` already fails int parsing at load.
     So the guard accepts a ``str`` alongside an exact ``int``: an environment
     variable and a ``.env`` entry both arrive as one, and a guard that demanded an
     exact ``int`` and nothing else would break *every* integer setting in every
@@ -1377,7 +1333,7 @@ def test_every_duration_setting_is_discovered() -> None:
         # for this field is the difference between "wait thirty seconds" and
         # "delete phase A".
         "shutdown_drain_seconds",
-        # ADR-0083 §7's three scheduler intervals, acknowledged here for the same
+        # ADR-0083 §7's scheduler intervals, acknowledged here for the same
         # reason ``shutdown_drain_seconds`` is: §7 requires *every* duration the hub
         # adds to be refused at load unless finite and strictly positive, and
         # joining this tuple is what subjects each to the parametrised guards below.
@@ -1388,20 +1344,8 @@ def test_every_duration_setting_is_discovered() -> None:
         # finishes.
         "retention_purge_interval",
         "conversation_sweep_interval",
-        "observation_interval",
-        # ADR-0218 §7's two trigger durations, acknowledged here for the reason
-        # every duration above is. Neither is nullable and ADR-0084 §3's departure
-        # is why: "the job is off" is a coherent deployment and is spelled once, on
-        # the interval above, where a quiet window of `None` would have to mean
-        # "observe mid-conversation" — a policy §1 ruled against rather than a way
-        # of turning anything off. The `bool` guard bites in the direction that
-        # matters most for the first: a one-second quiet window makes *every*
-        # candidate quiet, which is the mid-conversation read the field exists to
-        # prevent, arrived at through the value meant to prevent it.
-        "observation_quiet_window",
-        "observation_max_unobserved_age",
         # ADR-0111 §11's arming of leg 7's chunked walk, acknowledged here for the
-        # reason the three above are: joining this tuple is what subjects it to the
+        # reason the intervals above are: joining this tuple is what subjects it to the
         # parametrised guards below. It follows ADR-0083 §7's convention exactly —
         # disabled is `None`, never `0` — and the `bool` guard bites hardest here of
         # any interval on that table, because this is the one job whose run costs a

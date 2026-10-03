@@ -81,7 +81,6 @@ from ai_assistant.core.types import (
     DestinationProtocol,
     DestinationTrust,
     DestinationTrustRecord,
-    EpisodicMemory,
     FeedbackEvent,
     FeedbackKind,
     Goal,
@@ -113,7 +112,7 @@ from ai_assistant.core.types import (
     ToolDefinition,
     ToolOutcome,
 )
-from ai_assistant.learning import ModelBackedObserver, RuleBasedFeedbackProcessor
+from ai_assistant.learning import RuleBasedFeedbackProcessor
 from ai_assistant.memory import (
     InMemoryMemoryStore,
     MemoryIngestor,
@@ -713,18 +712,6 @@ def _feedback() -> FeedbackEvent:
     )
 
 
-def _episode() -> EpisodicMemory:
-    """One episode for the observer to read."""
-    return EpisodicMemory(
-        id="e1",
-        content="we talked about coffee",
-        provenance=Provenance(
-            source=MemorySource.USER_ASSERTED, confidence=1.0, last_updated=_AWARE
-        ),
-        occurred_at=_AWARE,
-    )
-
-
 def _tool() -> ToolDefinition:
     """The one side-effecting tool the execution seams run a step over."""
     return ToolDefinition(
@@ -917,11 +904,6 @@ async def _ingestion(now: Clock) -> None:
         reads=FakeSourceReadRecorder(),
         now=now,
     ).ingest()
-
-
-async def _observer(now: Clock) -> None:
-    """The observer stamps each proposal it draws from the batch."""
-    await ModelBackedObserver(FakeModelProvider(), now=now).observe([_episode()])
 
 
 async def _planner(now: Clock) -> None:
@@ -1271,7 +1253,6 @@ SEAMS = [
     Seam("FakeRecipientGrants", _fake_recipient_grants, ClockReadingError),
     Seam("FakeTranscriptArchive", _fake_transcript_archive, TranscriptArchiveError),
     Seam("IngestionStage", _ingestion, ClockReadingError),
-    Seam("ModelBackedObserver", _observer, ClockReadingError),
     Seam("ModelBackedPlanner", _planner, PlanningError),
     Seam("QuestionStage", _questions, DeferralStoreError),
     Seam("RuleBasedFeedbackProcessor", _rule_based_processor, ClockReadingError),
@@ -1609,11 +1590,8 @@ PROPAGATED: Final[dict[str, str]] = {
     "FakeRecipientGrantStore": _UNDECLARED,
     "FakeRecipientGrants": _UNDECLARED,
     "IngestionStage": _UNDECLARED,
-    "ModelBackedObserver": (
-        "documented at ``learning/observer.py:656``, and `learning` owns no error class"
-    ),
     "RuleBasedFeedbackProcessor": (
-        "documented at ``learning/processor.py:146``, on the observer's precedent"
+        "documented at ``learning/processor.py:146``, and `learning` owns no error class"
     ),
     "SqliteGoalAuthorizationStore": (
         "documented at ``permissions/goal_authorizations.py``'s constructor: a clock this "
