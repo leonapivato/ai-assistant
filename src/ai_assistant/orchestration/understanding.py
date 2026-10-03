@@ -91,6 +91,7 @@ from ai_assistant.core.types import (
     band_of,
 )
 from ai_assistant.orchestration.disclosure import admitted_to_understanding
+from ai_assistant.orchestration.episode_reads import without_open_episodes
 
 if TYPE_CHECKING:
     from collections.abc import Sequence
@@ -303,13 +304,15 @@ class RecentEpisodes:
             size = min(_MAX_PAGE, self._limit - counted + len(shared))
             page = await self._memory.episodes(cursor=cursor, limit=size)
             addresses = [row.position.episode_id for row in page.items]
-            found = await self._memory.get_many(addresses)
+            # ADR-0286 §6:4: an open episode — the running activation's own among
+            # them — is an id with no record here, so it takes no place in the window.
+            found = without_open_episodes(await self._memory.get_many(addresses))
             for address in addresses:
                 record = found.get(address)
                 if not isinstance(record, EpisodicMemory):
-                    # Expired or deleted between the two reads: a gap, never an error,
-                    # and never the end of the walk — a page whose every row vanished
-                    # still hands on its cursor.
+                    # Expired or deleted between the two reads, or open: a gap, never an
+                    # error, and never the end of the walk — a page whose every row
+                    # vanished still hands on its cursor.
                     continue
                 if address in shared:
                     selected.append(record)
@@ -435,7 +438,8 @@ async def fetch_held(
         The records found and admitted, with what was asked for and what was missing.
     """
     ids = tuple(dict.fromkeys((*(episode_ids or ()), *recalled_ids)))
-    found = await memory.get_many(ids) if ids else {}
+    # ADR-0286 §6:4: an open episode is an id with no record, recorded as missing.
+    found = without_open_episodes(await memory.get_many(ids)) if ids else {}
     candidates = [
         record
         for id_ in ids

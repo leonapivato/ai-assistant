@@ -388,9 +388,10 @@ class TolerantStage[P]:
 class StageRecord:
     """The entries a pass accumulates, readable while it runs (§6).
 
-    Written once, at capture, by :meth:`bounded`. Exactly one end entry is ever
-    appended, and it is last. The controller appends to it, and so does the resume
-    path, which the controller does not run (ADR-0284 §5:5).
+    Written as each stage ends and frozen by the end entry (ADR-0286 §3, §4), each
+    write by :meth:`bounded`. Exactly one end entry is ever appended, and it is last.
+    The controller appends to it, and so does the resume path, which the controller
+    does not run (ADR-0284 §5:5).
     """
 
     entries: list[StageEntry] = field(default_factory=list)
@@ -461,7 +462,7 @@ class StageRecord:
         return (*entries[:head], *entries[-tail:]), len(entries) - limit
 
 
-async def run_recorded[T](  # noqa: PLR0913 — where to record, which stage and why, the clock, the body and its verdict
+async def run_recorded[T](  # noqa: PLR0913 — where to record, which stage and why, the clock, the body, its verdict and the append
     record: Callable[[], StageRecord | None],
     stage: ControllerStage,
     due: ControllerRule,
@@ -469,6 +470,7 @@ async def run_recorded[T](  # noqa: PLR0913 — where to record, which stage and
     clock: Clock,
     body: Callable[[], Awaitable[T]],
     verdict: Callable[[T], Verdict] | None = None,
+    appended: Callable[[], Awaitable[None]] | None = None,
 ) -> T:
     """Run one stage the controller does not run, and record it (ADR-0284 §5:4-§5:5).
 
@@ -494,6 +496,9 @@ async def run_recorded[T](  # noqa: PLR0913 — where to record, which stage and
         body: The stage's work.
         verdict: The verdict the body's result carries, for a ``drive`` or a
             ``routing`` stage.
+        appended: Awaited once the stage's entry is appended, so the episode is
+            extended as the stage ends (ADR-0286 §3, §9). It never raises but for a
+            cancellation.
 
     Returns:
         What the body returned.
@@ -518,6 +523,8 @@ async def run_recorded[T](  # noqa: PLR0913 — where to record, which stage and
                     outcome=StageOutcome.TIMED_OUT if timed_out else StageOutcome.FAILED,
                 )
             )
+            if appended is not None:
+                await appended()
             target.end(
                 ControllerRule.STAGE_TIMED_OUT if timed_out else ControllerRule.STAGE_FAILED,
                 clock(),
@@ -537,6 +544,8 @@ async def run_recorded[T](  # noqa: PLR0913 — where to record, which stage and
                 route_outcome=reached.route_outcome,
             )
         )
+        if appended is not None:
+            await appended()
     return result
 
 
@@ -549,13 +558,21 @@ class ActivationController[P: PassFacts]:
         stages: Sequence[ControllerStageRun[P]],
         clock: Clock,
         rules: Sequence[Rule] = ACTIVATION_RULES,
+        appended: Callable[[], Awaitable[None]] | None = None,
     ) -> None:
-        """Hold the stages the rules may make due, the clock and the rule table."""
+        """Hold the stages, the clock, the rule table and what follows each entry.
+
+        ``appended`` is awaited once each stage's entry is appended, so the episode is
+        extended as the stage ends (ADR-0286 §3). It never raises but for a
+        cancellation, and the end entry is not followed by it: that entry is the
+        freeze's (§4).
+        """
         self._stages: Mapping[ControllerStage, ControllerStageRun[P]] = {
             stage.name: stage for stage in stages
         }
         self._clock = clock
         self._rules = tuple(rules)
+        self._appended = appended
 
     def _due(self, state: P) -> Rule:
         for rule in self._rules:
@@ -607,6 +624,8 @@ class ActivationController[P: PassFacts]:
                         route_outcome=result.verdict.route_outcome,
                     )
                 )
+                if self._appended is not None:
+                    await self._appended()
                 if result.outcome is StageOutcome.DONE:
                     continue
                 if result.tolerated and not state.deadline_passed:

@@ -1203,8 +1203,10 @@ async def test_no_log_on_the_capture_path_carries_the_reply() -> None:
     stages = {
         event.get("stage") for event in captured if event["event"] == "activation_capture_degraded"
     }
-    assert stages == {"record_turn", "episode"}, (
-        "both of capture's logging branches ran, so the assertion below has both subjects"
+    # ADR-0286 §3: the refusing store fails the admission write, so the first stage's
+    # append finds no record and logs its mismatch too.
+    assert stages == {"record_turn", "episode", "append"}, (
+        "every capture logging branch ran, so the assertion below has each as a subject"
     )
     counted = {
         event["event"] for event in captured if str(event["event"]).endswith("replies_rendered")

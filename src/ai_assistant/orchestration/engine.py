@@ -3670,6 +3670,12 @@ class Engine:
         #: reason stated on the first of those — coupling two unrelated startup
         #: exclusions makes each one's reasoning the other's problem.
         self._recovery_scan_lock = asyncio.Lock()
+        #: Whether this engine has already closed the open episodes a dead process
+        #: left (ADR-0286 §7), guarded as the recovery scan above is guarded and for
+        #: its reason: ``start`` is also the scheduler's recurring sweep.
+        self._open_episodes_closed = False
+        #: Serialises the check-close-set above, for the scan lock's reason.
+        self._open_episodes_lock = asyncio.Lock()
         #: Whether this engine has already voided the delivery leases it inherited
         #: (ADR-0131 §3). Held here rather than in the outbox because the engine is
         #: what the hub starts: instance lock → one hub process → one composition
@@ -3929,8 +3935,14 @@ class Engine:
         step a previous process left ``RUNNING`` — and every claim open under its
         authorisation — is resolved before this engine does anything a caller can
         observe.
+
+        **ADR-0286 §7's close follows it, also on the first call only, and before the
+        deletion sweep** (:meth:`_close_open_episodes_once`): an episode a dead process
+        left open is frozen ``interrupted`` / ``hub_stopped`` before anything sweeps
+        or reads its conversation.
         """
         await self._recover_scan_once()
+        await self._close_open_episodes_once()
         await self._conversations.sweep_deletions()
         await self._conversations.reclaim()
         if self._notification_outbox is not None:
@@ -3978,6 +3990,26 @@ class Engine:
                 return
             await self._recovery.recover()
             self._recovery_scanned = True
+
+    async def _close_open_episodes_once(self) -> None:
+        """Close the episodes a dead process left open, once per engine (ADR-0286 §7).
+
+        On the first call of :meth:`start`, guarded as :meth:`_recover_scan_once` is
+        guarded and before the deletion sweep (§7:2). Every open episode the store
+        holds that no capture of this process holds is closed ``interrupted`` /
+        ``hub_stopped``; an engine that admitted an activation before its first
+        ``start`` passes over that activation's episode, and a later ``start`` closes
+        nothing. **The flag is set only after the close returns**, so a store failure
+        — which propagates from ``start`` as the sweeps' failures do (§7:4) — leaves
+        the next call to finish it.
+        """
+        async with self._open_episodes_lock:
+            if self._open_episodes_closed:
+                return
+            await self._conversations.activation_writer.close_open(
+                stage_limit=self._stage_record_limit
+            )
+            self._open_episodes_closed = True
 
     async def _recover_leases_once(self) -> None:
         """Void the delivery leases a previous hub process left behind (ADR-0131 §3).
@@ -5850,8 +5882,16 @@ class Engine:
         read_park: ParkedRead | None = None,
         goal_id: str | None = None,
         attempt_id: str | None = None,
+        derived_from_external: bool | None = None,
     ) -> None:
-        """Observe only a validated unsettled resolution, before its processing awaits."""
+        """Observe only a validated unsettled resolution, before its processing awaits.
+
+        **The resume's episode is written here** (ADR-0286 §2:3, §9), once its
+        conversation is resolved through the parking episode; a resume whose
+        conversation is not resolved writes none. ``derived_from_external`` is the
+        parked turn's retained ADR-0223 value where the resume continues a parked
+        step (§3:3), which the pass then holds from its admission (ADR-0286 §4:3).
+        """
         scope = CURRENT_ACTIVATION.get()
         if scope is None or scope.state is not None:
             return
@@ -5877,6 +5917,18 @@ class Engine:
                 if origin is not None:
                     state.resolved_conversation(origin.conversation_id)
                     state.relate(predecessor_episode_id=origin.episode_id)
+        if derived_from_external is not None:
+            state.holds_external(value=derived_from_external)
+        await self._activation_coordinator.admit(state)
+
+    async def _episode_appended(self) -> None:
+        """Extend this worker's open episode as a stage ends (ADR-0286 §3, §9).
+
+        A pass no channel admitted — an internal call — has no episode to extend.
+        """
+        state = active_state()
+        if state is not None:
+            await self._activation_coordinator.append(state)
 
     async def cancel_read(self, token: ContinuationToken, /) -> ReadCancellation:
         """Withdraw a parked read's question, or interrupt the read it dispatched.
@@ -9586,6 +9638,11 @@ class Engine:
         cancellation arrives at the admission barrier. A resume's empty scope
         can be admitted by its validated resolution hook; a restatement stays
         empty and performs no capture.
+
+        **A channel activation's episode is written once the barrier opens and
+        before any of its processing runs** (ADR-0286 §2:1). A resume's is written
+        at its resolution point instead (:meth:`_admit_control`), which is where its
+        activation is admitted.
         """
         self._reject_if_closing()
         admitted = asyncio.Event()
@@ -9598,6 +9655,8 @@ class Engine:
             try:
                 try:
                     await admitted.wait()
+                    if scope.state is not None:
+                        await self._activation_coordinator.admit(scope.state)
                     value = await work()
                 except BaseException as exc:
                     failure = exc
@@ -9855,6 +9914,7 @@ class Engine:
             ControllerRule.REPLY_OWED,
             clock=self._clock,
             body=compose,
+            appended=self._episode_appended,
         )
 
     def _resume_record(self) -> StageRecord | None:
@@ -12129,15 +12189,18 @@ class Engine:
         """Run one pass's stages by ADR-0280 §4's rules, recording on its state.
 
         The working set is carried on the activation's state while the pass runs
-        (§3), and the entries accumulate there for capture (§6). A pass with no
-        admitted activation — an internal call no channel admitted — still runs by
-        the rules, into a record nothing writes.
+        (§3), and the entries accumulate there, each appended to the open episode as
+        its stage ends (ADR-0286 §3). A pass with no admitted activation — an
+        internal call no channel admitted — still runs by the rules, into a record
+        nothing writes.
         """
         state = active_state()
         record = StageRecord() if state is None else state.stages
         if state is not None:
             state.working = working
-        await ActivationController(stages=stages, clock=self._clock).run(working, record)
+        await ActivationController(
+            stages=stages, clock=self._clock, appended=self._episode_appended
+        ).run(working, record)
 
     async def _windows_stage(self, working: _ActivationPass) -> None:
         """ADR-0282 §3: assemble the pass's windows before recall and understanding.
@@ -12759,6 +12822,10 @@ class Engine:
         # two consumers: the episode's stamp and the `SelectionOrigin` the runner is
         # given, which makes them the same boolean rather than two that agree.
         origin = SelectionOrigin.over(turn.memories)
+        if (capture := active_state()) is not None:
+            # ADR-0286 §4:3: the pass holds its value from here, so the stage's
+            # append carries it.
+            capture.holds_external(value=origin.planned_with_external_content)
         self._check_plan_is_for_goal(turn)
         raised = responded.raised
         planned = _Planned(
@@ -13671,6 +13738,7 @@ class Engine:
                 clock=self._clock,
                 body=lambda: self._resume_routed(park, approved=approved),
                 verdict=_resumed_route_verdict,
+                appended=self._episode_appended,
             )
             return park, routed
 
@@ -15024,6 +15092,8 @@ class Engine:
                     binding=ParkedBinding(execution_id=parked.execution_id, step_id=parked.step_id),
                     goal_id=owner.goal_id,
                     attempt_id=owner.id,
+                    # ADR-0223 §3:3: the parking turn's value, retained with the park.
+                    derived_from_external=parked.derived_from_external,
                 )
 
             observed = DriveObservation()
@@ -15078,6 +15148,7 @@ class Engine:
                 clock=self._clock,
                 body=drive,
                 verdict=_resumed_drive_verdict,
+                appended=self._episode_appended,
             )
             if isinstance(driven, _WithheldResumption):
                 return driven
@@ -15529,6 +15600,7 @@ class Engine:
                 derived_from_external=derived_from_external,
                 delivery=None if spoken is None else spoken.delivery,
             )
+            state.holds_external(value=derived_from_external)
             state.composition_timed_out = composed is not None and composed.timed_out
         result = TurnOutcome(
             turn=turn,

@@ -1,4 +1,8 @@
-"""Bound terminal capture separately from processing and drain its safety work."""
+"""Write an activation's episode as it runs, freeze it once, and drain its safety work.
+
+The admission write and each stage's append run inside the pass (ADR-0286 §2, §3);
+the freeze is bounded separately from processing (ADR-0275 §8).
+"""
 
 from __future__ import annotations
 
@@ -47,6 +51,14 @@ class ActivationCoordinator:
         self._clock = checked_clock(now, owner="ActivationCoordinator")
         self._payload_limit = payload_limit
 
+    async def admit(self, state: ActivationState) -> None:
+        """Write the open episode once the activation is admitted (ADR-0286 §2)."""
+        await self._writer.admit(state, payload_limit=self._payload_limit)
+
+    async def append(self, state: ActivationState) -> None:
+        """Extend the open episode as a stage ends, inside the pass (ADR-0286 §3)."""
+        await self._writer.append(state, payload_limit=self._payload_limit, drain=self._safety)
+
     async def finish(
         self,
         state: ActivationState,
@@ -67,6 +79,9 @@ class ActivationCoordinator:
             processing = state.processing(ended_at, failure)
         except Exception:
             capture_loss("terminal", "metadata")
+            # ADR-0286 §5:2: no freezing revision can be built, so capture ends here
+            # and an episode the admission wrote is deleted rather than left open.
+            await self._writer.abandon(state, self._safety)
             return FinalizedActivation(report)
 
         def checked_output() -> EpisodeProcessingRecord:

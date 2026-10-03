@@ -1,4 +1,8 @@
-"""Call-local facts for one admitted activation, never a durable start row."""
+"""Call-local facts for one admitted activation, and how far its episode's writes got.
+
+The episode is written at admission and extended as stages end (ADR-0286 §2, §3);
+:class:`EpisodeProgress` is the writer's account of what it has stored so far.
+"""
 
 from __future__ import annotations
 
@@ -55,6 +59,7 @@ if TYPE_CHECKING:
         ActivationRecall,
         ActivationUnderstanding,
         ChannelInput,
+        EpisodicMemory,
         ExchangeDisposition,
         Modality,
         ParkedBinding,
@@ -83,6 +88,37 @@ class CaptureFacts:
     derived_from_external: bool
     parked: ParkedBinding | None
     delivery: SpokenDelivery | None
+
+
+@dataclass
+class EpisodeProgress:
+    """What one activation's episode writes are known to have done (ADR-0286 §2-§5, §8).
+
+    The writer keeps it from the admission write until the capture settles, and reads
+    nothing else to decide whether to continue: each write after the first is
+    conditioned on the stored record carrying exactly :attr:`written`, or, after a
+    write whose outcome is not known, exactly :attr:`uncertain` (§3:4).
+    """
+
+    #: ``activation:<activation_id>`` (ADR-0283 §2).
+    address: str
+    #: The admission write's one capture timestamp (§2:2): ``occurred_at``,
+    #: ``expires_at``, the placement's ``set_at`` and the instants ``record_turn`` and
+    #: the archive entry carry all reuse it.
+    captured_at: datetime
+    #: The record the store is known to carry: the last write that returned.
+    written: EpisodicMemory | None = None
+    #: The record a write whose outcome is not known carried, until a read settles it.
+    uncertain: EpisodicMemory | None = None
+    #: An episode may stand at the address, so ending capture owes its deletion.
+    possible: bool = False
+    #: Capture ended (§5): nothing further is written for this activation.
+    ended: bool = False
+    #: The freezing write is confirmed (§4).
+    frozen: bool = False
+    #: A record-scoped ``forget`` named this address while the capture was in flight
+    #: (§8).
+    forgotten: bool = False
 
 
 @dataclass
@@ -121,7 +157,17 @@ class ActivationState:
     #: the rules read. Held here while the pass runs and never persisted; its shape
     #: is the engine's, which is the one component that knows each decision's type.
     working: object | None = None
+    #: ADR-0223's value for this pass's episode, once the pass holds it: computed over
+    #: its own supply (§3:2) or retained from a parked turn (§3:3). ``None`` until
+    #: then. ADR-0286 §4:3 carries the latest value into every append after that.
+    derived_from_external: bool | None = None
+    #: The writer's account of this activation's episode, from its admission write.
+    capture: EpisodeProgress | None = field(default=None, repr=False)
     _last_understanding_version: int = field(default=0, init=False, repr=False)
+
+    def holds_external(self, *, value: bool) -> None:
+        """Record ADR-0223's value as the pass now holds it (ADR-0286 §4:3)."""
+        self.derived_from_external = value
 
     def transcription(self, transcript: str | None) -> None:
         """Keep exact text, including an empty transcript, without audio bytes."""
@@ -234,6 +280,37 @@ class ActivationState:
             links=self.links,
             understanding=self.understanding,
             understanding_omitted=self._omission(),
+            understanding_elided=self.understanding_elided,
+            stages=stages,
+            recall=self.recall,
+            stages_elided=stages_elided,
+        )
+
+    def open_processing(self) -> EpisodeProcessingRecord:
+        """The open record as the pass stands now (ADR-0286 §1, §3).
+
+        It carries what the pass has recorded into the record's own fields — the
+        trigger as it stands, the links, the understanding versions, the recall
+        result and the stage entries ended so far, each under its bound — and no
+        status, reason, end time, omission or end entry. ``response_degraded`` and
+        ``output_degraded`` stay unset here: the freezing write sets them, and an
+        unset field may take a value then (§3:3).
+
+        Raises:
+            ValueError: If admission metadata is incomplete.
+        """
+        if self.activation_id is None or self.started_at is None:
+            raise ValueError("activation admission metadata is incomplete")
+        entries = self.stages.entries
+        if self.stages.ended:
+            entries = entries[:-1]
+        stages, stages_elided = StageRecord(list(entries)).bounded(self.stage_limit)
+        return EpisodeProcessingRecord(
+            activation_id=self.activation_id,
+            started_at=self.started_at,
+            trigger=self.trigger,
+            links=self.links,
+            understanding=self.understanding,
             understanding_elided=self.understanding_elided,
             stages=stages,
             recall=self.recall,
