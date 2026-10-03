@@ -1,6 +1,12 @@
-"""Fit live episode inspection results to the public payload limit (ADR-0275)."""
+"""Episode reads: inspection fitted to the payload limit, and the open-episode filter.
+
+Inspection is ADR-0275's. ADR-0286 §6:4 adds the one rule a by-id read that feeds a
+model applies: an open episode is an id with no record.
+"""
 
 from __future__ import annotations
+
+from typing import TYPE_CHECKING
 
 from ai_assistant.core.episode_encoding import encode_cursor
 from ai_assistant.core.types import (
@@ -8,9 +14,34 @@ from ai_assistant.core.types import (
     EpisodeChunk,
     EpisodeCursor,
     EpisodePage,
+    EpisodicMemory,
     ProcessingStatus,
 )
 from ai_assistant.orchestration.payloads import canonical_payload, check_payload
+
+if TYPE_CHECKING:
+    from collections.abc import Mapping
+
+    from ai_assistant.core.types import MemoryRecord
+
+
+def is_open_episode(record: object) -> bool:
+    """Whether ``record`` is an open episode (ADR-0286 §1), which no model is shown."""
+    return (
+        isinstance(record, EpisodicMemory)
+        and record.processing_record is not None
+        and record.processing_record.is_open
+    )
+
+
+def without_open_episodes(found: Mapping[str, MemoryRecord]) -> dict[str, MemoryRecord]:
+    """``found`` as a reader that feeds a model takes it (ADR-0286 §6:4).
+
+    A ``get_many`` reaches open episodes as it reaches any other (§6:5); a reader
+    whose records reach a model treats each as an id with no record, so it is left
+    out of the mapping exactly as a missing id is.
+    """
+    return {key: record for key, record in found.items() if not is_open_episode(record)}
 
 
 def fit_page(

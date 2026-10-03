@@ -66,7 +66,6 @@ async def test_shutdown_snapshot_waits_for_capture_children_created_after_it() -
     state = _admitted()
     processing = asyncio.Event()
     release = asyncio.Event()
-    held = harness.memory.suspend_next_operation()
 
     async def work() -> str:
         processing.set()
@@ -77,6 +76,9 @@ async def test_shutdown_snapshot_waits_for_capture_children_created_after_it() -
         ActivationScope(state), work, seam="receive", check_output=lambda _: None
     )
     await processing.wait()
+    # The admission write is behind it (ADR-0286 §2), so the next store operation is
+    # the freeze's, which a capture child created after the snapshot makes.
+    held = harness.memory.suspend_next_operation()
     closing = asyncio.create_task(harness.engine.aclose())
     await asyncio.sleep(0)
     release.set()

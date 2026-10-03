@@ -17,17 +17,25 @@ from ai_assistant.core.errors import (
     TranscriptArchiveError,
 )
 from ai_assistant.core.types import (
+    ActivationLinks,
     ChannelContext,
     ChannelIdentity,
     ChannelInput,
+    ControllerRule,
+    ControllerStage,
     EpisodicMemory,
     ExchangeDisposition,
+    MemoryWrite,
     Modality,
     NewConversation,
     ParkedBinding,
+    PlacementReach,
+    PlacementSetter,
     RecordedChannelTrigger,
     SpokenDelivery,
     SpokenDeliveryState,
+    StageEntry,
+    StageOutcome,
     TextChannelPayload,
     WholeTextReply,
 )
@@ -46,7 +54,6 @@ if TYPE_CHECKING:
     from ai_assistant.core.types import (
         Conversation,
         EpisodeCaptureReport,
-        MemoryWrite,
         TranscriptEntry,
     )
     from ai_assistant.orchestration.activation_state import ActivationState
@@ -60,16 +67,30 @@ async def _drain(work: Awaitable[None]) -> None:
     await work
 
 
-class CommitThenFail(FakeMemoryStore):
-    """A store that can commit before the caller observes a failure."""
+def freezes(writes: Sequence[MemoryWrite]) -> bool:
+    """Whether a batch carries an episode's freezing write (ADR-0286 §4)."""
+    return any(
+        isinstance(write.record, EpisodicMemory)
+        and write.record.processing_record is not None
+        and not write.record.processing_record.is_open
+        for write in writes
+    )
 
-    def __init__(self, *, cancelled: bool = False) -> None:
+
+class CommitThenFail(FakeMemoryStore):
+    """A store whose freezing write can commit before the caller observes a failure."""
+
+    def __init__(self, *, cancelled: bool = False, commits: bool = True) -> None:
         super().__init__(now=lambda: _AT)
         self.after: Callable[[], Awaitable[None]] | None = None
         self.cancelled = cancelled
+        self.commits = commits
 
     async def write_atomic(self, writes: Sequence[MemoryWrite]) -> Sequence[str]:
-        await super().write_atomic(writes)
+        if not freezes(writes):
+            return await super().write_atomic(writes)
+        if self.commits:
+            await super().write_atomic(writes)
         if self.after is not None:
             await self.after()
         if self.cancelled:
@@ -181,8 +202,17 @@ class Wiring:
             state.response = "the complete reply"
         return state
 
+    async def admit(self, state: ActivationState, *, limit: int = 1024) -> None:
+        """The admission write, as the engine makes it before processing (ADR-0286 §2)."""
+        await self.writer.admit(state, payload_limit=limit)
+
+    async def append(self, state: ActivationState, *, limit: int = 1024) -> None:
+        """One stage's append, as the engine makes it when the stage ends (§3)."""
+        await self.writer.append(state, payload_limit=limit, drain=_drain)
+
     async def write(self, state: ActivationState, *, limit: int = 1024) -> EpisodeCaptureReport:
-        """Use a fixed end reading, rebuilt from the state as the coordinator does."""
+        """Admit, then freeze with a fixed end reading, rebuilt as the coordinator does."""
+        await self.admit(state, limit=limit)
         return await self.writer.write(
             state,
             state.processing(_AT, None),
@@ -234,7 +264,7 @@ async def test_an_ended_exchange_is_written_at_its_activation_address_on_its_cha
 
 
 class CommitThen(FakeMemoryStore):
-    """A store that runs a hook once its write has committed, and then answers."""
+    """A store that runs a hook once a freezing write has committed, and then answers."""
 
     def __init__(self) -> None:
         super().__init__(now=lambda: _AT)
@@ -242,7 +272,7 @@ class CommitThen(FakeMemoryStore):
 
     async def write_atomic(self, writes: Sequence[MemoryWrite]) -> Sequence[str]:
         written = await super().write_atomic(writes)
-        if self.after is not None:
+        if self.after is not None and freezes(writes):
             await self.after()
         return written
 
@@ -324,13 +354,18 @@ async def test_an_episode_forgotten_before_it_commits_is_destroyed_by_its_captur
 async def test_an_expired_episode_keeps_its_transcript() -> None:
     """ADR-0225 §5: expiry removes nothing from the archive, and no read stands in for forget.
 
-    The episode's retention has already passed when the entry is written; the capture
-    is unmarked, so the entry, the turn and the report stand.
+    The episode's retention passes once its freeze is confirmed and its entry written;
+    the capture is unmarked, so the entry, the turn and the report stand.
     """
-    later = _AT + timedelta(seconds=5)
-    wiring = Wiring(memory=FakeMemoryStore(now=lambda: later))
+    reading = [_AT]
+    wiring = Wiring(memory=FakeMemoryStore(now=lambda: reading[0]))
     wiring.writer._retention = timedelta(seconds=1)
     state = await wiring.state()
+
+    async def expired() -> None:
+        reading[0] = _AT + timedelta(seconds=5)
+
+    wiring.archive.after = expired
     report = await wiring.write(state)
 
     assert report.state == "recorded"
@@ -454,15 +489,38 @@ async def test_commit_then_failure_on_a_deleted_conversation_leaves_no_episode(
     assert state.recorded_episode_id is None
 
 
-async def test_an_indeterminate_write_on_a_standing_conversation_writes_no_archive_entry() -> None:
-    """§7:4: no archive entry and no ``record_turn`` after an indeterminate write, and
-    the episode it may have left stays where the conversation stands."""
+async def test_an_indeterminate_freeze_its_read_confirms_is_recorded() -> None:
+    """ADR-0286 §3:5: the freezing write's outcome is not known, and one read before the
+    archive entry finds the freezing revision stored, which confirms the freeze."""
     wiring = Wiring(memory=CommitThenFail())
     state = await wiring.state()
-    assert (await wiring.write(state)).state == "degraded"
-    assert wiring.archive.recorded == {}
+    assert (await wiring.write(state)).state == "recorded"
+    assert _ADDRESS in wiring.archive.recorded
     assert await wiring.on_channel(state) == [_ADDRESS]
+    assert await wiring.last_turn_at(state) == _AT
+    episode = await wiring.memory.get(_ADDRESS)
+    assert isinstance(episode, EpisodicMemory)
+    assert episode.processing_record is not None
+    assert not episode.processing_record.is_open
+
+
+async def test_an_indeterminate_freeze_that_did_not_land_leaves_no_episode() -> None:
+    """ADR-0286 §3:5, §5:2: the read finds the open record, not the freezing revision —
+    a mismatch, so no archive entry, no ``record_turn``, and the episode deleted,
+    whatever the conversation's state."""
+    wiring = Wiring(memory=CommitThenFail(commits=False))
+    state = await wiring.state()
+    with capture_logs() as logs:
+        assert (await wiring.write(state)).state == "degraded"
+    assert wiring.archive.recorded == {}
+    assert await wiring.on_channel(state) == []
+    assert await wiring.memory.export() == []
     assert await wiring.last_turn_at(state) is None
+    assert await wiring.conversations.get(str(state.conversation_id)) is not None
+    assert [(row["stage"], row["reason"]) for row in logs] == [
+        ("freeze", "failed"),
+        ("freeze", "mismatch"),
+    ]
 
 
 async def test_a_conversation_deleted_before_record_turn_keeps_neither_write() -> None:
@@ -484,8 +542,9 @@ async def test_a_conversation_deleted_before_record_turn_keeps_neither_write() -
 
 
 async def test_a_write_known_not_to_have_committed_reaches_nothing_else() -> None:
-    """§7:3: no archive entry and no ``record_turn``, and no compensation that could
-    delete the record already holding the address."""
+    """ADR-0286 §2:4: an admission collision is a capture failure — no archive entry,
+    no ``record_turn``, and no compensation that could delete the record already
+    holding the address."""
     wiring = Wiring(memory=Conflicting(now=lambda: _AT))
     state = await wiring.state()
     assert (await wiring.write(state)).state == "degraded"
@@ -530,3 +589,114 @@ async def test_standalone_collision_preserves_existing_record_and_does_not_retry
     assert (await wiring.write(repeated)).state == "degraded"
     assert await wiring.memory.get(report.episode_id) == before
     assert len(await wiring.memory.export()) == 1
+
+
+def _entry(stage: ControllerStage, due: ControllerRule) -> StageEntry:
+    return StageEntry(stage=stage, due=due, started_at=_AT, ended_at=_AT, outcome=StageOutcome.DONE)
+
+
+async def _freeze(wiring: Wiring, state: ActivationState) -> EpisodeCaptureReport:
+    """The freezing write alone, the admission already made."""
+    return await wiring.writer.write(
+        state,
+        state.processing(_AT, None),
+        payload_limit=1024,
+        checked_output=lambda: state.processing(_AT, None),
+        drain=_drain,
+    )
+
+
+async def test_admission_writes_an_open_episode_each_append_extends_and_the_end_freezes() -> None:
+    """ADR-0286 §1-§4: open at admission, one more entry per stage end, frozen last.
+
+    The frozen record's processing record is the one a single write at the end would
+    have stored (§3:3's closing paragraph).
+    """
+    wiring = Wiring()
+    state = await wiring.state()
+
+    await wiring.admit(state)
+
+    opened = await wiring.memory.get(_ADDRESS)
+    assert isinstance(opened, EpisodicMemory)
+    assert opened.processing_record is not None
+    assert opened.processing_record.is_open
+    assert opened.processing_record.stages == ()
+    assert opened.content == ""
+    assert opened.placement.reach is PlacementReach.OWNER
+    assert opened.placement.set_by is PlacementSetter.DERIVED
+    assert opened.placement.set_at == opened.occurred_at == _AT
+    stages = (
+        (ControllerStage.BEGIN_CONVERSATION, ControllerRule.CONVERSATION_UNRESOLVED),
+        (ControllerStage.ASSOCIATE_GOAL, ControllerRule.ASSOCIATION_DUE),
+    )
+    for count, (stage, due) in enumerate(stages, start=1):
+        state.stages.append(_entry(stage, due))
+        await wiring.append(state)
+        stored = await wiring.memory.get(_ADDRESS)
+        assert isinstance(stored, EpisodicMemory)
+        assert stored.processing_record is not None
+        assert stored.processing_record.is_open
+        assert len(stored.processing_record.stages) == count
+    state.stages.end(ControllerRule.NOTHING_DUE, _AT)
+
+    report = await _freeze(wiring, state)
+
+    assert report.state == "recorded"
+    frozen = await wiring.memory.get(_ADDRESS)
+    assert isinstance(frozen, EpisodicMemory)
+    assert frozen.processing_record == state.processing(_AT, None)
+    assert frozen.content == episode_content(frozen)
+    assert wiring.writer._in_flight == {}
+
+
+async def test_a_stored_record_other_than_the_one_written_is_a_mismatch_and_leaves_none() -> None:
+    """ADR-0286 §3:4, §5: anything but the record last written ends capture, without a
+    retry, and deletes the episode by its id."""
+    wiring = Wiring()
+    state = await wiring.state()
+    await wiring.admit(state)
+    stored = await wiring.memory.get(_ADDRESS)
+    assert isinstance(stored, EpisodicMemory)
+    assert stored.processing_record is not None
+    moved = stored.model_copy(
+        update={
+            "processing_record": stored.processing_record.model_copy(
+                update={"links": ActivationLinks(goal_id="someone-else")}
+            )
+        }
+    )
+    await wiring.memory.write_atomic([MemoryWrite(record=moved)])
+    state.stages.append(
+        _entry(ControllerStage.BEGIN_CONVERSATION, ControllerRule.CONVERSATION_UNRESOLVED)
+    )
+
+    with capture_logs() as logs:
+        await wiring.append(state)
+        report = await _freeze(wiring, state)
+
+    assert [(row["stage"], row["reason"]) for row in logs] == [("append", "mismatch")]
+    assert report.state == "degraded"
+    assert await wiring.memory.export() == []
+    assert wiring.archive.recorded == {}
+    assert await wiring.last_turn_at(state) is None
+
+
+async def test_the_write_after_a_forget_mark_writes_nothing_and_deletes() -> None:
+    """ADR-0286 §8:2: the next write after the mark deletes the episode by its id and
+    ends capture; nothing re-creates it."""
+    wiring = Wiring()
+    state = await wiring.state()
+    await wiring.admit(state)
+    wiring.writer.forgetting(_ADDRESS)
+    state.stages.append(
+        _entry(ControllerStage.BEGIN_CONVERSATION, ControllerRule.CONVERSATION_UNRESOLVED)
+    )
+
+    await wiring.append(state)
+    report = await _freeze(wiring, state)
+
+    assert report.state == "degraded"
+    assert await wiring.memory.export() == []
+    assert wiring.archive.recorded == {}
+    assert await wiring.last_turn_at(state) is None

@@ -7,7 +7,7 @@ from datetime import UTC, datetime
 
 import pytest
 from structlog.testing import capture_logs
-from test_activation_writer import CommitThenFail, Wiring
+from test_activation_writer import Wiring
 
 from ai_assistant.core.errors import OversizedValueError
 from ai_assistant.core.types import EpisodicMemory, ProcessingReason, ProcessingStatus
@@ -37,6 +37,7 @@ async def test_finalization_reads_end_once_and_records_original_processing_cance
         now=clock,
         payload_limit=1024,
     )
+    await coordinator.admit(state)
     result = await coordinator.finish(
         state,
         failure=asyncio.CancelledError() if interrupted else None,
@@ -71,6 +72,7 @@ async def test_output_refusal_is_checked_before_content_and_retains_original_err
         payload_limit=1024,
     )
     refusal = OversizedValueError("result is too large", limit=1024, size=1025)
+    await coordinator.admit(state)
 
     def check_output() -> None:
         # ADR-0283 §2: the address is fixed at admission, so the output check runs
@@ -105,6 +107,7 @@ async def test_cleanup_budget_cancels_and_waits_for_the_registered_write(
         now=lambda: _AT,
         payload_limit=1024,
     )
+    await coordinator.admit(state)
     loop = asyncio.get_running_loop()
     reading = loop.time()
     monkeypatch.setattr(loop, "time", lambda: reading)
@@ -130,8 +133,11 @@ async def test_cleanup_budget_cancels_and_waits_for_the_registered_write(
 
 
 async def test_second_cancellation_drains_registered_deletion_compensation() -> None:
-    memory = CommitThenFail()
-    wiring = Wiring(memory=memory)
+    """The conversation is deleted once the frozen episode's entry is written, so
+    ``record_turn`` answers ``None`` and the fence's deletion runs as a safety task,
+    which two cancellations of the finalization wait for (ADR-0275 §8:11)."""
+    wiring = Wiring()
+    memory = wiring.memory
     state = await wiring.state()
     tasks: list[asyncio.Task[None]] = []
     coordinator = ActivationCoordinator(
@@ -141,13 +147,14 @@ async def test_second_cancellation_drains_registered_deletion_compensation() -> 
         now=lambda: _AT,
         payload_limit=1024,
     )
+    await coordinator.admit(state)
     ready = asyncio.Event()
     release = asyncio.Event()
 
     async def deleted() -> None:
         assert state.conversation_id is not None
         await wiring.conversations.stamp_deleted(state.conversation_id)
-        held = wiring.conversations.suspend_next_operation()
+        held = memory.suspend_next_operation()
 
         async def gate() -> None:
             await held.reached()
@@ -160,7 +167,7 @@ async def test_second_cancellation_drains_registered_deletion_compensation() -> 
         drivers.append(driver)
 
     drivers: list[asyncio.Task[None]] = []
-    memory.after = deleted
+    wiring.archive.after = deleted
     parent = asyncio.create_task(coordinator.finish(state, failure=None, check_output=lambda: None))
     await ready.wait()
     parent.cancel()

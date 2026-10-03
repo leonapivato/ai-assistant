@@ -133,6 +133,7 @@ from ai_assistant.core.types import (
     rests_on_recorded_external_content,
 )
 from ai_assistant.orchestration.conversations import BELIEF_KINDS
+from ai_assistant.orchestration.episode_reads import without_open_episodes
 from ai_assistant.orchestration.origin import SelectionOrigin
 from ai_assistant.orchestration.retrieval import assemble_by_band
 
@@ -6415,7 +6416,8 @@ async def _hop_records(
                 wanted.append(identifier)
     # ADR-0284 §6:2: the hop reads every record it reaches, failed, interrupted and
     # outside episodes included; a reader that should pass over one reads its status.
-    resolved = dict(await store.get_many(wanted))
+    # ADR-0286 §6:4: an open episode is the one it passes over, as an id with no record.
+    resolved = without_open_episodes(await store.get_many(wanted))
     reads.note(len(resolved))
 
     expansion: list[MemoryRecord] = []
