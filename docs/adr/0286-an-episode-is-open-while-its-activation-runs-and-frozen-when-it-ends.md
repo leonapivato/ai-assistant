@@ -1,6 +1,6 @@
 # 286. An episode is open while its activation runs, and frozen when it ends
 
-- Status: Proposed
+- Status: Accepted
 - Date: 2026-10-03
 - Scope: [M36](https://github.com/leonapivato/ai-assistant/milestone/2), reopened 2026-09-30 for [#2613](https://github.com/leonapivato/ai-assistant/issues/2613); step 3a of the plan recorded there on 2026-10-03, the open episode, behind the cutover that steps 2 and 3 share.
 - Dependency: ADR-0284 and ADR-0285, implemented at `6b41b305`.
