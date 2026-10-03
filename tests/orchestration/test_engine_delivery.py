@@ -155,7 +155,6 @@ def _wired(  # noqa: PLR0913 — one parameter per knob a case here varies, whic
         trace_sink=harness.trace_sink,
         trace_retention=harness.trace_retention,
         conversations=harness.conversations,
-        observation=harness.observation,
         questions=harness.questions,
         notification_outbox=outbox,
         now=(lambda: AT) if now is None else now,

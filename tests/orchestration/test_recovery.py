@@ -934,7 +934,6 @@ def engine_with(scan: RecoveryScan | None) -> Engine:
         trace_sink=harness.trace_sink,
         trace_retention=harness.trace_retention,
         conversations=harness.conversations,
-        observation=harness.observation,
         questions=harness.questions,
         recovery=scan,
         archive=FakeTranscriptArchive(),

@@ -138,7 +138,6 @@ from ai_assistant.orchestration import (
     IngestionStage,
     LearningLoop,
     MemoryWriteStage,
-    ObservationStage,
     ParkedReadOperations,
     QuestionStage,
     RecipientGrantOperations,
@@ -195,7 +194,6 @@ from ai_assistant.testing import (
     FakeNotificationPolicy,
     FakeNotificationStore,
     FakeNotificationWriter,
-    FakeObserver,
     FakeParkedReads,
     FakePlanner,
     FakePlanStore,
@@ -659,14 +657,6 @@ async def _engine(now: Clock) -> None:
             archive=FakeTranscriptArchiveWriter(),
             archive_enabled=True,
         ),
-        observation=ObservationStage(
-            observer=FakeObserver(),
-            conversations=conversations,
-            memory=memory,
-            writes=writes,
-            batch_size=20,
-            route="anthropic:claude-opus-4-8",
-        ),
         questions=QuestionStage(
             writer=writer, deferrals=deferrals, memory=memory, now=lambda: _AWARE
         ),
@@ -939,22 +929,6 @@ async def _planner(now: Clock) -> None:
     await ModelBackedPlanner(FakeModelProvider(_PLAN_REPLY), now=now).plan(
         _goal(), utterance="a request", context=_context(), capabilities=("search_housing",)
     )
-
-
-async def _observation(now: Clock) -> None:
-    """The pass reads the clock to decide which conversation is due."""
-    memory = FakeMemoryStore(now=lambda: _AWARE)
-    conversations = FakeConversationStore(now=lambda: _AWARE)
-    await conversations.start()
-    await ObservationStage(
-        observer=FakeObserver(),
-        conversations=conversations,
-        memory=memory,
-        writes=_writes(memory),
-        batch_size=20,
-        route="anthropic:claude-opus-4-8",
-        now=now,
-    ).run()
 
 
 async def _questions(now: Clock) -> None:
@@ -1299,7 +1273,6 @@ SEAMS = [
     Seam("IngestionStage", _ingestion, ClockReadingError),
     Seam("ModelBackedObserver", _observer, ClockReadingError),
     Seam("ModelBackedPlanner", _planner, PlanningError),
-    Seam("ObservationStage", _observation, ClockReadingError),
     Seam("QuestionStage", _questions, DeferralStoreError),
     Seam("RuleBasedFeedbackProcessor", _rule_based_processor, ClockReadingError),
     Seam("SqliteAuditTrail", _sqlite_audit_trail, AuditError),
@@ -1639,7 +1612,6 @@ PROPAGATED: Final[dict[str, str]] = {
     "ModelBackedObserver": (
         "documented at ``learning/observer.py:656``, and `learning` owns no error class"
     ),
-    "ObservationStage": _UNDECLARED,
     "RuleBasedFeedbackProcessor": (
         "documented at ``learning/processor.py:146``, on the observer's precedent"
     ),

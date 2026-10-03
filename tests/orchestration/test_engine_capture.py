@@ -25,10 +25,10 @@ narrowing rather than an abandonment. The positive half is asserted end to end h
 in the case below that used to be test 4.
 
 **Test 14 is untouched and is the case ADR-0222 most easily breaks**, so §8's
-assertion 12 restates it over the change's own surface: the capture path, the
-observation path and the three render sites emit no log event whose payload contains
-the reply's text, elided or whole. Rendering a reply into a prompt is not a licence
-to log it (ADR-0004 §5).
+assertion 12 restates it over the change's own surface: the capture path and the
+render sites emit no log event whose payload contains the reply's text, elided or
+whole. The observation path and its render site were retired by ADR-0285 §1.
+Rendering a reply into a prompt is not a licence to log it (ADR-0004 §5).
 """
 
 from __future__ import annotations
@@ -75,7 +75,6 @@ from ai_assistant.core.types import (
     SpokenAudioFormat,
     TurnOutcome,
 )
-from ai_assistant.learning import ModelBackedObserver
 from ai_assistant.orchestration import composing
 from ai_assistant.orchestration.composing import ComposingStage
 from ai_assistant.orchestration.payloads import canonical_payload
@@ -309,7 +308,7 @@ async def test_a_stream_that_published_nothing_captures_no_reply() -> None:
     assert _verdicts(episode) == ((), ())
 
 
-async def test_a_no_reply_record_renders_its_phrase_and_nothing_else_at_all_three_sites() -> None:
+async def test_a_no_reply_record_renders_its_phrase_and_nothing_else_at_each_site() -> None:
     """Issue #1873: the population this flip is the first to write.
 
     A record carrying a verdict beside an ``outcome`` of ``None`` did not exist before
@@ -321,8 +320,9 @@ async def test_a_no_reply_record_renders_its_phrase_and_nothing_else_at_all_thre
     Driven end to end over a record the **engine captured**, because that is the half
     the three per-site cases cannot show: they build their own record, and what #1873 is
     about is that this shape now arrives from production capture. The real planner and
-    the real observer stand behind recording providers for test 4's reason — a fake
-    assembles no prompt, and the render sites live inside the producers.
+    the real composer stand behind recording providers for test 4's reason — a fake
+    assembles no prompt, and the render sites live inside the producers. The observer
+    was a third site until ADR-0285 §1 retired it.
     """
     phrase = "the selected tool ran"
     goals = iter(f"g-{n}" for n in range(1, 10))
@@ -345,16 +345,14 @@ async def test_a_no_reply_record_renders_its_phrase_and_nothing_else_at_all_thre
             }
         )
     )
-    observing_model = FakeModelProvider(json.dumps({"beliefs": []}))
     # A blank completion, which is ADR-0170 §8's classified composition failure and one
-    # of §1's five no-reply paths. It is the path that reaches all three sites: the four
+    # of §1's five no-reply paths. It is the path that reaches both sites: the four
     # others each end the pass at a park or a recovered resume, where the composing
     # stage is not reached at all on the *following* turn either.
     composing_model = FakeModelProvider("")
     harness = Harness(
         tools=(tool(),),
         planner=ModelBackedPlanner(planning_model),
-        observer=ModelBackedObserver(observing_model),
         composing=ComposingStage(model=composing_model, streaming=FakeStreamingCompleter()),
         loop_id_factory=lambda: next(goals),
     )
@@ -380,11 +378,9 @@ async def test_a_no_reply_record_renders_its_phrase_and_nothing_else_at_all_thre
     await harness.engine.converse(
         "and again", timeout=PATIENT, conversation_id=first.conversation_id
     )
-    await harness.engine.observe(conversation_id=first.conversation_id)
 
     for name, provider in (
         ("planner", planning_model),
-        ("observer", observing_model),
         ("composer", composing_model),
     ):
         rendered = _assembled(provider)
@@ -989,17 +985,17 @@ def _assembled(*providers: FakeModelProvider) -> str:
 
 
 @pytest.mark.parametrize("enriched", [False, True])
-async def test_a_captured_reply_reaches_the_tail_and_the_observation_batch(enriched: bool) -> None:
+async def test_a_captured_reply_reaches_the_conversation_tail(enriched: bool) -> None:
     """ADR-0222 §8's assertions 1 and 2, driven end to end, where §11's test 4 stood.
 
     §11's test 4 asserted the opposite of this and named itself "the test a reader
     lane must consciously delete"; ADR-0222 §8 deletes it, and this is the case that
     stands in its place over the same fixture. A reply is captured carrying a span
-    nothing else here holds, a **further turn of the same conversation** runs so the
-    episode enters the next turn's supply as a tail record, and an **observation
-    pass** runs over it. The real planner, composer and observer stand behind
-    recording providers, because a fake assembles no prompt and the render sites live
-    inside the producers.
+    nothing else here holds, and a **further turn of the same conversation** runs so
+    the episode enters the next turn's supply as a tail record. The real planner and
+    composer stand behind recording providers, because a fake assembles no prompt and
+    the render sites live inside the producers. Its observation-batch half went with
+    the observer (ADR-0285 §1).
 
     **The phrase is still there beside it**, which is §1's and §3's whole shape: the
     two are different facts and neither implies the other, so the assertion is that
@@ -1007,7 +1003,7 @@ async def test_a_captured_reply_reaches_the_tail_and_the_observation_batch(enric
 
     §13's second bullet is what this discharges — "every reader of the stored reply"
     was deferred, and this lane is two of the four it names. The escaping and
-    normalisation it conditioned them on are ``_quoted_span``'s, at all three sites.
+    normalisation it conditioned them on are ``_quoted_span``'s, at each site.
     """
     planning_model = FakeModelProvider(
         json.dumps(
@@ -1028,14 +1024,12 @@ async def test_a_captured_reply_reaches_the_tail_and_the_observation_batch(enric
             }
         )
     )
-    observing_model = FakeModelProvider(json.dumps({"beliefs": []}))
     composing_model = FakeModelProvider(f"You went hiking, {_SPAN}.")
 
     goals = iter(f"g-{n}" for n in range(1, 10))
     harness = Harness(
         tools=(tool(),),
         planner=ModelBackedPlanner(planning_model),
-        observer=ModelBackedObserver(observing_model),
         composing=ComposingStage(model=composing_model, streaming=FakeStreamingCompleter()),
         # A fresh goal id per turn: the second turn of one conversation is a second
         # objective, and a store that saw one id twice with two statements refuses it.
@@ -1100,41 +1094,34 @@ async def test_a_captured_reply_reaches_the_tail_and_the_observation_batch(enric
     await harness.engine.converse(
         "and what else?", timeout=PATIENT, conversation_id=first.conversation_id
     )
-    await harness.engine.observe(conversation_id=first.conversation_id)
 
     tail = _assembled(planning_model, composing_model)
-    batch = _assembled(observing_model)
     assert private not in tail
-    assert private not in batch
     assert f"what the assistant replied: {json.dumps(f'You went hiking, {_SPAN}.')}" in tail, (
         "ADR-0222 §1: a conversation-tail record renders its reply under its own bullet"
-    )
-    assert f"Assistant said: {json.dumps(f'You went hiking, {_SPAN}.')}" in batch, (
-        "ADR-0222 §3: the observation batch renders it as a second continuation line"
     )
     assert "the selected tool ran" in tail, (
         "§1: the phrase line is rendered first and the reply never replaces it"
     )
-    assert "the selected tool ran" in batch, "§3: the same, over the observation batch"
     # ADR-0284 §8: the user's own words are the episode's input, at every site.
     assert user_words in tail
-    assert user_words in batch
 
 
-async def test_no_log_on_the_capture_or_observation_path_carries_the_reply() -> None:
+async def test_no_log_on_the_capture_path_carries_the_reply() -> None:
     """§11 test 14, restated by ADR-0222 §8's assertion 12 over the new render sites.
 
     ADR-0004 §5 names "message bodies" a redaction target, and §8 restates this case
     "because this is the change that would most easily break it": rendering a reply
-    into a prompt is not a licence to log it. So the subjects are the capture path,
-    the observation path **and the three render sites**, each of which now emits
-    ADR-0222 §5's counter pair — two integers and no text — once per assembly.
+    into a prompt is not a licence to log it. So the subjects are the capture path
+    **and the render sites**, each of which now emits ADR-0222 §5's counter pair — two
+    integers and no text — once per assembly. The observation path and its render site
+    were the third subject until ADR-0285 §1 retired them.
 
     The capture path logs only where something failed, so the degraded routes are the
     ones worth driving: a refused ``append`` writes ``activation_capture_degraded``
     before the episode exists, and a refused episode write logs the same event after
-    the reply is in hand. Both are exercised beside the happy path and an observation
-    pass, and none of them may carry a word of the reply.
+    the reply is in hand. Both are exercised beside the happy path, and none of them
+    may carry a word of the reply.
     """
 
     class _RefusingStore(FakeMemoryStore):
@@ -1164,9 +1151,8 @@ async def test_no_log_on_the_capture_or_observation_path_carries_the_reply() -> 
             msg = "the conversation store is down"
             raise ConversationStoreError(msg)
 
-    observing_model = FakeModelProvider(json.dumps({"beliefs": []}))
     # The *real* planner on the happy path, so its render site is a subject here too
-    # (ADR-0222 §8's assertion 12 names all three): a fake planner assembles no prompt
+    # (ADR-0222 §8's assertion 12 names it): a fake planner assembles no prompt
     # and emits no counter pair.
     planning_model = FakeModelProvider(
         json.dumps(
@@ -1192,11 +1178,9 @@ async def test_no_log_on_the_capture_or_observation_path_carries_the_reply() -> 
             tools=(tool(),),
             composing=_replying(f"Certainly, {_SPAN}."),
             planner=ModelBackedPlanner(planning_model),
-            observer=ModelBackedObserver(observing_model),
         )
         outcome = await happy.engine.converse("go on", timeout=PATIENT)
         assert outcome.conversation_id is not None
-        await happy.engine.observe(conversation_id=outcome.conversation_id)
 
         refusing = Harness(
             composing=_replying(f"Certainly, {_SPAN}."),
@@ -1228,10 +1212,8 @@ async def test_no_log_on_the_capture_or_observation_path_carries_the_reply() -> 
     assert counted == {
         "planner_tail_replies_rendered",
         "composing_tail_replies_rendered",
-        "observation_batch_replies_rendered",
-    }, "all three of ADR-0222 §5's counting sites ran, so they are subjects here too"
+    }, "both remaining ADR-0222 §5 counting sites ran, so they are subjects here too"
     assert not any(_SPAN in json.dumps(event, default=str) for event in captured), (
         "ADR-0221 §11 test 14, as ADR-0222 §8's assertion 12 restates it: no log event "
-        "on the capture path, the observation path or the three render sites carries the "
-        "reply's text, elided or whole"
+        "on the capture path or the render sites carries the reply's text, elided or whole"
     )

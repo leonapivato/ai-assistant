@@ -12,9 +12,9 @@ belongs to a coordinator, not to either store… `orchestration` is the one plac
 that legitimately holds both handles by injection." Neither store may hold the
 other (golden rule 1), and the sequence spans both.
 
-**One stage, injected into every producer's stage.** ``LearningLoop.learn`` and
-``ObservationStage.observe`` both reach memory through this object rather than
-through a ``MemoryWriter`` handle of their own, which is the one sentence ADR-0078
+**One stage, injected into every producer's stage.** ``LearningLoop.learn``,
+``IngestionStage`` and ``ConsolidationStage`` reach memory through this object rather
+than through a ``MemoryWriter`` handle of their own, which is the one sentence ADR-0078
 §3 asks of the implementing lane: "a proposal reaches memory through the
 orchestration write stage, not through a ``MemoryWriter`` handle of its own. A
 producer holding the writer directly gets the ratified policy and applier and

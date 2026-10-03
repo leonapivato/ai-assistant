@@ -30,16 +30,6 @@ and destroy any of it (:class:`Belief`; ADR-0073 §7). Inspection is where
 into its band is ADR-0072 §1's projection, and an adapter doing it would put that
 projection in `interfaces/` (ADR-0073 §7).
 
-:meth:`Engine.observe` is the third non-turn leg (ADR-0077 §8): the *passive* half
-of accumulation, where ``learn`` is the dictated one. It reads a bounded batch of
-a conversation's episodes, has the injected ``Observer`` propose what they justify
-believing, and puts each proposal through the same write path ``learn`` uses —
-returning an
-:class:`~ai_assistant.orchestration.observation.ObservationReport`. It is
-deliberately explicit: nothing triggers it but a caller — the CLI, or the hub's
-scheduler as a second caller of the same operation, unchanged and **disabled by
-default** until the observation cursor lands (ADR-0083 §7, §13).
-
 Beside those sits the **maintenance surface** ADR-0083 §8 adds for that scheduler:
 :meth:`Engine.start`'s sweeps, :meth:`Engine.purge_expired`,
 :meth:`Engine.ingest_calendar`, :meth:`Engine.ingest_email` and
@@ -53,7 +43,7 @@ leg 6's (ADR-0093 §6); :meth:`Engine.ingest_email` is ADR-0140's, added beside 
 rather than through it. **One operation per ingestion source, and no ingestion
 operation takes a source** (ADR-0142 §4): each reads the injected
 :class:`~ai_assistant.core.protocols.Reader` once and puts every belief the
-reading proposes through the same write path ``learn`` and ``observe`` use,
+reading proposes through the same write path ``learn`` uses,
 because ADR-0093 §1 declines the capture exemption to a reader and a third
 party's report is the last thing that should reach the store unmediated. Each is
 **optional collaborator, required behaviour**: a reader ships disabled by default
@@ -387,7 +377,6 @@ if TYPE_CHECKING:
         NotificationCandidate,
         NotificationDisposition,
         NotificationPreferences,
-        ObservationReport,
         PermissionDecision,
         Question,
         RecipientGrant,
@@ -424,7 +413,6 @@ if TYPE_CHECKING:
         RecordedGoal,
         RespondedTurn,
     )
-    from ai_assistant.orchestration.observation import ObservationRunReport, ObservationStage
     from ai_assistant.orchestration.parked_reads import ParkedReadOperations
     from ai_assistant.orchestration.questions import QuestionStage
     from ai_assistant.orchestration.recall import RecallStage
@@ -1041,97 +1029,6 @@ def _consolidated(report: ConsolidationReport) -> Observation:
     )
 
 
-def _observed(report: ObservationReport) -> Observation:
-    """Read one **interactive** observation pass onto its own trace (ADR-0222 §9).
-
-    **The asymmetry this closes was not a decision, which is why it is closed here
-    in passing.** A scheduled run has carried a twelve-metric reading since ADR-0218
-    (:func:`_observed_due`), while a hand-run pass was tracked with no mapper at all
-    and therefore recorded empty metrics — so the denominator of any per-pass figure
-    was readable for the scheduler and not for the user. ADR-0222 §9 names that "cheap
-    to close", and closing it is the whole of the mechanism that ADR owes: the
-    act-record share and the laundering count it defines are a **reading of proposal
-    content** in a QA pass, and no field, flag or enum member is added to carry
-    either.
-
-    **Only counts the report already carries** (ADR-0222 §5's closing clause, which
-    is what makes this hook lawful where §5's own elision counts are not). Every
-    value below is a field of
-    :class:`~ai_assistant.core.types.ObservationReport` or a property it defines:
-    ``proposed`` is the length of the entries it returned and ``stored`` is its own
-    property for how many left a record live. Nothing here re-derives a rule that
-    lives in :mod:`ai_assistant.orchestration.observation` — a second statement of
-    which rulings count as committing is a second thing to disagree with the first —
-    and nothing here reaches for content, which ADR-0119 forbids a trace to carry at
-    all.
-
-    **No outcome, because there is no second one to reach.** A pass that raises
-    propagates and takes ``_tracked``'s fault path; a pass that returns is ``OK``,
-    which is the default, and stating it again here would be a second place for the
-    two to disagree. That is the difference from :func:`_consolidated`, whose
-    ``INCOMPLETE`` is a real fourth state ADR-0111 §9 gives a value.
-
-    Args:
-        report: What the pass read, proposed, and what memory did with it.
-
-    Returns:
-        The pass's own counts, on the operation's own trace.
-    """
-    return Observation(
-        metrics={
-            "episodes_read": report.episodes_read,
-            "proposed": len(report.proposals),
-            "stored": report.stored,
-            "dropped_unsupported": report.dropped_unsupported,
-            "discarded_unusable": report.discarded_unusable,
-            "discarded_over_limit": report.discarded_over_limit,
-        }
-    )
-
-
-def _observed_due(report: ObservationRunReport) -> Observation:
-    """Read one scheduled observation run onto its own ``OPERATION`` trace (ADR-0119 §8).
-
-    **Always ``OK``, and there is no fourth outcome to reach here.** ADR-0218 §3
-    gives a returning run exactly two terminal reasons — the listing it last read
-    held no due candidate, or the budget was spent — and §9 makes both *successful*:
-    "A run whose passes all complete but which observed nothing […] is a
-    **successful** run." The third disposition a reader might look for does not
-    exist as a return value at all: a run whose pass raises propagates and returns
-    no report, so it reaches this projection never and ``_tracked``'s fault path
-    always.
-
-    ``budget_spent`` is carried as a metric rather than as an outcome for exactly
-    that reason. It is not ``ConsolidationReport.halted``'s analogue — a halt is a
-    chunk that could not be recorded, where this is a bound working as designed —
-    so recording it as ``INCOMPLETE`` would report a job doing its job as a job that
-    stopped short.
-
-    Args:
-        report: What the run performed, read and ruled.
-
-    Returns:
-        The run's counters, and ``OK``.
-    """
-    return Observation(
-        outcome=TraceOutcome.OK,
-        metrics={
-            "passes": report.passes,
-            "conversations": report.conversations,
-            "episodes_read": report.episodes_read,
-            "model_calls": report.model_calls,
-            "proposed": report.proposed,
-            "committed": report.committed,
-            "deferred": report.deferred,
-            "rejected": report.rejected,
-            "dropped_unsupported": report.dropped_unsupported,
-            "discarded_unusable": report.discarded_unusable,
-            "discarded_over_limit": report.discarded_over_limit,
-            "budget_spent": report.budget_spent,
-        },
-    )
-
-
 def queued_question(admission: DeferralAdmission) -> QueuedQuestion:
     """Translate a ``core`` admission into the surface's own echo (ADR-0078 §7).
 
@@ -1222,11 +1119,6 @@ def learn_decision(kind: MemoryDecisionKind) -> LearnDecision:
     Total by construction: every :class:`~ai_assistant.core.types.MemoryDecisionKind`
     is handled, so a new ruling added to ``core`` fails type-checking here until it
     is given an echo, rather than silently losing its rendering.
-
-    Package-internal rather than module-private: the observation stage translates
-    the rulings it collects the same way, because ADR-0077 §4 puts every proposal
-    through the write path ``learn`` already uses — and two copies of a total
-    mapping is how one of them silently stops being total.
     """
     match kind:
         case MemoryDecisionKind.ACCEPT:
@@ -3036,7 +2928,6 @@ class Engine:
         conversations: ConversationLifecycle,
         composing: ComposingStage,
         informational_events: InformationalEventStage | None = None,
-        observation: ObservationStage,
         questions: QuestionStage,
         grant_operations: GrantOperations,
         recipient_grant_operations: RecipientGrantOperations,
@@ -3248,8 +3139,8 @@ class Engine:
                 ``Engine.__init__`` takes no ``ModelProvider`` and no
                 ``ContextProvider``, and reaching a concrete subsystem's internals
                 to find one is what golden rule 1 forbids (ADR-0170 §2). So the
-                stage is injected already wired, exactly as ``observation`` and
-                ``consolidation`` are.
+                stage is injected already wired, exactly as ``consolidation``
+                is.
 
                 **Required rather than optional, and that is ADR-0170 §4.** An
                 optional collaborator defaults to unwired, and an unwired composer
@@ -3258,25 +3149,13 @@ class Engine:
                 built without it could not return a conforming outcome at all. It is
                 required for the reason ``conversations`` is: an engine that can be
                 built without it is an engine that silently does not answer.
-            observation: The observation stage (ADR-0077 §8) — the other layer
-                holding both durable stores, because selecting a batch of episodes
-                spans them exactly as capture does. It must be wired to the *same*
-                ``MemoryStore`` passed above and to a writer over it, a
-                composition-root obligation of the same shape: a stage over a
-                second store would select episodes the write path cannot cite, and
-                every proposal it made would be refused for evidence that resolves
-                perfectly well in the store the user reads. Required rather than
-                optional, for the reason ``conversations`` is: an engine that could
-                be built without it is an engine whose ``observe`` silently does
-                nothing, and this operation is the *only* thing that fills the
-                derived band.
             questions: The deferred-question stage (ADR-0078 §8, §9) — the third
                 two-store owner, and the one that also **writes** through both: it
                 claims a question, re-submits its proposal through the same write
                 path ``learn`` uses, and records the outcome. Three
                 composition-root obligations ride on it, all argued on its own
                 constructor: its ``DeferralStore`` must be the very instance the
-                write stage behind ``loop`` and ``observation`` enqueues into (a
+                write stage behind ``loop`` enqueues into (a
                 second one queues questions nobody can answer), its writer must
                 write to the same ``MemoryStore`` passed above (applying a confirmed
                 retirement against a different store would retire nothing while
@@ -3300,7 +3179,7 @@ class Engine:
                 so an engine that could be built without them is one whose surface
                 is conditionally present — which is what ADR-0102 §7's "no
                 production path may build an engine with the store unopened" is
-                aimed at. Its sibling stages ``conversations``, ``observation`` and
+                aimed at. Its sibling stages ``conversations`` and
                 ``questions`` are required for the same reason.
 
                 **Spelled ``grant_operations`` and not ``grants``** because
@@ -3377,7 +3256,7 @@ class Engine:
             calendar_ingestion: The **calendar's** read-only ingestion stage
                 (ADR-0093 §6), or ``None`` where this deployment configured no
                 calendar source. It writes through the *same* write stage the learn
-                leg and ``observation`` use — the composition-root obligation
+                leg uses — the composition-root obligation
                 ADR-0078 §3 puts on every producer, so an ingested belief the policy
                 defers parks a question the user can actually answer, and one it
                 stores is retrievable and forgettable through the surfaces the user
@@ -3750,7 +3629,6 @@ class Engine:
         )
         self._informational_events = informational_events
         self._composing = composing
-        self._observation = observation
         self._questions = questions
         self._grants = grant_operations
         self._recipient_grants = recipient_grant_operations
@@ -4305,14 +4183,13 @@ class Engine:
         reads the injected ``Reader`` and puts each returned proposal through the
         write stage — conflict resolution, the ``MemoryPolicy``'s ruling, the
         write, and the durable question a deferral raises all happen behind that
-        seam, exactly as :meth:`learn` and :meth:`observe` do it. A reader inherits
+        seam, exactly as :meth:`learn` does it. A reader inherits
         no part of ADR-0075's capture exemption (§1).
 
         **Enabled is a deployment's choice and off is the default.** §6 permits a
         reader's job to ship enabled "once §9's gate is discharged", and ADR-0092 —
-        which is that gate — is ratified; so unlike observation, whose job is
-        disabled for a reason no configuration can answer (ADR-0083 §7, §13),
-        this one runs whenever the operator arms it. What it is *not* is on by
+        which is that gate — is ratified; so this one runs whenever the operator
+        arms it. What it is *not* is on by
         default: §7 is emphatic that "nothing may read a user's personal files
         because a default said so", and ``calendar_reader_interval`` is ``None``
         until someone sets it (§7a).
@@ -6535,133 +6412,6 @@ class Engine:
         check_arguments("learn", max_bytes=self._max_payload_bytes, event=event)
         return await self._tracked(self._learn(event), "learn", checked=True)
 
-    async def observe(self, *, conversation_id: Identifier | None = None) -> ObservationReport:
-        """Distil beliefs from a conversation's recent turns (ADR-0077 §8).
-
-        The accumulation leg, and an **explicit operation**: it is not wired into
-        the turn, and nothing runs it on a timer unless a deployment asks. Four
-        reasons, in the order they bind (ADR-0077 §8): nothing is waiting on an
-        observation while a turn is, and a one-shot process has no "after the
-        answer" to hide the round trip in; §8 sequences the epistemic-soundness work
-        ahead of the observer running at volume, and a per-turn trigger *is* volume
-        on the day it merges; the first producer that sends accumulated history to a
-        model should not run without the user knowing; and the hub's scheduler
-        becomes a second caller of this same operation, so cadence becomes
-        configuration rather than a contract change.
-
-        That last one has landed, and it changed nothing here: the scheduler's
-        observation job ships **disabled** (``Settings.observation_interval`` is
-        ``None`` by default), because without a durable cursor a periodic run
-        re-reads the same recent window and spends a model call each time while
-        never reaching the turns the window has already passed (ADR-0083 §7, §13).
-
-        Delegates to the
-        :class:`~ai_assistant.orchestration.observation.ObservationStage`, which
-        selects the batch, hands it to the injected ``Observer``, and puts each
-        returned proposal through the ``MemoryWriter`` — conflict resolution, the
-        policy's ruling and the write all happen behind that seam, exactly as
-        :meth:`learn` does it. The engine rules on nothing and writes nothing
-        itself.
-
-        Tracked like :meth:`converse`/:meth:`learn`: it reads both durable stores
-        and writes to one, so shutdown must drain it before closing those
-        connections (ADR-0042 §2). **And read onto its own trace by
-        :func:`_observed`** (ADR-0222 §9), which is the counting hook that decision
-        owes: a hand-run pass used to record empty metrics while a scheduled run
-        recorded twelve, so the denominator of any per-pass figure was readable for
-        the scheduler and not for the user.
-
-        Args:
-            conversation_id: The conversation to observe, or ``None`` for the most
-                recently active one (ADR-0077 §8). Relayed untouched: whether it
-                names a conversation is the store's question, and an unknown id
-                comes back as an ``AssistantError`` rather than as a silently empty
-                observation.
-
-        Returns:
-            An :class:`~ai_assistant.orchestration.observation.ObservationReport`:
-            what was proposed and what became of each proposal, what the producer
-            and the write path threw away, and **which route read the episodes** —
-            the report ADR-0013 §6 records as owed, made on the one call where it
-            matters most. The route is absent when no observer was called, which is
-            what a window whose episodes have all gone yields.
-
-        Raises:
-            RuntimeError: If the engine is shutting down.
-            UnknownConversationError: If ``conversation_id`` names nothing, or names
-                a conversation the user deleted.
-            ConversationStoreError: If the conversation index cannot be read.
-            MemoryStoreError: If an episode cannot be read, or the write path
-                failed. A partially applied batch is left as it stands and nothing
-                claims success for it (ADR-0022 §4); ``beliefs`` shows exactly what
-                landed.
-            ModelError: If the observing call failed, unwrapped and with its
-                classification intact. It is never re-sent to a second provider
-                (ADR-0077 §3).
-        """
-        self._reject_if_closing()
-        selected = (
-            None if conversation_id is None else identifier(conversation_id, name="conversation_id")
-        )
-        check_arguments("observe", max_bytes=self._max_payload_bytes, conversation_id=selected)
-        return await self._tracked(
-            self._observation.observe(selected), "observe", _observed, checked=True
-        )
-
-    async def observe_due(self) -> ObservationRunReport:
-        """Observe every conversation that is due, one bounded run (ADR-0218 §3).
-
-        The **maintenance surface**'s fourth scheduled operation, and the scheduled
-        trigger ADR-0083 §7's observation row now calls. ADR-0083 §8 settled that
-        this kind of method is "new *concrete* surface on a class in
-        ``orchestration``, not ``core`` contract surface", and :meth:`consolidate`
-        is the standing precedent in each respect: it is **not** on the
-        ``AssistantEngine`` Protocol, **not** a wire operation, and **not** a reason
-        to move ``PROTOCOL_VERSION``.
-
-        **A new operation rather than an argument on :meth:`observe`, and the reason
-        is not taste** (§3). ``observe`` is a wire operation that
-        ``core/protocols.py`` declares, so an argument on it moves
-        ``PROTOCOL_VERSION`` under ADR-0124 §9 — a protocol bump bought to express a
-        cadence. The second reason is stronger: ADR-0120 §3 attributes a write by
-        the seam of the operation that caused it, so one seam serving both callers
-        would make an armed job's writes indistinguishable from a user's deliberate
-        ones. The third is the return shape — ``ObservationReport`` describes one
-        pass and a run performs many. :meth:`observe` is untouched by this method
-        existing: same signature, same seam, same behaviour.
-
-        **Takes no argument, deliberately**, which is what makes it a legal
-        ``JobBody`` and keeps the due test, the candidate listing and the passes
-        behind this façade. The scheduler holds an ``Engine`` and nothing else, and
-        learns nothing about watermarks, quiet windows or spans.
-
-        **Its seam is ``observe_due`` and it is in ADR-0120 §3's machine set**, which
-        is what stops every measure over the user set stepping on the day this job is
-        armed — the precise confound §3 exists to prevent, produced by the precise
-        act it was written about. Every pass a run performs happens inside *this*
-        call's :meth:`_tracked` scope and is never a nested :meth:`observe`, so every
-        trace a run emits carries the run's correlation and attributes to this seam.
-
-        Returns:
-            What the run did, in Tier 2 counts and one disposition. Every count zero
-            is a **successful** run over a listing that held nothing due, and no
-            caller may read it as a failure.
-
-        Raises:
-            RuntimeError: If the engine is shutting down. The scheduler treats this
-                as *stop* rather than as a job failure (ADR-0083 §8).
-            ConversationStoreError: If the candidate listing, a page or an advance
-                could not be read or written.
-            MemoryStoreError: If an episode could not be read, or the write path
-                failed.
-            ModelError: Propagated unwrapped from a pass's provider, its
-                classification intact (ADR-0013 §5). The run halts; ADR-0111 §6
-                retries the job at its next due instant with no backoff.
-            DeferralStoreError: If a deferred question could not be parked.
-        """
-        self._reject_if_closing()
-        return await self._tracked(self._observation.run(), "observe_due", _observed_due)
-
     async def episodes(
         self,
         *,
@@ -7748,8 +7498,8 @@ class Engine:
     # seam rather than a rule somebody is asked to keep.
     #
     # **Reached from this façade's user-facing operations and from no operation on
-    # the turn path** (§4). Nothing below is called by :meth:`converse`,
-    # :meth:`resume`, :meth:`observe`, or by any stage they drive; no stage holds an
+    # the turn path** (§4). Nothing below is called by :meth:`converse`
+    # or :meth:`resume`, or by any stage they drive; no stage holds an
     # archive seam at all. The seven exist for the surfaces §8 gives them, and
     # ADR-0225 §13's first test is what pins that a turn's prompts carry no archive
     # text.

@@ -17,14 +17,13 @@ import pytest
 from ai_assistant.app import build_engine, composition
 from ai_assistant.app.composition import (
     _build_model_provider,
+    _consolidation_spec,
     _model_specs,
-    _observer_spec,
     _reconciler_spec,
 )
 from ai_assistant.core.config import EmbedderKind, Settings
 from ai_assistant.core.errors import ConfigurationError, ModelError, ModelUnavailableError
 from ai_assistant.core.types import Message, Role
-from ai_assistant.learning import ModelBackedObserver
 from ai_assistant.memory import MemoryIngestor, ModelBackedReconciler
 from ai_assistant.models import PydanticAIProvider, RetryingProvider, RoutingProvider
 from ai_assistant.planning import ModelBackedPlanner
@@ -272,47 +271,48 @@ def test_every_spec_is_checked_not_merely_the_first() -> None:
         _build_model_provider(Settings(), ("anthropic:claude-x", "nosuchvendor:whatever"))
 
 
-# --- the observer's route: named, separable, and never falling back (ADR-0077 §3) ---
+# --- consolidation's route: named, separable, and never falling back (ADR-0285 §5) ---
 
 
-def _observer_provider(engine: Engine) -> ModelProvider:
-    """The provider the composed engine's observer will actually read episodes with.
+def _consolidation_provider(engine: Engine) -> ModelProvider:
+    """The provider the composed engine's consolidation stage will actually call.
 
     The same deliberate reach-in ``_planner_model`` uses: the composition root's
     obligations are about *which object ends up where*, and no public surface
-    exposes that — an ``Observer`` holds its provider and shows nobody.
+    exposes that — the stage holds its provider and shows nobody.
     """
-    observer = engine._observation._observer
-    assert isinstance(observer, ModelBackedObserver)
-    return observer._model
+    stage = engine._consolidation
+    assert stage is not None, "consolidation is always wired"
+    return stage._model
 
 
-def test_the_observer_reads_through_the_conversational_route_when_unset() -> None:
-    """Unset means ``default_model``, which widens no recipient set (ADR-0077 §3)."""
+def test_consolidation_reads_through_the_conversational_route_when_unset() -> None:
+    """Unset means ``default_model``, which widens no recipient set (ADR-0285 §5)."""
     settings = Settings(default_model="anthropic:claude-x", fallback_models=("openai:gpt-5",))
-    assert _observer_spec(settings) == "anthropic:claude-x"
+    assert settings.consolidation_model is None
+    assert _consolidation_spec(settings) == "anthropic:claude-x"
 
 
-def test_a_named_observer_model_is_the_route_that_reads_episodes() -> None:
+def test_a_named_consolidation_model_is_the_route_consolidation_reads_through() -> None:
     """Set, it names the route — and the answers' route is untouched."""
-    settings = Settings(default_model="anthropic:claude-x", observer_model="openai:gpt-5")
-    assert _observer_spec(settings) == "openai:gpt-5"
+    settings = Settings(default_model="anthropic:claude-x", consolidation_model="openai:gpt-5")
+    assert _consolidation_spec(settings) == "openai:gpt-5"
     assert _model_specs(settings) == ("anthropic:claude-x",)
 
 
-async def test_build_engine_gives_the_observer_a_route_that_cannot_fall_back(
+async def test_build_engine_gives_consolidation_a_route_that_cannot_fall_back(
     tmp_path: Path,
 ) -> None:
-    """The observer's seam is a ``RetryingProvider``, never a ``RoutingProvider``.
+    """Consolidation's seam is a ``RetryingProvider``, never a ``RoutingProvider``.
 
-    **This is the no-fallback property, structurally**: with two specs configured
-    the planner gets a two-route router, and the observer gets a provider that holds
-    no route list at all — so there is no second candidate a routable failure could
-    advance to. An implementation that reused the router wholesale would pass every
-    other test in this file (ADR-0077 §3, ADR-0013 §4).
+    **This is the no-fallback property, structurally** (ADR-0285 §5, §11:3): with two
+    specs configured the planner gets a two-route router, and consolidation gets a
+    provider that holds no route list at all — so there is no second candidate a
+    routable failure could advance to. An implementation that reused the router
+    wholesale would pass every other test in this file (ADR-0013 §4).
 
     Retry is deliberately kept: it re-sends to the *same* provider, so it widens no
-    recipient set, and dropping it would make the observer less resilient than every
+    recipient set, and dropping it would make consolidation less resilient than every
     other call for no privacy gain.
     """
     settings = Settings(
@@ -322,7 +322,7 @@ async def test_build_engine_gives_the_observer_a_route_that_cannot_fall_back(
     )
     engine = build_engine(settings, data_dir=tmp_path)
     try:
-        model = _observer_provider(engine)
+        model = _consolidation_provider(engine)
         assert isinstance(model, RetryingProvider)
         assert not isinstance(model, RoutingProvider)
         assert isinstance(_planner_model(engine), RoutingProvider)  # the answers still route
@@ -331,30 +331,31 @@ async def test_build_engine_gives_the_observer_a_route_that_cannot_fall_back(
 
 
 @pytest.mark.parametrize(
-    ("observer_model", "expected"),
+    ("consolidation_model", "expected"),
     [(None, "anthropic:claude-x"), ("openai:gpt-5", "openai:gpt-5")],
 )
-async def test_only_the_named_route_is_reached_when_an_observation_fails(
-    tmp_path: Path, observer_model: str | None, expected: str
+async def test_only_the_named_route_is_reached_when_a_consolidation_call_fails(
+    tmp_path: Path, consolidation_model: str | None, expected: str
 ) -> None:
-    """Unset and set, the primary failing reaches **no** second provider (ADR-0077 §3).
+    """Unset and set, the primary failing reaches **no** second provider (ADR-0285 §5).
 
-    ADR-0077 §9's paired case, run through the real composed engine: every
-    ``PydanticAIProvider`` the build constructs is swapped for a counting double, the
-    observer's own call is driven, and the assertion is that exactly one spec was
-    ever called and it was the observer's. A router behind the observer would call
-    the fallback here and be caught.
+    §11:3's route test, run through the real composed engine: every
+    ``PydanticAIProvider`` the build constructs is swapped for a counting double,
+    consolidation's own provider is driven, and the assertion is that exactly one
+    spec was ever called — ``consolidation_model`` where it is set and
+    ``default_model`` where it is not. A router behind consolidation would call the
+    fallback here and be caught.
     """
     built: dict[str, _FailingProvider] = {}
 
     def _double(spec: str) -> _FailingProvider:
-        # **One double per spec, shared by every consumer of it.** Since ADR-0159
-        # the build constructs three single-route providers, and two of them name
-        # `default_model` when neither is configured separately — the observer's and
-        # the reconciler's. Keyed per construction rather than per spec, the later
-        # build would replace the earlier one in `built` and the observer's call
-        # count would vanish. Sharing aggregates instead, which is what the
-        # assertion below actually wants: exactly one *spec* was ever reached.
+        # **One double per spec, shared by every consumer of it.** The build
+        # constructs more than one single-route provider, and consolidation's and the
+        # reconciler's both name `default_model` when neither is configured
+        # separately. Keyed per construction rather than per spec, the later build
+        # would replace the earlier one in `built` and consolidation's call count
+        # would vanish. Sharing aggregates instead, which is what the assertion below
+        # actually wants: exactly one *spec* was ever reached.
         return built.setdefault(spec, _FailingProvider(ModelUnavailableError(f"{spec} is down")))
 
     monkeypatch = pytest.MonkeyPatch()
@@ -364,13 +365,13 @@ async def test_only_the_named_route_is_reached_when_an_observation_fails(
             embedder=EmbedderKind.HASHING,
             default_model="anthropic:claude-x",
             fallback_models=("openai:gpt-5",),
-            observer_model=observer_model,
+            consolidation_model=consolidation_model,
             model_max_attempts=1,  # no backoff to wait on; retry is not what is on test
         )
         engine = build_engine(settings, data_dir=tmp_path)
         try:
             with pytest.raises(ModelError):
-                await _observer_provider(engine).complete(PROMPT)
+                await _consolidation_provider(engine).complete(PROMPT)
         finally:
             await engine.aclose()
     finally:
@@ -380,14 +381,14 @@ async def test_only_the_named_route_is_reached_when_an_observation_fails(
     assert called == {expected: 1}
 
 
-def test_an_uninstalled_observer_vendor_stops_the_build(tmp_path: Path) -> None:
-    """The observer's route is vendor-checked too, at startup (ADR-0062 §2, ADR-0077 §3).
+def test_an_uninstalled_consolidation_vendor_stops_the_build(tmp_path: Path) -> None:
+    """Consolidation's route is vendor-checked too, at startup (ADR-0062 §2, ADR-0285 §5).
 
     Without it a deployment whose answers route perfectly well would fail on the
-    first observation instead — and an observation is exactly the call an operator is
-    least likely to make while they still remember changing the setting.
+    first consolidation run instead — a scheduled job an operator is least likely to
+    be watching while they still remember changing the setting.
     """
-    settings = Settings(default_model="anthropic:claude-x", observer_model="groq:llama-3")
+    settings = Settings(default_model="anthropic:claude-x", consolidation_model="groq:llama-3")
 
     with pytest.raises(ConfigurationError, match="groq:llama-3"):
         build_engine(settings, data_dir=tmp_path)
@@ -399,10 +400,12 @@ def test_an_uninstalled_observer_vendor_stops_the_build(tmp_path: Path) -> None:
 def _reconciler_of(engine: Engine) -> ModelBackedReconciler:
     """The reconciler the composed engine's writer holds.
 
-    Reached through the observation stage's write stage, which is the *one* write
+    Reached through the consolidation stage's write stage, which is the *one* write
     stage every producer shares (ADR-0078 §3) and therefore holds the one writer.
     """
-    writer = engine._observation._writes._writer
+    stage = engine._consolidation
+    assert stage is not None, "consolidation is always wired"
+    writer = stage._writes._writer
     assert isinstance(writer, MemoryIngestor)
     reconciler = writer._reconciler
     assert isinstance(reconciler, ModelBackedReconciler)
@@ -412,7 +415,7 @@ def _reconciler_of(engine: Engine) -> ModelBackedReconciler:
 def _reconciler_provider(engine: Engine) -> ModelProvider:
     """The provider the composed engine's writer will actually label through.
 
-    The same deliberate reach-in the observer's uses: the composition root's
+    The same deliberate reach-in consolidation's uses: the composition root's
     obligations are about *which object ends up where*, and no public surface
     exposes that — a writer holds its reconciler and shows nobody, which is the
     whole of ADR-0159 §2's "``memory``-internal seam".

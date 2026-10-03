@@ -207,7 +207,6 @@ if TYPE_CHECKING:
         NotificationEnqueue,
         NotificationPreferences,
         ObservationOutcome,
-        ObservationReport,
         ParkedBinding,
         ParkedRead,
         ParkedReadDisposition,
@@ -14117,10 +14116,9 @@ class AssistantEngine(Protocol):
     async def learn(self, event: FeedbackEvent) -> LearnOutcome:
         """Fold one piece of feedback into memory, and say what it did.
 
-        The *dictated* half of accumulation, where :meth:`observe` is the passive
-        one. Every proposal the feedback produces goes through the ratified write
-        path, and the summary carries one entry per proposal — including, for a
-        deferral, where the question it raised went.
+        The *dictated* half of accumulation. Every proposal the feedback produces
+        goes through the ratified write path, and the summary carries one entry per
+        proposal — including, for a deferral, where the question it raised went.
 
         Args:
             event: What the user said about what the assistant got right or wrong.
@@ -14131,46 +14129,6 @@ class AssistantEngine(Protocol):
 
         Raises:
             MemoryStoreError: If reading or writing memory failed.
-        """
-        ...
-
-    async def observe(self, *, conversation_id: Identifier | None = None) -> ObservationReport:
-        """Read a bounded batch of a conversation's episodes and propose what they justify.
-
-        The *passive* half of accumulation (ADR-0077 §8). It is deliberately
-        explicit: nothing triggers it but a caller. Each proposal goes through the
-        same write path :meth:`learn` uses, so the observer neither widens its own
-        batch nor rules on its own output.
-
-        ``conversation_id`` is a **selector rather than a subject**, which is why it
-        is keyword-only like :meth:`converse`'s: "this conversation, or the one the
-        selector picks" (ADR-0085 §2). What it picks is the first conversation
-        holding a turn above its observation watermark, least recently active first
-        (ADR-0212 §3) — it was "the most recently active conversation" until that
-        decision replaced ADR-0077 §8's selection sentence.
-
-        **A pass reads only what has not been observed**, so naming a conversation
-        twice in succession does something the first time and nothing the second,
-        reporting a pass that read no episodes. That is the honest answer to "what
-        has already been looked at"; a deliberate re-observation that ignores the
-        watermark is not offered here (ADR-0212 §9, issue #1789).
-
-        Args:
-            conversation_id: The conversation to read, or ``None`` to select the
-                first one with unobserved turns.
-
-        Returns:
-            What the pass did — the proposals with their rulings, the counts kept
-            apart, the route that read the episodes, and which conversation it was.
-
-        Raises:
-            ValueError: If ``conversation_id`` is present and blank.
-            UnknownConversationError: If it names no conversation this engine can
-                operate on.
-            ConversationStoreError: If reading the conversation index failed.
-            MemoryStoreError: If reading or writing memory failed.
-            ModelError: If the observing call failed. Surfaced unwrapped and with
-                its classification intact (ADR-0077 §3).
         """
         ...
 

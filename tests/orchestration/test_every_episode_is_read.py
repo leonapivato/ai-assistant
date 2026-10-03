@@ -1,10 +1,10 @@
 """Every read reads every episode, failed and outside ones included (ADR-0284 §6:2).
 
 These tests once pinned ADR-0283 §4's eligibility filter. ADR-0284 §6 retires the
-flag and the axis: history, retrieval, both episodic reads, the citation hop and the
-observer read every episode their reads return. Each test seeds failed episodes —
-the passes the retired flag marked ineligible — beside completed ones, and asserts
-they are read.
+flag and the axis: history, retrieval, both episodic reads and the citation hop read
+every episode their reads return. (The observer was a further reader until ADR-0285
+§1 retired it.) Each test seeds failed episodes — the passes the retired flag marked
+ineligible — beside completed ones, and asserts they are read.
 """
 
 from __future__ import annotations
@@ -12,7 +12,7 @@ from __future__ import annotations
 from datetime import UTC, datetime
 
 import pytest
-from channel_episodes import channel_numbers, conversation_episode
+from channel_episodes import conversation_episode
 from test_loop_reads import _belief, _bounded, _loop
 from test_loop_structured import _Script, _structured
 
@@ -33,18 +33,13 @@ from ai_assistant.core.types import (
     SemanticMemory,
     UnderstandingOmission,
 )
-from ai_assistant.orchestration import MemoryWriteStage, ObservationStage
 from ai_assistant.orchestration.conversations import HISTORY_REPLAY_BOUND, ConversationLifecycle
 from ai_assistant.orchestration.loop import ConversationalOperation
 from ai_assistant.orchestration.reads import READ_BUDGET, _hop_records, _Reads
 from ai_assistant.orchestration.retrieval import assemble_by_band
 from ai_assistant.testing import (
     FakeConversationStore,
-    FakeDeferralStore,
-    FakeMemoryPolicy,
     FakeMemoryStore,
-    FakeMemoryWriter,
-    FakeObserver,
     FakeTranscriptArchiveWriter,
 )
 from ai_assistant.testing.activation import ended_pass
@@ -210,52 +205,3 @@ async def test_citation_hops_reach_failed_evidence_and_named_records() -> None:
     )
     assert [record.id for record in named.expansion] == ["hidden"]
     assert named.unresolved == 0
-
-
-@pytest.mark.parametrize(
-    "flags",
-    [
-        (False, False),
-        (True, False, False),
-        (False, True),
-        (True,),
-        (False,),
-    ],
-)
-async def test_observation_reads_failed_episodes_and_advances_the_watermark(
-    flags: tuple[bool, ...],
-) -> None:
-    """ADR-0284 §6:2: the observer reads every episode, whatever its status, and the
-    pass advances to the page's highest number, so nothing is read twice."""
-    memory = FakeMemoryStore(now=lambda: _AT)
-    conversations = FakeConversationStore(now=lambda: _AT)
-    observer = FakeObserver()
-    stage = ObservationStage(
-        observer=observer,
-        conversations=conversations,
-        memory=memory,
-        writes=MemoryWriteStage(
-            writer=FakeMemoryWriter(store=memory, policy=FakeMemoryPolicy(), now=lambda: _AT),
-            deferrals=FakeDeferralStore(now=lambda: _AT),
-        ),
-        batch_size=10,
-        route="observer",
-        now=lambda: _AT,
-    )
-    conversation = await conversations.start()
-    identifiers = [f"activation:{index}" for index in range(len(flags))]
-    for identifier, completed in zip(identifiers, flags, strict=True):
-        await memory.add(
-            conversation_episode(conversation.id, identifier, occurred_at=_AT, completed=completed)
-        )
-    numbers = await channel_numbers(memory, conversation.id)
-
-    await stage.observe(conversation.id)
-
-    assert [record.id for batch in observer.batches for record in batch] == identifiers
-    assert observer.call_count == 1
-    stored = await conversations.get(conversation.id)
-    assert stored is not None
-    assert stored.observed_through == numbers[identifiers[-1]]
-    await stage.observe(conversation.id)
-    assert observer.call_count == 1, "nothing above the watermark is re-read"

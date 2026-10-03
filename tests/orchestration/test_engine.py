@@ -20,7 +20,7 @@ from pathlib import Path
 from typing import TYPE_CHECKING, Any, Final, Protocol
 
 import pytest
-from channel_episodes import channel_ids, channel_records, conversation_episode
+from channel_episodes import channel_ids, channel_records
 from pydantic import SecretStr
 
 from ai_assistant.core.errors import (
@@ -78,8 +78,6 @@ from ai_assistant.core.types import (
     MemoryKind,
     MemorySource,
     MemoryUpdateProposal,
-    ObservationReport,
-    ObservedProposal,
     OriginUnrecordedBinding,
     PlannerOutput,
     PlanStep,
@@ -116,8 +114,6 @@ from ai_assistant.orchestration import (
     HeldSource,
     IngestionStage,
     MemoryWriteStage,
-    ObservationRunReport,
-    ObservationStage,
     QuestionStage,
     RecipientGrantOperations,
     RoutingStage,
@@ -159,7 +155,6 @@ from ai_assistant.testing import (
     FakeMemoryStore,
     FakeMemoryWriter,
     FakeModelProvider,
-    FakeObserver,
     FakeParkedReads,
     FakePlanStore,
     FakeReader,
@@ -174,7 +169,6 @@ from ai_assistant.testing import (
     FakeTraceRetention,
     FakeTraceSink,
     FakeTranscriptArchive,
-    ObservationGate,
     evaluation_trace,
     source_grant,
 )
@@ -259,9 +253,9 @@ def _grant_ids() -> Callable[[], str]:
 def _grant_operations(sources: Sequence[HeldSource] = ()) -> GrantOperations:
     """The grant collaborator every ``Engine`` needs (ADR-0102 §7).
 
-    Required rather than optional on the façade, like ``questions`` and
-    ``observation``: the four grant methods are on the Protocol, so an engine that
-    could be built without them is one whose surface is conditionally present. Empty
+    Required rather than optional on the façade, like ``questions``: the four grant
+    methods are on the Protocol, so an engine that could be built without them is one
+    whose surface is conditionally present. Empty
     ``sources`` is the ordinary deployment — a reader ships disabled, so nothing is
     grantable until one is configured (ADR-0093 §7).
     """
@@ -348,11 +342,6 @@ RETENTION = timedelta(days=30)
 #: the wrong one pass.
 TRACE_RETENTION = timedelta(days=365)
 
-#: The observation bounds and route the harness wires (ADR-0077 §1, §3). Both are
-#: the composition root's job in production; here they are fixed so a test can
-#: assert the route the report names.
-OBSERVATION_BATCH = 20
-
 #: ADR-0197 §7's routed-park lifetime, as ``Settings`` defaults it. Named here so a
 #: case that advances the injected clock past it names one figure rather than two.
 ROUTED_TTL = timedelta(minutes=15)
@@ -364,7 +353,6 @@ GOAL_QUESTION_TTL = timedelta(hours=72)
 #: The engine's own default outstanding-confirmation ceiling, restated so a case that
 #: wants backpressure can lower it without every other case naming a number.
 DEFAULT_MAX_OUTSTANDING = 1024
-OBSERVER_ROUTE = "anthropic:claude-opus-4-8"
 
 CAPABILITY = "send_email"
 PARAMETERS = {"to": "someone@example.com"}
@@ -708,7 +696,6 @@ class Harness:
         # object** to the `SearchServicer` it builds, which is ADR-0244 §18's
         # one-instance obligation held by the case rather than by this harness.
         parked_reads: FakeParkedReads | None = None,
-        observer: object | None = None,
         reader: object | None = None,
         email_reader: object | None = None,
         queue_limit: int = 50,
@@ -846,32 +833,14 @@ class Harness:
         self.policy_for_writer = FakeMemoryPolicy()
 
         writer = FakeMemoryWriter(store=self.memory, policy=self.policy_for_writer, now=lambda: AT)
-        # **One** write stage over that writer and one deferral queue, shared by both
-        # producers' stages, as the composition root wires it (ADR-0078 §3). Both are
+        # **One** write stage over that writer and one deferral queue, shared by every
+        # producer's stage, as the composition root wires it (ADR-0078 §3). Both are
         # kept on the harness: a learn test reads back what was parked, and the
         # question surface answers it.
         self.deferrals = FakeDeferralStore(now=lambda: AT, queue_limit=queue_limit)
         self.writes = MemoryWriteStage(writer=writer, deferrals=self.deferrals)
         self.questions = QuestionStage(
             writer=writer, deferrals=self.deferrals, memory=self.memory, now=lambda: AT
-        )
-        # The observation stage over the *same* store and write stage, as the
-        # composition root wires it (ADR-0077 §8). Kept on the harness so a test can
-        # read what batch reached the producer.
-        self.observer = observer if observer is not None else FakeObserver()
-        self.observation = ObservationStage(
-            observer=self.observer,  # type: ignore[arg-type]  # a duck-typed fake stands in for the Protocol
-            conversations=self.conversation_store,
-            memory=self.memory,
-            writes=self.writes,
-            batch_size=OBSERVATION_BATCH,
-            route=OBSERVER_ROUTE,
-            # ADR-0218 §2's due test reads the run's clock against the store's, and
-            # every instant this harness stamps is `AT` — so a run clock an hour
-            # later makes any candidate quiet, deterministically and without a case
-            # depending on where the wall clock happens to be. It reaches
-            # `observe_due` and nothing else: `observe` applies no due test.
-            now=lambda: AT + timedelta(hours=1),
         )
         # Leg 6's ingestion stage over the *same* write stage (ADR-0093 §6,
         # ADR-0078 §3), and **only when a reader is given**: a reader ships disabled
@@ -1102,7 +1071,6 @@ class Harness:
             trace_sink=self.trace_sink,
             trace_retention=trace_retention,
             conversations=self.conversations,
-            observation=self.observation,
             questions=self.questions,
             calendar_ingestion=self.ingestion,
             email_ingestion=self.email_ingestion,
@@ -1975,7 +1943,6 @@ def _fresh_facade(harness: Harness) -> Engine:
         trace_sink=harness.trace_sink,
         trace_retention=harness.trace_retention,
         conversations=harness.conversations,
-        observation=harness.observation,
         questions=harness.questions,
         id_factory=lambda: next(harness.handles),
         # The same durable state, which for the archive means the same store: a
@@ -2100,7 +2067,6 @@ async def test_a_recovered_entry_does_not_count_toward_the_confirmation_ceiling(
         trace_sink=harness.trace_sink,
         trace_retention=harness.trace_retention,
         conversations=harness.conversations,
-        observation=harness.observation,
         questions=harness.questions,
         id_factory=lambda: next(harness.handles),
         max_outstanding_confirmations=1,
@@ -2168,7 +2134,6 @@ async def test_an_in_process_park_resolved_elsewhere_is_reconciled_and_frees_the
         trace_sink=harness.trace_sink,
         trace_retention=harness.trace_retention,
         conversations=harness.conversations,
-        observation=harness.observation,
         questions=harness.questions,
         id_factory=lambda: next(harness.handles),
         max_outstanding_confirmations=1,
@@ -2228,7 +2193,6 @@ async def test_reconcile_keeps_a_concurrent_same_engine_converse_park() -> None:
         trace_sink=harness.trace_sink,
         trace_retention=harness.trace_retention,
         conversations=harness.conversations,
-        observation=harness.observation,
         questions=harness.questions,
         id_factory=lambda: next(harness.handles),
         archive=FakeTranscriptArchive(),
@@ -2375,7 +2339,6 @@ async def test_concurrent_recovery_does_not_prune_another_calls_returned_token()
         trace_sink=harness.trace_sink,
         trace_retention=harness.trace_retention,
         conversations=harness.conversations,
-        observation=harness.observation,
         questions=harness.questions,
         id_factory=lambda: next(harness.handles),
         archive=FakeTranscriptArchive(),
@@ -3174,7 +3137,6 @@ async def test_a_clock_at_the_start_of_the_calendar_does_not_break_the_sweep() -
         trace_sink=harness.trace_sink,
         trace_retention=harness.trace_retention,
         conversations=harness.conversations,
-        observation=harness.observation,
         questions=harness.questions,
         now=lambda: datetime.min.replace(tzinfo=UTC) + timedelta(days=1),
         archive=FakeTranscriptArchive(),
@@ -3267,7 +3229,7 @@ async def test_ingest_reads_the_configured_source_and_reports_what_it_proposed()
     "``Engine`` grows an ingestion operation for the job to call: new concrete
     surface in ``orchestration``, not ``core`` contract surface." The engine rules
     on nothing and writes nothing itself; it relays to the stage, which puts every
-    proposal through the same gate ``learn`` and ``observe`` use.
+    proposal through the same gate ``learn`` uses.
     """
     reader = FakeReader()
     harness = Harness(reader=reader)
@@ -3623,7 +3585,6 @@ async def test_outstanding_confirmations_apply_backpressure_without_stranding() 
         trace_sink=harness.trace_sink,
         trace_retention=harness.trace_retention,
         conversations=harness.conversations,
-        observation=harness.observation,
         questions=harness.questions,
         id_factory=lambda: next(harness.handles),
         max_outstanding_confirmations=2,  # tighten for the test
@@ -3711,7 +3672,6 @@ async def test_the_confirmation_ceiling_is_a_hard_bound_under_concurrency() -> N
         trace_sink=harness.trace_sink,
         trace_retention=harness.trace_retention,
         conversations=harness.conversations,
-        observation=harness.observation,
         questions=harness.questions,
         id_factory=lambda: next(harness.handles),
         max_outstanding_confirmations=2,  # ceiling of two, three concurrent turns
@@ -3753,7 +3713,6 @@ async def test_a_non_positive_confirmation_ceiling_is_refused() -> None:
             trace_sink=harness.trace_sink,
             trace_retention=harness.trace_retention,
             conversations=harness.conversations,
-            observation=harness.observation,
             questions=harness.questions,
             max_outstanding_confirmations=0,
             archive=FakeTranscriptArchive(),
@@ -3784,7 +3743,6 @@ async def test_a_non_integer_confirmation_ceiling_is_refused(bad: object) -> Non
             trace_sink=harness.trace_sink,
             trace_retention=harness.trace_retention,
             conversations=harness.conversations,
-            observation=harness.observation,
             questions=harness.questions,
             max_outstanding_confirmations=bad,  # type: ignore[arg-type]  # the point of the test
             archive=FakeTranscriptArchive(),
@@ -4950,228 +4908,6 @@ async def test_forget_conversation_shows_the_span_then_destroys_everything() -> 
     assert await harness.engine.conversation(first.conversation_id) is None
     assert await harness.engine.recent_conversations() == ()
     assert await harness.memory.export() == [], "every episode it recorded is gone"
-
-
-# --- the observation leg (ADR-0077 §8) -----------------------------------
-
-
-async def _one_captured_turn(harness: Harness) -> str:
-    """Seed one episode on a conversation's channel, so an episode exists to observe.
-
-    Since ADR-0283 a conversation's history is the episodes on its channel, so the
-    episode is written there directly and the conversation's ``last_turn_at`` moved
-    with ``record_turn``, as the activation writer does.
-    """
-    conversation = await harness.conversations.begin(None)
-    episode = conversation_episode(
-        conversation.id, "activation:observed", content="the user said something", occurred_at=AT
-    )
-    await harness.memory.add(episode)
-    await harness.conversation_store.record_turn(
-        conversation.id, episode_id=episode.id, occurred_at=AT
-    )
-    return conversation.id
-
-
-async def test_observe_delegates_to_the_stage_and_reports_what_happened() -> None:
-    """One call in, one report out — and it names the route that read the episodes.
-
-    The route is ADR-0013 §6's owed reporting, made on the one call where it matters
-    most: a model reading back the transcript.
-    """
-    harness = Harness()
-    conversation = await _one_captured_turn(harness)
-
-    report = await harness.engine.observe(conversation_id=conversation)
-
-    assert isinstance(report, ObservationReport)
-    assert report.conversation_id == conversation
-    assert report.episodes_read == 1
-    assert report.route == OBSERVER_ROUTE
-    assert report.proposals  # the default fake observer proposes from the batch
-    assert all(isinstance(entry, ObservedProposal) for entry in report.proposals)
-
-
-async def test_a_hand_run_pass_records_its_own_counts_on_its_own_trace() -> None:
-    """ADR-0222 §9's counting hook: the interactive seam becomes as legible as the scheduled one.
-
-    §9 names the gap in terms: a scheduled run is traced with a twelve-metric mapper
-    while "a single interactive pass is traced [...] with no mapper and therefore
-    empty metrics. So the denominator of any per-pass figure is readable for scheduled
-    runs and not for interactive ones. That asymmetry is not this decision's to
-    justify and is cheap to close, so the lane closes it."
-
-    **Only counts the report already carries** (ADR-0222 §5's closing clause, which is
-    what makes this hook lawful where §5's own elision counts are not). Every metric
-    below is a field of ``ObservationReport`` or a property it defines; nothing here
-    re-derives a rule that lives in ``orchestration.observation``, and nothing reads
-    proposal *content*, which is why §9's act-record share and laundering count stay a
-    QA-pass reading rather than becoming a field or a trace metric.
-
-    The seam is still ``observe`` and is still outside ADR-0120 §3's machine set — §9
-    adds a mapper, not an operation.
-    """
-    harness = Harness()
-    conversation = await _one_captured_turn(harness)
-
-    report = await harness.engine.observe(conversation_id=conversation)
-
-    (trace,) = harness.trace_sink.recorded
-    assert trace.seam == "observe"
-    assert trace.outcome is TraceOutcome.OK
-    metrics = dict(trace.metrics)
-    assert metrics["episodes_read"] == report.episodes_read == 1
-    assert metrics["proposed"] == len(report.proposals)
-    assert metrics["proposed"] > 0, "the default fake observer proposes from the batch"
-    assert metrics["stored"] == report.stored
-    assert metrics["dropped_unsupported"] == report.dropped_unsupported
-    assert metrics["discarded_unusable"] == report.discarded_unusable
-    assert metrics["discarded_over_limit"] == report.discarded_over_limit
-
-
-async def test_a_hand_run_pass_over_nothing_carries_zeroes_rather_than_no_metrics() -> None:
-    """The same hook, on the pass that used to be indistinguishable from an untraced one.
-
-    A pass whose target holds nothing above its watermark reads no episode and calls
-    no observer, and before ADR-0222 §9 it recorded empty metrics — exactly what a
-    seam with no mapper records. A reader could not tell "nothing to observe" from
-    "nobody wired a reading", which is the asymmetry §9 closes; the zeroes are what
-    makes the two distinguishable.
-    """
-    harness = Harness()
-    conversation = await _one_captured_turn(harness)
-    await harness.engine.observe(conversation_id=conversation)
-
-    report = await harness.engine.observe(conversation_id=conversation)
-
-    assert report.episodes_read == 0
-    _, trace = harness.trace_sink.recorded
-    assert trace.seam == "observe"
-    assert dict(trace.metrics) == {
-        "episodes_read": 0,
-        "proposed": 0,
-        "stored": 0,
-        "dropped_unsupported": 0,
-        "discarded_unusable": 0,
-        "discarded_over_limit": 0,
-    }
-
-
-async def test_observe_with_no_id_selects_the_most_recently_active_conversation() -> None:
-    """The façade relays "no id" as ADR-0077 §8's selector, not as "everything"."""
-    harness = Harness()
-    conversation = await _one_captured_turn(harness)
-
-    report = await harness.engine.observe()
-
-    assert report.conversation_id == conversation
-
-
-async def test_a_scheduled_run_carries_its_own_seam_and_never_the_hand_run_pass_s() -> None:
-    """ADR-0218 §6, at the seam that decides every measure's population.
-
-    ADR-0120 §3 attributes a write by "the seam of the operation that caused it", and
-    §6 puts ``observe_due`` in the machine set on the tie-break §3 states for having
-    the split at all: "A correction rate that counted those would rise on the day of
-    the arming, and the rise would be a fact about the scheduler rather than about
-    the user model." So one seam serving both callers would make an armed job's
-    writes indistinguishable from a user's deliberate ones — which is why this is a
-    second operation and not an argument on ``observe``.
-
-    Asserted at the ``Engine`` because that is where the label is fixed: every pass a
-    run performs happens inside the **run's own** ``_tracked`` scope and is never a
-    nested ``observe``, so exactly one ``OPERATION`` trace comes back and its seam is
-    the run's. The metrics are the run's counts, which is §5's one-crossing rule —
-    the detail rides on the operation's own trace rather than on a second record.
-    """
-    harness = Harness()
-    await _one_captured_turn(harness)
-
-    report = await harness.engine.observe_due()
-
-    assert report.passes == 1
-    (trace,) = harness.trace_sink.recorded
-    assert trace.seam == "observe_due"
-    assert trace.outcome is TraceOutcome.OK
-    assert dict(trace.metrics)["passes"] == 1
-    assert dict(trace.metrics)["model_calls"] == 1
-    assert "observe" not in {record.seam for record in harness.trace_sink.recorded}
-
-
-async def test_a_scheduled_run_over_nothing_due_is_a_success_carrying_zeroes() -> None:
-    """ADR-0218 §9: a run that observed nothing is a **successful** run.
-
-    "A run whose passes all complete but which observed nothing — because no
-    candidate was due, or because every due candidate's page resolved to no episode —
-    is a **successful** run. It is not logged as a failure and does not change the
-    job's next due instant." An empty store is the cheapest form of that, and it is
-    the tick an armed job spends most of its life on: one bounded listing read, no
-    model call, and an ``OK`` trace of zeroes.
-    """
-    harness = Harness()
-
-    report = await harness.engine.observe_due()
-
-    assert report == ObservationRunReport()
-    (trace,) = harness.trace_sink.recorded
-    assert trace.seam == "observe_due"
-    assert trace.outcome is TraceOutcome.OK
-    assert dict(trace.metrics)["passes"] == 0
-
-
-async def test_a_scheduled_run_is_refused_once_shutdown_has_begun() -> None:
-    """It is the same admission check every tracked operation takes (ADR-0042 §2).
-
-    The scheduler reads this ``RuntimeError`` as *stop* rather than as a job failure
-    (ADR-0083 §8), which is what makes refusing at the door the right answer for a
-    job that is armed by default and therefore ticking while a hub shuts down.
-    """
-    harness = Harness()
-    await harness.engine.aclose()
-    with pytest.raises(RuntimeError, match="shutting down"):
-        await harness.engine.observe_due()
-
-
-async def test_observe_is_refused_once_shutdown_has_begun() -> None:
-    """It writes to the connection-owning store, so it is admission-checked (§2)."""
-    harness = Harness()
-    await harness.engine.aclose()
-    with pytest.raises(RuntimeError, match="shutting down"):
-        await harness.engine.observe()
-
-
-async def test_observe_is_drained_before_shutdown_closes_resources() -> None:
-    """An in-flight observation quiesces before the stores close (ADR-0042 §2).
-
-    It reads both durable stores and writes to one, so closing underneath it would
-    be closing a connection a live write is using.
-    """
-    gate = ObservationGate()
-    closed: list[str] = []
-    harness = Harness(
-        observer=FakeObserver(gate=gate),
-        closers=(_recording_closer(closed),),
-    )
-    conversation = await _one_captured_turn(harness)
-
-    running = asyncio.ensure_future(harness.engine.observe(conversation_id=conversation))
-    await gate.reached()
-    shutdown = asyncio.ensure_future(harness.engine.aclose())
-    await asyncio.sleep(0)
-    assert closed == []  # the store is still open while the observation runs
-    gate.release()
-    await running
-    await shutdown
-    assert closed == ["closed"]
-
-
-def _recording_closer(closed: list[str]) -> Callable[[], Awaitable[None]]:
-    """A closer that records that it ran, for the drain assertion above."""
-
-    async def _close() -> None:
-        closed.append("closed")
-
-    return _close
 
 
 # --- lost evidence: tombstones and presented confidence (ADR-0077 §6) ----

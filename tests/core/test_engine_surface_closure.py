@@ -66,10 +66,11 @@ _NAMESPACE: Final = {
 #: claim — each names *which* entry an ADR added, which is what a reader checking a
 #: promotion against its ADR needs.
 #:
-#: Twenty-four are ADR-0085 §5's own walk:
+#: Twenty-four were ADR-0085 §5's own walk:
 #: thirteen from ``engine.py`` (of which ``BeliefSummary`` is new, §4a), six from
 #: ``questions.py``, one from ``runner.py``, one from ``loop.py``, two from
-#: ``observation.py`` and one from ``conversations.py``. The twenty-fifth is
+#: ``observation.py`` and one from ``conversations.py``; ADR-0285 §2 removed the two
+#: from ``observation.py`` with the ``observe`` method. The next is
 #: ADR-0102 §3's ``GrantableSource``, which the four grant operations name. The last
 #: eight are ADR-0130 §9's, which the five notification operations name: the held
 #: record, the candidate it carries, the two enumerations naming a ruling, the
@@ -354,8 +355,6 @@ PROMOTED: Final[frozenset[str]] = frozenset(
         "AnswerOutcome",
         "Disposition",
         "TurnResult",
-        "ObservedProposal",
-        "ObservationReport",
         "ConversationDigest",
         "GrantableSource",
         "HeldNotification",
@@ -1381,6 +1380,12 @@ def test_the_promoted_surface_and_the_protocol_version_are_both_pinned() -> None
     refuse the pairing. **The method set does not move and stays at 67**: the lane
     adds no ``AssistantEngine`` member and no gateway route.
 
+    **70 is ADR-0285 §2, under the first limb**, which moves both numbers the other
+    way. ``AssistantEngine.observe`` is removed, so the method set falls to **66**,
+    and ``ObservationReport`` and ``ObservedProposal`` leave the surface with it. A
+    client at 69 may call a method a hub at 70 no longer answers, which is ADR-0285
+    §2's own ground for the bump.
+
     **ADR-0124 §9 decides no mechanical check and creates none**, saying one is
     owed and leaving its shape open. This is not that check — it is a *pin*, and
     a deliberately crude one: it fails when either number moves, which is the
@@ -1389,14 +1394,15 @@ def test_the_promoted_surface_and_the_protocol_version_are_both_pinned() -> None
     """
     from ai_assistant.wire.envelope import PROTOCOL_VERSION  # noqa: PLC0415 — asserted about
 
-    assert (len(_method_names()), PROTOCOL_VERSION) == (67, 69), (
+    assert (len(_method_names()), PROTOCOL_VERSION) == (66, 70), (
         "the promoted method set and the protocol version are pinned together "
         "(ADR-0124 §9); move either and this pin makes you name the limb you are "
         "under — the method set, or a wire-carried core type"
     )
 
 
-#: ADR-0085 §6b's twelve derived predicates. **The list is normative there** — "a
+#: ADR-0085 §6b's derived predicates, less the five ADR-0285 §2 removed with the two
+#: observation types. **The list is normative there** — "a
 #: triad implementation that carried a subset would leave the CLI reading an
 #: attribute that is not there" — so it is spelled out rather than derived, which
 #: is the one place in this module an enumeration is the right shape.
@@ -1409,11 +1415,6 @@ DERIVED_PREDICATES: Final[frozenset[tuple[str, str]]] = frozenset(
         ("Belief", "lost_evidence"),
         ("Belief", "unsupported"),
         ("BeliefSummary", "unsupported"),
-        ("ObservedProposal", "stored"),
-        ("ObservedProposal", "evidence_count"),
-        ("ObservedProposal", "inspectable"),
-        ("ObservationReport", "stored"),
-        ("ObservationReport", "discarded"),
     }
 )
 

@@ -2513,33 +2513,33 @@ class Settings(BaseSettings):
         ),
     )
 
-    # Which model reads the episodic stream (ADR-0077 §3). A **first-class named
-    # setting** rather than an accident of ``default_model``, because an
-    # observation's prompt is accumulated history — the most sensitive data the
-    # system holds — and the roadmap demands that choice be explicit and separable
-    # from the route the user's answers come from.
+    # Which model consolidation reads through (ADR-0285 §5). A **first-class named
+    # setting** rather than an accident of ``default_model``, because a
+    # consolidation prompt carries a whole chunk of stored records — among the most
+    # sensitive data the system holds — and that choice should be explicit and
+    # separable from the route the user's answers come from. Renamed from
+    # ``observer_model`` with no alias (ADR-0285 §5): the observer whose route it
+    # was is retired, and an alias is the in-between state that decision removes.
     #
-    # **Unset — the default — means the observer reads through the route already
-    # configured for conversation** (``default_model``). That is chosen over
-    # off-by-default and over a required second spec for one reason: it *widens
-    # nothing*. ADR-0004 §2's property is that user data reaches only providers the
-    # user explicitly configured, and a default naming no new provider cannot
-    # breach it; an off-by-default observer would make leg 3 unreachable without
-    # configuration, and a required second spec would make the commonest correct
-    # setup — one provider used for everything — an error.
+    # **Unset — the default — means consolidation reads through the route already
+    # configured for conversation** (``default_model``). That *widens nothing*:
+    # ADR-0004 §2's property is that user data reaches only providers the user
+    # explicitly configured, and a default naming no new provider cannot breach it,
+    # while a required second spec would make the commonest correct setup — one
+    # provider used for everything — an error.
     #
     # It is deliberately **not** part of ``fallback_models``' preference order, and
     # the composition root builds it as a route of its own that **never falls
-    # back** (ADR-0013 §4, §6): fallback buys reliability by widening the set of
-    # providers that see a prompt, and for a deferrable job over accumulated
-    # history the reliability is worth nothing and the widening is the one cost
+    # back** (ADR-0285 §5, ADR-0013 §4, §6): fallback buys reliability by widening
+    # the set of providers that see a prompt, and for a deferrable job over stored
+    # records the reliability is worth nothing and the widening is the one cost
     # that matters. Naming ``default_model`` here explicitly is therefore *not* the
     # same as leaving it unset in general — it is the same route, still without
     # fallback — so no duplicate check applies to it.
-    observer_model: _ModelSpec | None = Field(
+    consolidation_model: _ModelSpec | None = Field(
         default=None,
         description=(
-            "Model that reads the episodic stream when observing, in pydantic-ai "
+            "Model that consolidation reads stored records through, in pydantic-ai "
             "'provider:model' form. Unset means the same route conversation uses. "
             "Never falls back, whichever route it names."
         ),
@@ -2925,13 +2925,13 @@ class Settings(BaseSettings):
     # knob that no longer governs destruction.
     #
     # `reconciler_model` is the route the reconciler **names** rather than
-    # inheriting, typed as the same validated spec `observer_model` carries so a
+    # inheriting, typed as the same validated spec `consolidation_model` carries so a
     # malformed route is refused where `Settings` is built and not at the first
     # ingest that would have used it. Unset means the route already configured for
     # conversation (`default_model`), which is what makes the setting cost nothing
     # to have: it names no provider the operator did not already configure, so
-    # ADR-0004 §2's property cannot be breached by leaving it unset. Like the
-    # observer's, the composition root builds it as a route of its own that **never
+    # ADR-0004 §2's property cannot be breached by leaving it unset. Like
+    # consolidation's, the composition root builds it as a route of its own that **never
     # falls back** (ADR-0013 §4, §6) — a reconciler's failure buys nothing by
     # reaching a second provider, because ADR-0159 §3 degrades it to an unlabelled
     # member rather than a failed write, and widening the set of providers shown two

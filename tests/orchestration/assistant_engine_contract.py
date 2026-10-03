@@ -2201,11 +2201,12 @@ class AssistantEngineContract(ChannelReceiverContract, EpisodeInspectionContract
     async def test_a_blank_identifier_is_refused_on_the_keyword_selectors(
         self, engine: AssistantEngine
     ) -> None:
-        """The two methods whose identifier is a keyword-only selector."""
+        """``converse``'s keyword-only selector, and ``answer``'s identifier.
+
+        ``observe`` was the second keyword-only selector until ADR-0285 §2 removed it.
+        """
         with pytest.raises(ValueError, match=r"\w"):
             await engine.converse("hello", timeout=_PATIENT, conversation_id="  ")
-        with pytest.raises(ValueError, match=r"\w"):
-            await engine.observe(conversation_id="  ")
         with pytest.raises(ValueError, match=r"\w"):
             await engine.answer("  ", accept=True)
 
@@ -2425,8 +2426,6 @@ class AssistantEngineContract(ChannelReceiverContract, EpisodeInspectionContract
         """
         with pytest.raises(UnknownConversationError):
             await engine.converse("hello", timeout=_PATIENT, conversation_id="no-such-id")
-        with pytest.raises(UnknownConversationError):
-            await engine.observe(conversation_id="no-such-id")
 
     async def test_a_turn_with_no_conversation_named_runs_in_one_it_minted(
         self, engine: AssistantEngine

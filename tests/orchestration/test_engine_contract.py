@@ -126,7 +126,6 @@ from ai_assistant.orchestration import (
     HeldSource,
     LearningLoop,
     MemoryWriteStage,
-    ObservationStage,
     QuestionStage,
     RecipientGrantOperations,
     RoutingStage,
@@ -159,7 +158,6 @@ from ai_assistant.testing import (
     FakeMemoryWriter,
     FakeModelProvider,
     FakeNotificationOutbox,
-    FakeObserver,
     FakePlanStore,
     FakeRecipientGrantStore,
     FakeRoutingRecorder,
@@ -574,14 +572,6 @@ def _wire(  # noqa: PLR0913 — one knob per state the shared suite needs a subj
     deferrals = FakeDeferralStore(now=lambda: AT)
     writes = MemoryWriteStage(writer=writer, deferrals=deferrals)
     questions = QuestionStage(writer=writer, deferrals=deferrals, memory=records, now=lambda: AT)
-    observation = ObservationStage(
-        observer=FakeObserver(),
-        conversations=conversation_store,
-        memory=records,
-        writes=writes,
-        batch_size=OBSERVATION_BATCH,
-        route=OBSERVER_ROUTE,
-    )
     loop = LearningLoop(
         context=FakeContextProvider(),
         memory=records,
@@ -627,7 +617,6 @@ def _wire(  # noqa: PLR0913 — one knob per state the shared suite needs a subj
         trace_sink=FakeTraceSink(),
         trace_retention=timedelta(days=365),
         conversations=conversations,
-        observation=observation,
         questions=questions,
         # ADR-0197's routing stage, holding the write-only half of §9's trail (§9 puts
         # the capability on the stage, so the façade holds no trail seam of any width). A
