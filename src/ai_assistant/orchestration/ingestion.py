@@ -43,11 +43,8 @@ in that case no reader is reached. One row per attempt — refused, unanswerable
 failed, discarded, unconfirmed or completed — written **before** the reading is
 used, so nothing durable comes of a read the trail does not hold.
 
-**No check stands between the reader and the writer, deliberately.** The sibling
-:class:`~ai_assistant.orchestration.observation.ObservationStage` refuses a
-proposal citing an episode it never handed the producer, because only that stage
-knows the batch and the writer cannot see it. Nothing here is knowable only to
-this layer: §4's band and episode rules are producer-side obligations that the
+**No check stands between the reader and the writer, deliberately.** Nothing here
+is knowable only to this layer: §4's band and episode rules are producer-side obligations that the
 shared ``Reader`` conformance suite pins on **every** implementation, so
 re-asserting them here would be a second copy of a rule the seam already holds,
 sited where a reader's non-conformance would be reported as an ingestion fault
@@ -280,7 +277,7 @@ class IngestionStage:
         re-read honest without new durable state.
 
         **Each proposal is ingested in order and independently**, exactly as the
-        learn leg and the observation stage do it. There is no transaction —
+        learn leg does it. There is no transaction —
         ``MemoryStore`` offers none — so a writer failure propagates with the
         earlier proposals *already applied*, and nothing reports success for a
         partially applied set: that would be a claim about memory integrity this

@@ -22,13 +22,14 @@ is ``ConsolidationStage``: it is the producer that selects **stored** records �
 including ``ATTESTED`` ones a reader wrote, deliberately, since ADR-0106 §10's
 first clause obliges a test that it does — and it is the subject of ADR-0106's own
 title, "Consolidation inherits taint, lands in the derived band". ``ObservationStage``
-is the other candidate and is not this path: it distils captured **episodes**, and
-ADR-0093 §4 forbids a reader an ``EpisodicMemory``, so no reader-authored span
-reaches it. The route by which an attacker's sentence *does* reach an episode — a
-plan rationale this system's own model authored — is ADR-0098 §5's residual, which
-ADR-0181 §7 states is not closed here and which the forbidden-belief definition
-does not reach: such a belief carries ``derived_from_external=False`` honestly and
-fails clause (ii). This suite claims nothing about it.
+was the other candidate until ADR-0285 §1 retired it, and was not this path: it
+distilled captured **episodes**, and ADR-0093 §4 forbids a reader an
+``EpisodicMemory``, so no reader-authored span reached it. The route by which an
+attacker's sentence *does* reach an episode — a plan rationale this system's own
+model authored — is ADR-0098 §5's residual, which ADR-0181 §7 states is not closed
+here and which the forbidden-belief definition does not reach: such a belief carries
+``derived_from_external=False`` honestly and fails clause (ii). This suite claims
+nothing about it.
 
 **Each cycle consolidates over its own walk**, so cycle *i* re-reads everything the
 store holds rather than only what cycle *i* added. That is at least as much

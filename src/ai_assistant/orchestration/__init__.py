@@ -104,7 +104,7 @@ reaches memory. It holds the ratified ``MemoryWriter`` *and* the ``DeferralStore
 so an ``ASK_USER`` ruling's question is parked durably instead of vanishing when the
 proposal goes out of scope — the drop issue #423 reports, closed by a wiring choice
 rather than by a new writer. Every producer's stage (``LearningLoop``,
-``ObservationStage``, ``IngestionStage``) writes through it rather than through a
+``IngestionStage``, ``ConsolidationStage``) writes through it rather than through a
 ``MemoryWriter`` handle of its own, which is the one obligation ADR-0078 §3 places
 on this lane.
 
@@ -114,20 +114,8 @@ recorded, then runs ``claim`` → ``ingest`` → ``resolve`` to commit an answer
 the *only* producer of a ``UserConfirmation``, and only from a deferral it has
 claimed — the one authority in this system that has never been delegable.
 
-``ObservationStage`` is the **observation stage** (ADR-0077 §8), the second such
-two-store owner: it selects a bounded batch of a conversation's recent episodes,
-hands them to the injected ``Observer``, and puts every proposal that comes back
-through the ratified write path — reporting what was proposed, what became of it,
-and which model route read the episodes (``ObservationReport``,
-``ObservedProposal``). The producer holds no store, so selecting the batch could
-never have been its job (ADR-0077 §1). It also owns the **scheduled run** behind
-``Engine.observe_due`` (ADR-0218 §3): the due test, the candidate walk and the
-passes are all behind this façade, so the scheduler learns nothing about
-watermarks, quiet windows or spans, and what a run returns is an
-``ObservationRunReport`` of counts rather than a list of pass reports.
-
 ``ConsolidationStage`` is the **consolidation stage** (ADR-0106, ADR-0111,
-ADR-0114), the fourth producer's stage and the only one that is also its own
+ADR-0114), a producer's stage, and the only one that is also its own
 producer. It walks the memory store a bounded chunk at a time from a durable
 cursor, asks an injected ``ModelProvider`` what each chunk justifies believing,
 and puts every proposal through the same write path — computing the derived-taint
@@ -210,12 +198,6 @@ from ai_assistant.orchestration.grants import GrantOperations, HeldSource
 from ai_assistant.orchestration.ingestion import IngestionReport, IngestionStage
 from ai_assistant.orchestration.loop import LearningLoop
 from ai_assistant.orchestration.notifications import NotificationWriteStage, hand_off
-from ai_assistant.orchestration.observation import (
-    ObservationRunReport,
-    ObservationStage,
-    observed_ruled,
-    observed_unsupported,
-)
 from ai_assistant.orchestration.parked_reads import ParkedReadOperations
 from ai_assistant.orchestration.payloads import (
     DEFAULT_MAX_PAYLOAD_BYTES,
@@ -254,8 +236,6 @@ __all__ = [
     "LearningLoop",
     "MemoryWriteStage",
     "NotificationWriteStage",
-    "ObservationRunReport",
-    "ObservationStage",
     "ParkedReadOperations",
     "QuestionStage",
     "RecipientGrantOperations",
@@ -276,8 +256,6 @@ __all__ = [
     "hand_off",
     "learn_decision",
     "learn_outcome",
-    "observed_ruled",
-    "observed_unsupported",
     "presented_confidence",
     "question_state",
     "queued_question",

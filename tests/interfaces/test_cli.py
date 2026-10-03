@@ -127,7 +127,6 @@ from ai_assistant.orchestration import (
     HeldSource,
     LearningLoop,
     MemoryWriteStage,
-    ObservationStage,
     QuestionStage,
     RecipientGrantOperations,
     StepExecutor,
@@ -150,7 +149,6 @@ from ai_assistant.testing import (
     FakeMemoryStore,
     FakeMemoryWriter,
     FakeModelProvider,
-    FakeObserver,
     FakePlanStore,
     FakeRecipientGrantStore,
     FakeSourceGrantStore,
@@ -386,25 +384,6 @@ async def _succeeds(parameters: object, *, idempotency_key: str | None) -> None:
     """A tool that does nothing and succeeds."""
 
 
-def _observation(
-    conversations: FakeConversationStore, memory: FakeMemoryStore, writes: MemoryWriteStage
-) -> ObservationStage:
-    """The observation stage over the same stores the rest of the engine holds.
-
-    Wired the way the composition root wires it (ADR-0077 §8): one memory store for
-    selection, retrieval and the write path, so a proposal's citations resolve
-    against the store its episodes came from.
-    """
-    return ObservationStage(
-        observer=FakeObserver(),
-        conversations=conversations,
-        memory=memory,
-        writes=writes,
-        batch_size=20,
-        route=OBSERVER_ROUTE,
-    )
-
-
 def _engine(
     *,
     tools: tuple[ToolDefinition, ...] = (),
@@ -481,7 +460,6 @@ def _engine(
             archive=FakeTranscriptArchiveWriter(),
             archive_enabled=True,
         ),
-        observation=_observation(conversations, memory, writes),
         questions=QuestionStage(writer=writer, deferrals=deferrals, memory=memory, now=lambda: AT),
         closers=closers,
         archive=FakeTranscriptArchive(),
@@ -4476,7 +4454,6 @@ def _conversation_engine(
             archive=FakeTranscriptArchiveWriter(),
             archive_enabled=True,
         ),
-        observation=_observation(conversations, memory, writes),
         questions=QuestionStage(writer=writer, deferrals=deferrals, memory=memory, now=lambda: AT),
         archive=FakeTranscriptArchive(),
     )

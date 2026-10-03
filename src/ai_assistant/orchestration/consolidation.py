@@ -452,8 +452,7 @@ class ConsolidationReport:
     :class:`~ai_assistant.orchestration.writes.WriteOutcome`'s reason: it crosses
     no *subsystem* boundary. Every field is Tier 2 — counts and two dispositions,
     no belief text and no record id — so it is loggable under ADR-0004 §5, which
-    is why an ``ObservationReport``-shaped result naming beliefs is not what a
-    scheduled run returns.
+    is why a result naming beliefs is not what a scheduled run returns.
 
     Attributes:
         chunks: How many chunks this run processed and recorded as done.
@@ -520,16 +519,15 @@ class ConsolidationStage:
         """Wire the stage from injected contracts.
 
         Two obligations no type can express, so each is the composition root's
-        (ADR-0028 §4's shape, as :class:`ObservationStage` states its three):
+        (ADR-0028 §4's shape):
 
         * **``memory`` must be the store the write stage's writer persists to.**
           Wired to a second store, this walks records the write path cannot cite
           and every proposal is refused for unresolved evidence — the silent
           failure ADR-0114's Alternatives give as the decisive reason the walk sits
           on ``MemoryStore`` rather than beside it.
-        * **``model`` must not fall back.** ADR-0077 §3's rule reads here with more
-          force than it does on observation: a consolidation prompt carries a whole
-          chunk of stored records, so widening the set of providers that see one
+        * **``model`` must not fall back** (ADR-0285 §5). A consolidation prompt
+          carries a whole chunk of stored records, so widening the set of providers that see one
           buys reliability for work that is deferrable by construction — the next
           run re-reads the chunk, because this one will not have recorded it as
           done. That is a property of the provider the composition root builds;
@@ -1010,8 +1008,8 @@ def _record_run(report: ConsolidationReport) -> None:
 
     **The job records it, not the scheduler**, because ``Scheduler._run_job``
     states in terms that "the job's result is never logged. The scheduler is
-    generic over jobs and cannot know which results are safe to render — an
-    ``ObservationReport`` names beliefs, which is Tier 1 content". That reasoning is
+    generic over jobs and cannot know which results are safe to render — a result
+    naming beliefs is Tier 1 content". That reasoning is
     right and is left alone; this report is the case it could not know about, and
     the job knows: every field is a count or a disposition, so the whole of it is
     Tier 2 and passes ADR-0004 §5.

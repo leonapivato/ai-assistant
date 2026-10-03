@@ -38,7 +38,7 @@ from ai_assistant.core.types import (
     SecretScope,
 )
 from ai_assistant.evaluation import MeasureReader, SqliteTraceStore
-from ai_assistant.learning import ModelBackedObserver, RuleBasedFeedbackProcessor
+from ai_assistant.learning import RuleBasedFeedbackProcessor
 from ai_assistant.memory import (
     DefaultMemoryPolicy,
     DefaultNotificationPolicy,
@@ -82,7 +82,6 @@ from ai_assistant.orchestration import (
     LearningLoop,
     MemoryWriteStage,
     NotificationWriteStage,
-    ObservationStage,
     ParkedReadOperations,
     QuestionStage,
     RecipientGrantOperations,
@@ -582,7 +581,7 @@ def build_composition(  # noqa: PLR0915 — one statement per resource this root
       the façade's ordered shutdown — with its claim-token source left at its
       ``secrets``-backed **default**, which is the guarantee rather than a detail;
     * **one** :class:`MemoryWriteStage` over that writer and that queue is shared by
-      the learn leg and the observation stage, and the :class:`QuestionStage` that
+      every producer's stage, and the :class:`QuestionStage` that
       answers a question is given the very same queue, writer and store — which is
       how two of ADR-0078 §3's three composition-root obligations are discharged
       here rather than hoped for (the third is structural);
@@ -597,11 +596,9 @@ def build_composition(  # noqa: PLR0915 — one statement per resource this root
     * the model seam is composed **retry inside routing**, the order ADR-0013 §3
       recommends and that nothing in `models/` can enforce, since enforcing it
       would mean a wrapper knowing what wraps it (see :func:`_build_model_provider`);
-    * the **observer's** seam is composed differently on purpose — retry and *no
-      routing*, one named route that never falls back (ADR-0077 §3, see
-      :func:`_build_observer_provider`) — and the stage is told which route that is,
-      because reporting which model read the episodes is what ADR-0013 §6 records as
-      owed and no seam exposes it;
+    * **consolidation's** seam is composed differently on purpose — retry and *no
+      routing*, one named route that never falls back (ADR-0285 §5, see
+      :func:`_build_consolidation_provider`);
     * the **grant store is opened here**, as the **sixth** connection-owning Tier 1
       store, and the *same object* is passed twice — as a
       :class:`~ai_assistant.core.protocols.SourceGrantStore` to the grant operations
@@ -663,9 +660,8 @@ def build_composition(  # noqa: PLR0915 — one statement per resource this root
             over (``default_model`` then ``fallback_models``, ADR-0062) and their
             resilience knobs, the context localisation window, the parked-confirmation
             lifetime the runner enforces (``confirmation_ttl``, #310), the four
-            permission gate thresholds the policy is constructed with (#239), and
-            the observer's route and its two per-call bounds (``observer_model``,
-            ``observation_batch_size``, ``observation_max_proposals``; ADR-0077),
+            permission gate thresholds the policy is constructed with (#239),
+            consolidation's route (``consolidation_model``; ADR-0285 §5),
             the calendar source and ADR-0093 §7a's eight figures bounding a read of
             it (``calendar_reader_path`` and friends; unset by default, in which
             case no reader is built), the data directory (``data_dir``) and the
@@ -724,8 +720,8 @@ def build_composition(  # noqa: PLR0915 — one statement per resource this root
             rather than letting it escape as a traceback. Or if a configured model
             spec names a vendor pydantic-ai does not know or whose optional package
             is not installed — the router's specs (ADR-0062 §2, see
-            :func:`_build_model_provider`) and the observer's own route alike
-            (ADR-0077 §3, see :func:`_build_observer_provider`). Or if
+            :func:`_build_model_provider`) and consolidation's own route alike
+            (ADR-0285 §5, see :func:`_build_consolidation_provider`). Or if
             the on-device embedder cannot be constructed because its vendored model
             artifact is missing or incomplete (ADR-0006 §2, ADR-0024, see
             :func:`_build_embedder`).
@@ -737,14 +733,13 @@ def build_composition(  # noqa: PLR0915 — one statement per resource this root
     # above the data directory. Every step that needs an open store stays below,
     # inside the cleanup block that closes what it opened on a later failure.
     model = _build_model_provider(settings, _model_specs(settings))
-    # The observer's route, built here and separately: it is one route and it never
-    # falls back (ADR-0077 §3). Above the data directory with the rest, so an
-    # observer spec naming an uninstalled vendor fails the build rather than the
-    # first observation.
-    observer_route = _observer_spec(settings)
-    observer_model = _build_observer_provider(settings, observer_route)
-    # The reconciler's route, on the observer's shape and for the observer's reasons
-    # (ADR-0159 §3, ADR-0077 §3): one route, named rather than inherited, and no
+    # Consolidation's route, built here and separately: it is one route and it never
+    # falls back (ADR-0285 §5). Above the data directory with the rest, so a
+    # consolidation spec naming an uninstalled vendor fails the build rather than
+    # the first consolidation run.
+    consolidation_model = _build_consolidation_provider(settings, _consolidation_spec(settings))
+    # The reconciler's route, on consolidation's shape and for its reasons
+    # (ADR-0159 §3, ADR-0285 §5): one route, named rather than inherited, and no
     # fallback. Built up here so a spec naming an uninstalled vendor fails the build
     # rather than the first ingest that would have used it.
     reconciler_route = _reconciler_spec(settings)
@@ -2410,51 +2405,6 @@ def build_composition(  # noqa: PLR0915 — one statement per resource this root
                 # `_model_specs` puts `default_model` first.
                 streaming=PydanticAIStreamingCompleter(settings.default_model),
             ),
-            # The observation stage (ADR-0077 §8), over the *same* memory store and
-            # the *same* writer the learn leg uses, so an observed belief is
-            # retrievable, inspectable and forgettable through the surfaces the user
-            # already has — and so a proposal's citations resolve against the store
-            # its episodes were selected from (ADR-0028 §4's obligation, applied to a
-            # second producer). One ``Settings`` value bounds both the selection and
-            # the producer, which is what keeps the stage's batch inside the bound
-            # the producer refuses beyond (ADR-0077 §1, §9.7).
-            observation=ObservationStage(
-                observer=ModelBackedObserver(
-                    observer_model,
-                    # The calendar a belief's event time is stated in (ADR-0156 §2,
-                    # §3): ``settings.timezone`` again, the same value ADR-0008 §5
-                    # gives the temporal context and ADR-0130 §6 gives the
-                    # notification policy, because §6 of ADR-0008 introduces no
-                    # second timezone source. Withholding it would be a producer
-                    # that resolves no relative expression at all, since UTC is the
-                    # one calendar §3 refuses to substitute.
-                    timezone=settings.timezone,
-                    max_batch_size=settings.observation_batch_size,
-                    max_proposals=settings.observation_max_proposals,
-                ),
-                conversations=conversations,
-                memory=memory,
-                # The same write stage the learn leg uses, so an observed proposal
-                # the policy defers parks a question the user can answer rather than
-                # being reported to a stage nobody is watching and dropped.
-                writes=writes,
-                batch_size=settings.observation_batch_size,
-                route=observer_route,
-                # ADR-0218 §7's three run figures, from `Settings` so that an
-                # operator's values win over the stage's own defaults. They reach
-                # the **scheduled** run and nothing else: `assistant observe`
-                # applies no due test, because an operator who typed the command
-                # has already decided it is time (§10).
-                #
-                # `scheduler_run_budget` is the same field the consolidation stage
-                # below is given, which is ADR-0111 §4's budget reaching a second
-                # chunked job rather than a second budget: "Two chunked jobs may be
-                # armed at once, and the arithmetic adds" (ADR-0218 §8), and both
-                # intervals are readable off the hub's configuration record.
-                quiet_window=settings.observation_quiet_window,
-                max_unobserved_age=settings.observation_max_unobserved_age,
-                run_budget=settings.scheduler_run_budget,
-            ),
             # The answer path (ADR-0078 §8, §9), over the *same* deferral queue the
             # write stage above enqueues into, the *same* writer an ordinary `learn`
             # applies through, and the *same* memory store — so a question the user
@@ -2462,8 +2412,8 @@ def build_composition(  # noqa: PLR0915 — one statement per resource this root
             # would actually retire.
             questions=QuestionStage(writer=writer, deferrals=deferrals, memory=memory),
             # Leg 6's ingestion stage (ADR-0093 §6), over the *same* write stage
-            # the learn leg and the observation stage use — ADR-0078 §3's one
-            # obligation reaching a third producer, so an attested proposal the
+            # the learn leg uses — ADR-0078 §3's one obligation reaching a second
+            # producer, so an attested proposal the
             # policy defers parks a question the user can answer and one it stores
             # is inspectable and forgettable through the surfaces that already
             # exist (ADR-0028 §4).
@@ -2583,15 +2533,12 @@ def build_composition(  # noqa: PLR0915 — one statement per resource this root
             # cannot resolve — which ADR-0114's Alternatives give as the decisive
             # reason the walk sits *on* `MemoryStore` rather than beside it.
             #
-            # **The observer's provider, deliberately reused.** ADR-0077 §3's
-            # no-fallback rule is what this producer needs and it is exactly what
-            # `_build_observer_provider` builds — one named route that never falls
-            # back — and the reasoning reads here with more force: a consolidation
-            # prompt carries a whole chunk of stored records, and the work is
-            # deferrable by construction, because a run that fails does not record
-            # its chunk as done. A second `consolidation_model` family would be
-            # config surface with no decision behind it; ADR-0106 §12 leaves this
-            # job's quality parameters to leg 8's measurement.
+            # **Its own route, built from `consolidation_model`** — or from
+            # `default_model` where that is unset — and one that never falls back
+            # (ADR-0285 §5; `_build_consolidation_provider`). A consolidation prompt
+            # carries a whole chunk of stored records, and the work is deferrable by
+            # construction, because a run that fails does not record its chunk as
+            # done, so a second recipient buys nothing.
             #
             # **Always wired, unlike `ingestion` above**, because nothing about it
             # is conditional on a source or a grant: the job is armed by its
@@ -2602,7 +2549,7 @@ def build_composition(  # noqa: PLR0915 — one statement per resource this root
             consolidation=ConsolidationStage(
                 memory=memory,
                 writes=writes,
-                model=observer_model,
+                model=consolidation_model,
                 chunk_size=settings.scheduler_chunk_size,
                 run_budget=settings.scheduler_run_budget,
             ),
@@ -3082,16 +3029,16 @@ def ensure_model_credentials(settings: Settings) -> None:
     revoked or throttled still fails at request time, classified there as the
     model error it is.
 
-    Every route is checked — the router's whole preference order *and* the
-    observer's own — because ADR-0077 §3 gives the observer a route that never
-    falls back, so a credential it lacks disables observation silently rather
-    than being covered by a sibling. Duplicates are checked once; the observer's
-    spec defaults to ``default_model``, and repeating the probe would only repeat
-    the message.
+    Every route is checked — the router's whole preference order *and*
+    consolidation's own — because ADR-0285 §5 gives consolidation a route that
+    never falls back, so a credential it lacks disables consolidation silently
+    rather than being covered by a sibling. Duplicates are checked once;
+    consolidation's spec defaults to ``default_model``, and repeating the probe
+    would only repeat the message.
 
     Args:
         settings: Loaded application settings — the router's preference order and
-            the observer's route.
+            consolidation's route.
 
     Raises:
         ConfigurationError: If a spec names a vendor whose package is missing or
@@ -3100,11 +3047,11 @@ def ensure_model_credentials(settings: Settings) -> None:
             misconfiguration to a single exit code through one type check
             (ADR-0083 §5).
     """
-    for spec in dict.fromkeys((*_model_specs(settings), _observer_spec(settings))):
+    for spec in dict.fromkeys((*_model_specs(settings), _consolidation_spec(settings))):
         # In this order: the vendor check owns the "package not installed" message
         # and names the extra to install, and the credential probe presumes the
         # vendor resolved. Repeating a check `build_engine` also runs is cheap and
-        # deliberate — the same reasoning `_build_observer_provider` records for
+        # deliberate — the same reasoning `_build_consolidation_provider` records for
         # re-checking a spec that may equal `default_model`.
         ensure_vendor_available(spec)
         ensure_credential_available(spec)
@@ -3186,19 +3133,19 @@ def _build_model_provider(settings: Settings, specs: Sequence[str]) -> RoutingPr
     )
 
 
-def _observer_spec(settings: Settings) -> str:
-    """The one ``"provider:model"`` spec the observer reads episodes through (ADR-0077 §3).
+def _consolidation_spec(settings: Settings) -> str:
+    """The one ``"provider:model"`` spec consolidation reads through (ADR-0285 §5).
 
-    ``observer_model`` when the operator named one; otherwise ``default_model`` —
-    **the route already configured for conversation**, and deliberately not the
+    ``consolidation_model`` when the operator named one; otherwise ``default_model``
+    — **the route already configured for conversation**, and deliberately not the
     whole ``fallback_models`` preference order, because this route never falls back
-    (:func:`_build_observer_provider`).
+    (:func:`_build_consolidation_provider`).
 
     That default is what makes the setting cost nothing to have: it names no
     provider the operator did not already configure, so ADR-0004 §2's property —
     user data reaches only providers the user explicitly configured — cannot be
     breached by leaving it unset. What the setting buys is that the choice is
-    *nameable and separable*: an operator who wants the episodic stream read by a
+    *nameable and separable*: an operator who wants stored records read by a
     smaller, cheaper or locally-hosted model changes one value and does not touch
     the route their answers come from.
 
@@ -3209,55 +3156,57 @@ def _observer_spec(settings: Settings) -> str:
         The spec, never empty: ``default_model`` stands behind it.
     """
     return (
-        settings.observer_model if settings.observer_model is not None else settings.default_model
+        settings.consolidation_model
+        if settings.consolidation_model is not None
+        else settings.default_model
     )
 
 
-def _build_observer_provider(settings: Settings, spec: str) -> RetryingProvider:
-    """Build the observer's model seam: **retry, and no routing at all** (ADR-0077 §3).
+def _build_consolidation_provider(settings: Settings, spec: str) -> RetryingProvider:
+    """Build consolidation's model seam: **retry, and no routing at all** (ADR-0285 §5).
 
-    The deliberate difference from :func:`_build_model_provider`, and the whole of
-    ADR-0077 §3's second part: **an observation's failure is never re-sent to a
-    second provider.** ADR-0013 §4 already rules the mechanism — "a caller who names
-    a model has already chosen" — and here its own Consequences decide the case:
+    The deliberate difference from :func:`_build_model_provider`: **a consolidation
+    call's failure is never re-sent to a second provider.** ADR-0013 §4 already rules
+    the mechanism — "a caller who names a model has already chosen" — and its own
+    Consequences decide the case:
 
     * fallback's cost is that *more providers may see a given prompt*, which for a
-      turn buys an answer the user is waiting for. An observation buys nothing with
-      it, because observation is **deferrable**: the episodes are durable, nothing
-      is waiting, and the free remedy is to run again.
+      turn buys an answer the user is waiting for. A consolidation run buys nothing
+      with it, because the work is **deferrable**: a run that fails does not record
+      its chunk as done, nothing is waiting, and the free remedy is the next run.
     * it is the one payload where the trade inverts. A turn's prompt is one
-      utterance; an observation's prompt is accumulated history, so widening the set
-      of recipients for reliability is exactly what ADR-0004 §7's minimisation rule
-      argues against when the reliability buys nothing.
+      utterance; a consolidation prompt is a whole chunk of stored records, so
+      widening the set of recipients for reliability is exactly what ADR-0004 §7's
+      minimisation rule argues against when the reliability buys nothing.
 
-    So the observer is handed a :class:`RetryingProvider` and not a
+    So consolidation is handed a :class:`RetryingProvider` and not a
     :class:`RoutingProvider` — there is no second candidate for a routable failure
     to advance to, rather than a router that happens to hold one route. **Retry is
     not fallback**: it re-sends to the *same* provider, so it widens no recipient
-    set, and dropping it would make the observer less resilient than every other
+    set, and dropping it would make consolidation less resilient than every other
     call for no privacy gain.
 
     The route **requires its own credential** (ADR-0013 §6), which follows from the
     same shape: nothing stands behind it, so a provider the deployment cannot
-    authenticate to fails the observation rather than quietly diverting the
-    transcript somewhere it can.
+    authenticate to fails the run rather than quietly diverting the records
+    somewhere it can.
 
     Args:
         settings: Loaded application settings — the resilience knobs the retry
             wrapper is built from, the same ones every other route gets, because how
             patient this deployment is is not a property of which vendor answered.
-        spec: The observer's ``"provider:model"`` spec (:func:`_observer_spec`).
+        spec: Consolidation's ``"provider:model"`` spec (:func:`_consolidation_spec`).
 
     Returns:
-        The provider the observer reads episodes through.
+        The provider consolidation reads stored records through.
 
     Raises:
         ConfigurationError: If ``spec`` names a vendor unknown to pydantic-ai or
             whose optional package is not installed — checked here for the reason
             ADR-0062 §2 gives, so an operator learns at startup rather than on the
-            first observation. It is checked even when it repeats ``default_model``:
-            the check is cheap, and a helper that trusted a caller to have checked
-            already would break the day the two stop coinciding.
+            first consolidation run. It is checked even when it repeats
+            ``default_model``: the check is cheap, and a helper that trusted a caller
+            to have checked already would break the day the two stop coinciding.
     """
     ensure_vendor_available(spec)
     return RetryingProvider(PydanticAIProvider(spec), policy=RetryPolicy.from_settings(settings))
@@ -3267,7 +3216,7 @@ def _reconciler_spec(settings: Settings) -> str:
     """The one ``"provider:model"`` spec the reconciler labels through (ADR-0159 §3).
 
     ``reconciler_model`` when the operator named one; otherwise ``default_model``.
-    The same shape :func:`_observer_spec` has, and the same argument: the default
+    The same shape :func:`_consolidation_spec` has, and the same argument: the default
     names no provider the operator did not already configure, so ADR-0004 §2's
     property cannot be breached by leaving it unset, while the setting still makes
     the choice *nameable and separable* — an operator who wants two stored beliefs
@@ -3290,7 +3239,7 @@ def _reconciler_spec(settings: Settings) -> str:
 def _build_reconciler_provider(settings: Settings, spec: str) -> RetryingProvider:
     """Build the reconciler's model seam: **retry, and no routing** (ADR-0159 §3).
 
-    The observer's shape (:func:`_build_observer_provider`), reached by the same
+    Consolidation's shape (:func:`_build_consolidation_provider`), reached by the same
     argument. Fallback's cost is that *more providers may see a given prompt*, and a
     reconciler's prompt is two of the user's own stored beliefs. What it would buy
     is reliability, and reliability buys nothing here: ADR-0159 §3's never-raises

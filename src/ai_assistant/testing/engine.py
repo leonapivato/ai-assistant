@@ -111,7 +111,6 @@ from ai_assistant.core.types import (
     MemorySource,
     NewConversation,
     NotificationDelivery,
-    ObservationReport,
     OperationConfirmation,
     OutboundReach,
     OutboundStatement,
@@ -448,7 +447,6 @@ class FakeAssistantEngine:
             claim and so meets no ``ClaimRefused``. Script it to drive a rendering
             surface over each of the seven ``DriveWithheld`` members a fixed statement
             is owed for.
-        observation: What :meth:`observe` returns.
         answered: What :meth:`answer` returns, or ``None`` to synthesise one from
             the question's own state.
     """
@@ -714,7 +712,6 @@ class FakeAssistantEngine:
         #: **A scripted outcome that already carries the member keeps what it carries**,
         #: which is :attr:`forecast_not_read`'s own arrangement.
         self.drive_withheld: DriveWithheld | None = None
-        self.observation: ObservationReport = ObservationReport()
         self.answered: AnswerOutcome | None = None
         # ADR-0250 §§12, 15's three operations, each defaulting to what the concrete
         # engine answers in that decision's M1: an empty listing, and the non-acting
@@ -2875,18 +2872,6 @@ class FakeAssistantEngine:
             )
         )
         return self._checked(outcome, "learn")
-
-    async def observe(self, *, conversation_id: Identifier | None = None) -> ObservationReport:
-        """Report what a passive observation pass would have done."""
-        selected = (
-            None if conversation_id is None else identifier(conversation_id, name="conversation_id")
-        )
-        check_arguments("observe", max_bytes=self._max_payload_bytes, conversation_id=selected)
-        self.calls.append(("observe", {"conversation_id": selected}))
-        if selected is not None and selected not in self.conversations_held:
-            msg = f"no conversation {selected!r}"
-            raise UnknownConversationError(msg)
-        return self._checked(self.observation, "observe")
 
     # --- the inspection surface -------------------------------------------
 

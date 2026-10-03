@@ -117,7 +117,6 @@ from ai_assistant.orchestration.executor import StepExecutor
 from ai_assistant.orchestration.grants import GrantOperations
 from ai_assistant.orchestration.ingestion import IngestionStage
 from ai_assistant.orchestration.loop import LearningLoop
-from ai_assistant.orchestration.observation import ObservationStage
 from ai_assistant.orchestration.questions import QuestionStage
 from ai_assistant.orchestration.recipient_grants import RecipientGrantOperations
 from ai_assistant.orchestration.runner import StepRunner
@@ -135,7 +134,6 @@ from ai_assistant.testing import (
     FakeFeedbackProcessor,
     FakeGoalAssociator,
     FakeModelProvider,
-    FakeObserver,
     FakeOutboundTransport,
     FakePlanStore,
     FakeRecipientGrantStore,
@@ -669,14 +667,6 @@ def build_world(
         # A separate provider from the planner's: one ``FakeModelProvider`` shared
         # across the two seams would hand the composer the planner's JSON.
         composing=ComposingStage(model=FakeModelProvider(), streaming=FakeStreamingCompleter()),
-        observation=ObservationStage(
-            observer=FakeObserver(),
-            conversations=conversations,
-            memory=store,
-            writes=writes,
-            batch_size=20,
-            route="fake:replaying",
-        ),
         questions=QuestionStage(writer=writer, deferrals=deferrals, memory=store, now=lambda: NOW),
         grant_operations=GrantOperations(
             store=FakeSourceGrantStore(),

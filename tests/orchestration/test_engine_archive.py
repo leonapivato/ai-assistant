@@ -7,7 +7,7 @@ fakes.
 is the point of it (§13 item 1). It archives a span nothing else in the tree says,
 runs a turn on each of the four shapes §13 names — routed and unrouted, spoken and
 typed — and asserts the span reaches no prompt any model seam received: the router's,
-the planner's, the composing stage's and the observer's. A lane that decided to feed
+the planner's and the composing stage's. A lane that decided to feed
 the archive back into a prompt cannot make it pass; it has to remove it, and removing
 it is the moment the ADR §12 defers is owed.
 """
@@ -35,7 +35,7 @@ from ai_assistant.core.types import (
     TranscriptEntry,
 )
 from ai_assistant.orchestration.routing import RoutingStage
-from ai_assistant.testing import FakeModelProvider, FakeObserver
+from ai_assistant.testing import FakeModelProvider
 from ai_assistant.testing.routing import FakeRoutingRecorder
 
 if TYPE_CHECKING:
@@ -100,7 +100,7 @@ class RecordingPlanner:
         )
 
 
-def _seen_by(harness: Harness, planner: RecordingPlanner, observer: FakeObserver) -> str:
+def _seen_by(harness: Harness, planner: RecordingPlanner) -> str:
     """Everything any model seam of this turn was shown, rendered for a substring check.
 
     Deliberately over-wide: it takes the *whole* recorded call rather than the prompt
@@ -112,7 +112,6 @@ def _seen_by(harness: Harness, planner: RecordingPlanner, observer: FakeObserver
     composing = harness.engine._composing  # the seam under assertion
     seams: list[object] = [
         planner.shown,
-        observer.batches,
         getattr(composing, "_model", None) and getattr(composing._model, "calls", None),
     ]
     routing = harness.routing
@@ -133,8 +132,7 @@ async def test_an_archived_span_reaches_no_prompt_on_an_unrouted_turn(spoken: bo
     absent embedder — and this is the behavioural assertion over all three at once.
     """
     planner = RecordingPlanner()
-    observer = FakeObserver()
-    harness = Harness(planner=planner, observer=observer, tools=(tool(),))
+    harness = Harness(planner=planner, tools=(tool(),))
     harness.archive.hold(_entry())
 
     if spoken:
@@ -143,9 +141,8 @@ async def test_an_archived_span_reaches_no_prompt_on_an_unrouted_turn(spoken: bo
         )
     else:
         await harness.engine.converse("what did I say about the ledger", timeout=PATIENT)
-    await harness.engine.observe()
 
-    assert ARCHIVED_SPAN not in _seen_by(harness, planner, observer)
+    assert ARCHIVED_SPAN not in _seen_by(harness, planner)
 
 
 async def test_an_archived_span_reaches_no_prompt_on_a_routed_turn() -> None:
@@ -156,19 +153,16 @@ async def test_an_archived_span_reaches_no_prompt_on_a_routed_turn() -> None:
     it is routed at all.
     """
     planner = RecordingPlanner()
-    observer = FakeObserver()
     router = FakeModelProvider(json.dumps({"operation": "beliefs", "query": "ledger"}))
     harness = Harness(
         planner=planner,
-        observer=observer,
         routing=RoutingStage(model=router, recorder=FakeRoutingRecorder()),
     )
     harness.archive.hold(_entry())
 
     await harness.engine.converse("what do you believe about the ledger", timeout=PATIENT)
-    await harness.engine.observe()
 
-    assert ARCHIVED_SPAN not in _seen_by(harness, planner, observer)
+    assert ARCHIVED_SPAN not in _seen_by(harness, planner)
     assert ARCHIVED_SPAN not in repr(router.calls)
 
 

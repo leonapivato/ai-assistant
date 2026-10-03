@@ -2404,7 +2404,9 @@ from ai_assistant.wire.errors import (
 #:     ``RecordedChannelTrigger.origin`` and drops its ``conversation``, and requires a
 #:     resume's stages; ``EpisodicMemory.disposition`` and ``EpisodeSummary.response_kind``
 #:     are removed, and ``EpisodeResponseKind`` with them.
-PROTOCOL_VERSION: Final[int] = 69
+#: 70: ADR-0285 §2 removes ``AssistantEngine.observe`` from the promoted method set, and
+#:     ``ObservationReport`` and ``ObservedProposal`` with it.
+PROTOCOL_VERSION: Final[int] = 70
 
 #: ADR-0085 §8a: "The correlation id is a UUID string and is at most 36 bytes.
 #: Bounding it is what makes the reserve a constant rather than an aspiration; a

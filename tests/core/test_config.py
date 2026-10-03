@@ -601,49 +601,73 @@ def test_the_spec_pattern_accepts_every_model_name_pydantic_ai_ships() -> None:
     )
 
 
-# --- the observer's route and its two per-call bounds (ADR-0077 §§1, 2, 3) ---
+# --- consolidation's route (ADR-0285 §5), and the observer's two per-call bounds ---
 
 
-def test_observer_model_is_unset_by_default() -> None:
-    """Unset means "read through the route conversation already uses" (ADR-0077 §3).
+def test_consolidation_model_is_unset_by_default() -> None:
+    """Unset means "read through the route conversation already uses" (ADR-0285 §5).
 
     The default that **widens nothing**: ADR-0004 §2's property is that user data
     reaches only providers the operator explicitly configured, and a default naming
     no new provider cannot breach it. Which route unset resolves to is the
     composition root's to apply — this only pins that the field says nothing.
     """
-    assert Settings().observer_model is None
+    assert Settings().consolidation_model is None
 
 
-def test_observer_model_accepts_a_route_of_its_own() -> None:
-    """Set, it names the route that reads episodes — separably from the answers'."""
-    settings = Settings(observer_model="openai:gpt-5", default_model="anthropic:claude-opus-4-8")
-    assert settings.observer_model == "openai:gpt-5"
+def test_consolidation_model_accepts_a_route_of_its_own() -> None:
+    """Set, it names the route consolidation reads through — separably from the answers'."""
+    settings = Settings(
+        consolidation_model="openai:gpt-5", default_model="anthropic:claude-opus-4-8"
+    )
+    assert settings.consolidation_model == "openai:gpt-5"
     assert settings.default_model == "anthropic:claude-opus-4-8"
 
 
-def test_a_malformed_observer_model_is_rejected_at_load() -> None:
+def test_a_malformed_consolidation_model_is_rejected_at_load() -> None:
     """Validated for form like every other spec (ADR-0062 §2)."""
     with pytest.raises(ValidationError, match="malformed model spec"):
-        Settings(observer_model="not-a-spec")
+        Settings(consolidation_model="not-a-spec")
 
 
-def test_observer_model_may_repeat_the_default_model() -> None:
+def test_consolidation_model_may_repeat_the_default_model() -> None:
     """Naming the conversational route explicitly is not a useless duplicate route.
 
     ``_fallbacks_are_alternatives`` refuses a fallback repeating an earlier route,
-    because routing would re-send the same prompt to the same place. The observer is
+    because routing would re-send the same prompt to the same place. Consolidation is
     not in that order at all — it is one route that never falls back — so naming
     ``default_model`` there is simply saying out loud what unset already means.
     """
-    settings = Settings(default_model="openai:gpt-5", observer_model="openai:gpt-5")
-    assert settings.observer_model == settings.default_model
+    settings = Settings(default_model="openai:gpt-5", consolidation_model="openai:gpt-5")
+    assert settings.consolidation_model == settings.default_model
 
 
-def test_observer_model_parses_from_the_environment(monkeypatch: pytest.MonkeyPatch) -> None:
-    """An operator sets one variable to move the episodic read to another model."""
+def test_consolidation_model_parses_from_the_environment(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """An operator sets one variable to move consolidation to another model."""
+    monkeypatch.setenv("ASSISTANT_CONSOLIDATION_MODEL", "openai:gpt-5")
+    assert load_settings().consolidation_model == "openai:gpt-5"
+
+
+def test_the_old_observer_model_name_has_no_alias(monkeypatch: pytest.MonkeyPatch) -> None:
+    """ADR-0285 §5: renamed "with the same type, the same default of ``None`` and no alias".
+
+    So a hub environment that still sets ``ASSISTANT_OBSERVER_MODEL`` starts without an
+    error and its consolidation reads through ``default_model`` — the silent
+    consequence §5 states so that the cutover's deploy renames the variable. Pinned
+    here so an alias added later, which is exactly the in-between state §5 rules out,
+    fails a test rather than quietly reviving the old name.
+    """
     monkeypatch.setenv("ASSISTANT_OBSERVER_MODEL", "openai:gpt-5")
-    assert load_settings().observer_model == "openai:gpt-5"
+
+    settings = load_settings()
+
+    assert settings.consolidation_model is None
+    assert "observer_model" not in Settings.model_fields
+    field = Settings.model_fields["consolidation_model"]
+    assert field.alias is None
+    assert field.validation_alias is None
 
 
 def test_the_observation_bounds_have_the_defaults_the_adr_names() -> None:
@@ -2390,7 +2414,7 @@ class TestTheEgressRegistrationSettings:
 def test_reconciler_model_is_unset_by_default() -> None:
     """Unset means the route conversation already uses (ADR-0159 §3, ADR-0077 §3).
 
-    The same default the observer's route takes, for the same reason: it names no
+    The same default consolidation's route takes, for the same reason: it names no
     provider the operator did not already configure, so ADR-0004 §2's property
     cannot be breached by leaving it unset. Which route unset resolves to is the
     composition root's to apply.

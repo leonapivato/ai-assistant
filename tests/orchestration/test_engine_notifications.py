@@ -89,7 +89,6 @@ def _wired(
         trace_sink=harness.trace_sink,
         trace_retention=harness.trace_retention,
         conversations=harness.conversations,
-        observation=harness.observation,
         questions=harness.questions,
         notifications=store,
         notification_policy=policy,

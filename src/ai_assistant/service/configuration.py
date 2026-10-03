@@ -144,13 +144,6 @@ SEAM_STARTUP: Final = "hub_startup"
 # whose build never had the setting. The value **was** observed; what it was
 # observed to be is "off", and a boolean is how a number-or-boolean record says
 # so (§9's third clause).
-#
-# **`observation_interval` is the closest live analogue of #829's arming**, and
-# the reason this pair shape is worth the keys: the before/after of a job that
-# grows the user model is exactly what #829 requires be datable. It reads that way
-# in both directions since ADR-0218 §5 armed it by default — the act this pair
-# dates is now usually the upgrade that moved the default rather than an operator,
-# and an operator who sets the disable sentinel is dated by the same diff.
 
 #: Whether the retention purge is armed (ADR-0083 §7). It expires memory records,
 #: reclaims purgeable deferred questions, and sweeps the trace store itself
@@ -167,20 +160,6 @@ CONVERSATION_SWEEP_ARMED: Final = "conversation_sweep_interval_armed"
 
 #: How often it runs, present only when armed.
 CONVERSATION_SWEEP_SECONDS: Final = "conversation_sweep_interval_seconds"
-
-#: Whether belief distillation is armed (ADR-0083 §7, ADR-0077). This is the job
-#: that *grows* the user model, and since ADR-0218 §5 it ships **armed** — so the
-#: moment it is armed is, for most deployments, the upgrade that moved the default
-#: rather than an operator's act. The intervention is no less datable for that, and
-#: this pair is what dates it: arming changes the ``CONFIGURATION`` trace the hub
-#: emits at every start, and ADR-0120 §8 "partitions at a ``CONFIGURATION`` trace
-#: diff", so a window straddling the upgrade is partitioned by the mechanism that
-#: already existed for an operator flipping it by hand. §6 of that ADR is what keeps
-#: the *populations* apart once it is armed, by giving a scheduled run its own seam.
-OBSERVATION_ARMED: Final = "observation_interval_armed"
-
-#: How often it runs, present only when armed.
-OBSERVATION_SECONDS: Final = "observation_interval_seconds"
 
 #: Whether scheduled calendar ingestion is armed (ADR-0093 §7a). It is the
 #: producer of the coverage readings whose absences close validity windows
@@ -207,8 +186,7 @@ EMAIL_READER_SECONDS: Final = "email_reader_interval_seconds"
 #: the arming §9 was written for**, rather than another analogue of it: §9's own
 #: prose states the act it dates as "an operator changing ``consolidation_interval``
 #: from ``None`` to a duration and restarting the hub", and until #820's deadline
-#: landed there was no such setting to name. The observation entry above is
-#: described there as "the closest live analogue"; this is the thing itself.
+#: landed there was no such setting to name.
 #:
 #: It also matters more than the other intervals to what the measures read. This
 #: is the only job whose run distils *stored records* into new beliefs on its own
@@ -223,7 +201,7 @@ CONSOLIDATION_ARMED: Final = "consolidation_interval_armed"
 #: was given: at most one budget plus one chunk of loop time per interval.
 CONSOLIDATION_SECONDS: Final = "consolidation_interval_seconds"
 
-# --- the allowlist: what one scheduled run and one observation pass may do ----
+# --- the allowlist: what one scheduled run may do -----------------------------
 
 #: The per-run deadline a chunked scheduled walk is bound by (ADR-0111 §4). It is
 #: what decides an ``INCOMPLETE`` outcome, so a measure counting halted runs is
@@ -234,14 +212,6 @@ SCHEDULER_RUN_BUDGET_SECONDS: Final = "scheduler_run_budget_seconds"
 #: names this one by name as an intervention: "a chunk size or a ``fetch_k``
 #: moving mid-window is as much an intervention as an arming".
 SCHEDULER_CHUNK_SIZE: Final = "scheduler_chunk_size"
-
-#: How many of a conversation's turns one observation pass reads (ADR-0077 §1).
-#: It bounds the evidence behind every belief the pass proposes.
-OBSERVATION_BATCH_SIZE: Final = "observation_batch_size"
-
-#: The most beliefs one observation pass may propose; excess is discarded
-#: (ADR-0077 §2). It caps the write stream a correction rate is computed over.
-OBSERVATION_MAX_PROPOSALS: Final = "observation_max_proposals"
 
 # --- the allowlist: the trace stream's own horizon ----------------------------
 
@@ -260,7 +230,7 @@ TRACE_RETENTION_SECONDS: Final = "trace_retention_seconds"
 #: Whether a captured episode is ever deleted (ADR-0074 §7).
 EPISODE_RETENTION_FINITE: Final = "episode_retention_finite"
 
-#: How long one survives, present only when finite. Episodes are what observation
+#: How long one survives, present only when finite. Episodes are what recall
 #: reads and what a conversation-scoped retrieval returns, so the horizon bounds
 #: the corpus every accuracy measure is computed over.
 EPISODE_RETENTION_SECONDS: Final = "episode_retention_seconds"
@@ -363,8 +333,6 @@ ALLOWLIST_KEYS: Final[frozenset[str]] = frozenset(
         RETENTION_PURGE_SECONDS,
         CONVERSATION_SWEEP_ARMED,
         CONVERSATION_SWEEP_SECONDS,
-        OBSERVATION_ARMED,
-        OBSERVATION_SECONDS,
         CALENDAR_READER_ARMED,
         CALENDAR_READER_SECONDS,
         EMAIL_READER_ARMED,
@@ -373,8 +341,6 @@ ALLOWLIST_KEYS: Final[frozenset[str]] = frozenset(
         CONSOLIDATION_SECONDS,
         SCHEDULER_RUN_BUDGET_SECONDS,
         SCHEDULER_CHUNK_SIZE,
-        OBSERVATION_BATCH_SIZE,
-        OBSERVATION_MAX_PROPOSALS,
         TRACE_RETENTION_FINITE,
         TRACE_RETENTION_SECONDS,
         EPISODE_RETENTION_FINITE,
@@ -520,8 +486,6 @@ class ConfigurationStamp:
         metrics: dict[str, int | float | bool] = {
             SCHEDULER_RUN_BUDGET_SECONDS: settings.scheduler_run_budget.total_seconds(),
             SCHEDULER_CHUNK_SIZE: settings.scheduler_chunk_size,
-            OBSERVATION_BATCH_SIZE: settings.observation_batch_size,
-            OBSERVATION_MAX_PROPOSALS: settings.observation_max_proposals,
             EMBEDDING_TIMEOUT_SECONDS: settings.embedding_timeout_seconds,
             RETRIEVAL_SEARCH_LIMIT: self._retrieval_search_limit,
             CONFLICT_SEARCH_LIMIT: self._conflict_search_limit,
@@ -540,7 +504,6 @@ class ConfigurationStamp:
             CONVERSATION_SWEEP_SECONDS,
             settings.conversation_sweep_interval,
         )
-        _pair(metrics, OBSERVATION_ARMED, OBSERVATION_SECONDS, settings.observation_interval)
         _pair(
             metrics,
             CALENDAR_READER_ARMED,
@@ -645,10 +608,6 @@ __all__ = [
     "NOTIFICATION_RECONSIDER_SECONDS",
     "NOTIFICATION_RETENTION_FINITE",
     "NOTIFICATION_RETENTION_SECONDS",
-    "OBSERVATION_ARMED",
-    "OBSERVATION_BATCH_SIZE",
-    "OBSERVATION_MAX_PROPOSALS",
-    "OBSERVATION_SECONDS",
     "RECONCILER_MAX_CONFLICTS",
     "RETENTION_PURGE_ARMED",
     "RETENTION_PURGE_SECONDS",

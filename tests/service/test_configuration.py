@@ -53,10 +53,6 @@ from ai_assistant.service.configuration import (
     NOTIFICATION_RECONSIDER_SECONDS,
     NOTIFICATION_RETENTION_FINITE,
     NOTIFICATION_RETENTION_SECONDS,
-    OBSERVATION_ARMED,
-    OBSERVATION_BATCH_SIZE,
-    OBSERVATION_MAX_PROPOSALS,
-    OBSERVATION_SECONDS,
     RECONCILER_MAX_CONFLICTS,
     RETENTION_PURGE_ARMED,
     RETENTION_PURGE_SECONDS,
@@ -193,14 +189,12 @@ async def test_the_declared_allowlist_is_exactly_what_two_deployments_produce(
         calendar_reader_interval=timedelta(minutes=15),
         email_source_path=tmp_path / "mail.mbox",
         email_reader_interval=timedelta(minutes=25),
-        observation_interval=timedelta(hours=6),
         consolidation_interval=timedelta(hours=12),
     )
     disarmed = Settings(
         data_dir=tmp_path / "disarmed",
         retention_purge_interval=None,
         conversation_sweep_interval=None,
-        observation_interval=None,
         consolidation_interval=None,
         episode_retention=None,
         trace_retention=None,
@@ -228,12 +222,6 @@ async def test_a_default_deployment_records_its_effective_figures(settings: Sett
         RETENTION_PURGE_SECONDS: timedelta(hours=1).total_seconds(),
         CONVERSATION_SWEEP_ARMED: True,
         CONVERSATION_SWEEP_SECONDS: timedelta(hours=1).total_seconds(),
-        # Armed on a fresh install since ADR-0218 §5, and recorded with its cadence
-        # — which is what makes the upgrade that moved this default a
-        # ``CONFIGURATION`` diff ADR-0120 §8 partitions on, rather than a step in
-        # every measure over the accumulation that nothing dates.
-        OBSERVATION_ARMED: True,
-        OBSERVATION_SECONDS: timedelta(minutes=15).total_seconds(),
         CALENDAR_READER_ARMED: False,
         EMAIL_READER_ARMED: False,
         # Off on a fresh install (ADR-0083 §7, ADR-0111 §11), and recorded as off
@@ -243,8 +231,6 @@ async def test_a_default_deployment_records_its_effective_figures(settings: Sett
         CONSOLIDATION_ARMED: False,
         SCHEDULER_RUN_BUDGET_SECONDS: timedelta(minutes=5).total_seconds(),
         SCHEDULER_CHUNK_SIZE: 50,
-        OBSERVATION_BATCH_SIZE: 20,
-        OBSERVATION_MAX_PROPOSALS: 40,
         TRACE_RETENTION_FINITE: True,
         TRACE_RETENTION_SECONDS: timedelta(days=365).total_seconds(),
         EPISODE_RETENTION_FINITE: True,
@@ -294,7 +280,7 @@ async def test_a_disabled_job_is_recorded_as_off_and_not_as_absent(tmp_path: Pat
 
     §3: "An absent key means *not observed* and never zero". A disabled interval
     encoded as a missing key would therefore claim the emitter never looked — and
-    a measure could not tell a hub with observation switched off from one built
+    a measure could not tell a hub with the purge switched off from one built
     before the setting existed. The boolean says which.
     """
     disarmed = Settings(data_dir=tmp_path / "hub-data", retention_purge_interval=None)
@@ -378,43 +364,26 @@ async def test_arming_email_ingestion_moves_the_mapping_as_arming_the_calendar_d
     assert armed != disarmed
 
 
-async def test_an_armed_observation_job_dates_the_arming(tmp_path: Path) -> None:
-    """#829's requirement, in the shape this seam gives it — now in both directions.
+async def test_the_configuration_trace_carries_no_observation_figure(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """ADR-0285 §3 and §11:3: "``service/configuration.py`` reports no observation figure."
 
-    ADR-0119 §9 is #829 requirement 2's carrier: "the arming moment is stamped
-    somewhere telemetry can see". Observation **ships armed** since ADR-0218 §5, so
-    the act this pair dates is usually the upgrade that moved the default rather
-    than an operator — and §5 relies on exactly that: "arming changes the
-    ``CONFIGURATION`` trace the hub emits at startup, and ADR-0120 §8 partitions at
-    a ``CONFIGURATION`` trace diff". The direction an operator can still take is
-    disarming, which has to be datable for the same reason, so the disabled reading
-    is asserted from the disable sentinel rather than from the default.
-
-    Consolidation is the arming §9's prose names, and the test below is this one
-    with that field's name in it. Both are kept, because the property is per field:
-    a pair that reached the list and a ``_pair`` call that was never made look
-    identical from any deployment that does not move the field in question.
+    Asserted over the declared list and over a trace actually stamped, from settings
+    loaded where a pre-change deployment's ``ASSISTANT_OBSERVATION_*`` variables are
+    still set — the cutover §5 names, where a variable that names no field is
+    ignored without an error. A stamp that still read one of them would put a key
+    on the record whatever the variable said, so absence from *this* trace is the
+    claim, not absence from a default one.
     """
-    armed = dict((await _recorded(Settings(data_dir=tmp_path / "hub-data"))).metrics)
-    disarmed = dict(
-        (
-            await _recorded(Settings(data_dir=tmp_path / "hub-data", observation_interval=None))
-        ).metrics
-    )
-    retimed = dict(
-        (
-            await _recorded(
-                Settings(data_dir=tmp_path / "hub-data", observation_interval=timedelta(hours=6))
-            )
-        ).metrics
-    )
+    monkeypatch.setenv("ASSISTANT_OBSERVATION_INTERVAL", "PT6H")
+    monkeypatch.setenv("ASSISTANT_OBSERVATION_BATCH_SIZE", "7")
+    monkeypatch.setenv("ASSISTANT_OBSERVATION_MAX_PROPOSALS", "3")
 
-    assert armed[OBSERVATION_ARMED] is True
-    assert armed[OBSERVATION_SECONDS] == timedelta(minutes=15).total_seconds()
-    assert disarmed[OBSERVATION_ARMED] is False
-    assert OBSERVATION_SECONDS not in disarmed
-    assert retimed[OBSERVATION_ARMED] is True
-    assert retimed[OBSERVATION_SECONDS] == timedelta(hours=6).total_seconds()
+    metrics = dict((await _recorded(Settings(data_dir=tmp_path / "hub-data"))).metrics)
+
+    assert not [key for key in ALLOWLIST_KEYS if "observ" in key]
+    assert not [key for key in metrics if "observ" in key]
 
 
 async def test_an_armed_consolidation_job_dates_the_arming_9_was_written_for(
@@ -427,8 +396,8 @@ async def test_an_armed_consolidation_job_dates_the_arming_9_was_written_for(
     ``None`` to a duration and restarting the hub (#829's third requirement,
     ADR-0111 §11's 'an implementation lane's act against this text once
     ratified')." Until that setting existed there was nothing to name, so the list
-    carried the observation pair above and described it as the closest analogue.
-    The setting exists now, and this is the property §9 was written for.
+    carried an observation pair and described it as the closest analogue. The
+    setting exists now, and this is the property §9 was written for.
 
     **It is worth its own case rather than a line on the union test**, because
     that test asserts a *set of keys* and would stay green if both keys were

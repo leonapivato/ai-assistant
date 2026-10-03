@@ -58,6 +58,7 @@ from ai_assistant.core.errors import (
     TranscriptArchiveError,
 )
 from ai_assistant.core.protocols import (
+    AssistantEngine,
     AuthorizationResolution,
     ConnectionPurger,
     CoverageAnswers,
@@ -91,7 +92,6 @@ from ai_assistant.core.types import (
     TraceKind,
 )
 from ai_assistant.evaluation import SqliteTraceStore
-from ai_assistant.learning import ModelBackedObserver
 from ai_assistant.memory import (
     DefaultMemoryPolicy,
     DefaultNotificationPolicy,
@@ -1101,10 +1101,10 @@ async def test_build_engine_hands_the_facade_the_configured_drain_budget(
 def test_the_credential_preflight_covers_every_configured_route(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
-    """The router's whole preference order *and* the observer's own route.
+    """The router's whole preference order *and* consolidation's own route.
 
-    The observer's route never falls back (ADR-0077 §3), so a credential it lacks
-    disables observation rather than being covered by a sibling — which is exactly
+    Consolidation's route never falls back (ADR-0285 §5), so a credential it lacks
+    disables consolidation rather than being covered by a sibling — which is exactly
     the silent, hours-later failure #530 is about, in the one place nothing is
     waiting to notice it.
     """
@@ -1116,7 +1116,7 @@ def test_the_credential_preflight_covers_every_configured_route(
         Settings(
             default_model="anthropic:one",
             fallback_models=("openai:two",),
-            observer_model="anthropic:three",
+            consolidation_model="anthropic:three",
         )
     )
 
@@ -1126,7 +1126,7 @@ def test_the_credential_preflight_covers_every_configured_route(
 def test_the_credential_preflight_asks_once_per_distinct_route(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
-    """The observer's spec defaults to ``default_model``; repeating only repeats the message."""
+    """Consolidation's spec defaults to ``default_model``; repeating it only repeats the message."""
     asked: list[str] = []
     monkeypatch.setattr(composition_module, "ensure_vendor_available", lambda spec: None)
     monkeypatch.setattr(composition_module, "ensure_credential_available", asked.append)
@@ -1308,30 +1308,6 @@ def test_a_context_config_failure_touches_no_disk_either(
     assert not absent.exists()
 
 
-async def test_build_engine_wires_the_observation_stage_over_the_one_memory_store(
-    tmp_path: Path,
-) -> None:
-    """The stage selects from, and writes through, the store everything else uses.
-
-    ADR-0028 §4's obligation applied to a second producer (ADR-0077 §8): a stage over
-    a second store would select episodes the write path cannot cite, so every
-    proposal would be refused for evidence that resolves perfectly well in the store
-    the user reads — and the derived band would stay empty while the run reported
-    health.
-    """
-    engine = build_engine(Settings(embedder=EmbedderKind.HASHING), data_dir=tmp_path)
-    try:
-        memory = engine._loop._memory
-        stage = engine._observation
-        assert stage._memory is memory
-        assert stage._writes is engine._loop._writes
-        # The same conversation index the capture stage appends turns to, or the
-        # selection would look for a conversation nothing ever recorded.
-        assert stage._conversations is engine._conversations._conversations
-    finally:
-        await engine.aclose()
-
-
 async def test_build_engine_hands_capture_the_narrow_archive_seam(tmp_path: Path) -> None:
     """ADR-0225 §13 item 2's last clause: the composition root's wiring, asserted directly.
 
@@ -1481,76 +1457,6 @@ async def test_build_engine_reads_both_archive_settings_from_configuration(
         await engine.aclose()
 
 
-async def test_build_engine_gives_the_stage_and_the_producer_one_batch_bound(
-    tmp_path: Path,
-) -> None:
-    """One ``Settings`` value bounds both, which is what keeps them in step.
-
-    ADR-0077 §1 puts the oversized-batch refusal on the producer because the
-    Protocol is a cross-subsystem contract; §9.7 correspondingly has the stage select
-    **at most** that many. Wired from two values, the producer's ``ValueError`` would
-    stop being a guard on a contract and start being a routine failure.
-    """
-    settings = Settings(
-        embedder=EmbedderKind.HASHING, observation_batch_size=7, observation_max_proposals=2
-    )
-    engine = build_engine(settings, data_dir=tmp_path)
-    try:
-        stage = engine._observation
-        observer = stage._observer
-        assert isinstance(observer, ModelBackedObserver)
-        assert stage._batch_size == 7
-        assert observer.max_batch_size == 7
-        assert observer.max_proposals == 2
-    finally:
-        await engine.aclose()
-
-
-async def test_build_engine_gives_the_observer_the_one_configured_timezone(
-    tmp_path: Path,
-) -> None:
-    """ADR-0156 §7's wiring line: the producer resolves in ``Settings.timezone``.
-
-    The same value ADR-0008 §5 gives the temporal context and ADR-0130 §6 gives the
-    notification policy — this producer is a third consumer of it, not a fourth
-    source of truth (ADR-0008 §6). It is load-bearing rather than cosmetic:
-    ``EpisodicMemory.occurred_at`` is a ``UtcInstant`` (ADR-0030 §4) while
-    *"yesterday"* is said in the speaker's calendar, so a producer left without this
-    would either resolve against UTC — wrong by a day for every evening utterance
-    west of UTC — or, as ADR-0156 §3's second clause requires instead, resolve
-    nothing at all. A zone far from UTC is chosen so a default could not pass.
-    """
-    settings = Settings(embedder=EmbedderKind.HASHING, timezone="Pacific/Kiritimati")
-    engine = build_engine(settings, data_dir=tmp_path)
-    try:
-        observer = engine._observation._observer
-        assert isinstance(observer, ModelBackedObserver)
-        assert observer._zone == ZoneInfo("Pacific/Kiritimati")
-    finally:
-        await engine.aclose()
-
-
-async def test_build_engine_tells_the_stage_the_route_the_observer_reads_through(
-    tmp_path: Path,
-) -> None:
-    """The route the report names is the one the provider was built from (ADR-0013 §6).
-
-    No seam exposes it — an ``Observer`` holds its provider and shows nobody — so the
-    label is supplied by the layer that built the provider, and a stage told anything
-    else would report a read that did not happen.
-    """
-    settings = Settings(
-        embedder=EmbedderKind.HASHING,
-        default_model="anthropic:claude-x",
-        observer_model="openai:gpt-5",
-    )
-    engine = build_engine(settings, data_dir=tmp_path)
-    try:
-        assert engine._observation._route == "openai:gpt-5"
-    finally:
-        await engine.aclose()
-
-
 async def test_build_engine_opens_the_deferral_queue_under_the_data_dir(
     tmp_path: Path,
 ) -> None:
@@ -1663,15 +1569,16 @@ async def test_build_engine_gives_the_write_stage_and_the_answer_path_one_queue(
     are wired independently — so identity here is the only way to check it, exactly as
     ADR-0028 §4's writer/store rule is checked.
 
-    The observation stage is included because it is the *second* producer and reaches
+    The consolidation stage is included because it is another producer and reaches
     memory through the same stage: a second write stage over a second queue would park
-    an observed question the question surface cannot show, which is the drop ADR-0078
-    ends restored by a wiring mistake.
+    a consolidated question the question surface cannot show, which is the drop
+    ADR-0078 ends restored by a wiring mistake.
     """
     engine = build_engine(Settings(embedder=EmbedderKind.HASHING), data_dir=tmp_path)
     try:
         writes = engine._loop._writes
-        assert engine._observation._writes is writes, "one write stage, both producers"
+        assert engine._consolidation is not None
+        assert engine._consolidation._writes is writes, "one write stage, both producers"
         assert engine._questions._deferrals is writes._deferrals
         assert isinstance(writes._deferrals, SqliteDeferralStore)
     finally:
@@ -3050,8 +2957,8 @@ async def test_build_engine_wires_the_ingestion_stage_over_the_one_memory_store(
 ) -> None:
     """ADR-0028 §4's obligation applied to a **third** producer (ADR-0093 §6).
 
-    The stage writes through the *same* write stage the learn leg and the
-    observation stage use, which is ADR-0078 §3's one wiring obligation: a producer
+    The stage writes through the *same* write stage the learn leg uses, which is
+    ADR-0078 §3's one wiring obligation: a producer
     holding a ``MemoryWriter`` of its own "gets the ratified policy and applier and
     silently loses the queue", and a reader's proposals reach nobody in the moment,
     so a lost question is one nobody is ever asked. Over a second store an ingested
@@ -4059,3 +3966,29 @@ def test_the_streamed_answer_comes_from_the_route_configured_for_conversation() 
     """
     settings = Settings(embedder=EmbedderKind.HASHING)
     assert composition_module._model_specs(settings)[0] == settings.default_model
+
+
+async def test_the_composed_engine_and_its_contract_declare_no_observe(tmp_path: Path) -> None:
+    """ADR-0285 §2 and §11:3: ``AssistantEngine`` declares no ``observe``.
+
+    Asserted on every face the method used to have: the Protocol, the promoted method
+    set the wire derives from it (``wire.surface.METHODS`` — what a client at the
+    earlier version may still call, and why §2 advances ``PROTOCOL_VERSION``), the
+    hub's client, the canonical fake, and the engine the production composition root
+    builds — which also loses the scheduled ``observe_due`` the hub used to arm.
+    """
+    from ai_assistant.testing import FakeAssistantEngine  # noqa: PLC0415 — asserted about
+    from ai_assistant.wire import surface  # noqa: PLC0415 — asserted about
+    from ai_assistant.wire.client import HubEngineClient  # noqa: PLC0415 — asserted about
+
+    assert not hasattr(AssistantEngine, "observe")
+    assert "observe" not in surface.METHODS
+    assert not hasattr(HubEngineClient, "observe")
+    assert not hasattr(FakeAssistantEngine, "observe")
+
+    engine = build_engine(Settings(embedder=EmbedderKind.HASHING), data_dir=tmp_path)
+    try:
+        assert not hasattr(engine, "observe")
+        assert not hasattr(engine, "observe_due")
+    finally:
+        await engine.aclose()

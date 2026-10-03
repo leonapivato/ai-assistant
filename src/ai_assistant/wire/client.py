@@ -134,7 +134,6 @@ if TYPE_CHECKING:
         NonBlankEncodableText,
         NotificationDelivery,
         NotificationPreferences,
-        ObservationReport,
         PermissionDecision,
         Placement,
         Question,
@@ -653,21 +652,6 @@ class HubClient:
             What memory did with it.
         """
         return await self._call("learn", event=event)  # type: ignore[no-any-return]
-
-    async def observe(self, *, conversation_id: Identifier | None = None) -> ObservationReport:
-        """Distil beliefs from a conversation's recent turns.
-
-        Args:
-            conversation_id: Which conversation, or ``None`` for the most recently
-                active one.
-
-        Returns:
-            What the pass proposed and what became of it.
-        """
-        selected = (
-            None if conversation_id is None else identifier(conversation_id, name="conversation_id")
-        )
-        return await self._call("observe", conversation_id=selected)  # type: ignore[no-any-return]
 
     async def episodes(
         self,
