@@ -26,6 +26,7 @@ import pytest
 from ai_assistant.app import build_engine
 from ai_assistant.core.config import EmbedderKind, Settings
 from ai_assistant.core.episode_encoding import episode_content
+from ai_assistant.core.errors import ChannelProcessingTimeoutError
 from ai_assistant.core.types import (
     ActionPlan,
     ActivationLinks,
@@ -424,6 +425,34 @@ async def test_an_informational_events_episode_is_stored_open_before_its_first_s
     assert processing.stages == ()
     assert processing.trigger.channel == _SENSOR
     _frozen(await composed.stored(_address(result)))
+
+
+async def test_an_append_runs_inside_the_pass_deadline(composed: Composed) -> None:
+    """§3:8: an append whose store never answers is cut off at the pass's deadline; the
+    pass times out as its kind classifies the expiry, and the freeze still records."""
+    addresses: list[str] = []
+
+    async def never(state: ActivationState, **_kwargs: object) -> None:
+        assert state.episode_address is not None
+        addresses.append(state.episode_address)
+        await asyncio.Event().wait()
+
+    # A test double for the bound method: the store read it makes never returns.
+    composed.writer.append = never  # type: ignore[method-assign]
+
+    with pytest.raises(ChannelProcessingTimeoutError):
+        await asyncio.wait_for(
+            composed.engine.receive(
+                ChannelInput(target=_SENSOR, payload=TextChannelPayload(text="eco mode")),
+                reply=None,
+                timeout=timedelta(milliseconds=300),
+            ),
+            timeout=5,
+        )
+
+    processing = _frozen(await composed.stored(addresses[0]))
+    assert processing.status is not ProcessingStatus.COMPLETED
+    assert processing.stages[-1].due is ControllerRule.STAGE_TIMED_OUT
 
 
 async def _parked(composed: Composed) -> tuple[str, str, Any]:
