@@ -43,6 +43,11 @@ BACKTICK_RE = re.compile(r"`([^`\n]+)`")
 # A backticked token is a path only when it names one of these trees. Requiring
 # the prefix is what keeps ``origin/main`` and ``feat(scope)`` out: a token that
 # merely contains a slash is not evidence of a path.
+#
+# `benchmarks/` stays although ADR-0285 §8 deleted that tree, because the corpus
+# still cites it. Dropping the prefix would turn those citations into tokens no
+# tool reads: `brief_check` would stop reporting a brief that names a deleted
+# harness path, and `floor_test` would stop binding a change that brings one back.
 PATH_PREFIXES = (
     "src/",
     "tests/",
