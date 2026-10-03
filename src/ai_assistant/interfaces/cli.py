@@ -38,13 +38,6 @@ and the two destroys under it reach a conversation the ``conversations`` surface
 already reclaimed — which is the whole point of the archive: reaching the retention
 horizon evicts a turn from the working set rather than destroying it.
 
-``observe`` is the accumulation surface (ADR-0077 §8, §9.8): it asks the engine to
-read back one conversation's recent turns, and renders what was proposed, what the
-gate did with each proposal, and **which model route read the transcript**. It is
-explicit by design — nothing here polls, schedules, or observes as a side effect of
-another command — and it renders a deferred proposal's citations in full, because no
-later view resolves them (#431).
-
 ``questions``, ``answer`` and ``forget-question`` are the deferred-question surface
 (ADR-0078 §8): a memory decision the gate would not make without the user's word now
 waits durably, and this is where it reaches them. The two enumerations stay
@@ -410,8 +403,6 @@ if TYPE_CHECKING:
         IngestSummary,
         LearnOutcome,
         NotificationCandidate,
-        ObservationReport,
-        ObservedProposal,
         OperationConfirmation,
         QueuedQuestion,
         RoutedListing,
@@ -1039,11 +1030,11 @@ def _present_id(value: str) -> str:
 
 
 def _present_optional_id(value: str | None) -> str | None:
-    """:func:`_present_id` for the two id parameters that may be absent.
+    """:func:`_present_id` for the id parameters that may be absent.
 
-    ``observe``'s positional and ``ask --conversation`` both default to ``None``,
-    which is the "no conversation named" state — the one thing this must not turn
-    into a blank, and the reason it cannot simply be :func:`_present_id`. The shape
+    ``ask --conversation`` and every parameter like it default to ``None``, which is
+    the "none named" state — the one thing this must not turn into a blank, and the
+    reason it cannot simply be :func:`_present_id`. The shape
     :func:`_present_subject` uses for the same reason.
 
     Args:
@@ -2211,33 +2202,6 @@ def forget_question(
     missing.
     """
     code = asyncio.run(_forget_question(question_id))
-    raise typer.Exit(code)
-
-
-@app.command()
-def observe(
-    conversation_id: str | None = typer.Argument(
-        None,
-        callback=_present_optional_id,
-        help=(
-            "The conversation to observe. Defaults to the least recently active "
-            "conversation that still has turns nobody has distilled."
-        ),
-    ),
-) -> None:
-    """Distil beliefs from a conversation's recent turns, and record what stuck.
-
-    The assistant reads back what was actually said, proposes what it should
-    durably believe about you as a result, and puts each proposal through the same
-    gate ``assistant learn`` uses — so nothing is stored just because a model
-    suggested it. What comes back names the model route that read the transcript,
-    every belief proposed and what became of it, and anything thrown away.
-
-    Nothing observes on its own: this runs only when you ask for it. Whatever is
-    stored is immediately visible with ``assistant beliefs`` and destroyable with
-    ``assistant forget``.
-    """
-    code = asyncio.run(_observe_conversation(conversation_id))
     raise typer.Exit(code)
 
 
@@ -4180,27 +4144,6 @@ async def _forget_question(question_id: str) -> int:
     return await _drive_forget_question(engine, question_id)
 
 
-async def _observe_conversation(conversation_id: str | None) -> int:
-    """Load settings, build the engine, run one observation pass, and close it.
-
-    The accumulation counterpart to :func:`_learn_feedback`, with the same single
-    error boundary (ADR-0042 §7): every stage that can fail — loading settings,
-    configuring logging, constructing the engine, the observation itself, and
-    shutdown — is inside it, so an :class:`AssistantError` is rendered and mapped to
-    a non-zero exit code rather than escaping as a traceback. The id arrives
-    non-blank and already stripped, exactly as ``ask --conversation``'s does
-    (:func:`_present_optional_id`, ADR-0085 §3c): whether it *names* a conversation
-    is the engine's question (ADR-0074 §1).
-    """
-    try:
-        engine = await _open_engine()
-    except (AssistantError, TransportError) as exc:
-        _render_error(exc)
-        return _EXIT_ERROR
-
-    return await _drive_observe(engine, conversation_id)
-
-
 async def _list_sources() -> int:
     """Obtain a client, enumerate the grantable sources, and render them.
 
@@ -6057,24 +6000,6 @@ async def _drive_forget_transcript_conversation(
         _print("[yellow]Nothing to destroy:[/] no transcript was held under that conversation.")
         return _EXIT_ERROR
     _print(f"[green]Destroyed.[/] {destroyed} turn(s) of that conversation's transcript are gone.")
-    return _EXIT_OK
-
-
-async def _drive_observe(engine: AssistantEngine, conversation_id: str | None) -> int:
-    """Run one observation pass and render what it did (ADR-0077 §8, ADR-0042 §6).
-
-    The adapter conveys the request and renders the engine's
-    :class:`~ai_assistant.orchestration.ObservationReport`; it selects no episodes,
-    proposes nothing, and authors no memory write — all of that is behind the
-    façade (ADR-0042 §6). An :class:`AssistantError` from any stage is rendered and
-    mapped to a non-zero exit code.
-    """
-    try:
-        report = await engine.observe(conversation_id=conversation_id)
-    except (AssistantError, TransportError) as exc:
-        _render_error(exc)
-        return _EXIT_ERROR
-    _render_observation(report)
     return _EXIT_OK
 
 
@@ -10281,166 +10206,6 @@ def _deferred_message(queued: QueuedQuestion | None) -> str:
             )
         case _:  # pragma: no cover — exhaustive over the enum
             assert_never(queued.outcome)
-
-
-def _render_observation(report: ObservationReport) -> None:
-    """Render one observation pass (ADR-0077 §8, §9.8).
-
-    Four things the user is owed, in this order:
-
-    1. **what was read, and by which model.** ADR-0013 §6 records "which provider
-       answered is not currently reported, and should be once there is an interface
-       to report it"; this is that interface, for the one call where it matters
-       most — a model reading back the transcript. The route is *absent* when the
-       observer was never called, and is then not claimed.
-    2. **every belief proposed**, whether or not it was stored, with the evidence
-       behind it and the gate's ruling. A proposal the gate refused is as
-       informative as one it kept.
-    3. **the deferrals**, in full and by name. ``ASK_USER`` writes nothing and
-       nothing persists it (ADR-0077 §4, #423), so if this rendering omitted the
-       candidate the deferral would be invisible — which is the gap the interim is
-       there to close. The note under a deferred proposal says outright that it is
-       not queued.
-    4. **what was thrown away**, so silence never reads as "there was nothing to
-       learn" (ADR-0022 §3).
-    """
-    if report.conversation_id is None:
-        _print("[dim]No conversation to observe yet — have one first with[/] assistant ask.")
-        return
-    if report.route is None:
-        _print(
-            f"[dim]Nothing to observe in conversation[/] {_safe(report.conversation_id)}[dim]: "
-            "none of its recent turns still has a recorded episode, so no model was asked.[/]"
-        )
-        return
-    _print(
-        f"[bold]Observed[/] {report.episodes_read} episode(s) from conversation "
-        f"{_safe(report.conversation_id)}, read by [bold cyan]{_safe(report.route)}[/]."
-    )
-    if not report.proposals:
-        _print("[dim]Nothing in them was worth believing durably.[/]")
-    else:
-        _print(
-            f"{len(report.proposals)} belief(s) proposed, {report.stored} stored. "
-            "[dim]See them with[/] assistant beliefs[dim].[/]"
-        )
-        for proposal in report.proposals:
-            _render_observed_proposal(proposal)
-    _render_observation_discards(report)
-
-
-def _observed_message(decision: LearnDecision) -> str:
-    """The ruling line for one observed proposal (ADR-0077 §8, ADR-0078 §7).
-
-    :data:`_LEARN_MESSAGES` no longer carries ``DEFERRED``, because the ``learn``
-    surface says which of four things the queue did and reads that off the result. An
-    **observation** cannot: ADR-0078 §7 is explicit that "an observer proposal refused
-    at the cap is reported to the observing stage and no further; what that stage's
-    own result carries is ADR-0077's to decide, not this ADR's to specify from
-    outside", so ``ObservationReport`` is deliberately not widened here and this line
-    claims nothing about the admission. It says only what is true on every branch —
-    nothing was stored, and an answer is owed.
-    """
-    if decision is LearnDecision.DEFERRED:
-        return "Not stored — it needs your answer."
-    return _LEARN_MESSAGES[decision]
-
-
-def _render_observed_proposal(proposal: ObservedProposal) -> None:
-    """Render one proposed belief and what the gate did with it.
-
-    The epistemic step leads the row rather than the band: every observed proposal
-    is in the ``derived`` band by contract, so the band carries no information here
-    while ``observed`` versus ``inferred`` is the difference between "your own words
-    show this" and "I generalised from them" (ADR-0072 §3).
-
-    **The citations are printed for whatever the write path did not keep** — a
-    deferral, a rejection, a drop. ADR-0077 §4 requires a reported deferral to carry
-    "the candidate's content, its citations and the policy's stated reason", and the
-    reason they must be *here* is that no later view resolves them. Since ADR-0078 a
-    deferred proposal **is** persisted and ``assistant questions`` shows its content,
-    the reason it was deferred and what accepting it would retire — but resolving
-    ``Provenance.evidence`` into readable text is ADR-0073 §10's open half of #431,
-    which ADR-0078 §11 deliberately leaves there. So this is still the only rendering
-    of a deferred proposal's *warrant*. A **stored** belief is not
-    printed with its evidence, because it has that later view — ``assistant
-    beliefs`` lists it and the forget ceremony shows the warrant in full — and
-    echoing every episode behind every accepted belief would reprint the transcript
-    the observation was distilled *from*.
-
-    Engine-supplied text — the content, the rationale, the policy's reason, the id,
-    a citation's content — is neutralised for this terminal like any other
-    (``_safe``, ADR-0042 §4).
-    """
-    _print(
-        f"\n  [bold cyan]{proposal.step.value}[/] · {proposal.kind.value} · "
-        f"confidence {proposal.confidence:.2f} · "
-        f"from {proposal.evidence_count} episode(s)"
-    )
-    _print(f"  {_safe(proposal.content)}")
-    _print(f"  [dim]Why:[/] {_safe(proposal.rationale)}")
-    if not proposal.inspectable:
-        _render_citations(proposal)
-    if proposal.decision is None:
-        _print(f"  [yellow]Not stored:[/] {_safe(proposal.reason)}.")
-        return
-    _print(
-        f"  [dim]Memory:[/] {_observed_message(proposal.decision)} "
-        f"[dim]({_safe(proposal.reason)})[/]"
-    )
-    # A deferral gets **no extra note here, and the absence is the decision**
-    # (ADR-0019, ADR-0078 §7). The old note said the proposal was "gone when this
-    # command ends", which was true and became false the moment the write stage
-    # started parking one. Nothing may replace it, because there is nothing further
-    # this adapter can honestly say: an observer's refusals stay at the observing
-    # stage "and no further", so `ObservationReport` deliberately does not carry the
-    # admission — widening it is ADR-0077's call, not this lane's — and every
-    # replacement tried was a claim about state the report does not hold. "Go answer
-    # it" is false when the queue refused it; "the queue was full" is false when the
-    # question was parked on page two, answered, or lapsed. The ruling line above
-    # says the one thing that holds on every branch — nothing was stored and an
-    # answer is owed — and `assistant questions` documents itself.
-    if proposal.record_id is not None:
-        _print(f"  [dim]id:[/] {_safe(proposal.record_id)}")
-
-
-def _render_citations(proposal: ObservedProposal) -> None:
-    """Render the episodes one proposal rests on (ADR-0077 §4).
-
-    A citation the stage could not resolve is a **tombstone**, exactly as on the
-    inspection surface (:func:`_render_evidence`) and for ADR-0073 §4's reason: never
-    a bare id, never a silent gap. Here it means the evidence went away between
-    selection and the write, which is also why nothing was stored.
-    """
-    if not proposal.evidence:
-        return
-    _print("  [dim]From:[/]")
-    for item in proposal.evidence:
-        if item.content is None:
-            _print("    [yellow]—[/] [dim]an episode stood here and is gone.[/]")
-        else:
-            _print(f"    - {_safe(item.content)}")
-
-
-def _render_observation_discards(report: ObservationReport) -> None:
-    """Say what was thrown away getting here, or that nothing was (ADR-0077 §4).
-
-    Reported rather than left silent, because "no beliefs" and "ten beliefs, all
-    unusable" are the two states this counting exists to tell apart — silence
-    reading as success is the failure ``memory_degraded`` was added to prevent
-    (ADR-0022 §3). The three counts are kept apart because they answer different
-    questions: what the model emitted and the producer could not use, what the
-    producer dropped to stay inside its bound, and what the write path refused
-    because the evidence had gone.
-    """
-    if not report.discarded:
-        return
-    _print(
-        f"\n[dim]Discarded {report.discarded}: "
-        f"{report.discarded_unusable} unusable, "
-        f"{report.discarded_over_limit} over the per-pass limit, "
-        f"{report.dropped_unsupported} whose evidence went away before it could be stored.[/]"
-    )
 
 
 def _render_questions(

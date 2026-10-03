@@ -1,9 +1,9 @@
 """The browser's control surface end to end (ADR-0177).
 
-Thirteen operations reach a browser here that did not before: the grant surface,
-the belief surface, the deferred-question surface, and ``observe``. ADR-0177 §1
-admits them by name and closes the enumeration at thirty; §2 keeps the four request
-classes; §5, §6 and §7 say what the surfaces owe once they are reachable.
+The grant surface, the belief surface and the deferred-question surface reach a
+browser here. ADR-0177 §1 admits them by name; §2 keeps the four request classes;
+§5, §6 and §7 say what the surfaces owe once they are reachable. ``observe``, which
+this lane added beside them, left the surface with ADR-0285 §6.
 
 **Driven through a real socket** for ``test_gateway.py``'s reason: what is under
 test is a request the browser makes and a body it renders, and the router, the door
@@ -32,9 +32,6 @@ from ai_assistant.core.types import (
     Evidence,
     GrantScope,
     MemoryKind,
-    MemorySource,
-    ObservationReport,
-    ObservedProposal,
     QuestionState,
     ReportedExtent,
     SuccessorLink,
@@ -70,7 +67,6 @@ _ADDED: dict[str, str] = {
     "/questions/interrupted": "interrupted_questions",
     "/question/answer": "answer",
     "/question/forget": "forget_question",
-    "/observe": "observe",
 }
 
 #: One well-formed body per path, so a case can drive any of them without inventing
@@ -90,7 +86,6 @@ _WELL_FORMED: dict[str, dict[str, Any]] = {
     "/questions/interrupted": {},
     "/question/answer": {"question_id": "q-1", "accept": True},
     "/question/forget": {"question_id": "q-1"},
-    "/observe": {},
 }
 
 
@@ -782,44 +777,22 @@ async def test_forgetting_a_question_reports_whether_there_was_one() -> None:
         assert again == {"destroyed": False}
 
 
-# --- ADR-0077 §8: observing ---------------------------------------------------
+# --- a turn's conversation, the browser's own --------------------------------
 
 
-async def test_the_conversation_is_a_selector_and_an_absent_one_is_not_an_error() -> None:
-    """ADR-0085 §2: ``conversation_id`` is "a **selector rather than a subject**" —
-    "this conversation, or the most recently active" — so an absent one selects and
-    does not refuse."""
-    engine = FakeAssistantEngine()
-    engine.start_conversation("c-1")
-    async with _harness(engine) as one:
-        status, _ = await one.whole("POST", "/observe", {})
-        named_status, _ = await one.whole("POST", "/observe", {"conversation_id": "c-1"})
-
-        assert (status, named_status) == (200, 200)
-        assert engine.calls == [
-            ("observe", {"conversation_id": None}),
-            ("observe", {"conversation_id": "c-1"}),
-        ]
-
-
-@pytest.mark.parametrize("path", ["/observe", "/ask", "/ask/stream"])
-async def test_a_selector_of_the_wrong_type_is_refused_rather_than_read_as_absent(
+@pytest.mark.parametrize("path", ["/ask", "/ask/stream"])
+async def test_a_conversation_of_the_wrong_type_is_refused_rather_than_read_as_absent(
     path: str,
 ) -> None:
     """ADR-0177 §1: "the gateway derives none of them, **defaults none of them**".
 
-    An absent ``conversation_id`` is a selector — "this conversation, or the most
-    recently active" (ADR-0085 §2) — so reading a number as an absence answers a
-    *different* well-formed question instead of refusing a malformed one.
-
-    It matters most where the operation writes: ``observe`` proposes beliefs from the
-    batch it reads, so a mistyped selector silently accepted would put proposals on a
-    conversation nobody named. The two turn entries are here too because the reader is
-    shared and the refusal has to reach the streamed shape as well as the unary ones.
+    An absent ``conversation_id`` runs the turn in a fresh conversation, so reading a
+    number as an absence answers a *different* well-formed question instead of
+    refusing a malformed one — and the turn writes, so it would record an episode on a
+    conversation nobody asked for. Both turn entries are here because the reader is
+    shared and the refusal has to reach the streamed shape as well as the unary one.
     """
-    body: dict[str, Any] = {"conversation_id": 7}
-    if path != "/observe":
-        body["utterance"] = "what is on today"
+    body: dict[str, Any] = {"conversation_id": 7, "utterance": "what is on today"}
     async with _harness() as one:
         status, answered = await one.whole("POST", path, body)
 
@@ -828,63 +801,15 @@ async def test_a_selector_of_the_wrong_type_is_refused_rather_than_read_as_absen
         assert one.engine.calls == [], path
 
 
-@pytest.mark.parametrize("path", ["/observe", "/ask"])
-async def test_a_null_selector_is_the_absence_it_says_it_is(path: str) -> None:
-    """JSON has a way of saying "no selector", and a client using it is not getting
-    the type wrong — so ``null`` reads as the absence the omitted member is."""
-    body: dict[str, Any] = {"conversation_id": None}
-    if path != "/observe":
-        body["utterance"] = "what is on today"
+async def test_a_null_conversation_is_the_absence_it_says_it_is() -> None:
+    """JSON has a way of saying "no conversation", and a client using it is not
+    getting the type wrong — so ``null`` reads as the absence the omitted member is."""
+    body: dict[str, Any] = {"conversation_id": None, "utterance": "what is on today"}
     async with _harness() as one:
-        status, _ = await one.whole("POST", path, body)
-
-        assert status == 200, path
-        assert one.engine.calls[0][1]["conversation_id"] is None, path
-
-
-async def test_an_observation_keeps_its_three_discard_counts_apart() -> None:
-    """They are three different facts — what the producer could not use, what it
-    dropped over its own limit, and what the write path refused for want of support —
-    and a single "not stored" figure would be this adapter deciding they are one.
-
-    ``decision`` absent means **no ruling was ever made**, which is not the same as a
-    ruling that rejected the proposal, so the two are not flattened either.
-    """
-    engine = FakeAssistantEngine()
-    engine.observation = ObservationReport(
-        proposals=(
-            ObservedProposal(
-                content="the owner runs on Tuesdays",
-                kind=MemoryKind.SEMANTIC,
-                step=MemorySource.INFERRED,
-                confidence=0.6,
-                rationale="three Tuesdays in the batch",
-                decision=None,
-                record_id=None,
-                reason="the batch ended before it was ruled on",
-                evidence=(Evidence(content="a run on Tuesday"),),
-            ),
-        ),
-        discarded_unusable=1,
-        discarded_over_limit=2,
-        dropped_unsupported=3,
-        route="a-model",
-        episodes_read=9,
-    )
-    async with _harness(engine) as one:
-        status, body = await one.whole("POST", "/observe", {})
+        status, _ = await one.whole("POST", "/ask", body)
 
         assert status == 200
-        report = body["observation"]
-        assert (
-            report["discarded_unusable"],
-            report["discarded_over_limit"],
-            report["dropped_unsupported"],
-        ) == (1, 2, 3)
-        assert report["route"] == "a-model"
-        assert report["episodes_read"] == 9
-        assert report["proposals"][0]["decision"] is None
-        assert report["proposals"][0]["evidence"] == [{"content": "a run on Tuesday"}]
+        assert one.engine.calls[0][1]["conversation_id"] is None
 
 
 # --- what the gateway refuses of its own -------------------------------------

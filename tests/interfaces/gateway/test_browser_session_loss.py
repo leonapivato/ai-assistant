@@ -119,7 +119,6 @@ _AUDITED: Final = (
     _Listing(
         "connection-log", "#connection-log-button", "**/connections/recent", "connection-log-list"
     ),
-    _Listing("observation", "#observe-button", "**/observe", "observation-body"),
 )
 
 #: The request each case ends the session with: one the page makes for a *different*

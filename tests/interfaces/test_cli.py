@@ -86,8 +86,6 @@ from ai_assistant.core.types import (
     NotificationDispositionKind,
     NotificationPreferences,
     NotificationReach,
-    ObservationReport,
-    ObservedProposal,
     OperationConfirmation,
     PlannerOutput,
     PlanStep,
@@ -5593,333 +5591,28 @@ async def test_forget_conversation_declines_an_id_it_cannot_show(output: StringI
     assert "No conversation has the id" in output.getvalue()
 
 
-# --- observe: the accumulation surface (ADR-0077 §8, §9.8) ---------------
+# --- the observe command is retired (ADR-0285 §6) -------------------------
 
 
-#: The citations behind the default scripted proposal, resolved.
-_TWO_EPISODES = _cited("they asked for metric", "they asked for metric again")
+def test_the_observe_command_is_gone_and_reaches_no_client(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """ADR-0285 §6: "The CLI's ``observe`` command ... is removed."
 
-
-def _proposal(
-    *,
-    decision: LearnDecision | None = LearnDecision.STORED,
-    record_id: str | None = "rec-9",
-    content: str = "the user prefers metric units",
-    reason: str = "fake: configured decision",
-    evidence: tuple[Evidence, ...] = _TWO_EPISODES,
-) -> ObservedProposal:
-    """One entry of an observation report, as the stage builds it.
-
-    ``evidence`` defaults to two resolved citations, because a proposal citing
-    nothing is not a shape a conforming observer can produce (ADR-0077 §5's floor is
-    a minimum of one, two for an ``INFERRED`` belief).
+    Asserted over the registered commands, so a hidden command or an alias that kept
+    the name fails here, and by invoking it: a usage error, with no client opened, so
+    nothing that still answers ``observe`` behind the façade is reached through this
+    surface.
     """
-    return ObservedProposal(
-        content=content,
-        kind=MemoryKind.SEMANTIC,
-        step=MemorySource.OBSERVED,
-        confidence=0.6,
-        rationale="they said so twice",
-        decision=decision,
-        record_id=record_id,
-        reason=reason,
-        evidence=evidence,
-    )
+    group = typer.main.get_command(cli.app)
+    assert isinstance(group, TyperGroup)
+    assert "observe" not in group.commands
 
-
-class _RecordingObserveEngine:
-    """A stand-in façade recording the observation calls the command makes."""
-
-    def __init__(self, report: ObservationReport) -> None:
-        self._report = report
-        self.observed: list[str | None] = []
-
-    async def observe(self, conversation_id: str | None = None) -> ObservationReport:
-        self.observed.append(conversation_id)
-        return self._report
-
-    async def start(self) -> None:
-        """The start-up sweeps, which this stand-in has no stores to sweep."""
-
-    async def aclose(self) -> None:
-        """Nothing to release: this stand-in owns no resource."""
-
-
-class _FailingObserveEngine(_RecordingObserveEngine):
-    """A façade whose observation fails, so the boundary is exercised."""
-
-    def __init__(self) -> None:
-        super().__init__(ObservationReport())
-
-    async def observe(self, conversation_id: str | None = None) -> ObservationReport:
-        self.observed.append(conversation_id)
-        msg = "memory is unavailable"
-        raise MemoryStoreError(msg)
-
-
-def _observed_report(**overrides: object) -> ObservationReport:
-    """A report over one conversation, with one stored belief unless overridden."""
-    fields: dict[str, object] = {
-        "proposals": (_proposal(),),
-        "route": OBSERVER_ROUTE,
-        "conversation_id": "conv-1",
-        "episodes_read": 3,
-    }
-    fields.update(overrides)
-    return ObservationReport(**fields)  # type: ignore[arg-type]  # heterogeneous test kwargs
-
-
-def test_observe_names_what_was_read_and_which_model_read_it(
-    output: StringIO, monkeypatch: pytest.MonkeyPatch
-) -> None:
-    """ADR-0013 §6's owed reporting, on the call where it matters most (ADR-0077 §3).
-
-    The user chooses when their transcript is read, and the surface tells them which
-    provider read it — a stronger form of consent than a setting.
-    """
-    engine = _RecordingObserveEngine(_observed_report())
-    _wire(monkeypatch, engine)
-
+    opened = _wire_recording_opens(monkeypatch, FakeAssistantEngine())
     result = CliRunner().invoke(cli.app, ["observe"])
 
-    assert result.exit_code == 0
-    rendered = _flat(output.getvalue())
-    assert "3 episode(s)" in rendered
-    assert "conv-1" in rendered
-    assert OBSERVER_ROUTE in rendered
-    assert engine.observed == [None], "no id means the engine's own selector"
-
-
-def test_observe_relays_the_conversation_it_was_given(
-    output: StringIO, monkeypatch: pytest.MonkeyPatch
-) -> None:
-    """The id is relayed untouched: whether it names a conversation is the engine's."""
-    engine = _RecordingObserveEngine(_observed_report(conversation_id="conv-2"))
-    _wire(monkeypatch, engine)
-
-    result = CliRunner().invoke(cli.app, ["observe", "conv-2"])
-
-    assert result.exit_code == 0
-    assert engine.observed == ["conv-2"]
-
-
-def test_observe_shows_each_belief_with_its_step_evidence_and_ruling(
-    output: StringIO, monkeypatch: pytest.MonkeyPatch
-) -> None:
-    """Everything the surface owes: what was proposed, on what, and what became of it.
-
-    The **epistemic step** leads rather than the band, because every observed
-    proposal is derived and ``observed`` versus ``inferred`` is the informative half
-    (ADR-0072 §3). The id is shown so the belief is immediately inspectable with
-    ``assistant beliefs`` and destroyable with ``assistant forget``.
-    """
-    _wire(monkeypatch, _RecordingObserveEngine(_observed_report()))
-
-    result = CliRunner().invoke(cli.app, ["observe"])
-
-    assert result.exit_code == 0
-    rendered = _flat(output.getvalue())
-    assert "observed" in rendered
-    assert "semantic" in rendered
-    assert "0.60" in rendered
-    assert "2 episode(s)" in rendered
-    assert "the user prefers metric units" in rendered
-    assert "they said so twice" in rendered
-    assert "Stored a new memory." in rendered
-    assert "rec-9" in rendered
-    assert "assistant beliefs" in rendered
-
-
-def test_observe_renders_a_deferral_in_full_and_claims_nothing_about_the_queue(
-    output: StringIO, monkeypatch: pytest.MonkeyPatch
-) -> None:
-    """**Inverted by ADR-0078**, and inverted to *silence* rather than a new promise.
-
-    It used to say the proposal was "gone when this command ends", which was true —
-    nothing recorded one (ADR-0077 §4, #423). The write stage now parks it, so that
-    sentence became a lie and had to go (ADR-0019).
-
-    **Nothing replaces it**, because there is nothing further this adapter can
-    honestly say. An observer's refusals stay at the observing stage "and no further"
-    (ADR-0078 §7), so ``ObservationReport`` deliberately does not carry the admission,
-    and every candidate replacement is a claim about state it does not hold: "go
-    answer it" is false when the queue refused it, and "the queue was full" is false
-    when the question was parked on a later page, answered, or lapsed. The ruling line
-    says the one thing true on every branch — nothing was stored, an answer is owed.
-
-    The candidate, its evidence and the policy's reason are still rendered in full,
-    for ADR-0077 §4's reason and one ADR-0078 does not remove: resolving
-    ``Provenance.evidence`` into readable text is #431's open half, so this is still
-    the only place a deferred proposal's *warrant* is shown.
-    """
-    report = _observed_report(
-        proposals=(
-            _proposal(
-                decision=LearnDecision.DEFERRED,
-                record_id=None,
-                content="the user works from Lisbon",
-                reason="fake: an inference never silently overrides an assertion",
-            ),
-        )
-    )
-    _wire(monkeypatch, _RecordingObserveEngine(report))
-
-    result = CliRunner().invoke(cli.app, ["observe"])
-
-    assert result.exit_code == 0
-    # Flattened: Rich wraps at the console width, so a long reason spans lines.
-    rendered = _flat(output.getvalue())
-    assert "the user works from Lisbon" in rendered  # the candidate, not just a ruling
-    assert "an inference never silently overrides an assertion" in rendered
-    assert "Not stored — it needs your answer" in rendered
-    assert "gone when this command ends" not in rendered, "that claim is false since ADR-0078"
-    # Every claim about *what became of the question* is absent, because the report
-    # does not carry it and each one is false on some branch.
-    assert "assistant questions" not in rendered, "it may not be on that list"
-    assert "queue was full" not in rendered, "and it may not have been"
-    assert "go answer" not in rendered
-
-
-def test_observe_reports_a_proposal_the_write_path_refused_for_lost_evidence(
-    output: StringIO, monkeypatch: pytest.MonkeyPatch
-) -> None:
-    """A drop is reported, never omitted (ADR-0077 §5).
-
-    No ruling was sought, so no ruling is claimed: the line says the belief was not
-    stored and why, rather than showing a decision nobody made.
-    """
-    report = _observed_report(
-        proposals=(
-            _proposal(
-                decision=None,
-                record_id=None,
-                # The stage's own words for a drop: no ruling was sought, so there is
-                # no policy reason to relay (ADR-0077 §5).
-                reason=(
-                    "the evidence it cited went away between selection and the write, "
-                    "so nothing was stored"
-                ),
-            ),
-        ),
-        dropped_unsupported=1,
-    )
-    _wire(monkeypatch, _RecordingObserveEngine(report))
-
-    result = CliRunner().invoke(cli.app, ["observe"])
-
-    assert result.exit_code == 0
-    rendered = _flat(output.getvalue())
-    assert "Not stored" in rendered
-    assert "the evidence it cited went away" in rendered
-
-
-def test_observe_reports_what_was_thrown_away(
-    output: StringIO, monkeypatch: pytest.MonkeyPatch
-) -> None:
-    """Silence must not read as "there was nothing to learn" (ADR-0022 §3, ADR-0077 §4).
-
-    The three counts stay apart because they answer different questions: what the
-    producer could not use, what it dropped to stay inside its bound, and what the
-    write path refused for evidence that had gone.
-    """
-    report = _observed_report(discarded_unusable=2, discarded_over_limit=1, dropped_unsupported=3)
-    _wire(monkeypatch, _RecordingObserveEngine(report))
-
-    result = CliRunner().invoke(cli.app, ["observe"])
-
-    assert result.exit_code == 0
-    rendered = _flat(output.getvalue())
-    assert "Discarded 6" in rendered
-    assert "2 unusable" in rendered
-    assert "1 over the per-pass limit" in rendered
-    assert "3 whose evidence went away" in rendered
-
-
-def test_observe_says_so_when_the_batch_justified_no_belief(
-    output: StringIO, monkeypatch: pytest.MonkeyPatch
-) -> None:
-    """A pass that proposed nothing is a normal outcome, reported as one (ADR-0022 §4)."""
-    _wire(monkeypatch, _RecordingObserveEngine(_observed_report(proposals=())))
-
-    result = CliRunner().invoke(cli.app, ["observe"])
-
-    assert result.exit_code == 0
-    assert "Nothing in them was worth believing" in output.getvalue()
-
-
-def test_observe_does_not_claim_a_route_when_no_model_was_asked(
-    output: StringIO, monkeypatch: pytest.MonkeyPatch
-) -> None:
-    """A window whose episodes have all gone reaches no provider (ADR-0077 §9.7).
-
-    Printing a route here would claim a read that never happened — the one thing §3's
-    reporting exists to make truthful.
-    """
-    report = ObservationReport(conversation_id="conv-1", route=None)
-    _wire(monkeypatch, _RecordingObserveEngine(report))
-
-    result = CliRunner().invoke(cli.app, ["observe"])
-
-    assert result.exit_code == 0
-    rendered = _flat(output.getvalue())
-    assert OBSERVER_ROUTE not in rendered
-    assert "Nothing to observe" in rendered
-    assert "no model was asked" in rendered
-
-
-def test_observe_with_nothing_to_observe_at_all_says_so(
-    output: StringIO, monkeypatch: pytest.MonkeyPatch
-) -> None:
-    """An empty store points the user at the command that fills it."""
-    _wire(monkeypatch, _RecordingObserveEngine(ObservationReport()))
-
-    result = CliRunner().invoke(cli.app, ["observe"])
-
-    assert result.exit_code == 0
-    assert "No conversation to observe" in output.getvalue()
-
-
-def test_observe_renders_a_failure_rather_than_a_traceback(
-    output: StringIO, monkeypatch: pytest.MonkeyPatch
-) -> None:
-    """One error boundary spans every stage, mapping to a non-zero code (ADR-0042 §7)."""
-    _wire(monkeypatch, _FailingObserveEngine())
-
-    result = CliRunner().invoke(cli.app, ["observe"])
-
-    assert result.exit_code == cli._EXIT_ERROR
-    assert "Error" in output.getvalue()
-    assert "memory is unavailable" in output.getvalue()
-
-
-async def test_an_observed_belief_is_immediately_inspectable(output: StringIO) -> None:
-    """End to end over a real engine: observe, then read it back (ADR-0077 §9.8).
-
-    The claim the surface makes — "see them with ``assistant beliefs``" — asserted
-    rather than promised, over the same store the observation wrote to. The
-    provenance a reader gets is the derived band, so ``beliefs`` shows the belief
-    with the standing it was formed at.
-    """
-    engine, conversations = _conversation_engine()
-    try:
-        await cli._drive_turn(
-            engine,
-            "hello",
-            timeout=timedelta(seconds=5),
-            approver=lambda _c: True,
-            confirm_operation=_no_routed_card,
-        )
-        conversation = (await conversations.recent())[0].id
-
-        assert await cli._drive_observe(engine, conversation) == 0
-        assert "1 belief(s) proposed" in output.getvalue()
-
-        assert await cli._drive_beliefs(engine, bands=None, kinds=None, limit=50, offset=0) == 0
-    finally:
-        await engine.aclose()
-
-    rendered = output.getvalue()
-    assert "derived" in rendered, "an observed belief reads back in the derived band"
+    assert result.exit_code == 2
+    assert opened == []
 
 
 # --- lost evidence, rendered (ADR-0077 §6, §9.8) ------------------------
@@ -5994,131 +5687,6 @@ def test_the_forget_prompt_shows_the_warrant_the_user_is_judging(output: StringI
     assert "About to forget this belief" in rendered
     assert "they asked for metric units" in rendered
     assert "an item of evidence stood here and is gone" in rendered
-
-
-async def test_an_observed_belief_reads_back_with_the_episodes_behind_it(
-    output: StringIO,
-) -> None:
-    """End to end: observe, then read the belief's own evidence back (ADR-0077 §6, §9.8).
-
-    The claim the ``observe`` surface makes — that what it stored is immediately
-    inspectable — asserted against the citations, not merely the row. This is
-    ADR-0073 §4's gate discharged: a derived belief now reaches the user with the
-    warrant it was formed from.
-    """
-    engine, conversations = _conversation_engine()
-    try:
-        await cli._drive_turn(
-            engine,
-            "hello",
-            timeout=timedelta(seconds=5),
-            approver=lambda _c: True,
-            confirm_operation=_no_routed_card,
-        )
-        conversation = (await conversations.recent())[0].id
-        assert await cli._drive_observe(engine, conversation) == 0
-
-        # The command's own default: every kind except episodic, because an episode
-        # is the evidence a belief is made of rather than a belief (ADR-0074 §6).
-        page = await engine.beliefs(kinds=list(cli._DEFAULT_BELIEF_KINDS))
-        assert len(page) == 1
-        assert page[0].band is BeliefBand.DERIVED
-        assert page[0].evidence_count >= 1
-        assert page[0].lost_evidence == 0
-        assert page[0].unsupported is False
-
-        # The listing carries no citations at all (ADR-0085 §4a), so the warrant
-        # comes from the single-belief view — which is the split being exercised.
-        detail = await engine.belief(page[0].id)
-        assert detail is not None
-        cli._render_belief(detail)
-    finally:
-        await engine.aclose()
-
-    assert "Because:" in output.getvalue()
-
-
-def test_a_deferral_shows_the_episodes_it_rests_on(
-    output: StringIO, monkeypatch: pytest.MonkeyPatch
-) -> None:
-    """ADR-0077 §4: a reported deferral carries the candidate, **its citations**, the reason.
-
-    The citations have to be *here* because nothing persists a deferred proposal —
-    there is no later belief-detail view through which its warrant could ever be
-    inspected, so a count would be the last word on a belief the user is being asked
-    to act on. Resolved content, never an id (ADR-0073 §4's floor).
-    """
-    report = _observed_report(
-        proposals=(
-            _proposal(
-                decision=LearnDecision.DEFERRED,
-                record_id=None,
-                content="the user works from Lisbon",
-                reason="fake: an inference never silently overrides an assertion",
-                evidence=_cited("I'm in Lisbon this month", "the Lisbon office again"),
-            ),
-        )
-    )
-    _wire(monkeypatch, _RecordingObserveEngine(report))
-
-    result = CliRunner().invoke(cli.app, ["observe"])
-
-    assert result.exit_code == 0
-    rendered = _flat(output.getvalue())
-    assert "I'm in Lisbon this month" in rendered
-    assert "the Lisbon office again" in rendered
-    assert "rec-" not in rendered, "no citation id reaches the terminal"
-
-
-def test_a_dropped_proposal_tombstones_the_evidence_that_went_away(
-    output: StringIO, monkeypatch: pytest.MonkeyPatch
-) -> None:
-    """The citation that vanished is why nothing was stored, so it is shown as gone.
-
-    Echoing the copy still sitting in the pass's batch would print back content the
-    user may have just destroyed with ``forget-conversation``; dropping it would hide
-    a citation, which ADR-0073 §4's floor forbids. A tombstone is the only honest
-    third option.
-    """
-    report = _observed_report(
-        proposals=(
-            _proposal(
-                decision=None,
-                record_id=None,
-                reason="the evidence it cited went away between selection and the write",
-                evidence=(_cited("a surviving episode")[0], _GONE),
-            ),
-        ),
-        dropped_unsupported=1,
-    )
-    _wire(monkeypatch, _RecordingObserveEngine(report))
-
-    result = CliRunner().invoke(cli.app, ["observe"])
-
-    assert result.exit_code == 0
-    rendered = _flat(output.getvalue())
-    assert "a surviving episode" in rendered
-    assert "an episode stood here and is gone" in rendered
-
-
-def test_a_stored_belief_points_at_its_own_view_rather_than_reprinting_the_transcript(
-    output: StringIO, monkeypatch: pytest.MonkeyPatch
-) -> None:
-    """A kept belief has a later detail view; a deferral does not — hence the split.
-
-    Printing every episode behind every accepted belief would reprint the transcript
-    the observation was distilled *from*, which is the opposite of what a summary is
-    for. The id and ``assistant beliefs`` are the route to the warrant instead.
-    """
-    _wire(monkeypatch, _RecordingObserveEngine(_observed_report()))
-
-    result = CliRunner().invoke(cli.app, ["observe"])
-
-    assert result.exit_code == 0
-    rendered = _flat(output.getvalue())
-    assert "they asked for metric" not in rendered, "a stored belief does not reprint its episodes"
-    assert "rec-9" in rendered
-    assert "assistant beliefs" in rendered
 
 
 # --- the deferred-question surface (ADR-0078 §8, §9) ----------------------
@@ -8094,16 +7662,13 @@ def test_the_amend_scope_option_names_every_use_the_type_admits(
 def _id_invocations(value: str) -> tuple[tuple[str, list[str]], ...]:
     """Every parameter on this surface that carries an identifier, invoked with ``value``.
 
-    Six, not the five #705 enumerates: ``observe``'s is an *optional positional*, so
-    it reads like a flagless default rather than an id and was missed. Named so a
-    failure says which command failed.
+    Named so a failure says which command failed.
     """
     return (
         ("forget", ["forget", value, "--yes"]),
         ("answer", ["answer", value, "--accept"]),
         ("forget-question", ["forget-question", value]),
         ("forget-conversation", ["forget-conversation", value, "--yes"]),
-        ("observe", ["observe", value]),
         ("ask --conversation", ["ask", "hello", "--conversation", value, "--yes"]),
         ("dismiss", ["dismiss", value]),
         ("forget-notification", ["forget-notification", value]),
@@ -8200,17 +7765,13 @@ def test_an_omitted_optional_id_still_means_no_conversation_was_named(
     """``None`` is the "no conversation named" state and must survive the callback.
 
     The one thing ``_present_optional_id`` must not do is turn an absent id into a
-    blank one — which would make ``assistant observe`` refuse itself, and
-    ``assistant ask`` unable to start a conversation at all.
+    blank one — which would leave ``assistant ask`` unable to start a conversation at
+    all.
     """
     engine = FakeAssistantEngine()
     _wire(monkeypatch, engine)
 
-    assert CliRunner().invoke(cli.app, ["observe"]).exit_code == 0
     assert CliRunner().invoke(cli.app, ["ask", "hello", "--yes"]).exit_code == 0
-    assert [call for call in engine.calls if call[0] == "observe"] == [
-        ("observe", {"conversation_id": None})
-    ]
     streamed = [call for call in engine.calls if call[0] == "converse_streaming"]
     assert [call[1]["conversation_id"] for call in streamed] == [None]
 
@@ -8229,7 +7790,7 @@ def test_every_id_parameter_on_the_surface_carries_an_id_callback() -> None:
     parameter.** An id spelled without an ``_id`` suffix — as ``ask``'s
     ``--conversation`` is — has to be recognised by name here, and a second such
     spelling would slip the walk. That residual is why the behavioural cases above
-    enumerate the six explicitly rather than deriving them from this.
+    enumerate them explicitly rather than deriving them from this.
 
     **ADR-0250 §11's two keywords are the second and third such spellings**, and they
     are named below rather than left to slip: ``ask --answering`` names a question and
@@ -8269,7 +7830,6 @@ def test_every_id_parameter_on_the_surface_carries_an_id_callback() -> None:
         "forget-conversation:conversation_id": True,
         "forget-notification:notification_id": True,
         "forget-question:question_id": True,
-        "observe:conversation_id": True,
         "remember-recipients:decision_id": True,
         "revoke-destination-trust:record_id": True,
         "revoke-authorization:authorization_id": True,
