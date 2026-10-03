@@ -3898,7 +3898,7 @@ class EpisodeProcessingRecord(BaseModel):
     """
 
     model_config = ConfigDict(frozen=True, extra="forbid")
-    schema_version: Literal[5] = 5
+    schema_version: Literal[6] = 6
     activation_id: Identifier
     started_at: UtcInstant
     ended_at: UtcInstant | None = None

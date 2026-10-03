@@ -2409,7 +2409,9 @@ from ai_assistant.wire.errors import (
 #: 71: ADR-0286 §15 lane 1 makes ``EpisodeProcessingRecord.status``, ``reason`` and
 #:     ``ended_at`` optional (an open record), and adds ``hub_stopped`` to
 #:     ``ProcessingReason`` and to ``ControllerRule``, on the wire-carried record.
-PROTOCOL_VERSION: Final[int] = 71
+#: 72: ADR-0286 §15 lane 2 advances ``EpisodeProcessingRecord.schema_version`` to
+#:     ``Literal[6]`` (§13:1), on the wire-carried record.
+PROTOCOL_VERSION: Final[int] = 72
 
 #: ADR-0085 §8a: "The correlation id is a UUID string and is at most 36 bytes.
 #: Bounding it is what makes the reserve a constant rather than an aspiration; a

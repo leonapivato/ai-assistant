@@ -1372,7 +1372,7 @@ class MemoryStoreContract:
         got = await store.get("understood")
         assert isinstance(got, EpisodicMemory)
         assert got.processing_record is not None
-        assert got.processing_record.schema_version == 5
+        assert got.processing_record.schema_version == 6
         assert got.processing_record.understanding == (version,)
         assert got.processing_record.understanding[0].meaning_referents[0].id == " "
         assert got.processing_record.understanding_omitted is None

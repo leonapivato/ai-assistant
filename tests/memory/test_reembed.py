@@ -42,6 +42,7 @@ from ai_assistant.core.types import (
 )
 from ai_assistant.memory import SqliteMemoryStore
 from ai_assistant.memory import reembed as reembed_module
+from ai_assistant.memory._episode_format import EPISODE_RECORD_FORMAT
 from ai_assistant.memory.reembed import (
     BACKUP_SUFFIX,
     WORK_SUFFIX,
@@ -1260,7 +1261,7 @@ async def test_reembedding_preserves_processing_record_marker_and_digest(tmp_pat
     assert before is not None
     outcome = await Reembedder(store=path, embedder=HashingEmbedder(dimensions=_NEW)).run()
     assert outcome.swapped
-    assert _read(path, "SELECT version FROM episode_record_format") == [(6,)]
+    assert _read(path, "SELECT version FROM episode_record_format") == [(EPISODE_RECORD_FORMAT,)]
     opened = SqliteMemoryStore(
         traces_sink=FakeTraceSink(), path=path, embedder=HashingEmbedder(dimensions=_NEW)
     )
