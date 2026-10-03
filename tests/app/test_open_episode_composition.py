@@ -42,6 +42,7 @@ from ai_assistant.core.types import (
     GoalAssociation,
     Idempotency,
     MemoryWrite,
+    MemoryWriteMode,
     NewConversation,
     PlacementReach,
     PlacementSetter,
@@ -453,6 +454,40 @@ async def test_an_append_runs_inside_the_pass_deadline(composed: Composed) -> No
     processing = _frozen(await composed.stored(addresses[0]))
     assert processing.status is not ProcessingStatus.COMPLETED
     assert processing.stages[-1].due is ControllerRule.STAGE_TIMED_OUT
+
+
+async def test_the_admission_write_runs_inside_the_calls_deadline(
+    composed: Composed, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """ADR-0274 §7, ADR-0286 §2:1: an event's budget starts at receiver admission, so an
+    admission insert the store never answers is cut off there; the event times out as
+    its kind classifies the expiry, and the insert that never landed leaves nothing."""
+    addresses: list[str] = []
+    original = composed.memory.write_atomic
+
+    async def write_atomic(writes: Sequence[MemoryWrite]) -> Sequence[str]:
+        if not addresses and any(
+            write.mode is MemoryWriteMode.INSERT_IF_ABSENT for write in writes
+        ):
+            addresses.append(writes[0].record.id)
+            await asyncio.Event().wait()
+        return await original(writes)
+
+    monkeypatch.setattr(composed.memory, "write_atomic", write_atomic)
+
+    with pytest.raises(ChannelProcessingTimeoutError):
+        await asyncio.wait_for(
+            composed.engine.receive(
+                ChannelInput(target=_SENSOR, payload=TextChannelPayload(text="eco mode")),
+                reply=None,
+                timeout=timedelta(milliseconds=300),
+            ),
+            timeout=5,
+        )
+
+    (address,) = addresses
+    assert await composed.stored(address) is None
+    assert not composed.writer.holds(address)
 
 
 async def _parked(composed: Composed) -> tuple[str, str, Any]:

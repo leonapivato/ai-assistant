@@ -297,7 +297,7 @@ class ActivationWriter:
         if progress is not None:
             await self._settle(progress, drain)
 
-    async def close_open(self, *, stage_limit: int) -> None:
+    async def close_open(self, *, stage_limit: int, payload_limit: int) -> None:
         """Close every open episode no capture of this process holds (ADR-0286 §7).
 
         Each is frozen ``interrupted`` / ``hub_stopped`` by an end entry due
@@ -305,7 +305,9 @@ class ActivationWriter:
         placement and ``Provenance.derived_from_external`` stay as stored, no archive
         entry is written, and ``record_turn`` is called with no delivery only where
         the episode is on a conversation's channel; a ``None`` from it deletes the
-        episode (§7:3).
+        episode (§7:3). The closed record is measured against ADR-0275 §9:1's bound
+        as every write of an episode is (§3:6), and one that exceeds it is deleted
+        by its id as a capture failure (§5:2).
 
         Raises:
             MemoryStoreError: If the store cannot be read or written (§7:4).
@@ -316,12 +318,14 @@ class ActivationWriter:
             page = await self._memory.open_episodes(after=after, limit=_OPEN_PAGE)
             for entry in page:
                 if not self.holds(entry.record.id):
-                    await self._close(entry.record, stage_limit=stage_limit)
+                    await self._close(
+                        entry.record, stage_limit=stage_limit, payload_limit=payload_limit
+                    )
             if len(page) < _OPEN_PAGE:
                 return
             after = page[-1].number
 
-    async def _close(self, stored: EpisodicMemory, *, stage_limit: int) -> None:
+    async def _close(self, stored: EpisodicMemory, *, stage_limit: int, payload_limit: int) -> None:
         processing = stored.processing_record
         if processing is None or not processing.is_open:  # pragma: no cover — the read's own
             return
@@ -352,6 +356,15 @@ class ActivationWriter:
         )
         closed = stored.model_copy(update={"processing_record": frozen})
         closed = closed.model_copy(update={"content": episode_content(closed)})
+        try:
+            _bounded(closed, payload_limit)
+        except ValueError:
+            # §3:6 on the freezing write the close is (§7:3): a capture failure, so
+            # the episode is deleted by its id (§5:2) rather than left open for every
+            # later start to fail on again.
+            capture_loss("close", "invalid_or_oversized")
+            await self._memory.delete(stored.id)
+            return
         await self._memory.write_atomic(
             [
                 MemoryWrite(

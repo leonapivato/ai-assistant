@@ -783,16 +783,8 @@ async def test_a_close_under_a_lowered_stage_limit_still_extends_the_stored_reco
     for entry in stored:
         state.stages.append(entry)
         await wiring.append(state)
-    restarted = ActivationWriter(
-        memory=wiring.memory,
-        conversations=wiring.conversations,
-        archive=wiring.archive,
-        archive_enabled=True,
-        retention=timedelta(days=30),
-        now=lambda: _AT,
-    )
 
-    await restarted.close_open(stage_limit=2)
+    await _restarted(wiring).close_open(stage_limit=2, payload_limit=1024)
 
     closed = await wiring.memory.get(_ADDRESS)
     assert isinstance(closed, EpisodicMemory)
@@ -803,3 +795,45 @@ async def test_a_close_under_a_lowered_stage_limit_still_extends_the_stored_reco
     assert processing.stages[:2] == (stored[0], stored[2])
     assert processing.stages[-1].due is ControllerRule.HUB_STOPPED
     assert processing.stages_elided == 1
+
+
+def _restarted(wiring: Wiring) -> ActivationWriter:
+    """A second process's writer over the same stores, holding no capture."""
+    return ActivationWriter(
+        memory=wiring.memory,
+        conversations=wiring.conversations,
+        archive=wiring.archive,
+        archive_enabled=True,
+        retention=timedelta(days=30),
+        now=lambda: _AT,
+    )
+
+
+async def test_a_close_that_would_exceed_the_record_bound_deletes_the_episode() -> None:
+    """ADR-0286 §3:6, §7:3: the close is a freezing write, measured on the whole record
+    it would store; one past ADR-0275 §9:1's bound is a capture failure, and the episode
+    is deleted by its id (§5:2) rather than written or left open."""
+    wiring = Wiring()
+    state = await wiring.state()
+    await wiring.admit(state)
+    opened = await wiring.memory.get(_ADDRESS)
+    assert isinstance(opened, EpisodicMemory)
+    processing = opened.processing_record
+    assert processing is not None
+    assert isinstance(processing.trigger, RecordedChannelTrigger)
+    trigger = processing.trigger.model_copy(
+        update={"payload": processing.trigger.payload.model_copy(update={"text": "x" * 40_000})}
+    )
+    large = opened.model_copy(
+        update={"processing_record": processing.model_copy(update={"trigger": trigger})}
+    )
+    # A dead pass's open episode holding a long input: written fresh, since the store
+    # refuses to rewrite a stored trigger in place.
+    await wiring.memory.delete(_ADDRESS)
+    await wiring.memory.write_atomic([MemoryWrite(record=large)])
+
+    with capture_logs() as logs:
+        await _restarted(wiring).close_open(stage_limit=8, payload_limit=1024)
+
+    assert [(row["stage"], row["reason"]) for row in logs] == [("close", "invalid_or_oversized")]
+    assert await wiring.memory.export() == []
