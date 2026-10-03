@@ -242,20 +242,21 @@ class ActivationWriter:
             if state.capture is not None:
                 await self._settle(state.capture, drain)
             return state.degraded_report()
-        if state.capture is None:
-            # Cancelled at the admission barrier, so no processing ran and none will:
-            # the admission write is still owed ahead of the freeze (§2:1).
-            await self.admit(state, payload_limit=payload_limit)
-        progress = state.capture
-        if progress is None:
-            # The admission write could not be made, and logged why (§2).
-            return state.degraded_report()
         writes = _Writes()
         conversation_id = state.conversation_id
         try:
+            if state.capture is None:
+                # Cancelled at the admission barrier, so no processing ran and none
+                # will: the admission write is still owed ahead of the freeze (§2:1).
+                # It sits inside this scope, so a cancellation that lands after its
+                # insert committed still ends the capture and deletes the episode.
+                await self.admit(state, payload_limit=payload_limit)
+            if state.capture is None:
+                # The admission write could not be made, and logged why (§2).
+                return state.degraded_report()
             return await self._freeze(
                 state,
-                progress,
+                state.capture,
                 processing,
                 writes,
                 payload_limit=payload_limit,
@@ -263,17 +264,28 @@ class ActivationWriter:
                 drain=drain,
             )
         finally:
-            try:
-                if progress.frozen:
-                    if conversation_id is not None and not writes.verified:
-                        await drain(self._fence(conversation_id, progress, writes))
-                elif not progress.ended:
-                    # Cut short before the freeze was confirmed — cancelled, timed out
-                    # or raised: §5:2's capture failure.
-                    capture_loss("freeze", "unconfirmed")
-                    await self._end(progress, drain)
-            finally:
-                self._settled(progress)
+            if state.capture is not None:
+                await self._finished(state.capture, conversation_id, writes, drain)
+
+    async def _finished(
+        self,
+        progress: EpisodeProgress,
+        conversation_id: str | None,
+        writes: _Writes,
+        drain: Callable[[Awaitable[None]], Awaitable[None]],
+    ) -> None:
+        """Fence a frozen capture or end an unfrozen one, then stop tracking it."""
+        try:
+            if progress.frozen:
+                if conversation_id is not None and not writes.verified:
+                    await drain(self._fence(conversation_id, progress, writes))
+            elif not progress.ended:
+                # Cut short before the freeze was confirmed — cancelled, timed out or
+                # raised: §5:2's capture failure.
+                capture_loss("freeze", "unconfirmed")
+                await self._end(progress, drain)
+        finally:
+            self._settled(progress)
 
     async def abandon(
         self,
@@ -314,9 +326,16 @@ class ActivationWriter:
         if processing is None or not processing.is_open:  # pragma: no cover — the read's own
             return
         now = self._now()
-        # The bound is the record's own where it already bit, and the configured one
-        # otherwise: the record does not carry its limit (ADR-0280 §6:6).
-        limit = len(processing.stages) if processing.stages_elided else stage_limit
+        # The bound is the record's own where it already bit. Otherwise it is the
+        # configured one, but never below the entries already stored: the record does
+        # not carry its limit (ADR-0280 §6:6), and under a setting lowered since the
+        # pass wrote them, a shorter bound is a revision that does not extend the
+        # stored record (§3:3), which the store refuses at every start.
+        limit = (
+            len(processing.stages)
+            if processing.stages_elided
+            else max(stage_limit, len(processing.stages))
+        )
         stages, elided = StageRecord(list(processing.stages)).bounded(
             limit, ending=(ControllerRule.HUB_STOPPED, now)
         )
@@ -427,21 +446,21 @@ class ActivationWriter:
 
         Answers ``True`` where the write returned, ``False`` where capture ended, and
         ``None`` where the write's outcome is not known: the next read then accepts
-        exactly ``revision`` and nothing else.
+        ``revision`` as well as the record last written, since either is what that
+        write leaves stored, and the write after it is conditioned on the read.
         """
         if progress.forgotten:
             # ADR-0286 §8:2: the next write after the mark writes nothing.
             capture_loss(stage, "forgotten")
             await self._end(progress, drain)
             return False
-        expected = progress.written if progress.uncertain is None else progress.uncertain
         refusal: str | None
         try:
             stored = await self._memory.get(progress.address)
         except Exception:
             stored, refusal = None, "read_failed"
         else:
-            refusal = _refusal(stored, expected, revision)
+            refusal = _refusal(stored, _expected(stored, progress), revision)
         if stored is None or refusal is not None:
             capture_loss(stage, refusal or "mismatch")
             await self._end(progress, drain)
@@ -716,6 +735,21 @@ def _refusal(
         return "mismatch"
     if not episode_extends(expected, revision):
         return "not_an_extension"
+    return None
+
+
+def _expected(stored: MemoryRecord | None, progress: EpisodeProgress) -> EpisodicMemory | None:
+    """The record the writer may continue from, where ``stored`` is exactly it (§3:4).
+
+    That is the record it last wrote, or, after a write whose outcome it does not
+    know, the record that write carried: a write cut short may or may not have landed,
+    and either record is one this capture wrote. ``None`` where it is neither.
+    """
+    if stored is None:
+        return None
+    for candidate in (progress.uncertain, progress.written):
+        if candidate is not None and _carries(stored, candidate):
+            return candidate
     return None
 
 

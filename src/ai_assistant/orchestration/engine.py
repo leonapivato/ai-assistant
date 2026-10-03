@@ -5926,10 +5926,30 @@ class Engine:
         """Extend this worker's open episode as a stage ends (ADR-0286 §3, §9).
 
         A pass no channel admitted — an internal call — has no episode to extend.
+
+        **It runs inside the pass's own deadline** (§3:8): a turn's or an event's
+        append is bounded by the deadline its stages run under, and one the deadline
+        cuts short is dropped rather than raised, so it neither fails processing nor
+        takes the stage's place in the record. The stage after it meets the deadline
+        itself, and is classified as that pass kind classifies its expiry. What the
+        cut-off append would have added the next write carries, the freeze at the
+        latest: the writer's account already holds a write whose outcome it does not
+        know, and a delete it started runs on through its drain. A resume holds no
+        pass deadline — its ``timeout`` is each seam attempt's budget (ADR-0029 §4) —
+        so its appends are bounded as its other store calls are.
         """
         state = active_state()
-        if state is not None:
+        if state is None:
+            return
+        working = state.working
+        if not isinstance(working, _ActivationPass):
             await self._activation_coordinator.append(state)
+            return
+        try:
+            async with asyncio.timeout_at(working.deadline):
+                await self._activation_coordinator.append(state)
+        except TimeoutError:
+            return
 
     async def cancel_read(self, token: ContinuationToken, /) -> ReadCancellation:
         """Withdraw a parked read's question, or interrupt the read it dispatched.

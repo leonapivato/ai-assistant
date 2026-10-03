@@ -26,11 +26,13 @@ from ai_assistant.core.types import (
     EpisodicMemory,
     ExchangeDisposition,
     MemoryWrite,
+    MemoryWriteMode,
     Modality,
     NewConversation,
     ParkedBinding,
     PlacementReach,
     PlacementSetter,
+    ProcessingReason,
     RecordedChannelTrigger,
     SpokenDelivery,
     SpokenDeliveryState,
@@ -700,3 +702,104 @@ async def test_the_write_after_a_forget_mark_writes_nothing_and_deletes() -> Non
     assert await wiring.memory.export() == []
     assert wiring.archive.recorded == {}
     assert await wiring.last_turn_at(state) is None
+
+
+class AdmitsThenCancels(FakeMemoryStore):
+    """A store whose admission insert commits before its caller is cancelled."""
+
+    async def write_atomic(self, writes: Sequence[MemoryWrite]) -> Sequence[str]:
+        written = await super().write_atomic(writes)
+        if any(write.mode is MemoryWriteMode.INSERT_IF_ABSENT for write in writes):
+            raise asyncio.CancelledError
+        return written
+
+
+async def test_a_cancellation_after_the_fallback_admission_commits_leaves_no_episode() -> None:
+    """ADR-0286 §5:2: an activation cancelled at the admission barrier is admitted by its
+    finalization; a cancellation that lands once that insert committed still ends the
+    capture, deletes the episode by its id and stops tracking it."""
+    wiring = Wiring(memory=AdmitsThenCancels(now=lambda: _AT))
+    state = await wiring.state()
+
+    with pytest.raises(asyncio.CancelledError):
+        await _freeze(wiring, state)
+
+    assert await wiring.memory.export() == []
+    assert not wiring.writer.holds(_ADDRESS)
+    assert wiring.archive.recorded == {}
+    assert await wiring.last_turn_at(state) is None
+
+
+class LosesOneAppend(FakeMemoryStore):
+    """A store whose next replacing write fails without committing anything."""
+
+    def __init__(self) -> None:
+        super().__init__(now=lambda: _AT)
+        self.lose = False
+
+    async def write_atomic(self, writes: Sequence[MemoryWrite]) -> Sequence[str]:
+        if self.lose and any(write.mode is MemoryWriteMode.IF_UNCHANGED for write in writes):
+            self.lose = False
+            raise MemoryStoreError("private store diagnostics")
+        return await super().write_atomic(writes)
+
+
+async def test_a_write_whose_outcome_is_unknown_and_did_not_land_is_continued_from() -> None:
+    """ADR-0286 §3:4: after a write whose outcome it does not know, the writer continues
+    from the record that write carried or from the record it last wrote — here the
+    second, since the write did not land — and the freeze carries every entry."""
+    memory = LosesOneAppend()
+    wiring = Wiring(memory=memory)
+    state = await wiring.state()
+    await wiring.admit(state)
+    state.stages.append(
+        _entry(ControllerStage.BEGIN_CONVERSATION, ControllerRule.CONVERSATION_UNRESOLVED)
+    )
+    memory.lose = True
+
+    with capture_logs() as logs:
+        await wiring.append(state)
+    state.stages.end(ControllerRule.NOTHING_DUE, _AT)
+    report = await _freeze(wiring, state)
+
+    assert [(row["stage"], row["reason"]) for row in logs] == [("append", "failed")]
+    assert report.state == "recorded"
+    frozen = await wiring.memory.get(_ADDRESS)
+    assert isinstance(frozen, EpisodicMemory)
+    assert frozen.processing_record == state.processing(_AT, None)
+
+
+async def test_a_close_under_a_lowered_stage_limit_still_extends_the_stored_record() -> None:
+    """ADR-0286 §7: a restart whose configured stage limit is below the entries a dead
+    pass stored closes the episode anyway, under the shortest bound that extends it."""
+    wiring = Wiring()
+    state = await wiring.state()
+    await wiring.admit(state)
+    stored = (
+        _entry(ControllerStage.BEGIN_CONVERSATION, ControllerRule.CONVERSATION_UNRESOLVED),
+        _entry(ControllerStage.ASSOCIATE_GOAL, ControllerRule.ASSOCIATION_DUE),
+        _entry(ControllerStage.COMPOSE, ControllerRule.REPLY_OWED),
+    )
+    for entry in stored:
+        state.stages.append(entry)
+        await wiring.append(state)
+    restarted = ActivationWriter(
+        memory=wiring.memory,
+        conversations=wiring.conversations,
+        archive=wiring.archive,
+        archive_enabled=True,
+        retention=timedelta(days=30),
+        now=lambda: _AT,
+    )
+
+    await restarted.close_open(stage_limit=2)
+
+    closed = await wiring.memory.get(_ADDRESS)
+    assert isinstance(closed, EpisodicMemory)
+    processing = closed.processing_record
+    assert processing is not None
+    assert not processing.is_open
+    assert processing.reason is ProcessingReason.HUB_STOPPED
+    assert processing.stages[:2] == (stored[0], stored[2])
+    assert processing.stages[-1].due is ControllerRule.HUB_STOPPED
+    assert processing.stages_elided == 1
