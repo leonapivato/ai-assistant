@@ -1,6 +1,6 @@
 # 160. The episodic bound meets the belief budget, and post-hoc attribution replaces the ablation arm
 
-- Status: Partially superseded by ADR-0162 (§1's episodic bound value of 15, and §1's clause fixing the evidence that moves it)
+- Status: Partially superseded by ADR-0162 (§1's episodic bound value of 15, and §1's clause fixing the evidence that moves it) and ADR-0285 (§3:2–§3:7 and §4:1–§4:9)
 - Date: 2026-08-16
 - **Partially supersedes:**
   [ADR-0158](0158-an-episode-may-supplement-the-answering-prompt-and-never-shares-the-belief-budget.md)
@@ -95,6 +95,12 @@
   ADR-0162 lands **in the same change as this record**, the existence condition
   ADR-0083 §15 states. Appended per ADR-0070 §1: no text below is rewritten, and §1's
   two clauses stand exactly as written. Refs #1210, #1029.
+- Partially superseded: 2026-10-03 by ADR-0285 — §3:2–§3:7 and §4:1–§4:9, the scored
+  benchmark run and its retraction predicate, are replaced entire: the benchmark harness
+  is deleted, and a resumed benchmark effort decides its own measurements (ADR-0285 §8).
+  §3:1 and every other clause stand. These replacements take effect on ratification of
+  ADR-0285. This reciprocal header record accompanies the numbered draft under ADR-0070
+  and ADR-0082; prior supersessions and the ratified body below are preserved.
 
 ## Context
 

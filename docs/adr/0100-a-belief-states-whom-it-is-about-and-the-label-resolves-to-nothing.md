@@ -1,6 +1,6 @@
 # 100. A belief states whom it is about when that is not the owner, and the label resolves to nothing
 
-- Status: Accepted
+- Status: Partially superseded by ADR-0285 (§5:1–§5:4)
 - Date: 2026-08-04
 - **Note (2026-08-04): ratified.** `Proposed` → `Accepted`, in the separate lane
   #633 requires, after **both** required reviews came back green on the content
@@ -105,6 +105,12 @@
   hold beliefs about other people. §3's reading of an unstated subject is
   therefore a **reading**, stated as one, and §8 bounds what it can honestly
   promise for records written before the field existed.
+- Partially superseded: 2026-10-03 by ADR-0285 — §5:1–§5:4 are replaced entire: there is
+  no observer to refuse a subject, no `ObservationOutcome` to count it and no `Observer`
+  suite to pin it (ADR-0285 §1). §4 and §9 stand for every producer that remains. These
+  replacements take effect on ratification of ADR-0285. This reciprocal header record
+  accompanies the numbered draft under ADR-0070 and ADR-0082; prior supersessions and
+  the ratified body below are preserved.
 
 ## Context
 

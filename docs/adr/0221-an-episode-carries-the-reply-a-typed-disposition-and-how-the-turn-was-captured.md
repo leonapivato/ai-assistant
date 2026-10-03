@@ -1,6 +1,6 @@
 # 221. An episode carries the reply, a typed disposition, and how the turn was captured
 
-- Status: Partially superseded by ADR-0223 (§6's first clause, and within it only its first sentence — *"Capture writes the captured episode's `Provenance.derived_from_external` exactly as it does today — it is not set, and takes its `False` default"*. Capture now stamps that field, from the turn's own selection and threaded to the capture point. The remaining sentence of that clause, the whole of §6's second clause, and every other section of this ADR stand) and ADR-0275 (§1, §2, §5, §8 and §14's episode response role, processing metadata and model-facing eligibility) and ADR-0284 (§2:1's `EpisodicMemory.disposition` field; §3:1 and §3:2)
+- Status: Partially superseded by ADR-0223 (§6's first clause, and within it only its first sentence — *"Capture writes the captured episode's `Provenance.derived_from_external` exactly as it does today — it is not set, and takes its `False` default"*. Capture now stamps that field, from the turn's own selection and threaded to the capture point. The remaining sentence of that clause, the whole of §6's second clause, and every other section of this ADR stand) and ADR-0275 (§1, §2, §5, §8 and §14's episode response role, processing metadata and model-facing eligibility) and ADR-0284 (§2:1's `EpisodicMemory.disposition` field; §3:1 and §3:2) and ADR-0285 (§4:1)
 - Date: 2026-09-01
 - Partially superseded: 2026-09-02 by ADR-0223 — **§6's first clause no longer
   holds of capture: `Provenance.derived_from_external` is stamped on the captured
@@ -55,6 +55,12 @@
   effect on ratification of ADR-0284. This reciprocal header record accompanies the
   numbered draft under ADR-0070 and ADR-0082; prior supersessions and the ratified body
   below are preserved.
+- Partially superseded: 2026-10-03 by ADR-0285 — §4:1, the observation prompt's
+  replacement of ADR-0162 §8:1, is replaced entire: there is no observation prompt
+  (ADR-0285 §1). §4:2 and every other clause stand. These replacements take effect on
+  ratification of ADR-0285. This reciprocal header record accompanies the numbered draft
+  under ADR-0070 and ADR-0082; prior supersessions and the ratified body below are
+  preserved.
 
 ## Context
 

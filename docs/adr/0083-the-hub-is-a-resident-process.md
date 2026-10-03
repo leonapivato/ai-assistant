@@ -1,6 +1,6 @@
 # 83. The hub is a resident process: lifecycle, exclusivity, and an internal scheduler
 
-- Status: Partially superseded by ADR-0218 (§7's job-table row for observation, in its Default and Calls cells)
+- Status: Partially superseded by ADR-0218 (§7's job-table row for observation, in its Default and Calls cells) and ADR-0285 (§7's job-table row for observation, whole)
 - Date: 2026-07-31
 - Partially superseded: 2026-08-29 by ADR-0218 — **§7's job-table row for
   observation is replaced in two cells: the job no longer ships disabled, and it no
@@ -162,6 +162,11 @@
   `Proposed`, alone in its PR, and merges ahead of anything implementing against
   it (ADR-0015 §5).
 - **No implementation lands with it.** No `src/`, no `tests/`.
+- Partially superseded: 2026-10-03 by ADR-0285 — §7's job-table row for observation is
+  removed whole: the scheduler arms no observation job (ADR-0285 §3). Every other row
+  and clause stands. These replacements take effect on ratification of ADR-0285. This
+  reciprocal header record accompanies the numbered draft under ADR-0070 and ADR-0082;
+  prior supersessions and the ratified body below are preserved.
 
 ## Context
 

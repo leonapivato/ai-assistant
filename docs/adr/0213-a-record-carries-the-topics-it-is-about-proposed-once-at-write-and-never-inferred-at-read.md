@@ -1,6 +1,6 @@
 # 213. A record carries the topics it is about, proposed once at write and never inferred at read
 
-- Status: Partially superseded by ADR-0239 (§4's set-at-write clause, §6's producer enumeration and its no-labelling-another-producer's-record clause, and §8's revised-only-by-two-routes and only-in-place-write clauses — each for `EpisodicMemory` records only)
+- Status: Partially superseded by ADR-0239 (§4's set-at-write clause, §6's producer enumeration and its no-labelling-another-producer's-record clause, and §8's revised-only-by-two-routes and only-in-place-write clauses — each for `EpisodicMemory` records only) and ADR-0285 (§5:9; §6:1's `ModelBackedObserver` member)
 - Date: 2026-08-29
 - **Partially superseded: 2026-09-05 by
   [ADR-0239](0239-the-observation-pass-labels-the-episodes-it-read-and-a-label-lands-as-a-conditional-write-at-the-episodes-own-id.md),
@@ -31,6 +31,12 @@
   `Partially superseded by` token, so under ADR-0082 §2 the record is its appended
   dated note and nothing is written on the line. **Nothing here supersedes anything**,
   wholly or in part, and no other ADR's text is touched by this change.
+- Partially superseded: 2026-10-03 by ADR-0285 — §5:9 is replaced entire, and §6:1 loses
+  its `ModelBackedObserver` member: `ConsolidationStage` is the one producer of topics
+  (ADR-0285 §1). Every other clause stands. These replacements take effect on
+  ratification of ADR-0285. This reciprocal header record accompanies the numbered draft
+  under ADR-0070 and ADR-0082; prior supersessions and the ratified body below are
+  preserved.
 
 ## Context
 

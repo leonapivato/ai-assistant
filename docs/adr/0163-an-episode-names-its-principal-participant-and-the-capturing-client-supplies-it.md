@@ -1,6 +1,6 @@
 # 163. An episode names its principal participant, and the capturing client supplies it
 
-- Status: Accepted
+- Status: Partially superseded by ADR-0285 (§5:3's observation-prompt member)
 - Date: 2026-08-19
 - **Note (2026-08-19): ratified.** `Proposed` → `Accepted` on the content this ADR
   merges with, after **both** required lenses — adversarial and architecture, the set
@@ -147,6 +147,12 @@
   stacked addition under ADR-0082 §1, so no Status change is owed. That producer
   delivers no episode with several distinguishable speakers, so §3's deferred
   eligibility ruling is still open (#2557).
+- Partially superseded: 2026-10-03 by ADR-0285 — §5:3's enumeration loses its
+  observation-prompt member: the tree holds two such surfaces, the planner's record
+  renderer and the consolidation prompt (ADR-0285 §1). Every other clause stands. These
+  replacements take effect on ratification of ADR-0285. This reciprocal header record
+  accompanies the numbered draft under ADR-0070 and ADR-0082; prior supersessions and
+  the ratified body below are preserved.
 
 ## Context
 
