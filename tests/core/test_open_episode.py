@@ -497,6 +497,41 @@ def test_the_understanding_bound_keeps_version_one_and_the_latest() -> None:
     )
 
 
+@pytest.mark.parametrize(
+    ("revision", "elided"),
+    [
+        ((1, 4), 2),  # recorded entries deleted, nothing appended
+        ((1, 5), 2),  # shrunk while appending
+        ((1, 2, 5), 2),
+    ],
+)
+def test_a_revision_never_drops_recorded_stage_entries_by_a_smaller_bound(
+    revision: tuple[int, ...], elided: int
+) -> None:
+    stored = _open(stages=tuple(map(_stage, (1, 2, 3, 4))))
+    assert not _extends(stored, _open(stages=tuple(map(_stage, revision)), stages_elided=elided))
+
+
+@pytest.mark.parametrize(
+    ("revision", "elided"),
+    [
+        ((1, 4), 2),  # recorded versions deleted, nothing appended
+        ((1, 5), 3),  # shrunk while appending
+    ],
+)
+def test_a_revision_never_drops_recorded_versions_by_a_smaller_bound(
+    revision: tuple[int, ...], elided: int
+) -> None:
+    stored = _open(understanding=tuple(map(_understanding, (1, 2, 3, 4))))
+    shrunk = _open(understanding=tuple(map(_understanding, revision)), understanding_elided=elided)
+    assert not _extends(stored, shrunk)
+
+
+def test_a_cut_record_is_not_cut_further() -> None:
+    stored = _open(stages=tuple(map(_stage, (1, 2, 4, 5))), stages_elided=1)
+    assert not _extends(stored, _open(stages=tuple(map(_stage, (1, 6))), stages_elided=4))
+
+
 def test_an_elided_count_never_shrinks() -> None:
     stored = _open(stages=tuple(map(_stage, (1, 2, 4, 5))), stages_elided=1)
     assert not _extends(stored, _open(stages=tuple(map(_stage, (1, 2, 4, 5)))))

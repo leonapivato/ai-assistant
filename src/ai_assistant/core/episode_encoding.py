@@ -458,14 +458,22 @@ def _appended(
     keeps the rest from the end.
     """
     added = len(after) + after_elided - len(before) - before_elided
-    if added < 0:
+    if added < 0 or after_elided < before_elided:
         return False
     if after_elided == before_elided:
         return (before_elided == 0 or added == 0) and after[: len(before)] == before
+    # The bound bit, at the revision's length. The stored sequence passed the same
+    # bound, so it is no longer than that limit, and exactly as long where the bound
+    # had already dropped entries: a shorter revision would lose recorded entries.
     limit = len(after)
     kept_head = head(limit)
     kept_tail = limit - kept_head
-    if kept_head < 1 or kept_tail < 1 or (before_elided and len(before) != limit):
+    if (
+        kept_head < 1
+        or kept_tail < 1
+        or len(before) > limit
+        or (before_elided and len(before) != limit)
+    ):
         return False
     # The bound over the stored entries followed by the appended ones (ADR-0286 §3):
     # the revision's index ``i`` holds that sequence's entry ``source``, which is a
