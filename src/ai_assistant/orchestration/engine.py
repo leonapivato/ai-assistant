@@ -2627,6 +2627,17 @@ def _turn_expired(working: _TurnPass) -> Exception | None:
     return None
 
 
+def _left(deadline: float) -> timedelta:
+    """What is left of a budget whose deadline is on the running loop's clock, never negative.
+
+    A spoken call's budget is the whole call's and starts at receiver admission
+    (ADR-0274 §6, ADR-0200 §3), and the episode's admission write runs inside it
+    (ADR-0286 §2:1), so the work after that write is handed what remains rather than
+    the whole budget again. An exhausted one is each stage's own expiry.
+    """
+    return timedelta(seconds=max(deadline - asyncio.get_running_loop().time(), 0.0))
+
+
 def _event_expired(event: _EventPass) -> Exception | None:
     """The event path's twin, mapped outward as ``_understand_event`` maps its expiry."""
     if event.deadline <= asyncio.get_running_loop().time():
@@ -4601,8 +4612,19 @@ class Engine:
         projection = replace(projection, capture_report=state.reserved_report)
         task = self._activation_task(
             ActivationScope(state),
+            # A spoken call's budget is the whole call's, starting at receiver
+            # admission, so it is handed what the admission write left of it
+            # (ADR-0274 §6, ADR-0200 §3). A typed turn's is threaded to each seam
+            # whole, its pass deadline read at the turn's entry (ADR-0029 §4,
+            # ADR-0276 §5), and an event's is the deadline itself (ADR-0274 §7).
             lambda: self._dispatch_channel(
-                accepted, capability, timeout=timeout, projection=projection, deadline=deadline
+                accepted,
+                capability,
+                timeout=_left(deadline)
+                if isinstance(accepted.payload, SpeechChannelPayload)
+                else timeout,
+                projection=projection,
+                deadline=deadline,
             ),
             seam=projection.method,
             check_output=lambda result: check_payload(
@@ -4951,6 +4973,7 @@ class Engine:
             stage_limit=self._stage_record_limit,
         )
         projection = replace(projection, capture_report=state.reserved_report)
+        deadline = asyncio.get_running_loop().time() + timeout.total_seconds()
         turn = self._activation_task(
             ActivationScope(state),
             lambda: self._channel_stream_result(
@@ -4971,7 +4994,7 @@ class Engine:
                 max_bytes=self._max_payload_bytes,
                 subject=f"the result of {projection.method}()",
             ),
-            deadline=asyncio.get_running_loop().time() + timeout.total_seconds(),
+            deadline=deadline,
         )
         # A turn nobody reads still fails legibly rather than as asyncio's
         # "Task exception was never retrieved" on the next collection: §9 makes an
@@ -9686,9 +9709,10 @@ class Engine:
 
         ``deadline`` is the budget the call was handed, read at receiver admission
         on the running loop's clock (ADR-0274 §7). The admission write runs inside
-        it, and one it cuts short is dropped: the work then meets the deadline
-        itself and is classified as its kind classifies the expiry, and the freeze's
-        read settles whether the cut-off insert landed (ADR-0286 §3:4).
+        it, and one it cuts short is dropped: the work — a spoken call handed only
+        what is left of its whole-call budget (:func:`_left`) — then meets the expiry
+        itself and is classified as its kind classifies it, and the freeze's read
+        settles whether the cut-off insert landed (ADR-0286 §3:4).
         """
         self._reject_if_closing()
         admitted = asyncio.Event()
