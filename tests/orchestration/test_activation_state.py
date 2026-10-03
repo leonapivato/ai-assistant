@@ -77,6 +77,7 @@ def test_record_preserves_exact_admitted_material_and_reversed_wall_clock() -> N
     state = _admitted()
     record = state.processing(_AT - timedelta(seconds=3), None)
     assert record.activation_id == _ID
+    assert record.ended_at is not None
     assert record.started_at > record.ended_at
     assert isinstance(record.trigger, RecordedChannelTrigger)
     assert isinstance(record.trigger.payload, RecordedTextInput)

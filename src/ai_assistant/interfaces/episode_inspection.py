@@ -118,11 +118,13 @@ def _retention_notice(console: Console) -> None:
 def render_detail(console: Console, record: EpisodicMemory) -> None:
     """Distinguish processing status from goal achievement and playback."""
     processing = record.processing_record
+    status = None if processing is None else processing.status
+    reason = None if processing is None else processing.reason
     console.print(
         f"Episode {json.dumps(record.id, ensure_ascii=False)}\n"
         f"Activation: {processing.activation_id if processing else 'unavailable'}\n"
-        f"Processing: {processing.status.value if processing else 'unavailable'}\n"
-        f"Reason: {processing.reason.value if processing else 'unavailable'}\n"
+        f"Processing: {status.value if status else 'unavailable'}\n"
+        f"Reason: {reason.value if reason else 'unavailable'}\n"
         f"Response: {_response_label(record)}",
         markup=False,
         emoji=False,

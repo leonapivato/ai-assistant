@@ -429,6 +429,8 @@ async def test_an_event_captured_without_an_understanding_is_its_status_line() -
     assert episode.processing_record is not None
     status = episode.processing_record.status
     reason = episode.processing_record.reason
+    assert status is not None
+    assert reason is not None
     assert episode.content == f"status {status.value}, reason {reason.value}"
     assert "thermostat" not in episode.content
 

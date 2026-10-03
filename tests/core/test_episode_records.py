@@ -139,6 +139,7 @@ def test_recording_keeps_reversed_clock_and_exact_transcript_without_audio() -> 
     data["ended_at"] = "2025-12-31T23:59:59Z"
     data["trigger"]["payload"]["transcript"] = "  exact text\n"
     record = EpisodeProcessingRecord.model_validate(data)
+    assert record.ended_at is not None
     assert record.ended_at < record.started_at
     assert isinstance(record.trigger, RecordedChannelTrigger)
     assert isinstance(record.trigger.payload, RecordedSpeechInput)
