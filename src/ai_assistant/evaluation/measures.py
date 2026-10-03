@@ -83,7 +83,6 @@ from ai_assistant.evaluation._vocabulary import (
     DECISIONS_REINFORCE,
     DECISIONS_SUPERSEDE,
     DIRECT_SEAMS,
-    OBSERVE_SEAM,
 )
 from ai_assistant.evaluation.sqlite_store import SqliteTraceStore
 
@@ -311,8 +310,6 @@ class _Totals:
     corrections_with_a_set: int = 0
     direct_rulings: int = 0
     direct_reinforcements: int = 0
-    observe_rulings: int = 0
-    observe_reinforcements: int = 0
 
     def __iadd__(self, other: _Totals) -> _Totals:
         """Fold another part's sums in, which is how the whole window is formed."""
@@ -322,8 +319,6 @@ class _Totals:
         self.corrections_with_a_set += other.corrections_with_a_set
         self.direct_rulings += other.direct_rulings
         self.direct_reinforcements += other.direct_reinforcements
-        self.observe_rulings += other.observe_rulings
-        self.observe_reinforcements += other.observe_reinforcements
         return self
 
 
@@ -489,9 +484,6 @@ class _Collector:
         if seam in DIRECT_SEAMS:
             totals.direct_rulings += rulings
             totals.direct_reinforcements += decisions[DECISIONS_REINFORCE]
-        if seam == OBSERVE_SEAM:
-            totals.observe_rulings += rulings
-            totals.observe_reinforcements += decisions[DECISIONS_REINFORCE]
 
     def _add_retrieval(self, ordinal: int, trace: EvaluationTrace) -> None:
         """Count §2's counter-inconsistency and feed §4's surfacings from one read."""
@@ -592,9 +584,6 @@ class _Collector:
             ),
             repeated_explanation=Rate(
                 numerator=totals.direct_reinforcements, denominator=totals.direct_rulings
-            ),
-            observe_share=Rate(
-                numerator=totals.observe_reinforcements, denominator=totals.observe_rulings
             ),
         )
 

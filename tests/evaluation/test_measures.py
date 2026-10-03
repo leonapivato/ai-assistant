@@ -8,6 +8,7 @@ docstrings name the section each one holds.
 
 from __future__ import annotations
 
+from dataclasses import fields, replace
 from datetime import timedelta
 from typing import TYPE_CHECKING
 
@@ -27,6 +28,7 @@ from measure_fixtures import (
     write,
 )
 
+from ai_assistant.evaluation._figures import Part, Rate
 from ai_assistant.evaluation.measures import compute
 from ai_assistant.testing import FakeTraceStore
 
@@ -275,27 +277,108 @@ class TestRepeatedExplanationRate:
         assert result.whole.repeated_explanation.numerator == 1
         assert result.whole.repeated_explanation.denominator == 2
 
-    async def test_observe_reinforcements_are_excluded_and_reported_apart(self) -> None:
-        """§6's finding: the observation stage's overlap is not a product signal."""
-        result = await report(
-            write(when=at(days=1), correlation="c1", metrics=decisions(reinforce=5)),
-            operation("observe", when=at(days=1), correlation="c1"),
-        )
-        assert result.whole is not None
-        assert result.whole.repeated_explanation.defined is False
-        assert result.whole.observe_share.numerator == 5
-        assert result.whole.observe_share.denominator == 5
-
-    async def test_a_converse_reinforcement_is_in_neither_figure(self) -> None:
-        """``converse`` is a user seam and not a *direct* one, and not ``observe``."""
+    async def test_a_converse_reinforcement_is_not_a_repeated_explanation(self) -> None:
+        """``converse`` is a user seam and not a *direct* one."""
         result = await report(
             write(when=at(days=1), correlation="c1", metrics=decisions(reinforce=3)),
             operation("converse", when=at(days=1), correlation="c1"),
         )
         assert result.whole is not None
         assert result.whole.repeated_explanation.defined is False
-        assert result.whole.observe_share.defined is False
         assert result.whole.correction.denominator == 3
+
+    def test_the_observe_reinforcement_share_has_left_the_report(self) -> None:
+        """ADR-0285 §7:1's second clause: no figure of a part is the ``observe`` share."""
+        assert [f.name for f in fields(Part)] == [
+            "start",
+            "end",
+            "user",
+            "machine",
+            "correction",
+            "beliefs_per_correction",
+            "repeated_explanation",
+        ]
+
+
+class TestRetiredObservationSeams:
+    """ADR-0285 §7:2 — a stored observation trace is read as any unclassified one.
+
+    "A trace a store already holds under the ``observe`` or ``observe_due`` seam is
+    read as a trace under any seam on no set: it is unclassified, counted as such,
+    and enters no measure. No reader special-cases either name." Each stream below
+    is therefore tested twice: once for what the trace does not do, and once against
+    the same stream under a seam no set has ever named, which is what "read as a
+    trace under any seam on no set" means when it is checked rather than assumed.
+    """
+
+    _UNLISTED = "never_classified"
+
+    @staticmethod
+    def _stream(seam: str) -> tuple[EvaluationTrace, ...]:
+        """A surfacing, then a write under ``seam`` that rules, reinforces and overturns.
+
+        Everything a classified write would feed: six decision counts for §5's and
+        §6's sums, a reinforcement for §6's rate, and a ``SUPERSEDED`` set naming the
+        surfaced record for §4's join. A direct write in the same window keeps §6's
+        rate defined, so a stray contribution would move a number rather than turn
+        an undefined figure into a defined one.
+        """
+        return (
+            *_surfaced(),
+            write(
+                when=at(days=1, hours=2),
+                correlation="c2",
+                metrics=decisions(accept=1, reinforce=2, supersede=1),
+                written=("fresh",),
+                superseded=("r1",),
+            ),
+            operation(seam, when=at(days=1, hours=2), correlation="c2"),
+            write(when=at(days=1, hours=3), correlation="c3", metrics=decisions(accept=1)),
+            operation("learn", when=at(days=1, hours=3), correlation="c3"),
+            settled_marker(),
+        )
+
+    @pytest.mark.parametrize("seam", ["observe", "observe_due"])
+    async def test_the_trace_is_unclassified_counted_and_in_no_measure(self, seam: str) -> None:
+        result = await report(*self._stream(seam))
+        assert result.health is not None
+        assert result.health.unclassified == 1
+        assert result.health.unclassified_seams == (seam,)
+        assert result.whole is not None
+        assert result.whole.user.overturned == 0
+        assert result.whole.user.non_ambiguous == 1
+        assert result.whole.machine.overturned == 0
+        assert result.whole.correction == Rate(numerator=0, denominator=1)
+        assert result.whole.beliefs_per_correction.defined is False
+        assert result.whole.repeated_explanation == Rate(numerator=0, denominator=1)
+
+    @pytest.mark.parametrize("seam", ["observe", "observe_due"])
+    async def test_the_report_is_the_one_any_unlisted_seam_gets(self, seam: str) -> None:
+        """Identical to the report under a never-classified seam, but for its name.
+
+        The name is the one thing §3 obliges the report to carry — it "names each
+        unclassified seam it met" — and it reaches two places: the unclassified seams,
+        and the operation-latency summary, which is §7's diagnostic over every seam
+        and is not a measure. Every other figure, including every rate of every part,
+        must be the same object.
+        """
+        result = await report(*self._stream(seam))
+        control = await report(*self._stream(self._UNLISTED))
+        assert control.health is not None
+        expected = replace(
+            control,
+            health=replace(control.health, unclassified_seams=(seam,)),
+            latency=tuple(
+                sorted(
+                    (
+                        replace(entry, seam=seam) if entry.seam == self._UNLISTED else entry
+                        for entry in control.latency
+                    ),
+                    key=lambda entry: entry.seam,
+                )
+            ),
+        )
+        assert result == expected
 
 
 class TestEligibility:

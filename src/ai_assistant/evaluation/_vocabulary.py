@@ -108,10 +108,14 @@ COUNT_KEYS: Final = (*DECISION_KEYS, *RETRIEVAL_COUNT_KEYS)
 # --- operation seams (`Engine._tracked`) --------------------------------------
 
 #: ADR-0120 §3's **user** set: the operations whose writes originate with the
-#: user. ``observe`` is here because "the content originates with the user even
-#: though the proposal is the model's" — a supersession reached that way is the
-#: user correcting the system through the only route the system offers.
-USER_SEAMS: Final = frozenset({"converse", "resume", "observe", "learn", "answer"})
+#: user.
+#:
+#: **ADR-0285 §7 took the two observation seams off both sets**, with the
+#: operations they labelled. A trace a store already holds under either is read
+#: exactly as a trace under any seam on neither set — unclassified, counted and
+#: named in the report, and in no population — so neither name is restated in this
+#: package, and no reader here special-cases it.
+USER_SEAMS: Final = frozenset({"converse", "resume", "learn", "answer"})
 
 #: ADR-0120 §3's **machine** set: the operations that write on their own
 #: initiative. Keeping these out of §4's and §5's numerators is what lets #829's
@@ -125,29 +129,14 @@ USER_SEAMS: Final = frozenset({"converse", "resume", "observe", "learn", "answer
 #: which fails safe and fails silently — so a third source's lane owes this set a
 #: member, and #1076 records that ADR-0142 §5's own cost measurement does not
 #: mention this file.
-#: **``observe_due`` is a member and ``observe`` is not** (ADR-0218 §6). Two of §3's
-#: grounds point in different directions for a scheduled observation — the content
-#: originates with the user, and the run writes on its own initiative — and what
-#: decides between them is the purpose §3 states for the split: "A correction rate
-#: that counted those would rise on the day of the arming, and the rise would be a
-#: fact about the scheduler rather than about the user model." ADR-0218 arms this
-#: job, so if its writes carried the ``observe`` seam every measure over the user set
-#: would step at the moment of arming. The cost is stated rather than buried: §5's
-#: correction rate loses the scheduled population, and #1815 holds whether a fourth
-#: set — writes whose *content* is the user's but whose *cause* is not — is wanted.
 MACHINE_SEAMS: Final = frozenset(
-    {"ingest_calendar", "ingest_email", "consolidate", "observe_due", "purge_expired", "start"}
+    {"ingest_calendar", "ingest_email", "consolidate", "purge_expired", "start"}
 )
 
 #: ADR-0120 §3's **direct** set, a subset of the user set: a user act the user
-#: performed, rather than one the observation stage mined out of a conversation.
+#: performed whose whole purpose is the write — telling the assistant something
+#: (``learn``) or answering its question (``answer``).
 DIRECT_SEAMS: Final = frozenset({"learn", "answer"})
-
-#: The observation stage, whose reinforcements ADR-0120 §6 excludes from the
-#: repeated-explanation rate and reports apart: "successive observation batches
-#: overlap by design, so their reinforcements are dominated by the stage
-#: re-reading the same episodes".
-OBSERVE_SEAM: Final = "observe"
 
 # --- notification ruling seams and keys (`memory/notification_traces.py`) -----
 
@@ -257,7 +246,6 @@ __all__ = [
     "NOTIFICATION_DISPOSITION_KEYS",
     "NOTIFICATION_METRIC_KEYS",
     "NOTIFICATION_RECONSIDER_SEAM",
-    "OBSERVE_SEAM",
     "RETRIEVAL_COUNT_KEYS",
     "RETURNED",
     "USER_SEAMS",
