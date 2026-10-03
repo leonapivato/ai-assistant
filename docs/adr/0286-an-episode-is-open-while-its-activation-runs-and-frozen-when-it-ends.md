@@ -5,6 +5,7 @@
 - Scope: [M36](https://github.com/leonapivato/ai-assistant/milestone/2), reopened 2026-09-30 for [#2613](https://github.com/leonapivato/ai-assistant/issues/2613); step 3a of the plan recorded there on 2026-10-03, the open episode, behind the cutover that steps 2 and 3 share.
 - Dependency: ADR-0284 and ADR-0285, implemented at `6b41b305`.
 - Authorization: the owner directed on 2026-09-30 (#2613) that the working episode and the saved episode be the same thing, ruled the minimum on 2026-10-03, agreed the shape and its recommendations in conversation the same day, accepted proposal #2657 ("lgtm, convert it to the ADR") and directed its conversion into this ADR. The dispatcher assigned 0286, the next number on `main`. That authorizes drafting and numbering, not ratification or implementation.
+- **Partially supersedes** [ADR-0114](0114-the-store-contract-carries-the-walk.md) — **one scope, read across two clauses.** **§1:2's *in the store's own insertion order* and §1:7's *nothing left to examine*, at an open episode alone**: a chunk examines no record at or past the lowest-keyed open episode, and a chunk that carries no position because that episode is next means nothing is left to examine for now (§6 below). Every other clause stands, §1:3's never-reissued key included.
 - **Partially supersedes** [ADR-0204](0204-a-record-carries-whether-the-supply-it-was-produced-over-held-withheld-content.md) — **one scope, read across three clauses.** **§2:5, §2:6 and §5:5, for an open episode alone**: until it freezes, an episode carries reach `OWNER` and setter `DERIVED` whatever the evaluation will find, and the write that freezes it writes the evaluation's value in place of that, clearing it where the evaluation is `False` (§6 below). The evaluation, its terms, its site and its value at freeze stand, and every other clause stands.
 - **Partially supersedes** [ADR-0217](0217-a-record-carries-who-may-receive-it-and-a-model-may-only-narrow-it.md) — **one scope, read across two clauses.** **§1:3 and §3:3, for an open episode alone**: an open episode is written with reach `OWNER` and setter `DERIVED` though no evaluation has found anything yet, and the write that freezes it replaces that placement with the derivation's, wider or not (§6 below). Every other clause stands.
 - **Partially supersedes** [ADR-0275](0275-an-episode-records-one-activation-after-processing-ends.md) — **eleven scopes.** **§1:4's *no live activation log***: the episode is written at admission and extended as stages end (§2, §3 below). **§2:2's *with no durable start row***: the admission write is one. **§4:1's record shapes, in the changes alone**: `status`, `reason` and `ended_at` are `None` while a record is open, `ProcessingReason` gains `hub_stopped`, and `schema_version` is 6 (§1, §7, §13 below). **§5:3's table, in the addition alone**: a restart's close records `interrupted` / `hub_stopped` (§7 below). **§8:2's sequence, and its *no captured processing envelope is updated in place afterward***: the episode is inserted at admission and replaced at each stage end and at freeze (§2–§4 below). **§8:4's last sentence**: an open episode is a durable record of a pass in progress. **§8:6's capture timestamp, in when it is taken**: by the admission write (§2 below). **§8:13's first sentence, in its *interrupted* member**: a restart closes an episode admission wrote as `interrupted` (§7 below). **§9:4, for an open episode alone**: the open state is a ground for `OWNER` / `DERIVED`, and the write that freezes it may widen that placement (§6 below). **§11:5's *unavailable* label, for an open episode's end fields alone**: they are labelled in progress (§11 below). **§12:6's immutability, for an open episode alone**: its processing record and response may be replaced by a record that extends them (§3, §12 below). Every other clause stands, §2:4's single finalization, §3:4, §6:2's collision rule and §9:1's bound included.
@@ -113,9 +114,11 @@ so its channel is absent until a later write carries it.
 > the stage's entry and whatever the stage produced into the record's own fields.
 
 > **Normative.** `core` gains a pure `episode_extends(stored: EpisodicMemory, revision:
-> EpisodicMemory) -> bool`, decided from the two records alone. It holds exactly where
-> both carry a processing record with one `activation_id`, the stored one is open, the
-> revision differs from it, and every difference is one the next clause admits.
+> EpisodicMemory) -> bool`, decided from the two records' processing records and
+> `outcome` alone. It holds exactly where both carry a processing record with one
+> `activation_id`, the stored one is open, the two differ in their processing record or
+> `outcome`, and every such difference is one the next clause admits. No other field
+> of the episode enters it.
 
 > **Normative.** A revision may differ from the stored record only by: a field at its
 > unset value taking a value, for the trigger's `channel`, the speech trigger's
@@ -167,8 +170,10 @@ per-stage bound could only refuse what the whole bound refuses, or cut what ADR-
 > owed and then calls `record_turn`, in ADR-0283 §7:1's order, once the freezing write
 > is confirmed. ADR-0283 §7:2's verification and its drain apply unchanged.
 
-The response is `outcome`, as ADR-0284 §4:1 defines it, appended by the stage that
-produces it or by the freezing write. Delivery stays a row the conversation store keeps
+These fields are not judged by `episode_extends`, which reads the processing record
+and `outcome` alone; what bounds them on an open episode is §1's validator, and the
+freezing write is what lifts it. The response is `outcome`, as ADR-0284 §4:1 defines
+it, appended by the stage that produces it or by the freezing write. Delivery stays a row the conversation store keeps
 (ADR-0283 §6), and annotates the episode without writing it.
 
 ### 5. A capture failure ends capture
@@ -201,8 +206,14 @@ the next restart closes it; Consequences names that residue.
 > `ChannelEpisodePage.total` counts no open episode.
 
 > **Normative.** `MemoryStore.walk_records` examines no record at or past the
-> lowest-keyed open episode. A chunk stops before it, and where it is the next record
-> to examine, the chunk examines nothing.
+> lowest-keyed open episode the store holds. A chunk stops before it. Where it is the
+> next record to examine, the chunk examines nothing and carries no position, which
+> tells its caller that nothing is left to examine for now; the walk's recorded
+> position has not passed the open episode, so a later read resumes there.
+
+> **Normative.** `ConsolidationStage` keeps its handling of a chunk with no position:
+> it ends the run, reports it exhausted, and advances nothing, so its next run reads
+> from the same position.
 
 > **Normative.** A reader that feeds a model and fetches by id — the citation hop, the
 > understanding phase's fetch (ADR-0282 §5:1) and any other `get` or `get_many` on such
@@ -308,9 +319,16 @@ stale; ADR-0275 §11:4's handling of a stale read applies unchanged.
 > ADR-0283 §3:2 bounds them.
 
 > **Normative.** The memory store refuses, with `MemoryStoreError` and nothing
-> written, a write replacing a stored episode that carries a processing record,
-> unless the stored record is open and `episode_extends` holds of the stored and the
-> written record. A frozen episode's processing record and response stay immutable.
+> written, a write replacing a stored episode that carries a processing record where
+> the written record's processing record or `outcome` differs from the stored one's,
+> unless the stored record is open and `episode_extends` holds of the two. A frozen
+> episode's processing record and response therefore stay immutable.
+
+> **Normative.** The guard judges no other field. A write that leaves an episode's
+> processing record and `outcome` as stored is admitted as ADR-0275 §12:6 admits it,
+> the owner's placement acts (ADR-0217 §7) and ADR-0284 §7:4's re-derivation of a
+> frozen episode's `content` included; §1's validators still bound what an open
+> episode may carry.
 
 > **Normative.** The store keeps whether an episode is open as an indexed column,
 > written with every write of the record. An episode's channel columns are written by
@@ -348,6 +366,7 @@ writer calls.
 
 | Earlier clause | What changes |
 | --- | --- |
+| ADR-0114 §1:2, §1:7 | The walk stops at the oldest open episode, and waits there. |
 | ADR-0204 §2:5, §2:6, §5:5 | An open episode is placed owner-only; freeze writes the evaluation's value over it. |
 | ADR-0217 §1:3, §3:3 | As ADR-0204, in the placement's terms. |
 | ADR-0275 §1:4, §2:2, §4:1, §5:3, §8:2, §8:4, §8:6, §8:13, §9:4, §11:5, §12:6 | Written at admission, extended per stage, frozen at the end; closed on restart. |
@@ -381,8 +400,9 @@ episode carries only fields that were saved at the end before.
 > **Normative.** Lane 2's conformance suite asserts that `walk_records` does not pass
 > an open episode and returns it once frozen, that the reads §6 names never return an
 > open episode and do not count it against a limit, and that the write guard admits an
-> extending revision of an open episode and refuses every other change to an episode,
-> open or frozen.
+> extending revision of an open episode, refuses every other change to an episode's
+> processing record or `outcome`, open or frozen, and admits a placement-only change
+> to a frozen episode.
 
 > **Normative.** Lane 3's tests assert, through production composition: an episode is
 > stored open before the first stage of a typed turn, a spoken turn, an informational

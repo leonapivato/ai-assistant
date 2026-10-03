@@ -1,6 +1,6 @@
 # 114. The store contract carries the walk: a chunk in insertion order, and a named cursor that never leads its effects
 
-- Status: Accepted
+- Status: Partially superseded by ADR-0286 (§1:2's reach and §1:7's exhaustion, at an open episode alone)
 - Date: 2026-08-06
 - **Note (2026-08-07): ratified.** `Proposed` → `Accepted`, in the separate lane
   #633 requires, after **both** required lenses came back green on the content
@@ -101,6 +101,15 @@
   this ADR closes no issue on ratification and conditions no obligation on it, and
   its Consequences state in terms that "neither lane's ratification is a
   precondition on the other's". Refs #632, #729, #785, #633.
+- Partially superseded: 2026-10-03 by ADR-0286 — one scope, read across two clauses.
+  §1:2's *in the store's own insertion order* and §1:7's *nothing left to examine*, at
+  an open episode alone: a chunk examines no record at or past the lowest-keyed open
+  episode the store holds, and a chunk that carries no position because that episode is
+  next means nothing is left to examine for now, the recorded position not having passed
+  it (ADR-0286 §6). Every other clause stands, §1:3's never-reissued key included. These
+  replacements take effect on ratification of ADR-0286. This reciprocal header record
+  accompanies the numbered draft under ADR-0070 and ADR-0082; the ratification note
+  above and the ratified body below are preserved.
 - **Durability clause.** Every reference below to ADR-NNNN is to its text as
   merged on 2026-08-06, not to its status on any later day. Where a later ADR
   changes one of them, this ADR is read against the text quoted here and the
