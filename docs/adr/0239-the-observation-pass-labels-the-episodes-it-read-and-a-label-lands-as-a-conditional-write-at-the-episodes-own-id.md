@@ -1,6 +1,6 @@
 # 239. The observation pass labels the episodes it read, and a label lands as a conditional write at the episode's own id
 
-- Status: Accepted
+- Status: Partially superseded by ADR-0285 (§1, §2, §3, §5, §8 and §9 entire; §4:5–§4:7)
 - Date: 2026-09-05
 - **Two records are owed on earlier ADRs and this change writes both.** §14 names
   every clause this decision replaces, quotes each, and applies ADR-0070 §1's test to
@@ -13,6 +13,12 @@
   carries a leading token, so under ADR-0082 §2 each record is written on that line
   **and** in an appended dated note. No other ADR's text is touched by this change,
   and nothing here supersedes anything else.
+- Partially superseded: 2026-10-03 by ADR-0285 — the labelling pass is retired with the
+  observer, and no producer proposes an episode's labels (ADR-0285 §1, §9). §1, §2, §3,
+  §5, §8 and §9 are replaced entire, and §4:5–§4:7. §4:1–§4:4, §6, §7 and §13 stand for
+  the labels an episode carries. These replacements take effect on ratification of
+  ADR-0285. This reciprocal header record accompanies the numbered draft under ADR-0070
+  and ADR-0082; prior supersessions and the ratified body below are preserved.
 
 ## Context
 

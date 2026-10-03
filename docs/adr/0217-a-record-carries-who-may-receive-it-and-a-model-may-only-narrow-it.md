@@ -1,6 +1,6 @@
 # 217. A record carries who may receive it, the owner's act is final over a model's, and a model may only narrow
 
-- Status: Partially superseded by ADR-0276 (§2's application clause, in its *no new site* half alone: the record-level predicate is applied at one further site, over the stored records of the understanding stage's two windows, ahead of that stage) and ADR-0281 (§2's application clause, in its *no new site* half, for one further site alone: recall's records, ahead of the understanding stage)
+- Status: Partially superseded by ADR-0276 (§2's application clause, in its *no new site* half alone: the record-level predicate is applied at one further site, over the stored records of the understanding stage's two windows, ahead of that stage) and ADR-0281 (§2's application clause, in its *no new site* half, for one further site alone: recall's records, ahead of the understanding stage) and ADR-0285 (§4:2; §5:1–§5:4; §5:7–§5:8)
 - Date: 2026-08-29
 - Partially superseded: 2026-09-22 by ADR-0276 — §2's clause *"The rule is applied at the
   sites the channel's audience is read today, and at no new site"*, in its *no new site*
@@ -79,6 +79,13 @@
   replacements recorded by the ADR-0276 note above took effect then; that note's
   "which remains Proposed" was true when written and is stale. The Status line above
   is unchanged (#2555).
+- Partially superseded: 2026-10-03 by ADR-0285 — §4:2, §5:1–§5:4 and §5:7–§5:8 are
+  replaced entire: no producer proposes a placement, and an owner's correction is not
+  distilled by an observer (ADR-0285 §1). §4's other clauses bind any producer a later
+  decision admits, and every other clause stands. These replacements take effect on
+  ratification of ADR-0285. This reciprocal header record accompanies the numbered draft
+  under ADR-0070 and ADR-0082; prior supersessions and the ratified body below are
+  preserved.
 
 ## Context
 

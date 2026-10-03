@@ -1,6 +1,6 @@
 # 156. A distilled belief states its event time in its content, and no record type grows a field for it
 
-- Status: Partially superseded by ADR-0162 (§2's fourth clause, in the respect that it makes the observer's utility bar the standing test for an episode recording what the user said to the assistant)
+- Status: Partially superseded by ADR-0162 (§2's fourth clause, in the respect that it makes the observer's utility bar the standing test for an episode recording what the user said to the assistant) and ADR-0285 (§2:1)
 - Date: 2026-08-15
 - **Not a substantive contract ADR; contract-surface only for the review set, and
   the two are different questions.** [ADR-0015](0015-simplify-the-agent-workflow.md)
@@ -158,6 +158,12 @@
   reading its own §4 does not support is corrected rather than grandfathered. Appended
   dated note per ADR-0070 §1; no ratified text is rewritten, no decision of this or any
   other ADR moves, and no mark is added (ADR-0089 §5). Refs #2302.
+- Partially superseded: 2026-10-03 by ADR-0285 — §2:1, the observation prompt's
+  rendering of `occurred_at`, is replaced entire: there is no observation prompt
+  (ADR-0285 §1). Every other clause stands. These replacements take effect on
+  ratification of ADR-0285. This reciprocal header record accompanies the numbered draft
+  under ADR-0070 and ADR-0082; prior supersessions and the ratified body below are
+  preserved.
 
 ## Context
 

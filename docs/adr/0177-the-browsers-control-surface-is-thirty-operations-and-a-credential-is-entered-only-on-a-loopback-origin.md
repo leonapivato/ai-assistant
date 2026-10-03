@@ -1,6 +1,6 @@
 # 177. The browser's control surface is thirty operations, and a credential is entered only on a loopback origin
 
-- Status: Partially superseded by ADR-0178 (§8's four-member rendering clause, and §8's no-claim clause, each only as it reaches a surface rendering a `Confirmation` that carries that decision's §1 egress member) and ADR-0200 (§1's thirty-operation enumeration, which gains `converse_spoken`, and §1's deadline carve-out, which gains that operation's turn budget) and ADR-0250 (§1's thirty-operation enumeration alone, which gains `goals`, `withdraw_clarification` and `abandon_goal`. That one scope, and nothing else in this ADR: §1's every-argument-the-browser-owns clause, its caller-owned-deadline class — which gains no member, because none of the three takes a turn budget — its `learn`-is-unreached clause and its single-principal clause bind entire, and §§2-13 are untouched)
+- Status: Partially superseded by ADR-0178 (§8's four-member rendering clause, and §8's no-claim clause, each only as it reaches a surface rendering a `Confirmation` that carries that decision's §1 egress member) and ADR-0200 (§1's thirty-operation enumeration, which gains `converse_spoken`, and §1's deadline carve-out, which gains that operation's turn budget) and ADR-0250 (§1's thirty-operation enumeration alone, which gains `goals`, `withdraw_clarification` and `abandon_goal`. That one scope, and nothing else in this ADR: §1's every-argument-the-browser-owns clause, its caller-owned-deadline class — which gains no member, because none of the three takes a turn budget — its `learn`-is-unreached clause and its single-principal clause bind entire, and §§2-13 are untouched) and ADR-0285 (§1:1's `observe` member)
 - Date: 2026-08-22
 - Amended: 2026-08-24 by ADR-0186 — **§1's third clause again, by the same count,
   and this note retires the count rather than correcting it.** The change carrying
@@ -223,6 +223,11 @@
   reading its own §4 does not support is corrected rather than grandfathered. Appended
   dated note per ADR-0070 §1; no ratified text is rewritten, no decision of this or any
   other ADR moves, and no mark is added (ADR-0089 §5). Refs #2302.
+- Partially superseded: 2026-10-03 by ADR-0285 — §1:1's enumeration loses `observe`,
+  which leaves the promoted surface and the gateway (ADR-0285 §2, §6). Every other
+  member and clause stands. These replacements take effect on ratification of ADR-0285.
+  This reciprocal header record accompanies the numbered draft under ADR-0070 and
+  ADR-0082; prior supersessions and the ratified body below are preserved.
 
 ## Context
 

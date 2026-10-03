@@ -1,6 +1,6 @@
 # 120. A measure is a rate over one window of the trace stream, read offline while the hub is stopped
 
-- Status: Partially superseded by ADR-0128 (§7's #824 shortfall watch) and ADR-0218 (§3's second normative clause, in the machine seam set's membership)
+- Status: Partially superseded by ADR-0128 (§7's #824 shortfall watch) and ADR-0218 (§3's second normative clause, in the machine seam set's membership) and ADR-0285 (§3:2's `observe` and `observe_due` members; §6:3–§6:5)
 - Date: 2026-08-09
 - Partially superseded: 2026-08-29 by ADR-0218 — **§3's machine seam set gains a
   member: a scheduled observation run writes on its own initiative and carries its
@@ -193,6 +193,13 @@
   definitions" and "the inspection and report surface" — by the route those
   bullets name, which is the mechanism working rather than an amendment
   (ADR-0102 §13).
+- Partially superseded: 2026-10-03 by ADR-0285 — §3:2 loses its `observe` member of the
+  user set and the `observe_due` member ADR-0218 added to the machine set, and
+  §6:3–§6:5, the `observe` exclusion and share, are replaced entire. A trace an old
+  store holds under either seam is read as unclassified (ADR-0285 §7). Every other
+  clause stands. These replacements take effect on ratification of ADR-0285. This
+  reciprocal header record accompanies the numbered draft under ADR-0070 and ADR-0082;
+  prior supersessions and the ratified body below are preserved.
 
 ## Context
 

@@ -1,7 +1,14 @@
 # 218. A conversation is observed once it goes quiet, a max-age backstop bounds the wait, and the job ships armed
 
-- Status: Partially superseded by ADR-0283 (every clause, where it names a turn ordinal, `ConversationStore.turns`, `turns_after` or `conversations_with_unobserved_turns`, or bounds the watermark by the conversation's highest ordinal)
+- Status: Partially superseded by ADR-0283 (every clause, where it names a turn ordinal, `ConversationStore.turns`, `turns_after` or `conversations_with_unobserved_turns`, or bounds the watermark by the conversation's highest ordinal) and ADR-0285 (every clause except §8's narrowing of the chunked-walk admissibility clause)
 - Date: 2026-08-29
+- Partially superseded: 2026-10-03 by ADR-0285 — the scheduled observation run, its due
+  rule, its settings and its seam are retired (ADR-0285 §1–§3, §5, §7). Every clause is
+  replaced except §8's narrowing of ADR-0111 §4's second normative clause, recorded in
+  §11(d) and on ADR-0111, which keeps consolidation admissible as a chunked job and
+  stands. These replacements take effect on ratification of ADR-0285. This reciprocal
+  header record accompanies the numbered draft under ADR-0070 and ADR-0082; prior
+  supersessions and the ratified body below are preserved.
 - **Partially supersedes**
   [ADR-0083](0083-the-hub-is-a-resident-process.md) — §7's job-table row for
   observation, in its **Default** and **Calls** cells and in nothing else of §7.
