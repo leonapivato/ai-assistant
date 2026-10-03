@@ -58,9 +58,19 @@ class TestSeamSets:
     """§3's two allowlists, and the subset relation the direct set stands in."""
 
     def test_every_named_seam_is_a_public_engine_operation(self) -> None:
-        """``Engine._tracked`` labels each trace with the public method's own name."""
-        for seam in vocabulary.USER_SEAMS | vocabulary.MACHINE_SEAMS:
+        """``Engine._tracked`` labels each trace with the public method's own name.
+
+        **Less the two ADR-0285 §2 removed from the engine**, ``observe`` and
+        ``observe_due``. Their classification leaves the sets under §7, in that
+        ADR's evaluation lane (§11 item 6), which lands after the engine lane and
+        removes this exemption with them. Until then both are asserted *absent* from
+        the engine, so the exemption cannot outlive the methods it excuses.
+        """
+        retired = {"observe", "observe_due"}
+        for seam in (vocabulary.USER_SEAMS | vocabulary.MACHINE_SEAMS) - retired:
             assert hasattr(Engine, seam), seam
+        for seam in retired:
+            assert not hasattr(Engine, seam), seam
 
     def test_the_two_sets_are_disjoint(self) -> None:
         """A seam on both lists would put one write in two causes."""
