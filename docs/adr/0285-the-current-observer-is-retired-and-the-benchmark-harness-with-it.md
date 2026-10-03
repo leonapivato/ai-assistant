@@ -1,6 +1,6 @@
 # 285. The current observer is retired, and the benchmark harness with it
 
-- Status: Proposed
+- Status: Accepted
 - Date: 2026-10-03
 - Scope: [M36](https://github.com/leonapivato/ai-assistant/milestone/2), reopened 2026-09-30 for [#2613](https://github.com/leonapivato/ai-assistant/issues/2613); the first item of the plan recorded there on 2026-10-03, ahead of step 3a and step 3b, behind their shared cutover.
 - Dependency: ADR-0284, implemented at `ee659a12`.
