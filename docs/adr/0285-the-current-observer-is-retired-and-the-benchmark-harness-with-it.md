@@ -102,9 +102,14 @@ reads.
 > and its conformance suite, `ObservationOutcome` and `EpisodeLabelling` are
 > removed, and `ObservationStage` with its report types.
 
-> **Normative.** No component of this system proposes a belief from episodes in the
-> background until an ADR of the observation milestone (#2528) introduces one. This
-> ADR adds no producer in the observer's place.
+> **Normative.** This ADR adds no producer in the observer's place, and no new
+> producer of beliefs from episodes is added until an ADR of the observation
+> milestone (#2528) introduces one.
+
+Consolidation is not such a producer and is not touched. Where an operator arms it
+(`consolidation_interval` is unset by default), it walks the records of the store,
+episodes among them, and proposes beliefs from what it reads, exactly as it does
+today (§9).
 
 > **Normative.** No clause this ADR supersedes binds the observer the observation
 > milestone builds. That milestone's ADR decides which of them, if any, it adopts.
@@ -230,8 +235,10 @@ would still need porting (#2626).
 
 ADR-0239 §4:1–§4:4, §6 and §7 still state what such a label means.
 
-What the user says in conversation is no longer turned into beliefs in the background.
-It is still recorded: every episode keeps the user's words, and recall (ADR-0281) finds
+What the user says in conversation is no longer distilled into beliefs by an
+observation pass after each conversation goes quiet. Consolidation, where an operator
+arms it, still reads episodes among the records it walks. What the user says is still
+recorded: every episode keeps the user's words, and recall (ADR-0281) finds
 them. Once step 3 keeps episodes until they are forgotten, nothing said is lost when
 the retention horizon passes. ADR-0162's principle, that what the user tells the
 assistant is recorded, holds through the episode. Its intake clauses (§1, §2, §4, §6,
@@ -355,8 +362,9 @@ and §8 is about the record's migration.
   observation milestone replaces whole. `learning/` shrinks to `learn`, and the
   gate's population is `learn`, consolidation, ingestion and the other producers
   that already write.
-- What the user says is kept as episodes and found by recall. A belief is written
-  only when someone asks for one explicitly or when consolidation derives one.
+- What the user says is kept as episodes and found by recall. No pass distils a
+  conversation into beliefs: beliefs come from explicit `learn`, from consolidation
+  where an operator arms it, and from the other producers that already write them.
   Episodes get no automatic topic or participant labels. The Observe button and the
   `assistant observe` command go.
 - Two Protocols change, `Observer` and `AssistantEngine`, and the wire protocol
