@@ -1280,6 +1280,7 @@ async def test_a_conversation_the_hub_declined_is_reported_as_a_declined_request
         "/resume",
         "/pending_confirmations",
         "/connected_accounts",
+        "/observe",
         "/nonsense",
     ],
 )
@@ -1293,17 +1294,20 @@ async def test_an_operation_this_gateway_does_not_serve_reaches_nothing(
     request for ``/nonsense`` is" (ADR-0175 §12), so it lands in ADR-0168 §6's residual
     fourth class and the engine is not reached.
 
-    **Two different reasons are asserted by one test and they are worth telling
+    **Three different reasons are asserted by one test and they are worth telling
     apart.** ``learn`` is admitted by *nothing*: ADR-0177 §1 leaves it out by name and
     §11 gives it a trigger, so a shape for it here would be the lane inventing an
-    operation. Every other path below names an operation this gateway *does* serve, at
-    a different path: a shape is a method and a path together (ADR-0168 §6), so a path
-    that merely names a served operation is no more admitted than ``/nonsense``. That
-    is now the whole reason ``/resume`` and ``/pending_confirmations`` are here —
-    ADR-0178's merge discharged ADR-0177 §8's precondition and the pair is served, at
-    ``/confirmation/resume`` and ``/confirmations``. Either way the answer is §6's
-    fourth class, which is the property that makes an enumeration checkable: a path
-    nothing serves behaves identically to a path nothing has heard of.
+    operation. ``/observe`` was served until ADR-0285 §6 removed the route, so a
+    request for it is now one the surface has no shape for, whatever the engine behind
+    it still answers. Every other path below names an operation this gateway *does*
+    serve, at a different path: a shape is a method and a path together (ADR-0168 §6),
+    so a path that merely names a served operation is no more admitted than
+    ``/nonsense``. That is now the whole reason ``/resume`` and
+    ``/pending_confirmations`` are here — ADR-0178's merge discharged ADR-0177 §8's
+    precondition and the pair is served, at ``/confirmation/resume`` and
+    ``/confirmations``. Each way the answer is §6's fourth class, which is the property
+    that makes an enumeration checkable: a path nothing serves behaves identically to a
+    path nothing has heard of.
     """
     status, body = await harness.whole("POST", path, {})
 
@@ -1362,7 +1366,6 @@ def test_the_surface_resolves_onto_what_it_serves_and_the_gateways_own_poll() ->
         "interrupted_questions",
         "answer",
         "forget_question",
-        "observe",
         "notifications",
         "dismiss_notification",
         "forget_notification",

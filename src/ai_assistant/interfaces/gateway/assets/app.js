@@ -8364,8 +8364,8 @@ async function relay(half, path, payload, panelId, stopping, noticed) {
   if (stopping !== undefined && stopping.signal.aborted) {
     throw stopping.signal.reason;
   }
-  // Every other request that names a conversation goes through here — the digest, the
-  // forget, and `observe`, which sends this view's selection exactly as `ask` does.
+  // Every other request that names a conversation goes through here — the digest and
+  // the forget.
   conversationLost(body, payload.conversation_id);
   // **A refusal answered to a request sent under a session this page no longer holds is
   // not reported at all** (#2404). Everywhere else the guard sits at the caller, after
@@ -12665,91 +12665,6 @@ function renderConnectionAct(list, one) {
   list.appendChild(item);
 }
 
-// --- looking over a conversation (ADR-0077 §8) -------------------------------
-//
-// The passive half of accumulation, and it is deliberately explicit: nothing
-// triggers it but a caller, which here is the owner pressing a button. The
-// conversation id is a **selector rather than a subject** — this one, or the most
-// recently active — so the page sends the one it is working in and nothing when it
-// holds none.
-async function observe() {
-  fault(null, "observation");
-  const half = headerHalf();
-  if (half === null) {
-    showBootstrap();
-    return;
-  }
-  const asked = conversationId === null ? {} : { conversation_id: conversationId };
-  const era = sessionEra;
-  try {
-    const body = await relay(half, "/observe", asked, "observation");
-    // Not this session's answer (#2404).
-    if (!sameSession(half, era)) {
-      return;
-    }
-    if (body === null) {
-      return;
-    }
-    renderObservation(body.observation);
-    show("observation", true);
-  } catch (_) {
-    // Not this session's condition to report (#2404).
-    if (!sameSession(half, era)) {
-      return;
-    }
-    fault(GATEWAY_GONE, "observation");
-  }
-}
-
-// What one pass did. The three discard counts are kept apart because they are three
-// different facts, and `decision` being absent means **no ruling was ever made** —
-// which is not the same as a ruling that rejected the proposal.
-function renderObservation(report) {
-  const body = el("observation-body");
-  clearNode(body);
-  line(
-    body,
-    report.conversation_id === null
-      ? `Read ${report.episodes_read} episode(s).`
-      : `Read ${report.episodes_read} episode(s) of conversation ${report.conversation_id}.`,
-    "hint"
-  );
-  if (report.route !== null) {
-    line(body, `Route: ${report.route}`, "hint");
-  }
-  line(
-    body,
-    `${report.discarded_unusable} proposal(s) could not be used, ` +
-      `${report.discarded_over_limit} were over the producer's limit, and ` +
-      `${report.dropped_unsupported} were dropped for want of support.`,
-    "hint"
-  );
-  if (report.proposals.length === 0) {
-    line(body, "Nothing was proposed.", "hint");
-  }
-  report.proposals.forEach((one) => renderProposal(body, one));
-}
-
-function renderProposal(body, proposal) {
-  const item = document.createElement("div");
-  item.className = "belief-row";
-  line(item, proposal.content, "reply");
-  line(
-    item,
-    `${proposal.kind} · ${proposal.step} · confidence ${proposal.confidence.toFixed(2)}`,
-    "hint"
-  );
-  line(item, `Because: ${proposal.rationale}`, "hint");
-  line(
-    item,
-    proposal.decision === null
-      ? `No ruling was made on it. ${proposal.reason}`
-      : `Ruling: ${proposal.decision}. ${proposal.reason}`,
-    "hint"
-  );
-  body.appendChild(item);
-}
-
 const CONTROL_PANELS = [
   "confirmations",
   "control",
@@ -12763,7 +12678,6 @@ const CONTROL_PANELS = [
   "tuning",
   "connections",
   "connection-log",
-  "observation",
   // ADR-0250's listing, omitted here when it was written (#2395) although `readGoals`
   // reveals it and it renders goal outcome statements, clarification text and goal ids
   // — Tier 1 content about the owner's outstanding work, which is exactly what a page
@@ -12898,7 +12812,6 @@ el("goals-button").addEventListener("click", () => {
   return listGoals();
 });
 el("clear-reference").addEventListener("click", clearReference);
-el("observe-button").addEventListener("click", observe);
 el("review-button").addEventListener("click", listNotifications);
 el("tuning-button").addEventListener("click", listTuning);
 el("connections-button").addEventListener("click", listConnections);

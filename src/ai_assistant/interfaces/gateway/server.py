@@ -59,14 +59,15 @@ two facts rather than one (§4): the device is one the owner listed in
 The assets alone are served on overlay membership, because they are the bundle this
 repository ships to anyone who installs it.
 
-**A browser reaches a closed enumeration of thirty operations** (ADR-0177 §1,
-superseding ADR-0175 §6's first clause and its figure of five). Twenty-eight of
-them are served here today: milestone 14's ``converse``, ``converse_streaming``,
+**A browser reaches a closed enumeration of operations** (ADR-0177 §1,
+superseding ADR-0175 §6's first clause and its figure of five; ADR-0285 §6 took
+``observe`` out of it). Among those served here: milestone 14's ``converse``,
+``converse_streaming``,
 ``recent_conversations``, ``conversation`` and ``forget_conversation``, together
 with the grant surface — ``grantable_sources``, ``grant``, ``revoke``,
 ``recent_grants``, ``standing_grants`` — the belief surface — ``beliefs``,
 ``belief``, ``forget`` — the deferred-question surface — ``questions``,
-``interrupted_questions``, ``answer``, ``forget_question`` — ``observe``, the
+``interrupted_questions``, ``answer``, ``forget_question`` — the
 notification *review* surface — ``notifications``, ``dismiss_notification``,
 ``forget_notification``, ``notification_preferences``,
 ``set_notification_preferences`` — and the connection surface —
@@ -182,8 +183,6 @@ from ai_assistant.core.types import (
     MemoryKind,
     NotificationPreferences,
     NotificationReach,
-    ObservationReport,
-    ObservedProposal,
     OriginUnrecordedBinding,
     PermissionDecision,
     Question,
@@ -381,10 +380,6 @@ _INTERRUPTED_PATH: Final = "/questions/interrupted"
 _ANSWER_PATH: Final = "/question/answer"
 _FORGET_QUESTION_PATH: Final = "/question/forget"
 
-#: ADR-0077 §8's passive half, explicit as that section makes it: "nothing triggers
-#: it but a caller", and here the caller is the owner pressing a button.
-_OBSERVE_PATH: Final = "/observe"
-
 #: ADR-0177 §8's CONFIRM pair, unblocked by ADR-0178's merge and no sooner: §8's
 #: precondition is "discharged rather than replaced, on its own stated firing
 #: condition" (ADR-0178 §8), and what the surface owes once it is unblocked is §8's
@@ -526,7 +521,6 @@ _ASSISTANT_PATHS: Final[Mapping[tuple[str, str], str]] = {
     ("POST", _INTERRUPTED_PATH): "interrupted_questions",
     ("POST", _ANSWER_PATH): "answer",
     ("POST", _FORGET_QUESTION_PATH): "forget_question",
-    ("POST", _OBSERVE_PATH): "observe",
     ("POST", _CONFIRMATIONS_PATH): "pending_confirmations",
     ("POST", _RESUME_PATH): "resume",
     ("POST", _CANCEL_READ_PATH): "cancel_read",
@@ -1331,7 +1325,6 @@ class Gateway:
             _INTERRUPTED_PATH: self._interrupted_questions,
             _ANSWER_PATH: self._answer,
             _FORGET_QUESTION_PATH: self._forget_question,
-            _OBSERVE_PATH: self._observe,
             _CONFIRMATIONS_PATH: self._pending_confirmations,
             _RESUME_PATH: self._resume,
             _CANCEL_READ_PATH: self._cancel_read,
@@ -3005,27 +2998,6 @@ class Gateway:
         destroyed = await self._relayed(partial(self._engine.forget_question, named))
         return _rendered({"destroyed": destroyed})
 
-    # --- ADR-0077 §8: the passive half, driven by a caller ----------------
-
-    async def _observe(self, request: Request) -> Response:
-        """Read a bounded batch of a conversation's episodes and report what it did.
-
-        ``conversation_id`` is "a **selector rather than a subject**" (ADR-0085 §2), so
-        an absent one selects rather than being an error. What it selects is the first
-        conversation holding a turn above its observation watermark, ordered
-        ``last_active_at`` ascending (ADR-0212 §3) — it was "the most recently active
-        conversation" until that decision replaced ADR-0077 §8's selection sentence.
-
-        Args:
-            request: The admitted request, carrying an optional ``conversation_id``.
-
-        Returns:
-            The proposals with their rulings, the counts kept apart, and the route.
-        """
-        named = _optional_string(_payload(request), "conversation_id")
-        report = await self._relayed(partial(self._engine.observe, conversation_id=named))
-        return _rendered({"observation": _observation_view(report)})
-
     # --- ADR-0177 §8, ADR-0178 §7: the CONFIRM prompt ---------------------
     #
     # ADR-0177 §8 blocked this surface "before a ratified decision supplies what
@@ -3679,18 +3651,18 @@ _PAGE_CEILING: Final = 2**63
 def _optional_string(payload: Mapping[str, Any], name: str) -> str | None:
     """One string member that may be absent, refusing one that is present and wrong.
 
-    **Absent is a selector and a wrong type is not.** ``conversation_id`` is "a
-    **selector** rather than a subject" (ADR-0085 §2) — this conversation, or the most
-    recently active — so omitting it asks a well-formed question. Reading a number as
-    an absence would answer a *different* well-formed question instead, which is the
-    gateway defaulting an argument ADR-0177 §1 makes the browser's own.
+    **Absent is a choice and a wrong type is not.** ``conversation_id`` on a turn is
+    the conversation to continue, or ``None`` to run in a fresh one, so omitting it
+    asks a well-formed question. Reading a number as an absence would answer a
+    *different* well-formed question instead, which is the gateway defaulting an
+    argument ADR-0177 §1 makes the browser's own.
 
-    It matters most where the operation writes. ``observe`` proposes beliefs from the
-    batch it reads, so a mistyped selector silently accepted would put proposals on a
-    conversation nobody named.
+    It matters because the operation writes: a turn is recorded as an episode, so a
+    mistyped member silently accepted would start a conversation nobody asked for and
+    leave the one the browser named without the turn it meant to add.
 
-    ``null`` is accepted as the absence it is: JSON has a way of saying "no selector"
-    and a client using it is not getting the type wrong.
+    ``null`` is accepted as the absence it is: JSON has a way of saying "no
+    conversation" and a client using it is not getting the type wrong.
 
     Args:
         payload: The request's JSON object.
@@ -6375,48 +6347,6 @@ def _connection_act_view(act: ConnectionAct) -> dict[str, Any]:
         "reference": act.reference,
         "revision": str(act.revision),
         "account": None if act.account is None else _account_view(act.account),
-    }
-
-
-def _observation_view(report: ObservationReport) -> dict[str, Any]:
-    """What one observation pass did (ADR-0077 §8).
-
-    The three discard counts are kept **apart** because they are three different
-    facts: what the producer could not use, what it dropped over its own limit, and
-    what the write path refused for want of support. A single "not stored" figure
-    would be this adapter deciding they are the same thing.
-
-    ``route`` is absent where no model read the episodes at all, which is a fact
-    about the pass rather than a missing field.
-    """
-    return {
-        "proposals": [_proposal_view(one) for one in report.proposals],
-        "discarded_unusable": report.discarded_unusable,
-        "discarded_over_limit": report.discarded_over_limit,
-        "dropped_unsupported": report.dropped_unsupported,
-        "route": report.route,
-        "conversation_id": report.conversation_id,
-        "episodes_read": report.episodes_read,
-    }
-
-
-def _proposal_view(proposal: ObservedProposal) -> dict[str, Any]:
-    """One proposal an observation pass made, with how memory folded it.
-
-    ``decision`` is ``null`` where **no ruling was ever made** — the proposal never
-    reached the write path — which is a different thing from a ruling that rejected
-    it, and the two are not flattened into one.
-    """
-    return {
-        "content": proposal.content,
-        "kind": proposal.kind.value,
-        "step": proposal.step.value,
-        "confidence": proposal.confidence,
-        "rationale": proposal.rationale,
-        "decision": None if proposal.decision is None else proposal.decision.value,
-        "record_id": proposal.record_id,
-        "reason": proposal.reason,
-        "evidence": [_evidence_view(one) for one in proposal.evidence],
     }
 
 

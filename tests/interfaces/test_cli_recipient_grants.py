@@ -135,7 +135,7 @@ def test_the_two_flag_names_are_the_ones_the_decision_fixed() -> None:
     Each flag carries the name of the argument it supplies, and on ``resume`` the
     qualified form is also what keeps it from being read as a retention control over
     what the assistant remembers — which is what "remember" means everywhere else on
-    this surface (``learn``, ``observe``, ``forget``).
+    this surface (``learn``, ``forget``).
     """
     resolved = _resolved_commands()
     flags = {

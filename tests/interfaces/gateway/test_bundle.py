@@ -4058,7 +4058,6 @@ def test_the_page_reaches_what_the_gateway_serves_and_nothing_beyond_it() -> Non
         '"/questions/interrupted"',
         '"/question/answer"',
         '"/question/forget"',
-        '"/observe"',
         '"/notifications"',
         '"/notification/dismiss"',
         '"/notification/forget"',
@@ -4075,6 +4074,9 @@ def test_the_page_reaches_what_the_gateway_serves_and_nothing_beyond_it() -> Non
         assert served in script, served
     for later in ('"/learn"', '"/resume"', '"/pending_confirmations"'):
         assert later not in script, later
+    # ADR-0285 §6 removed the route, and a page still reaching for it would get the
+    # residual fourth class the paragraph above describes.
+    assert '"/observe"' not in script
 
 
 def test_the_page_offers_every_use_a_grant_may_authorise_and_no_proper_subset() -> None:
@@ -4240,7 +4242,6 @@ _RELAY_ENTRIES: Final = (
     "readQuestions",
     "answerQuestion",
     "forgetQuestion",
-    "observe",
     "readNotifications",
     "dismissNotification",
     "forgetNotification",
@@ -4274,7 +4275,6 @@ _FAULT_PANELS: Final = frozenset(
         "tuning",
         "connections",
         "connection-log",
-        "observation",
         "authorizations",
     }
 )
