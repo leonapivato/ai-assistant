@@ -88,6 +88,7 @@ from ai_assistant.memory._episode_format import (
     check_format,
     inspect_existing,
 )
+from ai_assistant.memory._episode_guard import is_open, refuse_episode_change
 from ai_assistant.memory._transactions import transaction
 from ai_assistant.memory._walk import (
     check_walk_limit,
@@ -335,7 +336,7 @@ def _to_micros(instant: datetime) -> int:
 #: revision an ``IF_UNCHANGED`` element was computed against (``None`` in every
 #: other mode, which :class:`~ai_assistant.core.types.MemoryWrite`'s validator
 #: guarantees), and the vector embedded for it before the lock was taken.
-type _PreparedWrite = tuple[MemoryRecord, MemoryWriteMode, int | None, Embedding]
+type _PreparedWrite = tuple[MemoryRecord, MemoryWriteMode, int | None, Embedding | None]
 
 
 #: The three label axes ADR-0237 §1 adds that are matched by an equality, and the
@@ -747,12 +748,17 @@ class SqliteMemoryStore:
                 # ``channel_instance`` are the episode's channel, written with the
                 # record (``NULL`` for a record on no channel) and indexed below with
                 # the number, so no channel read reaches into the blob.
+                #
+                # ``is_open`` is whether the row is an open episode (ADR-0286 §12:4),
+                # ``1`` or ``0``, written with every write of the record and indexed
+                # below, so the reads that pass over an open episode, the walk that
+                # stops at one and ``open_episodes`` decode no blob to find it.
                 "CREATE TABLE IF NOT EXISTS records("
                 "rowid INTEGER PRIMARY KEY AUTOINCREMENT, id TEXT UNIQUE NOT NULL, "
                 "kind TEXT NOT NULL, data TEXT NOT NULL, "
                 "expires_at INTEGER, valid_until INTEGER, valid_from INTEGER, "
                 "about_person TEXT, revision INTEGER NOT NULL DEFAULT 0, occurred_at INTEGER, "
-                "channel_type TEXT, channel_instance TEXT)"
+                "channel_type TEXT, channel_instance TEXT, is_open INTEGER NOT NULL DEFAULT 0)"
             )
             self._init_revision_issuer(conn)
             conn.execute(
@@ -1290,7 +1296,7 @@ class SqliteMemoryStore:
 
     @staticmethod
     def _index_channels(conn: sqlite3.Connection) -> None:
-        """Create the two indexes ADR-0283's reads are served from, inside ``_setup``.
+        """Create the indexes ADR-0283's and ADR-0286's reads are served from, in ``_setup``.
 
         ``records_by_channel`` orders a channel's rows by number, so
         :meth:`channel_episodes` and :meth:`channel_episode_ids` read one index range
@@ -1307,6 +1313,10 @@ class SqliteMemoryStore:
             "CREATE INDEX IF NOT EXISTS records_by_parking ON records("
             f"{_PARKS_EXECUTION}, {_PARKS_STEP})"
         )
+        # ADR-0286 §12:4: whether an episode is open is an indexed column. Keyed with
+        # the number, so the walk's lowest open episode and ``open_episodes``' page
+        # are one index range in number order.
+        conn.execute("CREATE INDEX IF NOT EXISTS records_by_open ON records(is_open, rowid)")
 
     def _micros_from_json(self, data: str, key: str, *, nested: str | None = None) -> int | None:
         """Read a stored ISO instant from a record's JSON, as a µs epoch or None.
@@ -1496,18 +1506,20 @@ class SqliteMemoryStore:
                 store unchanged).
         """
         snapshot = record.model_copy(deep=True)
-        vector = await self._embed_one(snapshot.content)
+        # The store embeds no open episode (ADR-0286 §12:5); the write that freezes it
+        # embeds its content.
+        vector = None if is_open(snapshot) else await self._embed_one(snapshot.content)
         async with self._lock:
             await _run_to_completion(self._add_sync, snapshot, vector)
         return snapshot.id
 
-    def _add_sync(self, record: MemoryRecord, vector: Embedding) -> None:
+    def _add_sync(self, record: MemoryRecord, vector: Embedding | None) -> None:
         # The transaction rolls the partial multi-table write back on any failure,
         # so a later commit cannot persist an inconsistent record/vector pair.
         with self._transaction(f"store memory {record.id!r}"):
             self._persist_record(record, vector)
 
-    def _persist_record(self, record: MemoryRecord, vector: Embedding) -> None:
+    def _persist_record(self, record: MemoryRecord, vector: Embedding | None) -> None:
         """Write one record and its vector into the *open* transaction, no commit.
 
         Shared by :meth:`add` and :meth:`write_atomic`: an overwrite rewrites every
@@ -1538,14 +1550,31 @@ class SqliteMemoryStore:
         runs, so the two rules never interact. The caller's transaction rolls the
         refusal back, so nothing this method touched is committed.
 
+        **An open episode is written with no vector** (ADR-0286 §12:5): ``vector`` is
+        ``None`` exactly for one, any vector the row held is removed, and the write
+        that freezes it embeds its content. ``search`` joins ``vec_records``, so an
+        open episode is unreachable by the KNN as well as excluded by the
+        ``is_open`` predicate the restriction carries.
+
+        **The episode guard is judged here too** (ADR-0286 §12:2-§12:4), off the
+        stored row this method already reads, through the helper the in-memory store
+        shares, so the two cannot disagree about what extends an open episode.
+
         Raises:
             MemoryStoreError: ``record.id`` names a stored record of a different
                 ``kind``. Deliberately *not* :class:`MemoryStoreConflictError`,
                 whose remedy is "re-mint and retry": this is a producer fault a
                 retry does not answer (ADR-0108 §4, on ADR-0081 §3's reasoning).
+                Or the write changes a stored episode's processing record or
+                response other than by extending an open one, or changes or drops
+                its channel (ADR-0286 §12), or an open episode arrives with a
+                vector or a frozen record without one.
         """
         conn = self._conn
-        blob = sqlite_vec.serialize_float32(list(vector))
+        open_episode = is_open(record)
+        if open_episode != (vector is None):
+            msg = "an open episode is written with no vector, and every other record with one"
+            raise MemoryStoreError(msg)
         # ``revision`` is excluded from the payload rather than written into it
         # (ADR-0219 §1): the stamp is a property of the row this store holds, not of
         # the bytes a producer wrote, so it lives in a column beside the blob. That
@@ -1575,11 +1604,11 @@ class SqliteMemoryStore:
         # (§6), and ``NULL`` fails the ``IS NOT NULL`` the restriction leads with.
         occurred_at = _to_micros(record.occurred_at) if isinstance(record, EpisodicMemory) else None
         # ADR-0283 §1's channel columns, from the same record the blob is. An upsert
-        # rewrites them with every other column, and never to a different value: a
-        # write that would move a stored record's channel — ``NULL`` to a channel
-        # included — is refused below, because the number stays with the id and a
-        # channel gained at a low number would sit below a reader's watermark. The
-        # number is the ``rowid``, which the update branch keeps.
+        # rewrites them with every other column, and never to a different value once
+        # written: the guard below refuses a write that would change or drop a stored
+        # record's channel, and admits one that gives a channel to an episode stored
+        # on none — the first write carrying it writes the columns (ADR-0286 §12:4).
+        # The number is the ``rowid``, which the update branch keeps.
         channel = channel_of(record)
         channel_type = None if channel is None else channel.channel_type
         channel_instance = None if channel is None else channel.instance_id
@@ -1593,21 +1622,7 @@ class SqliteMemoryStore:
             )
             raise MemoryStoreError(msg)
         if row is not None:
-            stored = self._decode(str(row[2]))
-            if (
-                isinstance(stored, EpisodicMemory)
-                and stored.processing_record is not None
-                and (
-                    not isinstance(record, EpisodicMemory)
-                    or record.processing_record != stored.processing_record
-                    or record.outcome != stored.outcome
-                )
-            ):
-                msg = "recorded processing and response are immutable"
-                raise MemoryStoreError(msg)
-            if channel_of(stored) != channel:
-                msg = "an episode's channel is immutable: it is written once, with the record"
-                raise MemoryStoreError(msg)
+            refuse_episode_change(self._decode(str(row[2])), record)
         # One stamp per write that stores a row, taken from the issuer inside the
         # caller's transaction (ADR-0219 §1). Taken on both branches and after the
         # cross-kind refusal, so a refused write burns nothing and an upsert takes a
@@ -1617,8 +1632,8 @@ class SqliteMemoryStore:
             cursor = conn.execute(
                 "INSERT INTO records"
                 "(id, kind, data, expires_at, valid_until, valid_from, about_person, revision, "
-                "occurred_at, channel_type, channel_instance) "
-                "VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)",
+                "occurred_at, channel_type, channel_instance, is_open) "
+                "VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)",
                 (
                     record.id,
                     record.kind,
@@ -1631,6 +1646,7 @@ class SqliteMemoryStore:
                     occurred_at,
                     channel_type,
                     channel_instance,
+                    int(open_episode),
                 ),
             )
             rowid = cursor.lastrowid
@@ -1639,7 +1655,7 @@ class SqliteMemoryStore:
             conn.execute(
                 "UPDATE records SET kind = ?, data = ?, expires_at = ?, valid_until = ?, "
                 "valid_from = ?, about_person = ?, revision = ?, occurred_at = ?, "
-                "channel_type = ?, channel_instance = ? WHERE rowid = ?",
+                "channel_type = ?, channel_instance = ?, is_open = ? WHERE rowid = ?",
                 (
                     record.kind,
                     data,
@@ -1651,6 +1667,7 @@ class SqliteMemoryStore:
                     occurred_at,
                     channel_type,
                     channel_instance,
+                    int(open_episode),
                     rowid,
                 ),
             )
@@ -1661,7 +1678,11 @@ class SqliteMemoryStore:
             # otherwise be written at ``NULL`` and reachable by nothing.
             msg = f"sqlite reported no rowid for the write of {record.id!r}"
             raise MemoryStoreError(msg)
-        conn.execute("INSERT INTO vec_records(rowid, embedding) VALUES (?, ?)", (rowid, blob))
+        if vector is not None:
+            conn.execute(
+                "INSERT INTO vec_records(rowid, embedding) VALUES (?, ?)",
+                (rowid, sqlite_vec.serialize_float32(list(vector))),
+            )
         # The label index is rewritten in the same transaction as the row and the
         # vector: a record whose labels landed without it would be reachable by a
         # filter and by nothing else, and one whose labels did not land would be
@@ -1722,7 +1743,8 @@ class SqliteMemoryStore:
             return []
         prepared: list[_PreparedWrite] = []
         for record, mode, expected in snapshot:
-            vector = await self._embed_one(record.content)
+            # No embedding for an open episode (ADR-0286 §12:5).
+            vector = None if is_open(record) else await self._embed_one(record.content)
             prepared.append((record, mode, expected, vector))
         async with self._lock:
             await _run_to_completion(self._write_atomic_sync, prepared)
@@ -2326,7 +2348,11 @@ class SqliteMemoryStore:
         # assembled text carries no caller data — the same construction
         # ``_list_beliefs_sync`` uses, and the reason the S608 heuristic is
         # suppressed here rather than satisfied.
+        # ``is_open = 0`` first: an open episode is never a candidate (ADR-0286 §6:1).
+        # It carries no vector either, so the KNN could not reach it, but the
+        # predicate is stated rather than left to follow from the write path.
         eligible = [
+            "is_open = 0",
             "(expires_at IS NULL OR expires_at > ?)",
             "(valid_until IS NULL OR valid_until > ?)",
             "(valid_from IS NULL OR valid_from <= ?)",
@@ -2596,6 +2622,8 @@ class SqliteMemoryStore:
         uses, so the two reads cannot come to apply one axis differently.
         """
         eligible = [
+            # An open episode is never selected (ADR-0286 §6:1).
+            "is_open = 0",
             "(expires_at IS NULL OR expires_at > ?)",
             "(valid_until IS NULL OR valid_until > ?)",
         ]
@@ -2726,7 +2754,8 @@ class SqliteMemoryStore:
         One lock acquisition, one clock reading and one deferred read transaction
         for the page and its ``total``, so the two answer from one state of the
         store. The channel and the number are columns with an index of their own
-        (§1). Every live episode on the channel is read and counted (ADR-0284 §6:1).
+        (§1). Every live frozen episode on the channel is read and counted (ADR-0284
+        §6:1), and no open one (ADR-0286 §6:1).
 
         Raises:
             ValueError: An argument outside the bounds the Protocol states, refused
@@ -2761,7 +2790,11 @@ class SqliteMemoryStore:
         limit: int,
         now: int,
     ) -> tuple[list[tuple[int, str, int]], int]:
-        where = f"channel_type = ? AND channel_instance = ? AND kind = 'episodic' AND {_LIVE}"
+        # An open episode is neither read nor counted (ADR-0286 §6:1).
+        where = (
+            "channel_type = ? AND channel_instance = ? AND kind = 'episodic' AND is_open = 0 "
+            f"AND {_LIVE}"
+        )
         params: list[object] = [channel.channel_type, channel.instance_id, now, now, now]
         count_sql = f"SELECT COUNT(*) FROM records WHERE {where}"  # noqa: S608 — module literals; every value is bound
         if after is None:
@@ -2864,6 +2897,53 @@ class SqliteMemoryStore:
             return [(int(row[0]), str(row[1])) for row in self._conn.execute(sql, params)]
         except sqlite3.Error as exc:
             msg = "failed to enumerate a channel's episodes"
+            raise MemoryStoreError(msg) from exc
+
+    async def open_episodes(
+        self,
+        *,
+        after: int | None = None,
+        limit: int,
+    ) -> tuple[ChannelEpisode, ...]:
+        """Enumerate every open episode held, whatever its liveness (ADR-0286 §12:1).
+
+        Served from the ``records_by_open`` index — no lifecycle, window or channel
+        predicate — so it returns every open episode the table holds.
+
+        Raises:
+            ValueError: An argument outside the bounds the Protocol states, refused
+                before the lock is taken.
+            MemoryStoreError: If the store cannot be read, or a stored record is
+                corrupt.
+        """
+        check_channel_page(after, limit)
+        async with self._lock:
+            rows = await _run_to_completion(self._open_episodes_sync, after, limit)
+        entries: list[ChannelEpisode] = []
+        for number, data, revision in rows:
+            record = self._decoded_at(data, revision)
+            if not isinstance(record, EpisodicMemory) or not is_open(record):
+                msg = "the open index holds a record that is not an open episode"
+                raise MemoryStoreError(msg)
+            entries.append(
+                ChannelEpisode(number=number, record=record.model_copy(update={"score": None}))
+            )
+        return tuple(entries)
+
+    def _open_episodes_sync(self, after: int | None, limit: int) -> list[tuple[int, str, int]]:
+        sql = "SELECT rowid, data, revision FROM records WHERE is_open = 1"
+        params: list[object] = []
+        if after is not None:
+            sql += " AND rowid > ?"
+            params.append(min(after, MAX_EPISODE_NUMBER))
+        sql += " ORDER BY rowid LIMIT ?"
+        params.append(limit)
+        try:
+            return [
+                (int(row[0]), str(row[1]), int(row[2])) for row in self._conn.execute(sql, params)
+            ]
+        except sqlite3.Error as exc:
+            msg = "failed to enumerate the open episodes"
             raise MemoryStoreError(msg) from exc
 
     async def list_beliefs(
@@ -3032,11 +3112,22 @@ class SqliteMemoryStore:
             # bound of zero: `rowid` is an explicit `INTEGER PRIMARY KEY`, so a
             # legacy row can sit below zero and `rowid > 0` would silently skip it
             # while reporting exhaustion — the sentinel ADR-0114 §4 refuses by name.
-            sql = "SELECT rowid, data, revision FROM records"
+            # The walk examines nothing at or past the lowest-keyed open episode the
+            # table holds, an expired one included (ADR-0286 §6:2): read in the same
+            # snapshot as the rows, so a chunk whose next record is that episode
+            # examines nothing and carries no position.
+            (stop,) = conn.execute("SELECT MIN(rowid) FROM records WHERE is_open = 1").fetchone()
+            bounds: list[str] = []
             params: list[object] = []
             if after is not None:
-                sql += " WHERE rowid > ?"
+                bounds.append("rowid > ?")
                 params.append(after)
+            if stop is not None:
+                bounds.append("rowid < ?")
+                params.append(int(stop))
+            sql = "SELECT rowid, data, revision FROM records"
+            if bounds:
+                sql += " WHERE " + " AND ".join(bounds)
             sql += " ORDER BY rowid LIMIT ?"
             params.append(limit)
             return [

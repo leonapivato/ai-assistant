@@ -35,7 +35,10 @@ from memory_store_contract import (
     _CHANNEL_A,
     MemoryStoreContract,
     _activation_episode,
+    _appended,
+    _frozen,
     _on_channel,
+    _open_episode,
 )
 from pydantic import ValidationError
 
@@ -2485,7 +2488,7 @@ async def test_cancelling_a_write_does_not_release_the_connection(tmp_path: Path
     release = threading.Event()
     original_add = store._add_sync
 
-    def blocking_add(record: MemoryRecord, vector: Embedding) -> None:
+    def blocking_add(record: MemoryRecord, vector: Embedding | None) -> None:
         # Block only the first worker (record "a"): it enters, signals, and waits
         # inside the connection's turn until the test lets it finish.
         if not entered.is_set():
@@ -2546,7 +2549,7 @@ async def test_cancellation_takes_precedence_over_a_worker_error(tmp_path: Path)
     entered = threading.Event()
     release = threading.Event()
 
-    def failing_add(record: MemoryRecord, vector: Embedding) -> None:
+    def failing_add(record: MemoryRecord, vector: Embedding | None) -> None:
         entered.set()
         if not release.wait(timeout=5):  # pragma: no cover - only on a hang
             msg = "the blocked worker was never released"
@@ -3111,6 +3114,70 @@ async def test_a_channel_is_two_indexed_columns_written_with_the_record(tmp_path
             ("execution", "step"),
         )
         assert "records_by_parking" in parking_plan
+    finally:
+        store.close()
+
+
+class _CountingEmbedder(HashingEmbedder):
+    """A hashing embedder that records every text it is asked to embed."""
+
+    def __init__(self, *, dimensions: int) -> None:
+        super().__init__(dimensions=dimensions)
+        self.texts: list[str] = []
+
+    async def embed(self, texts: Sequence[str]) -> list[Embedding]:
+        self.texts.extend(texts)
+        return await super().embed(texts)
+
+
+async def test_an_open_episode_is_an_indexed_column_and_carries_no_vector(
+    tmp_path: Path,
+) -> None:
+    """ADR-0286 §12:4-§12:5: the open column is written with every write, and indexed.
+
+    The store embeds no open episode — the embedder is never asked, and no vector row
+    exists — and the write that freezes it embeds its content. The walk's lowest open
+    episode and ``open_episodes``' page are planned on the index, not a scan.
+    """
+    embedder = _CountingEmbedder(dimensions=8)
+    store = SqliteMemoryStore(
+        traces_sink=FakeTraceSink(), path=tmp_path / "memory.db", embedder=embedder, now=_fixed_now
+    )
+    try:
+        opened = _open_episode("episode")
+        await store.add(opened)
+        staged = _appended(opened, _fixed_now())
+        await store.write_atomic([MemoryWrite(record=staged, mode=MemoryWriteMode.UPSERT)])
+
+        def columns() -> tuple[int, int]:
+            (is_open,) = store._conn.execute(
+                "SELECT is_open FROM records WHERE id = 'episode'"
+            ).fetchone()
+            (vectors,) = store._conn.execute("SELECT COUNT(*) FROM vec_records").fetchone()
+            return int(is_open), int(vectors)
+
+        assert columns() == (1, 0)
+        assert embedder.texts == []
+
+        frozen = _frozen(staged, content="the frozen content")
+        await store.write_atomic([MemoryWrite(record=frozen, mode=MemoryWriteMode.UPSERT)])
+
+        assert columns() == (0, 1)
+        assert embedder.texts == ["the frozen content"]
+        assert [record.id for record in (await store.search("frozen content")).records] == [
+            "episode"
+        ]
+        for sql, params in (
+            ("SELECT MIN(rowid) FROM records WHERE is_open = 1", ()),
+            (
+                "SELECT rowid, data, revision FROM records WHERE is_open = 1 AND rowid > ? "
+                "ORDER BY rowid LIMIT ?",
+                (0, 10),
+            ),
+        ):
+            plan = _plan(store, sql, params)
+            assert "records_by_open" in plan
+            assert "TEMP B-TREE" not in plan
     finally:
         store.close()
 

@@ -41,6 +41,7 @@ from ai_assistant.core.episode_encoding import (
     check_list,
     detail_of,
     encode_cursor,
+    episode_extends,
     position_of,
     summary_of,
 )
@@ -145,6 +146,15 @@ def _parks_of(record: MemoryRecord) -> ParkedBinding | None:
     if not isinstance(record, EpisodicMemory) or record.processing_record is None:
         return None
     return record.processing_record.links.parks
+
+
+def _is_open(record: MemoryRecord) -> bool:
+    """Whether ``record`` is an open episode: its processing record is open (ADR-0286 §1)."""
+    return (
+        isinstance(record, EpisodicMemory)
+        and record.processing_record is not None
+        and record.processing_record.is_open
+    )
 
 
 # --- the walk surface's checks and its opaque token (ADR-0114) ---------------
@@ -659,9 +669,17 @@ class FakeMemoryStore:
         retry" — which does not answer a caller that asked to overwrite something
         of a kind it did not expect (ADR-0108 §4, on ADR-0081 §3's reasoning).
 
+        **The episode guard rides the same check** (ADR-0286 §12:2-§12:4): a write
+        changing a stored episode's processing record or ``outcome`` is refused
+        unless the stored record is open and ``episode_extends`` holds of the two, and
+        a write changing or dropping a channel already written is refused, while one
+        giving a channel to an episode stored on none is admitted.
+
         Raises:
             MemoryStoreError: ``record.id`` names a stored record of a different
-                ``kind``, or one on a different channel (ADR-0283 §1).
+                ``kind``, the write changes a stored episode's processing record or
+                response other than by extending an open one, or it changes or drops
+                the channel the stored episode is on (ADR-0283 §1, ADR-0286 §12).
         """
         stored = self._records.get(record.id)
         if (
@@ -672,8 +690,9 @@ class FakeMemoryStore:
                 or record.processing_record != stored.processing_record
                 or record.outcome != stored.outcome
             )
+            and not (isinstance(record, EpisodicMemory) and episode_extends(stored, record))
         ):
-            msg = "recorded processing and response are immutable"
+            msg = "recorded processing and response are immutable unless extending an open episode"
             raise MemoryStoreError(msg)
         if stored is not None and stored.kind != record.kind:
             msg = (
@@ -681,8 +700,8 @@ class FakeMemoryStore:
                 f"a {stored.kind} record is already stored under that id"
             )
             raise MemoryStoreError(msg)
-        if stored is not None and _channel_of(stored) != _channel_of(record):
-            msg = "an episode's channel is immutable: it is written once, with the record"
+        if stored is not None and _channel_of(stored) not in (None, _channel_of(record)):
+            msg = "an episode's channel is immutable: once written, it never changes"
             raise MemoryStoreError(msg)
 
     async def write_atomic(self, writes: Sequence[MemoryWrite]) -> Sequence[str]:
@@ -923,8 +942,11 @@ class FakeMemoryStore:
             now = self._now_utc()  # one reading for the whole search, not one per record
             scored: list[MemoryRecord] = []
             for record in self._records.values():
-                if not self._is_readable(record, now) or (
-                    wanted is not None and record.kind not in wanted
+                # An open episode never enters the ranking (ADR-0286 §6:1).
+                if (
+                    not self._is_readable(record, now)
+                    or _is_open(record)
+                    or (wanted is not None and record.kind not in wanted)
                 ):
                     continue
                 if (
@@ -1040,6 +1062,7 @@ class FakeMemoryStore:
                 record
                 for record in self._records.values()
                 if self._is_readable(record, now)
+                and not _is_open(record)
                 and (wanted_kinds is None or record.kind in wanted_kinds)
                 and (wanted_bands is None or band_of(record.provenance.source) in wanted_bands)
                 and _admits(
@@ -1151,11 +1174,14 @@ class FakeMemoryStore:
         async with self._resource.held():
             self._refuse_read()
             now = self._now_utc()  # one reading for the page and its total
+            # An open episode is neither read nor counted, before the page is cut
+            # (ADR-0286 §6:1).
             matching = [
                 (key, record)
                 for rid, key in self._keys.items()
                 if _channel_of(record := self._records[rid]) == channel
                 and self._is_readable(record, now)
+                and not _is_open(record)
             ]
             page = (
                 matching[-limit:]
@@ -1219,6 +1245,37 @@ class FakeMemoryStore:
                     if len(held) == limit:
                         break
             return tuple(held)
+
+    async def open_episodes(
+        self,
+        *,
+        after: int | None = None,
+        limit: int,
+    ) -> tuple[ChannelEpisode, ...]:
+        """Enumerate every open episode held, whatever its liveness (ADR-0286 §12:1).
+
+        Raises:
+            ValueError: An argument outside the bounds the Protocol states, checked
+                before the resource is held.
+            MemoryStoreError: The fake was constructed with a ``failure``.
+        """
+        _check_channel_page(after, limit)
+        async with self._resource.held():
+            self._refuse_read()
+            found: list[ChannelEpisode] = []
+            for rid, key in self._keys.items():
+                if after is not None and key <= after:
+                    continue
+                record = self._records[rid]
+                if isinstance(record, EpisodicMemory) and _is_open(record):
+                    found.append(
+                        ChannelEpisode(
+                            number=key, record=record.model_copy(deep=True, update={"score": None})
+                        )
+                    )
+                    if len(found) == limit:
+                        break
+            return tuple(found)
 
     async def list_beliefs(
         self,
@@ -1314,10 +1371,19 @@ class FakeMemoryStore:
             # ascending key order and stays that way: `_issue_key` only appends a
             # fresh, larger key, an upsert leaves an existing entry alone, and a
             # delete disturbs no other.
+            # The walk examines nothing at or past the lowest-keyed open episode the
+            # fake holds, an expired one included (ADR-0286 §6:2), so a chunk whose
+            # next record is that episode examines nothing and carries no position.
+            stop = min(
+                (key for rid, key in self._keys.items() if _is_open(self._records[rid])),
+                default=None,
+            )
             examined: list[tuple[int, str]] = []
             for rid, key in self._keys.items():
                 if after is not None and key <= after:
                     continue
+                if stop is not None and key >= stop:
+                    break
                 examined.append((key, rid))
                 if len(examined) == limit:
                     break

@@ -23,7 +23,12 @@ from typing import TYPE_CHECKING
 
 import pytest
 import sqlite_vec
-from memory_store_contract import _CHANNEL_A, _activation_episode, _on_channel
+from memory_store_contract import (
+    _CHANNEL_A,
+    _activation_episode,
+    _on_channel,
+    _open_episode,
+)
 
 from ai_assistant.core.errors import (
     EmbeddingDeadlineExpiredError,
@@ -1269,6 +1274,38 @@ async def test_reembedding_preserves_processing_record_marker_and_digest(tmp_pat
         assert await opened.episode_chunk("activation") == before
         # ADR-0284 §6:1: the failed episode is read like any other.
         assert [record.id for record in (await opened.search("coffee")).records] == ["activation"]
+    finally:
+        opened.close()
+
+
+async def test_reembedding_carries_an_open_episode_without_a_vector(tmp_path: Path) -> None:
+    """ADR-0286 §12:4-§12:5: the rebuild embeds no open episode and keeps it open.
+
+    The swap's verification holds every frozen record, and no open one, to a vector,
+    and checks the open column against each blob, so the swapped store still passes
+    over the open episode and still holds the walk at it.
+    """
+    path = tmp_path / "memory.db"
+    await _seed(path, [_on_channel("frozen"), _open_episode("open"), _on_channel("after")])
+
+    outcome = await Reembedder(store=path, embedder=HashingEmbedder(dimensions=_NEW)).run()
+
+    assert outcome.swapped
+    assert _read(path, "SELECT id, is_open FROM records ORDER BY rowid") == [
+        ("frozen", 0),
+        ("open", 1),
+        ("after", 0),
+    ]
+    assert _read(path, "SELECT COUNT(*) FROM vec_records") == [(2,)]
+    opened = SqliteMemoryStore(
+        traces_sink=FakeTraceSink(), path=path, embedder=HashingEmbedder(dimensions=_NEW)
+    )
+    try:
+        assert [entry.record.id for entry in await opened.open_episodes(limit=10)] == ["open"]
+        page = await opened.channel_episodes(_CHANNEL_A, limit=10)
+        assert [entry.record.id for entry in page.entries] == ["frozen", "after"]
+        chunk = await opened.walk_records("walk", limit=10)
+        assert [record.id for record in chunk.records] == ["frozen"]
     finally:
         opened.close()
 

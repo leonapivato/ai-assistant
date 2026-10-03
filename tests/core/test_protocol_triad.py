@@ -765,6 +765,7 @@ class _ARealMemoryStore:
         lambda *a, **k: None
     )
     channel_episodes = episode_parking = channel_episode_ids = staticmethod(lambda *a, **k: None)
+    open_episodes = staticmethod(lambda *a, **k: None)
 
 
 class _DecoyFixture:

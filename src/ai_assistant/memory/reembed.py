@@ -62,6 +62,7 @@ from ai_assistant.core.errors import (
 from ai_assistant.core.types import EpisodicMemory
 from ai_assistant.memory._channel_reads import channel_of
 from ai_assistant.memory._episode_format import check_format, inspect_existing
+from ai_assistant.memory._episode_guard import is_open
 from ai_assistant.memory._transactions import transaction
 from ai_assistant.memory.sqlite_store import (
     _ADAPTER,
@@ -144,7 +145,7 @@ _LEGACY_SOURCE_COLUMNS: Final = "rowid, id, kind, data, NULL"
 #: so the two cannot come to disagree about what a rebuilt row carries.
 _DESTINATION_COLUMNS: Final = (
     "rowid, id, kind, data, expires_at, valid_until, valid_from, about_person, revision, "
-    "occurred_at, channel_type, channel_instance"
+    "occurred_at, channel_type, channel_instance, is_open"
 )
 
 #: The named columns of :data:`_DESTINATION_COLUMNS` — ``rowid`` is implicit and is
@@ -429,8 +430,8 @@ def _decode(data: str, record_id: object) -> MemoryRecord:
 
 def _derived(
     record: MemoryRecord,
-) -> tuple[int | None, int | None, int | None, str | None, int | None, str | None, str | None]:
-    """The lifecycle, window, subject, instant and channel columns, as the write path does.
+) -> tuple[int | None, int | None, int | None, str | None, int | None, str | None, str | None, int]:
+    """The lifecycle, window, subject, instant, channel and open columns, as the write path does.
 
     Kept in this shape — read off the decoded model, not re-parsed from the JSON —
     so it cannot drift from ``SqliteMemoryStore._persist_record``, which is the
@@ -458,6 +459,11 @@ def _derived(
     rebuild that left them ``NULL`` would put every episode on no channel — history
     empty and a deletion that finds nothing to delete — while every record
     round-tripped intact.
+
+    **The open column is here for the same reason once more** (ADR-0286 §12:4): the
+    reads that pass over an open episode and the walk that stops at one read it alone,
+    so a rebuild that left it ``0`` would hand a half-written pass to every model read
+    while every record round-tripped intact.
     """
     expires = _to_micros(record.expires_at) if record.expires_at is not None else None
     valid_until = (
@@ -476,6 +482,7 @@ def _derived(
         occurred_at,
         None if channel is None else channel.channel_type,
         None if channel is None else channel.instance_id,
+        int(is_open(record)),
     )
 
 
@@ -849,7 +856,12 @@ class Reembedder:
             if not rows:
                 return embedded
             records = [_decode(str(row[3]), row[1]) for row in rows]
-            vectors = await self._embed([record.content for record in records])
+            # The store embeds no open episode (ADR-0286 §12:5), so neither does its
+            # rebuild: an open record is copied with no vector.
+            embedded_vectors = iter(
+                await self._embed([record.content for record in records if not is_open(record)])
+            )
+            vectors = [None if is_open(record) else next(embedded_vectors) for record in records]
             cursor = int(rows[-1][0])
             with transaction(work, "copy a re-embedded chunk", error=MemoryStoreError):
                 for row, record, vector in zip(rows, records, vectors, strict=True):
@@ -1139,7 +1151,7 @@ def _insert(
     work: sqlite3.Connection,
     row: _Row,
     record: MemoryRecord,
-    vector: Embedding,
+    vector: Embedding | None,
 ) -> None:
     """Write one copied row and its recomputed vector into the open transaction.
 
@@ -1159,12 +1171,19 @@ def _insert(
     if stamp is None or int(stamp) == 0:
         work.execute("UPDATE revision_issuer SET issued = issued + 1 WHERE singleton = 0")
         (stamp,) = work.execute("SELECT issued FROM revision_issuer WHERE singleton = 0").fetchone()
-    expires, valid_until, valid_from, about_person, occurred_at, channel_type, instance = _derived(
-        record
-    )
+    (
+        expires,
+        valid_until,
+        valid_from,
+        about_person,
+        occurred_at,
+        channel_type,
+        instance,
+        open_episode,
+    ) = _derived(record)
     work.execute(
         f"INSERT INTO records({_DESTINATION_COLUMNS}) "  # noqa: S608 — a module-level literal, never caller data
-        "VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)",
+        "VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)",
         (
             rowid,
             record_id,
@@ -1178,12 +1197,15 @@ def _insert(
             occurred_at,
             channel_type,
             instance,
+            open_episode,
         ),
     )
-    work.execute(
-        "INSERT INTO vec_records(rowid, embedding) VALUES (?, ?)",
-        (rowid, sqlite_vec.serialize_float32(list(vector))),
-    )
+    # An open episode carries no vector (ADR-0286 §12:5), as the store wrote it.
+    if vector is not None:
+        work.execute(
+            "INSERT INTO vec_records(rowid, embedding) VALUES (?, ?)",
+            (rowid, sqlite_vec.serialize_float32(list(vector))),
+        )
     # The label index goes across with the row (ADR-0237 §1). The work store's
     # schema carries an *empty* ``record_labels``, and the store's own backfill
     # runs only on the open that creates the table — so a copy that skipped this
@@ -1245,13 +1267,14 @@ def _verify_labels(
         )
 
 
-def _rowids(conn: sqlite3.Connection, table: str, what: str) -> set[int]:
-    """Every ``rowid`` in ``table``.
+def _rowids(conn: sqlite3.Connection, table: str, what: str, *, where: str = "") -> set[int]:
+    """Every ``rowid`` in ``table``, or every one ``where`` admits.
 
     Raises:
         MemoryStoreError: If the table cannot be scanned.
     """
-    sql = f"SELECT rowid FROM {table}"  # noqa: S608 — a module-level literal, never caller data
+    condition = f" WHERE {where}" if where else ""
+    sql = f"SELECT rowid FROM {table}{condition}"  # noqa: S608 — module-level literals, never caller data
     try:
         return {int(row[0]) for row in conn.execute(sql)}
     except sqlite3.Error as exc:
@@ -1369,7 +1392,7 @@ def _verify(
         if left[:4] != right[:4]:
             _fail(f"row {right[0]!r} differs from the live store's row {left[0]!r}")
         record = _decode(str(right[3]), right[1])
-        if (*right[4:8], *right[9:12]) != _derived(record):
+        if (*right[4:8], *right[9:13]) != _derived(record):
             _fail(f"row {right[0]!r} has columns that disagree with the record stored in it")
         labels.update((int(right[0]), axis, value) for axis, value in _labels_of(record))
         highest = max(highest, _verified_stamp(left, right))
@@ -1381,7 +1404,12 @@ def _verify(
         )
     _verify_labels(work, labels, str(plan.work))
 
-    record_rowids = _rowids(work, "records", str(plan.work))
+    # Every frozen record carries a vector and no open episode does (ADR-0286 §12:5).
+    # The open column was checked against each blob above, so it names exactly the
+    # rows that carry none.
+    record_rowids = _rowids(work, "records", str(plan.work)) - _rowids(
+        work, "records", str(plan.work), where="is_open = 1"
+    )
     vector_rowids = _rowids(work, "vec_records", str(plan.work))
     if record_rowids != vector_rowids:
         missing = len(record_rowids - vector_rowids)
