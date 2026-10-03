@@ -3351,6 +3351,11 @@ class ProcessingReason(StrEnum):
     PROCESSING_FAILED = "processing_failed"
     INTERNAL_ERROR = "internal_error"
     CANCELLED = "cancelled"
+    HUB_STOPPED = "hub_stopped"
+    """The process ended while the pass was open, and a restart closed its episode
+    (ADR-0286 §7). It is paired with :attr:`ProcessingStatus.INTERRUPTED` and with
+    the end entry's :attr:`ControllerRule.HUB_STOPPED`, and says nothing about how
+    far processing got: nothing recorded when it stopped."""
 
 
 class RecordedTextInput(BaseModel):
@@ -3700,6 +3705,10 @@ class ControllerRule(StrEnum):
     WINDOWS_UNASSEMBLED = "windows_unassembled"
     PARK_ANSWERED = "park_answered"
     """A resume continues the stage its parked work stopped in (ADR-0284 §5:4)."""
+    HUB_STOPPED = "hub_stopped"
+    """The process ended while the pass was open, and a restart's close appended the
+    end entry (ADR-0286 §7). It ends a pass, so it is in
+    :data:`ENDING_CONTROLLER_RULES`."""
 
 
 #: The rules that end a pass rather than make a stage due (ADR-0280 §4, §5).
@@ -3713,6 +3722,7 @@ ENDING_CONTROLLER_RULES: Final[frozenset[ControllerRule]] = frozenset(
         ControllerRule.STAGE_TIMED_OUT,
         ControllerRule.INTERRUPTED,
         ControllerRule.ENDED_BEFORE_CONTROLLER,
+        ControllerRule.HUB_STOPPED,
     }
 )
 
@@ -3873,16 +3883,28 @@ class ActivationRecall(BaseModel):
 
 
 class EpisodeProcessingRecord(BaseModel):
-    """Immutable facts about one activation, written after its processing ends."""
+    """The facts about one activation's processing, open while it runs (ADR-0286 §1).
+
+    A record is **open** while its ``status`` is ``None`` and **frozen** once it is
+    set; ``status``, ``reason`` and ``ended_at`` are all ``None`` or all set. An open
+    record's stages carry no end entry and it carries no ``understanding_omitted``. A
+    frozen record ends its stages in exactly one end entry, last, and carries exactly
+    one of a non-empty understanding and an omission. Openness is read off
+    ``status``, never off the absence of an end entry (ADR-0280 §6:2).
+
+    A frozen record is immutable. An open one is replaced only by a record that
+    extends it, which :func:`~ai_assistant.core.episode_encoding.episode_extends`
+    decides (ADR-0286 §3).
+    """
 
     model_config = ConfigDict(frozen=True, extra="forbid")
     schema_version: Literal[5] = 5
     activation_id: Identifier
     started_at: UtcInstant
-    ended_at: UtcInstant
+    ended_at: UtcInstant | None = None
     trigger: RecordedActivationTrigger
-    status: ProcessingStatus
-    reason: ProcessingReason
+    status: ProcessingStatus | None = None
+    reason: ProcessingReason | None = None
     response_degraded: bool = False
     output_degraded: bool = False
     links: ActivationLinks = Field(default_factory=ActivationLinks)
@@ -3893,10 +3915,29 @@ class EpisodeProcessingRecord(BaseModel):
     stages_elided: int = Field(default=0, strict=True, ge=0, lt=2**31)
     recall: ActivationRecall | None = None
 
+    @property
+    def is_open(self) -> bool:
+        """Whether the record is open: its pass has not ended (ADR-0286 §1)."""
+        return self.status is None
+
+    @model_validator(mode="after")
+    def _open_or_frozen(self) -> Self:
+        # ADR-0286 §1: all three are None while open, and all three are set once frozen.
+        unset = [field is None for field in (self.status, self.reason, self.ended_at)]
+        if any(unset) and not all(unset):
+            msg = "a processing record sets its status, reason and end time together"
+            raise ValueError(msg)
+        return self
+
     @model_validator(mode="after")
     def _understood_or_omitted(self) -> Self:
-        # ADR-0276 §7: exactly one of a non-empty history and an omission value.
-        if bool(self.understanding) == (self.understanding_omitted is not None):
+        # ADR-0286 §1: an open record carries no omission; ADR-0276 §7: a frozen one
+        # carries exactly one of a non-empty history and an omission value.
+        if self.is_open:
+            if self.understanding_omitted is not None:
+                msg = "an open processing record carries no understanding omission"
+                raise ValueError(msg)
+        elif bool(self.understanding) == (self.understanding_omitted is not None):
             msg = "a processing record carries either its understanding or why it has none"
             raise ValueError(msg)
         return self
@@ -3904,9 +3945,14 @@ class EpisodeProcessingRecord(BaseModel):
     @model_validator(mode="after")
     def _stages_follow_the_trigger(self) -> Self:
         # ADR-0280 §7: a channel activation records its stages ending in exactly one end
-        # entry, last, and ADR-0284 §5:4-§5:5 holds a resume to the same rule.
+        # entry, last, and ADR-0284 §5:4-§5:5 holds a resume to the same rule. ADR-0286
+        # §1: an open record's stages carry no end entry.
         ends = [entry.stage is ControllerStage.END for entry in self.stages]
-        if not ends or not ends[-1] or any(ends[:-1]):
+        if self.is_open:
+            if any(ends):
+                msg = "an open stage record carries no end entry"
+                raise ValueError(msg)
+        elif not ends or not ends[-1] or any(ends[:-1]):
             msg = "a stage record ends in exactly one end entry, last"
             raise ValueError(msg)
         return self
@@ -3989,15 +4035,19 @@ class EpisodeChunk(BaseModel):
 class EpisodicMemory(MemoryBase):
     """Something that happened: an event, with who and how it turned out.
 
-    ``processing_record`` (ADR-0275) records an activation after processing ends:
-    the experience of processing it (ADR-0284). Its absence supports other current
-    producers. Fresh-state startup does not import historical records.
+    ``processing_record`` (ADR-0275) records an activation: the experience of
+    processing it (ADR-0284). Its absence supports other current producers.
+    Fresh-state startup does not import historical records.
 
     With a processing record, ``outcome`` is the response — the text the activation
     sent back on its channel, nonblank, or ``None`` where it sent none (ADR-0284
     §4:1) — ``content`` is the search text one rule derives from the record (§7),
     and what became of a step or a route is on the stage entry that reached it
     (§5:2). ADR-0221 §2's ``disposition`` field is removed (§5:3).
+
+    An episode is **open** or **frozen** as its processing record is (ADR-0286 §1).
+    An open episode carries an empty ``content`` and reach ``OWNER`` with setter
+    ``DERIVED``: the freezing write derives its search text and its placement.
     """
 
     kind: Literal["episodic"] = "episodic"
@@ -4039,6 +4089,24 @@ class EpisodicMemory(MemoryBase):
             and not self.outcome.strip()
         ):
             msg = "a recorded response requires nonblank outcome text"
+            raise ValueError(msg)
+        return self
+
+    @model_validator(mode="after")
+    def _open_episode_is_bare_and_owner_only(self) -> Self:
+        # ADR-0286 §1, §6: until it freezes, an episode carries no search text and is
+        # placed owner-only by derivation, whatever the evaluation will find.
+        processing = self.processing_record
+        if processing is None or not processing.is_open:
+            return self
+        if self.content:
+            msg = "an open episode carries an empty content"
+            raise ValueError(msg)
+        if (
+            self.placement.reach is not PlacementReach.OWNER
+            or self.placement.set_by is not PlacementSetter.DERIVED
+        ):
+            msg = "an open episode is placed reach owner, set by derivation"
             raise ValueError(msg)
         return self
 

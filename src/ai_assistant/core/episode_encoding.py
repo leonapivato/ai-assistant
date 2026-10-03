@@ -3,7 +3,8 @@
 Inspection is ADR-0275's. ADR-0284 adds the two derivations every reader of an
 episode shares: :func:`episode_content`, its search text (§7), and
 :func:`project_episode`, what a model is shown of it (§8), with the one table of
-verdict phrases beside it.
+verdict phrases beside it. ADR-0286 adds :func:`episode_extends`, the one test of
+whether a revision of an open episode only extends the stored one (§3).
 """
 
 from __future__ import annotations
@@ -35,13 +36,16 @@ from ai_assistant.core.types import (
     ProjectedText,
     RecordedActivationTrigger,
     RecordedChannelTrigger,
+    RecordedSpeechInput,
     RecordedTextInput,
     RouteOutcome,
     rests_on_recorded_external_content,
 )
 
 if TYPE_CHECKING:
-    from collections.abc import Mapping
+    from collections.abc import Callable, Mapping
+
+    from ai_assistant.core.types import ActivationLinks
 
 _MAX_PAGE = 100
 _MAX_CHUNK = 65536
@@ -185,6 +189,9 @@ def episode_content(record: EpisodicMemory) -> str:
     ``origin`` is ``outside``. A resume carries no origin and no input (§2:4), so it
     contributes no words either.
 
+    **An open episode's** search text is empty (ADR-0286 §1, superseding §7:1 in
+    when): the freezing write derives it, and this returns ``""`` until then.
+
     **An episode without a processing record** keeps the ``content`` its producer
     gave it, and this returns it unchanged: §7:1 makes the rule a function of the
     processing record and sets it on processing-record episodes alone, and ADR-0275
@@ -202,6 +209,8 @@ def episode_content(record: EpisodicMemory) -> str:
     processing = record.processing_record
     if processing is None:
         return record.content
+    if processing.status is None or processing.reason is None:
+        return ""
     if processing.understanding:
         lines = [processing.understanding[-1].meaning]
     else:
@@ -291,10 +300,15 @@ def project_episode(
         The projection.
 
     Raises:
-        ValueError: If ``excerpt_chars`` is not an integer of at least 1.
+        ValueError: If ``excerpt_chars`` is not an integer of at least 1, or the
+            episode is open: an open episode is never a model input (ADR-0286 §6),
+            so a reader that feeds a model passes over it before it projects.
     """
     if type(excerpt_chars) is not int or excerpt_chars < 1:
         msg = "the episode excerpt bound must be an integer of at least 1"
+        raise ValueError(msg)
+    if record.processing_record is not None and record.processing_record.is_open:
+        msg = "an open episode is never a model input (ADR-0286 §6)"
         raise ValueError(msg)
     response = _projected(record.outcome, excerpt_chars)
     external = rests_on_recorded_external_content(record.provenance)
@@ -333,6 +347,164 @@ def project_episode(
         status=processing.status,
         reason=processing.reason,
         derived_from_external=external,
+    )
+
+
+# --- a revision of an open episode (ADR-0286 §3) -------------------------------
+
+
+def episode_extends(stored: EpisodicMemory, revision: EpisodicMemory) -> bool:
+    """Whether ``revision`` only extends the open episode ``stored`` (ADR-0286 §3).
+
+    Decided from the two records' processing records and ``outcome`` alone; no other
+    field of either episode enters it. It holds exactly where both carry a
+    processing record with one ``activation_id``, the stored one is open, the two
+    differ in their processing record or ``outcome``, and every difference is one
+    §3 admits:
+
+    - a field at its unset value taking a value: the trigger's ``channel``, a speech
+      trigger's ``transcript``, each field of ``links``, ``recall`` and ``outcome``
+      (from ``None``), and ``response_degraded`` and ``output_degraded`` (from
+      ``False``);
+    - entries appended at the end of ``understanding`` and of ``stages``, each under
+      its bound, with its elided count grown by exactly what the bound dropped;
+    - in the one revision that freezes it, ``status``, ``reason``, ``ended_at`` and
+      ``understanding_omitted``, with the end entry the record's own validators then
+      require last.
+
+    A field that carries a value keeps it.
+
+    **The bound is read off the two records**, because its limit is a setting the
+    record does not carry (ADR-0276 §7:4, ADR-0280 §6:6). Where a sequence's elided
+    count did not grow, the bound dropped nothing: the stored entries stand as the
+    revision's prefix, and a stored sequence the bound had already cut takes no
+    further entry. Where it grew, the bound bit at the revision's own length, which
+    is then the limit: ``understanding`` keeps its first entry and the latest,
+    ``stages`` its first half and the rest from the end, and every entry the
+    revision keeps from the stored sequence must sit where that bound puts it.
+
+    Args:
+        stored: The episode as the store holds it.
+        revision: The episode a writer would replace it with.
+
+    Returns:
+        Whether ``revision`` extends ``stored``.
+    """
+    before = stored.processing_record
+    after = revision.processing_record
+    if (
+        before is None
+        or after is None
+        or before.activation_id != after.activation_id
+        or not before.is_open
+    ):
+        return False
+    if before == after and stored.outcome == revision.outcome:
+        return False
+    if stored.outcome is not None and stored.outcome != revision.outcome:
+        return False
+    if not _appended(
+        before.understanding,
+        before.understanding_elided,
+        after.understanding,
+        after.understanding_elided,
+        head=_understanding_head,
+    ) or not _appended(
+        before.stages, before.stages_elided, after.stages, after.stages_elided, head=_stage_head
+    ):
+        return False
+    settled = before.model_copy(
+        update={
+            "trigger": _settled_trigger(before.trigger, after.trigger),
+            "links": _settled_links(before.links, after.links),
+            "recall": after.recall if before.recall is None else before.recall,
+            "response_degraded": before.response_degraded or after.response_degraded,
+            "output_degraded": before.output_degraded or after.output_degraded,
+            "understanding": after.understanding,
+            "understanding_elided": after.understanding_elided,
+            "stages": after.stages,
+            "stages_elided": after.stages_elided,
+            "status": after.status,
+            "reason": after.reason,
+            "ended_at": after.ended_at,
+            "understanding_omitted": after.understanding_omitted,
+        }
+    )
+    return settled == after
+
+
+def _understanding_head(limit: int) -> int:
+    """ADR-0276 §7:4: the history keeps version 1 and the latest ``limit - 1``."""
+    del limit
+    return 1
+
+
+def _stage_head(limit: int) -> int:
+    """ADR-0280 §6:6: the record keeps its first ``limit // 2`` entries and the rest last."""
+    return limit // 2
+
+
+def _appended(
+    before: tuple[object, ...],
+    before_elided: int,
+    after: tuple[object, ...],
+    after_elided: int,
+    *,
+    head: Callable[[int], int],
+) -> bool:
+    """Whether ``after`` is ``before`` with entries appended under a head-and-tail bound.
+
+    ``head`` gives how many entries the bound keeps from the front at a limit; it
+    keeps the rest from the end.
+    """
+    added = len(after) + after_elided - len(before) - before_elided
+    if added < 0:
+        return False
+    if after_elided == before_elided:
+        return (before_elided == 0 or added == 0) and after[: len(before)] == before
+    limit = len(after)
+    kept_head = head(limit)
+    kept_tail = limit - kept_head
+    if kept_head < 1 or kept_tail < 1 or (before_elided and len(before) != limit):
+        return False
+    # The bound over the stored entries followed by the appended ones (ADR-0286 §3):
+    # the revision's index ``i`` holds that sequence's entry ``source``, which is a
+    # stored entry where it falls inside the stored prefix.
+    combined = len(before) + added
+    for index, entry in enumerate(after):
+        source = index if index < kept_head else combined - kept_tail + (index - kept_head)
+        if source < len(before) and entry != before[source]:
+            return False
+    return True
+
+
+def _settled_trigger(
+    before: RecordedActivationTrigger, after: RecordedActivationTrigger
+) -> RecordedActivationTrigger:
+    """``before``, with its channel and its transcript taken from ``after`` where unset."""
+    settled = before
+    if before.channel is None:
+        settled = settled.model_copy(update={"channel": after.channel})
+    if (
+        isinstance(settled, RecordedChannelTrigger)
+        and isinstance(settled.payload, RecordedSpeechInput)
+        and settled.payload.transcript is None
+        and isinstance(after, RecordedChannelTrigger)
+        and isinstance(after.payload, RecordedSpeechInput)
+    ):
+        payload = settled.payload.model_copy(update={"transcript": after.payload.transcript})
+        settled = settled.model_copy(update={"payload": payload})
+    return settled
+
+
+def _settled_links(before: ActivationLinks, after: ActivationLinks) -> ActivationLinks:
+    """``before``, with each of its unset fields taken from ``after``."""
+    return before.model_copy(
+        update={
+            name: getattr(after, name)
+            for name in type(before).model_fields
+            if getattr(before, name) is None
+        }
     )
 
 

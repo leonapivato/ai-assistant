@@ -2406,7 +2406,10 @@ from ai_assistant.wire.errors import (
 #:     are removed, and ``EpisodeResponseKind`` with them.
 #: 70: ADR-0285 §2 removes ``AssistantEngine.observe`` from the promoted method set, and
 #:     ``ObservationReport`` and ``ObservedProposal`` with it.
-PROTOCOL_VERSION: Final[int] = 70
+#: 71: ADR-0286 §15 lane 1 makes ``EpisodeProcessingRecord.status``, ``reason`` and
+#:     ``ended_at`` optional (an open record), and adds ``hub_stopped`` to
+#:     ``ProcessingReason`` and to ``ControllerRule``, on the wire-carried record.
+PROTOCOL_VERSION: Final[int] = 71
 
 #: ADR-0085 §8a: "The correlation id is a UUID string and is at most 36 bytes.
 #: Bounding it is what makes the reserve a constant rather than an aspiration; a
