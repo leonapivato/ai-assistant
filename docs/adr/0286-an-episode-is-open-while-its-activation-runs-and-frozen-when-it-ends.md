@@ -8,6 +8,7 @@
 - **Partially supersedes** [ADR-0114](0114-the-store-contract-carries-the-walk.md) — **one scope, read across two clauses.** **§1:2's *in the store's own insertion order* and §1:7's *nothing left to examine*, at an open episode alone**: a chunk examines no record at or past the lowest-keyed open episode, and a chunk that carries no position because that episode is next means nothing is left to examine for now (§6 below). Every other clause stands, §1:3's never-reissued key included.
 - **Partially supersedes** [ADR-0204](0204-a-record-carries-whether-the-supply-it-was-produced-over-held-withheld-content.md) — **one scope, read across three clauses.** **§2:5, §2:6 and §5:5, for an open episode alone**: until it freezes, an episode carries reach `OWNER` and setter `DERIVED` whatever the evaluation will find, and the write that freezes it writes the evaluation's value in place of that, clearing it where the evaluation is `False` (§6 below). The evaluation, its terms, its site and its value at freeze stand, and every other clause stands.
 - **Partially supersedes** [ADR-0217](0217-a-record-carries-who-may-receive-it-and-a-model-may-only-narrow-it.md) — **one scope, read across two clauses.** **§1:3 and §3:3, for an open episode alone**: an open episode is written with reach `OWNER` and setter `DERIVED` though no evaluation has found anything yet, and the write that freezes it replaces that placement with the derivation's, wider or not (§6 below). Every other clause stands.
+- **Partially supersedes** [ADR-0223](0223-a-captured-episode-carries-the-externality-of-the-supply-its-turn-ran-over.md) — **one scope.** **§3:1's partition, in the addition alone**: an episode a restart closes is a fourth capture site, and keeps the `Provenance.derived_from_external` its stored episode carries, which the writer carries into each append from the pass's latest computed value, or `False` where the pass computed none (§4, §7 below). Every other clause stands.
 - **Partially supersedes** [ADR-0275](0275-an-episode-records-one-activation-after-processing-ends.md) — **eleven scopes.** **§1:4's *no live activation log***: the episode is written at admission and extended as stages end (§2, §3 below). **§2:2's *with no durable start row***: the admission write is one. **§4:1's record shapes, in the changes alone**: `status`, `reason` and `ended_at` are `None` while a record is open, `ProcessingReason` gains `hub_stopped`, and `schema_version` is 6 (§1, §7, §13 below). **§5:3's table, in the addition alone**: a restart's close records `interrupted` / `hub_stopped` (§7 below). **§8:2's sequence, and its *no captured processing envelope is updated in place afterward***: the episode is inserted at admission and replaced at each stage end and at freeze (§2–§4 below). **§8:4's last sentence**: an open episode is a durable record of a pass in progress. **§8:6's capture timestamp, in when it is taken**: by the admission write (§2 below). **§8:13's first sentence, in its *interrupted* member**: a restart closes an episode admission wrote as `interrupted` (§7 below). **§9:4, for an open episode alone**: the open state is a ground for `OWNER` / `DERIVED`, and the write that freezes it may widen that placement (§6 below). **§11:5's *unavailable* label, for an open episode's end fields alone**: they are labelled in progress (§11 below). **§12:6's immutability, for an open episode alone**: its processing record and response may be replaced by a record that extends them (§3, §12 below). Every other clause stands, §2:4's single finalization, §3:4, §6:2's collision rule and §9:1's bound included.
 - **Partially supersedes** [ADR-0276](0276-an-activation-is-understood-before-it-is-associated-and-the-understanding-is-retained-with-its-episode.md) — **two scopes.** **§7:1's *exactly one*, for an open record**: an open record carries no `understanding_omitted` and may carry no understanding (§1 below). **§7:3's *written once, at capture* and *no captured record is updated in place afterward***: versions are written as the stage that records them ends (§3 below). §7:3's last clause, that a later activation never rewrites an earlier episode's understanding, and every other clause stand.
 - **Partially supersedes** [ADR-0280](0280-an-activation-controller-runs-the-stages-by-rules-and-records-every-choice-with-the-episode.md) — **four scopes.** **§4:2's member set, in the addition alone**: `ControllerRule` gains `hub_stopped` (§7 below). **§6:2's appenders**: a restart's close appends an end entry too (§7 below). **§6:5 entire**: entries are written as stages end (§3 below). **§7:1's validator, for an open record**: an open record's stages carry no end entry (§1 below). Every other clause stands.
@@ -170,6 +171,10 @@ per-stage bound could only refuse what the whole bound refuses, or cut what ADR-
 > evaluation under ADR-0217 §1:3, `Provenance.derived_from_external`, and the capture
 > modality.
 
+> **Normative.** Where the pass computes ADR-0223 §1:2's value, the writer carries the
+> latest value computed into `Provenance.derived_from_external` on each append after
+> it, and the freezing write carries the value capture threads, as today.
+
 > **Normative.** A conversational finalization writes the archive entry where one is
 > owed and then calls `record_turn`, in ADR-0283 §7:1's order, once the freezing write
 > is confirmed. ADR-0283 §7:2's verification and its drain apply unchanged.
@@ -256,16 +261,22 @@ reach anyone the finished episode would not.
 > with outcome `done`, with `status` `interrupted`, `reason` `hub_stopped`, and its own
 > clock reading as `ended_at` and as both of the entry's readings.
 
-> **Normative.** The close is the freezing write for that episode, with three
-> differences. The placement stays reach `OWNER`, setter `DERIVED`, and
-> `Provenance.derived_from_external` is set true, because the evaluation and the
-> selection that would set them died with the process. No archive entry is written,
-> because no capture facts survive. And `record_turn` is called, with no delivery,
-> only where the episode is on a conversation's channel, and a `None` from it deletes
-> the episode as ADR-0283 §7:2 rules.
+> **Normative.** The close is the freezing write for that episode, with four
+> differences. The placement stays reach `OWNER`, setter `DERIVED`, because the
+> evaluation that could widen it died with the process. `Provenance.derived_from_external`
+> stays as the stored episode carries it: the latest value §4 carried into an append,
+> or `False` where the pass computed none. No archive entry is written, because no
+> capture facts survive. And `record_turn` is called, with no delivery, only where the
+> episode is on a conversation's channel, and a `None` from it deletes the episode as
+> ADR-0283 §7:2 rules.
 
 > **Normative.** A store failure during the close propagates from `start`, as the
 > sweeps' failures do.
+
+A restart's close is a capture site ADR-0223 §3's partition did not have, which is
+why ADR-0223 §3:1 is recorded as partially superseded in its addition: the value is
+neither recomputed at the close nor defaulted, but read off the episode the pass
+itself wrote.
 
 The close invents no episode, and ADR-0275 §8:13's other clauses stand: the episode
 was written at admission, and the restart records only how it ended, replaying nothing
@@ -379,6 +390,7 @@ writer calls.
 | ADR-0114 §1:2, §1:7 | The walk stops at the oldest open episode, and waits there. |
 | ADR-0204 §2:5, §2:6, §5:5 | An open episode is placed owner-only; freeze writes the evaluation's value over it. |
 | ADR-0217 §1:3, §3:3 | As ADR-0204, in the placement's terms. |
+| ADR-0223 §3:1 | A restart's close keeps the externality its last append recorded. |
 | ADR-0275 §1:4, §2:2, §4:1, §5:3, §8:2, §8:4, §8:6, §8:13, §9:4, §11:5, §12:6 | Written at admission, extended per stage, frozen at the end; closed on restart. |
 | ADR-0276 §7:1, §7:3 | Versions written as recorded; an open record carries no omission. |
 | ADR-0280 §4:2, §6:2, §6:5, §7:1 | Entries written as stages end; the restart's end entry. |
@@ -456,9 +468,9 @@ And in the system:
   deletion after a capture failure holds it until the next restart closes that
   episode; the capture loss is in the log.
 - A conversation's digest counts its frozen episodes, not the one in progress.
-- An episode the restart closes stays owner-only and is marked as resting on external
-  content, even where the finished pass would have been placed for anyone and read
-  nothing external.
+- An episode the restart closes stays owner-only, even where the finished pass would
+  have been placed for anyone, and is marked as resting on external content only as
+  far as its last append recorded.
 - What follows: step 3b, episodes kept until forgotten and the archive retired; then
   effects written into the open episode as they happen (#2584), and other activations'
   open episodes made visible once activations run concurrently.
