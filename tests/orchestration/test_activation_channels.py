@@ -77,7 +77,11 @@ async def test_event_failure_or_cancellation_records_once_after_model_cleanup(
     harness = Harness(informational_events=InformationalEventStage(model))
     task = asyncio.create_task(harness.engine.receive(event_input(), reply=None, timeout=_BUDGET))
     await model.entered.wait()
-    assert await harness.memory.export() == []
+    # ADR-0286 §2: the episode is stored open from admission, before the model ran.
+    (opened,) = await harness.memory.export()
+    assert isinstance(opened, EpisodicMemory)
+    assert opened.processing_record is not None
+    assert opened.processing_record.is_open
     if cancelled:
         task.cancel()
         with pytest.raises(asyncio.CancelledError):

@@ -3918,7 +3918,8 @@ class Engine:
                 written. A sweep that swallowed a store fault to keep running would
                 report success over work it never did, so it aborts loudly — an id
                 that is merely *gone* is a no-op and does not abort it.
-            MemoryStoreError: If an episode a deletion must destroy could not be.
+            MemoryStoreError: If an episode a deletion must destroy could not be, or
+                an episode a dead process left open could not be closed (ADR-0286 §7).
             NotificationOutboxError: If the outbox or the records it reconciles
                 against cannot be read or written.
         """

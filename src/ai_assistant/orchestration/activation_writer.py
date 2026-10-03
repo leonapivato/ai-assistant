@@ -248,7 +248,7 @@ class ActivationWriter:
             await self.admit(state, payload_limit=payload_limit)
         progress = state.capture
         if progress is None:
-            capture_loss("admission", "unwritten")
+            # The admission write could not be made, and logged why (§2).
             return state.degraded_report()
         writes = _Writes()
         conversation_id = state.conversation_id
