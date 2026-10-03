@@ -206,20 +206,19 @@ def _exactly_an_integer(value: object) -> object:
 
     pydantic's non-strict ``int`` coercion accepts ``True`` as ``1`` because
     ``bool`` is an ``int`` subclass, so ``Settings(observation_batch_size=True)``
-    loaded a one-item batch instead of refusing a flag where a count belongs — and
-    every bound the field carries (``ge``, ``le``, ``lt``) is satisfied by the
-    ``1`` that arrives, so nothing downstream can tell the difference.
+    (a field ADR-0285 §5 has since removed) loaded a one-item batch instead of
+    refusing a flag where a count belongs — and every bound an integer field
+    carries (``ge``, ``le``, ``lt``) is satisfied by the ``1`` that arrives, so
+    nothing downstream can tell the difference.
 
     The code **below** settings already refuses this, on the stated ground that a
-    flag is not a count: ``_check_batch_size`` in ``orchestration/observation.py``,
-    ``_check_tuning`` in ``orchestration/loop.py``, ``Engine.__init__``, and
-    ``_check_bound`` in ``learning/observer.py`` each exclude ``bool`` before their
-    range check. Because :class:`Settings` hands them an *already coerced* integer,
-    those guards can never fire on the settings path; they only ever protect the
-    constructor seam a test or a second composition root reaches directly. This
-    validator makes the configuration layer state the same rule the four layers
-    under it already state, rather than leaving it the one layer that does not
-    (issue #471).
+    flag is not a count: ``_check_tuning`` in ``orchestration/loop.py`` and
+    ``Engine.__init__`` each exclude ``bool`` before their range check. Because
+    :class:`Settings` hands them an *already coerced* integer, those guards can
+    never fire on the settings path; they only ever protect the constructor seam a
+    test or a second composition root reaches directly. This validator makes the
+    configuration layer state the same rule the layers under it already state,
+    rather than leaving it the one layer that does not (issue #471).
 
     An **allowlist of the two forms an integer setting is ever supplied in**, not
     a denylist of ``bool``, and that is load-bearing: ``bool`` is not the only type
@@ -252,7 +251,7 @@ def _exactly_an_integer(value: object) -> object:
 
     **Reachable only from untyped code constructing** :class:`Settings`
     **directly**, the same reachability :func:`_split_model_specs`' guard was
-    written for (#359): ``ASSISTANT_OBSERVATION_BATCH_SIZE=True`` already fails
+    written for (#359): ``ASSISTANT_DEFERRAL_QUEUE_LIMIT=True`` already fails
     int parsing at load, so no environment or ``.env`` value reaches this.
 
     Args:
@@ -1239,101 +1238,6 @@ class Settings(BaseSettings):
             "How often the hub finishes pending conversation deletions and then reclaims "
             "what retention has emptied (ADR-0083 §7). Set it to 'none' to disable the "
             "job; never 0."
-        ),
-    )
-    # **Ships armed, at fifteen minutes** (ADR-0218 §5, §7), which partially
-    # supersedes ADR-0083 §7's job-table row in its **Default** cell. The disabled
-    # default had one stated reason and ADR-0212 spent it: "Enabling it on a timer
-    # before the cursor exists buys repeated cost and no new coverage". With the
-    # watermark, a tick with nothing unobserved reads one bounded listing, calls no
-    # model and reports nothing observed, and a pass strictly advances rather than
-    # re-reading the window it read last time. What the disabled default left is a
-    # hub whose user model does not accumulate at all unless somebody remembers to
-    # run a command, which is #1737.
-    #
-    # **`None` is still the spelling of "off"**, and still the only one (ADR-0083
-    # §7's convention, unchanged): an operator who wants the job off sets the
-    # disable sentinel and one who wants a different cadence sets a duration.
-    # Neither is new surface, and neither is a `0`.
-    #
-    # **Fifteen minutes is bought against the serial loop rather than against
-    # cost** (ADR-0218 §7). The tick decides latency, not spend — a tick with no due
-    # candidate performs one bounded read and returns — so asking more often costs
-    # almost nothing, and what it does cost is ADR-0083 §7's serial loop. Against
-    # `scheduler_run_budget`'s five minutes this holds the job's share of that loop
-    # to about a third of its own period, leaving the hourly purge and sweep the
-    # rest. The user-visible figure it buys is one quiet window plus one interval —
-    # twenty-five minutes at these defaults — to the first run that reaches a
-    # conversation with nothing queued ahead of it.
-    observation_interval: _OptionalDuration = Field(
-        default=timedelta(minutes=15),
-        gt=timedelta(0),
-        description=(
-            "How often the hub looks for a conversation whose turns are due to be "
-            "distilled into beliefs (ADR-0218 §5). Armed by default; set it to "
-            "'none' to disable the job, never 0."
-        ),
-    )
-    # ADR-0218 §2's due test, in two durations. A candidate is **due** when it is
-    # quiet, **or** aged, **or** full, and a scheduled pass is performed only
-    # against a due candidate. The third arm gets **no field of its own**: its
-    # threshold is `observation_batch_size`, because the condition it tests is
-    # exactly "a whole page is available to read", and a second count would let the
-    # two disagree about what a page is (§7).
-    #
-    # **Ten minutes for the quiet window, and it is measured on `last_active_at`**
-    # (§1) — the instant a turn *begins*, never the instant one was recorded, so a
-    # conversation whose next turn is in flight is not called quiet. Long enough
-    # that a pause to read, to think or to fetch a coffee does not end the
-    # exchange; short enough that a conversation finished before lunch is a belief
-    # by lunch. It is the figure most likely to be tuned by a deployment, which is
-    # why it is a field.
-    #
-    # **Two hours for the max age, and three constraints fix it** (§7). It is well
-    # above the quiet window, so a conversation with any ordinary pause is served
-    # by the quiet arm and the backstop stays the exception. It is far below
-    # `episode_retention`'s 30 days, so a continuously-active conversation's oldest
-    # unobserved turns are distilled long before they can expire. And it is below
-    # the time the full-page arm takes in the regime this backstop is for — a
-    # conversation trickling one recorded turn per quiet window, which is
-    # `observation_batch_size` quiet windows, 200 minutes at these figures — so the
-    # arm binds rather than being a field that never fires.
-    #
-    # **Neither is nullable, and ADR-0084 §3's departure is the precedent** (§7).
-    # "The job is off" is a coherent deployment and is spelled once, on the
-    # interval above. A quiet window of `None` would have to mean "observe
-    # mid-conversation", which is a *policy* §1 ruled against rather than a way of
-    # turning anything off; a max age of `None` would leave the full-page arm alone
-    # to bound a trickling conversation, which it does not — a conversation
-    # receiving one turn an hour is never quiet and takes twenty hours to fill a
-    # page. One field means off, so a reader does not have to work out which of
-    # three nulls disabled the job.
-    #
-    # **No cross-field refusal**, between these two or against `episode_retention`
-    # (§7). A max age at or below the quiet window makes every candidate aged
-    # before it is quiet and the job a pure age trigger — a policy an operator can
-    # state, and refusing it at load would reject a configuration that behaves
-    # exactly as its author asked. A rule against `episode_retention` is worse: that
-    # field is nullable and `None` means "keep forever", so the comparison has a
-    # branch that means nothing, and the setting it would police is the user's
-    # deliberate choice. Both interactions are named in ADR-0218's Consequences
-    # instead, which is where a figure an operator should think about belongs when
-    # refusing it would be wrong.
-    observation_quiet_window: _DurationSetting = Field(
-        default=timedelta(minutes=10),
-        gt=timedelta(0),
-        description=(
-            "How long a conversation must have been inactive before a scheduled "
-            "observation reads it (ADR-0218 §1). Positive and finite."
-        ),
-    )
-    observation_max_unobserved_age: _DurationSetting = Field(
-        default=timedelta(hours=2),
-        gt=timedelta(0),
-        description=(
-            "How long a conversation's oldest unobserved turn may wait before a "
-            "scheduled observation reads it whether or not the conversation has gone "
-            "quiet (ADR-0218 §2). Positive and finite."
         ),
     )
     # **Leg 7's consolidation job, and the precondition its absence used to
@@ -2838,59 +2742,6 @@ class Settings(BaseSettings):
         ),
     )
 
-    # --- Observation (ADR-0077) ------------------------------------------
-    # The two per-call bounds on an observation pass. Both are **named here rather
-    # than left to the implementation** (ADR-0077 §1, §2, following ADR-0074 §9.3):
-    # two conforming stages picking 20 and 2,000 would send categorically different
-    # amounts of Tier 1 data to a model while each believed it conformed.
-    #
-    # ``observation_batch_size`` is how many of a conversation's most recent turns
-    # one pass reads. Positive, because a zero batch observes nothing while
-    # reporting health; and bounded **above** by ``2**63`` because the batch is
-    # read through ``ConversationStore.turns``, whose ``limit`` outside
-    # ``[0, 2**63)`` is a ``ValueError`` by its own contract. A setting the store
-    # would refuse must fail at load, not at the first observation — which is what
-    # ``load_settings`` promises for every other value here. The default is
-    # deliberately small: a handful of exchanges, not a month of transcript,
-    # because this batch is both a prompt and an egress.
-    #
-    # ``observation_max_proposals`` is the most beliefs one pass may return; excess
-    # is discarded rather than queued (a queue is durable state nothing ratifies,
-    # and the episodes remain in the store for a later pass — for as long as they
-    # remain live, which ADR-0074 §7's horizon bounds).
-    #
-    # **Forty, and the ground is cost and egress on one pass rather than the intake
-    # rule expressed as a number** (ADR-0162 §6). Five *was* ADR-0077 §2's
-    # selectivity bar in numbers — "a batch that genuinely yields more durable
-    # beliefs than that is a batch worth observing twice" — and ADR-0162 §1 replaces
-    # that bar for an episode recording what the user told the assistant, so the
-    # figure's ground does not survive with the figure. The probe measured 8.7, 9.1
-    # and 9.0 proposals per pass at ``observation_batch_size`` 20 under a cap of 60
-    # that never bound; 40 is more than four times that mean, two records per episode
-    # in the batch. Held equal to ``learning.observer``'s
-    # ``DEFAULT_OBSERVATION_MAX_PROPOSALS``, which is what a direct construction gets
-    # and which carries the same reasoning at length; the composition root passes
-    # this one, so an operator's value wins over both.
-    #
-    # **``discarded_over_limit`` above zero is a defect, never the steady state**
-    # (§6). A pass in which the bound binds is an *incomplete* pass: it meets the
-    # completeness rule up to the bound and no further, the truncation drops records
-    # by position in a model's reply rather than by any ranking, and the response is
-    # to raise this value, lower ``observation_batch_size``, or both. The two are a
-    # pair — raising this one alone relocates the boundary, while halving the batch
-    # halves the material each pass must fit — which is why §6 names both.
-    observation_batch_size: _IntegerSetting = Field(
-        default=20,
-        ge=1,
-        lt=2**63,
-        description=("How many of a conversation's most recent turns one observation pass reads."),
-    )
-    observation_max_proposals: _IntegerSetting = Field(
-        default=40,
-        ge=1,
-        description="The most beliefs one observation pass may propose; excess is discarded.",
-    )
-
     # --- The conflict reconciler (ADR-0159) -------------------------------
     # Two knobs for the component that labels how a proposal stands to the records
     # a similarity search surfaced beside it — the seam that decides whether a fold
@@ -2902,7 +2753,7 @@ class Settings(BaseSettings):
     # ADR-0171 §1). It is **not** a second `conflict_limit`: that ceiling is 100 and
     # is a circuit breaker on a runaway store (ADR-0079 §1), nowhere near a cost
     # bound, where this one is exactly that. It is a `Settings` field for the reason
-    # `observation_max_proposals` is one (ADR-0077 §2) — a knob an operator tunes
+    # the retired `observation_max_proposals` was one (ADR-0077 §2) — a knob an operator tunes
     # against their own corpus.
     #
     # **Fifteen, because fifteen is what was measured** (ADR-0171 §1, partially
@@ -2997,7 +2848,7 @@ class Settings(BaseSettings):
     # the first page" is true in the strongest sense — and fifty unanswered
     # machine-asked questions is already past dignified. `lt=2**63` keeps it inside
     # the integer domain every count in these backends lives in, as
-    # `observation_batch_size` does for its own.
+    # the retired `observation_batch_size` did for its own.
     deferral_ttl: _OptionalDuration = Field(
         default=timedelta(days=30),
         gt=timedelta(0),
@@ -3223,7 +3074,7 @@ class Settings(BaseSettings):
     # past is wanted only so that "this morning" is still in view. One symmetric
     # horizon would have to be sized for the future and would drag a week of
     # history along with it. The defaults are deliberately small, on ADR-0077 §1's
-    # posture for `observation_batch_size` — "a handful of exchanges, not a month
+    # posture for the retired `observation_batch_size` — "a handful of exchanges, not a month
     # of transcript" — and for the same reason: this is Tier 1 data being read and
     # proposed, and a bound nobody argued is a payload nobody measured.
     #

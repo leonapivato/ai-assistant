@@ -192,7 +192,6 @@ if TYPE_CHECKING:
 
 AT = datetime(2026, 7, 23, 9, 0, tzinfo=UTC)
 RETENTION = timedelta(days=30)
-OBSERVATION_BATCH = 20
 OBSERVER_ROUTE = "anthropic:claude-opus-4-8"
 
 #: The one grantable identity the ``granting_engine`` fixture holds. It must equal

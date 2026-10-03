@@ -6,25 +6,15 @@ improves with use. It *proposes* only — the pipeline feeds the proposals to th
 memory write-path, which disposes of them via the policy (ADR-0009). No
 subsystem here writes memory directly.
 
-The public contracts are the ``FeedbackProcessor`` and ``Observer`` Protocols in
+The public contract is the ``FeedbackProcessor`` Protocol in
 `ai_assistant.core.protocols`. ``RuleBasedFeedbackProcessor`` turns explicit,
-user-stated feedback into proposals; ``ModelBackedObserver`` (ADR-0077) does the
-same job from the other direction, distilling beliefs out of episodes the user
-never commented on — which is what makes accumulation passive rather than
-dictated. Neither writes memory: both propose, and a deterministic policy
-disposes.
+user-stated feedback into proposals, and writes nothing: it proposes, and a
+deterministic policy disposes. Nothing here distils beliefs out of episodes.
+ADR-0285 retired the observer that did, and adds no producer in its place.
 """
 
-from ai_assistant.learning.observer import (
-    DEFAULT_OBSERVATION_BATCH_SIZE,
-    DEFAULT_OBSERVATION_MAX_PROPOSALS,
-    ModelBackedObserver,
-)
 from ai_assistant.learning.processor import RuleBasedFeedbackProcessor
 
 __all__ = [
-    "DEFAULT_OBSERVATION_BATCH_SIZE",
-    "DEFAULT_OBSERVATION_MAX_PROPOSALS",
-    "ModelBackedObserver",
     "RuleBasedFeedbackProcessor",
 ]

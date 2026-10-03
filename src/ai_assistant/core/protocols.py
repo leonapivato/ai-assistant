@@ -206,7 +206,6 @@ if TYPE_CHECKING:
         NotificationDisposition,
         NotificationEnqueue,
         NotificationPreferences,
-        ObservationOutcome,
         ParkedBinding,
         ParkedRead,
         ParkedReadDisposition,
@@ -2758,229 +2757,6 @@ class FeedbackProcessor(Protocol):
 
 
 @runtime_checkable
-class Observer(Protocol):
-    """Distils beliefs about the user out of episodes it is handed (ADR-0077).
-
-    The producer that makes passive accumulation real: it reads a bounded batch of
-    :class:`~ai_assistant.core.types.EpisodicMemory` records — what actually
-    happened — and proposes what the system should believe as a result. Named for
-    that product role, as every Protocol here is (``Planner``, ``MemoryPolicy``,
-    ``FeedbackProcessor``); nothing in this codebase uses the subscription pattern
-    the word otherwise names.
-
-    **It holds no store handle, and that is the scope limit rather than a rule
-    about it.** :meth:`observe` receives the episodes; an implementation cannot
-    fetch more, cannot widen its own batch, cannot read a belief, a plan, an audit
-    record or a permission decision, and cannot reach :class:`MemoryStore` at all.
-    The alternative — a producer holding a store and choosing what to read — would
-    make "the scope of observation" a property of one implementation's code rather
-    than of a ratified seam, and every later reviewer would have to re-derive it by
-    reading that code. Here it is a type: episodes in, proposals out. **Selecting**
-    the batch therefore belongs to `orchestration`, the one place that legitimately
-    holds both stores by injection (ADR-0074 §9).
-
-    **It writes nothing, and cannot rule on its own output.** An implementation
-    holds neither a :class:`MemoryWriter` nor a :class:`MemoryPolicy`; the caller
-    puts each returned proposal through the write path, in order and
-    independently, exactly as the feedback loop already does (ADR-0009 §3,
-    ADR-0028 §4). That is the whole content of "the model proposes; a
-    deterministic policy disposes" for the producer the principle was written for
-    (ADR-0005 §3), and ADR-0075 §2 names this producer as the paradigm case the
-    gate exists for — it is **not** covered by the capture exemption.
-
-    **A batch is a set of episodes, not a conversation.** Nothing here requires
-    the batch's members to share a conversation, and an implementation must not
-    ask which conversation an episode came from: an episode belonging to no
-    conversation is the default shape (ADR-0074 §3), and a producer keying on
-    conversation membership would re-impose "episode = turn" one layer up.
-
-    How :meth:`observe` observes the batch it is handed is governed by this
-    module's input-observation clause (ADR-0065) — its ``Sequence`` argument is a
-    container the caller may still be holding, so the clause has real bite here
-    even though every :class:`~ai_assistant.core.types.EpisodicMemory` in it is
-    frozen. Cancelling it is governed by this module's cancellation clause
-    (ADR-0060); a call that reaches a model provider is the widest suspension
-    window in the system.
-    """
-
-    async def observe(self, episodes: Sequence[EpisodicMemory]) -> ObservationOutcome:
-        """Propose what the batch justifies believing about the user.
-
-        **What may be proposed.** A ``SemanticMemory``, ``PreferenceMemory`` or
-        ``ProceduralMemory`` — never an ``EpisodicMemory``. An episode is a record
-        that something happened, and the only thing entitled to write one is the
-        deterministic capture path that was present when it happened (ADR-0074 §3,
-        ADR-0075 §2). A model-authored episode would be a fabricated event wearing
-        the type reserved for witnessed ones, and later beliefs would *cite* it as
-        though it were evidence. An observer distils evidence; it does not
-        manufacture it.
-
-        **And it states no subject.** Every proposal leaves ``about_person``
-        unset; one that would state it is **not proposed**, and is counted in
-        ``discarded_unusable`` (ADR-0100 §5). **The refusal is untouched by the
-        completeness rule below and now carries more traffic than it did.** When
-        that rule was ADR-0077 §2's bar, the refusal excluded nothing a
-        conforming observer would have produced, because a belief warranted only
-        when it is *about the user* had no non-owner subject to state. Complete
-        intake records what the user said about third parties as well, so
-        proposals whose grammatical subject is not the user are now ordinary
-        (ADR-0162 §3) — and such a record is not *mislabelled* but **unlabelled**,
-        as every observer record has been since ADR-0100, read under ADR-0100
-        §3 as the owner's own world. What the field never did is make a
-        producer-side obligation enforceable, and it must not be read as though
-        it did — a model proposing "Marta prefers window seats" with
-        ``about_person`` unset is as undetectable after ADR-0100 as before. The
-        difference is that the honest case is now recordable and the dishonest
-        one is a lie about a field.
-
-        **The refusal is the producer's and stays there.** It is not implemented
-        by a caller dropping a returned proposal — the caller's obligation below
-        is to put *each* returned proposal through the write path, in order and
-        independently, and an exception to that clause is a change to this seam
-        rather than a use of it — nor by a policy rule keyed on the band, since
-        the axis is band-independent and ``MemoryPolicy.decide`` receives no
-        producer identity to key on. Either would buy this producer's discipline
-        by charging someone else's contract (ADR-0100 §5, ADR-0081 §3).
-
-        **Every proposal is in the ``DERIVED`` band** — ``provenance.source`` is
-        ``OBSERVED`` or ``INFERRED`` (ADR-0072 §2) — and the choice between them
-        is ADR-0072 §3's test: whether the cited evidence *entails* the belief, or
-        merely *supports* it. A wrong ``OBSERVED`` record is a recording bug; a
-        wrong ``INFERRED`` record is a reasoning error over evidence that is itself
-        correct, and a producer that cannot tell them apart is not entitled to
-        either label.
-
-        **Evidence discipline.** Every proposal cites at least one episode id, and
-        **the ids are the producer's, never the model's**: an implementation that
-        prompts a model references episodes by a label it assigned, and maps each
-        label back to the id of the episode it actually read. This is ADR-0047 §2's
-        rule applied to citations, and it is load-bearing — a model that can write
-        an id can write one for an episode it never saw, and the provenance
-        display would then confidently cite a record with nothing to do with the
-        belief. Concretely:
-
-        - every cited id is drawn from ``episodes``, and none from outside it;
-        - an ``INFERRED`` proposal cites at least **two distinct** episode ids,
-          because a generalisation from a single instance is exactly the
-          "one unusual interaction hardens into a permanent, wrong preference"
-          failure the band exists to bound (ADR-0005 §Context). An ``OBSERVED``
-          proposal may rest on one, since it restates what its evidence shows;
-        - support is counted over **distinct ids**, never over citations: two
-          labels resolving to one episode are one support;
-        - a proposal that cannot meet its floor is **not proposed**, and is
-          counted in ``discarded_unusable``. It is never repaired by attaching the
-          batch wholesale — evidence attached to satisfy a rule is not evidence.
-
-        **Confidence is the producer's, and never the model's.** It is a
-        deterministic, pure function of the epistemic step and the number of
-        distinct supporting episodes: strictly below 1.0 always (1.0 is the
-        standing the user's own word carries, ADR-0072 §3, and
-        :class:`~ai_assistant.core.types.Provenance` now enforces it);
-        an ``OBSERVED`` belief outranking an ``INFERRED`` one on the same support;
-        non-decreasing in the number of supporting episodes, under a ceiling; no
-        clock, no randomness, no model-supplied number. The exact values are each
-        implementation's. Two properties follow and both matter more than
-        calibration: a model-supplied confidence is the model's mood rather than a
-        comparable quantity, and because the function is deterministic on its
-        inputs, **re-observing the same episodes cannot inflate a belief** — a
-        ``REINFORCE`` that takes the maximum finds nothing higher.
-
-        **For an episode recording what the user told the assistant, intake is
-        complete.** One record is proposed for each distinct thing the user
-        stated that a later question could ask about — an event that happened, a
-        person, place, organisation or thing named, a durable fact, a preference,
-        a workflow — **up to the maximum below**, which is the one exception and
-        which ``discarded_over_limit`` makes visible when it binds. Pure
-        conversational filler is what it passes over, and is the only thing it
-        passes over. **One record states one thing**: a sentence combining
-        several distinct facts or events is not the compliant form, because the
-        unit is the thing a later question could ask about and that is the unit
-        retrieval returns. That a thing merely happened, that it may not change a
-        later answer, and that recording it makes the pass read as a retelling
-        are **no longer grounds to refuse a record** (ADR-0162 §1, replacing
-        ADR-0077 §2's warrant bar for such an episode). The signal is the
-        telling: the user chose to say it to an assistant whose stated purpose is
-        to remember them, and *did the user say this?* is answerable from the
-        batch in front of the producer where *would this change a later answer?*
-        never was. "Proposing nothing is a perfectly good answer" is not
-        repealed, only relocated — it remains the right answer for a batch that
-        is only filler, and stops being the answer to a batch full of things that
-        happened.
-
-        **That rule reaches no other episode, and everywhere else the bar stands
-        exactly as ratified** (ADR-0162 §2). For an episode a reader ingested
-        (ADR-0097) or a sensor captured (ADR-0094), a belief is warranted only
-        when it is *about the user* and would change a later answer; summarising
-        the exchange is the failure mode there, because it turns the belief store
-        into a second transcript, at indefinite retention, behind the surface
-        that answers "what do you believe about me". The asymmetry is the ruling
-        rather than a compromise: the user telling the assistant something is a
-        speech act directed at the assistant, and content that arrives whether or
-        not the user meant it to is not that.
-
-        **How an implementation comes to know which rule a batch falls under is
-        not decided here**, and nothing in this contract carries the distinction:
-        no field of an episode records it, and the observation payload is not
-        widened to say so. The ADR introducing the second class of episode
-        decides it. Until then the seam fails closed from the caller's side — a
-        stage selecting a batch for a producer implementing the complete-intake
-        rule selects only episodes of that class, and such a producer is never
-        handed one outside it. Which rule a record was proposed under is a fact
-        about meaning, so both halves are producer-side obligations: this is the
-        half of selective memory a gate cannot enforce, because a policy judging
-        one proposal at a time cannot see that all twenty of them are a
-        retelling.
-
-        **Output is bounded, and excess is discarded rather than queued.** An
-        implementation is constructed with its own maximum; ``proposals`` never
-        exceeds it, and usable proposals dropped to meet it are counted in
-        ``discarded_over_limit``. A queue would be durable state nothing here
-        ratifies, and the episodes remain in the store, so a later pass over the
-        same batch can propose what this one dropped.
-
-        **``conflicts`` is left empty.** Conflicts are resolved by the writer, in
-        the same call that rules on them, and are not supplied by the caller
-        (ADR-0028 §3). A producer that filled them would be re-deriving `memory`'s
-        conflict semantics.
-
-        **Failure behaviour.** A model failure **propagates** unwrapped, its
-        classification intact: the caller asked for observation and it did not
-        happen, and returning "no beliefs" would be indistinguishable from
-        "nothing to learn". A **malformed response degrades** instead: entries the
-        producer can use are proposed, entries it cannot are discarded and
-        counted, and nothing is invented to fill a gap. **No proposals is a normal
-        outcome**, not an error (ADR-0022 §4).
-
-        Args:
-            episodes: The batch to observe, as a **set**: no id may appear twice,
-                and its length may not exceed the maximum the implementation was
-                constructed with. Both are refused rather than repaired (below).
-                Order carries no meaning, and the batch's members need not share a
-                conversation.
-
-        Returns:
-            The proposals distilled from the batch, with the two discard counts
-            that say what was thrown away getting there. An **empty batch yields
-            no proposals and no discards**, and reaches no model.
-
-        Raises:
-            ValueError: If ``episodes`` is longer than the implementation's
-                configured maximum, or carries the same episode id twice — each
-                **refused, never truncated or silently de-duplicated**. Truncating
-                would disable half the work while the caller kept reporting health,
-                and the episodes the caller believed were observed were never read
-                (the posture ADR-0073 §2 set: out of range is a ``ValueError``, not
-                a clamp). De-duplicating would hide a caller's selection bug and,
-                worse, let one episode supply the two *distinct* supports an
-                ``INFERRED`` belief owes. The obligation is on the seam because
-                this is a cross-subsystem contract: a stage that bounds its own
-                selection is not evidence that the next caller will.
-            ModelError: Propagated unwrapped from a model-backed implementation.
-        """
-        ...
-
-
-@runtime_checkable
 class Reader(Protocol):
     """Reads one source and proposes what it read (ADR-0093, ADR-0095 §1).
 
@@ -2988,7 +2764,7 @@ class Reader(Protocol):
     onto the box, the maildir a co-located fetcher writes — and returns one bounded
     :class:`~ai_assistant.core.types.SourceReading` of what that source currently
     says. Named for its product role, as every Protocol here is (``Planner``,
-    ``Observer``, ``MemoryPolicy``): the role is *reading a source*.
+    ``FeedbackProcessor``, ``MemoryPolicy``): the role is *reading a source*.
 
     **It holds no store handle, no writer, no policy and no engine**, which is the
     scope limit rather than a rule about it. An implementation may not write to any
@@ -3184,7 +2960,7 @@ class Fetcher(Protocol):
     reads one entry of that listing into a single attested
     :class:`~ai_assistant.core.types.MemoryRecord` carrying the file's own text.
     Named for its product role, as every Protocol here is (``Planner``,
-    ``Observer``, ``Reader``): the role is *fetching one named thing, now, for
+    ``FeedbackProcessor``, ``Reader``): the role is *fetching one named thing, now, for
     this turn*.
 
     **It is not a ``Reader`` and reusing that seam was never available.** A

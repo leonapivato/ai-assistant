@@ -75,7 +75,6 @@ from ai_assistant.core.types import (
     TimeOfDay,
     rests_on_recorded_external_content,
 )
-from ai_assistant.learning import ModelBackedObserver
 from ai_assistant.planning import ModelBackedPlanner
 from ai_assistant.testing import FakeFetcher, FakeModelProvider
 
@@ -506,7 +505,7 @@ async def test_a_conversation_that_never_held_an_external_record_keeps_its_allow
     assert second.step.disposition is Disposition.EXECUTED
 
 
-# --- §10 test 10: the two prompts that must not move ---------------------------
+# --- §10 test 10: the planner's prompt must not move (ADR-0285 retired the other) ---
 
 
 def _episode(*, marked: bool) -> EpisodicMemory:
@@ -572,24 +571,6 @@ async def test_the_planners_rendering_of_a_stamped_episode_is_byte_identical() -
             memories=(_episode(marked=marked),),
             capabilities=(CAPABILITY,),
         )
-
-    assert _assembled(stamped) == _assembled(unstamped)
-
-
-async def test_the_observers_rendering_of_a_stamped_episode_is_byte_identical() -> None:
-    """§10's test 10, second half, and the guard on §9's first clause.
-
-    §9: "``learning/observer.py`` and ``orchestration/observation.py`` compute no
-    disjunction of this field over their batch today, and this ADR adds none, obliges
-    none and is not cited toward one." Propagation is deferred until someone has a
-    taint rate (§11), and this case is what makes a lane that reaches for it early do
-    so deliberately rather than by editing a prompt that looked wrong.
-    """
-    stamped = FakeModelProvider(json.dumps({"beliefs": []}))
-    unstamped = FakeModelProvider(json.dumps({"beliefs": []}))
-
-    for provider, marked in ((stamped, True), (unstamped, False)):
-        await ModelBackedObserver(provider).observe([_episode(marked=marked)])
 
     assert _assembled(stamped) == _assembled(unstamped)
 

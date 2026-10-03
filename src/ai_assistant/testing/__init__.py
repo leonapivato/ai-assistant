@@ -104,13 +104,6 @@ from ai_assistant.testing.notifications import (
     FakeNotificationStore,
     FakeNotificationWriter,
 )
-from ai_assistant.testing.observation import (
-    DEFAULT_MAX_BATCH_SIZE,
-    DEFAULT_MAX_PROPOSALS,
-    FakeObserver,
-    ObservationGate,
-    ObservedBelief,
-)
 from ai_assistant.testing.parked_reads import FakeParkedReads
 from ai_assistant.testing.permissions import (
     FakeActionPolicy,
@@ -239,10 +232,8 @@ __all__ = [
     "DEFAULT_GRANTED_SOURCE",
     "DEFAULT_GRANT_ID",
     "DEFAULT_INSTALLATION",
-    "DEFAULT_MAX_BATCH_SIZE",
     "DEFAULT_MAX_DAY_CHARS",
     "DEFAULT_MAX_FORECAST_DAYS",
-    "DEFAULT_MAX_PROPOSALS",
     "DEFAULT_MAX_RESULTS",
     "DEFAULT_MAX_RESULT_CHARS",
     "DEFAULT_MAX_ROWS",
@@ -310,7 +301,6 @@ __all__ = [
     "FakeNotificationPolicy",
     "FakeNotificationStore",
     "FakeNotificationWriter",
-    "FakeObserver",
     "FakeOutboundTransport",
     "FakeParkedReads",
     "FakePlanStore",
@@ -343,8 +333,6 @@ __all__ = [
     "FakeTranscriptArchiveWriter",
     "FakeWebSearcher",
     "ModelCall",
-    "ObservationGate",
-    "ObservedBelief",
     "PolicyCall",
     "ProgrammedOutcome",
     "ScriptedDay",
