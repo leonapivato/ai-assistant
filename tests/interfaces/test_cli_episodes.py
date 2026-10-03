@@ -29,6 +29,9 @@ from ai_assistant.core.types import (
     InputOrigin,
     MemoryKind,
     MemorySource,
+    Placement,
+    PlacementReach,
+    PlacementSetter,
     ProcessingReason,
     ProcessingStatus,
     Provenance,
@@ -702,3 +705,144 @@ def test_json_detail_carries_the_recall_result_with_each_items_id_and_structured
     assert json.loads(output.getvalue())["processing_record"]["recall"]["items"][0]["id"] == (
         " never shown "
     )
+
+
+# --- an open episode (ADR-0286 §11) ----------------------------------------------------
+
+_HEADER_END = "Processing status does not report goal achievement or audio playback."
+
+
+def _open_record(record_id: str, **fields: object) -> EpisodicMemory:
+    """An open episode in lane 1's shapes: no status, reason or end time (ADR-0286 §1).
+
+    It carries the empty ``content`` and the reach ``OWNER`` set by derivation that the
+    episode's validator holds an open episode to; ``fields`` extend its processing
+    record with what a pass appends before it freezes (§3).
+    """
+    processing = EpisodeProcessingRecord.model_validate(
+        {
+            "activation_id": "activation",
+            "started_at": _AT,
+            "trigger": RecordedChannelTrigger(
+                target=_CHANNEL,
+                channel=_CHANNEL,
+                payload=RecordedTextInput(text=" exact input "),
+                context=ChannelContext(),
+                reply=None,
+                origin=InputOrigin.OUTSIDE,
+            ),
+            **fields,
+        }
+    )
+    assert processing.is_open
+    return EpisodicMemory(
+        id=record_id,
+        content="",
+        occurred_at=_AT,
+        provenance=Provenance(source=MemorySource.OBSERVED, confidence=0.9, last_updated=_AT),
+        placement=Placement(reach=PlacementReach.OWNER, set_by=PlacementSetter.DERIVED, set_at=_AT),
+        processing_record=processing,
+    )
+
+
+def _detail_lines(record: EpisodicMemory) -> list[str]:
+    buffer = StringIO()
+    episode_inspection.render_detail(Console(file=buffer, force_terminal=False, width=200), record)
+    return buffer.getvalue().splitlines()
+
+
+def test_listing_labels_an_open_episode_in_progress_and_keeps_the_others(
+    monkeypatch: pytest.MonkeyPatch, output: StringIO
+) -> None:
+    """A row's absent status reads in progress on an open episode alone (ADR-0286 §11).
+
+    An episode with no processing record keeps ``unavailable`` (ADR-0275 §11:5) and a
+    frozen one its status: the label is read off the summary's processing record and
+    status together, never off the absence of a status alone.
+    """
+    _wire(
+        monkeypatch,
+        _engine(_open_record("open"), _record("frozen", response="none"), _record("bare")),
+    )
+    result = CliRunner().invoke(cli.app, ["episodes"])
+    assert result.exit_code == 0, result.exception
+    rows = {
+        block.split("\n", 1)[0]: " ".join(block.split())
+        for block in output.getvalue().split("Episode ")[1:]
+    }
+    assert set(rows) == {'"open"', '"frozen"', '"bare"'}
+    assert f"Processing: {episode_inspection.IN_PROGRESS}" in rows['"open"']
+    assert "Processing: completed" in rows['"frozen"']
+    assert "Processing: unavailable" in rows['"bare"']
+    assert episode_inspection.IN_PROGRESS not in rows['"frozen"'] + rows['"bare"']
+
+
+def test_detail_labels_an_open_episodes_end_fields_in_progress_not_unavailable() -> None:
+    """Status and reason read in progress, and each section the pass may still fill says so.
+
+    An open record has no status, reason or end time (ADR-0286 §1), so nothing in its
+    human detail is ``unavailable``: that label stays an episode's with no processing
+    record (ADR-0275 §11:5, superseded for an open episode's end fields alone).
+    """
+    lines = _detail_lines(_open_record("open"))
+    assert lines[: lines.index(_HEADER_END)] == [
+        'Episode "open"',
+        "Activation: activation",
+        f"Processing: {episode_inspection.IN_PROGRESS}",
+        f"Reason: {episode_inspection.IN_PROGRESS}",
+        "Response: none yet",
+        "Stages: none recorded yet",
+    ]
+    assert "Recall: none recorded yet" in lines
+    assert "Understanding: none recorded yet" in lines
+    assert not any("unavailable" in line for line in lines[: lines.index("{")])
+
+
+def test_detail_renders_what_an_open_episode_has_appended() -> None:
+    """Stages, recall, understanding and a response appended before freeze render as usual."""
+    record = _open_record(
+        "open",
+        stages=(
+            _stage(
+                ControllerStage.UNDERSTANDING,
+                ControllerRule.UNPLANNED,
+                StageOutcome.DONE,
+                millis=250,
+            ),
+        ),
+        recall=ActivationRecall(
+            outcome=RecallOutcome.NOTHING_FOUND, cues=(RecallCue.ACTIVATION_INPUT,)
+        ),
+        understanding=(_version(1),),
+    ).model_copy(update={"outcome": "Recorded response"})
+    lines = _detail_lines(record)
+    assert f"Processing: {episode_inspection.IN_PROGRESS}" in lines
+    assert "Response: sent" in lines
+    assert _stage_section(record) == [
+        "Stages:",
+        "  understanding (due: unplanned): done, 0.250s",
+    ]
+    assert _recall_section(record) == ["Recall: nothing_found"]
+    assert _understanding_section(record)[0] == "Understanding v1 (interpretation)"
+
+
+def test_a_frozen_episodes_empty_sections_carry_no_in_progress_wording() -> None:
+    """``yet`` is an open episode's alone: a frozen one has nothing left to append."""
+    lines = _detail_lines(_record("frozen", response="none"))
+    assert "Response: none" in lines
+    assert "Recall: none recorded" in lines
+    human = lines[: lines.index("{")]
+    assert not any("yet" in line or episode_inspection.IN_PROGRESS in line for line in human)
+
+
+def test_cli_detail_of_a_stored_open_episode_shows_it_in_progress(
+    monkeypatch: pytest.MonkeyPatch, output: StringIO
+) -> None:
+    """A stored open episode reaches the renderer whole, through the engine's chunked read."""
+    _wire(monkeypatch, _engine(_open_record("open")))
+    result = CliRunner().invoke(cli.app, ["episode", "open"])
+    assert result.exit_code == 0, result.exception
+    rendered = " ".join(output.getvalue().split())
+    assert f"Processing: {episode_inspection.IN_PROGRESS}" in rendered
+    assert f"Reason: {episode_inspection.IN_PROGRESS}" in rendered
+    assert '"status": null' in rendered

@@ -19,7 +19,15 @@ if TYPE_CHECKING:
         ActivationUnderstanding,
         EpisodePage,
         EpisodeProcessingRecord,
+        EpisodeSummary,
     )
+
+#: The label an open episode carries in place of its absent end fields (ADR-0286 §11).
+#: A record is open while its status is ``None`` (§1), so its status, reason and end
+#: time are absent because its pass has not ended, not because the record lacks them:
+#: ``unavailable`` stays the label of an episode with no processing record (ADR-0275
+#: §11:5), and this one says the pass is still running.
+IN_PROGRESS = "in progress, not yet ended"
 
 
 async def read_detail(
@@ -69,6 +77,9 @@ def render_page(console: Console, page: EpisodePage) -> None:
     A row carries no response line: ADR-0284 §4:1 removes ``response_kind``, the
     summary's one fact saying whether its episode sent a response, and §4:3 has the
     CLI read no field that section removes. The detail view carries the label.
+
+    An open episode's row says it is in progress in place of its absent status
+    (ADR-0286 §11).
     """
     if not page.items:
         console.print("No live episodes matched.")
@@ -83,7 +94,7 @@ def render_page(console: Console, page: EpisodePage) -> None:
             f"  Occurred: {item.position.occurred_at.isoformat()}\n"
             f"  Activation: {item.activation_id or 'unavailable'}\n"
             f"  Channel: {channel}; modality: {item.modality.value}\n"
-            f"  Processing: {item.status.value if item.status else 'unavailable'}",
+            f"  Processing: {_summary_status(item)}",
             markup=False,
             emoji=False,
             highlight=False,
@@ -95,6 +106,18 @@ def render_page(console: Console, page: EpisodePage) -> None:
     _retention_notice(console)
 
 
+def _summary_status(item: EpisodeSummary) -> str:
+    """Label a row's processing status, reading openness as the summary carries it.
+
+    A summary with a processing record and no status is an open episode's, since a
+    record is open exactly while its status is ``None`` (ADR-0286 §1); one with no
+    processing record has no status to state (ADR-0275 §11:5).
+    """
+    if item.status is not None:
+        return item.status.value
+    return IN_PROGRESS if item.has_processing_record else "unavailable"
+
+
 def _response_label(record: EpisodicMemory) -> str:
     """Label an episode by whether it sent a response (ADR-0284 §4:3).
 
@@ -102,10 +125,15 @@ def _response_label(record: EpisodicMemory) -> str:
     on its channel, or ``None`` where it sent none (§4:1). An episode without a
     processing record is ``unavailable``: its ``outcome`` is not a response sent on a
     channel, so whether it has one is not something the record states.
+
+    An open episode with no response yet is ``none yet``: the stage that produces
+    one, or the freezing write, may still append it (ADR-0286 §4).
     """
     if record.processing_record is None:
         return "unavailable"
-    return "none" if record.outcome is None else "sent"
+    if record.outcome is not None:
+        return "sent"
+    return "none yet" if record.processing_record.is_open else "none"
 
 
 def _retention_notice(console: Console) -> None:
@@ -116,15 +144,25 @@ def _retention_notice(console: Console) -> None:
 
 
 def render_detail(console: Console, record: EpisodicMemory) -> None:
-    """Distinguish processing status from goal achievement and playback."""
+    """Distinguish processing status from goal achievement and playback.
+
+    An open episode is labelled in progress in place of its absent status, reason
+    and end time (ADR-0286 §11), and each section it may still grow says so.
+    """
     processing = record.processing_record
-    status = None if processing is None else processing.status
-    reason = None if processing is None else processing.reason
+    if processing is None:
+        activation = status = reason = "unavailable"
+    elif processing.status is None or processing.reason is None:
+        # ADR-0286 §1: an open record's status, reason and end time are all None.
+        activation, status, reason = processing.activation_id, IN_PROGRESS, IN_PROGRESS
+    else:
+        activation = processing.activation_id
+        status, reason = processing.status.value, processing.reason.value
     console.print(
         f"Episode {json.dumps(record.id, ensure_ascii=False)}\n"
-        f"Activation: {processing.activation_id if processing else 'unavailable'}\n"
-        f"Processing: {status.value if status else 'unavailable'}\n"
-        f"Reason: {reason.value if reason else 'unavailable'}\n"
+        f"Activation: {activation}\n"
+        f"Processing: {status}\n"
+        f"Reason: {reason}\n"
         f"Response: {_response_label(record)}",
         markup=False,
         emoji=False,
@@ -179,7 +217,7 @@ def _stage_lines(processing: EpisodeProcessingRecord | None) -> list[str]:
     if processing is None:
         return ["Stages: unavailable"]
     if not processing.stages:
-        return ["Stages: none recorded"]
+        return [f"Stages: {_none_recorded(processing)}"]
     lines = ["Stages:"]
     gap = len(processing.stages) // 2
     for index, entry in enumerate(processing.stages):
@@ -203,7 +241,7 @@ def _recall_lines(processing: EpisodeProcessingRecord | None) -> list[str]:
     if processing is None:
         return ["Recall: unavailable"]
     if processing.recall is None:
-        return ["Recall: none recorded"]
+        return [f"Recall: {_none_recorded(processing)}"]
     lines = [f"Recall: {processing.recall.outcome.value}"]
     lines.extend(
         f"  {item.kind.value} ({item.provenance.value}): {_quoted(item.excerpt)}"
@@ -225,12 +263,21 @@ def _understanding_lines(processing: EpisodeProcessingRecord | None) -> list[str
         return ["Understanding: unavailable"]
     if processing.understanding_omitted is not None:
         return [f"Understanding: not recorded ({processing.understanding_omitted.value})"]
+    if not processing.understanding and not processing.understanding_elided:
+        # Only an open record reaches here: a frozen one carries a non-empty
+        # understanding or an omission, and an open one carries no omission (ADR-0286 §1).
+        return [f"Understanding: {_none_recorded(processing)}"]
     lines: list[str] = []
     if processing.understanding_elided:
         lines.append(f"Understanding versions elided: {processing.understanding_elided}")
     for version in processing.understanding:
         lines.extend(_version_lines(version))
     return lines
+
+
+def _none_recorded(processing: EpisodeProcessingRecord) -> str:
+    """Say a section is empty, and on an open record that its pass may still fill it."""
+    return "none recorded yet" if processing.is_open else "none recorded"
 
 
 def _version_lines(version: ActivationUnderstanding) -> list[str]:
