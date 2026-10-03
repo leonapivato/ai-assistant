@@ -1,4 +1,4 @@
-"""The conversation values ADR-0074 §9 adds to ``core/types.py``, as ADR-0283 leaves them.
+"""The conversation values ADR-0074 §9 adds to ``core/types.py``, as ADR-0285 leaves them.
 
 What is asserted here is what the *types* guarantee on their own — frozen, every
 instant timezone-aware, and an export that carries the conversations and nothing
@@ -94,49 +94,33 @@ def test_an_export_carries_no_history() -> None:
         "exported_at",
         "conversations",
     }
-    assert exported.schema_version == 4
+    assert exported.schema_version == 5
     with pytest.raises(ValidationError):
         ConversationExport.model_validate({"exported_at": _NOW, "turns": ()})
 
 
-def test_a_fresh_conversation_has_no_observation_watermark() -> None:
-    """ADR-0212 §4: ``None`` is the only spelling of "no pass has recorded one".
+def test_a_conversation_carries_no_observation_watermark() -> None:
+    """ADR-0285 §4: the member ADR-0212 §1 added is removed, not left unset.
 
-    Additive, so every ``Conversation`` a build before ADR-0212 could construct is
-    still constructible and reads as a walk that has not started (§7).
+    ``extra="forbid"`` makes the removal a refusal: a producer still handing the
+    member in is told so rather than having it dropped silently.
     """
-    assert _conversation().observed_through is None
-
-
-@pytest.mark.parametrize("bad", [0, -1])
-def test_a_watermark_below_the_first_turn_names_no_position(bad: int) -> None:
-    """§8: bounded ``ge=FIRST_TURN_ORDINAL``, so 0 is not a sentinel for "none".
-
-    A zero-valued watermark would be a second spelling of the absence §4 rules is
-    spelled ``None`` — and one that reads as a *recorded* position. Since ADR-0283
-    §6:6 the position is an episode number, and those start at 1 too.
-    """
+    assert "observed_through" not in Conversation.model_fields
     with pytest.raises(ValidationError):
-        _conversation(observed_through=bad)
+        _conversation(observed_through=3)
 
 
-def test_the_watermark_is_carried_through_the_export() -> None:
-    """§7: the member is on ``Conversation``, so the document ``export`` builds has it.
+def test_the_export_version_moves_because_the_conversation_lost_a_member() -> None:
+    """ADR-0285 §4:4: the ``Conversation`` the document carries changed shape.
 
-    Which is why ``schema_version`` moves: the shape of the portable document
-    changed, and that is exactly what the version exists to announce (ADR-0039 §10,
-    ADR-0014 §5).
+    That is exactly what the version exists to announce (ADR-0039 §10, ADR-0014 §5),
+    so the document reads 5 where it read 4.
     """
-    exported = ConversationExport(
-        exported_at=_NOW, conversations=(_conversation(observed_through=3),)
-    )
-
-    assert exported.conversations[0].observed_through == 3
-    assert exported.schema_version == 4
+    assert ConversationExport(exported_at=_NOW).schema_version == 5
 
 
-@pytest.mark.parametrize("version", [1, 2, 3, 5])
+@pytest.mark.parametrize("version", [1, 2, 3, 4, 6])
 def test_the_export_refuses_a_version_that_is_not_the_shape_it_carries(version: int) -> None:
-    """The export label describes the history-free ADR-0283 shape exactly (§4:3)."""
+    """The export label describes the watermark-free ADR-0285 §4 shape exactly."""
     with pytest.raises(ValidationError):
         ConversationExport.model_validate({"schema_version": version, "exported_at": _NOW})

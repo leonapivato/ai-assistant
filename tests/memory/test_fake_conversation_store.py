@@ -211,28 +211,3 @@ async def test_the_fake_refuses_a_clock_that_is_not_a_conforming_reading() -> No
 
     with pytest.raises(ConversationStoreError):
         await store.start()
-
-
-async def test_the_fake_keeps_a_watermark_it_has_no_episode_to_compare_with() -> None:
-    """ADR-0283 §6:6: the fake does not bound the watermark above.
-
-    ADR-0212 §7's upper limb is gone — the watermark is an episode number the
-    ``MemoryStore`` issued, which this store cannot see — and the limbs that remain
-    ("not a positive integer") cannot be held by a frozen pydantic model at all, so a
-    dict-backed store has none to apply. A fake that compared the number with
-    anything it holds would certify a consumer against behaviour the real store does
-    not have (ADR-0026 §7): every episode number the observation stage records would
-    read back absent, and the walk would restart from the tail forever.
-    """
-    store = FakeConversationStore(now=_fixed_now)
-    conversation = await store.start()
-    far = 2**40
-    assert await store.record_observed(conversation.id, through_episode=far) is not None
-
-    read = await store.get(conversation.id)
-
-    assert read is not None
-    assert read.observed_through == far
-    assert [one.observed_through for one in await store.recent()] == [far]
-    assert [one.observed_through for one in (await store.export()).conversations] == [far]
-    assert await store.record_observed(conversation.id, through_episode=1) is None

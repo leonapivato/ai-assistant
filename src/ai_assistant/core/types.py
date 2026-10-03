@@ -16028,16 +16028,6 @@ class SpokenAudio(BaseModel):
 # `UtcInstant` (ADR-0023, ADR-0030).
 
 
-#: The least value a conversation-scoped position may take: 1, so 0 is never a
-#: spelling of "none". It floors ``Conversation.observed_through`` — an episode
-#: number since ADR-0283 §6:6, and episode numbers are positive integers
-#: (ADR-0283 §1). The name is the turn index's, which ADR-0283 retired; the value
-#: and the floor it expresses are unchanged. Public because
-#: every store and conformance suite that refuses a position below it needs the
-#: same figure.
-FIRST_TURN_ORDINAL = 1
-
-
 class Conversation(BaseModel):
     """A durable, device-agnostic conversation (ADR-0074 §1).
 
@@ -16060,31 +16050,15 @@ class Conversation(BaseModel):
     ``record_turn`` write nothing, and survives so the deletion sweep can find it
     and delete every episode on its channel (ADR-0283 §8).
 
-    **``observed_through`` is the observation walk's position, and it is a position
-    rather than a certificate** (ADR-0212 §1). Since ADR-0283 §6:6 and §11 it is an
-    **episode number**: the highest ``MemoryStore`` number on the conversation's
-    channel that a pass has recorded. It says the walk over this conversation has
-    advanced past that number, and that no later pass selects an episode at or
-    below it. It does **not** say that every episode below it was read, that a
-    belief was proposed, that a proposal was ruled, or that a model was called: a
-    conversation's first pass starts at its tail and leaves every episode below
-    that page beneath the first watermark recorded (ADR-0212 §§4, 5). What a reader
-    may conclude from a watermark of *n* is that the episodes numbered **above** *n*
-    are the walk's remaining work, and nothing whatever about those below it.
-
-    **One consumer reads it and no other may branch on it** (ADR-0212 §7). Because
-    a watermark is present, absent, high or low, no read of the conversation store
-    selects a different set of rows, orders them differently, refuses where it
-    would have answered, or returns a different value in any other member. A build
-    that does not read it ignores it and does not refuse to start over it.
-
     No cross-field ordering is validated. ``started_at``, ``last_active_at`` and
     ``last_turn_at`` all come from an injected clock, which this project never
     promises is monotonic (``core/clock.py``), so a rule like
     ``last_active_at >= started_at`` would make a legitimate clock adjustment
-    unrepresentable rather than catching a bug. ``observed_through`` is likewise
-    bounded below and nowhere above: the numbers it names are the memory store's,
-    which neither this model nor the conversation store can see (ADR-0283 §6:6).
+    unrepresentable rather than catching a bug.
+
+    **There is no observation watermark** (ADR-0285 §4). The member ADR-0212 §1
+    gave the conversation is removed with the observer that wrote it, and nothing
+    replaces it.
     """
 
     model_config = ConfigDict(extra="forbid", frozen=True)
@@ -16102,15 +16076,6 @@ class Conversation(BaseModel):
         default=None,
         description="Tombstone stamp: when the user's deletion was recorded (ADR-0074 §8).",
     )
-    observed_through: int | None = Field(
-        default=None,
-        ge=FIRST_TURN_ORDINAL,
-        description=(
-            "Highest episode number on this conversation's channel an observation pass has "
-            "recorded; unset until one has (ADR-0212 §1, ADR-0283 §6:6). A position in the "
-            "walk, never a claim that the episodes below it were read."
-        ),
-    )
 
 
 class ConversationExport(BaseModel):
@@ -16121,8 +16086,7 @@ class ConversationExport(BaseModel):
     which that store's own export carries; repeating them here, or an index of
     them, would put the same Tier 1 history in two exports under two retention
     rules. The delivery rows the conversation store also keeps are bookkeeping
-    about episodes rather than a record of the conversation, and the observation
-    watermark rides on each :class:`Conversation` already.
+    about episodes rather than a record of the conversation.
 
     **This is the store's raw snapshot.** A conversation stamped deleted is absent
     from it (that is what the validator below enforces), but a conversation whose
@@ -16135,18 +16099,20 @@ class ConversationExport(BaseModel):
     here, so that filtering an export down — which preserves order — stays a total
     operation.
 
-    ``schema_version`` is 4 because the turns are gone from the document (ADR-0275
-    §7:9 as ADR-0283 §4:3 reads it). Exports have no import operation and no
-    historical conversion path, so a version-3 document is not read here.
+    ``schema_version`` is 5 because the :class:`Conversation` the document carries
+    loses its observation watermark (ADR-0285 §4, ADR-0014 §5); it was 4 when the
+    turns left the document (ADR-0275 §7:9 as ADR-0283 §4:3 reads it). Exports have
+    no import operation and no historical conversion path, so a version-4 document
+    is not read here.
     """
 
     model_config = ConfigDict(extra="forbid", frozen=True)
 
-    schema_version: Literal[4] = Field(
-        default=4,
+    schema_version: Literal[5] = Field(
+        default=5,
         description=(
-            "Shape of this export, pinned to exactly 4 (ADR-0039 §10, ADR-0014 §5, "
-            "ADR-0283 §4:3): an export outlives the code that wrote it, so the label must "
+            "Shape of this export, pinned to exactly 5 (ADR-0039 §10, ADR-0014 §5, "
+            "ADR-0285 §4): an export outlives the code that wrote it, so the label must "
             "be a fact about the document rather than a producer's unchecked claim."
         ),
     )
@@ -31823,9 +31789,9 @@ class SpokenTurn(BaseModel):
 #: boundary, because a byte bound applied to UTF-8 without that clause produces
 #: invalid text.
 #:
-#: Public for :data:`FIRST_TURN_ORDINAL`'s own reason: every ``TranscriptArchive``
-#: implementation and the shared conformance suite need the same figure, and a
-#: bound one of them re-derived is a response size two stores could disagree about.
+#: Public because every ``TranscriptArchive`` implementation and the shared
+#: conformance suite need the same figure, and a bound one of them re-derived is a
+#: response size two stores could disagree about.
 TRANSCRIPT_EXCERPT_BYTES = 512
 
 

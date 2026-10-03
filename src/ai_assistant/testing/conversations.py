@@ -48,7 +48,6 @@ from pydantic import TypeAdapter, ValidationError
 from ai_assistant.core.clock import ClockReadingError, checked_clock
 from ai_assistant.core.errors import ConversationStoreError, UnknownConversationError
 from ai_assistant.core.types import (
-    FIRST_TURN_ORDINAL,
     Conversation,
     ConversationExport,
     Identifier,
@@ -112,8 +111,8 @@ def _random_id() -> str:
     return str(uuid4())
 
 
-def _check_page_bound(name: str, value: object, *, floor: int = 0) -> None:
-    """Refuse a paging argument that is not an exact ``int`` in ``[floor, 2**63)``.
+def _check_page_bound(name: str, value: object) -> None:
+    """Refuse a paging argument that is not an exact ``int`` in ``[0, 2**63)``.
 
     Duplicated from the production store rather than shared, for the reason given
     on :data:`_PAGE_BOUND`. **The type is part of the range**: without it this fake
@@ -123,11 +122,11 @@ def _check_page_bound(name: str, value: object, *, floor: int = 0) -> None:
     the rest, being an ``int`` subclass that is not a page size.
 
     Raises:
-        ValueError: If ``value`` is not an ``int``, is below ``floor``, or is
-            beyond the signed 64-bit range.
+        ValueError: If ``value`` is not an ``int``, is negative, or is beyond the
+            signed 64-bit range.
     """
-    if type(value) is not int or not floor <= value < _PAGE_BOUND:
-        msg = f"{name} must be an int in [{floor}, 2**63), got {describe_untrusted(value)}"
+    if type(value) is not int or not 0 <= value < _PAGE_BOUND:
+        msg = f"{name} must be an int in [0, 2**63), got {describe_untrusted(value)}"
         raise ValueError(msg)
 
 
@@ -563,38 +562,6 @@ class FakeConversationStore:
                 return {}
             held = self._deliveries[conversation_id]
             return {one: held[one] for one in ids if one in held}
-
-    async def record_observed(
-        self, conversation_id: str, *, through_episode: int
-    ) -> Conversation | None:
-        """Advance the watermark if it moves forward (ADR-0212 §8, ADR-0283 §6:6).
-
-        **The condition is read and the row written inside the one exclusion**
-        (ADR-0212 §8), which is what the suite's two-advances-racing case is
-        asserting against: the exclusion hands the loop back before this reads
-        anything, so a second advance really has to queue and really does find the
-        position the first left. Nothing bounds the value above: it is an episode
-        number, which this store cannot see.
-
-        The range refusal is before the exclusion is taken and before anything is
-        read, which is "locally, before any I/O".
-
-        Raises:
-            ValueError: If ``through_episode`` is outside ``[1, 2**63)``.
-            UnknownConversationError: If the id names nothing or names a stamped
-                conversation.
-        """
-        _check_page_bound("through_episode", through_episode, floor=FIRST_TURN_ORDINAL)
-        async with self._exclusive(conversation_id):
-            conversation = self._live(conversation_id)
-            recorded = conversation.observed_through
-            if recorded is not None and through_episode <= recorded:
-                # An attempt that loses is an attempt whose position already stands:
-                # nothing is written and nothing is raised, `record_delivery`'s shape.
-                return None
-            stamped = conversation.model_copy(update={"observed_through": through_episode})
-            self._conversations[conversation_id] = stamped
-            return stamped
 
     async def stamped_conversation_ids(
         self,
