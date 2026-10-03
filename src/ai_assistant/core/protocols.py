@@ -131,6 +131,7 @@ if TYPE_CHECKING:
         BoundEgressCall,
         CanonicalDestination,
         CarriedProvenance,
+        ChannelEpisode,
         ChannelEpisodeId,
         ChannelEpisodePage,
         ChannelIdentity,
@@ -987,11 +988,13 @@ class MemoryStore(Protocol):
     when it inserts it, a **number**: a positive integer from one counter shared by
     every record the store holds, greater than every number it issued before, never
     reissued and never changed. An upsert at a stored id keeps the number that id
-    holds, and so may not move the record's channel: a write through :meth:`add` or
-    any :meth:`write_atomic` mode whose record is on a different channel from the
-    one stored at its id — no channel to a channel included — raises
-    ``MemoryStoreError`` and writes nothing, since a channel gained at a low number
-    would sit below a reader's watermark. Neither a deletion, :meth:`purge_expired`
+    holds. An episode's channel is written by the first write that carries it and
+    never changed by a later one (ADR-0286 §12, partially superseding ADR-0283
+    §1:3): an episode stored on no channel may gain one, which is how an episode
+    inserted at admission learns the channel its activation resolves later, and a
+    write through :meth:`add` or any :meth:`write_atomic` mode whose record is on a
+    different channel from the one stored at its id, or on none, raises
+    ``MemoryStoreError`` and writes nothing. Neither a deletion, :meth:`purge_expired`
     nor :meth:`clear` releases a number, and a durable store's counter survives a
     close, a restart and a re-embedding. A
     channel's order is its episodes' numbers, ascending, and three reads answer by
@@ -1001,6 +1004,32 @@ class MemoryStore(Protocol):
     binding. A durable store keeps an episode's channel type, channel instance and
     number as indexed columns written with the record, so none of these reads
     filters a channel through the record's JSON.
+
+    **An episode is open or frozen** (ADR-0286 §1, §12). An episode whose processing
+    record's ``status`` is ``None`` is **open**: its activation is still running,
+    and the writer extends it as each stage ends. The store keeps whether an episode
+    is open as an indexed column written with every write of the record, embeds no
+    open episode, and embeds an episode's ``content`` by the write that freezes it.
+    The reads that feed a model pass over an open episode: :meth:`search`,
+    :meth:`select` and :meth:`channel_episodes` never return one and never count one
+    against a limit, and :meth:`walk_records` stops before the lowest-numbered one
+    (§6). :meth:`get`, :meth:`get_many`, :meth:`episodes`, :meth:`episode_chunk`,
+    :meth:`channel_episode_ids`, :meth:`episode_parking`, :meth:`list_beliefs`,
+    :meth:`export` and the deletions reach an open episode as they reach any other,
+    and :meth:`open_episodes` enumerates them.
+
+    **A recorded processing record and response change only by extension**
+    (ADR-0286 §12, partially superseding ADR-0275 §12:6). A write through :meth:`add`
+    or any :meth:`write_atomic` mode replacing a stored episode that carries a
+    processing record, where the written record's processing record or ``outcome``
+    differs from the stored one's, raises ``MemoryStoreError`` and writes nothing —
+    unless the stored record is open and
+    :func:`~ai_assistant.core.episode_encoding.episode_extends` holds of the two. A
+    frozen episode's processing record and response are therefore immutable. The
+    guard judges no other field: a write leaving both as stored is admitted, the
+    owner's placement acts on a frozen episode and the re-derivation of its
+    ``content`` included, and the record's own validators still bound what an open
+    episode may carry.
 
     Cancelling any method here is governed by this module's cancellation clause
     (ADR-0060), :meth:`select` included. How :meth:`add` and :meth:`write_atomic`
@@ -1054,7 +1083,10 @@ class MemoryStore(Protocol):
 
         Raises:
             MemoryStoreError: ``record.id`` names a stored record of a different
-                ``kind`` — nothing is written — or the write fails.
+                ``kind``, or the write would change a stored episode's processing
+                record or response other than by extending an open one, or change or
+                drop its channel (ADR-0286 §12) — nothing is written — or the write
+                fails.
         """
         ...
 
@@ -1117,9 +1149,12 @@ class MemoryStore(Protocol):
                 (ADR-0219 §3). Nothing is written; the caller re-reads and
                 re-decides.
             MemoryStoreError: an ``UPSERT`` or ``IF_UNCHANGED`` element's id names a
-                stored record of a different ``kind`` (ADR-0108 §4, ADR-0219 §4),
-                any other backend failure, or a malformed batch (two writes to the
-                same id, ADR-0046 §3). Nothing is written.
+                stored record of a different ``kind`` (ADR-0108 §4, ADR-0219 §4), an
+                element would change a stored episode's processing record or
+                response other than by extending an open one, or change or drop its
+                channel (ADR-0286 §12; this Protocol's docstring), any other backend
+                failure, or a malformed batch (two writes to the same id, ADR-0046
+                §3). Nothing is written.
         """
         ...
 
@@ -1480,9 +1515,12 @@ class MemoryStore(Protocol):
                 §2), and no value spells "unstated". An **empty sequence selects
                 nothing**; duplicates are set semantics.
 
-        Every episode the axes select is returned, failed, interrupted and outside
-        episodes included (ADR-0284 §6:2): a reader that should pass over an
-        unfinished or failed episode reads its status.
+        Every frozen episode the axes select is returned, failed, interrupted and
+        outside episodes included (ADR-0284 §6:2): a reader that should pass over a
+        failed episode reads its status. **An open episode is never returned**
+        (ADR-0286 §6:1): that predicate binds before every candidate ceiling, ranking
+        cut and limit, under ADR-0128 §1, so an open episode spends no candidate slot
+        and the activation's own episode takes no place in a result.
 
         Returns:
             A :class:`~ai_assistant.core.types.MemorySearchResult`: the matching
@@ -1703,9 +1741,12 @@ class MemoryStore(Protocol):
         one axis the values compose by **disjunction**: a record is eligible on
         that axis when it matches at least one of the values given.
 
-        Every episode the axes select is returned, failed, interrupted and outside
-        episodes included (ADR-0284 §6:2): a reader that should pass over an
-        unfinished or failed episode reads its status.
+        Every frozen episode the axes select is returned, failed, interrupted and
+        outside episodes included (ADR-0284 §6:2): a reader that should pass over a
+        failed episode reads its status. **An open episode is never returned**
+        (ADR-0286 §6:1): that predicate binds before every candidate ceiling, ranking
+        cut and limit, under ADR-0128 §1, so an open episode spends no candidate slot
+        and the activation's own episode takes no place in a result.
 
         Returns:
             A :class:`~ai_assistant.core.types.MemorySearchResult`: the eligible
@@ -1807,17 +1848,20 @@ class MemoryStore(Protocol):
         closed and one whose window is not yet open are not read, both ends of the
         window enforced (ADR-0007, ADR-0045 §6).
 
-        **Every live episode on the channel is read** (ADR-0284 §6:1-§6:2), failed,
-        interrupted and outside episodes included: the read takes no eligibility
-        axis, and a reader that should pass over an unfinished or failed episode
-        reads its status.
+        **Every live frozen episode on the channel is read** (ADR-0284 §6:1-§6:2),
+        failed, interrupted and outside episodes included: the read takes no
+        eligibility axis, and a reader that should pass over a failed episode reads
+        its status. **An open episode is never read** (ADR-0286 §6:1), and the
+        predicate binds before ``limit``: the running activation's own episode, which
+        is on its channel for as long as it runs, takes no slot of a page.
 
         It returns, in number order ascending, **the newest** ``limit`` of the
         matching episodes when ``after`` is ``None``, or **the oldest** ``limit``
         numbered above ``after`` otherwise. A short page is the whole remainder in
-        that mode. ``total`` is the count of every live episode on the channel,
-        whatever ``after`` and ``limit`` are — so a page and its ``total`` answer
-        from one read instant and one state of the store.
+        that mode. ``total`` is the count of every live frozen episode on the
+        channel, whatever ``after`` and ``limit`` are, and counts no open episode —
+        so a page and its ``total`` answer from one read instant and one state of
+        the store.
 
         This is not the enumeration a deletion walks: it filters by liveness, and
         :meth:`channel_episode_ids` is that
@@ -1895,6 +1939,46 @@ class MemoryStore(Protocol):
                 ``after`` is neither ``None`` nor a strict positive integer, as
                 :meth:`channel_episodes` bounds them. Refused before any I/O.
             MemoryStoreError: If the store cannot be read.
+        """
+        ...
+
+    async def open_episodes(
+        self,
+        *,
+        after: int | None = None,
+        limit: int,
+    ) -> tuple[ChannelEpisode, ...]:
+        """Enumerate every open episode this store physically holds (ADR-0286 §12:1).
+
+        An episode is open while its processing record's ``status`` is ``None``
+        (§1). **Every** open episode is included, whatever its channel or none, and
+        an expired one not yet purged, one whose window is closed and one whose
+        window is not yet open are all included: this is the enumeration a restart
+        walks to close what a dead process left open (§7), and no read filtered by
+        liveness or validity is that enumeration.
+
+        It returns the lowest ``limit`` numbered above ``after`` — or from the start
+        where ``after`` is ``None`` — in number order ascending. Each entry carries
+        the episode's number and the record as stored, a detached snapshot carrying
+        its stored ``revision``, so a caller can condition a write on it, with
+        ``score`` cleared to ``None`` because this read ranks nothing.
+
+        Args:
+            after: ``None`` for the start, or an episode number to read above. A
+                number no store has issued yet is a valid value and answers an empty
+                page.
+            limit: The page size.
+
+        Returns:
+            The page's open episodes, in number order.
+
+        Raises:
+            ValueError: ``limit`` is not a strict integer in ``[1, 1000]``, or
+                ``after`` is neither ``None`` nor a strict positive integer, as
+                :meth:`channel_episodes` bounds them (ADR-0283 §3:2). Refused before
+                any I/O.
+            MemoryStoreError: If the store cannot be read, or a stored record is
+                corrupt.
         """
         ...
 
@@ -2057,6 +2141,17 @@ class MemoryStore(Protocol):
         reconsidering changed rows cannot express its selection as a high-water
         mark alone, and this contract gives it no other mechanism.
 
+        **The walk waits at the oldest open episode** (ADR-0286 §6:2, partially
+        superseding ADR-0114 §1:2 and §1:7). A chunk examines no record at or past the
+        lowest-numbered open episode the store physically holds, an expired one
+        included: it stops before it. Where that episode is the next record to
+        examine, the chunk examines nothing and carries no position, which tells the
+        caller that nothing is left to examine **for now**; the walk's recorded
+        position has not passed the open episode, so a later read resumes there and
+        returns it once it is frozen. The walk is held rather than passed over the
+        episode, because it never returns below its position, and an episode passed
+        over while open would never be read once frozen.
+
         Args:
             walk: Names the walk whose position this read resumes from. Opaque to
                 the store: never interpreted, never normalised, and never shared
@@ -2075,8 +2170,9 @@ class MemoryStore(Protocol):
         Returns:
             The chunk: its eligible records in walk order, and the position of the
             last record examined. That position is absent **exactly when there was
-            nothing left to examine**, and that — never an empty record list — is
-            how a caller learns the walk is exhausted. A chunk may carry a position
+            nothing left to examine**, an open episode next included, and that —
+            never an empty record list — is how a caller learns the walk is
+            exhausted for now. A chunk may carry a position
             and no records, meaning the range it examined held nothing eligible;
             a caller advances on it exactly as on any other.
 

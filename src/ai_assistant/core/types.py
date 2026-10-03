@@ -4276,7 +4276,12 @@ _EPISODE_NUMBER_BOUND: Final = 2**63
 
 
 class ChannelEpisode(BaseModel):
-    """One live episode on a channel, with the number its store gave it (ADR-0283 §3:2).
+    """One episode with the number its store gave it (ADR-0283 §3:2, ADR-0286 §12:1).
+
+    What :meth:`~ai_assistant.core.protocols.MemoryStore.channel_episodes` returns for
+    a live episode on a channel, and what
+    :meth:`~ai_assistant.core.protocols.MemoryStore.open_episodes` returns for an open
+    episode, on a channel or none, live or not.
 
     Attributes:
         number: The store-wide number the episode was given when it was inserted —

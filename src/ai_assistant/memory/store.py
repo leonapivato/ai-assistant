@@ -52,6 +52,7 @@ from ai_assistant.core.types import (
     caseless_key,
 )
 from ai_assistant.memory._channel_reads import channel_of, check_channel_page, parks_of
+from ai_assistant.memory._episode_guard import is_open, refuse_episode_change
 from ai_assistant.memory._walk import (
     check_walk_limit,
     check_walk_name,
@@ -433,30 +434,24 @@ class InMemoryMemoryStore:
         caller that asked to overwrite something of a kind it did not expect
         (ADR-0108 §4, on ADR-0081 §3's reasoning).
 
+        The episode guard rides the same check (ADR-0286 §12:2-§12:4), shared with
+        the persistent store through ``_episode_guard``.
+
         Raises:
             MemoryStoreError: ``record.id`` names a stored record of a different
-                ``kind``, or one on a different channel (ADR-0283 §1).
+                ``kind``, the write changes a stored episode's processing record or
+                response other than by extending an open one, or it changes or drops
+                the channel the stored episode is on (ADR-0283 §1, ADR-0286 §12).
         """
         stored = self._records.get(record.id)
-        if (
-            isinstance(stored, EpisodicMemory)
-            and stored.processing_record is not None
-            and (
-                not isinstance(record, EpisodicMemory)
-                or record.processing_record != stored.processing_record
-                or record.outcome != stored.outcome
-            )
-        ):
-            msg = "recorded processing and response are immutable"
-            raise MemoryStoreError(msg)
-        if stored is not None and stored.kind != record.kind:
+        if stored is None:
+            return
+        refuse_episode_change(stored, record)
+        if stored.kind != record.kind:
             msg = (
                 f"cannot write {record.id!r} as a {record.kind} record: "
                 f"a {stored.kind} record is already stored under that id"
             )
-            raise MemoryStoreError(msg)
-        if stored is not None and channel_of(stored) != channel_of(record):
-            msg = "an episode's channel is immutable: it is written once, with the record"
             raise MemoryStoreError(msg)
 
     async def write_atomic(self, writes: Sequence[MemoryWrite]) -> Sequence[str]:
@@ -687,7 +682,9 @@ class InMemoryMemoryStore:
         scored = [
             record.model_copy(update={"score": score}, deep=True)
             for record in self._records.values()
+            # An open episode never enters the ranking (ADR-0286 §6:1).
             if self._is_readable(record, now)
+            and not is_open(record)
             and (wanted is None or record.kind in wanted)
             and (wanted_bands is None or band_of(record.provenance.source) in wanted_bands)
             and _admits(
@@ -787,6 +784,7 @@ class InMemoryMemoryStore:
             record
             for record in self._records.values()
             if self._is_readable(record, now)
+            and not is_open(record)
             and (wanted_kinds is None or record.kind in wanted_kinds)
             and (wanted_bands is None or band_of(record.provenance.source) in wanted_bands)
             and _admits(
@@ -892,11 +890,14 @@ class InMemoryMemoryStore:
         """
         check_channel_page(after, limit)
         now = self._now_utc()  # one reading for the page and its total
+        # An open episode is neither read nor counted, before the page is cut
+        # (ADR-0286 §6:1).
         matching = [
             (key, record)
             for rid, key in self._keys.items()
             if channel_of(record := self._records[rid]) == channel
             and self._is_readable(record, now)
+            and not is_open(record)
         ]
         page = (
             matching[-limit:]
@@ -949,6 +950,33 @@ class InMemoryMemoryStore:
                 if len(held) == limit:
                     break
         return tuple(held)
+
+    async def open_episodes(
+        self,
+        *,
+        after: int | None = None,
+        limit: int,
+    ) -> tuple[ChannelEpisode, ...]:
+        """Enumerate every open episode held, whatever its liveness (ADR-0286 §12:1).
+
+        Raises:
+            ValueError: An argument outside the bounds the Protocol states.
+        """
+        check_channel_page(after, limit)
+        found: list[ChannelEpisode] = []
+        for rid, key in self._keys.items():
+            if after is not None and key <= after:
+                continue
+            record = self._records[rid]
+            if isinstance(record, EpisodicMemory) and is_open(record):
+                found.append(
+                    ChannelEpisode(
+                        number=key, record=record.model_copy(deep=True, update={"score": None})
+                    )
+                )
+                if len(found) == limit:
+                    break
+        return tuple(found)
 
     async def list_beliefs(
         self,
@@ -1085,10 +1113,21 @@ class InMemoryMemoryStore:
         # walked prefix is still linear in what has been walked, which is the trade
         # a dict makes and the reason the persistent store keeps this an indexed
         # `rowid > ? ORDER BY rowid LIMIT ?` instead.
+        #
+        # The walk examines nothing at or past the lowest-keyed open episode this
+        # store holds, an expired one included (ADR-0286 §6:2), so a chunk whose next
+        # record is that episode examines nothing and carries no position — the walk
+        # waits there, rather than passing a record it could never come back for.
+        stop = min(
+            (key for rid, key in self._keys.items() if is_open(self._records[rid])),
+            default=None,
+        )
         examined: list[tuple[int, str]] = []
         for rid, key in self._keys.items():
             if after is not None and key <= after:
                 continue
+            if stop is not None and key >= stop:
+                break
             examined.append((key, rid))
             if len(examined) == limit:
                 break

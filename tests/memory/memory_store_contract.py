@@ -68,6 +68,7 @@ from ai_assistant.core.types import (
     MemoryWrite,
     MemoryWriteMode,
     Modality,
+    NewConversation,
     ParkedBinding,
     Placement,
     PlacementReach,
@@ -94,6 +95,7 @@ from ai_assistant.core.types import (
     UnresolvedMatter,
     Validity,
     WalkPosition,
+    WholeTextReply,
     band_of,
 )
 
@@ -947,6 +949,20 @@ class _ChannelEpisodeIdsOp(_ReadOp):
         return store.channel_episode_ids(_CHANNEL_B, limit=5)
 
 
+class _OpenEpisodesOp(_ReadOp):
+    """``open_episodes`` — ADR-0286 §12:1's enumeration, its own lock site."""
+
+    name = "open_episodes"
+
+    def first(self, store: MemoryStore) -> Coroutine[Any, Any, object]:
+        """Enumerate from the start — the call that is cancelled."""
+        return store.open_episodes(limit=5)
+
+    def second(self, store: MemoryStore) -> Coroutine[Any, Any, object]:
+        """Enumerate above the first number concurrently."""
+        return store.open_episodes(after=1, limit=5)
+
+
 #: Every locked ``MemoryStore`` operation ADR-0060's case is run against: each is a
 #: distinct ``async with self._lock`` site with its own ``_run_to_completion``. The
 #: writes came first (#370); the reads are the same invariant on the other half of
@@ -970,6 +986,7 @@ _CANCELLATION_OPS: tuple[Callable[[], _CancellationOp], ...] = (
     _ChannelEpisodesOp,
     _EpisodeParkingOp,
     _ChannelEpisodeIdsOp,
+    _OpenEpisodesOp,
 )
 
 
@@ -1051,6 +1068,128 @@ async def _numbers(store: MemoryStore, channel: ChannelIdentity) -> dict[str, in
     """Every episode ``store`` holds on ``channel``, id to number, in number order."""
     held = await store.channel_episode_ids(channel, limit=1000)
     return {entry.episode_id: entry.number for entry in held}
+
+
+#: The placement an open episode carries until it freezes (ADR-0286 §1): reach
+#: ``OWNER``, set by derivation, stamped with the admission write's reading.
+_ADMITTED_PLACEMENT = Placement(
+    reach=PlacementReach.OWNER, set_by=PlacementSetter.DERIVED, set_at=_IN_WINDOW
+)
+#: A second conversation, so a case can move an episode from one to another.
+_CONVERSATION_B = ChannelIdentity(channel_type="conversation", instance_id="b")
+
+
+def _open_episode(
+    record_id: str,
+    *,
+    channel: ChannelIdentity | None = _CHANNEL_A,
+    expires_at: datetime | None = None,
+    validity: Validity | None = None,
+    last_updated: datetime = _REVISED,
+) -> EpisodicMemory:
+    """An open activation episode, as the admission write stores one (ADR-0286 §1, §2).
+
+    Its processing record carries no end entry and no end fields, its ``content`` is
+    empty and it is placed owner-only by derivation. The trigger is conversational,
+    so its channel may be absent until a later write carries it (§2).
+    """
+    return EpisodicMemory(
+        id=record_id,
+        content="",
+        provenance=_provenance(last_updated=last_updated),
+        occurred_at=_IN_WINDOW,
+        expires_at=expires_at,
+        validity=validity or Validity(),
+        placement=_ADMITTED_PLACEMENT,
+        processing_record=EpisodeProcessingRecord(
+            activation_id="activation",
+            started_at=_IN_WINDOW,
+            trigger=RecordedChannelTrigger(
+                target=NewConversation(),
+                channel=channel,
+                payload=RecordedTextInput(text="exact input"),
+                context=ChannelContext(),
+                reply=WholeTextReply(),
+                origin=InputOrigin.USER,
+            ),
+        ),
+    )
+
+
+def _stage_entry(at: datetime) -> StageEntry:
+    """One ended stage, the entry an append adds (ADR-0286 §3)."""
+    return StageEntry(
+        stage=ControllerStage.TURN_LOOP,
+        due=ControllerRule.UNPLANNED,
+        started_at=at,
+        ended_at=at,
+        outcome=StageOutcome.DONE,
+    )
+
+
+def _revised(
+    episode: EpisodicMemory, *, processing: dict[str, object], **fields: object
+) -> EpisodicMemory:
+    """``episode`` with ``processing``'s fields on its processing record, validated.
+
+    Built through the models' validators rather than ``model_copy``, so a fixture
+    cannot be a state no writer could store.
+    """
+    record = episode.processing_record
+    assert record is not None
+    revised = EpisodeProcessingRecord.model_validate({**dict(record), **processing})
+    return EpisodicMemory.model_validate(
+        {**dict(episode), "processing_record": revised, "revision": 0, **fields}
+    )
+
+
+def _appended(episode: EpisodicMemory, at: datetime) -> EpisodicMemory:
+    """``episode`` extended by one stage entry (ADR-0286 §3)."""
+    record = episode.processing_record
+    assert record is not None
+    return _revised(episode, processing={"stages": (*record.stages, _stage_entry(at))})
+
+
+def _frozen(episode: EpisodicMemory, *, content: str = _ANY) -> EpisodicMemory:
+    """``episode`` frozen by its end entry, as the freezing write stores it (§4)."""
+    record = episode.processing_record
+    assert record is not None
+    return _revised(
+        episode,
+        processing={
+            "status": ProcessingStatus.COMPLETED,
+            "reason": ProcessingReason.RETURNED,
+            "ended_at": _IN_WINDOW,
+            "understanding_omitted": UnderstandingOmission.NOT_REACHED,
+            "stages": (*record.stages, *ended_pass(_IN_WINDOW)),
+        },
+        content=content,
+        placement=Placement(),
+    )
+
+
+async def _replace(
+    store: MemoryStore, record: MemoryRecord, door: str, *, companion: bool = False
+) -> None:
+    """Write ``record`` over the row stored at its id, through ``door``.
+
+    ``companion`` puts an unrelated insert ahead of it in the same batch, so a case
+    can assert that a refused write committed nothing of its batch.
+    """
+    if door == "add":
+        assert not companion
+        await store.add(record)
+        return
+    head = [MemoryWrite(record=_semantic("companion", "alpha"))] if companion else []
+    if door == "upsert":
+        write = MemoryWrite(record=record, mode=MemoryWriteMode.UPSERT)
+    else:
+        stored = await store.get(record.id)
+        assert stored is not None
+        write = MemoryWrite(
+            record=record, mode=MemoryWriteMode.IF_UNCHANGED, expected_revision=stored.revision
+        )
+    await store.write_atomic([*head, write])
 
 
 class MemoryStoreContract:
@@ -5987,74 +6126,324 @@ class MemoryStoreContract:
     async def test_channel_reads_refuse_a_limit_outside_their_bounds(
         self, store: MemoryStore, limit: Any
     ) -> None:
-        """§3:2: ``limit`` is a strict integer in ``[1, 1000]`` — ``bool`` is not one."""
+        """§3:2: ``limit`` is a strict integer in ``[1, 1000]`` — ``bool`` is not one.
+
+        ``open_episodes`` is bounded and refused as the channel reads are (ADR-0286
+        §12:1).
+        """
         with pytest.raises(ValueError, match="limit"):
             await store.channel_episodes(_CHANNEL_A, limit=limit)
         with pytest.raises(ValueError, match="limit"):
             await store.channel_episode_ids(_CHANNEL_A, limit=limit)
+        with pytest.raises(ValueError, match="limit"):
+            await store.open_episodes(limit=limit)
 
     @pytest.mark.parametrize("after", [0, -1, True, False, 1.0, "1"])
     async def test_channel_reads_refuse_an_after_that_is_not_a_strict_positive_integer(
         self, store: MemoryStore, after: Any
     ) -> None:
-        """§3:2: ``after`` is ``None`` or a strict positive integer."""
+        """§3:2: ``after`` is ``None`` or a strict positive integer (and ADR-0286 §12:1)."""
         with pytest.raises(ValueError, match="after"):
             await store.channel_episodes(_CHANNEL_A, after=after, limit=1)
         with pytest.raises(ValueError, match="after"):
             await store.channel_episode_ids(_CHANNEL_A, after=after, limit=1)
+        with pytest.raises(ValueError, match="after"):
+            await store.open_episodes(after=after, limit=1)
 
     async def test_channel_reads_accept_the_ends_of_their_bounds(self, store: MemoryStore) -> None:
         """``limit`` 1 and 1000, ``after`` 1 and far beyond any number, are all served."""
         await store.add(_on_channel("a"))
+        await store.add(_open_episode("o", channel=None))
         for limit in (1, 1000):
             assert len((await store.channel_episodes(_CHANNEL_A, limit=limit)).entries) == 1
             assert len(await store.channel_episode_ids(_CHANNEL_A, limit=limit)) == 1
+            assert len(await store.open_episodes(limit=limit)) == 1
         for after in (1, 2**63, 2**70):
             await store.channel_episodes(_CHANNEL_A, after=after, limit=1)
             await store.channel_episode_ids(_CHANNEL_A, after=after, limit=1)
+            await store.open_episodes(after=after, limit=1)
 
-    async def test_an_upsert_may_not_move_a_stored_records_channel(
-        self, store: MemoryStore
+    @pytest.mark.parametrize("door", ["add", "upsert", "if_unchanged"])
+    async def test_a_written_channel_never_changes_and_a_missing_one_may_be_gained(
+        self, store: MemoryStore, door: str
     ) -> None:
-        """§1: the channel is written with the record and never changed — not even from none.
+        """ADR-0286 §12:4 (ADR-0283 §1:3 as superseded): written once, by the first write.
 
-        ``early`` is stored on no channel, numbered below ``later``. Were an upsert
-        allowed to put ``early`` on the channel, it would keep its low number and sit
-        under any watermark taken at ``later``, unread by every read above it. So every
-        replacing door refuses, and a refused batch commits nothing.
+        ``early`` is stored on no channel and gains one by a later write, keeping the
+        number it was inserted at — which is how an episode inserted at admission
+        learns the channel its activation resolves later. ``later``'s channel, once
+        written, may be neither moved nor dropped by any replacing door, and a
+        refused batch commits nothing.
         """
         await store.add(_episode("early"))
         await store.add(_on_channel("later"))
-        before = await _numbers(store, _CHANNEL_A)
-        stored = await store.get("early")
-        assert stored is not None
-        moved = _on_channel("early")
+        number = (await store.channel_episode_ids(_CHANNEL_A, limit=10))[0].number
 
-        with pytest.raises(MemoryStoreError, match="channel"):
-            await store.add(moved)
-        with pytest.raises(MemoryStoreError, match="channel"):
-            await store.write_atomic(
-                [
-                    MemoryWrite(record=_semantic("bystander", "alpha")),
-                    MemoryWrite(record=moved, mode=MemoryWriteMode.UPSERT),
-                ]
-            )
-        with pytest.raises(MemoryStoreError, match="channel"):
-            await store.write_atomic(
-                [
-                    MemoryWrite(
-                        record=moved,
-                        mode=MemoryWriteMode.IF_UNCHANGED,
-                        expected_revision=stored.revision,
-                    )
-                ]
-            )
-        # A recorded processing record is immutable already, which refuses this one
-        # on that ground first; the obligation is the refusal, not its wording.
-        with pytest.raises(MemoryStoreError):
-            await store.add(_on_channel("later", channel=_CHANNEL_B))
+        # The stored processing record refuses these on that ground first, since a
+        # written channel is part of it; the obligation is the refusal, not its
+        # wording.
+        for moved in (
+            _on_channel("later", channel=_CHANNEL_B),
+            _on_channel("later", channel=None),
+        ):
+            with pytest.raises(MemoryStoreError):
+                await _replace(store, moved, door, companion=door != "add")
 
-        assert await store.get("bystander") is None
-        assert _unstamped_or_none(await store.get("early")) == _episode("early")
-        assert await _numbers(store, _CHANNEL_A) == before
+        assert await store.get("companion") is None
+        assert await _numbers(store, _CHANNEL_A) == {"later": number}
         assert await store.channel_episode_ids(_CHANNEL_B, limit=10) == ()
+
+        await _replace(store, _on_channel("early"), door)
+        gained = await _numbers(store, _CHANNEL_A)
+        assert list(gained) == ["early", "later"]
+        assert gained["early"] < number
+
+    # --- the open episode (ADR-0286 §6, §12, §15:2) ------------------------------
+
+    async def test_the_reads_that_feed_a_model_never_return_an_open_episode(
+        self, store: MemoryStore
+    ) -> None:
+        """§6:1: ``search``, ``select`` and ``channel_episodes`` pass over an open episode.
+
+        Three open episodes on the channel carry the newest numbers and the newest
+        write stamp, so a store that cut a page before passing over them would fill a
+        one-record page with one of them: the tail of ``channel_episodes``, the head
+        of ``select``'s order. None is returned and none is counted against a limit
+        or in ``total``.
+        """
+        await store.add(_on_channel("frozen"))
+        for index in range(3):
+            await store.add(_open_episode(f"open{index}", last_updated=_RESTAMPED))
+        frozen_number = (await _numbers(store, _CHANNEL_A))["frozen"]
+
+        for limit in (1, 10):
+            found = await store.search(_ANY, limit=limit)
+            assert [record.id for record in found.records] == ["frozen"]
+            selected = await store.select(limit=limit, kinds=[MemoryKind.EPISODIC])
+            assert [record.id for record in selected.records] == ["frozen"]
+            windowed = await store.select(
+                limit=limit, occurred_within=TimeWindow(start=_WINDOW_START, end=_WINDOW_END)
+            )
+            assert [record.id for record in windowed.records] == ["frozen"]
+            page = await store.channel_episodes(_CHANNEL_A, limit=limit)
+            assert [entry.record.id for entry in page.entries] == ["frozen"]
+            assert page.total == 1
+        above = await store.channel_episodes(_CHANNEL_A, after=frozen_number, limit=10)
+        assert above.entries == ()
+        assert above.total == 1
+
+    async def test_the_other_reads_reach_an_open_episode(self, store: MemoryStore) -> None:
+        """§6:5: inspection, enumeration, export and the deletions reach it as any other."""
+        opened = _open_episode("open")
+        await store.add(opened)
+
+        assert _unstamped_or_none(await store.get("open")) == opened
+        assert set(await store.get_many(["open"])) == {"open"}
+        assert [item.position.episode_id for item in (await store.episodes()).items] == ["open"]
+        assert await store.episode_chunk("open") is not None
+        assert list(await _numbers(store, _CHANNEL_A)) == ["open"]
+        assert [record.id for record in await store.export()] == ["open"]
+        assert await store.delete("open")
+        assert await store.open_episodes(limit=10) == ()
+
+    async def test_the_walk_waits_at_an_open_episode_and_returns_it_once_frozen(
+        self, store: MemoryStore
+    ) -> None:
+        """§6:2, §15:2: a chunk stops before the oldest open episode and resumes there.
+
+        Where the open episode is the next record to examine the chunk examines
+        nothing and carries no position — "nothing left to examine for now" — and the
+        recorded position has not passed it, so once it is frozen the walk returns it
+        and the records behind it.
+        """
+        await store.add(_on_channel("before"))
+        await store.add(_open_episode("open"))
+        await store.add(_on_channel("after"))
+
+        chunk = await store.walk_records("walk", limit=10)
+        assert [record.id for record in chunk.records] == ["before"]
+        assert chunk.position is not None
+        await store.advance_walk("walk", position=chunk.position)
+        for _ in range(2):  # reading changes nothing: the walk stays held
+            held = await store.walk_records("walk", limit=10)
+            assert held.records == ()
+            assert held.position is None
+
+        stored = await store.get("open")
+        assert isinstance(stored, EpisodicMemory)
+        await _replace(store, _frozen(stored), "if_unchanged")
+
+        resumed = await store.walk_records("walk", limit=10)
+        assert [record.id for record in resumed.records] == ["open", "after"]
+        assert resumed.position is not None
+        assert await _walk_to_exhaustion(store, "fresh", limit=1) == ["before", "open", "after"]
+
+    async def test_an_expired_open_episode_holds_the_walk_too(self, store: MemoryStore) -> None:
+        """§6:2: the lowest-numbered open episode the store *holds*, expired or not.
+
+        ``open_episodes`` reaches an expired one (§12:1) and a restart closes it (§7),
+        so it holds the walk until then rather than being passed while open.
+        """
+        await store.add(_open_episode("expired-open", expires_at=_LONG_AGO))
+        await store.add(_on_channel("after"))
+
+        chunk = await store.walk_records("walk", limit=10)
+
+        assert chunk.records == ()
+        assert chunk.position is None
+
+    async def test_open_episodes_enumerates_every_open_episode_held_in_number_order(
+        self, store: MemoryStore
+    ) -> None:
+        """§12:1: every open episode held — on any channel or none, live or not — paged by number.
+
+        Each entry carries its number and the record as stored, with its stored
+        revision and ``score`` cleared; a frozen episode and a record of another
+        kind are never entries.
+        """
+        seeded = {
+            "on-a": _open_episode("on-a"),
+            "on-none": _open_episode("on-none", channel=None),
+            "expired": _open_episode("expired", expires_at=_LONG_AGO),
+            "closed": _open_episode("closed", validity=Validity(valid_until=_LONG_AGO)),
+            "future": _open_episode("future", validity=Validity(valid_from=_FAR_FUTURE)),
+        }
+        await store.add(_on_channel("frozen"))
+        for record in seeded.values():
+            await store.add(record.model_copy(update={"score": 0.5}))
+            await store.add(_semantic(f"belief-{record.id}", "alpha"))
+
+        everything = await store.open_episodes(limit=1000)
+
+        assert [entry.record.id for entry in everything] == list(seeded)
+        numbers = [entry.number for entry in everything]
+        assert numbers == sorted(numbers)
+        for entry in everything:
+            assert entry.record.revision > 0
+            assert entry.record.score is None
+            assert _unstamped(entry.record) == seeded[entry.record.id]
+        first = await store.open_episodes(limit=2)
+        assert [entry.record.id for entry in first] == ["on-a", "on-none"]
+        rest = await store.open_episodes(after=first[-1].number, limit=10)
+        assert [entry.record.id for entry in rest] == ["expired", "closed", "future"]
+        assert await store.open_episodes(after=numbers[-1], limit=10) == ()
+        assert await store.open_episodes(after=2**70, limit=10) == ()
+
+    @pytest.mark.parametrize("door", ["add", "upsert", "if_unchanged"])
+    async def test_the_guard_admits_each_revision_that_extends_an_open_episode(
+        self, store: MemoryStore, door: str
+    ) -> None:
+        """§3, §12:2, §15:2: the channel arrives, stages append, a response lands, it freezes.
+
+        Every write is admitted through every replacing door, and the episode keeps
+        the number admission gave it: the channel's first write files it there, and
+        the freezing write takes it off ``open_episodes`` and onto the channel's read.
+        """
+        opened = _open_episode("episode", channel=None)
+        await store.add(opened)
+        (admitted,) = await store.open_episodes(limit=10)
+
+        channelled = _revised(
+            opened,
+            processing={
+                "trigger": opened.processing_record.trigger.model_copy(  # type: ignore[union-attr]
+                    update={"channel": _CONVERSATION_A}
+                )
+            },
+        )
+        staged = _appended(channelled, _IN_WINDOW)
+        answered = _revised(staged, processing={}, outcome="the reply")
+        frozen = _frozen(answered)
+        for revision in (channelled, staged, answered, frozen):
+            await _replace(store, revision, door)
+            assert _unstamped_or_none(await store.get("episode")) == revision
+
+        assert await store.open_episodes(limit=10) == ()
+        assert await _numbers(store, _CONVERSATION_A) == {"episode": admitted.number}
+        page = await store.channel_episodes(_CONVERSATION_A, limit=10)
+        assert [entry.record.id for entry in page.entries] == ["episode"]
+
+    @pytest.mark.parametrize(
+        "change",
+        [
+            "rewrite-an-entry",
+            "drop-an-entry",
+            "another-activation",
+            "replace-a-response",
+            "move-the-channel",
+            "strip",
+            "reopen-a-frozen-one",
+            "extend-a-frozen-one",
+        ],
+    )
+    @pytest.mark.parametrize("door", ["add", "upsert", "if_unchanged"])
+    async def test_the_guard_refuses_every_other_change_to_processing_or_response(
+        self, store: MemoryStore, change: str, door: str
+    ) -> None:
+        """§12:2, §15:2: open or frozen, a change that is not an extension writes nothing.
+
+        Each stored episode already carries one stage entry, a response and a
+        channel, so every value the revision touches is one already recorded.
+        """
+        opened = _revised(
+            _appended(_open_episode("episode", channel=_CONVERSATION_A), _IN_WINDOW),
+            processing={},
+            outcome="the reply",
+        )
+        stored_record = (
+            _frozen(opened) if change in {"reopen-a-frozen-one", "extend-a-frozen-one"} else opened
+        )
+        await store.add(stored_record)
+        record = opened.processing_record
+        assert record is not None
+        later = _IN_WINDOW + _ONE_MINUTE
+        changed: MemoryRecord
+        if change == "rewrite-an-entry":
+            changed = _revised(opened, processing={"stages": (_stage_entry(later),)})
+        elif change == "drop-an-entry":
+            changed = _revised(opened, processing={"stages": ()})
+        elif change == "another-activation":
+            changed = _appended(_revised(opened, processing={"activation_id": "another"}), later)
+        elif change == "replace-a-response":
+            changed = _revised(opened, processing={}, outcome="another reply")
+        elif change == "move-the-channel":
+            trigger = record.trigger.model_copy(update={"channel": _CONVERSATION_B})
+            changed = _appended(_revised(opened, processing={"trigger": trigger}), later)
+        elif change == "strip":
+            changed = opened.model_copy(update={"processing_record": None})
+        elif change == "reopen-a-frozen-one":
+            changed = opened
+        else:
+            changed = _frozen(_appended(opened, later))
+
+        with pytest.raises(MemoryStoreError):
+            await _replace(store, changed, door, companion=door != "add")
+
+        assert await store.get("companion") is None
+        assert _unstamped_or_none(await store.get("episode")) == stored_record
+
+    @pytest.mark.parametrize("door", ["add", "upsert", "if_unchanged"])
+    async def test_the_guard_admits_a_placement_only_change_to_a_frozen_episode(
+        self, store: MemoryStore, door: str
+    ) -> None:
+        """§12:3, §15:2: the guard judges the processing record and response alone.
+
+        The owner's placement act on a frozen episode, and a re-derived ``content``
+        beside it, leave both as stored and are admitted.
+        """
+        frozen = _on_channel("episode").model_copy(update={"outcome": "the reply"})
+        await store.add(frozen)
+        placed = frozen.model_copy(
+            update={
+                "placement": Placement(
+                    reach=PlacementReach.OWNER,
+                    set_by=PlacementSetter.OWNER_ACT,
+                    set_at=_NARROWED_AT,
+                )
+            }
+        )
+        await _replace(store, placed, door)
+        assert _unstamped_or_none(await store.get("episode")) == placed
+        rederived = placed.model_copy(update={"content": f"{_ANY} rederived"})
+        await _replace(store, rederived, door)
+        assert _unstamped_or_none(await store.get("episode")) == rederived

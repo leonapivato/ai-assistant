@@ -1397,6 +1397,12 @@ def test_the_promoted_surface_and_the_protocol_version_are_both_pinned() -> None
     a client at 70 fails as an unknown member. **The method set does not move and
     stays at 66**: the lane adds no ``AssistantEngine`` member and no gateway route.
 
+    **72 is ADR-0286 §15's lane 2, under the second limb alone.**
+    ``EpisodeProcessingRecord.schema_version`` becomes ``Literal[6]`` (§13:1), so a
+    record a hub at 72 emits fails a client at 71 as a literal mismatch and the
+    reverse. **The method set does not move and stays at 66**: ``MemoryStore`` gains
+    ``open_episodes``, which is no ``AssistantEngine`` member and no gateway route.
+
     **ADR-0124 §9 decides no mechanical check and creates none**, saying one is
     owed and leaving its shape open. This is not that check — it is a *pin*, and
     a deliberately crude one: it fails when either number moves, which is the
@@ -1405,7 +1411,7 @@ def test_the_promoted_surface_and_the_protocol_version_are_both_pinned() -> None
     """
     from ai_assistant.wire.envelope import PROTOCOL_VERSION  # noqa: PLC0415 — asserted about
 
-    assert (len(_method_names()), PROTOCOL_VERSION) == (66, 71), (
+    assert (len(_method_names()), PROTOCOL_VERSION) == (66, 72), (
         "the promoted method set and the protocol version are pinned together "
         "(ADR-0124 §9); move either and this pin makes you name the limb you are "
         "under — the method set, or a wire-carried core type"
