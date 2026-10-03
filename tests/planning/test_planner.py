@@ -20,7 +20,6 @@ from typing import TYPE_CHECKING, Any, Final
 import pytest
 import structlog
 from _int_str_digits import pinned_int_str_digits
-from benchmarks.memory.answer import RETRIEVED_HEADING, render_context
 from planner_contract import PlannerContract
 from pydantic import ValidationError
 
@@ -211,9 +210,9 @@ def _turn(
 ) -> EpisodicMemory:
     """An episode **without** a processing record (ADR-0275 §4:2's other producers).
 
-    The shape a benchmark harness row and every fixture here that is not about the
-    processing record take: ADR-0284 §8:2 renders its ``content`` as the projection's
-    input and its ``outcome`` as its response, with no origin, no verdict and no status.
+    The shape every fixture here that is not about the processing record takes:
+    ADR-0284 §8:2 renders its ``content`` as the projection's input and its
+    ``outcome`` as its response, with no origin, no verdict and no status.
 
     ``occurred_at`` defaults away from ``_WHEN`` in the tests that need to tell an
     episode's own instant from the context's, which are exactly the ones #1194 is
@@ -801,9 +800,9 @@ async def test_only_retrieved_records_renders_one_headed_group() -> None:
     """With no episodic prefix — every caller today — one group and one heading.
 
     The bullet's own shape is asserted whole here, rather than by substring, because
-    it is the line #1194 and #672 both changed and the one the benchmark harness
-    renders through: the band, the confidence, the stance clause and the quoted span
-    are each a separate obligation and a substring test would let any of them go.
+    it is the line #1194 and #672 both changed: the band, the confidence, the stance
+    clause and the quoted span are each a separate obligation and a substring test
+    would let any of them go.
     """
     model = FakeModelProvider(_VALID_REPLY)
     planner = ModelBackedPlanner(model, now=_fixed_now, id_factory=_counter())
@@ -1316,9 +1315,9 @@ async def test_an_episode_carries_no_provenance_tag_and_no_origin_phrase() -> No
 # --- ADR-0222 §1, §2, §4 and §5: the reply, in the tail alone -------------------
 #
 # §8's assertions 1, 3 to 11 at this site, with ADR-0284 §8:7 reading §1's condition
-# as *the record carries a response*. The line is emitted by the tail assembler and
-# never by `_render_record`, so the retrieved group — and the benchmark harness, which
-# builds it alone — renders no response.
+# as *the record carries a response*, and assertion 11 without the harness's half, which
+# went with the harness (ADR-0285 §8). The line is emitted by the tail assembler and
+# never by `_render_record`, so the retrieved group renders no response.
 
 #: ADR-0222 §4's ceiling, written out here.
 #:
@@ -1594,27 +1593,23 @@ async def test_the_retrieved_group_renders_no_reply() -> None:
     assert not [row for row in lines if row.startswith(_REPLY_LABEL)]
 
 
-async def test_the_benchmark_harness_renders_no_reply() -> None:
-    """The harness's block is the retrieved group's, so it renders no response either.
+def test_the_record_renderer_emits_no_reply() -> None:
+    """ADR-0222 §8's assertion 11, less its harness half (ADR-0285 §8 deleted the harness).
 
-    ``answer.render_context`` is ``RETRIEVED_HEADING`` plus ``planner._render_record``
-    per record, and the reply line is the tail assembler's, never that function's. So
-    a harness row — an episode with no processing record whose ``outcome`` is the other
-    speaker's turn — renders its ``content`` and not its ``outcome`` (ADR-0284 §8:7,
-    which supersedes ADR-0222 §2:2's byte-identity for benchmark prompts).
-
-    ``render_context`` is imported rather than reimplemented, because a copy of it
-    here would pin this test's idea of the harness rather than the harness.
+    ``_render_record`` called directly on a record carrying a response emits no reply
+    line, because that line is the tail assembler's and never this function's
+    (ADR-0284 §8:7). So an episode with no processing record whose ``outcome`` is its
+    response renders its ``content`` and not its ``outcome``, and an episode whose
+    processing record carries a stored reply renders no trace of that reply.
     """
-    harness_row = _turn("e1", "Ada: I adopted a dog.", outcome="Bo: what is her name?")
+    recordless = _turn("e1", "Ada: I adopted a dog.", outcome="Bo: what is her name?")
     processed = _processed("e1", outcome=_REPLY, step=Disposition.EXECUTED)
 
-    block = render_context([harness_row])
+    rendered = _render_record(recordless)
 
-    assert block == "\n".join([RETRIEVED_HEADING, _render_record(harness_row)])
-    assert "Ada: I adopted a dog." in block
-    assert "Bo: what is her name?" not in block
-    assert not [row for row in block.splitlines() if row.startswith(_REPLY_LABEL)]
+    assert "Ada: I adopted a dog." in rendered
+    assert "Bo: what is her name?" not in rendered
+    assert not [row for row in rendered.splitlines() if row.startswith(_REPLY_LABEL)]
     assert "Salamander-Kestrel-9" not in _render_record(processed)
 
 
@@ -4480,7 +4475,7 @@ async def test_a_blank_request_renders_no_heading_at_all() -> None:
     "A Protocol annotation validates nothing and a second spelling of the refusal
     would suggest otherwise … no implementation of this Protocol re-checks it." So a
     blank request is not an error here; it simply has no block, which is where this
-    module's pre-ADR-0248 callers and the benchmark harness sit.
+    module's pre-ADR-0248 callers sit.
     """
     prompt = _render_request(_goal(), _context(), [], utterance="")
 
