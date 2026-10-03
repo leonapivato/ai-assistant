@@ -36,11 +36,7 @@ import pytest
 from pydantic import ValidationError
 
 from ai_assistant.core.errors import ConversationStoreError, UnknownConversationError
-from ai_assistant.core.types import (
-    FIRST_TURN_ORDINAL,
-    SpokenDelivery,
-    SpokenDeliveryState,
-)
+from ai_assistant.core.types import SpokenDelivery, SpokenDeliveryState
 from ai_assistant.testing.cancellation import held_at_its_first_await, settle
 
 if TYPE_CHECKING:
@@ -484,34 +480,6 @@ class _ExportOp(_ReadOp):
         return store.export()
 
 
-class _RecordObservedOp(_PairedOp):
-    """``record_observed`` — ADR-0212 §8's advance, its own lock site.
-
-    Nothing is seeded beyond the two conversations: since ADR-0283 §6:6 the advance
-    is not bounded by the conversation's turns, so a conversation with none is
-    stamped and the call writes behind the lock site rather than only entering it.
-    """
-
-    name = "record_observed"
-
-    def first(self, store: ConversationStore) -> Coroutine[Any, Any, object]:
-        """Advance the left conversation's watermark — the call that is cancelled."""
-        return store.record_observed(self.left, through_episode=FIRST_TURN_ORDINAL)
-
-    def second(self, store: ConversationStore) -> Coroutine[Any, Any, object]:
-        """Advance the right one's concurrently."""
-        return store.record_observed(self.right, through_episode=FIRST_TURN_ORDINAL)
-
-    async def verify(self, store: ConversationStore) -> None:
-        """The concurrent advance landed; the cancelled one is all-or-nothing."""
-        right = await store.get(self.right)
-        assert right is not None
-        assert right.observed_through == FIRST_TURN_ORDINAL
-        left = await store.get(self.left)
-        assert left is not None
-        assert left.observed_through in (None, FIRST_TURN_ORDINAL)
-
-
 class _RecordTurnOp(_PairedOp):
     """``record_turn`` — ADR-0283 §6:2's write, its own lock site."""
 
@@ -607,7 +575,6 @@ _CANCELLATION_OPS: tuple[Callable[[], _CancellationOp], ...] = (
     _MarkActiveOp,
     _StampDeletedOp,
     _DropIfEligibleOp,
-    _RecordObservedOp,
     _RecordTurnOp,
     _RecordDeliveryOp,
     _DeliveriesOp,
@@ -739,7 +706,6 @@ class ConversationStoreContract:
         assert await store.get("nobody") is None
         for call in (
             store.mark_active("nobody"),
-            store.record_observed("nobody", through_episode=FIRST_TURN_ORDINAL),
             store.record_delivery("nobody", episode_id=_EPISODE, delivery=_COMPLETE),
         ):
             with pytest.raises(ConversationStoreError):
@@ -1253,7 +1219,7 @@ class ConversationStoreContract:
         self, store: ConversationStore, bad: int
     ) -> None:
         """ADR-0073 §2's posture, inherited: refused, never clamped."""
-        conversation_id, _ = await _seed(store, 1)
+        await _seed(store, 1)
 
         with pytest.raises(ValueError, match="must be an int"):
             await store.recent(limit=bad)
@@ -1261,8 +1227,6 @@ class ConversationStoreContract:
             await store.recent(offset=bad)
         with pytest.raises(ValueError, match="must be an int"):
             await store.stamped_conversation_ids(limit=bad)
-        with pytest.raises(ValueError, match="must be an int"):
-            await store.record_observed(conversation_id, through_episode=bad)
 
     @pytest.mark.parametrize("bad", [1.5, "3", True], ids=["float", "str", "bool"])
     async def test_a_paging_argument_that_is_not_an_integer_is_refused(
@@ -1276,7 +1240,7 @@ class ConversationStoreContract:
         exists to stop. ``True`` is in the list because ``bool`` is an ``int``
         subclass and is not a page size.
         """
-        conversation_id, _ = await _seed(store, 1)
+        await _seed(store, 1)
         limit = cast("int", bad)
 
         with pytest.raises(ValueError, match="must be an int"):
@@ -1285,158 +1249,34 @@ class ConversationStoreContract:
             await store.recent(offset=limit)
         with pytest.raises(ValueError, match="must be an int"):
             await store.stamped_conversation_ids(limit=limit)
-        with pytest.raises(ValueError, match="must be an int"):
-            await store.record_observed(conversation_id, through_episode=limit)
 
-    async def test_a_watermark_below_the_first_episode_is_refused(
+    async def test_recent_has_no_none_spelling_for_its_limit(
         self, store: ConversationStore
     ) -> None:
-        """An episode number names a position, and 0 names none (ADR-0283 §6:6).
+        """``recent``'s ``limit`` has a named default of 50 and no ``None`` spelling.
 
-        ``None`` is the only spelling of "no pass has recorded one" (ADR-0212 §4), so
-        0 is not a way to write one either; and ``recent``'s ``limit`` has a named
-        default of 50 and no ``None`` spelling, so passing one is the same malformed
-        argument as any other non-integer.
+        So passing one is the same malformed argument as any other non-integer.
         """
-        conversation_id, _ = await _seed(store, 1)
+        await _seed(store, 1)
 
-        with pytest.raises(ValueError, match="must be an int"):
-            await store.record_observed(conversation_id, through_episode=0)
         with pytest.raises(ValueError, match="must be an int"):
             await store.recent(limit=cast("int", None))
 
-    # --- the observation watermark (ADR-0212) --------------------------------
-
-    async def test_a_fresh_conversation_carries_no_watermark(
+    async def test_a_fresh_conversation_carries_no_observation_watermark(
         self, store: ConversationStore
     ) -> None:
-        """§4: ``None`` is the only spelling of "no pass has recorded one".
+        """ADR-0285 §4: the cursor is gone from the record and from the contract.
 
-        No store, migration or ``start`` initialises a watermark to a sentinel, to
-        zero, or to ``FIRST_TURN_ORDINAL`` — an absent one is *read*, never written,
-        and it is what makes a first pass read the tail rather than walk forward.
+        Asserted on what every presenting read hands back rather than on the type
+        alone, so an implementation that went on carrying the member — or an
+        operation to write it — fails here rather than passing silently.
         """
-        conversation = await store.start()
-
-        assert conversation.observed_through is None
-        read = await store.get(conversation.id)
-        assert read is not None
-        assert read.observed_through is None
-
-    async def test_an_advance_is_carried_by_every_read_that_presents_the_conversation(
-        self, store: ConversationStore
-    ) -> None:
-        """§7: the member is on ``Conversation``, so every read returning one carries it.
-
-        ``get``, ``recent`` and the document ``export`` builds, plus the record
-        ``record_observed`` itself hands back — asserted together, because a store
-        that stamped the row and answered from a stale copy on one of them would
-        leave the walk reading a position that is not the one recorded.
-        """
-        conversation_id, _ = await _seed(store, 3)
-
-        stamped = await store.record_observed(conversation_id, through_episode=2)
-
-        assert stamped is not None
-        assert stamped.observed_through == 2
-        read = await store.get(conversation_id)
-        assert read is not None
-        assert read.observed_through == 2
-        assert [one.observed_through for one in await store.recent()] == [2]
-        assert [one.observed_through for one in (await store.export()).conversations] == [2]
-
-    async def test_the_watermark_never_moves_backwards(self, store: ConversationStore) -> None:
-        """§5: a request at or below the recorded position performs nothing.
-
-        ``None`` and no raise, which is ``record_delivery``'s shape and its reason —
-        an attempt that loses is an attempt whose position already stands, which is
-        the ordinary outcome of two overlapping passes rather than an error.
-        """
-        conversation_id, _ = await _seed(store, 3)
-        assert await store.record_observed(conversation_id, through_episode=2) is not None
-
-        assert await store.record_observed(conversation_id, through_episode=1) is None
-        assert await store.record_observed(conversation_id, through_episode=2) is None
+        conversation_id, _ = await _seed(store, 1)
 
         read = await store.get(conversation_id)
         assert read is not None
-        assert read.observed_through == 2
-        assert await store.record_observed(conversation_id, through_episode=3) is not None
-
-    async def test_an_advance_is_not_bounded_by_the_conversations_turns(
-        self, store: ConversationStore
-    ) -> None:
-        """ADR-0283 §6:6: the watermark is an episode number, not an ordinal.
-
-        It "no longer bounds it by the conversation's turns", and the read-side
-        discard drops only a value that is not a positive integer — so a number far
-        above the highest ordinal is recorded, and every read that presents the
-        conversation carries it rather than discarding it. Episode numbers come from
-        one counter across the whole memory store, so this is the ordinary case once
-        the observation stage passes them.
-        """
-        conversation_id, _ = await _seed(store, 2)
-
-        stamped = await store.record_observed(conversation_id, through_episode=57)
-
-        assert stamped is not None
-        assert stamped.observed_through == 57
-        read = await store.get(conversation_id)
-        assert read is not None
-        assert read.observed_through == 57
-        assert [one.observed_through for one in await store.recent()] == [57]
-        assert [one.observed_through for one in (await store.export()).conversations] == [57]
-        assert await store.record_observed(conversation_id, through_episode=2) is None, (
-            "the one remaining condition still refuses a lowering"
-        )
-
-    async def test_a_conversation_with_no_turns_can_be_stamped(
-        self, store: ConversationStore
-    ) -> None:
-        """ADR-0283 §6:6, where there is no highest ordinal at all.
-
-        A conversation's episodes are on its channel in the memory store, and this
-        store holds no turn row for them once the writer records through
-        ``record_turn`` — so "no turns here" says nothing about what was observed.
-        """
-        conversation = await store.start()
-
-        assert await store.record_observed(conversation.id, through_episode=3) is not None
-
-        read = await store.get(conversation.id)
-        assert read is not None
-        assert read.observed_through == 3
-
-    async def test_two_concurrent_advances_leave_exactly_the_higher_recorded(
-        self, store: ConversationStore
-    ) -> None:
-        """§8: reading the two conditions and writing the row are one indivisible step.
-
-        The whole of what makes two overlapping observation passes safe, and it is
-        asserted on the *value* rather than on which call won: "whichever order the
-        calls arrive in, the **higher** of the two positions stands and the lower
-        performs nothing" (§5). A store that read the recorded value outside its
-        exclusion would let the lower advance land second and lose coverage
-        silently.
-        """
-        conversation_id, _ = await _seed(store, 4)
-        wanted = (2, 4, 3)
-
-        results = await asyncio.gather(
-            *(store.record_observed(conversation_id, through_episode=at) for at in wanted)
-        )
-
-        read = await store.get(conversation_id)
-        assert read is not None
-        assert read.observed_through == 4, (
-            "the higher position must stand however the concurrent advances interleaved"
-        )
-        for at, result in zip(wanted, results, strict=True):
-            if result is not None:
-                assert result.observed_through == at, (
-                    "a call that reports having stamped returns the conversation as *it* "
-                    "stamped it, never as a concurrent call left it"
-                )
+        assert "observed_through" not in type(read).model_fields
+        assert not hasattr(store, "record_observed")
 
     # --- the tombstone -------------------------------------------------------
 
@@ -1455,8 +1295,6 @@ class ConversationStoreContract:
         assert await store.recent() == []
         assert (await store.export()).conversations == ()
         assert await store.deliveries(conversation_id, episode_ids=[_EPISODE]) == {}
-        with pytest.raises(ConversationStoreError):
-            await store.record_observed(conversation_id, through_episode=FIRST_TURN_ORDINAL)
         with pytest.raises(ConversationStoreError):
             await store.record_delivery(conversation_id, episode_id=_EPISODE, delivery=_COMPLETE)
 
@@ -1740,7 +1578,6 @@ class ConversationStoreContract:
         """
         for call in (
             store.mark_active("nobody"),
-            store.record_observed("nobody", through_episode=FIRST_TURN_ORDINAL),
             store.record_delivery("nobody", episode_id=_EPISODE, delivery=_COMPLETE),
         ):
             with pytest.raises(UnknownConversationError):
@@ -1934,7 +1771,7 @@ class ConversationStoreContract:
 
         assert [one.id for one in exported.conversations] == [second.id, first.id]
         assert exported.conversations[1].last_turn_at == _NOW + _MINUTE
-        assert exported.schema_version == 4
+        assert exported.schema_version == 5
         assert set(exported.model_dump()) == {"schema_version", "exported_at", "conversations"}
 
     async def test_export_omits_a_stamped_conversation(

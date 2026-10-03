@@ -10859,8 +10859,8 @@ class ConversationStore(Protocol):
     episode's channel (ADR-0283 §1, §4). Nothing here indexes them, allocates a
     position for them or derives their ids: every episode's id is
     ``activation:<activation_id>``, fixed at admission (ADR-0283 §2). What this store
-    keeps is the conversation itself and two small facts about it: the delivery rows
-    below, and the observation watermark.
+    keeps is the conversation itself and one small fact about it: the delivery rows
+    below. It keeps no observation watermark (ADR-0285 §4).
 
     **What this contract does not own.** Every sequence spanning both stores —
     writing a conversational episode, finishing a user deletion, the retention
@@ -10871,9 +10871,10 @@ class ConversationStore(Protocol):
 
     **The mutation exclusion, which is this seam's obligation and not a
     caller's.** Per conversation, a :meth:`mark_active`, a :meth:`record_turn`, a
-    :meth:`record_delivery`, a :meth:`record_observed`, a :meth:`stamp_deleted` and a
-    :meth:`drop_if_eligible` **never interleave** (ADR-0283 §6:8); each observes the
-    conversation, decides, and writes as one indivisible step. An ``asyncio.Lock``
+    :meth:`record_delivery`, a :meth:`stamp_deleted` and a :meth:`drop_if_eligible`
+    **never interleave** (ADR-0283 §6:8, less the ``record_observed`` member
+    ADR-0285 §4 removes); each observes the conversation, decides, and writes as one
+    indivisible step. An ``asyncio.Lock``
     inside one engine would not discharge this — the engine already contemplates
     "another engine over the same durable stores", so two engines hold two locks and
     serialise nothing — which is why the obligation sits here (ADR-0074 §8). Each
@@ -10898,37 +10899,6 @@ class ConversationStore(Protocol):
     ascending as the tie-break, and stamped ids by ``id`` ascending. Paging
     arguments carry ADR-0073 §2's range posture unchanged — out of range is a
     ``ValueError``, not a clamp — inherited rather than restated.
-
-    **The observation watermark is store-written state on the conversation, and
-    exactly one consumer acts on it** (ADR-0212 §1, §7).
-    :attr:`~ai_assistant.core.types.Conversation.observed_through` is the position
-    the observation walk has reached — a position, never a certificate that the
-    episodes below it were read. It is **additive**: no read selects a different set
-    of rows, orders them differently, refuses where it would have answered, or
-    returns a different value in any other member because a watermark is present,
-    absent, high or low. A build that does not read it ignores it and **must not
-    refuse to start over it**; where a store persists conversations in a table the
-    column is nullable, carries no default, is added to an existing table without
-    rewriting a row, and changes no existing column, so a build written before this
-    member goes on inserting the columns it knows.
-
-    **The watermark is an episode number** (ADR-0283 §6:6, §11): the position the
-    observation walk has reached in ``MemoryStore`` numbers on the conversation's
-    channel, which this store cannot see. So nothing this store holds bounds it:
-    :meth:`record_observed` refuses only a lowering, and the read-side discard
-    below has no upper limb.
-
-    **A watermark this store cannot use is discarded, and the discard is the
-    store's** (ADR-0212 §7, as ADR-0283 §6:6 reads it). A stored value that is not
-    a positive integer below ``2**63`` yields a record whose ``observed_through``
-    is **absent** — not a ``ConversationStoreError``, not an
-    ``IncompatibleStateError``, and never a refusal to open or to serve. It is
-    never levelled and never advanced past a value that could not be read. Made an
-    obligation of the store rather than left to taste, because letting one bad
-    bookkeeping integer reach ``Conversation``'s own validation would turn it into
-    a store fault on :meth:`get`, :meth:`recent` and :meth:`export` for that
-    conversation — a conversation the user can no longer read because a column the
-    user never sees is wrong.
 
     **Delivery rows** (ADR-0283 §6, §10). Beside the conversation, the store keeps
     one small fact per spoken episode: a
@@ -11190,75 +11160,6 @@ class ConversationStore(Protocol):
                 ids, is a ``str``, or holds an element that is not a ``str``.
             ConversationStoreError: If the store cannot be read, or a stored row is
                 corrupt.
-        """
-        ...
-
-    async def record_observed(
-        self, conversation_id: str, *, through_episode: int
-    ) -> Conversation | None:
-        """Advance this conversation's observation watermark (ADR-0212 §8, ADR-0283 §6:6).
-
-        The second operation on this contract that writes a fact arriving **after**
-        the episodes it is about were recorded — :meth:`record_delivery` beside it
-        — and the store side of ADR-0111's cursor placement: the walking job
-        computes the position, and this store makes it durable, under the same
-        per-conversation exclusion its other mutations run under (ADR-0111 §1).
-
-        **The position is an episode number** (ADR-0283 §6:6, §11): a ``MemoryStore``
-        number on the conversation's channel.
-
-        **It stamps if and only if ``through_episode`` is strictly above the
-        recorded watermark.** Otherwise the operation **performs nothing, returns
-        ``None``, and raises nothing** — :meth:`record_delivery`'s shape and its
-        reason. A watermark is therefore never lowered, and a request to record a
-        value at or below the recorded one is a no-op rather than an error. **It is
-        not bounded above by anything this store holds**: the numbers it names are
-        the memory store's, which this one cannot see (ADR-0283 §6:6 drops ADR-0212
-        §8's second condition).
-
-        **Reading the condition and writing the row are one indivisible step**, so
-        two concurrent advances leave the **higher** value recorded. That is what
-        makes two overlapping observation passes safe with no serialisation
-        anywhere else: whichever order the calls arrive in, the higher position
-        stands and the lower performs nothing (ADR-0212 §5).
-
-        **A watermark this store discarded reads as absent here too.** The recorded
-        value the condition compares against is the *usable* one — a stored value
-        the store cannot use is treated as no watermark at all (see the class
-        docstring), so the conversation is stampable again from its tail rather than
-        permanently unreachable.
-
-        **This records the position and does not certify it.** The store refuses a
-        value that would lower the recorded one, and asserts nothing about what the
-        caller read to compute it. A caller that stamps a number it never read has
-        mis-positioned its own walk; the row makes no claim that could be false.
-        Vouching for the page a reader was served would mean per-reader durable
-        state growing with readers and pages, which is ADR-0111 §2's excluded shape,
-        and folding selection, observation and advance into one operation would put
-        a model call inside this store (golden rule 1).
-
-        Args:
-            conversation_id: The conversation whose watermark to advance.
-            through_episode: The position to record: the highest episode number in
-                the page the pass read (ADR-0283 §11); this store takes it as given,
-                within the condition above.
-
-        Returns:
-            The conversation as stamped, or ``None`` where it stamped nothing.
-
-        Raises:
-            ValueError: If ``through_episode`` is outside ``[1, 2**63)`` — refused
-                locally, before any I/O, on ADR-0085 §3's convention. ``None`` is
-                not a position and 0 names none, so neither is a spelling of "no
-                pass has recorded one": that is the absence of a watermark, which no
-                caller writes.
-            UnknownConversationError: If ``conversation_id`` names nothing or names
-                a conversation stamped deleted — the same refusal :meth:`mark_active`
-                and :meth:`record_delivery` carry. A pass whose conversation is
-                deleted between its page read and its advance meets this, and
-                ADR-0212 §6 rules it: the watermark is untouched, the page is never
-                re-read, and none is owed.
-            ConversationStoreError: If the store cannot be written.
         """
         ...
 

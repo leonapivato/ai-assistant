@@ -61,7 +61,6 @@ _SYNC_METHODS = {
     "mark_active": "_mark_active_sync",
     "stamp_deleted": "_stamp_deleted_sync",
     "drop_if_eligible": "_drop_if_eligible_sync",
-    "record_observed": "_record_observed_sync",
     "record_turn": "_record_turn_sync",
     "record_delivery": "_record_delivery_sync",
     "deliveries": "_deliveries_sync",
@@ -1285,169 +1284,7 @@ async def test_a_backend_fault_inside_a_transaction_is_the_seams_own_error() -> 
         await store.start()
 
 
-# --- the observation watermark's column and its discards (ADR-0212 §7) ------
-
-
-def _write_watermark(database: Path, conversation_id: str, value: object) -> None:
-    """Put an arbitrary value in the watermark column, through a raw connection.
-
-    The only writer that can: ``record_observed`` refuses everything outside
-    ``[FIRST_TURN_ORDINAL, 2**63)`` before any I/O, so a value the store has to
-    *discard* is unreachable through the seam. That is the point of ADR-0212 §7 —
-    what it governs is a store state reached from an operator's hand edit, a partial
-    recovery, a migration, or a downgrade.
-    """
-    raw = sqlite3.connect(database, isolation_level=None)
-    try:
-        raw.execute(
-            "UPDATE conversations SET observed_through = ? WHERE id = ?", (value, conversation_id)
-        )
-    finally:
-        raw.close()
-
-
-async def test_an_insert_naming_only_the_older_columns_still_succeeds(tmp_path: Path) -> None:
-    """§7 pinned against the **schema** rather than assumed from the code.
-
-    A build written before this member names only the columns it knows in its
-    ``INSERT INTO conversations(...)``, so a ``NOT NULL`` column with no default
-    would make that build's ``start`` fail against an upgraded database — a refusal
-    to serve over a watermark, arriving through the schema instead of through a read.
-    The insert below *is* that build's statement, and the conversation it writes then
-    reads back with no watermark.
-    """
-    path = tmp_path / "conversations.db"
-    store = SqliteConversationStore(path=path, now=_fixed_now)
-    try:
-        raw = sqlite3.connect(path, isolation_level=None)
-        try:
-            raw.execute(
-                "INSERT INTO conversations(id, started_at, last_active_at, last_turn_at, "
-                "deleted_at) VALUES ('older-build', 0, 0, NULL, NULL)"
-            )
-        finally:
-            raw.close()
-        await store.record_turn("older-build", episode_id="activation:a", occurred_at=_NOW)
-
-        read = await store.get("older-build")
-
-        assert read is not None
-        assert read.observed_through is None
-        assert read.last_turn_at == _NOW
-    finally:
-        store.close()
-
-
-@pytest.mark.parametrize(
-    ("value", "why"),
-    [
-        ("not-an-ordinal", "not an integer"),
-        (2.5, "not an integer"),
-        (0, "not positive"),
-        (-1, "not positive"),
-    ],
-)
-async def test_an_unusable_watermark_reads_as_absent_and_no_read_raises(
-    tmp_path: Path, value: object, why: str
-) -> None:
-    """§7: discarded, never levelled, and never this seam's error.
-
-    ADR-0111 §7's argument transfers word for word — "a cursor holds no evidence and
-    answers no query", so discarding one "returns nothing wrong to any client". The
-    store-side half is what stops one bad integer becoming a
-    ``ConversationStoreError`` on ``get``, ``recent`` and ``export`` for
-    that conversation: a conversation the user can no longer read because a
-    bookkeeping column is wrong, which is the outcome §7 forbids arriving through a
-    different door. ADR-0283 §6:6 leaves exactly these limbs: "a stored watermark
-    that is not a positive integer is discarded on read".
-    """
-    path = tmp_path / "conversations.db"
-    store = SqliteConversationStore(path=path, now=_fixed_now)
-    try:
-        conversation = await store.start()
-        _write_watermark(path, conversation.id, value)
-
-        read = await store.get(conversation.id)
-
-        assert read is not None, why
-        assert read.observed_through is None
-        assert [one.observed_through for one in await store.recent()] == [None]
-        assert [one.observed_through for one in (await store.export()).conversations] == [None]
-    finally:
-        store.close()
-
-
-@pytest.mark.parametrize("value", ["not-an-ordinal", 2.5, 0, -1])
-async def test_a_conversation_carrying_an_unusable_watermark_is_recovered(
-    tmp_path: Path, value: object
-) -> None:
-    """§7 end to end: a discarded watermark is one a pass can stamp afresh.
-
-    An implementation that compared the stored value rather than the discarded one
-    would refuse every advance against a text watermark — SQLite sorts every integer
-    below every string — leaving the walk unable ever to record a position.
-    """
-    path = tmp_path / "conversations.db"
-    store = SqliteConversationStore(path=path, now=_fixed_now)
-    try:
-        conversation = await store.start()
-        _write_watermark(path, conversation.id, value)
-
-        stamped = await store.record_observed(conversation.id, through_episode=2)
-
-        assert stamped is not None
-        assert stamped.observed_through == 2
-        assert await store.record_observed(conversation.id, through_episode=1) is None
-    finally:
-        store.close()
-
-
-async def test_a_large_watermark_is_kept_through_the_raw_column(tmp_path: Path) -> None:
-    """ADR-0283 §6:6: the upper limb of ADR-0212 §7's discard is gone.
-
-    The watermark is an episode number, which this store cannot see, so any positive
-    value is a usable position. Written through the raw column as well as through the
-    seam, so the decode is held to it and not only the write.
-    """
-    path = tmp_path / "conversations.db"
-    store = SqliteConversationStore(path=path, now=_fixed_now)
-    try:
-        conversation = await store.start()
-        assert await store.record_observed(conversation.id, through_episode=40) is not None
-        _write_watermark(path, conversation.id, 2**40)
-
-        read = await store.get(conversation.id)
-
-        assert read is not None
-        assert read.observed_through == 2**40
-        assert [one.observed_through for one in await store.recent()] == [2**40]
-        assert await store.record_observed(conversation.id, through_episode=50) is None
-    finally:
-        store.close()
-
-
-async def test_the_watermark_survives_a_reopen(tmp_path: Path) -> None:
-    """It is durable state, which is the whole reason it is a column at all."""
-    path = tmp_path / "conversations.db"
-    first = SqliteConversationStore(path=path, now=_fixed_now)
-    try:
-        conversation = await first.start()
-        assert await first.record_observed(conversation.id, through_episode=1) is not None
-    finally:
-        first.close()
-
-    reopened = SqliteConversationStore(path=path, now=_fixed_now)
-    try:
-        read = await reopened.get(conversation.id)
-
-        assert read is not None
-        assert read.observed_through == 1
-        assert await reopened.record_observed(conversation.id, through_episode=1) is None
-    finally:
-        reopened.close()
-
-
-# --- ADR-0247 §5: the two vestigial columns and their migration stay ---------
+# --- ADR-0285 §4: no observation watermark, and nothing drops an old one ------
 
 
 def _conversation_columns(database: Path) -> set[str]:
@@ -1459,6 +1296,91 @@ def _conversation_columns(database: Path) -> set[str]:
         raw.close()
 
 
+def _format_marker(database: Path) -> list[tuple[Any, ...]]:
+    """The store format the file's marker records, read from the file."""
+    raw = sqlite3.connect(database, isolation_level=None)
+    try:
+        return raw.execute("SELECT version FROM episode_record_format").fetchall()
+    finally:
+        raw.close()
+
+
+def test_a_fresh_file_has_no_watermark_column(tmp_path: Path) -> None:
+    """ADR-0285 §4:2: the schema creates no ``observed_through`` column.
+
+    Read from the file, because the claim is about the table's shape and no read
+    through the seam could show a column it never selects.
+    """
+    path = tmp_path / "conversations.db"
+    SqliteConversationStore(path=path, now=_fixed_now).close()
+
+    assert _conversation_columns(path) == {
+        "id",
+        "started_at",
+        "last_active_at",
+        "last_turn_at",
+        "deleted_at",
+        "search_calls",
+        "all_external_user_chosen",
+    }
+
+
+async def test_a_file_that_holds_the_old_column_opens_keeps_it_and_serves(
+    tmp_path: Path,
+) -> None:
+    """ADR-0285 §4:3: nothing drops the column, and no store format advances for it.
+
+    The file an earlier build wrote — the column present, a position recorded in it
+    — is reopened by this one. It opens without a migration, every presenting read
+    serves the conversation, a new conversation and a turn are written against the
+    old shape, and afterwards the column, the recorded value and the format marker
+    are exactly as they were: the column is left in place rather than dropped, and
+    the marker does not move. That is ADR-0285 §4's "a development file that still
+    holds the column opens and works, because nothing selects it".
+    """
+    path = tmp_path / "conversations.db"
+    first = SqliteConversationStore(path=path, now=_fixed_now)
+    try:
+        earlier = await first.start()
+    finally:
+        first.close()
+    raw = sqlite3.connect(path, isolation_level=None)
+    try:
+        raw.execute("ALTER TABLE conversations ADD COLUMN observed_through INTEGER")
+        raw.execute("UPDATE conversations SET observed_through = 7 WHERE id = ?", (earlier.id,))
+    finally:
+        raw.close()
+    marker = _format_marker(path)
+
+    reopened = SqliteConversationStore(path=path, now=_fixed_now)
+    try:
+        later = await reopened.start()
+        await reopened.record_turn(earlier.id, episode_id="activation:a", occurred_at=_NOW)
+
+        read = await reopened.get(earlier.id)
+        assert read is not None
+        assert read.last_turn_at == _NOW
+        assert {one.id for one in await reopened.recent()} == {earlier.id, later.id}
+        assert {one.id for one in (await reopened.export()).conversations} == {
+            earlier.id,
+            later.id,
+        }
+    finally:
+        reopened.close()
+
+    assert "observed_through" in _conversation_columns(path), "nothing drops the column"
+    assert _format_marker(path) == marker, "no store format advances for the column"
+    raw = sqlite3.connect(path, isolation_level=None)
+    try:
+        rows = dict(raw.execute("SELECT id, observed_through FROM conversations").fetchall())
+    finally:
+        raw.close()
+    assert rows == {earlier.id: 7, later.id: None}, "the column is neither read nor written"
+
+
+# --- ADR-0247 §5: the two vestigial columns and their migration stay ---------
+
+
 async def test_start_writes_neither_vestigial_column_and_both_take_their_default(
     tmp_path: Path,
 ) -> None:
@@ -1467,8 +1389,7 @@ async def test_start_writes_neither_vestigial_column_and_both_take_their_default
     ``start`` used to be the one place a draw was created, writing the flag ``1``
     explicitly. With the budget removed it names neither column, so both take the
     ``NOT NULL DEFAULT 0`` their declaration carries — which is also what makes a build
-    that names only the columns it knows go on inserting against an upgraded file, the
-    property ``_OBSERVED_COLUMN`` already states one column over.
+    that names only the columns it knows go on inserting against an upgraded file.
 
     Read from the file rather than through the store, because there is no longer any
     read that presents either value — which is the point.

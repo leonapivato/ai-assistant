@@ -686,7 +686,7 @@ class UnknownConversationError(ConversationStoreError):
     question: **a sweep cannot otherwise tell "already done" from "broken".**
     Walker A enumerates conversation ``C``; sweeper B — or the deleting call, or
     a later scheduler — finishes ``C`` and drops it; A's next call naming ``C``
-    (``record_observed(C, ...)``, say) then raises. Against one undifferentiated class A
+    (``mark_active(C)``, say) then raises. Against one undifferentiated class A
     either aborts a start-up sweep that was working perfectly, or swallows real
     store faults to avoid doing so.
 

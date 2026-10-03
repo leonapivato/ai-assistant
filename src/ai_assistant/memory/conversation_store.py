@@ -1,9 +1,9 @@
 """A persistent :class:`~ai_assistant.core.protocols.ConversationStore` on SQLite.
 
 Local-first storage (ADR-0002) for ADR-0074's conversation record: the durable
-identity of a conversation, the delivery rows ADR-0283 §6 keeps beside it, and the
-observation watermark. It holds no history — a conversation's turns are the
-episodes on its channel in the ``MemoryStore`` (ADR-0283 §1, §4) — so this store
+identity of a conversation and the delivery rows ADR-0283 §6 keeps beside it. It
+holds no history — a conversation's turns are the episodes on its channel in the
+``MemoryStore`` (ADR-0283 §1, §4) — so this store
 needs no embedder and no vector table, which is the whole of why it is a second
 store rather than a widening of the first (ADR-0074 §9).
 
@@ -39,6 +39,13 @@ hub to a fresh data directory with no migration, so the schema simply lacks it; 
 file written by an interim build of the same format that still carries a ``turns``
 table is opened without the table being read, and its foreign key cascades away
 with each conversation that is dropped.
+
+**There is no observation watermark** (ADR-0285 §4). The schema creates no
+``observed_through`` column and nothing adds one to an existing file. Nothing drops
+it either: a file written by an earlier build that still carries the column is
+opened and served unchanged, because no statement here names it — every read
+selects its columns by name, and the one ``INSERT`` names the columns it writes, so
+the nullable column takes ``NULL`` on every new row.
 """
 
 from __future__ import annotations
@@ -64,7 +71,6 @@ from ai_assistant.core.errors import (
     UnknownConversationError,
 )
 from ai_assistant.core.types import (
-    FIRST_TURN_ORDINAL,
     Conversation,
     ConversationExport,
     Identifier,
@@ -161,21 +167,6 @@ _DELIVERIES_COLUMNS: Final = (
     "PRIMARY KEY(conversation_id, episode_id)"
 )
 
-#: ADR-0212 §1's watermark, one nullable column with no default on the *conversation*
-#: — the row whose progress it records. Since ADR-0283 §6:6 the position it holds is
-#: an episode number the memory store issued. Held apart from the fresh-database
-#: ``CREATE TABLE`` for :meth:`SqliteConversationStore._migrate_observed` to add to a
-#: file written before it.
-#:
-#: **Nullable and defaultless is a contract obligation, not a convenience**
-#: (ADR-0212 §7): SQLite adds such a column in constant time without rewriting a row,
-#: every existing conversation comes back carrying no watermark, and a build written
-#: before this member — which names only the columns it knows in its
-#: ``INSERT INTO conversations(...)`` — goes on inserting against the upgraded file. A
-#: ``NOT NULL`` column with no default would make that build's ``start`` fail, which
-#: is a refusal to serve over a watermark arriving through the schema.
-_OBSERVED_COLUMN: Final = "observed_through INTEGER"
-
 #: ADR-0238 §8's per-conversation search budget: one counter and one flag, on the
 #: *conversation* row. **Both are vestigial and both stay** (ADR-0247 §5): the budget
 #: is removed, nothing reads either column and nothing writes either one, and the two
@@ -187,8 +178,7 @@ _OBSERVED_COLUMN: Final = "observed_through INTEGER"
 #:
 #: Held apart from the fresh-database ``CREATE TABLE`` for
 #: :meth:`SqliteConversationStore._migrate_search_draw` to add to a file written
-#: before them, exactly as :data:`_OBSERVED_COLUMN` is — and the migration stays for
-#: the same one-shape reason (§5).
+#: before them — and the migration stays for the same one-shape reason (§5).
 #:
 #: **``NOT NULL DEFAULT 0`` on both.** SQLite adds such a column in constant time
 #: without rewriting a row, and a build that names only the columns it knows in its
@@ -199,14 +189,13 @@ _SEARCH_DRAW_COLUMNS: Final = (
     "search_calls INTEGER NOT NULL DEFAULT 0, all_external_user_chosen INTEGER NOT NULL DEFAULT 0"
 )
 
-# **The six columns every conversation read selects.** An ordinary comment and not
+# **The five columns every conversation read selects.** An ordinary comment and not
 # a ``#:`` attribute block, because there is deliberately no name here to attach one
 # to: the list is written out at each read that needs it, because ruff's ``S608`` reads
 # a query assembled from a name as a possible injection vector whatever the name
 # holds, and a literal at the call site is the cheaper answer than a suppression on
-# each of them. The six are the five stored columns and ``observed_through``. What
-# keeps the reads in step is ``SqliteConversationStore._decode_conversation``, which
-# every one of them feeds.
+# each of them. What keeps the reads in step is
+# ``SqliteConversationStore._decode_conversation``, which every one of them feeds.
 
 
 async def _run_to_completion[T](fn: Callable[..., T], /, *args: object) -> T:
@@ -546,37 +535,8 @@ def _micros_of(value: object) -> int:
     return value
 
 
-def _usable_watermark(stored: object) -> int | None:
-    """Read a stored observation watermark, discarding one this build cannot use.
-
-    ADR-0212 §7's disposition as ADR-0283 §6:6 reads it, and the one place it is
-    decided: a value that is **not a positive integer** below ``2**63`` is
-    discarded, and the conversation is read as one with no watermark at all. It is
-    never levelled, never advanced past a value that could not be read, and — the
-    part that matters most — **never an error**. A watermark is bookkeeping that
-    holds no evidence and answers no query, so letting a bad one raise would make a
-    conversation unreadable through ``get``, ``recent`` and ``export`` because a
-    column the user never sees is wrong, which is exactly the outcome ADR-0111 §7
-    forbids arriving through a different door.
-
-    **There is no upper limb.** ADR-0212 §7 also discarded a value above the
-    conversation's highest turn ordinal; ADR-0283 §6:6 makes the watermark an
-    episode number — a ``MemoryStore`` number this store cannot see — and drops
-    that limb.
-
-    Args:
-        stored: The raw ``observed_through`` column value.
-
-    Returns:
-        The watermark, or ``None`` where there is none this build can use.
-    """
-    if type(stored) is not int or not FIRST_TURN_ORDINAL <= stored < _PAGE_BOUND:
-        return None
-    return stored
-
-
-def _check_page_bound(name: str, value: object, *, floor: int = 0) -> None:
-    """Refuse a paging argument that is not an exact ``int`` in ``[floor, 2**63)``.
+def _check_page_bound(name: str, value: object) -> None:
+    """Refuse a paging argument that is not an exact ``int`` in ``[0, 2**63)``.
 
     ADR-0073 §2's posture, and the check this backend most needs: a negative bound
     would reach SQLite, which reads ``LIMIT -1`` as *no limit at all*, and an
@@ -590,11 +550,11 @@ def _check_page_bound(name: str, value: object, *, floor: int = 0) -> None:
     it is an ``int`` subclass, and ``limit=True`` is not a page size.
 
     Raises:
-        ValueError: If ``value`` is not an ``int``, is below ``floor``, or is
-            beyond the signed 64-bit range.
+        ValueError: If ``value`` is not an ``int``, is negative, or is beyond the
+            signed 64-bit range.
     """
-    if type(value) is not int or not floor <= value < _PAGE_BOUND:
-        msg = f"{name} must be an int in [{floor}, 2**63), got {describe_untrusted(value)}"
+    if type(value) is not int or not 0 <= value < _PAGE_BOUND:
+        msg = f"{name} must be an int in [0, 2**63), got {describe_untrusted(value)}"
         raise ValueError(msg)
 
 
@@ -711,19 +671,13 @@ class SqliteConversationStore:
                 "CREATE TABLE IF NOT EXISTS conversations("
                 "id TEXT PRIMARY KEY, started_at INTEGER NOT NULL, "
                 "last_active_at INTEGER NOT NULL, last_turn_at INTEGER, deleted_at INTEGER, "
-                + _OBSERVED_COLUMN
-                + ", "
                 + _SEARCH_DRAW_COLUMNS
                 + ")"
             )
-            # Straight after the table it belongs to, and for the same reason
-            # `_migrate_delivery` runs one table down: `CREATE TABLE IF NOT EXISTS`
-            # is a no-op against a file that already holds `conversations`, so a
-            # database written before ADR-0212 would otherwise fail its first read
-            # on a column that is not there.
-            self._migrate_observed(conn)
-            # Beside it and for its reason: a database written before ADR-0238 would
-            # otherwise fail its first read on two columns that are not there.
+            # Straight after the table it belongs to: `CREATE TABLE IF NOT EXISTS` is
+            # a no-op against a file that already holds `conversations`, so a
+            # database written before ADR-0238 would otherwise fail its first read on
+            # two columns that are not there.
             self._migrate_search_draw(conn)
             # ADR-0283 §6's delivery rows. No turn table is created: the index is
             # retired (ADR-0283 §6, §12).
@@ -789,22 +743,6 @@ class SqliteConversationStore:
             raise ConversationStoreError(msg)
 
     @staticmethod
-    def _migrate_observed(conn: sqlite3.Connection) -> None:
-        """Add ADR-0212 §7's watermark column to a ``conversations`` table without it.
-
-        The column is nullable with no default, so SQLite adds it in constant time
-        **without rewriting a row**, every conversation written before it comes back
-        carrying no watermark — which §4 reads as a walk that has not started — and no
-        existing column changes. An ``ALTER TABLE ... ADD COLUMN`` rather than a
-        rebuild, because that is the whole of what is owed. ``PRAGMA table_info`` is
-        read rather than the stored DDL text, because what decides is the shape the
-        table actually has.
-        """
-        present = {str(row[1]) for row in conn.execute("PRAGMA table_info(conversations)")}
-        if _OBSERVED_COLUMN.split(" ")[0] not in present:
-            conn.execute("ALTER TABLE conversations ADD COLUMN " + _OBSERVED_COLUMN)
-
-    @staticmethod
     def _migrate_search_draw(conn: sqlite3.Connection) -> None:
         """Add ADR-0238 §8's counter and flag to a ``conversations`` table without them.
 
@@ -815,12 +753,11 @@ class SqliteConversationStore:
         Dropping the pair instead would mean rebuilding the one table holding every
         conversation, which ADR-0247 §13 defers with what fires it.
 
-        :meth:`_migrate_observed`'s shape. ``NOT NULL DEFAULT 0`` on both is what makes
-        it free — SQLite adds the columns in constant time **without rewriting a row**,
-        and no existing column changes. **Nothing back-fills either one** (ADR-0247
-        §10): no inference, repair or reconstruction is performed on any row, and a
-        conversation whose flag reads ``0`` behaves exactly as one whose flag reads
-        ``1``, because neither is read.
+        ``NOT NULL DEFAULT 0`` on both is what makes it free — SQLite adds the columns
+        in constant time **without rewriting a row**, and no existing column changes.
+        **Nothing back-fills either one** (ADR-0247 §10): no inference, repair or
+        reconstruction is performed on any row, and a conversation whose flag reads
+        ``0`` behaves exactly as one whose flag reads ``1``, because neither is read.
 
         An ``ALTER TABLE ... ADD COLUMN`` rather than a rebuild, because that is the
         whole of what is owed. ``PRAGMA table_info`` is read rather than the stored DDL
@@ -928,13 +865,8 @@ class SqliteConversationStore:
     def _decode_conversation(row: Sequence[Any]) -> Conversation:
         """Rebuild a :class:`Conversation` from its row, surfacing corruption.
 
-        The row is the six columns every conversation read selects — the five
-        stored ones and the raw watermark — because ADR-0212 §7 makes discarding an
-        unusable watermark **the store's** act, made where the record is built. The
-        discard itself is :func:`_usable_watermark`'s and is deliberately not a
-        fault: a watermark this build cannot use comes back absent rather than
-        raising, so one wrong bookkeeping integer cannot make a conversation
-        unreadable.
+        The row is the five columns every conversation read selects, in the order
+        each of them names them.
 
         Raises:
             ConversationStoreError: If the stored row does not validate.
@@ -948,7 +880,6 @@ class SqliteConversationStore:
                     None if row[3] is None else _instant_from(row[3], what="last_turn_at")
                 ),
                 deleted_at=None if row[4] is None else _instant_from(row[4], what="deleted_at"),
-                observed_through=_usable_watermark(row[5]),
             )
         except (ValidationError, TypeError, OverflowError) as exc:
             msg = f"a stored conversation could not be decoded: {exc}"
@@ -960,8 +891,7 @@ class SqliteConversationStore:
         rows = cls._fetch(
             conn,
             "read a conversation",
-            "SELECT c.id, c.started_at, c.last_active_at, c.last_turn_at, c.deleted_at, "
-            "c.observed_through "
+            "SELECT c.id, c.started_at, c.last_active_at, c.last_turn_at, c.deleted_at "
             "FROM conversations c WHERE c.id = ?",
             (conversation_id,),
         )
@@ -1056,8 +986,7 @@ class SqliteConversationStore:
         return self._fetch(
             self._conn,
             "read a conversation",
-            "SELECT c.id, c.started_at, c.last_active_at, c.last_turn_at, c.deleted_at, "
-            "c.observed_through "
+            "SELECT c.id, c.started_at, c.last_active_at, c.last_turn_at, c.deleted_at "
             "FROM conversations c WHERE c.id = ? AND c.deleted_at IS NULL",
             (conversation_id,),
         )
@@ -1275,61 +1204,6 @@ class SqliteConversationStore:
             raise ConversationStoreError(msg)
         return delivery
 
-    async def record_observed(
-        self, conversation_id: str, *, through_episode: int
-    ) -> Conversation | None:
-        """Advance the watermark if it moves it forward (ADR-0212 §8, ADR-0283 §6:6).
-
-        The read of the condition and the write are one ``IMMEDIATE`` transaction,
-        so two concurrent advances cannot both write from the same reading: the
-        second observes the position the first left and performs nothing, which is
-        ADR-0212 §5's monotonicity held **across processes** and not only across
-        coroutines on one loop. That is the whole of what makes two overlapping
-        observation passes safe. Nothing bounds the value above: it is an episode
-        number, which this store cannot see.
-
-        The range refusal is **before the lock and before any I/O**, on ADR-0085
-        §3's convention.
-
-        Raises:
-            ValueError: If ``through_episode`` is outside ``[1, 2**63)``.
-            UnknownConversationError: If the id names nothing or names a stamped
-                conversation.
-            ConversationStoreError: If the store cannot be written.
-        """
-        _check_page_bound("through_episode", through_episode, floor=FIRST_TURN_ORDINAL)
-        async with self._lock:
-            row = await _run_to_completion(
-                self._record_observed_sync, conversation_id, through_episode
-            )
-        return None if row is None else self._decode_conversation(row)
-
-    def _record_observed_sync(
-        self, conversation_id: str, through_episode: int
-    ) -> Sequence[Any] | None:
-        with self._transaction("record an observation watermark") as conn:
-            row = self._row_of(conn, conversation_id)
-            if row is None or row[4] is not None:
-                raise self._unknown(conversation_id)
-            # The one remaining condition, read under the write lock. The recorded
-            # value is the *usable* one, so a watermark this build discarded (§7) is
-            # stampable again from the tail rather than leaving the conversation
-            # permanently stuck behind a value nobody can read.
-            recorded = _usable_watermark(row[5])
-            if recorded is not None and through_episode <= recorded:
-                # `record_delivery`'s shape and its reason: no row is written, and
-                # no error is raised. An attempt that loses is an attempt whose
-                # position already stands.
-                return None
-            conn.execute(
-                "UPDATE conversations SET observed_through = ? WHERE id = ?",
-                (through_episode, conversation_id),
-            )
-            stamped = self._row_of(conn, conversation_id)
-            if stamped is None:  # pragma: no cover — the row was just updated here
-                raise self._unknown(conversation_id)
-            return stamped
-
     async def stamped_conversation_ids(
         self,
         *,
@@ -1392,8 +1266,7 @@ class SqliteConversationStore:
         return self._fetch(
             self._conn,
             "list recent conversations",
-            "SELECT c.id, c.started_at, c.last_active_at, c.last_turn_at, c.deleted_at, "
-            "c.observed_through "
+            "SELECT c.id, c.started_at, c.last_active_at, c.last_turn_at, c.deleted_at "
             "FROM conversations c WHERE c.deleted_at IS NULL "
             "ORDER BY c.last_active_at DESC, c.id ASC LIMIT ? OFFSET ?",
             (limit, offset),
@@ -1497,8 +1370,7 @@ class SqliteConversationStore:
             conversations = self._fetch(
                 conn,
                 "export conversations",
-                "SELECT c.id, c.started_at, c.last_active_at, c.last_turn_at, c.deleted_at, "
-                "c.observed_through "
+                "SELECT c.id, c.started_at, c.last_active_at, c.last_turn_at, c.deleted_at "
                 "FROM conversations c WHERE c.deleted_at IS NULL "
                 "ORDER BY c.last_active_at DESC, c.id ASC",
             )
