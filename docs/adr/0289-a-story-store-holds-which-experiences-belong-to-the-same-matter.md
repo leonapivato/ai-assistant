@@ -66,8 +66,7 @@ in the hub.
 > **Normative.** `core/protocols.py` gains a `StoryStore` Protocol. It is implemented
 > in `memory/` by a SQLite store on its own file, `stories.db`, in the data directory.
 
-> **Normative.** The Protocol ships as a triad, in one change with its SQLite
-> implementation (ADR-0137 §2): the Protocol, a conformance suite at
+> **Normative.** The Protocol ships as a triad: the Protocol, a conformance suite at
 > `tests/memory/story_store_contract.py`, and a canonical fake in
 > `ai_assistant.testing`.
 
@@ -182,10 +181,14 @@ about a story will need later.
 > stories an activation belongs to. They are added to `Engine`, the canonical fake
 > engine and the wire client, and the change advances `PROTOCOL_VERSION`.
 
-> **Normative.** Before a write that adds an activation member, the engine reads
-> `activation:<activation_id>` through `MemoryStore.get`, and refuses the write where
-> no record is there. An open episode is a record there (ADR-0286 §6), so a running
-> activation can be linked.
+> **Normative.** Before a create or a link that names an activation member, the
+> engine reads `activation:<activation_id>` through `MemoryStore.get` for each, and
+> refuses the write where no record is there. An open episode is a record there
+> (ADR-0286 §6), so a running activation can be linked.
+
+> **Normative.** A merge or a split checks no activation's record. It moves members a
+> story already holds, so an activation whose episode has since been forgotten moves
+> with the rest.
 
 > **Normative.** Every write the engine makes carries the actor `owner` and no
 > triggering activation.
@@ -224,17 +227,17 @@ about a story will need later.
 ### 6. Delivery
 
 > **Normative.** Land this ADR ratified before any implementation lane. Then the
-> implementation ships as three PRs:
+> implementation ships as two PRs:
 >
-> 1. **`core`, `memory` and `testing`**: §1 to §3, the triad with its SQLite
->    implementation;
-> 2. **the engine surface**: §4, across `AssistantEngine` in `core`, `Engine` in
->    `orchestration`, the wire client, the canonical fake engine, and the composition
->    in `app` building `stories.db`;
-> 3. **`interfaces`**: §5.
+> 1. **The store with its first caller**: §1 to §4. The triad rides with its primary
+>    production implementation, the engine whose demands shape the contract (ADR-0137
+>    §2), together with the SQLite store it composes: `StoryStore` and its suite and
+>    fake, the SQLite store in `memory/`, the `AssistantEngine` additions with
+>    `Engine`, the canonical fake engine and the wire client, and the composition in
+>    `app` building `stories.db`;
+> 2. **`interfaces`**: §5.
 
-> **Normative.** Lane 2 lands after lane 1, and lane 3 after lane 2, because each
-> calls what the one before adds.
+> **Normative.** Lane 2 lands after lane 1, because it calls what lane 1 adds.
 
 Deploying it adds `stories.db` and changes no existing record, so the hub keeps its
 data directory.
