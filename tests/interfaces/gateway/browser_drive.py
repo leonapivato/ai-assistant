@@ -32,6 +32,7 @@ browser's own. What is asserted is still what Chromium did.
 from __future__ import annotations
 
 import contextlib
+import functools
 from base64 import b64encode
 from dataclasses import dataclass
 from datetime import timedelta
@@ -185,6 +186,7 @@ window.__releaseHeldDecode = () => {
 """
 
 
+@functools.cache
 def rendering_of(seconds: float) -> str:
     """One playable ``audio/webm;codecs=opus`` rendering, base64 as the wire wants it.
 
@@ -194,6 +196,18 @@ def rendering_of(seconds: float) -> str:
     must not decode a rendering, and useless to a browser that must. So this
     encodes a tone through the same seam the hub's own synthesizer's output goes
     through, and :class:`SpeakingEngine` hands it back in the fake's place.
+
+    **Encoded once per duration and then handed out again.** Encoding is the
+    costliest thing a drive does before it reaches the browser — tens of
+    milliseconds, and about a tenth of a second on a loaded machine, for the
+    eight-second default every drive that names no rendering is given — and the
+    audio depends on nothing but ``seconds``. The container is not byte-identical
+    from one encoding to the next (two eight-byte header fields differ), so caching
+    does change one thing: two calls for one duration now return the same string.
+    Nothing tells two renderings apart by anything but their duration —
+    :class:`SpeakingEngine` repeats its last one, and the cases read the decoded
+    buffer's length — so that is a difference no case can see. The value is an
+    immutable ``str``, so no caller can change what the next one is handed.
 
     Args:
         seconds: How long the rendering plays for. Cases read this back off the
