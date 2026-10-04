@@ -162,9 +162,16 @@ class Composed:
 
 
 @pytest.fixture
-async def composed(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> AsyncIterator[Composed]:
-    """Wire the production root, substituting only the model-facing seams."""
-    settings = Settings(data_dir=tmp_path, embedder=EmbedderKind.HASHING)
+async def composed(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch, request: pytest.FixtureRequest
+) -> AsyncIterator[Composed]:
+    """Wire the production root, substituting only the model-facing seams.
+
+    A case that needs a finite ``episode_retention`` passes it as an indirect
+    parameter; every other case runs under the default, ``None`` since ADR-0287 §1.
+    """
+    window: timedelta | None = getattr(request, "param", None)
+    settings = Settings(data_dir=tmp_path, embedder=EmbedderKind.HASHING, episode_retention=window)
     model = FakeModelProvider(_reply)
 
     async def complete(
@@ -469,10 +476,15 @@ async def test_a_conversation_deleted_while_a_pass_runs_leaves_no_episode(
     assert await composed.held(conversation_id) == []
 
 
+@pytest.mark.parametrize("composed", [timedelta(days=30)], indirect=True, ids=["finite"])
 async def test_reclaim_keeps_a_conversation_whose_channel_holds_a_live_episode(
     composed: Composed, monkeypatch: pytest.MonkeyPatch
 ) -> None:
-    """§8:2: past the horizon, the one holding an episode stays and the empty one goes."""
+    """§8:2: past the horizon, the one holding an episode stays and the empty one goes.
+
+    Under a finite window only: ``None``, the default since ADR-0287 §1, switches
+    reclaim off (ADR-0074 §7), so there is no horizon to pass.
+    """
     kept = _conversation(await composed.say("hello"))
     empty = await composed.engine._conversations.begin(None)
     lifecycle = composed.engine._conversations

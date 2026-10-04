@@ -47,7 +47,6 @@ from ai_assistant.service.configuration import (
     EMAIL_READER_SECONDS,
     EMBEDDING_TIMEOUT_SECONDS,
     EPISODE_RETENTION_FINITE,
-    EPISODE_RETENTION_SECONDS,
     NOTIFICATION_QUEUE_LIMIT,
     NOTIFICATION_RECONSIDER_ARMED,
     NOTIFICATION_RECONSIDER_SECONDS,
@@ -190,6 +189,9 @@ async def test_the_declared_allowlist_is_exactly_what_two_deployments_produce(
         email_source_path=tmp_path / "mail.mbox",
         email_reader_interval=timedelta(minutes=25),
         consolidation_interval=timedelta(hours=12),
+        # Stated rather than defaulted since ADR-0287 §1 moved the default to
+        # ``None``: only a finite window emits ``episode_retention_seconds``.
+        episode_retention=timedelta(days=30),
     )
     disarmed = Settings(
         data_dir=tmp_path / "disarmed",
@@ -233,8 +235,10 @@ async def test_a_default_deployment_records_its_effective_figures(settings: Sett
         SCHEDULER_CHUNK_SIZE: 50,
         TRACE_RETENTION_FINITE: True,
         TRACE_RETENTION_SECONDS: timedelta(days=365).total_seconds(),
-        EPISODE_RETENTION_FINITE: True,
-        EPISODE_RETENTION_SECONDS: timedelta(days=30).total_seconds(),
+        # Kept until forgotten by default since ADR-0287 §1, and recorded as not
+        # finite rather than absent, so the boundary where the default moved is
+        # datable in the trace.
+        EPISODE_RETENTION_FINITE: False,
         EMBEDDING_TIMEOUT_SECONDS: 30.0,
         RETRIEVAL_SEARCH_LIMIT: _RETRIEVAL_LIMIT,
         CONFLICT_SEARCH_LIMIT: _CONFLICT_LIMIT,
