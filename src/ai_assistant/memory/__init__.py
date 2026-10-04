@@ -25,9 +25,12 @@ to hold a ``ModelProvider``, which ADR-0017 §1 permits because egress is a rule
 about which package opens the socket and ``models/`` is still the package that
 does.
 
+Since ADR-0289 it also holds the **story store** (:class:`SqliteStoryStore`), whose
+contract is likewise its own Protocol and which reads no other store (§1).
+
 Implements: ``MemoryStore``, ``MemoryPolicy``, ``MemoryWriter``,
-``ConversationStore``, ``DeferralStore``, ``NotificationStore`` and
-``NotificationPolicy``.
+``ConversationStore``, ``DeferralStore``, ``NotificationStore``,
+``NotificationPolicy`` and ``StoryStore``.
 """
 
 from __future__ import annotations
@@ -41,6 +44,7 @@ from ai_assistant.memory.notification_store import SqliteNotificationStore
 from ai_assistant.memory.policy import DefaultMemoryPolicy
 from ai_assistant.memory.sqlite_store import SqliteMemoryStore
 from ai_assistant.memory.store import InMemoryMemoryStore
+from ai_assistant.memory.story_store import SqliteStoryStore
 
 __all__ = [
     "DefaultMemoryPolicy",
@@ -52,4 +56,5 @@ __all__ = [
     "SqliteMemoryStore",
     "SqliteNotificationOutbox",
     "SqliteNotificationStore",
+    "SqliteStoryStore",
 ]

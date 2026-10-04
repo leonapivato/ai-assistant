@@ -64,6 +64,7 @@ from episode_inspection_contract import (
     INSPECTION_LIMIT,
     EpisodeInspectionSubject,
 )
+from story_surface_contract import STORY_LIMIT, STORY_SURFACE_AT, StorySurfaceSubject
 
 from ai_assistant.core.errors import (
     DuplicateDecisionError,
@@ -214,6 +215,14 @@ def _recorded_confirm(binding: EgressBinding | None) -> PermissionDecision:
 
 class TestFakeAssistantEngineContract(AssistantEngineContract):
     """The canonical fake, held to the shared contract."""
+
+    @pytest.fixture
+    def story_surface(self) -> StorySurfaceSubject:
+        """The canonical fake over the same injected memory store and bound."""
+        memory = FakeMemoryStore(now=lambda: STORY_SURFACE_AT)
+        built = FakeAssistantEngine(max_payload_bytes=STORY_LIMIT)
+        built.episode_memory = memory
+        return StorySurfaceSubject(engine=built, memory=memory)
 
     @pytest.fixture
     def episode_inspection(self) -> EpisodeInspectionSubject:

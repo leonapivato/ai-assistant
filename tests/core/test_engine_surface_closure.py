@@ -361,6 +361,22 @@ PROMOTED: Final[frozenset[str]] = frozenset(
         "OutboundReach",
         "OutboundDestination",
         "DriveWithheld",
+        # ADR-0289 §4's nine story methods, and the types they carry. A store-side
+        # type no method returns — ``StoryEntry``, ``StoryViewPage`` — is not here,
+        # because the walk does not reach it.
+        "StoryMember",
+        "StoryMemberKind",
+        "StoryActor",
+        "StoryChange",
+        "StoryHeader",
+        "StoryOutcome",
+        "StoryRefusal",
+        "StoryRefusalReason",
+        "StoryView",
+        "StoryMemberView",
+        "StoryLogPage",
+        "StoryLogLine",
+        "StoryPage",
     }
 )
 
@@ -741,8 +757,12 @@ def test_the_surface_carries_the_methods_the_adrs_fixed() -> None:
     **ADR-0287 §3 removes seven**, ADR-0225 §14's transcript-archive members, with the
     archive itself, so the count falls to fifty-nine. None was a browser operation, so
     ADR-0177 §1's enumeration does not move.
+
+    **ADR-0289 §4 adds nine**, the story surface — five writes and four reads — so the
+    count rises to sixty-eight. §5 rules that no browser or gateway surface reads or
+    writes a story, so ADR-0177 §1's enumeration does not move either.
     """
-    assert len(_method_names()) == 59
+    assert len(_method_names()) == 68
 
 
 def test_a_streaming_method_declares_its_union_chunk_first_terminal_last() -> None:
@@ -1407,7 +1427,7 @@ def test_the_promoted_surface_and_the_protocol_version_are_both_pinned() -> None
     """
     from ai_assistant.wire.envelope import PROTOCOL_VERSION  # noqa: PLC0415 — asserted about
 
-    assert (len(_method_names()), PROTOCOL_VERSION) == (59, 73), (
+    assert (len(_method_names()), PROTOCOL_VERSION) == (68, 74), (
         "the promoted method set and the protocol version are pinned together "
         "(ADR-0124 §9); move either and this pin makes you name the limb you are "
         "under — the method set, or a wire-carried core type"

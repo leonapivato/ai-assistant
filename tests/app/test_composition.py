@@ -84,6 +84,9 @@ from ai_assistant.core.types import (
     Reversibility,
     RiskLevel,
     SemanticMemory,
+    StoryMember,
+    StoryMemberKind,
+    StoryRefusalReason,
     TraceKind,
 )
 from ai_assistant.evaluation import SqliteTraceStore
@@ -1788,6 +1791,10 @@ async def test_the_grant_store_is_the_sixth_database_in_the_data_directory(
             # text — which is what makes the row safe to keep after the belief it
             # names is destroyed (ADR-0185 §2's ground).
             "routing.db",
+            # ADR-0289 §1's story store: which activations belong to the same matter,
+            # held as identities and instants with no free text (§2), on a file of its
+            # own because it reads no other store and no store reads it.
+            "stories.db",
             "traces.db",
         ]
         assert stat.S_IMODE((tmp_path / "grants.db").stat().st_mode) == 0o600
@@ -1805,6 +1812,32 @@ async def test_the_grant_store_is_the_sixth_database_in_the_data_directory(
         # "is the one clause of §9 that a working store can violate while every
         # other test passes".
         assert stat.S_IMODE((tmp_path / "routing.db").stat().st_mode) == 0o600
+        # And the story store (ADR-0289 §1, ADR-0004 §4).
+        assert stat.S_IMODE((tmp_path / "stories.db").stat().st_mode) == 0o600
+    finally:
+        await engine.aclose()
+
+
+async def test_the_story_store_is_wired_into_the_engine(tmp_path: Path) -> None:
+    """ADR-0289 §4: the built engine answers the story surface from ``stories.db``.
+
+    A refusal is enough to show the wiring: ``unknown_activation`` is the engine's
+    own check over the memory store, and ``unknown_story`` is the story store's, so
+    both seams answered and neither raised ``ConfigurationError``.
+    """
+    engine = build_engine(Settings(embedder=EmbedderKind.HASHING), data_dir=tmp_path)
+    try:
+        created = await engine.create_story(
+            [StoryMember(kind=StoryMemberKind.ACTIVATION, id="no-such-activation")]
+        )
+        assert created.refusal is not None
+        assert created.refusal.reason is StoryRefusalReason.UNKNOWN_ACTIVATION
+        linked = await engine.link_story(
+            "story:nowhere", [StoryMember(kind=StoryMemberKind.STORY, id="story:nowhere")]
+        )
+        assert linked.refusal is not None
+        assert linked.refusal.reason is StoryRefusalReason.UNKNOWN_STORY
+        assert (await engine.stories()).stories == ()
     finally:
         await engine.aclose()
 

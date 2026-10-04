@@ -74,6 +74,7 @@ import pytest
 from channel_receiver_contract import ChannelReceiverContract
 from episode_inspection_contract import EpisodeInspectionContract
 from pydantic import SecretStr
+from story_surface_contract import StorySurfaceContract
 
 from ai_assistant.core import errors as error_module
 from ai_assistant.core import protocols as protocols_module
@@ -1386,7 +1387,9 @@ UNSPEAKABLE_NOTIFICATION: Final = SPEAKABLE_NOTIFICATION.model_copy(
 )
 
 
-class AssistantEngineContract(ChannelReceiverContract, EpisodeInspectionContract, ABC):
+class AssistantEngineContract(
+    ChannelReceiverContract, EpisodeInspectionContract, StorySurfaceContract, ABC
+):
     """What every ``AssistantEngine`` implementation must do."""
 
     #: What this implementation raises for an argument its declared type refuses.

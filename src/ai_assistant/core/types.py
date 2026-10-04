@@ -31560,3 +31560,380 @@ class ChannelResult(BaseModel):
             msg = "a conversational result must name its outcome's conversation"
             raise ValueError(msg)
         return self
+
+
+# --- stories (ADR-0289) --------------------------------------------------------
+
+#: The prefix of every story id the story store mints (ADR-0289 §2). Carried so a
+#: reader can tell a story id when it sees one; the kind of a *member* is never
+#: inferred from it, because a member carries its kind beside its id (§2).
+STORY_ID_PREFIX: Final[str] = "story:"
+
+#: The largest page any story read returns, and the bound a ``limit`` is checked
+#: against: the same ceiling episode inspection pages to (ADR-0275).
+MAX_STORY_PAGE: Final[int] = 100
+
+#: One past the largest position or sequence number a story cursor may carry: the
+#: signed 64-bit ceiling a SQLite bind parameter tops out at (ADR-0073 §2).
+_STORY_POSITION_BOUND: Final[int] = 2**63
+
+
+class StoryMemberKind(StrEnum):
+    """Which of the two kinds of thing a story member is (ADR-0289 §2).
+
+    A **closed** enumeration: members are activations' episodes and other stories,
+    and nothing else. The kind is carried with the id and never inferred from it.
+    """
+
+    ACTIVATION = "activation"
+    """An activation, named by its activation id; its episode is the record at
+    ``activation:<activation_id>``."""
+
+    STORY = "story"
+    """Another story, named by its story id: a smaller matter inside a larger one."""
+
+
+class StoryActor(StrEnum):
+    """Who made a change to a story (ADR-0289 §2).
+
+    A **closed** enumeration, added to and never renamed. ADR-0289 gives it one
+    member; a later decision that builds a producer adds that producer's member.
+    """
+
+    OWNER = "owner"
+    """The owner, through the engine surface (ADR-0289 §4)."""
+
+
+class StoryChange(StrEnum):
+    """What one line of a story's change log records (ADR-0289 §2).
+
+    A **closed** enumeration, added to and never renamed.
+    """
+
+    CREATED = "created"
+    """The story was minted, by a create or as the new story of a split."""
+
+    ADDED = "added"
+    """A member was added to the story; the line names the member."""
+
+    REMOVED = "removed"
+    """A member was removed from the story; the line names the member."""
+
+    MERGED_INTO = "merged_into"
+    """The story was merged into another, which the line names."""
+
+    ABSORBED = "absorbed"
+    """The story absorbed another by a merge; the line names the absorbed story."""
+
+    SPLIT_OFF = "split_off"
+    """A split moved members between this story and the one the line names."""
+
+
+class StoryRefusalReason(StrEnum):
+    """Why a write to the story store was refused (ADR-0289 §3).
+
+    A **closed** enumeration, added to and never renamed. A refused write writes
+    nothing; a refusal is an outcome, never a :class:`~ai_assistant.core.errors.
+    StoryStoreError`, which is reserved for a store that could not read or write
+    its file.
+    """
+
+    NO_MEMBERS = "no_members"
+    """The write named no member: a create, a link, an unlink or a split with an
+    empty member list."""
+
+    UNKNOWN_STORY = "unknown_story"
+    """The write named a story the store does not hold, as the story written to or
+    as a member. The refusal names it."""
+
+    MERGED_STORY = "merged_story"
+    """The write was to a merged story, or named one as a member. The refusal names
+    the story and the story it was merged into."""
+
+    SELF_MERGE = "self_merge"
+    """A merge named the same story on both sides."""
+
+    LOOP = "loop"
+    """The write would make a story contain itself through some chain of stories.
+    The refusal names the stories forming the loop; the store never merges,
+    re-links or drops a link to resolve one."""
+
+    NOT_A_MEMBER = "not_a_member"
+    """A split named a member the story does not currently hold. The refusal names
+    the member."""
+
+    UNKNOWN_ACTIVATION = "unknown_activation"
+    """A create or a link through the engine named an activation with no record at
+    ``activation:<activation_id>`` (ADR-0289 §4). The refusal names the member.
+    The store itself never answers this: it reads no other store (§1)."""
+
+
+class StoryMember(BaseModel):
+    """One member of a story: its kind and its id, carried together (ADR-0289 §2)."""
+
+    model_config = ConfigDict(frozen=True, extra="forbid")
+    kind: StoryMemberKind
+    id: Identifier
+
+
+class StoryHeader(BaseModel):
+    """What a story carries of its own: its id, when it was made, and where it went.
+
+    A story holds no title, summary, state, owner or text of any kind (ADR-0289
+    §2). ``merged_into`` names the story it was merged into, once it has been,
+    which is how a reader of a merged story follows it.
+    """
+
+    model_config = ConfigDict(frozen=True, extra="forbid")
+    story_id: Identifier
+    created_at: UtcInstant
+    merged_into: Identifier | None
+
+
+class StoryEntry(BaseModel):
+    """One member in a story's clean view, with when and by whom it was linked.
+
+    ``position`` is the sequence number of the change-log line that added the entry,
+    so it is unique across the store and ascending in link order, and a page of the
+    view resumes after it.
+    """
+
+    model_config = ConfigDict(frozen=True, extra="forbid")
+    position: int = Field(strict=True, ge=0, lt=_STORY_POSITION_BOUND)
+    member: StoryMember
+    linked_at: UtcInstant
+    actor: StoryActor
+
+
+class StoryViewPage(BaseModel):
+    """A page of a story's clean view, in link order (ADR-0289 §3).
+
+    ``member_count`` is the story's current member count, whatever the page holds.
+    ``next_cursor`` is the position to resume after, or ``None`` on the last page.
+    """
+
+    model_config = ConfigDict(frozen=True, extra="forbid")
+    story: StoryHeader
+    member_count: int = Field(strict=True, ge=0, lt=_STORY_POSITION_BOUND)
+    entries: tuple[StoryEntry, ...]
+    next_cursor: int | None = Field(strict=True, ge=0, lt=_STORY_POSITION_BOUND)
+
+
+#: The changes whose line names a member, and those whose line names another story.
+_STORY_MEMBER_CHANGES: Final = frozenset({StoryChange.ADDED, StoryChange.REMOVED})
+_STORY_OTHER_CHANGES: Final = frozenset(
+    {StoryChange.MERGED_INTO, StoryChange.ABSORBED, StoryChange.SPLIT_OFF}
+)
+
+
+class StoryLogLine(BaseModel):
+    """One line of a story's change log: identities only (ADR-0289 §2).
+
+    ``sequence`` is unique across the store. ``member`` is present exactly on an
+    ``added`` or ``removed`` line, and ``other_story`` exactly on a ``merged_into``,
+    ``absorbed`` or ``split_off`` line. ``trigger`` is the activation that
+    triggered the change, where there was one. No field holds free text, and no
+    line is ever rewritten or removed.
+    """
+
+    model_config = ConfigDict(frozen=True, extra="forbid")
+    sequence: int = Field(strict=True, ge=0, lt=_STORY_POSITION_BOUND)
+    story_id: Identifier
+    change: StoryChange
+    member: StoryMember | None
+    other_story: Identifier | None
+    actor: StoryActor
+    trigger: Identifier | None
+    at: UtcInstant
+
+    @model_validator(mode="after")
+    def _names_what_its_change_names(self) -> Self:
+        if (self.member is not None) != (self.change in _STORY_MEMBER_CHANGES):
+            msg = "a story log line names a member exactly when it adds or removes one"
+            raise ValueError(msg)
+        if (self.other_story is not None) != (self.change in _STORY_OTHER_CHANGES):
+            msg = "a story log line names another story exactly on a merge or a split"
+            raise ValueError(msg)
+        return self
+
+
+class StoryLogPage(BaseModel):
+    """A page of a story's change log, in sequence order (ADR-0289 §3)."""
+
+    model_config = ConfigDict(frozen=True, extra="forbid")
+    story: StoryHeader
+    lines: tuple[StoryLogLine, ...]
+    next_cursor: int | None = Field(strict=True, ge=0, lt=_STORY_POSITION_BOUND)
+
+
+class StoryPage(BaseModel):
+    """A page of every story the store holds, newest first (ADR-0289 §3).
+
+    ``next_cursor`` is an opaque-to-the-caller position to pass back for the next
+    page, or ``None`` on the last.
+    """
+
+    model_config = ConfigDict(frozen=True, extra="forbid")
+    stories: tuple[StoryHeader, ...]
+    next_cursor: int | None = Field(strict=True, ge=0, lt=_STORY_POSITION_BOUND)
+
+
+class StoryRefusal(BaseModel):
+    """Why a write to a story was refused, and what it was refused over (ADR-0289 §3).
+
+    ``story_id`` names the story the refusal is about where there is one — the
+    unknown or merged story, the story merged into itself, or the story a loop
+    starts from — and ``merged_into`` names where a merged one went. ``member``
+    names the member at fault for ``not_a_member`` and ``unknown_activation``.
+    ``loop`` names the stories forming the loop, in containment order starting at
+    the story that would have contained itself, and is empty for every other reason.
+    """
+
+    model_config = ConfigDict(frozen=True, extra="forbid")
+    reason: StoryRefusalReason
+    story_id: Identifier | None = None
+    merged_into: Identifier | None = None
+    member: StoryMember | None = None
+    loop: tuple[Identifier, ...] = ()
+
+    @model_validator(mode="after")
+    def _names_what_its_reason_needs(self) -> Self:
+        reason = self.reason
+        if (reason is StoryRefusalReason.LOOP) != bool(self.loop):
+            msg = "a story refusal names a loop exactly when it refuses one"
+            raise ValueError(msg)
+        if (reason is StoryRefusalReason.MERGED_STORY) != (self.merged_into is not None):
+            msg = "a story refusal names a merge target exactly when it refuses a merged story"
+            raise ValueError(msg)
+        needs_story = reason in {
+            StoryRefusalReason.UNKNOWN_STORY,
+            StoryRefusalReason.MERGED_STORY,
+            StoryRefusalReason.SELF_MERGE,
+        }
+        if needs_story and self.story_id is None:
+            msg = f"a {reason.value} refusal names the story it is about"
+            raise ValueError(msg)
+        needs_member = reason in {
+            StoryRefusalReason.NOT_A_MEMBER,
+            StoryRefusalReason.UNKNOWN_ACTIVATION,
+        }
+        if needs_member != (self.member is not None):
+            msg = "a story refusal names a member exactly when the member is at fault"
+            raise ValueError(msg)
+        return self
+
+
+class StoryOutcome(BaseModel):
+    """What a write to the story store did (ADR-0289 §3).
+
+    Exactly one of ``story_id`` and ``refusal`` is set. An applied write names the
+    story it leaves standing — the one minted by a create or a split, the one
+    written by a link or an unlink, and the one merged into by a merge — and says
+    how many change-log lines it appended, which is ``0`` where every member it
+    named was passed over. A refused write appended nothing.
+    """
+
+    model_config = ConfigDict(frozen=True, extra="forbid")
+    story_id: Identifier | None = None
+    logged: int = Field(default=0, strict=True, ge=0, lt=_STORY_POSITION_BOUND)
+    refusal: StoryRefusal | None = None
+
+    @model_validator(mode="after")
+    def _applied_or_refused(self) -> Self:
+        if (self.story_id is None) == (self.refusal is None):
+            msg = "a story outcome is either applied, naming its story, or refused"
+            raise ValueError(msg)
+        if self.refusal is not None and self.logged:
+            msg = "a refused story write appended nothing"
+            raise ValueError(msg)
+        return self
+
+
+class StoryMemberView(BaseModel):
+    """One member of a story as the engine's view resolves it (ADR-0289 §4).
+
+    An activation member carries its episode's :class:`EpisodeSummary`, or is
+    marked ``forgotten`` where no record is there any more. A story member carries
+    its current ``member_count``, one level deep.
+    """
+
+    model_config = ConfigDict(frozen=True, extra="forbid")
+    position: int = Field(strict=True, ge=0, lt=_STORY_POSITION_BOUND)
+    member: StoryMember
+    linked_at: UtcInstant
+    actor: StoryActor
+    episode: EpisodeSummary | None
+    forgotten: bool
+    member_count: int | None = Field(strict=True, ge=0, lt=_STORY_POSITION_BOUND)
+
+    @model_validator(mode="after")
+    def _resolved_by_its_kind(self) -> Self:
+        if self.member.kind is StoryMemberKind.ACTIVATION:
+            if self.member_count is not None or self.forgotten == (self.episode is not None):
+                msg = "an activation member carries its episode, or is marked forgotten"
+                raise ValueError(msg)
+        elif self.member_count is None or self.episode is not None or self.forgotten:
+            msg = "a story member carries its member count and nothing else"
+            raise ValueError(msg)
+        return self
+
+
+class StoryView(BaseModel):
+    """A page of a story's members, resolved by the engine (ADR-0289 §4).
+
+    A merged story's view carries its header, which names the story it was merged
+    into, and no members.
+    """
+
+    model_config = ConfigDict(frozen=True, extra="forbid")
+    story: StoryHeader
+    member_count: int = Field(strict=True, ge=0, lt=_STORY_POSITION_BOUND)
+    members: tuple[StoryMemberView, ...]
+    next_cursor: int | None = Field(strict=True, ge=0, lt=_STORY_POSITION_BOUND)
+
+
+def check_story_page(cursor: object, limit: object) -> None:
+    """Refuse a story read's paging arguments before any store is read.
+
+    Args:
+        cursor: ``None``, or the position a previous page returned to resume after.
+        limit: How many items the page may hold, in ``[1, MAX_STORY_PAGE]``.
+
+    Raises:
+        ValueError: If either is out of range or not an exact ``int``.
+    """
+    if cursor is not None and (type(cursor) is not int or not 0 <= cursor < _STORY_POSITION_BOUND):
+        msg = "a story cursor must be an integer in [0, 2**63)"
+        raise ValueError(msg)
+    if type(limit) is not int or not 1 <= limit <= MAX_STORY_PAGE:
+        msg = f"a story page limit must be an integer in [1, {MAX_STORY_PAGE}]"
+        raise ValueError(msg)
+
+
+def story_members(members: object) -> tuple[StoryMember, ...]:
+    """Snapshot a write's members, refusing anything that is not one.
+
+    The snapshot is taken by revalidation, so a caller mutating its sequence after
+    the call cannot change what the store writes. An empty sequence is returned as
+    it is: whether no members is a refusal is the operation's to say (ADR-0289 §3).
+
+    Args:
+        members: The members a write names.
+
+    Returns:
+        The members, as a tuple of fresh values.
+
+    Raises:
+        ValueError: If ``members`` is a string or not a sequence, or holds anything
+            that is not a :class:`StoryMember`.
+    """
+    if isinstance(members, str | bytes) or not isinstance(members, Sequence):
+        msg = "story members must be a sequence of StoryMember"
+        raise ValueError(msg)
+    snapshot: list[StoryMember] = []
+    for member in members:
+        if not isinstance(member, StoryMember):
+            msg = f"a story member must be a StoryMember, got {type(member).__name__}"
+            raise ValueError(msg)
+        snapshot.append(StoryMember.model_validate(member.model_dump()))
+    return tuple(snapshot)

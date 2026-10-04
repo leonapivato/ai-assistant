@@ -53,6 +53,7 @@ from episode_inspection_contract import (
     INSPECTION_LIMIT,
     EpisodeInspectionSubject,
 )
+from story_surface_contract import STORY_LIMIT, STORY_SURFACE_AT, StorySurfaceSubject
 
 from ai_assistant.testing import FakeMemoryStore
 
@@ -266,6 +267,19 @@ class TestHubEngineClientContract(AssistantEngineContract):
         ValueError,
         HubUnavailableError,
     )
+
+    @pytest.fixture
+    async def story_surface(self, tmp_path: Path) -> AsyncIterator[StorySurfaceSubject]:
+        """The story methods over an authenticated local socket."""
+        memory = FakeMemoryStore(now=lambda: STORY_SURFACE_AT)
+        backing = FakeAssistantEngine(max_payload_bytes=STORY_LIMIT)
+        backing.episode_memory = memory
+        async with serving(
+            backing,
+            tmp_path / "hub.sock",
+            max_frame_bytes=STORY_LIMIT + ENVELOPE_RESERVE_BYTES,
+        ) as client:
+            yield StorySurfaceSubject(engine=client, memory=memory)
 
     @pytest.fixture
     async def episode_inspection(self, tmp_path: Path) -> AsyncIterator[EpisodeInspectionSubject]:

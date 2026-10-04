@@ -2415,7 +2415,11 @@ from ai_assistant.wire.errors import (
 #:     ``AssistantEngine`` method set: ``transcript_search``, ``transcript_conversation``,
 #:     ``transcript_entry``, ``transcript_entries``, ``forget_transcript_entry``,
 #:     ``forget_transcript_conversation`` and ``transcript_archive_size``.
-PROTOCOL_VERSION: Final[int] = 73
+#: 74: ADR-0289 §4 adds the nine story members to the promoted ``AssistantEngine``
+#:     method set — ``create_story``, ``link_story``, ``unlink_story``,
+#:     ``merge_stories``, ``split_story``, ``story``, ``story_log``, ``stories`` and
+#:     ``activation_stories`` — and the story types they carry.
+PROTOCOL_VERSION: Final[int] = 74
 
 #: ADR-0085 §8a: "The correlation id is a UUID string and is at most 36 bytes.
 #: Bounding it is what makes the reserve a constant rather than an aspiration; a
