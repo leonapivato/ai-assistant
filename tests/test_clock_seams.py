@@ -47,7 +47,6 @@ import pytest
 import structlog.testing
 
 import ai_assistant
-from ai_assistant.archive import SqliteTranscriptArchive
 from ai_assistant.context.sources import (
     CalendarContextSource,
     ClockContextSource,
@@ -67,7 +66,6 @@ from ai_assistant.core.errors import (
     NotificationStoreError,
     PlanningError,
     TraceStoreError,
-    TranscriptArchiveError,
 )
 from ai_assistant.core.types import (
     ActionPlan,
@@ -209,7 +207,6 @@ from ai_assistant.testing import (
     FakeToolRegistry,
     FakeTraceRetention,
     FakeTraceSink,
-    FakeTranscriptArchive,
     FakeWebSearcher,
     invoker_over,
     source_grant,
@@ -883,11 +880,6 @@ async def _fake_goal_authorization_store(now: Clock) -> None:
     await FakeGoalAuthorizationStore(now=now).live_for("goal-1", "tool-1")
 
 
-async def _fake_transcript_archive(now: Clock) -> None:
-    """A retention floor is evaluated at the read, which is what reads the clock."""
-    await FakeTranscriptArchive(retention=timedelta(days=7), now=now).size()
-
-
 async def _ingestion(now: Clock) -> None:
     """The stage stamps the read it records from its own clock."""
     memory = FakeMemoryStore(now=lambda: _AWARE)
@@ -1022,18 +1014,6 @@ async def _sqlite_goal_authorization_store(now: Clock) -> None:
             await store.live_for("goal-1", "tool-1")
         finally:
             store.close()
-
-
-async def _sqlite_transcript_archive(now: Clock) -> None:
-    """A retention floor is evaluated at the read, which is what reads the clock."""
-    with tempfile.TemporaryDirectory() as directory:
-        archive = SqliteTranscriptArchive(
-            path=Path(directory) / "archive.db", retention=timedelta(days=7), now=now
-        )
-        try:
-            await archive.size()
-        finally:
-            archive.close()
 
 
 async def _executor(now: Clock) -> None:
@@ -1245,7 +1225,6 @@ SEAMS = [
     Seam("FakeGoalAuthorizations", _fake_goal_authorizations, ClockReadingError),
     Seam("FakeRecipientGrantStore", _fake_recipient_grant_store, ClockReadingError),
     Seam("FakeRecipientGrants", _fake_recipient_grants, ClockReadingError),
-    Seam("FakeTranscriptArchive", _fake_transcript_archive, TranscriptArchiveError),
     Seam("IngestionStage", _ingestion, ClockReadingError),
     Seam("ModelBackedPlanner", _planner, PlanningError),
     Seam("QuestionStage", _questions, DeferralStoreError),
@@ -1258,7 +1237,6 @@ SEAMS = [
     Seam("SqlitePlanStore", _sqlite_plan_store, PlanningError),
     Seam("SqliteGoalAuthorizationStore", _sqlite_goal_authorization_store, ClockReadingError),
     Seam("SqliteRecipientGrantStore", _sqlite_recipient_grant_store, ClockReadingError),
-    Seam("SqliteTranscriptArchive", _sqlite_transcript_archive, TranscriptArchiveError),
     Seam("StepExecutor", _executor, PlanningError),
     Seam("StepRunner", _runner, PlanningError),
     # ADR-0235 §3's three clock reads — the listing's one-per-window instant, the

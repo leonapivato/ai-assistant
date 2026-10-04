@@ -182,29 +182,33 @@ def test_load_settings_rejects_a_non_positive_confirmation_ttl(
 # --- conversations: the two ADR-0074 durations (#449) --------------------
 
 
-def test_episode_retention_defaults_to_a_finite_horizon() -> None:
-    # ADR-0074 §7's load-bearing default, and the one an implementation copying
-    # `confirmation_ttl`'s shape gets wrong: `None` there means "a parked
-    # confirmation never goes stale" and here would mean unbounded episodic
-    # retention — an ever-growing Tier 1 log of everything the user has ever
-    # typed, which is exactly what §7 rejects.
-    horizon = Settings().episode_retention
-    assert horizon is not None
-    assert horizon > timedelta(0)
+def test_episode_retention_defaults_to_keeping_episodes_until_forgotten() -> None:
+    # ADR-0287 §1, partially superseding ADR-0074 §7's finite default: the episode
+    # is the one record of what was said, so the default keeps it until the user
+    # forgets it. `None` also switches conversation reclaim off (ADR-0074 §7).
+    assert Settings().episode_retention is None
 
 
-def test_episode_retention_accepts_an_explicit_none_as_keep_forever() -> None:
-    # The pair with the case above. `None` is the user's deliberate choice, and it
-    # also switches conversation reclaim off entirely (ADR-0074 §7).
-    assert Settings(episode_retention=None).episode_retention is None
+def test_episode_retention_defaults_to_none_when_the_environment_is_silent(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    # The same default through the loader a deployment uses, so an unset variable is
+    # not read as some finite horizon on the way in.
+    monkeypatch.delenv("ASSISTANT_EPISODE_RETENTION", raising=False)
+    assert load_settings().episode_retention is None
+
+
+def test_episode_retention_still_takes_a_finite_window() -> None:
+    # ADR-0287 §1 moves the default and nothing else: a deployment may still set a
+    # horizon, and the value it sets is the value it gets.
+    assert Settings(episode_retention=timedelta(days=30)).episode_retention == timedelta(days=30)
 
 
 def test_episode_retention_is_disabled_from_the_environment_by_the_sentinel(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
-    # The default is finite, so omitting the variable can never reach `None` and
-    # no duration literal spells it: without the sentinel "keep forever" would be
-    # unreachable from a deployment, which §7 says it must not be.
+    # ADR-0287 §1 keeps the setting's `None` spelling with its type, so an operator
+    # who already set the sentinel under the old finite default reads the same value.
     monkeypatch.setenv("ASSISTANT_EPISODE_RETENTION", "none")
     assert load_settings().episode_retention is None
 
@@ -707,10 +711,12 @@ def test_deferral_ttl_defaults_to_thirty_days() -> None:
     # assert. "Finite" alone admits a one-microsecond default that expires every
     # question before a user can list it and a decades-long one that keeps
     # unanswered Tier 1 content for a working lifetime — both conforming, neither
-    # intended. Thirty days is `episode_retention`'s own horizon, deliberately: a
+    # intended. Thirty days was `episode_retention`'s own horizon, deliberately: a
     # deferred question is about a belief, and for an observed one the evidence is
     # episodes on that clock, so a question outliving them would ask the user to
-    # adjudicate something the system can no longer explain.
+    # adjudicate something the system can no longer explain. ADR-0287 §1 moved that
+    # default to `None` and left this one where it was, so a question now lapses
+    # before the episodes it is about, never after them.
     assert Settings().deferral_ttl == timedelta(days=30)
 
 
@@ -1394,8 +1400,8 @@ def test_every_duration_setting_is_discovered() -> None:
         "calendar_upcoming_lead",
         # ADR-0119 §10's trace horizon. Acknowledged here rather than exempted,
         # for the reason every duration above is: joining this tuple is what
-        # subjects it to the parametrised guards below. It follows
-        # ``episode_retention``'s convention exactly — finite by default, ``None``
+        # subjects it to the parametrised guards below. It follows the convention
+        # ``episode_retention`` had until ADR-0287 §1 — finite by default, ``None``
         # reachable only through the disable sentinel and meaning "keep forever" —
         # and the positive bound matters here in the direction a retention setting
         # fails worst: a zero or negative horizon sweeps *every* trace at the first
@@ -1456,15 +1462,6 @@ def test_every_duration_setting_is_discovered() -> None:
         # ``bool`` guard is the difference between a day to answer and a question that
         # expires the second after it is asked.
         "parked_read_ttl",
-        # ADR-0225 §6's archive horizon. Nullable, and its ``None`` is the
-        # **default** rather than a sentinel an operator has to spell — the
-        # deliberate opposite of ``episode_retention`` above, on the ground §6
-        # argues: §7's case for a finite episodic default is entirely about the read
-        # path, and the archive is not on it (§4), so a finite default here would
-        # reintroduce the loss the archive exists to remove at a second number nobody
-        # can argue for. The ``bool`` guard is the difference between "keep forever"
-        # and a one-second horizon that hides every entry on the next read.
-        "transcript_archive_retention",
         # ADR-0241 §3's per-call search deadline, acknowledged here for the reason
         # every duration above is: joining this tuple is what subjects it to the
         # parametrised guards below. It is **not** nullable, for ``hub_read_timeout``'s
