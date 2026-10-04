@@ -31,6 +31,7 @@ if TYPE_CHECKING:
     from ai_assistant.core.types import (
         StoryHeader,
         StoryLogLine,
+        StoryLogPage,
         StoryMember,
         StoryMemberView,
         StoryOutcome,
@@ -167,50 +168,87 @@ def _advanced(previous: int | None, following: int) -> int:
 
 
 async def read_story(engine: AssistantEngine, story_id: str) -> StoryRead | None:
-    """Read a story's members and change log page by page, to the end.
+    """Read a story's change log and members page by page, to the end.
 
-    A merged story is read no further than its header, which is all its view renders
-    (ADR-0289 §5:2). Otherwise every member page is read, then every log page.
+    A merged story is read no further than the first log page that names where it
+    went, which is all its view renders (ADR-0289 §5:2): a merged story takes no
+    further write (§3), so nothing after that page can change.
 
-    **A story that changes while it is read is discarded, not rendered.** Each page
-    must carry the header the first did and the same member count, and the members
-    read must number that count; anything else means a write landed between pages,
-    and a view stitched across it would state a membership the story never had.
+    **A story that changes while it is read is discarded, not rendered.** Every write
+    that changes a story appends to its change log in the same transaction as the
+    clean view (§2), so the log's last sequence number is the story's version. The
+    whole log is read first, then every member page, and then the log is asked for
+    anything after the last line read: a line there means a write landed while the
+    members were read, and a view stitched across it would state a membership the
+    story never had beside a log that says otherwise. Each member page must also
+    carry the log's header and one member count, and the members must number it.
 
     Returns:
         The read, or ``None`` where the engine holds no such story.
 
     Raises:
-        ProtocolError: If the story changed between pages, or a continuation did not
-            advance.
+        ProtocolError: If the story changed while it was read, or a continuation did
+            not advance.
     """
-    first = await engine.story(story_id, limit=MAX_STORY_PAGE)
-    if first is None:
+    log = await engine.story_log(story_id, limit=MAX_STORY_PAGE)
+    if log is None:
         return None
-    header = first.story
+    header = log.story
     if header.merged_into is not None:
-        return StoryRead(header, first.member_count, (), ())
-    members = list(first.members)
-    cursor = first.next_cursor
-    while cursor is not None:
-        page = await engine.story(story_id, cursor=cursor, limit=MAX_STORY_PAGE)
-        if page is None or page.story != header or page.member_count != first.member_count:
-            raise ProtocolError("story changed while it was read; incomplete story discarded")
-        members.extend(page.members)
-        cursor = None if page.next_cursor is None else _advanced(cursor, page.next_cursor)
-    if len(members) != first.member_count:
-        raise ProtocolError("story changed while it was read; incomplete story discarded")
-    lines: list[StoryLogLine] = []
-    log_cursor: int | None = None
+        return StoryRead(header, 0, (), ())
+    lines = await _whole_log(engine, story_id, log)
+    member_count, members = await _whole_view(engine, story_id, header)
+    after = await engine.story_log(story_id, cursor=lines[-1].sequence, limit=1)
+    if after is None or after.story != header or after.lines:
+        raise _changed()
+    return StoryRead(header, member_count, members, lines)
+
+
+async def _whole_log(
+    engine: AssistantEngine, story_id: str, first: StoryLogPage
+) -> tuple[StoryLogLine, ...]:
+    """Every line of a story's log, from its first page on; never empty."""
+    lines = list(first.lines)
+    page = first
+    while page.next_cursor is not None:
+        cursor = page.next_cursor
+        following = await engine.story_log(story_id, cursor=cursor, limit=MAX_STORY_PAGE)
+        if following is None or following.story != first.story:
+            raise _changed()
+        if following.next_cursor is not None:
+            _advanced(cursor, following.next_cursor)
+        lines.extend(following.lines)
+        page = following
+    if not lines:  # pragma: no cover — every story's log opens with its creation (§3)
+        raise _changed()
+    return tuple(lines)
+
+
+async def _whole_view(
+    engine: AssistantEngine, story_id: str, header: StoryHeader
+) -> tuple[int, tuple[StoryMemberView, ...]]:
+    """A story's member count and every member, each page checked against the header."""
+    members: list[StoryMemberView] = []
+    member_count: int | None = None
+    cursor: int | None = None
     while True:
-        log = await engine.story_log(story_id, cursor=log_cursor, limit=MAX_STORY_PAGE)
-        if log is None or log.story != header:
-            raise ProtocolError("story changed while it was read; incomplete story discarded")
-        lines.extend(log.lines)
-        if log.next_cursor is None:
+        page = await engine.story(story_id, cursor=cursor, limit=MAX_STORY_PAGE)
+        if page is None or page.story != header:
+            raise _changed()
+        if member_count is not None and page.member_count != member_count:
+            raise _changed()
+        member_count = page.member_count
+        members.extend(page.members)
+        if page.next_cursor is None:
             break
-        log_cursor = _advanced(log_cursor, log.next_cursor)
-    return StoryRead(header, first.member_count, tuple(members), tuple(lines))
+        cursor = _advanced(cursor, page.next_cursor)
+    if len(members) != member_count:
+        raise _changed()
+    return member_count, tuple(members)
+
+
+def _changed() -> ProtocolError:
+    return ProtocolError("story changed while it was read; incomplete story discarded")
 
 
 def _member_line(view: StoryMemberView) -> str:
