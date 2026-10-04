@@ -1,6 +1,6 @@
 # 259. An effect is claimed once per goal before it is dispatched, and a turn-start pass reconciles what an earlier turn left uncertain or unfinished
 
-- Status: Accepted
+- Status: Partially superseded by ADR-0287 (§9:11's `ExchangeDisposition` limb)
 - **Depends on [ADR-0265](0265-an-intended-action-has-a-stable-identity-minted-once-and-linked-to-the-goal-elements-it-serves.md),
   which is cited and superseded in nothing.** §6 of that decision states four obligations over *"a decision that lands
   the claim"* — the row keyed on the goal, the intended action and the effect key; an answer for a completed act of
@@ -52,6 +52,14 @@
   an admission, or changes any signature on `InvocationLedger`**; and §3's own no-reconciliation-here statement, its
   recovery-scan clause and its spending-on-`INDETERMINATE` argument all bind entire.
 - Date: 2026-09-13
+- Partially superseded: 2026-10-03 by ADR-0287 — one scope. §9:11's
+  `ExchangeDisposition` limb, from *"and `ExchangeDisposition` gains exactly two
+  members"* to the clause's end. `ExchangeDisposition` and the two members it gained are
+  removed with the transcript archive (ADR-0287 §2). §9:11's `Disposition` and
+  `PROTOCOL_VERSION` limbs stand, and so does every other clause. These replacements
+  take effect on ratification of ADR-0287. This reciprocal header record accompanies the
+  numbered draft under ADR-0070 and ADR-0082; prior supersessions and the ratified body
+  below are preserved.
 
 ## Context
 

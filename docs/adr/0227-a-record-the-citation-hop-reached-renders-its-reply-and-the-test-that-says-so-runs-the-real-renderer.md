@@ -1,6 +1,6 @@
 # 227. A record the citation hop reached renders its reply, and the test that says so runs the real renderer
 
-- Status: Partially superseded by ADR-0284 (§1:1's and §1:2's condition and phrase line; §1:5's byte rule); §§1 and 3 amended by ADR-0229
+- Status: Partially superseded by ADR-0284 (§1:1's and §1:2's condition and phrase line; §1:5's byte rule) and ADR-0287 (§7:2's `ExchangeDisposition` and `disposition`); §§1 and 3 amended by ADR-0229
 - Date: 2026-09-03
 - **Partially supersedes:**
   [ADR-0222](0222-the-stored-reply-is-read-back-in-the-conversation-tail-and-by-the-observer.md)
@@ -106,6 +106,14 @@
   ratification of ADR-0284. This reciprocal header record accompanies the numbered draft
   under ADR-0070 and ADR-0082; prior supersessions and the ratified body below are
   preserved.
+- Partially superseded: 2026-10-03 by ADR-0287 — one scope. §7:2's *and an
+  `ExchangeDisposition` in `disposition`*, and its last sentence's *on a record that
+  also carries a `disposition`*. No record carries either: ADR-0284 removed the field,
+  and ADR-0287 §2 removes the type. §7:1, which says a test's records are shaped as the
+  production capture site writes them, stands and decides the rest. Every other clause
+  stands too. These replacements take effect on ratification of ADR-0287. This
+  reciprocal header record accompanies the numbered draft under ADR-0070 and ADR-0082;
+  prior supersessions and the ratified body below are preserved.
 
 ## Context
 

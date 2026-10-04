@@ -62,12 +62,12 @@
   under ADR-0070 and ADR-0082; prior supersessions and the ratified body below are
   preserved.
 - Partially superseded: 2026-10-03 by ADR-0287 — §2:1–§2:5 entire, as ADR-0284 left
-  them. `ExchangeDisposition`, its sixteen members, their values, and `_outcome_of` and
-  `_routed_outcome_of`, which return them, are removed with the transcript archive
-  (ADR-0287 §2). Every other clause stands. These replacements take effect on
-  ratification of ADR-0287. This reciprocal header record accompanies the numbered draft
-  under ADR-0070 and ADR-0082; prior supersessions and the ratified body below are
-  preserved.
+  them. `ExchangeDisposition`, its members (ADR-0259 §9:11 added two), their values, and
+  `_outcome_of` and `_routed_outcome_of`, which return them, are removed with the
+  transcript archive (ADR-0287 §2). Every other clause stands. These replacements take
+  effect on ratification of ADR-0287. This reciprocal header record accompanies the
+  numbered draft under ADR-0070 and ADR-0082; prior supersessions and the ratified body
+  below are preserved.
 
 ## Context
 
