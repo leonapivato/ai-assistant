@@ -1,6 +1,6 @@
 # 291. A channel's record is its own, separate from memory, and what it keeps is its kind's choice
 
-- Status: Proposed
+- Status: Accepted
 - Date: 2026-10-04
 - Scope: [#2578](https://github.com/leonapivato/ai-assistant/issues/2578), the channel redesign: what any channel may keep, between ADR-0290 (what a channel is and where one is needed) and the text chat channel ([#2680](https://github.com/leonapivato/ai-assistant/pull/2680)), which applies this decision to one kind.
 - Authorization: the owner accepted proposal #2681 on 2026-10-04, at `440f15a0`, and the dispatcher assigned 0291. This ADR is that proposal converted under `docs/proposals/README.md` → "When it is decided".
