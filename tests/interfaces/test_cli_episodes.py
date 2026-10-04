@@ -177,6 +177,32 @@ def test_human_detail_labels_whether_a_response_was_sent(
     assert "explicit forgetting" in rendered
 
 
+def test_no_transcript_group_remains_and_episode_names_no_archive(
+    monkeypatch: pytest.MonkeyPatch, output: StringIO
+) -> None:
+    """ADR-0287 §3: the ``transcript`` group is removed, and ``episode`` names no archive.
+
+    The group is asked for from both directions: the application registers no group of
+    that name, and invoking it is the usage error an unknown command is. ``episode``'s
+    help and the retention notice its detail renders each still distinguish retention
+    expiry from explicit forgetting (ADR-0275 §11:6), with no archive in either.
+    """
+    runner = CliRunner()
+    assert "transcript" not in {group.name for group in cli.app.registered_groups}
+    assert runner.invoke(cli.app, ["transcript", "search", "lease"]).exit_code == 2
+
+    help_text = " ".join(runner.invoke(cli.app, ["episode", "--help"]).output.split())
+    assert "Retention expiry" in help_text
+    assert "archive" not in help_text.lower()
+
+    _wire(monkeypatch, _engine(_record("record", response="sent")))
+    result = runner.invoke(cli.app, ["episode", "record"])
+    assert result.exit_code == 0, result.exception
+    rendered = " ".join(output.getvalue().split())
+    assert "Retention expiry" in rendered
+    assert "archive" not in rendered.lower()
+
+
 def test_listing_relays_filters_and_displays_exact_id_and_next_cursor(
     monkeypatch: pytest.MonkeyPatch, output: StringIO
 ) -> None:
