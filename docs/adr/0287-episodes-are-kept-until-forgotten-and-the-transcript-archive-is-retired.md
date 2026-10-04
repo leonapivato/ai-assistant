@@ -1,6 +1,6 @@
 # 287. Episodes are kept until forgotten, and the transcript archive is retired
 
-- Status: Proposed
+- Status: Accepted
 - Date: 2026-10-03
 - Scope: [M36](https://github.com/leonapivato/ai-assistant/milestone/2), reopened 2026-09-30 for [#2613](https://github.com/leonapivato/ai-assistant/issues/2613); step 3b of the plan recorded there on 2026-10-03, at the scope the owner ruled the same day, behind the cutover that steps 2 and 3 share.
 - Dependency: ADR-0284, ADR-0285 and ADR-0286, implemented at `6dd92efa`.
