@@ -244,7 +244,7 @@ def test_detail_label_reads_the_outcome(response: _Response) -> None:
         record = stored.model_copy(update={"outcome": outcome})
         buffer = StringIO()
         episode_inspection.render_detail(
-            Console(file=buffer, force_terminal=False, width=200), record
+            Console(file=buffer, force_terminal=False, width=200), record, stories=()
         )
         assert f"\nResponse: {label}\n" in buffer.getvalue()
 
@@ -394,7 +394,9 @@ def _version(
 def _understanding_section(record: EpisodicMemory) -> list[str]:
     """The human detail's understanding lines, between the recall lines and retention."""
     buffer = StringIO()
-    episode_inspection.render_detail(Console(file=buffer, force_terminal=False, width=200), record)
+    episode_inspection.render_detail(
+        Console(file=buffer, force_terminal=False, width=200), record, stories=()
+    )
     lines = buffer.getvalue().splitlines()
     start = next(n for n, line in enumerate(lines) if line.startswith("Understanding"))
     end = next(n for n, line in enumerate(lines) if line.startswith("Retention expiry"))
@@ -573,11 +575,13 @@ def test_cli_human_detail_carries_the_understanding_section(
 
 
 def _stage_section(record: EpisodicMemory) -> list[str]:
-    """The human detail's stage lines, between the header and the status disclaimer."""
+    """The human detail's stage lines, between the header's last line and the disclaimer."""
     buffer = StringIO()
-    episode_inspection.render_detail(Console(file=buffer, force_terminal=False, width=200), record)
+    episode_inspection.render_detail(
+        Console(file=buffer, force_terminal=False, width=200), record, stories=()
+    )
     lines = buffer.getvalue().splitlines()
-    start = next(n for n, line in enumerate(lines) if line.startswith("Response:"))
+    start = next(n for n, line in enumerate(lines) if line.startswith("Stories:"))
     end = lines.index("Processing status does not report goal achievement or audio playback.")
     return lines[start + 1 : end]
 
@@ -659,7 +663,9 @@ def test_human_detail_labels_a_missing_stage_record() -> None:
 def _recall_section(record: EpisodicMemory) -> list[str]:
     """The human detail's recall lines, between the status disclaimer and understanding."""
     buffer = StringIO()
-    episode_inspection.render_detail(Console(file=buffer, force_terminal=False, width=200), record)
+    episode_inspection.render_detail(
+        Console(file=buffer, force_terminal=False, width=200), record, stories=()
+    )
     lines = buffer.getvalue().splitlines()
     start = lines.index("Processing status does not report goal achievement or audio playback.")
     end = next(n for n, line in enumerate(lines) if line.startswith("Understanding"))
@@ -773,7 +779,9 @@ def _open_record(record_id: str, **fields: object) -> EpisodicMemory:
 
 def _detail_lines(record: EpisodicMemory) -> list[str]:
     buffer = StringIO()
-    episode_inspection.render_detail(Console(file=buffer, force_terminal=False, width=200), record)
+    episode_inspection.render_detail(
+        Console(file=buffer, force_terminal=False, width=200), record, stories=()
+    )
     return buffer.getvalue().splitlines()
 
 
@@ -817,6 +825,7 @@ def test_detail_labels_an_open_episodes_end_fields_in_progress_not_unavailable()
         f"Processing: {episode_inspection.IN_PROGRESS}",
         f"Reason: {episode_inspection.IN_PROGRESS}",
         "Response: none yet",
+        "Stories: none",
         "Stages: none recorded yet",
     ]
     assert "Recall: none recorded yet" in lines

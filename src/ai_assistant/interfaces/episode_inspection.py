@@ -20,6 +20,7 @@ if TYPE_CHECKING:
         EpisodePage,
         EpisodeProcessingRecord,
         EpisodeSummary,
+        StoryHeader,
     )
 
 #: The label an open episode carries in place of its absent end fields (ADR-0286 §11).
@@ -84,17 +85,9 @@ def render_page(console: Console, page: EpisodePage) -> None:
     if not page.items:
         console.print("No live episodes matched.")
     for item in page.items:
-        channel = (
-            "unavailable"
-            if item.channel is None
-            else f"{item.channel.channel_type}/{item.channel.instance_id}"
-        )
+        fields = "".join(f"\n  {label}: {value}" for label, value in summary_fields(item))
         console.print(
-            f"Episode {json.dumps(item.position.episode_id, ensure_ascii=False)}\n"
-            f"  Occurred: {item.position.occurred_at.isoformat()}\n"
-            f"  Activation: {item.activation_id or 'unavailable'}\n"
-            f"  Channel: {channel}; modality: {item.modality.value}\n"
-            f"  Processing: {_summary_status(item)}",
+            f"Episode {json.dumps(item.position.episode_id, ensure_ascii=False)}{fields}",
             markup=False,
             emoji=False,
             highlight=False,
@@ -104,6 +97,26 @@ def render_page(console: Console, page: EpisodePage) -> None:
         console.print(f"Next cursor: {page.next_cursor}", markup=False, emoji=False, soft_wrap=True)
         console.print("Use --cursor with the same channel and status filters.")
     _retention_notice(console)
+
+
+def summary_fields(item: EpisodeSummary) -> tuple[tuple[str, str], ...]:
+    """The labelled facts a listing row states after its episode id, in its order.
+
+    One source for the episode list's row and the story view's one-line activation
+    member (ADR-0289 §5:2), so the two cannot state different facts about one
+    episode. An open episode's processing reads in progress (ADR-0286 §11).
+    """
+    channel = (
+        "unavailable"
+        if item.channel is None
+        else f"{item.channel.channel_type}/{item.channel.instance_id}"
+    )
+    return (
+        ("Occurred", item.position.occurred_at.isoformat()),
+        ("Activation", item.activation_id or "unavailable"),
+        ("Channel", f"{channel}; modality: {item.modality.value}"),
+        ("Processing", _summary_status(item)),
+    )
 
 
 def _summary_status(item: EpisodeSummary) -> str:
@@ -143,11 +156,24 @@ def _retention_notice(console: Console) -> None:
     )
 
 
-def render_detail(console: Console, record: EpisodicMemory) -> None:
+def render_detail(
+    console: Console,
+    record: EpisodicMemory,
+    *,
+    stories: tuple[StoryHeader, ...] | None,
+) -> None:
     """Distinguish processing status from goal achievement and playback.
 
     An open episode is labelled in progress in place of its absent status, reason
     and end time (ADR-0286 §11), and each section it may still grow says so.
+
+    Args:
+        console: Where to render.
+        record: The verified record.
+        stories: The stories the episode's activation belongs to directly, as the
+            engine answered them, or ``None`` where the episode has no activation to
+            ask about. Rendered as one line, saying ``none`` for an activation that
+            belongs to no story (ADR-0289 §5:3).
     """
     processing = record.processing_record
     if processing is None:
@@ -163,7 +189,8 @@ def render_detail(console: Console, record: EpisodicMemory) -> None:
         f"Activation: {activation}\n"
         f"Processing: {status}\n"
         f"Reason: {reason}\n"
-        f"Response: {_response_label(record)}",
+        f"Response: {_response_label(record)}\n"
+        f"Stories: {_stories_label(stories)}",
         markup=False,
         emoji=False,
         highlight=False,
@@ -199,6 +226,19 @@ def render_detail(console: Console, record: EpisodicMemory) -> None:
         highlight=False,
         soft_wrap=True,
     )
+
+
+def _stories_label(stories: tuple[StoryHeader, ...] | None) -> str:
+    """Name the stories an activation belongs to directly, in the engine's order.
+
+    ``unavailable`` where the episode has no processing record, so no activation a
+    story could hold; ``none`` where the activation belongs to no story.
+    """
+    if stories is None:
+        return "unavailable"
+    if not stories:
+        return "none"
+    return ", ".join(_quoted(story.story_id) for story in stories)
 
 
 def _quoted(text: str) -> str:

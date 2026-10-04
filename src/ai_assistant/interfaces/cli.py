@@ -346,14 +346,17 @@ from ai_assistant.core.types import (
     SpendPeriod,
     SpendTotal,
     StepStatus,
+    StoryMember,
+    StoryMemberKind,
     ToolOutcome,
     TurnReference,
     ValueBound,
+    check_story_page,
     encodable_text,
     routed_listing_arm,
     secret_value,
 )
-from ai_assistant.interfaces import episode_inspection
+from ai_assistant.interfaces import episode_inspection, story_inspection
 from ai_assistant.interfaces.gateway import Disclosure, Note, run_gateway
 from ai_assistant.secret_store import KeyringSecretStore
 from ai_assistant.wire import (
@@ -371,7 +374,7 @@ from ai_assistant.wire import (
 from ai_assistant.wire.address import check_socket_path
 
 if TYPE_CHECKING:
-    from collections.abc import AsyncIterator, Callable, Mapping, Sequence
+    from collections.abc import AsyncIterator, Awaitable, Callable, Mapping, Sequence
 
     from ai_assistant.core.config import Settings
     from ai_assistant.core.protocols import AssistantEngine
@@ -398,6 +401,8 @@ if TYPE_CHECKING:
         RoutedListing,
         RoutedOperation,
         StepOutcome,
+        StoryHeader,
+        StoryOutcome,
         ToolCost,
         ToolInvocation,
         TurnOutcome,
@@ -1890,9 +1895,20 @@ async def _list_episodes(
 
 
 async def _show_episode(episode_id: str, *, as_json: bool) -> int:
+    """Read one episode whole and render it.
+
+    The human detail also names the stories the episode's activation belongs to
+    directly (ADR-0289 §5:3), read after the record is verified. ``--json`` prints
+    the canonical record and nothing else, so it asks for no stories.
+    """
+    stories: tuple[StoryHeader, ...] | None = None
     try:
         engine = await _open_engine()
         detail = await episode_inspection.read_detail(engine, episode_id)
+        if detail is not None and not as_json:
+            processing = detail[1].processing_record
+            if processing is not None:
+                stories = await engine.activation_stories(processing.activation_id)
     except (AssistantError, TransportError) as exc:
         _render_error(exc)
         return _EXIT_ERROR
@@ -1903,7 +1919,210 @@ async def _show_episode(episode_id: str, *, as_json: bool) -> int:
     if as_json:
         console.print(encoded, markup=False, emoji=False, highlight=False, soft_wrap=True)
     else:
-        episode_inspection.render_detail(console, record)
+        episode_inspection.render_detail(console, record, stories=stories)
+    return _EXIT_OK
+
+
+# --- stories (ADR-0289 §5) -------------------------------------------------------
+
+#: The owner's story commands. **For testing**: no phase produces or reads a story
+#: yet (ADR-0289 §4), so this group is how the store's rules are exercised by hand,
+#: and its help says so (§5:1). Rendering and argument parsing only: what a write
+#: may do is the story store's and the engine's to decide.
+story_app = typer.Typer(
+    name="story",
+    help=(
+        "For testing: create, link, unlink, merge, split, list and show stories by "
+        "hand. A story holds which experiences belong to the same matter; no part of "
+        "the assistant produces or reads one yet. Name a member with --activation "
+        "(an activation id) or --story (a story id)."
+    ),
+    no_args_is_help=True,
+)
+app.add_typer(story_app, name="story")
+
+
+def _present_ids(values: list[str] | None) -> list[str]:
+    """:func:`_present_id` over each value of a repeatable id option."""
+    return [_present_id(value) for value in values or []]
+
+
+_STORY_ACTIVATION_OPTION = typer.Option(
+    None,
+    "--activation",
+    "-a",
+    callback=_present_ids,
+    help="An activation member, by its activation id. Repeat for more.",
+)
+_STORY_STORY_OPTION = typer.Option(
+    None,
+    "--story",
+    "-s",
+    callback=_present_ids,
+    help="A story member, by its story id. Repeat for more.",
+)
+_STORY_ID_ARGUMENT = typer.Argument(
+    ..., callback=_present_id, help="The story's id (see 'assistant story list')."
+)
+
+
+def _story_members(activations: list[str] | None, stories: list[str] | None) -> list[StoryMember]:
+    """The members a write names, each carrying the kind its option stated (ADR-0289 §2).
+
+    The kind is never read off the id: ``--activation`` and ``--story`` say which.
+    Activations come first, then stories, each in the order given, and that is the
+    order the write names them in.
+    """
+    return [
+        *(StoryMember(kind=StoryMemberKind.ACTIVATION, id=value) for value in activations or []),
+        *(StoryMember(kind=StoryMemberKind.STORY, id=value) for value in stories or []),
+    ]
+
+
+async def _write_story(
+    applied: str, write: Callable[[AssistantEngine], Awaitable[StoryOutcome]]
+) -> int:
+    """Run one story write and render its outcome; a refusal exits non-zero."""
+    try:
+        engine = await _open_engine()
+        outcome = await write(engine)
+    except (AssistantError, TransportError) as exc:
+        _render_error(exc)
+        return _EXIT_ERROR
+    return _EXIT_OK if story_inspection.render_outcome(console, applied, outcome) else _EXIT_ERROR
+
+
+@story_app.command("create")
+def story_create(
+    activation: list[str] | None = _STORY_ACTIVATION_OPTION,
+    story: list[str] | None = _STORY_STORY_OPTION,
+) -> None:
+    """Create a story holding the members named."""
+    members = _story_members(activation, story)
+    raise typer.Exit(
+        asyncio.run(_write_story("Created story", lambda engine: engine.create_story(members)))
+    )
+
+
+@story_app.command("link")
+def story_link(
+    story_id: str = _STORY_ID_ARGUMENT,
+    activation: list[str] | None = _STORY_ACTIVATION_OPTION,
+    story: list[str] | None = _STORY_STORY_OPTION,
+) -> None:
+    """Add the members named to a story; one already in it is passed over."""
+    members = _story_members(activation, story)
+    raise typer.Exit(
+        asyncio.run(
+            _write_story("Linked to story", lambda engine: engine.link_story(story_id, members))
+        )
+    )
+
+
+@story_app.command("unlink")
+def story_unlink(
+    story_id: str = _STORY_ID_ARGUMENT,
+    activation: list[str] | None = _STORY_ACTIVATION_OPTION,
+    story: list[str] | None = _STORY_STORY_OPTION,
+) -> None:
+    """Remove the members named from a story; one not in it is passed over."""
+    members = _story_members(activation, story)
+    raise typer.Exit(
+        asyncio.run(
+            _write_story(
+                "Unlinked from story", lambda engine: engine.unlink_story(story_id, members)
+            )
+        )
+    )
+
+
+@story_app.command("merge")
+def story_merge(
+    story_id: str = typer.Argument(
+        ..., callback=_present_id, help="The story to merge; it is left empty, marked merged."
+    ),
+    into: str = typer.Option(
+        ..., "--into", callback=_present_id, help="The story it is merged into."
+    ),
+) -> None:
+    """Merge one story into another, which takes its members."""
+    raise typer.Exit(
+        asyncio.run(
+            _write_story("Merged into story", lambda engine: engine.merge_stories(story_id, into))
+        )
+    )
+
+
+@story_app.command("split")
+def story_split(
+    story_id: str = _STORY_ID_ARGUMENT,
+    activation: list[str] | None = _STORY_ACTIVATION_OPTION,
+    story: list[str] | None = _STORY_STORY_OPTION,
+) -> None:
+    """Move the members named out of a story into a new story."""
+    members = _story_members(activation, story)
+    raise typer.Exit(
+        asyncio.run(
+            _write_story(
+                "Split the members named into new story",
+                lambda engine: engine.split_story(story_id, members),
+            )
+        )
+    )
+
+
+@story_app.command("list")
+def story_list(
+    limit: int = typer.Option(DEFAULT_PAGE_SIZE, "--limit", help="How many stories at most."),
+    cursor: int | None = typer.Option(None, "--cursor", help="A previous page's next cursor."),
+) -> None:
+    """List every story, newest first."""
+    try:
+        check_story_page(cursor, limit)
+    except ValueError as exc:
+        raise typer.BadParameter(str(exc)) from exc
+    raise typer.Exit(asyncio.run(_list_stories(cursor=cursor, limit=limit)))
+
+
+async def _list_stories(*, cursor: int | None, limit: int) -> int:
+    try:
+        engine = await _open_engine()
+        page = await engine.stories(cursor=cursor, limit=limit)
+    except (AssistantError, TransportError) as exc:
+        _render_error(exc)
+        return _EXIT_ERROR
+    story_inspection.render_listing(console, page)
+    return _EXIT_OK
+
+
+@story_app.command("show")
+def story_show(story_id: str = _STORY_ID_ARGUMENT) -> None:
+    """Show a story: its members, then its change log, oldest first.
+
+    An activation member is its episode's summary, in progress while the episode is
+    open, or forgotten once it is gone; a story member is its id and member count. A
+    merged story shows only the story it was merged into.
+    """
+    raise typer.Exit(asyncio.run(_show_story(story_id)))
+
+
+async def _show_story(story_id: str) -> int:
+    try:
+        engine = await _open_engine()
+        read = await story_inspection.read_story(engine, story_id)
+    except (AssistantError, TransportError) as exc:
+        _render_error(exc)
+        return _EXIT_ERROR
+    if read is None:
+        console.print(
+            f"No story {story_inspection.quoted(story_id)}.",
+            markup=False,
+            emoji=False,
+            highlight=False,
+            soft_wrap=True,
+        )
+        return _EXIT_ERROR
+    story_inspection.render_story(console, read)
     return _EXIT_OK
 
 
