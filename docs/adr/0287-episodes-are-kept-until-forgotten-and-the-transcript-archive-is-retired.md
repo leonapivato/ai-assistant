@@ -7,11 +7,13 @@
 - Authorization: on 2026-10-03 the owner ruled step 3b down to its minimum (#2613): keep today's forgetting rules, make `episode_retention` default to `None`, and retire the transcript archive with `ExchangeDisposition` ("I dont care much about getting the forgetting functionality perfect right now"). The same day the owner accepted proposal #2665 ("lgtm, convert it to the ADR") and directed its conversion into this ADR. The dispatcher assigned 0287, the next number on `main`. That authorizes drafting and numbering, not ratification or implementation.
 - **Supersedes** [ADR-0225](0225-a-transcript-archive-keeps-the-exchange-as-text-and-nothing-but-the-user-reads-it.md) — **whole.** The transcript archive is removed (§2, §3 below). Its earlier partial supersessions by ADR-0248 and ADR-0283 stay on its status line as history.
 - **Partially supersedes** [ADR-0074](0074-conversation-is-an-entity-and-every-turn-is-an-episode.md) — **one scope, §7's finite default.** This takes in: *"Captured episodes carry a finite `expires_at` by default"*; the setting's *"defaulting to a finite duration"*; `None`'s *"available only by the user setting it"*; the requirement that the default be finite, with the test it owes for an unset configuration; and the reasoning given for a finite default, meaning the three reconciliation bullets and the paragraph *"The default is finite, and the user may set it to unbounded"*. The default becomes `None` (§1 below). Several things stand: the setting and its type; `None` as "keep forever"; read-time enforcement and `purge_expired` under a finite window; the conversation reclaim as ADR-0283 left it; and §7's rule that `None` disables that reclaim. Every other clause stands too.
-- **Partially supersedes** [ADR-0221](0221-an-episode-carries-the-reply-a-typed-disposition-and-how-the-turn-was-captured.md) — **one scope.** **§2:1–§2:5 entire, as ADR-0284 left them.** `ExchangeDisposition`, its sixteen members, their values and the two mapping functions that return them are removed (§2 below). Every other clause stands.
+- **Partially supersedes** [ADR-0221](0221-an-episode-carries-the-reply-a-typed-disposition-and-how-the-turn-was-captured.md) — **one scope.** **§2:1–§2:5 entire, as ADR-0284 left them.** `ExchangeDisposition`, its members, their values and the two mapping functions that return them are removed (§2 below). Every other clause stands.
+- **Partially supersedes** [ADR-0227](0227-a-record-the-citation-hop-reached-renders-its-reply-and-the-test-that-says-so-runs-the-real-renderer.md) — **one scope.** **§7:2's *and an `ExchangeDisposition` in `disposition`*, and its last sentence's *on a record that also carries a `disposition`***. No record carries either: ADR-0284 removed the field, and §2 below removes the type. §7:1, which says a test's records are shaped as the production capture site writes them, stands and decides the rest. Every other clause stands too.
+- **Partially supersedes** [ADR-0259](0259-an-effect-is-claimed-once-per-goal-before-it-is-dispatched-and-a-turn-start-pass-reconciles-what-an-earlier-turn-left-uncertain-or-unfinished.md) — **one scope.** **§9:11's `ExchangeDisposition` limb**, from *"and **`ExchangeDisposition` gains exactly two members**"* to the clause's end. `ExchangeDisposition` and the two members it gained are removed (§2 below). §9:11's `Disposition` and `PROTOCOL_VERSION` limbs stand, and so does every other clause.
 - **Partially supersedes** [ADR-0275](0275-an-episode-records-one-activation-after-processing-ends.md) — **six scopes.** **§8:3's and §9:1's archive member**: the check each of them places before the writes now comes before the episode's writes alone. **§8:5's archive projections, and its last sentence.** **§8:7's last sentence.** **§9:3 entire.** **§11:6's *through the archive-first sequence in §9*, and its third sentence.** **§13:2's ADR-0225 member.** Every other clause stands, including §9:2's retention under `episode_retention`.
 - **Partially supersedes** [ADR-0283](0283-a-channels-history-is-its-episodes-and-the-turn-index-is-retired.md) — **three scopes.** **§7:2's *discards the archive entry***: where `record_turn` returns `None`, the writer deletes the episode and reports the capture degraded. **§8:1's *discards its archive entries***: deleting a conversation stamps it, drops its parked reads, then deletes its channel's episodes. **§9:1–§9:2 entire.** Every other clause stands.
 - **Partially supersedes** [ADR-0284](0284-an-episode-is-the-experience-of-processing-its-activation.md) — **one scope.** **§5:3's second sentence**: `ExchangeDisposition` leaves now with the archive, as that sentence foresaw. §5:3's first sentence stands, and so does every other clause.
-- **Partially supersedes** [ADR-0286](0286-an-episode-is-open-while-its-activation-runs-and-frozen-when-it-ends.md) — **four scopes.** **§2:2's archive member**: the admission write's timestamp is reused by `occurred_at`, by `expires_at` and by `record_turn`'s instant. **§3:5's *before the archive entry***: the read comes before `record_turn`, where a `record_turn` follows. **§4:4's archive entry**: once the freezing write is confirmed, a conversational finalization calls `record_turn`. **§5:3's archive member**: once the freeze is confirmed, a failure of `record_turn` is handled as ADR-0275 §8:7 and ADR-0283 §7:2 handle it. Every other clause stands.
+- **Partially supersedes** [ADR-0286](0286-an-episode-is-open-while-its-activation-runs-and-frozen-when-it-ends.md) — **five scopes.** **§2:2's archive member**: the admission write's timestamp is reused by `occurred_at`, by `expires_at` and by `record_turn`'s instant. **§3:5's *before the archive entry***: the read comes before `record_turn`, where a `record_turn` follows. **§4:4's archive entry**: once the freezing write is confirmed, a conversational finalization calls `record_turn`. **§5:3's archive member**: once the freeze is confirmed, a failure of `record_turn` is handled as ADR-0275 §8:7 and ADR-0283 §7:2 handle it. **§8:1's discard, and with it ADR-0225 §5:3's order**: `forget` on the address of an open episode marks the capture in flight there, as it does today, and then deletes the record, in the same call. Every other clause stands, including §8:2.
 
 ## Context
 
@@ -166,8 +168,10 @@ longer answers.
 So forgetting a record deletes it. Forgetting a conversation still takes the tombstone
 and the grace period of ADR-0283 §8:1: it stamps the conversation, drops its parked
 reads, deletes its channel's episodes and drops the conversation once the grace has
-passed. A belief whose cited episode is forgotten keeps the dead id, and its citation
-still renders as lost (ADR-0077 §6).
+passed. A forget that names an open episode still marks the capture in flight, so
+the writer deletes the episode at its next write (ADR-0286 §8). A belief whose cited
+episode is forgotten keeps the dead id, and its citation still renders as lost
+(ADR-0077 §6).
 
 ```mermaid
 flowchart LR
@@ -226,24 +230,29 @@ ADR-0123's backups hold whatever was in the data directory when they were taken,
 a forget cannot reach them, as before.
 
 The proposal's starting list of affected ADRs had four things wrong when read
-against `main`. First, ADR-0074 §8 never carried an archive step: ADR-0225 §5 added
-the discard, and it goes with ADR-0225, so ADR-0074 records §7 alone. Second,
-ADR-0283 §5 is about resolving a resumed read and holds no archive clause; the
-writer's discard, the deletion's discard and the archive's address are §7:2, §8:1
-and §9. Third, the type the proposal called `TranscriptSearchHit` is
-`TranscriptHit`. Fourth, the engine methods behind the CLI are members of
-`AssistantEngine`, so their removal is a third Protocol change and decides how §6
-cuts the lanes.
+against `main`, and it left three clauses out. First, ADR-0074 §8 never carried an
+archive step: ADR-0225 §5 added the discard, and it goes with ADR-0225, so ADR-0074
+records §7 alone. Second, ADR-0283 §5 is about resolving a resumed read and holds no
+archive clause; the writer's discard, the deletion's discard and the archive's
+address are §7:2, §8:1 and §9. Third, the type the proposal called
+`TranscriptSearchHit` is `TranscriptHit`. Fourth, the engine methods behind the CLI
+are members of `AssistantEngine`, so their removal is a third Protocol change and
+decides how §6 cuts the lanes. The three clauses it missed are these: ADR-0286 §8:1
+forgets an open episode in ADR-0225 §5:3's archive-first order; ADR-0259 §9:11 gave
+`ExchangeDisposition` two more members, eighteen in all; and ADR-0227 §7:2 shapes
+test records with an `ExchangeDisposition`.
 
 | Earlier clause | What changes |
 | --- | --- |
 | ADR-0074 §7's finite default | `episode_retention` defaults to `None`. |
 | ADR-0221 §2:1–§2:5 | No `ExchangeDisposition`. |
 | ADR-0225 | Superseded whole. |
+| ADR-0227 §7:2's `ExchangeDisposition` | Test records carry no disposition. |
+| ADR-0259 §9:11's `ExchangeDisposition` limb | Its two added members go with the type. |
 | ADR-0275 §8:3, §8:5, §8:7, §9:1, §9:3, §11:6, §13:2 | No archive write, discard, projection or semantics. |
 | ADR-0283 §7:2, §8:1, §9:1–§9:2 | No archive discard; no archive address or rendering. |
 | ADR-0284 §5:3's second sentence | `ExchangeDisposition` has left. |
-| ADR-0286 §2:2, §3:5, §4:4, §5:3 | No archive entry after the freeze. |
+| ADR-0286 §2:2, §3:5, §4:4, §5:3, §8:1 | No archive entry after the freeze, and no discard when an open episode is forgotten. |
 
 ### 6. Delivery
 
