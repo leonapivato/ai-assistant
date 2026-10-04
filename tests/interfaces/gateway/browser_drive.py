@@ -453,5 +453,15 @@ async def driving(
         finally:
             gateway.close()
             server.close()
+            # Close the connections the context did not own, or the wait below is the
+            # gateway's read deadline. `wait_closed()` waits for every accepted
+            # connection to end, and closing the context ends only the browser's: a
+            # `route.fetch()` goes out through Playwright's own HTTP client, in the
+            # driver process, whose keep-alive socket outlives the context. Its
+            # handler then sits in its read until `gateway_read_timeout` (thirty
+            # seconds) and the case spends them in this `finally` -- every case that
+            # fetched, once each. After `close()`, so no connection can be accepted
+            # after the sweep.
+            server.close_clients()
             with contextlib.suppress(Exception):
                 await server.wait_closed()
