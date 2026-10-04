@@ -5,11 +5,12 @@ name: gate
 # machine. Ratified in ADR-0010.
 
 on:
-  # `ready_for_review` is explicit so marking a draft PR ready re-runs the gate —
-  # which is what lets the codex-review workflow (ADR-0012) fire on that
-  # transition via workflow_run. The other three are the default pull_request set.
+  # The default pull_request set, named so that nothing is added by accident.
+  # Marking a draft ready runs nothing (ADR-0288 §1): the job has no draft
+  # condition, so the run on the head's own push is already the one the merger
+  # reads, and a run on the flip would test identical content.
   pull_request:
-    types: [opened, synchronize, reopened, ready_for_review]
+    types: [opened, synchronize, reopened]
   push:
     branches: [main]
 
