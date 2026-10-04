@@ -1,6 +1,6 @@
 # 289. A story store holds which experiences belong to the same matter
 
-- Status: Proposed
+- Status: Accepted
 - Date: 2026-10-04
 - Scope: [M40](https://github.com/leonapivato/ai-assistant/milestone/7), the story capability.
 - Dependency: ADR-0286 and ADR-0287, implemented at `032b30d1`.
