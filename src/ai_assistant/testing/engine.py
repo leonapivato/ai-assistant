@@ -2968,7 +2968,7 @@ class FakeAssistantEngine:
         check_arguments("create_story", max_bytes=self._max_payload_bytes, members=named)
         self.calls.append(("create_story", {"members": named}))
         if refusal := await unknown_activation(self.episode_memory, named):
-            return StoryOutcome(refusal=refusal)
+            return self._checked(StoryOutcome(refusal=refusal), "create_story")
         outcome = await self.story_store.create(named, actor=StoryActor.OWNER)
         return self._checked(outcome, "create_story")
 
@@ -2983,7 +2983,7 @@ class FakeAssistantEngine:
         )
         self.calls.append(("link_story", {"story_id": target, "members": named}))
         if named and (refusal := await unknown_activation(self.episode_memory, named)):
-            return StoryOutcome(refusal=refusal)
+            return self._checked(StoryOutcome(refusal=refusal), "link_story")
         outcome = await self.story_store.link(target, named, actor=StoryActor.OWNER)
         return self._checked(outcome, "link_story")
 
