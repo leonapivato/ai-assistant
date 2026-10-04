@@ -17,6 +17,7 @@ from typing import TYPE_CHECKING
 
 import pytest
 
+from ai_assistant.core.errors import OversizedValueError
 from ai_assistant.core.types import (
     ChannelContext,
     ChannelIdentity,
@@ -288,6 +289,28 @@ class StorySurfaceContract:
                 break
             log_cursor = log.next_cursor
         assert log_lines == 1 + len(ids)
+
+    @pytest.mark.parametrize("operation", ["create_story", "link_story"])
+    async def test_a_refusal_too_large_for_the_limit_is_refused_as_oversized(
+        self, story_surface: StorySurfaceSubject, operation: str
+    ) -> None:
+        """An argument that fits can earn a refusal that does not; both engines refuse it.
+
+        The refusal names the member back, so an activation id just under the argument
+        limit makes an outcome over the result limit (ADR-0085 §8c).
+        """
+        subject = story_surface
+        await _seeded(subject, "a1")
+        story_id = await _created(subject, act("a1"))
+        long_id = "x" * (STORY_LIMIT - 100)
+        call = (
+            subject.engine.create_story([act(long_id)])
+            if operation == "create_story"
+            else subject.engine.link_story(story_id, [act(long_id)])
+        )
+        with pytest.raises(OversizedValueError):
+            await call
+        assert [h.story_id for h in (await subject.engine.stories()).stories] == [story_id]
 
     async def test_malformed_arguments_are_refused_before_any_write(
         self, story_surface: StorySurfaceSubject

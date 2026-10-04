@@ -106,6 +106,56 @@ async def test_a_fault_mid_write_writes_nothing(tmp_path: Path) -> None:
         store.close()
 
 
+@pytest.mark.parametrize("operation", ["create", "link", "merge", "split"])
+async def test_a_backend_failure_mid_write_rolls_the_whole_operation_back(
+    tmp_path: Path, operation: str
+) -> None:
+    """A member insert failing after its log line is appended leaves neither behind.
+
+    The fault is injected by a trigger another connection installs, so it fires inside
+    the store's own transaction after ``_add`` has written the ``added`` line — the
+    point a store writing the view and the log separately would leave an orphan line.
+    """
+    path = tmp_path / "stories.db"
+    store = SqliteStoryStore(path=path, now=lambda: STORY_AT)
+    try:
+        source = await made(store, act("a"), act("b"))
+        target = await made(store, act("c"))
+        before = {
+            story_id: (await held(store, story_id), await logged(store, story_id))
+            for story_id in (source, target)
+        }
+        injector = sqlite3.connect(path)
+        injector.execute(
+            "CREATE TRIGGER injected BEFORE INSERT ON members "
+            "BEGIN SELECT RAISE(ABORT, 'injected fault'); END"
+        )
+        injector.commit()
+        attempts = {
+            "create": lambda: store.create([act("d")], actor=StoryActor.OWNER),
+            "link": lambda: store.link(source, [act("d")], actor=StoryActor.OWNER),
+            "merge": lambda: store.merge(source, target, actor=StoryActor.OWNER),
+            "split": lambda: store.split(source, [act("a")], actor=StoryActor.OWNER),
+        }
+        with pytest.raises(StoryStoreError, match="injected fault"):
+            await attempts[operation]()
+        after = {
+            story_id: (await held(store, story_id), await logged(store, story_id))
+            for story_id in (source, target)
+        }
+        assert after == before
+        assert len((await store.stories()).stories) == 2
+        injector.execute("DROP TRIGGER injected")
+        injector.commit()
+        injector.close()
+        outcome = await store.link(source, [act("d")], actor=StoryActor.OWNER)
+        assert outcome.logged == 1
+        lines = await logged(store, source)
+        assert lines[-1].sequence > max(line.sequence for line in before[target][1])
+    finally:
+        store.close()
+
+
 async def test_a_corrupt_row_is_a_story_store_error(tmp_path: Path) -> None:
     path = tmp_path / "stories.db"
     store = SqliteStoryStore(path=path, now=lambda: STORY_AT)
