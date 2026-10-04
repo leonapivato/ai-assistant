@@ -25,13 +25,13 @@ from typing import TYPE_CHECKING
 
 import gateway_ports
 import pytest
-from browser_drive import DESKTOP, driving
+from browser_drive import driving
 from playwright.async_api import Error as BrowserError
 
 if TYPE_CHECKING:
     from pathlib import Path
 
-    from playwright.async_api import Browser, BrowserContext, Dialog, Route
+    from playwright.async_api import Browser, BrowserContext, Dialog, Route, ViewportSize
 
 pytestmark = [
     pytest.mark.integration,
@@ -45,6 +45,25 @@ pytestmark = [
 _CANARY = "browser-isolation-canary"
 
 
+def _window_of_its_own(case: int) -> ViewportSize:
+    """A viewport no other case in the run drives at, so its first drive opens a context.
+
+    The shelf lends one context per viewport, and a context it has lent before
+    carries every origin it has served — so whether a *shared* viewport's next drive
+    is lent that context depends on which ports the cases before it happened to use,
+    which is to say on the order the run took. A width no other module asks for makes
+    each case here start from a fresh context and its second drive the first re-lend,
+    whatever ran before.
+
+    Args:
+        case: A number distinct for each case in this module.
+
+    Returns:
+        The viewport.
+    """
+    return {"width": 1000 + case, "height": 700}
+
+
 async def test_the_next_drive_at_a_viewport_is_lent_the_same_context_without_its_cookie(
     gateway_browser: Browser, tmp_path: Path
 ) -> None:
@@ -55,12 +74,13 @@ async def test_the_next_drive_at_a_viewport_is_lent_the_same_context_without_its
     ``127.0.0.1`` would be offered to the next. The reuse half is pinned beside it
     because a shelf that stopped lending would pass every other case in this module.
     """
-    async with driving(gateway_browser, tmp_path / "first", viewport=DESKTOP) as first:
+    window = _window_of_its_own(1)
+    async with driving(gateway_browser, tmp_path / "first", viewport=window) as first:
         assert await first.page.context.cookies() != [], "the admitted drive set no cookie"
         context = first.page.context
 
     async with driving(
-        gateway_browser, tmp_path / "second", viewport=DESKTOP, admitted=False
+        gateway_browser, tmp_path / "second", viewport=window, admitted=False
     ) as second:
         assert second.page.context is context
         assert await second.page.context.cookies() == []
@@ -79,16 +99,17 @@ async def test_storage_a_case_wrote_is_not_read_by_a_later_case_on_the_same_port
     the cycle eventually would, and writes to both stores before the first drive
     ends.
     """
+    window = _window_of_its_own(2)
     port = gateway_ports.free_port()
     monkeypatch.setattr(gateway_ports, "free_port", lambda: port)
 
-    async with driving(gateway_browser, tmp_path / "first", viewport=DESKTOP) as first:
+    async with driving(gateway_browser, tmp_path / "first", viewport=window) as first:
         await first.page.evaluate(
             "key => { localStorage.setItem(key, 'left'); sessionStorage.setItem(key, 'left'); }",
             _CANARY,
         )
 
-    async with driving(gateway_browser, tmp_path / "second", viewport=DESKTOP) as second:
+    async with driving(gateway_browser, tmp_path / "second", viewport=window) as second:
         assert second.origin == first.origin
         left = await second.page.evaluate(
             "key => [localStorage.getItem(key), sessionStorage.getItem(key)]", _CANARY
@@ -107,19 +128,20 @@ async def test_a_route_a_listener_and_a_second_page_end_with_the_case_that_made_
     opened fresh for every case, so neither can reach the next one; the second page
     is closed with the case that opened it, because the context it lives in is not.
     """
+    window = _window_of_its_own(3)
     unanswered: list[Dialog] = []
 
     def hold(dialog: Dialog) -> None:
         unanswered.append(dialog)
 
-    async with driving(gateway_browser, tmp_path / "first", viewport=DESKTOP) as first:
+    async with driving(gateway_browser, tmp_path / "first", viewport=window) as first:
         await first.page.route("**/app.js", _refuse)
         first.page.on("dialog", hold)
         beside = await first.page.context.new_page()
         await beside.goto(f"{first.origin}/")
         context = first.page.context
 
-    async with driving(gateway_browser, tmp_path / "second", viewport=DESKTOP) as second:
+    async with driving(gateway_browser, tmp_path / "second", viewport=window) as second:
         assert second.page.context is context
         assert context.pages == [second.page]
         assert await second.page.evaluate("() => confirm('dismissed?')") is False
@@ -134,14 +156,15 @@ async def test_a_context_whose_case_raised_is_closed_and_not_lent_again(
     So it is closed rather than shelved, and the next drive at that viewport is
     opened in a context of its own.
     """
+    window = _window_of_its_own(4)
     lent: list[BrowserContext] = []
     with pytest.raises(RuntimeError, match="the case failed"):
-        await _fail_inside_a_drive(gateway_browser, tmp_path / "first", lent)
+        await _fail_inside_a_drive(gateway_browser, tmp_path / "first", window, lent)
     [context] = lent
 
     with pytest.raises(BrowserError):
         await context.new_page()
-    async with driving(gateway_browser, tmp_path / "second", viewport=DESKTOP) as second:
+    async with driving(gateway_browser, tmp_path / "second", viewport=window) as second:
         assert second.page.context is not context
 
 
@@ -151,13 +174,13 @@ async def _refuse(route: Route) -> None:
 
 
 async def _fail_inside_a_drive(
-    browser: Browser, tmp_path: Path, lent: list[BrowserContext]
+    browser: Browser, tmp_path: Path, window: ViewportSize, lent: list[BrowserContext]
 ) -> None:
     """Open a drive, note the context it was lent, and end it by raising.
 
     Raises:
         RuntimeError: Always, from inside the drive.
     """
-    async with driving(browser, tmp_path, viewport=DESKTOP) as drive:
+    async with driving(browser, tmp_path, viewport=window) as drive:
         lent.append(drive.page.context)
         raise RuntimeError("the case failed")

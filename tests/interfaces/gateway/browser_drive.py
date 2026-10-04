@@ -434,8 +434,7 @@ class _Shelf:
     layer:** state set on the *context* itself — ``context.route``, ``context.on``,
     ``context.add_init_script``, ``context.grant_permissions`` and the like. A case
     reaches its context only to open a second page. ``test_browser_isolation.py``
-    pins each half of this, and the layer is run in reverse order as well as the
-    usual one before a change to it is shipped.
+    pins each half of this.
 
     **A context is lent again only after a clean exit.** A case that raised — a
     failed assertion, a timeout, a cancellation — returns a context nothing vouches
