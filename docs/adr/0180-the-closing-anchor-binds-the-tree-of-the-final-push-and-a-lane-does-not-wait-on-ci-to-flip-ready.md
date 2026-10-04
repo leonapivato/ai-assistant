@@ -1,6 +1,6 @@
 # 180. The closing anchor binds the tree of the final push, and a lane does not wait on CI to flip ready
 
-- Status: Accepted
+- Status: Accepted, §4's trigger bullet and a Consequences revisit trigger amended by ADR-0288
 - Date: 2026-08-22
 - **What this changes and what it does not.** It changes two things about the
   tail of a branch: ADR-0136 §1's closing anchor stops being an *ordering*
@@ -10,6 +10,25 @@
   what a review record covers, and nothing about the merge bar: `gate` green on
   the merged content is still required, and the merger still watches it. No
   Protocol, no `core/types.py` value and no runtime behaviour is decided here.
+- Amended: 2026-10-04 by
+  [ADR-0288](0288-marking-a-draft-ready-runs-no-gate.md) — **§4's first bullet, in
+  its trigger half, and the third revisit trigger in Consequences.** §4 says
+  `gate.yml` keeps *"the same four `pull_request` types"*, and that *"§2 depends on
+  `ready_for_review` continuing to trigger a run, because that run is the one the
+  merger reads on a lane that never waited"*. ADR-0288 §1 removes `ready_for_review`
+  from the types, so they are three, and marking a draft ready runs no gate. The
+  run the merger reads is the one the head's own push started, which carries no
+  draft condition (ADR-0288 §1:2). The Consequences' trigger *"if CI ever stops
+  running on `ready_for_review`"* has fired. ADR-0288 §2 is the revisit it asks for,
+  and it finds that §2 does not depend on that run and stands entire. So does every
+  other marked clause, §1:1 to §3:3. The Context's fourth fact, and the
+  Consequences bullets *"One CI run instead of two, where the flip is prompt"* and
+  *"A cancelled predecessor run becomes routine on the PR page"*, describe the
+  workflow as it stood on 2026-08-22 and no longer describe it. **This is an
+  amendment and not a supersession** (ADR-0070 §1): no marked clause moves, and a
+  reader holding only this ADR acts identically. This change takes effect on
+  ratification of ADR-0288. Nothing below is rewritten: the sentences stay legible
+  where they were written, beside this note.
 
 ## Context
 

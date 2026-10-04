@@ -90,6 +90,22 @@
   own §1 — ADR-0070 §1's first term — with no other ADR as its cause, so it is
   recorded as this appended dated note, the Consequences text below is **not**
   rewritten, and no `Status` edit is owed (ADR-0082 §1). Refs #997, PR #987.
+- Amended: 2026-10-04 by
+  [ADR-0288](0288-marking-a-draft-ready-runs-no-gate.md) — **§4's first net, in
+  its list of trigger types, and §6's first bullet as it reads that list.** §4 says
+  `.github/workflows/gate.yml` *"triggers on four `pull_request` types — `opened`,
+  `synchronize`, `reopened`, `ready_for_review` —"*. ADR-0288 §1 removes
+  `ready_for_review`, so it triggers on three, and marking a draft ready runs no
+  gate. §6 says §4 *"depends on CI's being unchanged — including on the trigger
+  set"*. The net does not rest on the type removed. §4 names `synchronize` as
+  *"the one that carries this net"*, and that type is unchanged. So are the net's
+  reliance on the draft PR being open and its one gap, and ADR-0288 §1:2 keeps the
+  run free of any draft condition, which the net needs. **This is an amendment and
+  not a supersession** (ADR-0070 §1): a reader holding only this ADR acts
+  identically. This `Status` line leads with `Partially superseded by`, so the
+  record is this note alone and the line is not edited (ADR-0082 §2). ADR-0015's
+  header note, which restates §4's four types, points here. This change takes
+  effect on ratification of ADR-0288. Nothing in §4 or §6 is rewritten.
 - **What this changes and what it does not.** It moves one sentence of ADR-0015's
   `Consequences` — the every-commit full gate — and nothing else. CI's gate is
   untouched (§6), the Definition of Done is untouched, and no Protocol, no
