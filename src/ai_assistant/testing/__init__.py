@@ -12,10 +12,6 @@ only; production code must not import it (enforced by ``lint-imports``).
 
 from __future__ import annotations
 
-from ai_assistant.testing.archive import (
-    FakeTranscriptArchive,
-    FakeTranscriptArchiveWriter,
-)
 from ai_assistant.testing.batch import (
     DEFAULT_BATCH_ISSUER,
     DEFAULT_BATCH_REPLY,
@@ -329,8 +325,6 @@ __all__ = [
     "FakeTraceRetention",
     "FakeTraceSink",
     "FakeTraceStore",
-    "FakeTranscriptArchive",
-    "FakeTranscriptArchiveWriter",
     "FakeWebSearcher",
     "ModelCall",
     "PolicyCall",

@@ -37,11 +37,14 @@ from ai_assistant.core.types import Reversibility, RiskLevel, describe_untrusted
 #: The string an operator sets a setting to in the environment to select its
 #: ``None`` value — "disable this entirely". Environment variables arrive as
 #: strings, so any nullable setting whose *default* is not ``None``
-#: (``confirm_at_risk``, ``confirm_at_reversibility``, ``episode_retention``,
-#: ``deferral_ttl``, ``trace_retention``)
+#: (``confirm_at_risk``, ``confirm_at_reversibility``, ``deferral_ttl``,
+#: ``trace_retention``)
 #: would otherwise be un-disable-able from the environment: omitting the variable
 #: restores the default, and neither a scale member nor a duration literal spells
-#: ``None``. Case-insensitive, and distinct from every ``RiskLevel`` and
+#: ``None``. ``episode_retention`` opts in too although its default is now ``None``:
+#: ADR-0287 §1 keeps its ``None`` spelling with its type, so an operator's
+#: ``ASSISTANT_EPISODE_RETENTION=none`` still means what it meant.
+#: Case-insensitive, and distinct from every ``RiskLevel`` and
 #: ``Reversibility`` member value and from every duration form, so it cannot
 #: collide with a real value on any field that opts into it.
 _DISABLE_SENTINEL = "none"
@@ -694,9 +697,10 @@ _DurationSetting = Annotated[timedelta, BeforeValidator(_only_a_duration)]
 _NullableDuration = Annotated[timedelta | None, BeforeValidator(_only_a_duration)]
 
 #: A retention horizon, or ``None`` for "keep forever" — reachable from the
-#: environment only through the disable sentinel, since the default is finite
-#: (ADR-0074 §7). The nullable duration *with* the sentinel, where
-#: :data:`_NullableDuration` is the one without it.
+#: environment only through the disable sentinel wherever the default is finite.
+#: The nullable duration *with* the sentinel, where :data:`_NullableDuration` is the
+#: one without it. ``episode_retention`` keeps it under a ``None`` default (ADR-0287
+#: §1), so the spelling an operator already uses goes on parsing.
 #:
 #: pydantic runs the **last** ``BeforeValidator`` listed here first, so
 #: :func:`_only_a_duration` sees the value exactly as it was configured and
@@ -2656,18 +2660,20 @@ class Settings(BaseSettings):
     # parsed from an ISO-8601 duration or ``HH:MM:SS`` string in the environment
     # (``ASSISTANT_EPISODE_RETENTION=P7D``, ``ASSISTANT_CONVERSATION_TOMBSTONE_GRACE=PT1H``).
     #
-    # ``episode_retention`` **defaults to a finite duration, and that is the whole
-    # decision** (ADR-0074 §7). It is the right *shape* to copy from
-    # ``confirmation_ttl`` above and exactly the wrong default to inherit: that
-    # field defaults to ``None``, which there means "a parked confirmation never
-    # goes stale" and here would mean **unbounded episodic retention** — an
-    # ever-growing Tier 1 log of everything the user has ever typed, with no cap
-    # decision behind it (ADR-0007 §5 deferred size caps), which is precisely what
-    # §7 rejects. An implementation that copied the default along with the type
-    # would ship the opposite of the ADR while looking like it followed it. So
-    # ``None`` here means "keep forever", it is the user's deliberate choice, and it
-    # is reachable only by setting the variable to the disable sentinel — which is
-    # also what switches conversation reclaim off entirely (§7).
+    # ``episode_retention`` **defaults to ``None``: an episode is kept until it is
+    # forgotten** (ADR-0287 §1, partially superseding ADR-0074 §7's finite default).
+    # The episode is the one record of what was said (ADR-0284), and no pass distils
+    # it into a belief any more (ADR-0285), so a finite default would delete the only
+    # copy. The cost is the one §7 named: the episodic store grows without bound
+    # unless a deployment sets a horizon, with no size cap decided behind it
+    # (ADR-0007 §5).
+    #
+    # The setting itself is unmoved. A deployment that sets a finite window gets
+    # exactly what it got before: the writer stamps ``expires_at`` from it, the store
+    # hides an expired record at the read, and ``retention_purge`` deletes it. The
+    # disable sentinel still spells ``None``, and ``None`` still switches conversation
+    # reclaim off entirely (ADR-0074 §7), which under this default means deletion is
+    # the only thing that removes a conversation.
     #
     # ``conversation_tombstone_grace`` is **positive and finite with no ``None``
     # spelling** (§8), because "no grace" and "infinite grace" are the two values
@@ -2677,12 +2683,13 @@ class Settings(BaseSettings):
     # them. ``gt=timedelta(0)`` refuses the first at load, as ``confirmation_ttl``
     # refuses its own non-positive values.
     episode_retention: _OptionalDuration = Field(
-        default=timedelta(days=30),
+        default=None,
         gt=timedelta(0),
         description=(
-            "How long a captured conversation turn's episode is retained. Finite by "
-            "default (ADR-0074 §7); set it to 'none' to keep episodes forever, which "
-            "also stops idle conversations being reclaimed."
+            "How long a captured conversation turn's episode is retained. Unset keeps "
+            "episodes until they are forgotten, which is the default (ADR-0287 §1) "
+            "and also stops idle conversations being reclaimed; a finite window "
+            "expires and purges them."
         ),
     )
     conversation_tombstone_grace: _DurationSetting = Field(
@@ -2691,54 +2698,6 @@ class Settings(BaseSettings):
         description=(
             "How long a deleted conversation's tombstone survives the deletion, so a "
             "capture that commits late is still swept (ADR-0074 §8). Positive and finite."
-        ),
-    )
-
-    # --- The transcript archive (ADR-0225) -------------------------------
-    # Whether the archive is written at all, and how long it keeps what it holds.
-    # Two settings rather than one, because one field cannot spell both answers
-    # (§6): "how long" and "whether at all" are different questions, and the
-    # durations here are validated ``gt=timedelta(0)``, so there is no duration that
-    # spells "off". Collapsing them would mean either a zero duration — the value
-    # ADR-0074 §8 calls out as breaking its own protocol — or reading ``None`` as
-    # "off", which is the mirror image of the mistake §7 warns about for
-    # ``confirmation_ttl``: the same spelling meaning "keep forever" in one field and
-    # "keep nothing" in another.
-    #
-    # ``transcript_archive_retention`` **defaults to ``None``, and that is the
-    # deliberate opposite of ``episode_retention``'s finite default** (§6). §7's
-    # argument for a finite episodic default is entirely about the read path: an
-    # unbounded one "would ship an ever-growing Tier 1 log of everything the user has
-    # ever typed" inside the store the pipeline retrieves from and the observer
-    # mines. The archive is in neither — nothing retrieves it, nothing observes it,
-    # nothing reads it into a prompt (§4) — and a finite default here would
-    # reintroduce exactly the loss the archive exists to remove, at a second number
-    # nobody can argue for. The user may set one; the system does not choose one on
-    # their behalf.
-    #
-    # It is read from nowhere else: no implementation derives it from
-    # ``episode_retention``, and a change to that setting moves nothing in the
-    # archive. Enforcement is **at the read** (§6), so shortening it takes effect on
-    # the next read everywhere and lengthening it undertakes nothing in the other
-    # direction — what reclamation has already taken is gone.
-    #
-    # ``transcript_archive_enabled`` defaults to ``True``, because a worst-case net
-    # that is off by default catches nothing. Turning it off stops the write and
-    # **destroys nothing**: entries already held stay, stay searchable and stay
-    # destroyable, so a configuration change is never a silent deletion.
-    transcript_archive_enabled: bool = Field(
-        default=True,
-        description=(
-            "Whether a captured turn is also written to the transcript archive "
-            "(ADR-0225 §6). Turning it off stops the write and destroys nothing."
-        ),
-    )
-    transcript_archive_retention: _NullableDuration = Field(
-        default=None,
-        gt=timedelta(0),
-        description=(
-            "How long the transcript archive keeps an entry, enforced at the read. "
-            "Unset means keep forever, which is the default (ADR-0225 §6)."
         ),
     )
 
@@ -2830,6 +2789,9 @@ class Settings(BaseSettings):
     # can no longer explain. `None` — reachable only through the disable sentinel —
     # is the user's deliberate "ask me forever": the question never lapses and its
     # record is never purged, in the same words `episode_retention` already uses.
+    # ADR-0287 §1 has since moved `episode_retention`'s default to `None` and left
+    # this one at 30 days, so a deferred question now lapses before the episodes it
+    # is about rather than after them (ADR-0287's Consequences).
     #
     # `deferral_queue_limit` bounds the **answerable** queue (`PENDING` and before
     # its deadline); lapsed and resolved rows awaiting a sweep do not count against
@@ -2964,8 +2926,9 @@ class Settings(BaseSettings):
     # non-positive horizon would sweep every trace at the first purge, which is
     # an instrument switched off by misconfiguration. `None` — reachable only
     # through the disable sentinel — means keep forever, matching
-    # `episode_retention`'s convention, and a finite default is chosen for that
-    # field's reason: unbounded is the wrong thing to inherit by omission.
+    # `episode_retention`'s convention, and a finite default is chosen for the
+    # reason ADR-0074 §7 once gave that field: unbounded is the wrong thing to
+    # inherit by omission.
     trace_retention: _OptionalDuration = Field(
         default=timedelta(days=365),
         gt=timedelta(0),

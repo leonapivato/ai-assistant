@@ -1,19 +1,19 @@
-"""ADR-0221 §11's tests 8 and 9: the values are pinned, and absence still decodes.
+"""ADR-0221 §11's tests 8 and 9 for ``Modality``: values pinned, absence decodes.
 
 Test 8 — *every enum value is pinned* — is asserted **over the whole membership**
 rather than member by member, and that is the whole point of it. §2 fixes each
 member's serialised value because a ``StrEnum`` serialises its value and the record
 carrying it is wire-carried as well as persisted, so two conforming implementations
-emitting ``step_executed`` and ``STEP_EXECUTED`` for one fact would leave every
-record written under the loser undecodable. A per-member assertion would pass while
-a *seventeenth* member arrived spelled any way at all, which is exactly the drift
-§2's closing clause forbids: "a member added later takes a value of the same form —
-the member name lower-cased". So both halves are asserted: the exact roster of
-sixteen, and the form rule that outlives it.
+emitting ``speech`` and ``SPEECH`` for one fact would leave every record written
+under the loser undecodable. A per-member assertion would pass while a third member
+arrived spelled any way at all, which is exactly the drift §2's closing clause
+forbids: "a member added later takes a value of the same form — the member name
+lower-cased". So both halves are asserted: the exact roster, and the form rule that
+outlives it. §5 binds :class:`~ai_assistant.core.types.Modality` to that rule in
+terms.
 
-Since ADR-0284 §5:3 the enum is :class:`~ai_assistant.core.types.TranscriptEntry`'s
-alone — the episode carries no ``disposition``, and what became of a step or a route
-is on the stage entry that reached it — so the round trip is the transcript entry's.
+ADR-0287 §2 removed ``ExchangeDisposition``, the other enum §11 test 8 pinned, with
+the transcript archive that was its one carrier.
 
 Test 9 — *a record constructed with no capture stated* — is the migration §8 calls
 self-clearing, read from the record's side: ``capture`` is additive with a default
@@ -23,63 +23,27 @@ proves a record the store was *given* comes back whole
 (``tests/memory/memory_store_contract.py``), and this proves a payload written
 before the field existed decodes at all.
 
-Scoped to ``core``. What each render site does with a disposition is ADR-0221 §3's
-and Lane D's; what capture writes into either field is §5's and Lane E's. Neither is
-asserted here, and no phrase table appears in this module for the reason §3 keeps
-them out of ``core``.
+Scoped to ``core``. What capture writes into ``capture`` is §5's and Lane E's, and
+is not asserted here.
 """
 
 from __future__ import annotations
 
 import json
 from datetime import UTC, datetime
-from typing import TYPE_CHECKING, Any
+from typing import Any
 
 import pytest
 
 from ai_assistant.core.types import (
     Capture,
-    Disposition,
     EpisodicMemory,
-    ExchangeDisposition,
     MemorySource,
     Modality,
     Provenance,
-    RouteOutcome,
-    TranscriptEntry,
 )
 
-if TYPE_CHECKING:
-    from enum import StrEnum
-
 _WHEN = datetime(2026, 6, 1, tzinfo=UTC)
-
-#: ADR-0221 §2's table, member by member, in its own order: the no-step case, then
-#: one per :class:`Disposition` member, then one per :class:`RouteOutcome` member.
-#: Spelled out here rather than derived from the source enums — a derivation would
-#: reproduce whatever the implementation did, including a mistake, and the point of
-#: the pin is that the ADR and the code agree.
-_DISPOSITION_VALUES: dict[str, str] = {
-    "NO_ACTION_NEEDED": "no_action_needed",
-    "STEP_EXECUTED": "step_executed",
-    "STEP_DENIED": "step_denied",
-    "STEP_AWAITING_CONFIRMATION": "step_awaiting_confirmation",
-    "STEP_NO_CAPABLE_TOOL": "step_no_capable_tool",
-    "STEP_AMBIGUOUS_CAPABILITY": "step_ambiguous_capability",
-    "STEP_INVALID_PARAMETERS": "step_invalid_parameters",
-    "STEP_EGRESS_UNBINDABLE": "step_egress_unbindable",
-    # ADR-0259 §9's two, "ADR-0221 §2's own form, the member name lower-cased".
-    "STEP_EFFECT_ALREADY_CLAIMED": "step_effect_already_claimed",
-    "STEP_EFFECT_UNSCOPED": "step_effect_unscoped",
-    "ROUTED_PERFORMED": "routed_performed",
-    "ROUTED_AWAITING_CONFIRMATION": "routed_awaiting_confirmation",
-    "ROUTED_REFUSED": "routed_refused",
-    "ROUTED_AMBIGUOUS": "routed_ambiguous",
-    "ROUTED_AMBIGUOUS_TRUNCATED": "routed_ambiguous_truncated",
-    "ROUTED_NOT_FOUND": "routed_not_found",
-    "ROUTED_UNRECORDED": "routed_unrecorded",
-    "ROUTED_FAILED": "routed_failed",
-}
 
 #: ADR-0221 §5's two, pinned the same way and under §2's rule, which §5 extends to
 #: this enum in terms.
@@ -104,37 +68,12 @@ def _episode(**overrides: Any) -> EpisodicMemory:
 # --- §11.8: every enum value is pinned, over the whole membership -------------
 
 
-def test_exchange_disposition_is_one_member_per_source_member_and_one_more() -> None:
-    """§2's shape, asserted as an arithmetic identity rather than as a literal.
-
-    The count is not an arbitrary number: it is one per :class:`Disposition` member,
-    one for the no-step case, and one per :class:`RouteOutcome` member. Asserting it
-    against the *source* enums' lengths is what makes this fail on the day a member
-    is added to one of them without a member here — the cost §2 accepts and
-    ``assert_never`` at the render sites collects.
-
-    **The literal it used to carry beside them is gone rather than refreshed**
-    (ADR-0259 §9 takes both enums to eighteen). A number written twice is a number
-    that can be updated in one place, and the arithmetic below is the property §2
-    actually states; :data:`_DISPOSITION_VALUES` is what pins the membership itself,
-    name by name and value by value, which is the pin a count was standing in for.
-    """
-    assert len(ExchangeDisposition) == len(Disposition) + 1 + len(RouteOutcome)
-    assert len(ExchangeDisposition) == len(_DISPOSITION_VALUES)
-
-
-def test_every_exchange_disposition_value_is_the_one_the_adr_fixes() -> None:
-    """§2's table, whole. A seventeenth member fails here rather than shipping."""
-    assert {member.name: member.value for member in ExchangeDisposition} == _DISPOSITION_VALUES
-
-
 def test_every_modality_value_is_the_one_the_adr_fixes() -> None:
     """§5's two, under §2's rule, which §5 binds to this enum in terms."""
     assert {member.name: member.value for member in Modality} == _MODALITY_VALUES
 
 
-@pytest.mark.parametrize("enum", [ExchangeDisposition, Modality], ids=["disposition", "modality"])
-def test_every_member_takes_a_value_of_the_stated_form(enum: type[StrEnum]) -> None:
+def test_every_modality_member_takes_a_value_of_the_stated_form() -> None:
     """§2's closing clause: the value is the member name lower-cased.
 
     The half of test 8 the roster above cannot carry. A member added later is a
@@ -142,37 +81,12 @@ def test_every_member_takes_a_value_of_the_stated_form(enum: type[StrEnum]) -> N
     changed"; this says *what* the new member's value has to be, and fails a member
     given a second spelling, an alias or a numeric encoding.
     """
-    assert all(member.value == member.name.lower() for member in enum)
-
-
-@pytest.mark.parametrize("member", list(ExchangeDisposition), ids=lambda m: m.value)
-def test_a_record_round_trips_carrying_the_same_disposition_back(
-    member: ExchangeDisposition,
-) -> None:
-    """§11.8's second half, over the whole membership rather than one member.
-
-    Through JSON rather than through ``model_dump()`` alone, because the claim §2
-    rests on is about what a *peer* decodes: the value that leaves this system as
-    text is the value that comes back as this member. The record is the transcript
-    entry, the enum's one carrier since ADR-0284 §5:3.
-    """
-    entry = TranscriptEntry(
-        address="e1",
-        conversation_id="c1",
-        occurred_at=_WHEN,
-        asked="where did we land on the flights?",
-        replied="Tuesday.",
-        disposition=member,
-    )
-    encoded = json.loads(entry.model_dump_json())
-
-    assert encoded["disposition"] == member.value
-    assert TranscriptEntry.model_validate(encoded).disposition is member
+    assert all(member.value == member.name.lower() for member in Modality)
 
 
 @pytest.mark.parametrize("member", list(Modality), ids=lambda m: m.value)
 def test_a_record_round_trips_carrying_the_same_modality_back(member: Modality) -> None:
-    """§11.8's second half for §5's enum, nested inside ``capture``."""
+    """§11.8's second half, through JSON, nested inside ``capture``."""
     encoded = json.loads(_episode(capture=Capture(modality=member)).model_dump_json())
 
     assert encoded["capture"] == {"modality": member.value}
