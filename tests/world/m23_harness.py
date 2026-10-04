@@ -143,8 +143,6 @@ from ai_assistant.testing import (
     FakeStreamingCompleter,
     FakeTraceRetention,
     FakeTraceSink,
-    FakeTranscriptArchive,
-    FakeTranscriptArchiveWriter,
     source_grant,
 )
 from ai_assistant.tools.builtin import (
@@ -661,8 +659,6 @@ def build_world(
             memory=store,
             retention=timedelta(days=30),
             now=lambda: NOW,
-            archive=FakeTranscriptArchiveWriter(),
-            archive_enabled=True,
         ),
         # A separate provider from the planner's: one ``FakeModelProvider`` shared
         # across the two seams would hand the composer the planner's JSON.
@@ -692,7 +688,6 @@ def build_world(
         ),
         connection_operations=ConnectionOperations(provisioner=FakeConnectionProvisioner()),
         now=lambda: NOW,
-        archive=FakeTranscriptArchive(),
     )
 
     ids = count(1)

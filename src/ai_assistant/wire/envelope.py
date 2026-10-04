@@ -2411,7 +2411,11 @@ from ai_assistant.wire.errors import (
 #:     ``ProcessingReason`` and to ``ControllerRule``, on the wire-carried record.
 #: 72: ADR-0286 §15 lane 2 advances ``EpisodeProcessingRecord.schema_version`` to
 #:     ``Literal[6]`` (§13:1), on the wire-carried record.
-PROTOCOL_VERSION: Final[int] = 72
+#: 73: ADR-0287 §3 removes the seven transcript-archive members from the promoted
+#:     ``AssistantEngine`` method set: ``transcript_search``, ``transcript_conversation``,
+#:     ``transcript_entry``, ``transcript_entries``, ``forget_transcript_entry``,
+#:     ``forget_transcript_conversation`` and ``transcript_archive_size``.
+PROTOCOL_VERSION: Final[int] = 73
 
 #: ADR-0085 §8a: "The correlation id is a UUID string and is at most 36 bytes.
 #: Bounding it is what makes the reserve a constant rather than an aspiration; a

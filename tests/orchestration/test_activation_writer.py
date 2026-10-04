@@ -14,7 +14,6 @@ from ai_assistant.core.errors import (
     ConversationStoreError,
     MemoryStoreConflictError,
     MemoryStoreError,
-    TranscriptArchiveError,
 )
 from ai_assistant.core.types import (
     ActivationLinks,
@@ -24,7 +23,6 @@ from ai_assistant.core.types import (
     ControllerRule,
     ControllerStage,
     EpisodicMemory,
-    ExchangeDisposition,
     MemoryWrite,
     MemoryWriteMode,
     Modality,
@@ -44,20 +42,12 @@ from ai_assistant.core.types import (
 from ai_assistant.orchestration.activation_state import CaptureFacts, admit_channel
 from ai_assistant.orchestration.activation_writer import ActivationWriter
 from ai_assistant.orchestration.conversations import conversation_channel
-from ai_assistant.testing import (
-    FakeConversationStore,
-    FakeMemoryStore,
-    FakeTranscriptArchiveWriter,
-)
+from ai_assistant.testing import FakeConversationStore, FakeMemoryStore
 
 if TYPE_CHECKING:
     from collections.abc import Awaitable, Callable, Sequence
 
-    from ai_assistant.core.types import (
-        Conversation,
-        EpisodeCaptureReport,
-        TranscriptEntry,
-    )
+    from ai_assistant.core.types import Conversation, EpisodeCaptureReport
     from ai_assistant.orchestration.activation_state import ActivationState
 
 _AT = datetime(2026, 9, 20, tzinfo=UTC)
@@ -130,39 +120,22 @@ class TurnUnrecordable(FakeConversationStore):
         return await super().get(conversation_id)
 
 
-class DeletingArchive(FakeTranscriptArchiveWriter):
-    """An archive whose append is followed by the conversation's deletion."""
-
-    def __init__(self) -> None:
-        super().__init__()
-        self.after: Callable[[], Awaitable[None]] | None = None
-
-    async def append(self, entry: TranscriptEntry) -> None:
-        await super().append(entry)
-        if self.after is not None:
-            await self.after()
-
-
 class Wiring:
-    """The production writer with three observable canonical stores."""
+    """The production writer with two observable canonical stores."""
 
     def __init__(
         self,
         *,
         memory: FakeMemoryStore | None = None,
         conversations: FakeConversationStore | None = None,
-        archive_enabled: bool = True,
     ) -> None:
         self.memory = memory if memory is not None else FakeMemoryStore(now=lambda: _AT)
         self.conversations = (
             conversations if conversations is not None else FakeConversationStore(now=lambda: _AT)
         )
-        self.archive = DeletingArchive()
         self.writer = ActivationWriter(
             memory=self.memory,
             conversations=self.conversations,
-            archive=self.archive,
-            archive_enabled=archive_enabled,
             retention=timedelta(days=30),
             now=lambda: _AT,
         )
@@ -192,9 +165,6 @@ class Wiring:
         if captured:
             assert conversation is not None
             state.facts = CaptureFacts(
-                asked="exact request",
-                response="the complete reply",
-                disposition=ExchangeDisposition.NO_ACTION_NEEDED,
                 modality=Modality.TEXT,
                 supplied_withheld=False,
                 derived_from_external=False,
@@ -259,10 +229,6 @@ async def test_an_ended_exchange_is_written_at_its_activation_address_on_its_cha
     # understood the input, so a line of its status, then the user's own words.
     assert episode.content == episode_content(episode)
     assert episode.content == "status completed, reason returned\n  exact request  "
-    entry = wiring.archive.recorded[_ADDRESS]
-    assert entry.asked == "exact request", "the archive's half is threaded, not the content"
-    assert entry.replied == "the complete reply"
-    assert entry.occurred_at == _AT
 
 
 class CommitThen(FakeMemoryStore):
@@ -279,12 +245,11 @@ class CommitThen(FakeMemoryStore):
         return written
 
 
-async def test_a_record_forgotten_between_episode_and_entry_leaves_no_entry() -> None:
-    """ADR-0225 §5 under §7:1: the user forgot the record before its entry landed.
+async def test_a_record_forgotten_once_it_is_frozen_gets_no_record_turn() -> None:
+    """ADR-0286 §8, as ADR-0287 §4 keeps it: the user forgot the record after its freeze.
 
-    ``forget`` marks the capture, its discard finds nothing and its delete takes the
-    episode; the writer then appends the entry, sees the mark, calls no
-    ``record_turn`` and destroys the entry through the fence.
+    ``forget`` marks the capture and its delete takes the episode; the writer then sees
+    the mark, calls no ``record_turn`` and reports the capture degraded.
     """
     memory = CommitThen()
     wiring = Wiring(memory=memory)
@@ -292,49 +257,19 @@ async def test_a_record_forgotten_between_episode_and_entry_leaves_no_entry() ->
 
     async def forgotten() -> None:
         wiring.writer.forgetting(_ADDRESS)
-        await wiring.archive.discard(_ADDRESS)
         await memory.delete(_ADDRESS)
 
     memory.after = forgotten
     report = await wiring.write(state)
 
     assert report.state == "degraded"
-    assert wiring.archive.recorded == {}
     assert await wiring.memory.get(_ADDRESS) is None
     assert await wiring.last_turn_at(state) is None, "no record_turn for a forgotten episode"
     assert state.recorded_episode_id is None
 
 
-class Undiscardable(DeletingArchive):
-    """An archive whose discard fails, as a broken backing's would."""
-
-    async def discard(self, address: str) -> bool:
-        raise TranscriptArchiveError("private provider diagnostics")
-
-
-async def test_a_record_forgotten_before_its_entry_is_never_given_one() -> None:
-    """ADR-0225 §5: a marked capture writes no entry, so no failed discard can strand one."""
-    memory = CommitThen()
-    wiring = Wiring(memory=memory)
-    wiring.archive = Undiscardable()
-    wiring.writer._archive = wiring.archive
-    state = await wiring.state()
-
-    async def forgotten() -> None:
-        wiring.writer.forgetting(_ADDRESS)
-        await memory.delete(_ADDRESS)
-
-    memory.after = forgotten
-    report = await wiring.write(state)
-
-    assert report.state == "degraded"
-    assert wiring.archive.recorded == {}, "no entry was written for a forgotten record"
-    assert await wiring.memory.get(_ADDRESS) is None
-    assert await wiring.last_turn_at(state) is None
-
-
 async def test_an_episode_forgotten_before_it_commits_is_destroyed_by_its_capture() -> None:
-    """ADR-0225 §5: ``forget`` found nothing yet, so the capture destroys what it writes."""
+    """ADR-0286 §8: ``forget`` found nothing yet, so the capture destroys what it writes."""
     memory = CommitThen()
     wiring = Wiring(memory=memory)
     state = await wiring.state()
@@ -347,57 +282,20 @@ async def test_an_episode_forgotten_before_it_commits_is_destroyed_by_its_captur
     report = await wiring.write(state)
 
     assert report.state == "degraded"
-    assert wiring.archive.recorded == {}
     assert await wiring.on_channel(state) == []
     assert await wiring.last_turn_at(state) is None
     assert wiring.writer._in_flight == {}, "the capture stopped being tracked"
 
 
-async def test_an_expired_episode_keeps_its_transcript() -> None:
-    """ADR-0225 §5: expiry removes nothing from the archive, and no read stands in for forget.
-
-    The episode's retention passes once its freeze is confirmed and its entry written;
-    the capture is unmarked, so the entry, the turn and the report stand.
-    """
-    reading = [_AT]
-    wiring = Wiring(memory=FakeMemoryStore(now=lambda: reading[0]))
-    wiring.writer._retention = timedelta(seconds=1)
-    state = await wiring.state()
-
-    async def expired() -> None:
-        reading[0] = _AT + timedelta(seconds=5)
-
-    wiring.archive.after = expired
-    report = await wiring.write(state)
-
-    assert report.state == "recorded"
-    assert _ADDRESS in wiring.archive.recorded
-    assert await wiring.memory.get(_ADDRESS) is None, "the episode reads as expired"
-    assert await wiring.last_turn_at(state) == _AT
-
-
-async def test_the_archive_switch_off_records_the_episode_and_the_turn_and_no_entry() -> None:
-    """ADR-0225 §6: with the archive switched off the capture is otherwise unchanged."""
-    wiring = Wiring(archive_enabled=False)
-    state = await wiring.state()
-    report = await wiring.write(state)
-    assert report.state == "recorded"
-    assert report.episode_id == _ADDRESS
-    assert wiring.archive.recorded == {}
-    assert await wiring.on_channel(state) == [_ADDRESS]
-    assert state.recorded_episode_id == _ADDRESS
-    assert await wiring.last_turn_at(state) == _AT
-
-
 @pytest.mark.parametrize("standalone", [False, True])
-async def test_a_capture_with_no_capture_facts_has_no_archive_entry_and_is_in_history(
+async def test_a_capture_with_no_capture_facts_is_in_history(
     standalone: bool,
 ) -> None:
     """A pass that ends before capture is still on its channel, and in its history.
 
     ADR-0284 §6:2 retires the eligibility axis (superseding ADR-0283 §7:5): the episode
     is read by history like any other. Its ``content`` is §7's one rule, as on every
-    other episode, it carries no ``disposition`` (§5:3), and it owes no transcript entry.
+    other episode, and it carries no ``disposition`` (§5:3).
     """
     wiring = Wiring()
     state = await wiring.state(captured=False, standalone=standalone)
@@ -409,7 +307,6 @@ async def test_a_capture_with_no_capture_facts_has_no_archive_entry_and_is_in_hi
     assert episode.content == episode_content(episode)
     assert "disposition" not in episode.model_dump()
     assert episode.processing_record is not None
-    assert wiring.archive.recorded == {}
     if standalone:
         assert await wiring.conversations.recent() == []
         return
@@ -428,7 +325,6 @@ async def test_complete_record_bound_refuses_before_any_write() -> None:
     )
     assert (await wiring.write(state)).state == "degraded"
     assert await wiring.memory.export() == []
-    assert wiring.archive.recorded == {}
     assert await wiring.last_turn_at(state) is None
 
 
@@ -442,7 +338,6 @@ async def test_an_unknown_record_turn_outcome_leaves_a_standing_conversation_s_w
     assert report.state == "degraded"
     assert report.episode_id is None
     assert await wiring.memory.get(_ADDRESS) is not None
-    assert _ADDRESS in wiring.archive.recorded
     assert logs == [
         {
             "event": "activation_capture_degraded",
@@ -469,7 +364,7 @@ async def test_commit_then_failure_on_a_deleted_conversation_leaves_no_episode(
     cancelled: bool,
 ) -> None:
     """§7:4, §14:2: an episode write that commits and then propagates cancellation (or
-    fails), on a conversation deleted meanwhile, leaves no episode and no archive entry."""
+    fails), on a conversation deleted meanwhile, leaves no episode."""
     memory = CommitThenFail(cancelled=cancelled)
     wiring = Wiring(memory=memory)
     state = await wiring.state()
@@ -487,17 +382,15 @@ async def test_commit_then_failure_on_a_deleted_conversation_leaves_no_episode(
         assert all("secret" not in str(row) for row in logs)
     assert await wiring.memory.export() == []
     assert await wiring.on_channel(state) == []
-    assert wiring.archive.recorded == {}
     assert state.recorded_episode_id is None
 
 
 async def test_an_indeterminate_freeze_its_read_confirms_is_recorded() -> None:
     """ADR-0286 §3:5: the freezing write's outcome is not known, and one read before the
-    archive entry finds the freezing revision stored, which confirms the freeze."""
+    ``record_turn`` finds the freezing revision stored, which confirms the freeze."""
     wiring = Wiring(memory=CommitThenFail())
     state = await wiring.state()
     assert (await wiring.write(state)).state == "recorded"
-    assert _ADDRESS in wiring.archive.recorded
     assert await wiring.on_channel(state) == [_ADDRESS]
     assert await wiring.last_turn_at(state) == _AT
     episode = await wiring.memory.get(_ADDRESS)
@@ -508,13 +401,12 @@ async def test_an_indeterminate_freeze_its_read_confirms_is_recorded() -> None:
 
 async def test_an_indeterminate_freeze_that_did_not_land_leaves_no_episode() -> None:
     """ADR-0286 §3:5, §5:2: the read finds the open record, not the freezing revision —
-    a mismatch, so no archive entry, no ``record_turn``, and the episode deleted,
-    whatever the conversation's state."""
+    a mismatch, so no ``record_turn``, and the episode deleted, whatever the
+    conversation's state."""
     wiring = Wiring(memory=CommitThenFail(commits=False))
     state = await wiring.state()
     with capture_logs() as logs:
         assert (await wiring.write(state)).state == "degraded"
-    assert wiring.archive.recorded == {}
     assert await wiring.on_channel(state) == []
     assert await wiring.memory.export() == []
     assert await wiring.last_turn_at(state) is None
@@ -525,32 +417,30 @@ async def test_an_indeterminate_freeze_that_did_not_land_leaves_no_episode() -> 
     ]
 
 
-async def test_a_conversation_deleted_before_record_turn_keeps_neither_write() -> None:
-    """§7:2, §14:2: ``record_turn``'s ``None`` deletes the episode and discards the
-    archive entry, and the capture is degraded."""
-    wiring = Wiring()
+async def test_a_conversation_deleted_before_record_turn_keeps_no_episode() -> None:
+    """§7:2, §14:2: ``record_turn``'s ``None`` deletes the episode, and the capture is
+    degraded."""
+    memory = CommitThen()
+    wiring = Wiring(memory=memory)
     state = await wiring.state()
 
     async def deleted() -> None:
         await wiring.conversations.stamp_deleted(str(state.conversation_id))
 
-    wiring.archive.after = deleted
+    memory.after = deleted
     report = await wiring.write(state)
     assert report.state == "degraded"
     assert report.episode_id is None
     assert await wiring.memory.export() == []
     assert await wiring.on_channel(state) == []
-    assert wiring.archive.recorded == {}
 
 
 async def test_a_write_known_not_to_have_committed_reaches_nothing_else() -> None:
-    """ADR-0286 §2:4: an admission collision is a capture failure — no archive entry,
-    no ``record_turn``, and no compensation that could delete the record already
-    holding the address."""
+    """ADR-0286 §2:4: an admission collision is a capture failure — no ``record_turn``,
+    and no compensation that could delete the record already holding the address."""
     wiring = Wiring(memory=Conflicting(now=lambda: _AT))
     state = await wiring.state()
     assert (await wiring.write(state)).state == "degraded"
-    assert wiring.archive.recorded == {}
     assert await wiring.last_turn_at(state) is None
 
 
@@ -680,7 +570,6 @@ async def test_a_stored_record_other_than_the_one_written_is_a_mismatch_and_leav
     assert [(row["stage"], row["reason"]) for row in logs] == [("append", "mismatch")]
     assert report.state == "degraded"
     assert await wiring.memory.export() == []
-    assert wiring.archive.recorded == {}
     assert await wiring.last_turn_at(state) is None
 
 
@@ -700,7 +589,6 @@ async def test_the_write_after_a_forget_mark_writes_nothing_and_deletes() -> Non
 
     assert report.state == "degraded"
     assert await wiring.memory.export() == []
-    assert wiring.archive.recorded == {}
     assert await wiring.last_turn_at(state) is None
 
 
@@ -726,7 +614,6 @@ async def test_a_cancellation_after_the_fallback_admission_commits_leaves_no_epi
 
     assert await wiring.memory.export() == []
     assert not wiring.writer.holds(_ADDRESS)
-    assert wiring.archive.recorded == {}
     assert await wiring.last_turn_at(state) is None
 
 
@@ -802,8 +689,6 @@ def _restarted(wiring: Wiring) -> ActivationWriter:
     return ActivationWriter(
         memory=wiring.memory,
         conversations=wiring.conversations,
-        archive=wiring.archive,
-        archive_enabled=True,
         retention=timedelta(days=30),
         now=lambda: _AT,
     )

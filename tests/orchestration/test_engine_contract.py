@@ -55,7 +55,6 @@ from assistant_engine_contract import (
     SettledParkSubject,
     SingleSlotParkSubject,
     SpendSubject,
-    TranscriptSubject,
     backwards_clock,
     near_ceiling_limit,
     overfull_invocation_rows,
@@ -63,7 +62,6 @@ from assistant_engine_contract import (
     seeded_read_trail,
     seeded_spend_ledger,
     seeded_trail,
-    seeded_transcript_archive,
 )
 from episode_inspection_contract import (
     INSPECTION_AT,
@@ -169,8 +167,6 @@ from ai_assistant.testing import (
     FakeToolInvoker,
     FakeTraceRetention,
     FakeTraceSink,
-    FakeTranscriptArchive,
-    FakeTranscriptArchiveWriter,
     opening_act,
 )
 from ai_assistant.testing.grants import source_grant
@@ -458,7 +454,6 @@ def _wire(  # noqa: PLR0913 — one knob per state the shared suite needs a subj
     authorizations: GoalAuthorizationStore | None = None,
     max_outstanding_confirmations: int = _DEFAULT_MAX_OUTSTANDING,
     notification_outbox: FakeNotificationOutbox | None = None,
-    archive: FakeTranscriptArchive | None = None,
 ) -> Engine:
     """Build one engine over in-memory fakes, wired as the composition root would.
 
@@ -564,8 +559,6 @@ def _wire(  # noqa: PLR0913 — one knob per state the shared suite needs a subj
         memory=records,
         retention=RETENTION,
         now=conversation_clock,
-        archive=FakeTranscriptArchiveWriter(),
-        archive_enabled=True,
     )
     writer = FakeMemoryWriter(store=records, policy=FakeMemoryPolicy(), now=lambda: AT)
     deferrals = FakeDeferralStore(now=lambda: AT)
@@ -677,7 +670,6 @@ def _wire(  # noqa: PLR0913 — one knob per state the shared suite needs a subj
         id_factory=_counter("tok"),
         max_payload_bytes=max_payload_bytes,
         max_outstanding_confirmations=max_outstanding_confirmations,
-        archive=FakeTranscriptArchive() if archive is None else archive,
     )
 
 
@@ -688,11 +680,10 @@ class TestEngineContract(AssistantEngineContract):
     async def episode_inspection(self) -> AsyncIterator[EpisodeInspectionSubject]:
         """The production engine with an injected inspection store and small payload bound."""
         memory = FakeMemoryStore(now=lambda: INSPECTION_AT)
-        archive = FakeTranscriptArchive()
-        built = _wire(memory=memory, archive=archive, max_payload_bytes=INSPECTION_LIMIT)
+        built = _wire(memory=memory, max_payload_bytes=INSPECTION_LIMIT)
         await built.start()
         try:
-            yield EpisodeInspectionSubject(engine=built, memory=memory, archive=archive)
+            yield EpisodeInspectionSubject(engine=built, memory=memory)
         finally:
             await built.aclose()
 
@@ -1175,24 +1166,6 @@ class TestEngineContract(AssistantEngineContract):
         await built.start()
         try:
             yield ReadSubject(engine=built, trail=trail)
-        finally:
-            await built.aclose()
-
-    @pytest.fixture
-    async def transcripts(self) -> AsyncIterator[TranscriptSubject]:
-        """One wired engine over a seeded transcript archive, and that archive.
-
-        Built and handed over on :attr:`reads`' terms exactly: the engine holds its
-        ``TranscriptArchive`` privately, so the suite's negative controls — a refusal
-        that must leave the archive untouched, a scripted fault that must not be
-        reached — are only expressible if the case can hold the object the
-        composition wired.
-        """
-        archive = seeded_transcript_archive()
-        built = _wire(archive=archive)
-        await built.start()
-        try:
-            yield TranscriptSubject(engine=built, archive=archive)
         finally:
             await built.aclose()
 

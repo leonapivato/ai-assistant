@@ -439,7 +439,7 @@ async def test_an_episode_write_that_commits_then_cancels_on_a_deleted_conversat
     assert await composed.held(conversation_id) == []
 
 
-async def test_a_conversation_deleted_while_a_pass_runs_leaves_neither_episode_nor_archive(
+async def test_a_conversation_deleted_while_a_pass_runs_leaves_no_episode(
     composed: Composed, monkeypatch: pytest.MonkeyPatch
 ) -> None:
     """§7, §8: the pass's capture degrades and leaves nothing behind it."""
@@ -466,7 +466,6 @@ async def test_a_conversation_deleted_while_a_pass_runs_leaves_neither_episode_n
     assert result.capture.state == "degraded"
     address = f"activation:{result.capture.activation_id}"
     assert await composed.memory.get(address) is None
-    assert await composed.engine._archive.entry(address) is None
     assert await composed.held(conversation_id) == []
 
 

@@ -38,7 +38,6 @@ from ai_assistant.core.types import (
     ActionPlan,
     EpisodicMemory,
     EvidenceDigest,
-    ExchangeDisposition,
     GoalBrief,
     MemoryKind,
     MemorySource,
@@ -164,16 +163,14 @@ def _episode(
     content: str,
     *,
     outcome: str | None = None,
-    disposition: ExchangeDisposition | None = None,
 ) -> EpisodicMemory:
     """A captured turn, as ``orchestration.conversations`` stamps one.
 
-    ``outcome`` and ``disposition`` default to absent, which is what every case
-    asserting over the *carrier* wants: neither field is read at this seam, and
-    ADR-0229 §1 applies "no class, kind or field test at the servicer". A case
-    asserting over a **prompt** passes both, because ADR-0227 §7's fidelity rule
-    requires the shape ``Engine._capture`` writes — the reply in ``outcome``, beside
-    a ``disposition``, and absent from ``content``.
+    ``outcome`` defaults to absent, which is what every case asserting over the
+    *carrier* wants: the field is not read at this seam, and ADR-0229 §1 applies "no
+    class, kind or field test at the servicer". A case asserting over a **prompt**
+    passes it, because ADR-0227 §7:1's fidelity rule requires the shape
+    ``Engine._capture`` writes — the reply in ``outcome``, and absent from ``content``.
     """
     return EpisodicMemory(
         id=record_id,
@@ -2507,7 +2504,6 @@ async def test_a_label_naming_a_tail_record_changes_that_records_rendering_not_a
         "tail-1",
         "The user asked: which lender?",
         outcome=reply,
-        disposition=ExchangeDisposition.STEP_EXECUTED,
     )
     phrase_only = both.model_copy(update={"outcome": None})
 
@@ -2564,7 +2560,6 @@ async def test_the_budget_cuts_evidence_and_never_the_record_a_label_named() -> 
                 record_id,
                 f"The user asked about billing, round {position}.",
                 outcome=None if position == 0 else f"The billing answer, round {position}.",
-                disposition=ExchangeDisposition.STEP_EXECUTED,
             )
         )
     planner = FakePlanner(now=_clock, read_request=_hop("M1"))

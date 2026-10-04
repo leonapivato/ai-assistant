@@ -53,7 +53,6 @@ from ai_assistant.testing import (
     FakeNotificationOutbox,
     FakeNotificationPolicy,
     FakeNotificationStore,
-    FakeTranscriptArchive,
 )
 
 if TYPE_CHECKING:
@@ -158,7 +157,6 @@ def _wired(  # noqa: PLR0913 — one parameter per knob a case here varies, whic
         questions=harness.questions,
         notification_outbox=outbox,
         now=(lambda: AT) if now is None else now,
-        archive=FakeTranscriptArchive(),
     )
 
 

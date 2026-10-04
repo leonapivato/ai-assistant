@@ -168,7 +168,6 @@ from ai_assistant.testing import (
     FakeToolInvoker,
     FakeTraceRetention,
     FakeTraceSink,
-    FakeTranscriptArchive,
     evaluation_trace,
     source_grant,
 )
@@ -804,11 +803,6 @@ class Harness:
             if conversation_store is None
             else conversation_store
         )
-        # ADR-0225 §10: **one** archive, handed out as two seams — the narrow writer
-        # to capture and the wide face to the façade below — which is what the
-        # composition root does. Two unrelated fakes would be a composition nothing
-        # builds: capture would write into one store and ``forget`` would destroy from
-        # another, so every cascade case would pass vacuously.
         #: ADR-0238 §14's store, and ADR-0242 §4's: **the caller's where one was given**,
         #: so the engine's three trust operations and the search footing below hold the
         #: *same* object. A second assignment here would leave a case's seeded records
@@ -817,14 +811,11 @@ class Harness:
         self.destination_trust = (
             FakeDestinationTrustStore() if destination_trust is None else destination_trust
         )
-        self.archive = FakeTranscriptArchive(now=lambda: AT)
         self.conversations = ConversationLifecycle(
             conversations=self.conversation_store,
             memory=self.memory,
             retention=RETENTION,
             now=lambda: AT,
-            archive=self.archive.writer(),
-            archive_enabled=True,
         )
         self.ids = iter(f"d-{n}" for n in range(1, 100))
         self.handles = iter(f"tok-{n}" for n in range(1, 100))
@@ -1117,9 +1108,6 @@ class Harness:
             # the call: ADR-0207's park cases pin that the spoken path acquired no
             # edge to it, which a subject holding no outbox at all cannot show.
             notification_outbox=notification_outbox,
-            # The **same** archive the capture stage above holds the narrow face of
-            # (ADR-0225 §10), so `forget` destroys the entry capture wrote.
-            archive=self.archive,
         )
 
 
@@ -1945,9 +1933,6 @@ def _fresh_facade(harness: Harness) -> Engine:
         conversations=harness.conversations,
         questions=harness.questions,
         id_factory=lambda: next(harness.handles),
-        # The same durable state, which for the archive means the same store: a
-        # restarted process reaches the transcripts the previous one wrote.
-        archive=harness.archive,
     )
 
 
@@ -2070,7 +2055,6 @@ async def test_a_recovered_entry_does_not_count_toward_the_confirmation_ceiling(
         questions=harness.questions,
         id_factory=lambda: next(harness.handles),
         max_outstanding_confirmations=1,
-        archive=FakeTranscriptArchive(),
     )
     pending = await facade.pending_confirmations()
     assert len(pending) == 1
@@ -2137,7 +2121,6 @@ async def test_an_in_process_park_resolved_elsewhere_is_reconciled_and_frees_the
         questions=harness.questions,
         id_factory=lambda: next(harness.handles),
         max_outstanding_confirmations=1,
-        archive=FakeTranscriptArchive(),
     )
     parked = await facade_a.converse("send it", timeout=PATIENT)  # A parks in-process (g-1)
     assert parked.step is not None
@@ -2195,7 +2178,6 @@ async def test_reconcile_keeps_a_concurrent_same_engine_converse_park() -> None:
         conversations=harness.conversations,
         questions=harness.questions,
         id_factory=lambda: next(harness.handles),
-        archive=FakeTranscriptArchive(),
     )
     first = await facade.converse("send it", timeout=PATIENT)  # park g-1 in facade._parked
     assert first.step is not None
@@ -2341,7 +2323,6 @@ async def test_concurrent_recovery_does_not_prune_another_calls_returned_token()
         conversations=harness.conversations,
         questions=harness.questions,
         id_factory=lambda: next(harness.handles),
-        archive=FakeTranscriptArchive(),
     )
     facade._plans = _GateFirstGetPlan(harness.plans)  # type: ignore[assignment]  # test double
 
@@ -3139,7 +3120,6 @@ async def test_a_clock_at_the_start_of_the_calendar_does_not_break_the_sweep() -
         conversations=harness.conversations,
         questions=harness.questions,
         now=lambda: datetime.min.replace(tzinfo=UTC) + timedelta(days=1),
-        archive=FakeTranscriptArchive(),
     )
 
     report = await facade.purge_expired()
@@ -3588,7 +3568,6 @@ async def test_outstanding_confirmations_apply_backpressure_without_stranding() 
         questions=harness.questions,
         id_factory=lambda: next(harness.handles),
         max_outstanding_confirmations=2,  # tighten for the test
-        archive=FakeTranscriptArchive(),
     )
 
     first = await engine.converse("send it", timeout=PATIENT)
@@ -3675,7 +3654,6 @@ async def test_the_confirmation_ceiling_is_a_hard_bound_under_concurrency() -> N
         questions=harness.questions,
         id_factory=lambda: next(harness.handles),
         max_outstanding_confirmations=2,  # ceiling of two, three concurrent turns
-        archive=FakeTranscriptArchive(),
     )
 
     calls = [asyncio.ensure_future(engine.converse("send it", timeout=PATIENT)) for _ in range(3)]
@@ -3715,7 +3693,6 @@ async def test_a_non_positive_confirmation_ceiling_is_refused() -> None:
             conversations=harness.conversations,
             questions=harness.questions,
             max_outstanding_confirmations=0,
-            archive=FakeTranscriptArchive(),
         )
 
 
@@ -3745,7 +3722,6 @@ async def test_a_non_integer_confirmation_ceiling_is_refused(bad: object) -> Non
             conversations=harness.conversations,
             questions=harness.questions,
             max_outstanding_confirmations=bad,  # type: ignore[arg-type]  # the point of the test
-            archive=FakeTranscriptArchive(),
         )
 
 

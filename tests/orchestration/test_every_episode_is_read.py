@@ -40,7 +40,6 @@ from ai_assistant.orchestration.retrieval import assemble_by_band
 from ai_assistant.testing import (
     FakeConversationStore,
     FakeMemoryStore,
-    FakeTranscriptArchiveWriter,
 )
 from ai_assistant.testing.activation import ended_pass
 
@@ -81,8 +80,6 @@ async def test_history_reads_failed_episodes_up_to_the_replay_bound() -> None:
     stage = ConversationLifecycle(
         conversations=conversations,
         memory=memory,
-        archive=FakeTranscriptArchiveWriter(),
-        archive_enabled=False,
         retention=None,
         now=lambda: _AT,
     )

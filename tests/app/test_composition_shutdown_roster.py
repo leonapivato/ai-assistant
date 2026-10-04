@@ -1,7 +1,7 @@
 """Every database the composition root opens is closed by the façade's shutdown.
 
 A hand-written case per store is the shape this invariant kept failing in. Three of
-them exist — the transcript archive's (#1902) and the two #1903 adds beside it — and
+them were added — the transcript archive's (#1902) and the two #1903 adds beside it — and
 each was written *after* a store had already shipped with its ``close`` on the
 build-failure cleanup list and absent from ``Engine(closers=…)``, so a build that
 **failed** closed it and one that **succeeded** never did. The next store to be

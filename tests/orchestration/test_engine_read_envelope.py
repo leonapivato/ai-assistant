@@ -9,10 +9,10 @@ rather than beside the servicer:
   a seam. §11 calls this "the milestone's exit shape and the one test that fails if
   the hop is merely wired". **ADR-0227 §7 re-specifies it** and this module carries
   the re-specification: the fixture is shaped as ``Engine._capture`` writes an
-  episode — the user's material in ``content``, the composed reply in ``outcome``,
-  an ``ExchangeDisposition`` beside it — because "a fixture that carries in one
-  field what production carries in another asserts nothing about production, however
-  faithfully the rest of the path is wired". §7 requires the existing test
+  episode — the user's material in ``content`` and the composed reply in ``outcome``,
+  with no disposition beside it since ADR-0287 — because "a fixture that carries in
+  one field what production carries in another asserts nothing about production,
+  however faithfully the rest of the path is wired". §7 requires the existing test
   **rewritten** rather than supplemented, "a second test beside a fixture that cannot
   fail is a test suite that reports two greens for one guarantee".
 * **item 5**'s engine arm — ``converse_spoken`` declares its channel's audience
@@ -49,7 +49,6 @@ from ai_assistant.core.types import (
     BeliefBand,
     EpisodicMemory,
     EvidenceDigest,
-    ExchangeDisposition,
     GoalBrief,
     MemorySource,
     PlannerOutput,
@@ -235,14 +234,12 @@ def _episode(
     content: str,
     *,
     outcome: str | None = None,
-    disposition: ExchangeDisposition | None = None,
 ) -> EpisodicMemory:
-    """One captured turn, shaped as ``Engine._capture`` writes one (ADR-0227 §7).
+    """One captured turn, shaped as ``Engine._capture`` writes one (ADR-0227 §7:1).
 
     ``content`` is the user's material and the plan's rationale; ``outcome`` is the
-    composed reply; ``disposition`` is what became of the pass. A reply asserted to
-    have reached a prompt goes in ``outcome`` on a record that also carries a
-    ``disposition``, "because that is the combination the render rules turn on".
+    composed reply. A reply asserted to have reached a prompt goes in ``outcome``. No
+    record carries a disposition (ADR-0287 §2, superseding §7:2's).
     """
     return EpisodicMemory(
         id=record_id,
@@ -341,7 +338,6 @@ async def _seeded[StoreT: FakeMemoryStore](store: StoreT, *, content: str = _EAR
             "episode-1",
             content,
             outcome=f"{_LENDER} is the best fit for your budget.",
-            disposition=ExchangeDisposition.STEP_EXECUTED,
         )
     )
     await store.add(
@@ -964,7 +960,6 @@ async def test_a_named_episode_in_the_supplement_renders_the_reply_it_carries() 
             "episode-1",
             f"The user asked: {_QUESTION} for the house purchase?",
             outcome=f"{_LENDER} is the best fit for your budget.",
-            disposition=ExchangeDisposition.STEP_EXECUTED,
         )
     )
     composing, model = _recorder()

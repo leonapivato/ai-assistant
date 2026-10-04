@@ -60,7 +60,6 @@ if TYPE_CHECKING:
         ActivationUnderstanding,
         ChannelInput,
         EpisodicMemory,
-        ExchangeDisposition,
         Modality,
         ParkedBinding,
         RecordedActivationTrigger,
@@ -74,15 +73,12 @@ _log = structlog.get_logger(__name__)
 
 @dataclass(frozen=True)
 class CaptureFacts:
-    """The policy facts, and the transcript entry's halves, a capture path supplies.
+    """The policy facts a capture path supplies.
 
     The episode's ``content`` is not among them: it is derived from the processing
     record by one rule at the write (ADR-0284 §7:1).
     """
 
-    asked: str | None
-    response: str | None
-    disposition: ExchangeDisposition
     modality: Modality
     supplied_withheld: bool
     derived_from_external: bool
@@ -102,9 +98,9 @@ class EpisodeProgress:
 
     #: ``activation:<activation_id>`` (ADR-0283 §2).
     address: str
-    #: The admission write's one capture timestamp (§2:2): ``occurred_at``,
-    #: ``expires_at``, the placement's ``set_at`` and the instants ``record_turn`` and
-    #: the archive entry carry all reuse it.
+    #: The admission write's one capture timestamp (§2:2, as ADR-0287 left it):
+    #: ``occurred_at``, ``expires_at``, the placement's ``set_at`` and the instant
+    #: ``record_turn`` carries all reuse it.
     captured_at: datetime
     #: The record the store is known to carry: the last write that returned.
     written: EpisodicMemory | None = None

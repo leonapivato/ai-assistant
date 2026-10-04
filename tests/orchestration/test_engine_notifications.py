@@ -49,7 +49,6 @@ from ai_assistant.testing import (
     FakeGoalAssociator,
     FakeNotificationPolicy,
     FakeNotificationStore,
-    FakeTranscriptArchive,
 )
 
 if TYPE_CHECKING:
@@ -93,7 +92,6 @@ def _wired(
         notifications=store,
         notification_policy=policy,
         now=lambda: AT,
-        archive=FakeTranscriptArchive(),
     )
 
 

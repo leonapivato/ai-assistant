@@ -211,23 +211,12 @@ _NAMESPACE: Final = {
 #: a ``SpokenAudio | None``, and ``SpokenAudio`` is already on this roster, so the
 #: rest of ADR-0206 §6's addition reaches no type this list did not already name.
 #:
-#: The last three are ADR-0225 §10's — ``TranscriptEntry``, which the archive's
-#: addressed read and its two enumerating reads return; ``TranscriptHit``, which the
-#: search returns; and ``TranscriptArchiveSize``, which §6's size report returns.
-#: §10 declares all three field by field and fixes each as additive-only, and the
-#: walk terminates at every one of them immediately: ``Identifier``,
-#: ``EncodableText``, ``UtcInstant``, ``int`` and ``bool`` are scalars ADR-0087 §2c
-#: spells, and ``ExchangeDisposition`` is a closed ``StrEnum`` already inside this
-#: closure through ``TurnOutcome``.
+#: ADR-0225 §10's three archive types — ``TranscriptEntry``, ``TranscriptHit`` and
+#: ``TranscriptArchiveSize`` — were on this roster until ADR-0287 §3 removed the seven
+#: methods that returned them, and with those methods no member of the surface reaches
+#: them.
 #:
-#: **Neither archive Protocol is on this surface and neither type it is keyed by is
-#: minted here**, which is §10's split rather than an omission. ``TranscriptArchive``
-#: and ``TranscriptArchiveWriter`` are seams the *hub* holds — the engine's wide one
-#: and capture's narrow one — and nothing on this surface returns either or names
-#: one in an argument. What crosses is the three values above, on the seven methods
-#: ADR-0225 §14 adds and on no other.
-#:
-#: The two after those are ADR-0244 §9's and §11's — ``ReadAnswerOutcome``, which
+#: Two more are ADR-0244 §9's and §11's — ``ReadAnswerOutcome``, which
 #: ``TurnOutcome.read_answer`` names, and ``ReadCancellation``, which ``cancel_read``
 #: returns. Both are closed ``StrEnum``\ s, so the walk terminates at each immediately.
 #:
@@ -319,9 +308,6 @@ PROMOTED: Final[frozenset[str]] = frozenset(
         "TurnReference",
         "ReadAnswerOutcome",
         "ReadCancellation",
-        "TranscriptArchiveSize",
-        "TranscriptEntry",
-        "TranscriptHit",
         "SpokenRendering",
         "SpokenTurn",
         "SpokenAudio",
@@ -751,8 +737,12 @@ def test_the_surface_carries_the_methods_the_adrs_fixed() -> None:
     **ADR-0285 §2 removes one**, ``observe`` — one of ADR-0085 §1's fifteen — with the
     observation stage it delegated to, so the count falls to sixty-six. The scheduled
     ``observe_due`` was never on the Protocol and moves nothing here.
+
+    **ADR-0287 §3 removes seven**, ADR-0225 §14's transcript-archive members, with the
+    archive itself, so the count falls to fifty-nine. None was a browser operation, so
+    ADR-0177 §1's enumeration does not move.
     """
-    assert len(_method_names()) == 66
+    assert len(_method_names()) == 59
 
 
 def test_a_streaming_method_declares_its_union_chunk_first_terminal_last() -> None:
@@ -1403,6 +1393,12 @@ def test_the_promoted_surface_and_the_protocol_version_are_both_pinned() -> None
     reverse. **The method set does not move and stays at 66**: ``MemoryStore`` gains
     ``open_episodes``, which is no ``AssistantEngine`` member and no gateway route.
 
+    **73 is ADR-0287 §3, under the first limb.** ``AssistantEngine`` loses its seven
+    transcript-archive members, so the method set falls to **59**: a client at 72 may
+    call an operation a hub at 73 no longer answers, which is §3's own ground for the
+    bump. ``TranscriptEntry``, ``TranscriptHit`` and ``TranscriptArchiveSize`` leave
+    the surface with them.
+
     **ADR-0124 §9 decides no mechanical check and creates none**, saying one is
     owed and leaving its shape open. This is not that check — it is a *pin*, and
     a deliberately crude one: it fails when either number moves, which is the
@@ -1411,7 +1407,7 @@ def test_the_promoted_surface_and_the_protocol_version_are_both_pinned() -> None
     """
     from ai_assistant.wire.envelope import PROTOCOL_VERSION  # noqa: PLC0415 — asserted about
 
-    assert (len(_method_names()), PROTOCOL_VERSION) == (66, 72), (
+    assert (len(_method_names()), PROTOCOL_VERSION) == (59, 73), (
         "the promoted method set and the protocol version are pinned together "
         "(ADR-0124 §9); move either and this pin makes you name the limb you are "
         "under — the method set, or a wire-carried core type"

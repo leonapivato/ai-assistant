@@ -64,7 +64,6 @@ from ai_assistant.testing import (
     FakeIdentifiers,
     FakeIdentifierSpace,
     FakePlanStore,
-    FakeTranscriptArchive,
 )
 
 if TYPE_CHECKING:
@@ -936,7 +935,6 @@ def engine_with(scan: RecoveryScan | None) -> Engine:
         conversations=harness.conversations,
         questions=harness.questions,
         recovery=scan,
-        archive=FakeTranscriptArchive(),
     )
 
 
