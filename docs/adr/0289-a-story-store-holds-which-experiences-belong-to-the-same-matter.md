@@ -123,17 +123,23 @@ in the hub.
 > member not in the story is passed over, with no log line. A story left with no
 > members stays as a story with no members.
 
-> **Normative.** **Merge** of story A into story B adds each of A's members that B
-> does not already hold to B, logged on B as `added`. It logs `merged_into` on A and
-> `absorbed` on B, each naming the other. It replaces A with B in the membership of
-> every story that held A, logged on each as `removed` A and `added` B. From then on
-> A records B as the story it was merged into.
+> **Normative.** **Merge** of story A into story B moves A's members to B: each is
+> removed from A, logged on A as `removed`, and added to B where B does not already
+> hold it, logged on B as `added`. A member B already holds keeps its existing entry,
+> with its link instant, actor and place in the order. A is left with no members.
 
-> **Normative.** Where B was itself a member of A, a merge of A into B passes over
-> that member instead of making B contain itself.
+> **Normative.** A merge logs `merged_into` on A and `absorbed` on B, each naming the
+> other. From then on A records B as the story it was merged into.
+
+> **Normative.** A merge removes A from every story that held it, logged on each as
+> `removed`. It adds B to each such story that does not already hold B and is not B
+> itself, logged as `added`. A story that already holds B keeps that entry as it was.
+
+> **Normative.** Where B was itself a member of A, a merge of A into B removes that
+> member from A and adds nothing for it, instead of making B contain itself.
 
 > **Normative.** A merge that would leave any story containing itself through any
-> chain of stories, after that one exception, is refused.
+> chain of stories, after those exceptions, is refused.
 
 > **Normative.** A merge of a story into itself is refused.
 
