@@ -36,11 +36,13 @@ from base64 import b64encode
 from dataclasses import dataclass
 from datetime import timedelta
 from typing import TYPE_CHECKING, Any, Final
+from weakref import WeakKeyDictionary
 
 import gateway_ports
 import numpy as np
 from gateway_mint import bootstrap_value
 from gateway_timing import Clock, Timers
+from playwright.async_api import Error as BrowserError
 
 from ai_assistant.core.config import Settings
 from ai_assistant.core.types import SpokenAudio, SpokenAudioFormat
@@ -365,6 +367,147 @@ class Drive:
         await self.page.wait_for_selector("#console:not([hidden])")
 
 
+@dataclass
+class _Held:
+    """One reusable context, and every origin a page of it has been sent to.
+
+    Attributes:
+        context: The context, carrying the microphone grant and :data:`PROBE`.
+        window: The viewport it was opened at, which is also its place on the shelf.
+        served: Every origin a drive has loaded in it. An origin is never served twice
+            by one context; see :meth:`_Shelf.check_out`.
+    """
+
+    context: BrowserContext
+    window: tuple[int, int]
+    served: set[str]
+
+
+class _Shelf:
+    """The contexts one browser lends to the layer's drives, one per viewport.
+
+    **What is reused, and what is not.** Opening a context, installing the probe and
+    closing it again is a fixed cost every case paid before it did anything, and the
+    page it held was the only thing in it a case ever touched. So a context outlives
+    its case and the next drive at the same viewport is lent it, while *the page is
+    still opened fresh for every case and closed at its end*. Everything a case can
+    reach through its page — listeners (``page.on``), routes (``page.route``), the
+    mouse a press left down, a viewport set mid-case, ``sessionStorage``, history and
+    the document itself — therefore dies with the case exactly as it did when the
+    context did. So do any further pages the case opened from ``page.context``: every
+    page of the context is closed at check-in, not only the drive's own.
+
+    **What a context could carry from one case to the next, and why none of it
+    reaches the next case.**
+
+    - *Cookies* are scoped to a host and not to a port, so the session cookie one
+      gateway set would be sent to the next gateway on ``127.0.0.1``. They are
+      cleared on every check-out of a context that has served before.
+    - *Everything scoped to an origin* — ``localStorage`` (where the page keeps half
+      of its session header), IndexedDB, the Cache API, service workers, the HTTP
+      cache — would be visible to a later case only if that case's gateway had the
+      same origin, which is to say the same port. Ports do repeat: ``gateway_ports``
+      hands them out of a block of 64, round-robin. So the rule is structural rather
+      than a clearing routine that has to name every store: **a context never serves
+      the same origin twice.** A check-out for an origin the context has already
+      served closes that context and opens a fresh one, so every origin a case sees
+      is one its context has never loaded — whatever the browser keeps per origin,
+      including stores nobody here thought to name.
+    - *The microphone grant and the probe* are the same for every case, which is why
+      they are context options and not per-page ones.
+
+    **What would break the argument, and is therefore not done anywhere in the
+    layer:** state set on the *context* itself — ``context.route``, ``context.on``,
+    ``context.add_init_script``, ``context.grant_permissions`` and the like. A case
+    reaches its context only to open a second page. ``test_browser_isolation.py``
+    pins each half of this, and the layer is run in reverse order as well as the
+    usual one before a change to it is shipped.
+
+    **A context is lent again only after a clean exit.** A case that raised — a
+    failed assertion, a timeout, a cancellation — returns a context nothing vouches
+    for, so it is closed rather than shelved and the next case gets a fresh one.
+
+    **The browser is still the one ADR-0216 §3 allows.** Nothing here launches
+    anything: a context is a profile inside the session's one browser, and the shelf
+    holds at most one per viewport the layer drives at. They close with the browser
+    at the end of the session.
+    """
+
+    def __init__(self) -> None:
+        """Start with nothing shelved."""
+        self._idle: dict[tuple[int, int], _Held] = {}
+
+    async def check_out(self, browser: Browser, viewport: ViewportSize, origin: str) -> _Held:
+        """Lend a context at ``viewport`` that has never loaded ``origin``.
+
+        Args:
+            browser: The browser a fresh context is opened in, where one is needed.
+            viewport: The window the drive is at.
+            origin: The origin the drive is about to load.
+
+        Returns:
+            A context with no page open in it and no cookie set, whose ``served``
+            already records ``origin``.
+        """
+        window = (viewport["width"], viewport["height"])
+        idle = self._idle.pop(window, None)
+        if idle is not None and origin not in idle.served:
+            try:
+                await idle.context.clear_cookies()
+            except BrowserError:
+                # A context the browser no longer has -- nothing a case should
+                # inherit, and nothing to close.
+                idle = None
+            else:
+                idle.served.add(origin)
+                return idle
+        if idle is not None:
+            await idle.context.close()
+        context = await browser.new_context(permissions=["microphone"], viewport=viewport)
+        try:
+            await context.add_init_script(PROBE)
+        except BaseException:
+            await context.close()
+            raise
+        return _Held(context=context, window=window, served={origin})
+
+    async def check_in(self, held: _Held, *, reusable: bool) -> None:
+        """Close every page of a lent context, then shelve it or close it.
+
+        Args:
+            held: What :meth:`check_out` lent.
+            reusable: Whether the drive ended cleanly. A context whose case raised
+                is closed rather than lent again.
+        """
+        if not reusable or held.window in self._idle:
+            # The second branch is a case holding two drives at one viewport at once:
+            # the shelf keeps one context per viewport, so the other is closed.
+            await held.context.close()
+            return
+        try:
+            for page in list(held.context.pages):
+                await page.close()
+        except BaseException:
+            await held.context.close()
+            raise
+        self._idle[held.window] = held
+
+
+#: One shelf per browser. Keyed by the browser rather than held globally so that a
+#: context is never lent to a drive in a browser it does not belong to: the harness's
+#: own cases (``test_browser_harness.py``) pass browsers of their own, and the
+#: session's real one must never be handed a context one of them opened.
+_SHELVES: WeakKeyDictionary[Browser, _Shelf] = WeakKeyDictionary()
+
+
+def _shelf_of(browser: Browser) -> _Shelf:
+    """The shelf ``browser``'s contexts are lent from, made on first use."""
+    shelf = _SHELVES.get(browser)
+    if shelf is None:
+        shelf = _SHELVES[browser] = _Shelf()
+    return shelf
+
+
 @contextlib.asynccontextmanager
 async def driving(
     browser: Browser,
@@ -412,22 +555,21 @@ async def driving(
     )
     server: asyncio.Server = await gateway.start()
     origin = f"http://127.0.0.1:{settings.gateway_port}"
-    # A context per case rather than a browser per case: it is milliseconds where a
-    # launch is a quarter of a second, and it is what keeps one case's session,
-    # storage and permissions out of the next one's.
-    # Created *inside* the cleanup-protected region, and closed only if it exists.
-    # `gateway.start()` above has already bound a listening socket, so a refusal from
-    # `new_context()` would otherwise leave the gateway and its server running for the
-    # rest of the run -- and that refusal is the realistic one, because the browser is
-    # session-scoped and shared, so an earlier case may have crashed or closed it
-    # (adversarial review, round 7, `major`).
-    context: BrowserContext | None = None
+    window = viewport if viewport is not None else _DEFAULT
+    # A page per case in a context the layer reuses, rather than a context per case:
+    # see `_Shelf` for what is reused, what is not, and why the next case cannot tell.
+    # Checked out *inside* the cleanup-protected region, and checked in only if it
+    # exists. `gateway.start()` above has already bound a listening socket, so a
+    # refusal from `new_context()` would otherwise leave the gateway and its server
+    # running for the rest of the run -- and that refusal is the realistic one,
+    # because the browser is session-scoped and shared, so an earlier case may have
+    # crashed or closed it (adversarial review, round 7, `major`).
+    shelf = _shelf_of(browser)
+    held: _Held | None = None
+    clean = False
     try:
-        context = await browser.new_context(
-            permissions=["microphone"], viewport=viewport if viewport is not None else _DEFAULT
-        )
-        await context.add_init_script(PROBE)
-        page = await context.new_page()
+        held = await shelf.check_out(browser, window, origin)
+        page = await held.context.new_page()
         drive = Drive(
             page=page,
             gateway=gateway,
@@ -441,6 +583,7 @@ async def driving(
         if admitted:
             await drive.admit()
         yield drive
+        clean = True
     finally:
         # Nested rather than sequential, which is the same defect one line over: the
         # browser is still torn down first, but a raising `close()` must not take the
@@ -448,16 +591,16 @@ async def driving(
         # close is a fact about the run worth failing on -- it just no longer costs
         # every later case a live port.
         try:
-            if context is not None:
-                await context.close()
+            if held is not None:
+                await shelf.check_in(held, reusable=clean)
         finally:
             gateway.close()
             server.close()
             # Close the connections the context did not own, or the wait below is the
             # gateway's read deadline. `wait_closed()` waits for every accepted
-            # connection to end, and closing the context ends only the browser's: a
+            # connection to end, and closing the pages ends only the browser's: a
             # `route.fetch()` goes out through Playwright's own HTTP client, in the
-            # driver process, whose keep-alive socket outlives the context. Its
+            # driver process, whose keep-alive socket outlives the page. Its
             # handler then sits in its read until `gateway_read_timeout` (thirty
             # seconds) and the case spends them in this `finally` -- every case that
             # fetched, once each. After `close()`, so no connection can be accepted

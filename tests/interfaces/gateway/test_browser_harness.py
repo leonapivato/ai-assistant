@@ -517,15 +517,23 @@ class _QuietPage:
     async def wait_for_selector(self, selector: str) -> None:
         del selector
 
+    async def close(self) -> None:
+        pass
+
 
 class _QuietContext:
     """A context that opens, serves one :class:`_QuietPage`, and closes."""
+
+    def __init__(self) -> None:
+        self.pages: list[_QuietPage] = []
 
     async def add_init_script(self, script: str) -> None:
         del script
 
     async def new_page(self) -> _QuietPage:
-        return _QuietPage()
+        page = _QuietPage()
+        self.pages.append(page)
+        return page
 
     async def close(self) -> None:
         pass
