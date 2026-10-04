@@ -186,9 +186,11 @@ outcome that can be unknown.
 > **Normative.** Every read of the hub's own records, recall and the current time
 > included, is direct and travels on no channel.
 
-This is what keeps trusted material and outside content apart by construction: the
-assistant's own memory never arrives the way a search result does, so no channel
-ever has to be declared trusted.
+This keeps what the hub holds and what newly arrives from outside apart by
+construction: the assistant's own memory never arrives the way a search result does,
+so no channel ever has to be declared trusted. A direct read makes nothing trusted.
+A record is read with the provenance it was stored with, so a record resting on
+outside content is still `outside` when recall returns it (ADR-0281 §4).
 
 ### 7. Hub operations come from devices, with no channel
 
@@ -258,8 +260,8 @@ keeps in force until an ADR builds their replacement, are:
 crossing gets a channel, and nothing else does. A reminder's text can never pass as
 the user, because the channel it arrives on states its source. Everything that
 leaves meets its channel's requirements and has its outcome reported by an actuator.
-The assistant's own memory is never treated as outside content, and no channel
-needs to be declared trusted. Pasted or quoted text cannot operate the hub, because
+The hub's own records are read directly, with the provenance they were stored with,
+so no channel needs to be declared trusted. Pasted or quoted text cannot operate the hub, because
 a command takes a structured act.
 
 **What it costs.** Nothing changes in code now. The routes §8 names stand in tension
