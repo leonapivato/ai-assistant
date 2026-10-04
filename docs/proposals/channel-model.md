@@ -120,6 +120,12 @@ Because every action that leaves goes through one, the channels' requirements
 apply to everything that leaves, and every outcome that can be unknown is
 reported by the actuator that carried it.
 
+**A model call is processing, not output.** Calling a language model or an
+embedder sends user data out of the hub, through `models/` (ADR-0174 §1), but it
+is how the hub thinks, not an action planning chose: nothing is said to anyone,
+and nothing in the world changes. It has no channel and no actuator, and it stays
+under the egress rules for `models/` (owner, 2026-10-04).
+
 ### 5. Inside actions are direct
 
 An **inside action** changes only the hub's own records: writing or forgetting a
@@ -211,11 +217,6 @@ is the rule §7 states instead.
 
 ## What it leaves open
 
-- **Model calls.** Calling a language model or an embedder sends user data out of
-  the hub, through `models/` (ADR-0174 §1). The recommendation is that a model
-  call is processing, the way the hub thinks, and not an action whose output
-  leaves; it stays under the egress rules for `models/` and outside this model.
-  Not yet discussed with the owner.
 - **Readers.** A reader brings new input, so under §3 it is an internal sensor and
   its input belongs on a channel. Whether that channel is activating, and how its
   content then reaches memory instead of going straight to `MemoryWriter.ingest`,
