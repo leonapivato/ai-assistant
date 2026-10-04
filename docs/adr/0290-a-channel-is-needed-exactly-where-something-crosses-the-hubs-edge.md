@@ -1,9 +1,16 @@
 # 290. A channel is needed exactly where something crosses the hub's edge, and the hub reads and changes its own records directly
 
-- Status: Accepted
+- Status: Partially superseded by ADR-0291 (§1:3's window)
 - Date: 2026-10-04
 - Scope: [#2578](https://github.com/leonapivato/ai-assistant/issues/2578), the channel redesign: the first of its four decisions, the rule the other three apply.
 - Authorization: the owner accepted proposal #2678 on 2026-10-04, including its later revision that a model call is processing, not output, and the dispatcher assigned 0290. This ADR is that proposal converted under `docs/proposals/README.md` → "When it is decided".
+- Partially superseded: 2026-10-04 by ADR-0291 — one scope. §1:3, in its *a window of
+  what it recently carried* part alone: a channel has a window only where its kind
+  offers one, and the window is read from the channel's record (ADR-0291 §3). A
+  channel's kind, the identity the hub states and what its kind declares stand. Every
+  other clause stands. This replacement takes effect on ratification of ADR-0291. This
+  reciprocal header record accompanies the numbered draft under ADR-0070 and ADR-0082;
+  the ratified body below is preserved.
 
 ## Context
 
