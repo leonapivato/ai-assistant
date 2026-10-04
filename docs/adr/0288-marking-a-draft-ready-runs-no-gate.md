@@ -1,6 +1,6 @@
 # 288. Marking a draft ready runs no gate
 
-- Status: Proposed
+- Status: Accepted
 - Date: 2026-10-04
 - Authorization: the owner directed this on 2026-10-04 as one lane delivering one
   PR, the ADR and the `gate.yml` edit together. That departs deliberately from the
