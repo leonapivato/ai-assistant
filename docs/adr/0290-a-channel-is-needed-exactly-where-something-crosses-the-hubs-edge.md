@@ -1,6 +1,6 @@
 # 290. A channel is needed exactly where something crosses the hub's edge, and the hub reads and changes its own records directly
 
-- Status: Proposed
+- Status: Accepted
 - Date: 2026-10-04
 - Scope: [#2578](https://github.com/leonapivato/ai-assistant/issues/2578), the channel redesign: the first of its four decisions, the rule the other three apply.
 - Authorization: the owner accepted proposal #2678 on 2026-10-04, including its later revision that a model call is processing, not output, and the dispatcher assigned 0290. This ADR is that proposal converted under `docs/proposals/README.md` → "When it is decided".
