@@ -33,7 +33,9 @@ from ai_assistant.core.types import (
     Provenance,
     RecordedChannelTrigger,
     RecordedTextInput,
+    StoryActor,
     StoryChange,
+    StoryLogPage,
     StoryMember,
     StoryMemberKind,
     StoryRefusal,
@@ -418,7 +420,7 @@ def test_a_merged_story_shows_only_the_story_it_went_into(
     before = len(engine.calls)
     assert _invoke("story", "show", absorbed)[0] == 0
     assert output.getvalue() == f'Story "{absorbed}" was merged into story "{kept}".\n'
-    assert [method for method, _ in engine.calls[before:]] == ["story"]
+    assert [method for method, _ in engine.calls[before:]] == ["story_log"]
 
 
 def test_show_of_an_unknown_story_exits_non_zero(
@@ -448,7 +450,7 @@ def test_show_reads_every_page_of_a_story_too_large_for_one(
 
 
 class _ChangingEngine(FakeAssistantEngine):
-    """Answers the second view page with the story changed under the reader."""
+    """Answers a continuation page of the view or the log with the story changed."""
 
     def __init__(self, change: str) -> None:
         super().__init__(max_payload_bytes=2048)
@@ -467,10 +469,25 @@ class _ChangingEngine(FakeAssistantEngine):
             return view.model_copy(update={"story": merged})
         if self.change == "stalled":
             return view.model_copy(update={"next_cursor": cursor})
+        return None if self.change == "gone" else view
+
+    async def story_log(
+        self, story_id: Identifier, *, cursor: int | None = None, limit: int = 50
+    ) -> StoryLogPage | None:
+        page = await super().story_log(story_id, cursor=cursor, limit=limit)
+        if cursor is None or page is None or not self.change.startswith("log-"):
+            return page
+        if self.change == "log-header":
+            merged = page.story.model_copy(update={"merged_into": "story:elsewhere"})
+            return page.model_copy(update={"story": merged})
+        if self.change == "log-stalled":
+            return page.model_copy(update={"next_cursor": cursor})
         return None
 
 
-@pytest.mark.parametrize("change", ["count", "header", "stalled", "gone"])
+@pytest.mark.parametrize(
+    "change", ["count", "header", "stalled", "gone", "log-header", "log-stalled", "log-gone"]
+)
 def test_a_story_that_changes_between_pages_is_discarded(
     monkeypatch: pytest.MonkeyPatch, output: StringIO, change: str
 ) -> None:
@@ -484,6 +501,57 @@ def test_a_story_that_changes_between_pages_is_discarded(
         asyncio.run(story_inspection.read_story(engine, story))
     _wire(monkeypatch, engine)
     assert _invoke("story", "show", story)[0] == 1
+    assert "Activation:" not in output.getvalue()
+
+
+class _WritingEngine(FakeAssistantEngine):
+    """Unlinks a member on the first view read, before or after reading the page."""
+
+    def __init__(self, when: str, member: StoryMember) -> None:
+        super().__init__()
+        self.when = when
+        self.member = member
+        self.written = False
+
+    async def _write(self, story_id: Identifier) -> None:
+        if not self.written:
+            self.written = True
+            outcome = await self.story_store.unlink(
+                story_id, (self.member,), actor=StoryActor.OWNER
+            )
+            assert outcome.logged == 1
+
+    async def story(
+        self, story_id: Identifier, *, cursor: int | None = None, limit: int = 50
+    ) -> StoryView | None:
+        if self.when == "before":
+            await self._write(story_id)
+        view = await super().story(story_id, cursor=cursor, limit=limit)
+        if self.when == "after":
+            await self._write(story_id)
+        return view
+
+
+@pytest.mark.parametrize("when", ["before", "after"])
+def test_a_write_between_the_log_and_the_members_is_discarded(
+    monkeypatch: pytest.MonkeyPatch, output: StringIO, when: str
+) -> None:
+    """A membership and a log from two states of the story are never rendered together.
+
+    The log is read first and the members after it; an unlink landing on either side
+    of the member read appends a line the closing log read finds, so the read is
+    discarded rather than showing a member beside the log line that removed it.
+    """
+    engine = _WritingEngine(when, _activation(_FROZEN))
+    engine.episode_memory = FakeMemoryStore(now=lambda: _AT)
+    asyncio.run(engine.episode_memory.add(_episode(_FROZEN)))
+    asyncio.run(engine.episode_memory.add(_episode(_OPEN, open_=True)))
+    story = _create(engine, _activation(_FROZEN), _activation(_OPEN))
+    _wire(monkeypatch, engine)
+    code, _ = _invoke("story", "show", story)
+    assert engine.written
+    assert code == 1
+    assert "story changed while it was read" in output.getvalue()
     assert "Activation:" not in output.getvalue()
 
 
