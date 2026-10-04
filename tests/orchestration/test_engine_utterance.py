@@ -10,19 +10,16 @@ canonical fakes. §6's closing clause is what fixes the shape of every case here
 
 So nothing below builds a :class:`~ai_assistant.core.types.TurnResult`. Every case starts
 at ``converse`` — or, on the parked path, at ``converse`` and then ``resume`` — and reads
-what the archive, the episode store and the model seam were actually handed. A case that
+what the episode store and the model seam were actually handed. A case that
 asserted ``turn.utterance == turn.goal.statement`` over a turn it had assembled itself
 would pass against an implementation that read the request off the goal, which is exactly
 the implementation ADR-0248 §1 forbids.
 
-**What "unchanged across the change" is asserted as.** Each capture-path arm pins the
-*literal* the pre-decision tree produced for the archive: the archived half is the
-user's sentence byte for byte — the bytes ``turn.goal.statement`` produced before
-ADR-0248 and the bytes ``turn.utterance`` produces after it, which is §6's byte-equality
-stated where a reader can check it rather than inferred from the two fields agreeing.
-The episode's ``content`` is no longer a rendering of the turn: ADR-0284 §7 derives it
-by one rule from the record, and the user's sentence is in it because the trigger
-recorded it as the user's input — which is what the episode arms below assert.
+**What "unchanged across the change" is asserted as.** The episode's ``content`` is no
+longer a rendering of the turn: ADR-0284 §7 derives it by one rule from the record, and
+the user's sentence is in it because the trigger recorded it as the user's input — which
+is what the episode arms below assert. The archive arms these cases carried went with
+the archive (ADR-0287 §2, §5).
 
 **The store's own arms are not here.** §10's park arms — the round trip, the settlement
 clearing a fourth field, the schema upgrade and the trigger refusals — belong to
@@ -32,22 +29,17 @@ clearing a fourth field, the schema upgrade and the trigger refusals — belong 
 from __future__ import annotations
 
 import json
-from typing import TYPE_CHECKING, Any, Final
+from typing import Any, Final
 
 import pytest
 from test_engine import PATIENT, Harness, NoStepPlanner, confirmable, tool
 from test_engine_parked_reads import _ASKED, _parked, _wired
 from test_engine_read_envelope import _recorder
-from test_engine_routing import _UTTERANCE, _routed_harness, _seed_belief, _token
-from test_engine_routing import _parked as _routed_park
 
 from ai_assistant.core.episode_encoding import episode_content
 from ai_assistant.core.errors import PlanningError
 from ai_assistant.core.types import EpisodicMemory, ReadAnswerOutcome, Role, TurnResult
 from ai_assistant.orchestration.loop import LearningLoop
-
-if TYPE_CHECKING:
-    from ai_assistant.core.types import TranscriptEntry
 
 #: One sentence no other case in this tree says, so a match anywhere is this turn's. It
 #: carries a quotation mark and a non-ASCII character because the composing arm is over
@@ -57,23 +49,6 @@ _SAID: Final = 'where did I leave the "café" receipt'
 
 #: The same sentence with surrounding whitespace, for the one-normalisation arm.
 _PADDED: Final = f"  \n{_SAID}\t "
-
-
-async def _entries(wired: Any) -> list[TranscriptEntry]:
-    """Every archive entry this engine wrote, in the order its episodes were written.
-
-    The archive orders by instant and then address (ADR-0283 §9), and an address is an
-    activation's own id (§2), so under a frozen clock the archive's order says nothing
-    about which pass came first. The episode store's write order does, and every entry
-    sits at its episode's id.
-    """
-    entries = {entry.address: entry for entry in await wired.archive.entries()}
-    ordered = [
-        entries.pop(episode.id)
-        for episode in await _episodes(wired.memory)
-        if episode.id in entries
-    ]
-    return [*ordered, *entries.values()]
 
 
 async def _episodes(memory: Any) -> list[EpisodicMemory]:
@@ -89,10 +64,10 @@ async def _episodes(memory: Any) -> list[EpisodicMemory]:
     [{"planner": NoStepPlanner()}, {"tools": (tool(),)}],
     ids=["a-drove-no-step", "b-drove-one-step"],
 )
-async def test_a_turn_archives_and_renders_the_request_it_received(
+async def test_a_turn_renders_the_request_it_received(
     wiring: dict[str, Any],
 ) -> None:
-    """§6's arms (a) and (b): the archived user words and the episode are unchanged.
+    """§6's arms (a) and (b): the episode is unchanged.
 
     The two branches are the two ``_capture`` calls in ``Engine._run_turn``, and they are
     parametrised together because ADR-0248 §5 classifies them identically and the whole
@@ -103,8 +78,6 @@ async def test_a_turn_archives_and_renders_the_request_it_received(
 
     outcome = await harness.engine.converse(_SAID, timeout=PATIENT)
 
-    (entry,) = await _entries(harness)
-    assert entry.asked == _SAID, "ADR-0225 §1's first case, taken from the turn's own request"
     (episode,) = await _episodes(harness.memory)
     assert episode.content == episode_content(episode), "ADR-0284 §7:1's one rule"
     assert _SAID in episode.content, "§7:1: the user's own words, as the trigger recorded them"
@@ -122,7 +95,7 @@ async def test_the_pass_normalises_once_so_the_request_and_the_statement_cannot_
     The whitespace is the observable: a lane that stripped for the goal and copied the
     raw text to the turn would leave the two fields unequal here while passing every
     case above, which is the failure §1's one-normalisation clause exists to prevent.
-    Nothing downstream sees the padding either — not the archive, not the episode.
+    Nothing downstream sees the padding either.
     """
     harness = Harness(planner=NoStepPlanner())
 
@@ -131,42 +104,19 @@ async def test_the_pass_normalises_once_so_the_request_and_the_statement_cannot_
     assert outcome.turn is not None
     assert outcome.turn.utterance == _SAID
     assert outcome.turn.goal.outcome == _SAID
-    (entry,) = await _entries(harness)
-    assert entry.asked == _SAID
-
-
-# --- §6(c): the routed pass, whose utterance was already threaded -------------
-
-
-async def test_a_routed_pass_still_archives_the_utterance_it_threads() -> None:
-    """§6's arm (c): a routed pass "was already threaded and stays so".
-
-    ADR-0197 §10 is the contrast that proves ADR-0248 §2's rule rather than an exception
-    to it — a routed pass produces **no** ``TurnResult``, so a threaded argument is the
-    only carrier available and is correct. This arm is what would fail if a lane read
-    §2's "not a threaded argument" as reaching here too.
-    """
-    harness = _routed_harness()
-    await _seed_belief(harness.memory)
-
-    outcome = await harness.engine.converse(_UTTERANCE, timeout=PATIENT)
-
-    assert outcome.turn is None, "a routed pass produces no turn to read words off"
-    (entry,) = await _entries(harness)
-    assert entry.asked == _UTTERANCE
 
 
 # --- §6(d): the resolution of a parked read ----------------------------------
 
 
-async def test_a_parked_reads_resolution_archives_the_parked_passs_request() -> None:
+async def test_a_parked_reads_resolution_carries_the_parked_passs_request() -> None:
     """§6's arm (d), and §3's "the value belongs to **the pass**".
 
     The resumed turn is assembled from durable state, so its request is the **parked**
     pass's — read off the park, which retained it for ADR-0244 §2's own reason: §8
     composes over it and would otherwise fabricate it. A lane that supplied this pass's
-    words instead would archive a sentence the user never said on the turn being
-    rendered.
+    words instead would render a sentence the user never said on the turn being
+    resolved.
     """
     wired = _wired()
     parked = await wired.engine.converse(_ASKED, timeout=PATIENT)
@@ -181,16 +131,11 @@ async def test_a_parked_reads_resolution_archives_the_parked_passs_request() -> 
     assert outcome.read_answer is ReadAnswerOutcome.DISPATCHED
     assert outcome.turn is not None
     assert outcome.turn.utterance == _ASKED
-    entries = await _entries(wired)
-    assert [one.asked for one in entries] == [_ASKED, _ASKED], (
-        "the parking turn's entry and the resolution's, each carrying the same request "
-        "— which is what this decision preserves rather than changes (§8, #2265)"
-    )
     episodes = await _episodes(wired.memory)
     parking, resolution = episodes[-2:]
     assert _ASKED in parking.content, "ADR-0284 §7:1: the parking pass's input was the user's"
     # A resume has no input (ADR-0284 §2:4), so the resolution's search text is the one
-    # rule over its own record and carries no words; the request is in the archive.
+    # rule over its own record and carries no words.
     assert resolution.content == episode_content(resolution)
     assert _ASKED not in resolution.content
 
@@ -228,30 +173,12 @@ async def test_a_park_written_without_an_utterance_falls_back_to_its_goal_statem
     assert outcome.read_answer is ReadAnswerOutcome.DISPATCHED
     assert outcome.turn is not None
     assert outcome.turn.utterance == _ASKED, "the parked goal's outcome, which is those words"
-    assert (await _entries(wired))[-1].asked == _ASKED
 
 
 # --- §6's further arm: a pass that received no user words at all --------------
 
 
-async def test_the_resolution_of_a_parked_step_archives_no_user_words() -> None:
-    """§6's further arm, first case, and ADR-0225 §1's own clause rather than a gap.
-
-    The parked turn is right there, and its utterance was archived at its own address by
-    the pass that parked; repeating it would render one sentence as though the user had
-    said it twice.
-    """
-    harness = Harness(tools=(confirmable(),))
-    parked = await harness.engine.converse(_SAID, timeout=PATIENT)
-    assert parked.step is not None
-    assert parked.step.confirmation is not None
-
-    await harness.engine.resume(parked.step.confirmation.token, approved=True, timeout=PATIENT)
-
-    assert [one.asked for one in await _entries(harness)] == [_SAID, None]
-
-
-async def test_a_resumption_recovered_from_durable_state_archives_no_user_words() -> None:
+async def test_a_resumption_recovered_from_durable_state_carries_no_user_words() -> None:
     """§6's further arm, second case: no turn at all, so there are no words to carry.
 
     The in-memory handle is dropped and the park is recovered through
@@ -267,28 +194,16 @@ async def test_a_resumption_recovered_from_durable_state_archives_no_user_words(
     resumed = await harness.engine.resume(recovered.token, approved=True, timeout=PATIENT)
 
     assert resumed.turn is None, "a recovered resume carries no live turn"
-    assert [one.asked for one in await _entries(harness)] == [_SAID, None]
     assert _SAID not in (await _episodes(harness.memory))[-1].content, (
         "a resume has no input (ADR-0284 §2:4), so its content carries no user words"
     )
-
-
-async def test_the_resolution_of_a_routed_park_archives_no_user_words() -> None:
-    """§6's further arm, third case, at the routed seam."""
-    harness = _routed_harness()
-    await _seed_belief(harness.memory)
-    outcome = await _routed_park(harness)
-
-    await harness.engine.resume(_token(outcome), approved=True, timeout=PATIENT)
-
-    assert [one.asked for one in await _entries(harness)] == [_UTTERANCE, None]
 
 
 # --- §6's composing arm ------------------------------------------------------
 
 
 async def test_the_composed_user_prompt_renders_the_request_under_its_heading() -> None:
-    """§6's composing arm: the reader §5 moves that the archive arms do not cover.
+    """§6's composing arm: the reader §5 moves that the capture arms do not cover.
 
     **The heading is a claim about the text beneath it** (§4), so the assertion is over
     the exact two lines — the heading, and ``_quoted_span``'s rendering of the request —
@@ -334,16 +249,16 @@ async def test_every_moved_reader_takes_the_request_when_the_goal_says_something
     The goal minting is replaced so the pass produces the shape A1 will produce for real:
     a turn whose ``goal.outcome`` is the assistant's reading of the user and whose
     ``utterance`` is what they actually said. Every reader §5 moves must then say the
-    user's words — the archive's user half, the episode's ``content`` and the composing
-    prompt's quoted span — and none of them may say the reading.
+    user's words — the episode's ``content`` and the composing prompt's quoted span —
+    and none of them may say the reading.
 
     This is the case that fails if a reader is reverted, and the reason the no-op arms
     above cannot be the whole of §10: they run where the two values agree, so they pass
     against exactly the implementation this decision replaces.
 
     **Only the minting is replaced**, at the one seam ADR-0228 §1 owns and A1 supersedes.
-    The engine, the capture point, the archive, the episode writer and the production
-    composing stage are all the real ones.
+    The engine, the capture point, the episode writer and the production composing stage
+    are all the real ones.
     """
     composing, model = _recorder()
     harness = Harness(planner=NoStepPlanner(), composing=composing)
@@ -362,8 +277,6 @@ async def test_every_moved_reader_takes_the_request_when_the_goal_says_something
     assert outcome.turn is not None
     assert outcome.turn.goal.outcome == _INTERPRETED, "the goal really did diverge"
     assert outcome.turn.utterance == _SAID
-    (entry,) = await _entries(harness)
-    assert entry.asked == _SAID, "ADR-0225 §1: the user's own words, unrewritten"
     (episode,) = await _episodes(harness.memory)
     assert _SAID in episode.content
     assert _INTERPRETED not in episode.content
@@ -381,8 +294,8 @@ async def test_a_park_carrying_its_own_request_is_never_read_off_its_goal() -> N
     The fallback is for a park older than the field and for nothing else, so a park that
     carries one must be read from it even where its goal says something different. Driven
     by rewriting the stored row — the state A1 produces for real, where the parked goal is
-    an interpretation — and asserted on the resumed turn and on what the resolution
-    archived.
+    an interpretation — and asserted on the resumed turn and on the resolution's
+    episode.
 
     Together with :func:`test_a_park_written_without_an_utterance_falls_back_to_its_goal_statement`
     this is the whole of §3's branch: one case per side, each with values that tell the two
@@ -408,7 +321,6 @@ async def test_a_park_carrying_its_own_request_is_never_read_off_its_goal() -> N
     assert outcome.turn is not None
     assert outcome.turn.goal.outcome == _INTERPRETED, "the parked goal really did diverge"
     assert outcome.turn.utterance == _SAID, "the park's own request, not its goal statement"
-    assert (await _entries(wired))[-1].asked == _SAID
     assert _INTERPRETED not in (await _episodes(wired.memory))[-1].content
 
 
@@ -440,8 +352,6 @@ async def test_a_blank_utterance_is_refused_on_the_production_path_as_it_was(bla
 
     with pytest.raises(PlanningError, match="a turn needs a non-empty utterance"):
         await harness.engine.converse(blank, timeout=PATIENT)
-
-    assert await _entries(harness) == [], "nothing was captured for a turn that never ran"
 
 
 @pytest.mark.parametrize("blank", ["", "   ", "\n\t "], ids=["empty", "spaces", "mixed"])

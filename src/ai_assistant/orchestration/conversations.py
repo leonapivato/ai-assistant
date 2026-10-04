@@ -20,7 +20,7 @@ handles by injection — owns the cross-store sequences:
   channel still holds an episode, and drops a conversation record that holds none.
 
 Capture itself is the :class:`~ai_assistant.orchestration.activation_writer.ActivationWriter`'s
-(ADR-0283 §7), which this stage builds over the same three stores.
+(ADR-0283 §7), which this stage builds over the same two stores.
 
 **The two sweeps are opposite, and collapsing them is the error to avoid.**
 Finishing a user deletion destroys episodes because that is the request being
@@ -63,7 +63,6 @@ if TYPE_CHECKING:
         ConversationStore,
         MemoryStore,
         ParkedReads,
-        TranscriptArchiveWriter,
     )
     from ai_assistant.core.types import (
         Conversation,
@@ -164,18 +163,16 @@ class ParkingOrigin:
 class ConversationLifecycle:
     """Owns every ``ConversationStore``/``MemoryStore`` sequence (ADR-0074 §9)."""
 
-    def __init__(  # noqa: PLR0913 — the three stores this stage spans, the switch that gates the third's write, the horizon both the episodes and the index are judged against, and the clock; every one is an injected collaborator or its own configuration
+    def __init__(
         self,
         *,
         conversations: ConversationStore,
         memory: MemoryStore,
-        archive: TranscriptArchiveWriter,
-        archive_enabled: bool,
         retention: timedelta | None,
         now: Clock = _utcnow,
         parked_reads: ParkedReads | None = None,
     ) -> None:
-        """Wire the stage from the three injected stores.
+        """Wire the stage from the injected stores.
 
         **``retention`` must be the value ``conversations`` was built with.** No
         type can say so, so it is a composition-root obligation of the same shape
@@ -198,21 +195,6 @@ class ConversationLifecycle:
                 retrieves from and the writer persists to, because a stage wired to
                 a second store would write episodes no retrieval could see and
                 destroy nothing the user was shown.
-            archive: The transcript archive, as its **narrow** seam (ADR-0225 §10).
-                A :class:`~ai_assistant.core.protocols.TranscriptArchiveWriter` and
-                never a ``TranscriptArchive``: §4's turn-path fence gives the one
-                component that writes an entry no way to read one back, and this
-                annotation is the whole of the narrowing —
-                ``self._archive.search(...)`` fails ``mypy`` whatever object the
-                composition root passed. **Required with no default**, in §10's own
-                words: "a composition that omits it does not type-check".
-            archive_enabled: Whether a captured turn is also archived (ADR-0225 §6's
-                ``transcript_archive_enabled``). It gates the **write alone**:
-                turning it off destroys nothing, and both destroys below still run,
-                so entries already held stay searchable and stay destroyable and a
-                configuration change is never a silent deletion. Required with no
-                default for ``retention``'s reason — the one place the default is
-                decided is ``core.config.Settings``.
             retention: The episodic horizon. ``None`` means "keep forever": no
                 ``expires_at`` is stamped and the retention reclaim is switched off
                 entirely rather than guessed at (ADR-0074 §7).
@@ -230,26 +212,21 @@ class ConversationLifecycle:
                 both handles by injection" (ADR-0074 §9).
 
                 **Defaulted rather than required**, which is the one departure from
-                ``archive`` and ``retention`` above and takes
+                ``retention`` above and takes
                 :class:`~ai_assistant.orchestration.recipient_grants.RecipientGrantOperations`'
-                choice for the same object one seam over. A stage with no archive cannot
-                carry out §8 at all; a stage with no park store carries it out exactly as
-                it did before this decision, because a deployment that wired none holds no
-                park for any conversation. ``None`` drops nothing because there is nothing
-                to drop.
+                choice for the same object one seam over. A stage with no park store
+                carries §8 out exactly as it did before ADR-0244, because a deployment
+                that wired none holds no park for any conversation. ``None`` drops nothing
+                because there is nothing to drop.
         """
         self._conversations = conversations
         self._memory = memory
-        self._archive = archive
-        self._archive_enabled = archive_enabled
         self._retention = retention
         self._clock = checked_clock(now, owner="ConversationLifecycle")
         self._parked_reads = parked_reads
         self.activation_writer = ActivationWriter(
             conversations=conversations,
             memory=memory,
-            archive=archive,
-            archive_enabled=archive_enabled,
             retention=retention,
             now=now,
         )
@@ -465,11 +442,9 @@ class ConversationLifecycle:
             MemoryStoreError: If an episode could not be destroyed. The tombstone
                 stands and the next sweep finishes the job; reporting success over
                 content the user asked to be gone would be the worse failure.
-            TranscriptArchiveError: If the transcript could not be destroyed, which
-                aborts step 2 before any episode is deleted (ADR-0225 §5). The
-                tombstone stands here too, for the same reason.
             AssistantError: If this conversation's parked reads could not be dropped,
-                which aborts step 2 in the same place and for the same reason.
+                which aborts step 2 before any episode is deleted. The tombstone stands
+                here too, for the same reason.
         """
         stamped = await self._conversations.stamp_deleted(conversation_id)
         try:
@@ -519,39 +494,18 @@ class ConversationLifecycle:
             cursor = batch[-1]
 
     async def _finish_deletion(self, conversation_id: str) -> bool:
-        """Destroy this conversation's transcript and episodes, then ask for the drop (§8).
+        """Destroy this conversation's parked reads and episodes, then ask for the drop (§8).
 
-        ADR-0283 §8:1, in order: the archive's ``discard_conversation``, the parked
-        reads' drop, then **every episode ``channel_episode_ids`` returns for the
-        conversation's channel**, page by page until a read is empty, then
-        ``drop_if_eligible``. That enumeration is what the store physically holds —
-        expired but unpurged and not yet valid episodes included — and no read
-        filtered by liveness or validity is used in its place
-        (ADR-0275 §6:6). Idempotent by re-walking: a run that dies part-way is re-run
-        from the beginning, and the episodes it already deleted are no longer on the
-        channel.
+        ADR-0283 §8:1, in order, as ADR-0287 left it: the parked reads' drop, then
+        **every episode ``channel_episode_ids`` returns for the conversation's
+        channel**, page by page until a read is empty, then ``drop_if_eligible``. That
+        enumeration is what the store physically holds — expired but unpurged and not
+        yet valid episodes included — and no read filtered by liveness or validity is
+        used in its place (ADR-0275 §6:6). Idempotent by re-walking: a run that dies
+        part-way is re-run from the beginning, and the episodes it already deleted are
+        no longer on the channel.
 
-        **The archive discard is the first action of §8's step 2** (ADR-0225 §5),
-        before any episode is deleted, on the rule §5 draws from ADR-0074 §8's own
-        third mitigation: the residue of a partial failure must be the one the user
-        can still reach and destroy. A crash after it leaves *records* present, which
-        ``forget`` and this very sweep destroy on the next attempt; the other order
-        would leave retained text after a deletion the user was told succeeded.
-
-        **A discard that raises aborts the call here, and no clause of §8 changes.**
-        Every episode on the channel is still there, so step 3's own condition is
-        unmet by §8's own terms — the tombstone survives and the reclaim re-runs the
-        whole of step 2, this discard included, in the deleting call, at engine start
-        and later on the hub's schedule. No third conjunct is added to step 3.
-
-        **A second run finding the archive already empty is the conforming answer.**
-        ``discard_conversation`` destroys what it matches or nothing and returns zero
-        for a conversation with no entries (ADR-0225 §5), so the run that follows a
-        ``MemoryStore.delete`` failure part-way through step 2 carries the remaining
-        episode deletions through to the drop rather than treating the zero as an
-        error.
-
-        **The parked reads go second, and the position is argued rather than free**
+        **The parked reads go first, and the position is argued rather than free**
         (ADR-0244 §3). It is inside **step 2** and never after step 3, because
         ``drop_if_eligible`` removes the record and its tombstone — after which nothing
         enumerates this conversation again, and a park dropped there and interrupted
@@ -560,10 +514,9 @@ class ConversationLifecycle:
         here by running before the drop rather than by a reconciliation walk, a tombstone
         of its own or a second lifecycle — none of which §3 admits.
 
-        It goes **after** the archive discard, which ADR-0225 §5 fixes as "the first
-        action of §8's step 2", and **before** the episode walk, so a call arriving for
-        a conversation another sweep already dropped still reaches the parks — the one
-        route to them ADR-0244 §3 names besides the deadline.
+        It goes **before** the episode walk, so a call arriving for a conversation
+        another sweep already dropped still reaches the parks — the one route to them
+        ADR-0244 §3 names besides the deadline.
 
         **An open park stranded by a crash anywhere in this sequence is not an
         unrecoverable orphan** (ADR-0244 §3): it carries its own ``expires_at``,
@@ -577,15 +530,11 @@ class ConversationLifecycle:
             that commits and then dies is still swept.
 
         Raises:
-            TranscriptArchiveError: If the transcript could not be destroyed. Nothing
-                below runs, and the tombstone stands.
             AssistantError: If the parked-read store could not be written. Nothing below
-                runs and the tombstone stands, for the archive discard's own reason: the
-                residue of a partial failure has to be one the user can still reach and
-                destroy, and a park is reachable through the enumeration and self-clearing
-                on its deadline.
+                runs and the tombstone stands: the residue of a partial failure has to be
+                one the user can still reach and destroy, and a park is reachable through
+                the enumeration and self-clearing on its deadline.
         """
-        await self._archive.discard_conversation(conversation_id)
         if self._parked_reads is not None:
             await self._parked_reads.drop_for_conversation(conversation_id)
         channel = conversation_channel(conversation_id)

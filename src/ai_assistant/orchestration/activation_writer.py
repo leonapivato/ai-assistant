@@ -2,9 +2,9 @@
 
 ADR-0286 writes an activation's episode at admission (§2), replaces it with a record
 that extends it as each stage ends (§3), and freezes it with the end entry (§4);
-ADR-0283 §7's archive entry and ``record_turn`` follow the freeze. Any capture
-failure before the freeze is confirmed ends capture and deletes the episode (§5). A
-restart closes the episodes a dead process left open (§7).
+``record_turn`` follows the freeze (§4:4, as ADR-0287 left it). Any capture failure
+before the freeze is confirmed ends capture and deletes the episode (§5). A restart
+closes the episodes a dead process left open (§7).
 """
 
 from __future__ import annotations
@@ -38,7 +38,6 @@ from ai_assistant.core.types import (
     RecordedResumeTrigger,
     RecordedSpeechInput,
     StageOutcome,
-    TranscriptEntry,
     UnderstandingOmission,
 )
 from ai_assistant.orchestration.activation_state import EpisodeProgress
@@ -49,7 +48,7 @@ if TYPE_CHECKING:
     from datetime import timedelta
 
     from ai_assistant.core.clock import Clock
-    from ai_assistant.core.protocols import ConversationStore, MemoryStore, TranscriptArchiveWriter
+    from ai_assistant.core.protocols import ConversationStore, MemoryStore
     from ai_assistant.core.types import MemoryRecord
     from ai_assistant.orchestration.activation_state import ActivationState
 
@@ -66,10 +65,8 @@ def capture_loss(stage: str, reason: str) -> None:
 
 @dataclass
 class _Writes:
-    """What a frozen episode's archive entry and ``record_turn`` are known to have done."""
+    """What a frozen episode's ``record_turn`` is known to have done."""
 
-    archive_possible: bool = False
-    archive_confirmed: bool = False
     #: ``record_turn`` returned the conversation: it stands, and it knows the turn.
     verified: bool = False
     #: ``record_turn`` returned ``None``: the conversation is absent or stamped.
@@ -79,21 +76,17 @@ class _Writes:
 class ActivationWriter:
     """Write one episode at its admission address, extend it, freeze it, fence it."""
 
-    def __init__(  # noqa: PLR0913 — the same lifecycle collaborators and configuration
+    def __init__(
         self,
         *,
         conversations: ConversationStore,
         memory: MemoryStore,
-        archive: TranscriptArchiveWriter,
-        archive_enabled: bool,
         retention: timedelta | None,
         now: Clock,
     ) -> None:
         """Receive only the lifecycle's injected store contracts and capture settings."""
         self._conversations = conversations
         self._memory = memory
-        self._archive = archive
-        self._archive_enabled = archive_enabled
         self._retention = retention
         self._now = checked_clock(now, owner="ActivationWriter")
         #: The captures in flight, by address, from the admission write until each
@@ -103,12 +96,11 @@ class ActivationWriter:
     def forgetting(self, address: str) -> None:
         """Tell any capture in flight at ``address`` that its record is being forgotten.
 
-        ``forget`` calls this **before** its discard and its deletion, in the same call
-        (ADR-0286 §8:1). The capture's next write after the mark writes nothing: it
-        deletes the episode by its id and ends capture (§8:2). A capture whose freeze
-        is already confirmed writes no archive entry after the mark, calls no
-        ``record_turn``, and destroys its entry and episode through the fence
-        (ADR-0225 §5).
+        ``forget`` calls this **before** its deletion, in the same call (ADR-0286 §8:1,
+        as ADR-0287 §4 keeps it). The capture's next write after the mark writes
+        nothing: it deletes the episode by its id and ends capture (§8:2). A capture
+        whose freeze is already confirmed calls no ``record_turn`` after the mark, and
+        destroys its episode through the fence.
 
         The coordination is in-process, which is the whole of the hub's: one resident
         process per data directory owns both the writer and ``forget``. It reads no
@@ -209,7 +201,7 @@ class ActivationWriter:
         checked_output: Callable[[], EpisodeProcessingRecord],
         drain: Callable[[Awaitable[None]], Awaitable[None]],
     ) -> EpisodeCaptureReport:
-        """Freeze the episode, then write the archive entry, then ``record_turn``.
+        """Freeze the episode, then call ``record_turn``.
 
         An activation cancelled at the admission barrier ran no processing and wrote
         no episode yet; its admission write is made first, here, so the freeze always
@@ -223,19 +215,18 @@ class ActivationWriter:
         (§3:5).
 
         **Any capture failure before the freeze is confirmed ends capture** (§5:2):
-        no archive entry, no ``record_turn``, and the episode deleted by its id
-        through ``drain``, whatever the conversation's state.
+        no ``record_turn``, and the episode deleted by its id through ``drain``,
+        whatever the conversation's state.
 
-        **Once the freeze is confirmed, the order is ADR-0283 §7:1's**: the archive
-        entry where one is owed, then ``record_turn``, which is the deletion
-        verification (§7:2). A ``None`` from it means the conversation was deleted,
-        and the fence discards the entry and deletes the episode; an indeterminate
-        one re-reads the conversation (§7:4). That fence runs through ``drain``
-        (ADR-0275 §8:11), so a cancellation of this call cannot strand an episode on
-        a conversation the user deleted.
+        **Once the freeze is confirmed, ``record_turn`` follows** (§4:4, as ADR-0287
+        left it), and it is the deletion verification (ADR-0283 §7:2). A ``None``
+        from it means the conversation was deleted, and the fence deletes the
+        episode; an indeterminate one re-reads the conversation (§7:4). That fence
+        runs through ``drain`` (ADR-0275 §8:11), so a cancellation of this call cannot
+        strand an episode on a conversation the user deleted.
 
-        **A record the user forgets while it is captured leaves nothing** (ADR-0225
-        §5, ADR-0286 §8).
+        **A record the user forgets while it is captured leaves nothing** (ADR-0286
+        §8).
         """
         if isinstance(state.trigger, RecordedResumeTrigger) and state.conversation_id is None:
             capture_loss("association", "unresolved")
@@ -302,9 +293,9 @@ class ActivationWriter:
 
         Each is frozen ``interrupted`` / ``hub_stopped`` by an end entry due
         ``hub_stopped`` with outcome ``done``, at this clock's one reading. The
-        placement and ``Provenance.derived_from_external`` stay as stored, no archive
-        entry is written, and ``record_turn`` is called with no delivery only where
-        the episode is on a conversation's channel; a ``None`` from it deletes the
+        placement and ``Provenance.derived_from_external`` stay as stored, and
+        ``record_turn`` is called with no delivery only where the episode is on a
+        conversation's channel; a ``None`` from it deletes the
         episode (§7:3). The closed record is measured against ADR-0275 §9:1's bound
         as every write of an episode is (§3:6), and one that exceeds it is deleted
         by its id as a capture failure (§5:2).
@@ -432,16 +423,11 @@ class ActivationWriter:
         episode: EpisodicMemory,
         writes: _Writes,
     ) -> EpisodeCaptureReport:
-        """The archive entry, then ``record_turn``, once the freeze is confirmed (§4:4)."""
+        """``record_turn``, once the freeze is confirmed (§4:4, as ADR-0287 left it)."""
         conversation_id = state.conversation_id
-        owed = conversation_id is not None and state.facts is not None and self._archive_enabled
-        if conversation_id is not None:
-            if owed and not progress.forgotten:
-                # A record already forgotten is never given an entry (ADR-0225 §5).
-                await self._archive_once(state, conversation_id, episode, writes)
-            if not progress.forgotten:
-                await self._record_turn(state, conversation_id, episode, writes)
-        if (not owed or writes.archive_confirmed) and (conversation_id is None or writes.verified):
+        if conversation_id is not None and not progress.forgotten:
+            await self._record_turn(state, conversation_id, episode, writes)
+        if conversation_id is None or writes.verified:
             return EpisodeCaptureReport(
                 activation_id=state.activation_id, episode_id=episode.id, state="recorded"
             )
@@ -549,31 +535,6 @@ class ActivationWriter:
             return
         progress.possible = False
 
-    async def _archive_once(
-        self,
-        state: ActivationState,
-        conversation_id: str,
-        episode: EpisodicMemory,
-        writes: _Writes,
-    ) -> None:
-        """Write the transcript entry at the episode's own address, with no ordinal."""
-        facts = state.facts
-        assert facts is not None  # noqa: S101 — only canonical capture facts owe an archive entry
-        try:
-            entry = TranscriptEntry(
-                address=episode.id,
-                conversation_id=conversation_id,
-                occurred_at=episode.occurred_at,
-                asked=facts.asked,
-                replied=facts.response,
-                disposition=facts.disposition,
-            )
-            writes.archive_possible = True
-            await self._archive.append(entry)
-            writes.archive_confirmed = True
-        except Exception:
-            capture_loss("archive", "failed")
-
     async def _record_turn(
         self,
         state: ActivationState,
@@ -612,7 +573,7 @@ class ActivationWriter:
     async def _fence(
         self, conversation_id: str, progress: EpisodeProgress, writes: _Writes
     ) -> None:
-        """Destroy a frozen episode and its entry where its conversation is gone (§7:2, §7:4).
+        """Destroy a frozen episode where its conversation is gone (§7:2, §7:4).
 
         ``record_turn``'s ``None`` is the conversation's own answer and needs no
         re-read. Every other unverified path re-reads the conversation, and an
@@ -620,11 +581,8 @@ class ActivationWriter:
         recovery's sweep finds the episode on its channel while the tombstone stands
         (ADR-0283 §8).
 
-        **The archive entry goes first**, on ADR-0225 §5's rule that the residue of a
-        partial failure must be one the user can still reach and destroy.
-
         **A forgotten capture is destroyed whatever its conversation's state**,
-        because the user's act named the record itself (ADR-0225 §5).
+        because the user's act named the record itself (ADR-0286 §8).
         """
         if not writes.gone and not progress.forgotten:
             try:
@@ -634,23 +592,10 @@ class ActivationWriter:
                 return
             if standing is not None:
                 return
-        if writes.archive_possible and not await self._discard(progress.address):
-            # Keep the memory record reachable until archive destruction succeeds,
-            # as on the existing explicit-forget path.
-            return
         try:
             await self._memory.delete(progress.address)
         except Exception:
             capture_loss("compensate_episode", "failed")
-
-    async def _discard(self, address: str) -> bool:
-        """Discard this capture's archive entry, answering whether that succeeded."""
-        try:
-            await self._archive.discard(address)
-        except Exception:
-            capture_loss("compensate_archive", "failed")
-            return False
-        return True
 
     def _open(
         self, state: ActivationState, progress: EpisodeProgress, payload_limit: int

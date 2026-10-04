@@ -7,7 +7,7 @@ from datetime import UTC, datetime
 
 import pytest
 from structlog.testing import capture_logs
-from test_activation_writer import Wiring
+from test_activation_writer import CommitThen, Wiring
 
 from ai_assistant.core.errors import OversizedValueError
 from ai_assistant.core.types import EpisodicMemory, ProcessingReason, ProcessingStatus
@@ -78,7 +78,6 @@ async def test_output_refusal_is_checked_before_content_and_retains_original_err
         # ADR-0283 §2: the address is fixed at admission, so the output check runs
         # before anything is written.
         assert state.recorded_episode_id is None
-        assert wiring.archive.recorded == {}
         raise refusal
 
     result = await coordinator.finish(state, failure=None, check_output=check_output)
@@ -133,11 +132,11 @@ async def test_cleanup_budget_cancels_and_waits_for_the_registered_write(
 
 
 async def test_second_cancellation_drains_registered_deletion_compensation() -> None:
-    """The conversation is deleted once the frozen episode's entry is written, so
+    """The conversation is deleted once the episode's freeze has committed, so
     ``record_turn`` answers ``None`` and the fence's deletion runs as a safety task,
     which two cancellations of the finalization wait for (ADR-0275 §8:11)."""
-    wiring = Wiring()
-    memory = wiring.memory
+    memory = CommitThen()
+    wiring = Wiring(memory=memory)
     state = await wiring.state()
     tasks: list[asyncio.Task[None]] = []
     coordinator = ActivationCoordinator(
@@ -167,7 +166,7 @@ async def test_second_cancellation_drains_registered_deletion_compensation() -> 
         drivers.append(driver)
 
     drivers: list[asyncio.Task[None]] = []
-    wiring.archive.after = deleted
+    memory.after = deleted
     parent = asyncio.create_task(coordinator.finish(state, failure=None, check_output=lambda: None))
     await ready.wait()
     parent.cancel()
@@ -184,4 +183,3 @@ async def test_second_cancellation_drains_registered_deletion_compensation() -> 
     assert all(task.done() for task in tasks)
     assert state.recorded_episode_id is None
     assert await memory.export() == []
-    assert wiring.archive.recorded == {}

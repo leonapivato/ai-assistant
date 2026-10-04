@@ -8,7 +8,7 @@ from typing import TYPE_CHECKING
 
 import pytest
 
-from ai_assistant.core.errors import TranscriptArchiveError, UnknownConversationError
+from ai_assistant.core.errors import MemoryStoreError, UnknownConversationError
 from ai_assistant.core.types import (
     ChannelInput,
     NewConversation,
@@ -38,21 +38,21 @@ async def _receive(
     )
 
 
-async def test_archive_deletion_fences_new_capture_and_failed_deletion_can_be_retried(
+async def test_deletion_fences_new_capture_and_failed_deletion_can_be_retried(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
     engine = FakeAssistantEngine()
     first = await _receive(engine)
     assert first.channel is not None
     entered, release = asyncio.Event(), asyncio.Event()
-    discard = engine.archive.discard
+    delete = engine.episode_memory.delete
 
-    async def fail(_address: str) -> None:
+    async def fail(_record_id: str) -> bool:
         entered.set()
         await release.wait()
-        raise TranscriptArchiveError("controlled archive failure")
+        raise MemoryStoreError("controlled deletion failure")
 
-    monkeypatch.setattr(engine.archive, "discard", fail)
+    monkeypatch.setattr(engine.episode_memory, "delete", fail)
     forgetting = asyncio.create_task(engine.forget_conversation(first.channel.instance_id))
     await entered.wait()
     try:
@@ -60,7 +60,7 @@ async def test_archive_deletion_fences_new_capture_and_failed_deletion_can_be_re
             await _receive(engine, first.channel)
     finally:
         release.set()
-        with pytest.raises(TranscriptArchiveError):
+        with pytest.raises(MemoryStoreError):
             await forgetting
     assert await engine.conversation(first.channel.instance_id) is None
     assert await engine.recent_conversations() == ()
@@ -68,7 +68,7 @@ async def test_archive_deletion_fences_new_capture_and_failed_deletion_can_be_re
     assert await engine.episode_chunk(first.capture.episode_id) is not None
     with pytest.raises(UnknownConversationError):
         await _receive(engine, first.channel)
-    monkeypatch.setattr(engine.archive, "discard", discard)
+    monkeypatch.setattr(engine.episode_memory, "delete", delete)
     assert await engine.forget_conversation(first.channel.instance_id)
     assert (await engine.episodes()).items == ()
 

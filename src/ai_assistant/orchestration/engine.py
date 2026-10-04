@@ -146,7 +146,6 @@ from ai_assistant.core.types import (
     EpisodeChunk,
     EpisodePage,
     Evidence,
-    ExchangeDisposition,
     ForecastNotRead,
     Goal,
     GoalAbandonment,
@@ -352,7 +351,6 @@ if TYPE_CHECKING:
         SpendLedger,
         TraceRetention,
         TraceSink,
-        TranscriptArchive,
     )
     from ai_assistant.core.types import (
         ActionPlan,
@@ -390,9 +388,6 @@ if TYPE_CHECKING:
         SpendTotal,
         SpokenAudio,
         SpokenDeliveryReport,
-        TranscriptArchiveSize,
-        TranscriptEntry,
-        TranscriptHit,
         UtcInstant,
     )
     from ai_assistant.orchestration.authorization_surface import AuthorizationOperations
@@ -1425,52 +1420,6 @@ def conversation_summary(conversation: Conversation) -> ConversationSummary:
     )
 
 
-def _outcome_of(step: StepOutcome | None) -> ExchangeDisposition:  # noqa: C901, PLR0911 — one return per Disposition member plus the no-step case; collapsing them would hide the totality the docstring relies on
-    """What became of the exchange, as the captured episode's ``disposition`` (ADR-0221 §2).
-
-    Total over :class:`~ai_assistant.orchestration.runner.Disposition` and
-    mechanically so — the wildcard does nothing but ``assert_never`` — so a
-    disposition added without a member here fails the gate rather than recording an
-    exchange whose disposition reads as empty. This is deterministic recording, not a
-    judgement: it says what the engine did, and infers nothing about the user.
-
-    **A member rather than the phrase this returned until ADR-0221** (§2, §3). The
-    eight strings composed here were stored in the episode's ``outcome``; §1 gives
-    that field to the composed reply, so the fact goes into ``disposition`` as a
-    member of a closed vocabulary and the phrase is produced by each of
-    ``learning/observer.py``, ``planning/planner.py`` and
-    ``orchestration/composing.py`` from a table written out at that site. §2 fixes
-    those phrases as the strings this function used to return, byte for byte, which
-    is what makes the three prompts identical across the change — and ``NO_ACTION``
-    aside, the mapping below is one member of :class:`ExchangeDisposition` per member
-    of :class:`~ai_assistant.orchestration.runner.Disposition`, never a collapse of
-    two onto one (§2).
-    """
-    if step is None:
-        return ExchangeDisposition.NO_ACTION_NEEDED
-    match step.disposition:
-        case Disposition.EXECUTED:
-            return ExchangeDisposition.STEP_EXECUTED
-        case Disposition.DENIED:
-            return ExchangeDisposition.STEP_DENIED
-        case Disposition.AWAITING_CONFIRMATION:
-            return ExchangeDisposition.STEP_AWAITING_CONFIRMATION
-        case Disposition.NO_CAPABLE_TOOL:
-            return ExchangeDisposition.STEP_NO_CAPABLE_TOOL
-        case Disposition.AMBIGUOUS_CAPABILITY:
-            return ExchangeDisposition.STEP_AMBIGUOUS_CAPABILITY
-        case Disposition.INVALID_PARAMETERS:
-            return ExchangeDisposition.STEP_INVALID_PARAMETERS
-        case Disposition.EGRESS_UNBINDABLE:
-            return ExchangeDisposition.STEP_EGRESS_UNBINDABLE
-        case Disposition.EFFECT_ALREADY_CLAIMED:
-            return ExchangeDisposition.STEP_EFFECT_ALREADY_CLAIMED
-        case Disposition.EFFECT_UNSCOPED:
-            return ExchangeDisposition.STEP_EFFECT_UNSCOPED
-        case _:  # pragma: no cover - exhaustive
-            assert_never(step.disposition)
-
-
 @dataclass(frozen=True, slots=True)
 class _GoalPass:
     """What a pass's composer is told about this turn's goal (ADR-0250 §5, §10, §14).
@@ -1832,53 +1781,6 @@ def _reference_outcome(disposition: GoalQuestionDisposition) -> ReferenceOutcome
     if disposition is GoalQuestionDisposition.EXPIRED:
         return ReferenceOutcome.EXPIRED
     return ReferenceOutcome.ALREADY_SETTLED
-
-
-def _routed_outcome_of(outcome: RouteOutcome) -> ExchangeDisposition:  # noqa: PLR0911 — one return per RouteOutcome member; collapsing them would hide the totality `assert_never` rests on
-    """What became of a routed exchange, as its episode's ``disposition`` (§10, ADR-0221 §2).
-
-    Total over :class:`~ai_assistant.core.types.RouteOutcome` and mechanically so — the
-    wildcard does nothing but ``assert_never`` — so a member added without a member here
-    fails the gate rather than recording an exchange whose disposition reads as empty.
-
-    **A member rather than the phrase this returned until ADR-0221**, on the same
-    ground as :func:`_outcome_of` and with the same three render sites producing §2's
-    phrase for it. The ``ROUTED_*`` half of :class:`ExchangeDisposition` is one member
-    per member of :class:`~ai_assistant.core.types.RouteOutcome`, and §2 forbids
-    collapsing any of it onto the ``STEP_*`` half: ``ROUTED_PERFORMED`` and
-    ``STEP_EXECUTED`` are synonyms in ordinary English and different acts under
-    different clauses, so both ship.
-
-    **Every member is about the route and none is about its subject** (ADR-0197 §10).
-    The captured episode carries no part of the routed account: not the listing, not the
-    display subject, not the scalar argument, and not the candidates. That is §6's second
-    sentence made mechanical rather than hoped for — a conversation's recent turns are
-    retrieved into the next turn's prompt (ADR-0074 §5, ADR-0158 §5), so a capture that
-    folded a routed listing into the episode would deliver the routed result to a model
-    one turn later, satisfying every same-pass clause of §6 while breaking §6. ADR-0221
-    §1 puts the composed *reply* in that episode's ``outcome`` and leaves the clause
-    true, because ADR-0197 §6 hands the composing stage two enum values and nothing
-    else, so a routed reply cannot contain what §6 withholds.
-    """
-    match outcome:
-        case RouteOutcome.PERFORMED:
-            return ExchangeDisposition.ROUTED_PERFORMED
-        case RouteOutcome.AWAITING_CONFIRMATION:
-            return ExchangeDisposition.ROUTED_AWAITING_CONFIRMATION
-        case RouteOutcome.REFUSED:
-            return ExchangeDisposition.ROUTED_REFUSED
-        case RouteOutcome.AMBIGUOUS:
-            return ExchangeDisposition.ROUTED_AMBIGUOUS
-        case RouteOutcome.AMBIGUOUS_TRUNCATED:
-            return ExchangeDisposition.ROUTED_AMBIGUOUS_TRUNCATED
-        case RouteOutcome.NOT_FOUND:
-            return ExchangeDisposition.ROUTED_NOT_FOUND
-        case RouteOutcome.UNRECORDED:
-            return ExchangeDisposition.ROUTED_UNRECORDED
-        case RouteOutcome.FAILED:
-            return ExchangeDisposition.ROUTED_FAILED
-        case _:  # pragma: no cover - exhaustive
-            assert_never(outcome)
 
 
 #: How a routed pass composes its answer: the whole routed account, and the
@@ -2932,7 +2834,6 @@ class Engine:
         spend: SpendLedger,
         reads: SourceReadTrail,
         memory: MemoryStore,
-        archive: TranscriptArchive,
         deferrals: DeferralStore,
         traces: TraceRetention,
         trace_sink: TraceSink,
@@ -3060,23 +2961,6 @@ class Engine:
                 make the stage the seam for a question it has no part in. Wired to a
                 *second* store, a listing would show beliefs the assistant does not
                 use and ``forget`` would destroy nothing the user was shown.
-            archive: The transcript archive, as its **wide** seam (ADR-0225 §10) and
-                the **same** instance ``conversations`` was given the narrow face
-                of — a composition-root single-instance obligation of the same shape
-                as ``plans`` and ``trail``, because a façade wired to a second
-                archive would destroy nothing capture wrote. It carries no
-                ``append``, and the omission *is* the capability: §1 reserves writing
-                to capture, so ``self._archive.append(...)`` fails ``mypy`` here
-                whatever object was passed, and §4's package fence stops this module
-                naming the concrete class to get one back.
-
-                What this façade does with it in this change is one thing —
-                :meth:`forget` cascades the address-scoped discard §5 puts ahead of
-                the record's own destruction. The four reads, the conversation-scoped
-                destroy and the size report are operations of their own and are not
-                on this surface yet (ADR-0225 §14, lane C); this seam is reached from
-                the façade's user-facing and data-rights operations and from **no**
-                operation on the turn path (§4).
             deferrals: The durable deferred-question queue — the **same** instance
                 ``questions`` holds and the write stage enqueues into, a
                 composition-root single-instance obligation of the same shape as
@@ -3621,7 +3505,6 @@ class Engine:
         self._spend = spend
         self._reads = reads
         self._memory = memory
-        self._archive = archive
         self._deferrals = deferrals
         self._traces = traces
         self._trace_retention = trace_retention
@@ -6745,33 +6628,20 @@ class Engine:
         forget **the belief that id names**, not a guarantee that the bytes destroyed
         are the bytes rendered, and an adapter must not claim otherwise.
 
-        **It reaches the transcript archive first, and it attempts that discard
-        whether or not a live record stands at the id** (ADR-0225 §5). Both halves are
-        the decision. *First*, because the residue of a partial failure must be the
-        one the user can still reach and destroy: a failure between the two leaves a
-        record they can forget again rather than text they were told was gone. *Whether
-        or not*, because §3 keeps an entry's address valid after its episode has
-        expired, been reclaimed or been destroyed — so short-circuiting on an absent
-        memory record would make the transcript of an expired turn permanently
-        unreachable by this operation, which is ADR-0004 §6's right made conditional on
-        a horizon. A second attempt at the same id therefore reaches the entry however
-        the first one failed.
+        **A capture in flight at the id is told first, in the same call** (ADR-0286
+        §8:1, as ADR-0287 §4 keeps it): its next write writes nothing and deletes the
+        episode, so a record this call destroys is not written back after it.
 
         Args:
             record_id: The id the user named, taken as opaque.
 
         Returns:
             ``True`` if a record was destroyed, ``False`` if no record had that id —
-            which the adapter renders and maps to an exit code (ADR-0073 §7). The
-            archive discard does not enter the answer: the question this operation
-            answers is "was there a belief at that id", and reporting a destroyed
-            transcript as a destroyed record would tell the user something else.
+            which the adapter renders and maps to an exit code (ADR-0073 §7).
 
         Raises:
             RuntimeError: If the engine is shutting down.
             MemoryStoreError: If memory cannot be written.
-            TranscriptArchiveError: If the transcript entry could not be destroyed.
-                The memory record is left standing, deliberately (ADR-0225 §5).
         """
         self._reject_if_closing()
         named = identifier(record_id, name="record_id")
@@ -6779,19 +6649,13 @@ class Engine:
         return await self._tracked(self._forgotten(named), "forget", checked=True)
 
     async def _forgotten(self, record_id: str) -> bool:
-        """Discard the transcript entry, then destroy the record (ADR-0225 §5).
+        """Mark any capture in flight at the id, then destroy the record (ADR-0286 §8:1).
 
-        One coroutine rather than two tracked calls, so the pair is a single unit of
-        in-flight work: a shutdown drain that let the discard land and cancelled the
-        deletion would produce exactly the residue §5 orders the sequence to avoid.
-
-        **A capture in flight at this address is told first.** ADR-0283 §7:1 writes
-        the episode before its archive entry, so an entry could otherwise land after
-        this discard for a record this call destroyed;
-        ``ActivationWriter.forgetting`` makes that capture destroy its own writes.
+        ADR-0287 §4: the mark and the deletion are the whole of a forget. The mark
+        makes that capture's next write delete the episode rather than write it back
+        (§8:2), and it reads no store.
         """
         self._conversations.activation_writer.forgetting(record_id)
-        await self._archive.discard(record_id)
         return await self._memory.delete(record_id)
 
     async def guard(self, record_id: Identifier) -> Placement | None:
@@ -7600,327 +7464,6 @@ class Engine:
         return await self._tracked(
             self._conversations.delete(named), "forget_conversation", checked=True
         )
-
-    # --- the transcript archive (ADR-0225 §5, §6, §7, §8) ------------------
-
-    # **The seam is the wide one and it carries no ``append``** (ADR-0225 §10):
-    # ``self._archive.append(...)`` fails ``mypy`` here, the declared type having no
-    # such member, and `orchestration` may not import ``ai_assistant.archive`` (§4)
-    # so there is no concrete class to widen a value back to. Writing is capture's,
-    # on the ``TranscriptArchiveWriter`` ``ConversationLifecycle`` holds — which is
-    # how §1's "no other producer writes to the archive" becomes a property of the
-    # seam rather than a rule somebody is asked to keep.
-    #
-    # **Reached from this façade's user-facing operations and from no operation on
-    # the turn path** (§4). Nothing below is called by :meth:`converse`
-    # or :meth:`resume`, or by any stage they drive; no stage holds an
-    # archive seam at all. The seven exist for the surfaces §8 gives them, and
-    # ADR-0225 §13's first test is what pins that a turn's prompts carry no archive
-    # text.
-    #
-    # **Each is a single relay, deliberately.** The read-time retention predicate,
-    # the matching predicate, the total order, the excerpt bound and both figures of
-    # the size report are the *archive's* ratified guarantees (§6, §7), so an engine
-    # that re-filtered, re-ordered, re-bounded or re-counted anything here would be a
-    # second implementation of a rule the shared conformance suite could then only
-    # compare against itself. What this layer owes is what ADR-0085 makes its own:
-    # the argument refusal §9 requires be local and before any I/O, and the result
-    # measurement §8 makes part of this contract rather than of a transport.
-
-    async def transcript_search(
-        self,
-        query: NonBlankEncodableText,
-        *,
-        limit: int = DEFAULT_PAGE_SIZE,
-        offset: int = 0,
-    ) -> tuple[TranscriptHit, ...]:
-        """Search the archive lexically, newest first (ADR-0225 §7).
-
-        **The query is relayed exactly as the user wrote it.** It is validated
-        non-blank and measured, and it is not stripped, trimmed, collapsed or
-        otherwise normalised: ``NonBlankEncodableText`` rather than ``Identifier``
-        is the whole point, since an ``Identifier`` would rewrite ``" hello"`` into
-        ``"hello"`` before §7's predicate ever saw it. The NFC normalisation and the
-        full case folding the predicate performs are the archive's, applied to both
-        sides at the match and to neither value in storage.
-
-        Args:
-            query: What to look for, as the user wrote it.
-            limit: Page size, defaulting to
-                :data:`~ai_assistant.core.types.DEFAULT_PAGE_SIZE` and refused at
-                zero (see the note above this method).
-            offset: How many ordered hits to skip before the page begins.
-
-        Returns:
-            The page, newest first with the address breaking ties.
-
-        Raises:
-            RuntimeError: If the engine is shutting down.
-            TypeError: If ``limit`` or ``offset`` is not an integer, or is a ``bool``.
-            ValueError: If ``query`` is blank, ``limit`` is not in ``[1, 2**63)``, or
-                ``offset`` is not in ``[0, 2**63)``.
-            OversizedValueError: If the page exceeds the contract limit.
-            TranscriptArchiveError: If the archive cannot be read.
-        """
-        self._reject_if_closing()
-        asked = non_blank_text(query, name="query")
-        positive_page_argument(limit, name="limit")
-        page_argument(offset, name="offset")
-        check_arguments(
-            "transcript_search",
-            max_bytes=self._max_payload_bytes,
-            query=asked,
-            limit=limit,
-            offset=offset,
-        )
-        return await self._tracked(
-            self._transcript_search(asked, limit=limit, offset=offset),
-            "transcript_search",
-            checked=True,
-        )
-
-    async def _transcript_search(
-        self, query: str, *, limit: int, offset: int
-    ) -> tuple[TranscriptHit, ...]:
-        """Relay the search and freeze the page into this surface's own shape."""
-        return tuple(await self._archive.search(query, limit=limit, offset=offset))
-
-    async def transcript_conversation(
-        self,
-        conversation_id: Identifier,
-        *,
-        limit: int = DEFAULT_PAGE_SIZE,
-        offset: int = 0,
-    ) -> tuple[TranscriptEntry, ...]:
-        """Read one conversation's transcript, in the order it was said (§7).
-
-        **Ordinal order rather than newest-first**, which is the one read on this
-        surface that is not recency-ordered: a transcript's order is the order it was
-        said in.
-
-        **It consults no index and no conversation record** (§5). ADR-0074 §7
-        reclaims an emptied conversation's index and record on the horizon and the
-        archive keeps the transcript, so an id :meth:`conversation` answers ``None``
-        for still yields its transcript here. That is what "expiry evicts" means, and
-        it is the steady state rather than an anomaly.
-
-        Args:
-            conversation_id: Which conversation, taken as opaque.
-            limit: Page size, defaulting to
-                :data:`~ai_assistant.core.types.DEFAULT_PAGE_SIZE`.
-            offset: How many ordered entries to skip before the page begins.
-
-        Returns:
-            The page, by instant ascending and then address (ADR-0283 §9), entries
-            whole. Empty where the conversation has no surviving entries — not
-            distinguished from never having had any, because a surface that told
-            them apart would report on transcripts it is meant to have evicted.
-
-        Raises:
-            RuntimeError: If the engine is shutting down.
-            TypeError: If ``limit`` or ``offset`` is not an integer, or is a ``bool``.
-            ValueError: If ``conversation_id`` is blank, ``limit`` is not in
-                ``[1, 2**63)``, or ``offset`` is not in ``[0, 2**63)``.
-            OversizedValueError: If the page exceeds the contract limit.
-            TranscriptArchiveError: If the archive cannot be read.
-        """
-        self._reject_if_closing()
-        named = identifier(conversation_id, name="conversation_id")
-        positive_page_argument(limit, name="limit")
-        page_argument(offset, name="offset")
-        check_arguments(
-            "transcript_conversation",
-            max_bytes=self._max_payload_bytes,
-            conversation_id=named,
-            limit=limit,
-            offset=offset,
-        )
-        return await self._tracked(
-            self._transcript_conversation(named, limit=limit, offset=offset),
-            "transcript_conversation",
-            checked=True,
-        )
-
-    async def _transcript_conversation(
-        self, conversation_id: str, *, limit: int, offset: int
-    ) -> tuple[TranscriptEntry, ...]:
-        """Relay the conversation read and freeze the page."""
-        return tuple(await self._archive.conversation(conversation_id, limit=limit, offset=offset))
-
-    async def transcript_entry(self, address: Identifier) -> TranscriptEntry | None:
-        """Read one entry whole, by its address (§3, §7).
-
-        The second act of §7's show-a-hit-then-read-the-entry split, and the one
-        that makes §3's address stability exercised rather than asserted: an address
-        stays a valid name for its entry after the episode it names has expired,
-        been reclaimed or been destroyed.
-
-        **The address is a name and never a capability**, and reaching an entry here
-        is not citation resolution reaching one. That an expired episode's id is also
-        a live archive address is a property of §3's reuse and is not a fallback: no
-        citation resolution reads the archive (§4), and what a belief whose cited
-        episode has expired renders is unchanged by this operation existing.
-
-        Args:
-            address: The entry's address, taken as opaque.
-
-        Returns:
-            The entry, whole, or ``None`` where nothing is held at that address —
-            never held, past a finite ``transcript_archive_retention``, or destroyed,
-            and the three are deliberately not distinguished.
-
-        Raises:
-            RuntimeError: If the engine is shutting down.
-            ValueError: If ``address`` is blank or whitespace-only.
-            OversizedValueError: If the entry exceeds the contract limit.
-            TranscriptArchiveError: If the archive cannot be read.
-        """
-        self._reject_if_closing()
-        named = identifier(address, name="address")
-        check_arguments("transcript_entry", max_bytes=self._max_payload_bytes, address=named)
-        return await self._tracked(self._archive.entry(named), "transcript_entry", checked=True)
-
-    async def transcript_entries(
-        self, *, limit: int = DEFAULT_PAGE_SIZE, offset: int = 0
-    ) -> tuple[TranscriptEntry, ...]:
-        """Enumerate every entry the archive holds — the archive's export (§7).
-
-        A paged, ordered, unfiltered read of every entry *is* a portable snapshot of
-        everything a store of pure text holds, so ADR-0004 §6's export right for the
-        archive is satisfied by a read rather than by a second serialisation nobody
-        would gain anything from. It is also why the archive is the first Tier-1
-        store whose export exists on day one rather than deferred.
-
-        Args:
-            limit: Page size, defaulting to
-                :data:`~ai_assistant.core.types.DEFAULT_PAGE_SIZE`.
-            offset: How many ordered entries to skip before the page begins.
-
-        Returns:
-            The page, whole entries, newest first with the address breaking ties.
-
-        Raises:
-            RuntimeError: If the engine is shutting down.
-            TypeError: If ``limit`` or ``offset`` is not an integer, or is a ``bool``.
-            ValueError: If ``limit`` is not in ``[1, 2**63)`` or ``offset`` is not in
-                ``[0, 2**63)``.
-            OversizedValueError: If the page exceeds the contract limit.
-            TranscriptArchiveError: If the archive cannot be read.
-        """
-        self._reject_if_closing()
-        positive_page_argument(limit, name="limit")
-        page_argument(offset, name="offset")
-        check_arguments(
-            "transcript_entries", max_bytes=self._max_payload_bytes, limit=limit, offset=offset
-        )
-        return await self._tracked(
-            self._transcript_entries(limit=limit, offset=offset),
-            "transcript_entries",
-            checked=True,
-        )
-
-    async def _transcript_entries(self, *, limit: int, offset: int) -> tuple[TranscriptEntry, ...]:
-        """Relay the unfiltered enumeration and freeze the page."""
-        return tuple(await self._archive.entries(limit=limit, offset=offset))
-
-    async def forget_transcript_entry(self, address: Identifier) -> bool:
-        """Destroy the transcript entry at ``address`` (§5).
-
-        The archive's **own** address-scoped destroy, and not the cascade
-        :meth:`forget` performs on its way to destroying a belief. This one destroys
-        the transcript and touches no memory record, which is what gives a user whose
-        conversation was reclaimed on the horizon a way to destroy text they can
-        still read — ADR-0004 §6's right kept unconditional on a sweep.
-
-        **It reaches what the reads hide.** An entry past a finite
-        ``transcript_archive_retention`` and not yet physically reclaimed still yields
-        here: a destruction is never refused on the ground that a read would not have
-        shown it.
-
-        Args:
-            address: The entry's address, taken as opaque.
-
-        Returns:
-            ``True`` if an entry was destroyed, ``False`` if nothing was at that
-            address — idempotent, so a second call at the same address is a no-op.
-
-        Raises:
-            RuntimeError: If the engine is shutting down.
-            ValueError: If ``address`` is blank or whitespace-only. No spelling of
-                this argument means "everything" (ADR-0101 §9).
-            TranscriptArchiveError: If the archive cannot be written.
-        """
-        self._reject_if_closing()
-        named = identifier(address, name="address")
-        check_arguments("forget_transcript_entry", max_bytes=self._max_payload_bytes, address=named)
-        return await self._tracked(
-            self._archive.discard(named), "forget_transcript_entry", checked=True
-        )
-
-    async def forget_transcript_conversation(self, conversation_id: Identifier) -> int:
-        """Destroy every transcript entry of one conversation (§5).
-
-        Resolved inside the archive against its own entries, so it needs neither the
-        conversation index, the conversation record nor the memory store — which is
-        what closes the hole ADR-0074 §7's reclaim would otherwise open, and why the
-        scope the user names is the scope the archive resolves, forever.
-
-        **Not** :meth:`forget_conversation`, which stamps the conversation and
-        destroys its episodes, discarding these entries as the first action of
-        ADR-0074 §8's step 2. This one destroys the transcript alone, and reaches a
-        conversation that operation can no longer see.
-
-        Args:
-            conversation_id: Which conversation, taken as opaque.
-
-        Returns:
-            How many entries were destroyed. Total and idempotent: a conversation
-            with no entries is a no-op returning ``0``, which is the conforming
-            answer rather than a failure.
-
-        Raises:
-            RuntimeError: If the engine is shutting down.
-            ValueError: If ``conversation_id`` is blank or whitespace-only. The
-                argument is required and positional, and no spelling of it widens
-                what is destroyed (ADR-0101 §9).
-            TranscriptArchiveError: If the archive cannot be written.
-        """
-        self._reject_if_closing()
-        named = identifier(conversation_id, name="conversation_id")
-        check_arguments(
-            "forget_transcript_conversation",
-            max_bytes=self._max_payload_bytes,
-            conversation_id=named,
-        )
-        return await self._tracked(
-            self._archive.discard_conversation(named),
-            "forget_transcript_conversation",
-            checked=True,
-        )
-
-    async def transcript_archive_size(self) -> TranscriptArchiveSize:
-        """What the archive holds and what it costs on disk (§6).
-
-        The figure every surface rendering an archive read renders beside it,
-        unasked, so the size cap ADR-0225 §6 defers has a trigger somebody actually
-        has — ADR-0162 §5's lesson that a trigger with no instrument never fires.
-
-        **Both figures are the archive's own and neither is derived here.**
-        ``entries`` is what the reads would return and ``stored_bytes`` is what is on
-        the disk, and they are allowed to disagree: an entry hidden by a finite
-        retention has left the first and its bytes stay in the second until something
-        physically reclaims them. An engine that netted them would hide exactly the
-        growth the deferred cap exists to catch.
-
-        Returns:
-            The two figures, as they stand at the moment of the call.
-
-        Raises:
-            RuntimeError: If the engine is shutting down.
-            TranscriptArchiveError: If the archive cannot be measured.
-        """
-        self._reject_if_closing()
-        return await self._tracked(self._archive.size(), "transcript_archive_size", checked=True)
 
     async def pending_confirmations(self) -> tuple[Confirmation, ...]:
         """Recover, from durable state, every confirmation a user may still answer (ADR-0052 §1).
@@ -10339,7 +9882,6 @@ class Engine:
         association: _Association,
         *,
         conversation: str,
-        asked: str,
         spoken: _SpokenCapture | None,
     ) -> TurnOutcome:
         """Ask which goal the turn is about, and do nothing else (ADR-0250 §3, §5).
@@ -10368,7 +9910,6 @@ class Engine:
         Args:
             association: What §3 decided, carrying the disambiguation this asks about.
             conversation: The conversation this turn ran under.
-            asked: The user's own words, normalised once (ADR-0248 §1).
             spoken: This pass's spoken capture, or ``None``.
 
         Returns:
@@ -10385,7 +9926,6 @@ class Engine:
             turn=None,
             step=None,
             composed=ComposedReply(text=disambiguation_reply(disambiguation), degraded=False),
-            asked=asked,
             # This pass assembled no supply at all, so ADR-0204 §2's evaluation had
             # nothing to evaluate and ADR-0223 §2's disjunction is over an empty
             # selection. Both are stated rather than inherited: an undecided turn
@@ -12678,7 +12218,6 @@ class Engine:
             working.route_reached = outcome
 
         working.outcome = await self._routed_pass(
-            working.utterance,
             route,
             conversation=conversation,
             compose=working.compose_routed,
@@ -12747,7 +12286,6 @@ class Engine:
         working.outcome = await self._undecided(
             association,
             conversation=_resolved_turn(working).channel.instance_id,
-            asked=request_of(working.utterance),
             spoken=working.spoken,
         )
         working.asked_which = True
@@ -13319,9 +12857,6 @@ class Engine:
             step=None if driven is None else driven.step,
             parked=None if driven is None else driven.parked,
             composed=None if composition is None else composition.composed,
-            # ADR-0225 §1's first case: the pass carried a turn, so the user's own
-            # words are that turn's own `utterance` (ADR-0248 §4).
-            asked=planned.turn.utterance,
             supplied_withheld=planned.withheld,
             modality=planned.modality,
             # ADR-0223 §3's first case: this pass's own value, carried unchanged from
@@ -13370,9 +12905,8 @@ class Engine:
 
     # --- ADR-0197's routing stage, driven --------------------------------
 
-    async def _routed_pass(  # noqa: PLR0913 — the utterance, the route, its conversation, composer and spoken capture, and the verdict carrier; each a distinct fact of the pass
+    async def _routed_pass(
         self,
-        utterance: str,
         route: RoutedRoute,
         *,
         conversation: str,
@@ -13411,7 +12945,6 @@ class Engine:
                 reached(RouteOutcome.UNRECORDED)
             return await self._finish_route(
                 conversation,
-                utterance,
                 RoutedOperation(operation=operation, outcome=RouteOutcome.UNRECORDED),
                 compose=compose,
                 spoken=spoken,
@@ -13427,12 +12960,8 @@ class Engine:
             if registered:
                 # §10: a routed park is not composed for. The confirmation is what the
                 # user must answer, and prose beside it competes with the question.
-                return await self._finish_route(
-                    conversation, utterance, outcome, compose=None, spoken=spoken
-                )
-            return await self._finish_route(
-                conversation, utterance, outcome, compose=compose, spoken=spoken
-            )
+                return await self._finish_route(conversation, outcome, compose=None, spoken=spoken)
+            return await self._finish_route(conversation, outcome, compose=compose, spoken=spoken)
         finally:
             # Held across every await above and released here on every path, which is
             # what `_run_turn` already does with the handle it reserves before driving a
@@ -13883,9 +13412,6 @@ class Engine:
             step=None,
             composed=composed,
             routed=routed,
-            # ADR-0225 §1's third case: this pass received no user words at all — it
-            # is handed an opaque token and a boolean — so the entry carries none.
-            asked=None,
             # ADR-0204 §2's fifth clause: a pass that carries no turn carries
             # ``False``, and it is true of this episode rather than a default — its
             # content holds no goal statement and no plan rationale of any turn.
@@ -13917,7 +13443,6 @@ class Engine:
     async def _finish_route(
         self,
         conversation: str,
-        utterance: str,
         routed: RoutedOperation,
         *,
         compose: _RoutedComposer | None,
@@ -13941,10 +13466,6 @@ class Engine:
             composed=composed,
             routed=routed,
             spoken=spoken,
-            # ADR-0225 §1's second case: a routed pass threads its utterance, which
-            # is the user's own words for an episode that has no turn to read them
-            # off (ADR-0197 §10).
-            asked=utterance,
             # ADR-0221 §5's first case: this episode renders the utterance this pass
             # threads to the capture point, so the value is this pass's own —
             # `SPEECH` "whether or not that pass routed", which is what makes a routed
@@ -14979,11 +14500,6 @@ class Engine:
             turn=turn,
             step=None,
             composed=composed,
-            # ADR-0225 §1's first case as ADR-0248 §4 states it: the pass carried a
-            # turn, so the user's own words are that turn's own `utterance` — the
-            # **parked** turn's, which is whose question this answer continues, read
-            # off the turn this pass just built rather than recomputed here.
-            asked=turn.utterance,
             # ADR-0204 §2's evaluation, read off the one applier this pass minted and
             # never recomputed: the value the capture records is the one the filter
             # returned over the supply the reply was composed from.
@@ -15475,16 +14991,6 @@ class Engine:
             # ADR-0264 §7's field, on the same terms: the value assembled by the pass
             # that drove the step, by value and never a second computation.
             outbound_statement=outbound_statement,
-            # **No user words**, and this is ADR-0225 §1's own clause rather than an
-            # absence of data: the parked turn is right here, and its utterance was
-            # archived at its own address by the pass that parked. Repeating it here
-            # would render one sentence as though the user had said it twice. The
-            # asymmetry with `modality` and `supplied_withheld` just below is
-            # deliberate — those are *retained* from the parked turn and applied
-            # unchanged, because they describe the rendering this episode carries;
-            # this field describes what the user said on *this* pass, and they said
-            # nothing.
-            asked=None,
             # The **parking turn's** value, not this pass's (ADR-0204 §2's fourth
             # clause). This pass retrieves nothing and evaluates nothing; the episode
             # it captures renders the parked turn's goal and plan, so what it is
@@ -15515,14 +15021,13 @@ class Engine:
             attempt_report=attempt_report,
         )
 
-    async def _capture(  # noqa: PLR0913 — the capture point's five inputs plus the parked binding, the routed account, the user's own words the transcript archive keeps, the turn's disclosure evaluation, its origin mark and its spoken capture; every one is a distinct fact about the pass
+    async def _capture(  # noqa: PLR0913 — the capture point's five inputs plus the parked binding, the routed account, the turn's disclosure evaluation, its origin mark and its spoken capture; every one is a distinct fact about the pass
         self,
         conversation_id: str,
         *,
         turn: TurnResult | None,
         step: StepOutcome | None,
         composed: ComposedReply | None,
-        asked: str | None,
         supplied_withheld: bool,
         modality: Modality,
         derived_from_external: bool,
@@ -15573,13 +15078,6 @@ class Engine:
         ``reply_degraded``'s to report and is reported there; §1 adds no field saying
         a stored reply was cut short.
 
-        **What became of the pass is the transcript entry's ``disposition``**
-        (ADR-0221 §2, as ADR-0284 §5:3 keeps it) — :func:`_outcome_of` on a driven or
-        undriven step, :func:`_routed_outcome_of` on a routed pass. The episode's own
-        record of it is the verdict on its ``drive`` or ``routing`` stage entry
-        (ADR-0284 §5:2), and no renderer reads the episode's ``disposition`` field,
-        which ADR-0284 §11's lane 6 removes.
-
         **The episode's ``content`` is not composed here** (ADR-0284 §7:1). The writer
         derives it from the processing record by one rule, on every channel, so a
         routed pass is searchable by its understanding or its status and by the user's
@@ -15595,30 +15093,6 @@ class Engine:
         resumption passes the parked turn's, and a routed pass passes ``False`` —
         which is true of what its episode holds rather than a fallback, because a
         routed pass carries no goal statement and no plan rationale of any turn.
-
-        **``asked`` is the user's own words, passed at every call site, and this
-        method neither computes nor derives it** (ADR-0225 §1) — a fourth field with
-        the shape ``supplied_withheld``, ``modality`` and ``derived_from_external``
-        already have. It is what the *transcript archive* keeps as the user's half of
-        the exchange, and it is threaded rather than read off ``content`` for the
-        reason §1 gives: ``content`` is the episode's search text (ADR-0284 §7), and
-        the user's sentence is recoverable from it — if at all — only by parsing a
-        derivation this system is free to change.
-
-        Its three cases are ADR-0221 §5's three capture cases and no other partition
-        is introduced. :meth:`_run_turn` passes ``turn.utterance`` on both its
-        branches, because the pass carried a turn and ADR-0248 §4 supersedes ADR-0225
-        §1's fourth clause in that limb alone — the words are the turn's own request
-        rather than its goal statement, and at ADR-0248 the two are byte-equal (§6);
-        :meth:`_resume_read` passes the resumed turn's, which is the **parked** pass's
-        request (ADR-0248 §3); :meth:`_finish_route` passes the
-        ``utterance`` it already threads, because a routed pass has user material and
-        no turn to read it off; and :meth:`_capture_resumption` and
-        :meth:`_compose_and_capture_routed` each pass ``None``. The resumption's
-        ``None`` is §1's own clause rather than an absence of data — the parked turn
-        *is* in front of that method — because the utterance that parked was archived
-        at its own address by the pass that parked, and repeating it would render one
-        sentence as though the user had said it twice.
 
         **``spoken`` decides whether this capture writes a delivery at all** (ADR-0205
         §4). It is present exactly on a turn of ``converse_spoken``, which writes
@@ -15659,11 +15133,6 @@ class Engine:
         state = active_state()
         if state is not None:
             state.facts = CaptureFacts(
-                asked=asked,
-                response=None if composed is None else composed.text,
-                disposition=(
-                    _outcome_of(step) if routed is None else _routed_outcome_of(routed.outcome)
-                ),
                 parked=parked,
                 supplied_withheld=supplied_withheld,
                 modality=modality,

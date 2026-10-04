@@ -35,15 +35,7 @@ _ROOT: Final = Path(__file__).resolve().parents[2]
 #: Every case, in one file, each on its own named function so a report line can be
 #: attributed. The imports are real; only the bodies are the subject.
 _SNIPPET: Final = '''
-from datetime import timedelta
-
-from ai_assistant.core.protocols import (
-    ConversationStore,
-    MemoryStore,
-    TranscriptArchive,
-    TranscriptArchiveWriter,
-)
-from ai_assistant.orchestration.conversations import ConversationLifecycle
+from ai_assistant.core.protocols import TranscriptArchive, TranscriptArchiveWriter
 
 
 async def read_on_the_writer_seam(writer: TranscriptArchiveWriter) -> object:
@@ -59,15 +51,6 @@ async def enumerate_on_the_writer_seam(writer: TranscriptArchiveWriter) -> objec
 async def append_on_the_archive_seam(archive: TranscriptArchive) -> None:
     """§1 reserves writing to capture, so the engine's seam carries no append."""
     await archive.append(None)
-
-
-def a_composition_omitting_the_writer_seam(
-    conversations: ConversationStore, memory: MemoryStore, retention: timedelta | None
-) -> ConversationLifecycle:
-    """§10: "a composition that omits it does not type-check"."""
-    return ConversationLifecycle(
-        conversations=conversations, memory=memory, retention=retention, archive_enabled=True
-    )
 '''
 
 #: What the run must report, one per case above. Matched as substrings of the whole
@@ -77,7 +60,6 @@ _EXPECTED: Final = (
     '"TranscriptArchiveWriter" has no attribute "search"',
     '"TranscriptArchiveWriter" has no attribute "entries"',
     '"TranscriptArchive" has no attribute "append"',
-    'Missing named argument "archive" for "ConversationLifecycle"',
 )
 
 
@@ -122,9 +104,12 @@ def report(tmp_path_factory: pytest.TempPathFactory) -> str:
     return completed.stdout
 
 
-@pytest.mark.parametrize("expected", _EXPECTED, ids=["search", "entries", "append", "composition"])
+@pytest.mark.parametrize("expected", _EXPECTED, ids=["search", "entries", "append"])
 def test_the_type_checker_reports_the_seam_violation(report: str, expected: str) -> None:
-    """Each of §13 item 2's four type-level cases, as ``mypy`` reports it.
+    """Each of §13 item 2's type-level cases that still has a consumer, as ``mypy`` reports it.
+
+    The fourth, a ``ConversationLifecycle`` composition omitting the writer seam, went
+    when ADR-0287 §2 took the seam off that constructor.
 
     Matched over the report with its whitespace collapsed, because ``mypy`` folds a
     long message to the terminal width and the width is not a property of what is
@@ -134,7 +119,7 @@ def test_the_type_checker_reports_the_seam_violation(report: str, expected: str)
 
 
 def test_the_snippet_reports_nothing_else(report: str) -> None:
-    """The control: every reported error is one of the four this module is about.
+    """The control: every reported error is one of the cases this module is about.
 
     Without it the cases above would keep passing after a change that made the whole
     snippet fail for an unrelated reason — an import that stopped resolving, say —

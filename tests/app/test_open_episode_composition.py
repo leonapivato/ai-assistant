@@ -707,7 +707,7 @@ async def test_a_start_closes_an_open_episode_a_dead_process_left(
     tmp_path: Path, monkeypatch: pytest.MonkeyPatch
 ) -> None:
     """§7: closed ``interrupted`` / ``hub_stopped`` by an end entry due ``hub_stopped``,
-    owner-only, with no archive entry, and its turn recorded on its conversation."""
+    owner-only, and its turn recorded on its conversation."""
     dying = await _build(tmp_path, monkeypatch)
     try:
         conversation_id = _conversation(await dying.say("hello"))
@@ -735,7 +735,6 @@ async def test_a_start_closes_an_open_episode_a_dead_process_left(
         assert closed.placement.reach is PlacementReach.OWNER
         assert closed.placement.set_by is PlacementSetter.DERIVED
         assert closed.content == episode_content(closed)
-        assert await restarted.engine._archive.entry(address) is None
         assert address in await restarted.held(conversation_id)
         conversation = await restarted.engine._conversations._conversations.get(conversation_id)
         assert conversation is not None
@@ -843,7 +842,7 @@ async def test_forget_during_a_pass_leaves_no_episode_and_its_later_stages_write
     composed: Composed, monkeypatch: pytest.MonkeyPatch
 ) -> None:
     """§8: ``forget`` deletes the open episode at once; the pass runs on, its next write
-    deletes instead, and nothing re-creates the episode or gives it an archive entry."""
+    deletes instead, and nothing re-creates the episode."""
     conversation_id = _conversation(await composed.say("hello"))
     gate = _hold(monkeypatch, composed.engine, "_windows_stage", _saying("forget me"))
     written = _episode_writes(monkeypatch, composed.memory)
@@ -861,7 +860,6 @@ async def test_forget_during_a_pass_leaves_no_episode_and_its_later_stages_write
     assert result.capture.state == "degraded"
     assert address not in written[mark:], "no write after the forget names the episode"
     assert await composed.stored(address) is None
-    assert await composed.engine._archive.entry(address) is None
     assert address not in await composed.held(conversation_id)
 
 
@@ -884,7 +882,6 @@ async def test_a_conversation_deleted_during_a_pass_leaves_no_episode(
 
     assert result.capture.state == "degraded"
     assert await composed.stored(address) is None
-    assert await composed.engine._archive.entry(address) is None
     assert await composed.held(conversation_id) == []
 
 
@@ -918,7 +915,6 @@ async def test_a_forced_mismatch_reports_the_capture_degraded_and_leaves_no_epis
     assert isinstance(result.result, TextChannelResult)
     assert result.result.outcome.reply is not None, "processing was not failed by it"
     assert await composed.stored(address) is None
-    assert await composed.engine._archive.entry(address) is None
 
 
 async def test_an_admission_collision_deletes_nothing(composed: Composed) -> None:
@@ -939,4 +935,3 @@ async def test_an_admission_collision_deletes_nothing(composed: Composed) -> Non
     assert result.capture.state == "degraded"
     assert result.capture.episode_id is None
     assert await composed.stored(address) == before
-    assert await composed.engine._archive.entry(address) is None

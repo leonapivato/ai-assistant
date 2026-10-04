@@ -54,7 +54,6 @@ from ai_assistant.testing import (
     FakeConversationStore,
     FakeMemoryStore,
     FakeParkedReads,
-    FakeTranscriptArchiveWriter,
 )
 
 if TYPE_CHECKING:
@@ -94,7 +93,7 @@ class MovableClock:
 
 
 class Wiring:
-    """A stage and the three stores behind it, all sharing one clock."""
+    """A stage and the stores behind it, all sharing one clock."""
 
     def __init__(  # noqa: PLR0913 — one knob per store seam a case may need to vary
         self,
@@ -104,8 +103,6 @@ class Wiring:
         grace: timedelta = GRACE,
         memory: FakeMemoryStore | None = None,
         conversations: FakeConversationStore | None = None,
-        archive: FakeTranscriptArchiveWriter | None = None,
-        archive_enabled: bool = True,
         parked_reads: FakeParkedReads | None = None,
     ) -> None:
         self.clock = clock if clock is not None else MovableClock()
@@ -116,7 +113,6 @@ class Wiring:
             if conversations is not None
             else FakeConversationStore(now=self.clock, retention=retention, tombstone_grace=grace)
         )
-        self.archive = archive if archive is not None else FakeTranscriptArchiveWriter()
         # ``None`` unless a case asks for one: a stage wired without one carries out
         # §8 exactly as it did before ADR-0244 — which is the arm below that holds
         # the absence.
@@ -126,8 +122,6 @@ class Wiring:
             memory=self.memory,
             retention=retention,
             now=self.clock,
-            archive=self.archive,
-            archive_enabled=archive_enabled,
             parked_reads=parked_reads,
         )
 
@@ -515,7 +509,7 @@ async def test_a_binding_parked_in_a_deleted_conversation_finds_none() -> None:
 async def test_deletion_runs_its_steps_in_the_ratified_order(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
-    """§8:1: archive discard, parked-reads drop, the channel walk, then the drop.
+    """§8:1, as ADR-0287 §4 left it: parked-reads drop, the channel walk, then the drop.
 
     The walk reads the channel page by page until a read comes back empty — so the
     last ``channel_episode_ids`` call answers nothing and is followed only by
@@ -523,11 +517,6 @@ async def test_deletion_runs_its_steps_in_the_ratified_order(
     """
     log: list[str] = []
     clock = MovableClock()
-
-    class Archive(FakeTranscriptArchiveWriter):
-        async def discard_conversation(self, conversation_id: str) -> int:
-            log.append("discard_conversation")
-            return await super().discard_conversation(conversation_id)
 
     class Memory(FakeMemoryStore):
         async def channel_episode_ids(
@@ -559,7 +548,6 @@ async def test_deletion_runs_its_steps_in_the_ratified_order(
     wiring = Wiring(
         clock=clock,
         memory=memory,
-        archive=Archive(),
         parked_reads=parks,
         conversations=Conversations(now=clock, retention=RETENTION, tombstone_grace=GRACE),
     )
@@ -570,7 +558,6 @@ async def test_deletion_runs_its_steps_in_the_ratified_order(
     assert await wiring.stage.delete(conversation_id) is True
 
     assert log == [
-        "discard_conversation",
         "drop_for_conversation",
         "channel_episode_ids(after=None) -> 2",
         f"delete({episodes[0]})",
@@ -829,9 +816,8 @@ async def test_a_park_store_fault_aborts_step_two_and_the_tombstone_stands() -> 
     """The residue of a partial failure is one the user can still reach and destroy.
 
     The parks are dropped before any episode is deleted, so a store that cannot be
-    written leaves the episodes and the transcript exactly where ``forget`` and the next
-    sweep can still find them — ADR-0225 §5's rule, applied to the fourth store this
-    sequence spans. The tombstone stands, which is what makes the next sweep finish it.
+    written leaves the episodes exactly where ``forget`` and the next sweep can still
+    find them. The tombstone stands, which is what makes the next sweep finish it.
     """
     parks = FakeParkedReads()
     wiring = Wiring(parked_reads=parks)
@@ -1013,8 +999,6 @@ async def test_a_crashed_deletion_is_finished_after_the_index_is_reopened(tmp_pa
             memory=memory,
             retention=RETENTION,
             now=clock,
-            archive=FakeTranscriptArchiveWriter(),
-            archive_enabled=True,
         )
         conversation = await stage.begin(None)
         await memory.add(conversation_episode(conversation.id, "activation:before-the-crash"))
@@ -1033,8 +1017,6 @@ async def test_a_crashed_deletion_is_finished_after_the_index_is_reopened(tmp_pa
             memory=memory,
             retention=RETENTION,
             now=clock,
-            archive=FakeTranscriptArchiveWriter(),
-            archive_enabled=True,
         )
 
         assert await restarted.sweep_deletions() == 1
@@ -1137,8 +1119,6 @@ async def test_reclaim_judges_against_the_horizon_in_force_when_it_runs(
         memory=memory,
         retention=started_under,
         now=clock,
-        archive=FakeTranscriptArchiveWriter(),
-        archive_enabled=True,
     )
     conversation = await started.begin(None)  # emptied by construction: no turn ever landed
 
@@ -1149,8 +1129,6 @@ async def test_reclaim_judges_against_the_horizon_in_force_when_it_runs(
         memory=memory,
         retention=reclaimed_under,
         now=clock,
-        archive=FakeTranscriptArchiveWriter(),
-        archive_enabled=True,
     )
 
     assert await reclaiming.reclaim() == expected

@@ -17,7 +17,6 @@ from datetime import UTC, datetime, timedelta
 from decimal import Decimal
 from email.utils import format_datetime
 from enum import StrEnum
-from inspect import get_annotations
 from pathlib import Path
 from types import ModuleType
 from typing import TYPE_CHECKING, Any
@@ -37,7 +36,6 @@ from ai_assistant.app import (
     ensure_model_credentials,
 )
 from ai_assistant.app import composition as composition_module
-from ai_assistant.archive import SqliteTranscriptArchive
 from ai_assistant.context import (
     AssemblingContextProvider,
     CalendarContextSource,
@@ -55,7 +53,6 @@ from ai_assistant.core.errors import (
     RoutingTrailError,
     SourceNotGrantedError,
     TraceStoreError,
-    TranscriptArchiveError,
 )
 from ai_assistant.core.protocols import (
     AssistantEngine,
@@ -70,8 +67,6 @@ from ai_assistant.core.protocols import (
     RecipientGrants,
     SpendGate,
     SpendLedger,
-    TranscriptArchive,
-    TranscriptArchiveWriter,
 )
 from ai_assistant.core.types import (
     BeliefBand,
@@ -103,7 +98,7 @@ from ai_assistant.memory import deferral_store as deferral_store_module
 from ai_assistant.models import BoundedEmbedder, HashingEmbedder, RoutingProvider
 from ai_assistant.models.streaming import PydanticAIStreamingCompleter
 from ai_assistant.orchestration import Engine
-from ai_assistant.orchestration.conversations import BELIEF_KINDS, ConversationLifecycle
+from ai_assistant.orchestration.conversations import BELIEF_KINDS
 from ai_assistant.orchestration.loop import (
     _DEFAULT_EPISODIC_LIMIT,
     _DEFAULT_RETRIEVAL_LIMIT,
@@ -1308,68 +1303,6 @@ def test_a_context_config_failure_touches_no_disk_either(
     assert not absent.exists()
 
 
-async def test_build_engine_hands_capture_the_narrow_archive_seam(tmp_path: Path) -> None:
-    """ADR-0225 §13 item 2's last clause: the composition root's wiring, asserted directly.
-
-    §10 leaves *which object the root passes* to the root — one concrete satisfies
-    both Protocols, and no type checker rejects the concrete at either parameter — so
-    this is the assertion that stands where the type system does not. What
-    ``ConversationLifecycle`` is handed is the archive; what makes it the **narrow**
-    seam is the annotation on its own constructor, which is why the second assertion
-    below is about the *declared* type rather than about the object.
-
-    **One archive and not two.** A root that opened a second store here would have
-    capture writing transcripts into one file and ``forget`` destroying from another,
-    so every cascade would report success over text that was still on disk — the same
-    failure ADR-0028 §4 names one store over.
-    """
-    engine = build_engine(Settings(embedder=EmbedderKind.HASHING), data_dir=tmp_path)
-    try:
-        archive = engine._archive
-        # Read through ``object`` because the two *declared* types do not overlap —
-        # ``mypy`` refuses ``x is y`` between them outright, which is the seam split
-        # showing up in the assertion that has to reach past it. What is being
-        # asserted is object identity, which is the root's discipline (§10).
-        capture_seam: object = engine._conversations._archive
-        assert capture_seam is archive, "one archive, two seams"
-        assert isinstance(archive, SqliteTranscriptArchive)
-        # The narrowing is the *annotation* on each constructor, read as written
-        # because `from __future__ import annotations` leaves it a string and the
-        # names it resolves through live in a `TYPE_CHECKING` block. That the strings
-        # resolve to the two Protocols, and that the narrowing actually bites, is what
-        # `tests/archive/test_archive_seam_types.py` puts to `mypy`.
-        assert get_annotations(ConversationLifecycle.__init__)["archive"] == (
-            TranscriptArchiveWriter.__name__
-        )
-        assert get_annotations(Engine.__init__)["archive"] == TranscriptArchive.__name__
-    finally:
-        await engine.aclose()
-
-
-async def test_closing_the_engine_closes_the_transcript_archive(tmp_path: Path) -> None:
-    """ADR-0225 §6 and §9 are jointly about the files, so the connection must close.
-
-    §6 closes the archive's file set to the database and the sidecars SQLite keeps
-    beside it, and §9 makes every one of them owner-only. A connection left open past
-    shutdown leaves a ``-wal`` holding transcript pages behind — the one residue those
-    two sections exist to prevent, and the kind of omission that is invisible until a
-    backup picks the file up.
-
-    Asserted through the store's own refusal rather than through the closer list,
-    because a list is a statement about wiring and this is a statement about the
-    connection.
-    """
-    engine = build_engine(Settings(embedder=EmbedderKind.HASHING), data_dir=tmp_path)
-    archive = engine._archive
-    assert isinstance(archive, SqliteTranscriptArchive)
-    assert await archive.size() is not None, "open before, so the refusal below means something"
-
-    await engine.aclose()
-
-    with pytest.raises(TranscriptArchiveError):
-        await archive.size()
-
-
 async def test_closing_the_engine_closes_the_recipient_grant_store(
     tmp_path: Path, monkeypatch: pytest.MonkeyPatch
 ) -> None:
@@ -1428,33 +1361,6 @@ async def test_closing_the_engine_closes_the_routing_trail(tmp_path: Path) -> No
 
     with pytest.raises(RoutingTrailError):
         await trail.recent(limit=1)
-
-
-async def test_build_engine_reads_both_archive_settings_from_configuration(
-    tmp_path: Path,
-) -> None:
-    """ADR-0225 §6: the archive's retention is its own, and the switch gates the write.
-
-    Pinned because both are the kind of value a root can plausibly derive from
-    something else — and §6 forbids exactly that: "no implementation, setting or later
-    lane derives it from ``episode_retention``, and a change to ``episode_retention``
-    moves nothing in the archive".
-    """
-    settings = Settings(
-        embedder=EmbedderKind.HASHING,
-        episode_retention=timedelta(days=7),
-        transcript_archive_retention=timedelta(days=900),
-        transcript_archive_enabled=False,
-    )
-    engine = build_engine(settings, data_dir=tmp_path)
-    try:
-        archive = engine._archive
-        assert isinstance(archive, SqliteTranscriptArchive)
-        assert archive._retention == timedelta(days=900)
-        assert engine._conversations._archive_enabled is False
-        assert engine._conversations._retention == timedelta(days=7)
-    finally:
-        await engine.aclose()
 
 
 async def test_build_engine_opens_the_deferral_queue_under_the_data_dir(
@@ -1795,10 +1701,7 @@ async def test_the_grant_store_is_the_sixth_database_in_the_data_directory(
     the twelfth on the same terms again; and ADR-0197 §9's routing trail is the
     thirteenth, whose §9 states the residency clause explicitly for the reason
     ADR-0185 §9 gave — "a new store which omitted to would be a store nobody had
-    classified". ADR-0225 §10's transcript archive is the **fourteenth** and obeys
-    the ruling on the same terms, and it is the store the ruling matters most for:
-    it holds Tier 1 text for longer than anything else here and nothing but the
-    user reads it (§4). ADR-0238 §1's destination-trust store is the
+    classified". ADR-0238 §1's destination-trust store is the
     **fifteenth**, and §1 states the residency clause explicitly for ADR-0185
     §9's reason — "local and durable and … never written to a remote service".
     ADR-0244 §3's parked-read store joins them on the same terms, and its §2 is where
@@ -1886,15 +1789,6 @@ async def test_the_grant_store_is_the_sixth_database_in_the_data_directory(
             # names is destroyed (ADR-0185 §2's ground).
             "routing.db",
             "traces.db",
-            # ADR-0225 §10's transcript archive, the fourteenth and the thirteenth
-            # that is Tier 1: an entry holds what the user said and what the
-            # assistant said, verbatim. **A file of its own rather than a table in
-            # ``memory.db``** (§10, on ADR-0119 §6's reasoning): a separate file is
-            # what makes the reach of every whole-store operation a decided question
-            # instead of an accident of which tables share a connection —
-            # ``MemoryStore.clear`` empties one and not the other, and §5 obliges
-            # whoever gives ``clear`` a surface to erase both in one act.
-            "transcripts.db",
         ]
         assert stat.S_IMODE((tmp_path / "grants.db").stat().st_mode) == 0o600
         # ADR-0004 §4 reaches the eighth exactly as it reaches the sixth: a
@@ -1911,12 +1805,6 @@ async def test_the_grant_store_is_the_sixth_database_in_the_data_directory(
         # "is the one clause of §9 that a working store can violate while every
         # other test passes".
         assert stat.S_IMODE((tmp_path / "routing.db").stat().st_mode) == 0o600
-        # And the fourteenth (ADR-0225 §9, ADR-0004 §4). ADR-0225 §9 calls this the
-        # gate it "cannot close" — the archive ships at the memory store's own
-        # at-rest baseline while holding the same class of content for longer — so
-        # the one protection it does have is asserted rather than assumed here, and
-        # `tests/archive/` asserts it again over the sidecars and over a reopen.
-        assert stat.S_IMODE((tmp_path / "transcripts.db").stat().st_mode) == 0o600
     finally:
         await engine.aclose()
 

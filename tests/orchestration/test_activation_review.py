@@ -32,9 +32,9 @@ if TYPE_CHECKING:
 class StampedThenUnknown(FakeConversationStore):
     """``record_turn`` meets a conversation deleted meanwhile, and its outcome is unknown.
 
-    The episode and the archive entry are both written by then (ADR-0283 §7:1), so
-    the writer's compensation re-reads the conversation, finds it gone, and destroys
-    both through the drain (§7:4, ADR-0275 §8:11).
+    The episode is frozen by then (ADR-0286 §4), so the writer's compensation re-reads
+    the conversation, finds it gone, and destroys the episode through the drain (§7:4,
+    ADR-0275 §8:11).
     """
 
     async def record_turn(
@@ -58,7 +58,7 @@ async def _hold(entered: asyncio.Event, release: asyncio.Event, cancelled: async
         raise
 
 
-@pytest.mark.parametrize("stage", ["verify", "archive"])
+@pytest.mark.parametrize("stage", ["verify", "delete"])
 async def test_shutdown_does_not_cancel_safety_work_already_in_its_snapshot(
     monkeypatch: pytest.MonkeyPatch,
     stage: str,
@@ -69,23 +69,23 @@ async def test_shutdown_does_not_cancel_safety_work_already_in_its_snapshot(
     assert state.conversation_id is not None
     entered, release, cancelled, closed = (asyncio.Event() for _ in range(4))
     original_get = wiring.conversations.get
-    original_discard = wiring.archive.discard
+    original_delete = memory.delete
 
     async def get(conversation_id: str) -> Conversation | None:
         if stage == "verify":
             await _hold(entered, release, cancelled)
         return await original_get(conversation_id)
 
-    async def discard(address: str) -> None:
-        if stage == "archive":
+    async def delete(record_id: str) -> bool:
+        if stage == "delete":
             await _hold(entered, release, cancelled)
-        await original_discard(address)
+        return await original_delete(record_id)
 
     async def close() -> None:
         closed.set()
 
     monkeypatch.setattr(wiring.conversations, "get", get)
-    monkeypatch.setattr(wiring.archive, "discard", discard)
+    monkeypatch.setattr(memory, "delete", delete)
     harness = Harness(closers=(close,), drain_timeout=timedelta(0))
     harness.engine._activation_coordinator._writer = wiring.writer
 
@@ -97,7 +97,6 @@ async def test_shutdown_does_not_cancel_safety_work_already_in_its_snapshot(
     )
     async with asyncio.timeout(5):
         await entered.wait()
-    assert len(wiring.archive.recorded) == 1
     assert len(await memory.export()) == 1
     closing = asyncio.create_task(harness.engine.aclose())
     try:
@@ -111,7 +110,6 @@ async def test_shutdown_does_not_cancel_safety_work_already_in_its_snapshot(
         release.set()
         await asyncio.gather(task, closing, return_exceptions=True)
     assert await memory.export() == []
-    assert wiring.archive.recorded == {}
     assert closed.is_set()
 
 

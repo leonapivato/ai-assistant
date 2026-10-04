@@ -210,7 +210,6 @@ from ai_assistant.testing import (
     FakeTraceRetention,
     FakeTraceSink,
     FakeTranscriptArchive,
-    FakeTranscriptArchiveWriter,
     FakeWebSearcher,
     invoker_over,
     source_grant,
@@ -653,8 +652,6 @@ async def _engine(now: Clock) -> None:
             memory=memory,
             retention=timedelta(days=30),
             now=lambda: _AWARE,
-            archive=FakeTranscriptArchiveWriter(),
-            archive_enabled=True,
         ),
         questions=QuestionStage(
             writer=writer, deferrals=deferrals, memory=memory, now=lambda: _AWARE
@@ -690,7 +687,6 @@ async def _engine(now: Clock) -> None:
         # order rather than by time.
         connection_operations=ConnectionOperations(provisioner=FakeConnectionProvisioner()),
         now=now,
-        archive=FakeTranscriptArchive(),
     ).purge_expired()
 
 
@@ -819,8 +815,6 @@ async def _conversation_lifecycle(now: Clock) -> None:
     await ConversationLifecycle(
         conversations=FakeConversationStore(now=lambda: _AWARE),
         memory=FakeMemoryStore(now=lambda: _AWARE),
-        archive=FakeTranscriptArchiveWriter(),
-        archive_enabled=True,
         retention=timedelta(days=30),
         now=now,
     ).reclaim()
@@ -2110,8 +2104,6 @@ async def test_capture_clock_fault_degrades_receipt_without_writing_an_invalid_r
     writer = ActivationWriter(
         conversations=FakeConversationStore(now=lambda: _AWARE),
         memory=memory,
-        archive=FakeTranscriptArchiveWriter(),
-        archive_enabled=False,
         retention=None,
         now=now if label == "ActivationWriter" else lambda: _AWARE,
     )
