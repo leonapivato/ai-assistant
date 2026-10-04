@@ -65,6 +65,7 @@ from ai_assistant.core.errors import (
     NotificationOutboxError,
     NotificationStoreError,
     PlanningError,
+    StoryStoreError,
     TraceStoreError,
 )
 from ai_assistant.core.types import (
@@ -103,6 +104,9 @@ from ai_assistant.core.types import (
     Reversibility,
     RiskLevel,
     SemanticMemory,
+    StoryActor,
+    StoryMember,
+    StoryMemberKind,
     TextChannelPayload,
     TimeOfDay,
     ToolCall,
@@ -118,6 +122,7 @@ from ai_assistant.memory import (
     SqliteMemoryStore,
     SqliteNotificationOutbox,
     SqliteNotificationStore,
+    SqliteStoryStore,
 )
 from ai_assistant.memory import traces as memory_traces
 from ai_assistant.memory.conversation_store import SqliteConversationStore
@@ -202,6 +207,7 @@ from ai_assistant.testing import (
     FakeSourceGrantStore,
     FakeSourceReadRecorder,
     FakeSourceReadTrail,
+    FakeStoryStore,
     FakeStreamingCompleter,
     FakeToolInvoker,
     FakeToolRegistry,
@@ -954,6 +960,25 @@ async def _sqlite_deferral_store(now: Clock) -> None:
             store.close()
 
 
+async def _fake_story_store(now: Clock) -> None:
+    """A create stamps the story and its log lines from the store's own clock."""
+    await FakeStoryStore(now=now).create(
+        [StoryMember(kind=StoryMemberKind.ACTIVATION, id="a1")], actor=StoryActor.OWNER
+    )
+
+
+async def _sqlite_story_store(now: Clock) -> None:
+    """A create stamps the story and its log lines from the store's own clock."""
+    with tempfile.TemporaryDirectory() as directory:
+        store = SqliteStoryStore(path=Path(directory) / "stories.db", now=now)
+        try:
+            await store.create(
+                [StoryMember(kind=StoryMemberKind.ACTIVATION, id="a1")], actor=StoryActor.OWNER
+            )
+        finally:
+            store.close()
+
+
 async def _sqlite_notification_outbox(now: Clock) -> None:
     """A claim reads the clock to settle leases before it answers."""
     with tempfile.TemporaryDirectory() as directory:
@@ -1232,6 +1257,8 @@ SEAMS = [
     Seam("SqliteAuditTrail", _sqlite_audit_trail, AuditError),
     Seam("SqliteConversationStore", _sqlite_conversation_store, ConversationStoreError),
     Seam("SqliteDeferralStore", _sqlite_deferral_store, DeferralStoreError),
+    Seam("FakeStoryStore", _fake_story_store, StoryStoreError),
+    Seam("SqliteStoryStore", _sqlite_story_store, StoryStoreError),
     Seam("SqliteNotificationOutbox", _sqlite_notification_outbox, NotificationOutboxError),
     Seam("SqliteNotificationStore", _sqlite_notification_store, NotificationStoreError),
     Seam("SqlitePlanStore", _sqlite_plan_store, PlanningError),
