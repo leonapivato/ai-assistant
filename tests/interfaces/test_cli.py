@@ -630,6 +630,29 @@ def test_a_blank_line_the_composed_string_carries_is_a_blank_line(
     assert output.getvalue() == "\n  rec-1\nAbout to connect.\n\n"
 
 
+def test_a_break_a_prose_value_keeps_after_the_head_is_marked_as_a_continuation(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """Where the break is the *value's*, the line under it is still marked as data.
+
+    :func:`cli._safe_prose` keeps a value's newlines, because prose is legitimately more
+    than one line, so a line interpolating it is the one shape here where a break sits
+    between two pieces of content rather than ahead of or after them. :func:`cli._print`
+    reads a break after a line's head as a continuation of it wherever the break came
+    from, so a value that spells a field on its second line puts it behind the marker
+    and never at the head of a display line of its own.
+    """
+    output = StringIO()
+    _narrow(monkeypatch, output, 200)
+    forged = "  Conversation: c9"
+    value = cli._safe_prose(f"where did I put the lease\n{forged}")
+
+    cli._print(f"  [bold]You:[/] {value}")
+
+    lines = output.getvalue().splitlines()
+    assert lines == ["  You: where did I put the lease", f"  {_CONTINUATION}{forged}"]
+
+
 @pytest.mark.parametrize("width", [1, 4, 8, 12, 20, 28, 40, 64, 100, 120])
 def test_no_forged_field_reaches_the_head_of_a_display_line_at_any_width(
     monkeypatch: pytest.MonkeyPatch, width: int

@@ -138,8 +138,8 @@ def _response_label(record: EpisodicMemory) -> str:
 
 def _retention_notice(console: Console) -> None:
     console.print(
-        "Retention expiry removes an episode from live memory; explicit forgetting also "
-        "destroys its archived transcript. An archive may outlive an expired episode."
+        "Retention expiry, where a retention window is set, removes an episode from live "
+        "memory; explicit forgetting deletes it."
     )
 
 

@@ -28,16 +28,6 @@ distinction matters most. A conversation the user deleted reaches none of these 
 not because anything here filters it, but because the store hides a stamped
 conversation from every read that presents one.
 
-``transcript`` is the archive's surface (ADR-0225 §8), and it is a **group of its
-own** rather than a mode of either of the two above: §8 requires the archive's reads
-and destroys to "live on their own command, distinct from ``beliefs`` and from
-``conversations``", so that no surface presents a transcript entry as a belief, as
-something the assistant holds, or as evidence for anything. Every read there prints
-what it is showing and the archive's own size beside it without being asked (§6, §8),
-and the two destroys under it reach a conversation the ``conversations`` surface has
-already reclaimed — which is the whole point of the archive: reaching the retention
-horizon evicts a turn from the working set rather than destroying it.
-
 ``questions``, ``answer`` and ``forget-question`` are the deferred-question surface
 (ADR-0078 §8): a memory decision the gate would not make without the user's word now
 waits durably, and this is where it reaches them. The two enumerations stay
@@ -410,9 +400,6 @@ if TYPE_CHECKING:
         StepOutcome,
         ToolCost,
         ToolInvocation,
-        TranscriptArchiveSize,
-        TranscriptEntry,
-        TranscriptHit,
         TurnOutcome,
         Warrant,
     )
@@ -439,22 +426,6 @@ device_app = typer.Typer(
 )
 app.add_typer(device_app, name="device")
 
-#: The transcript archive's own command group (ADR-0225 §8). **Its own, and never a
-#: mode of ``beliefs`` or ``conversations``**: §8 puts the archive's reads and
-#: destroys on a command of their own so that nothing here presents a transcript
-#: entry as something the assistant believes. What it holds is what §7 and §5 admit
-#: and nothing else — four reads and two destroys — with §6's size report rendered
-#: beside every read rather than offered as a seventh command, because the figure is
-#: owed *unasked* and a command the user must think to run is one they never do.
-transcript_app = typer.Typer(
-    name="transcript",
-    help=(
-        "Search and read what was actually said, and destroy any of it. A record of "
-        "the exchange, kept apart from what I believe: nothing here reaches a reply."
-    ),
-    no_args_is_help=True,
-)
-app.add_typer(transcript_app, name="transcript")
 console = Console()
 
 #: Where a diagnostic goes when standard output is carrying an **artifact**
@@ -561,11 +532,6 @@ _HH_MM = re.compile(r"\d{2}:\d{2}")
 #: so it would escape the command's error boundary as a traceback (see
 #: :func:`_page_argument`).
 _PAGE_BOUND = 2**63
-
-#: Where :func:`_stored_bytes` starts printing a rounded figure beside the exact one.
-#: The exact count is never replaced by it: ADR-0225 §6 puts a *measurement* on the
-#: screen, and the surface that reports it is the last place to round one away.
-_MIB = 1024 * 1024
 
 #: The ``learn`` command's enum-typed options, defined once at module scope. Typer
 #: options for an ``Enum`` parameter are hoisted here rather than called inline in
@@ -1576,142 +1542,6 @@ def forget_conversation(
     raise typer.Exit(code)
 
 
-@transcript_app.command("search")
-def transcript_search(
-    query: str = typer.Argument(
-        ..., callback=_present_content, help="The words to look for, as you would say them."
-    ),
-    limit: int = typer.Option(
-        50, "--limit", callback=_positive_page_argument, help="How many hits to show at most."
-    ),
-    offset: int = typer.Option(
-        0, "--offset", callback=_page_argument, help="How many hits to skip before the page begins."
-    ),
-) -> None:
-    """Find where you or I said something, newest first.
-
-    A plain substring match, case-insensitive, over each half of a turn separately —
-    no stemming, no synonyms, no fuzzy matching, and nothing clever about meaning.
-    A query spanning the join between what you said and what I said matches nothing,
-    because the two halves are searched apart.
-
-    Each hit shows a bounded taste of the matching text and the address to read the
-    turn whole by: ``assistant transcript show <address>``.
-    """
-    code = asyncio.run(_search_transcript(query, limit=limit, offset=offset))
-    raise typer.Exit(code)
-
-
-@transcript_app.command("conversation")
-def transcript_conversation(
-    conversation_id: str = typer.Argument(
-        ..., callback=_present_id, help="The id of the conversation to read."
-    ),
-    limit: int = typer.Option(
-        50, "--limit", callback=_positive_page_argument, help="How many turns to show at most."
-    ),
-    offset: int = typer.Option(
-        0,
-        "--offset",
-        callback=_page_argument,
-        help="How many turns to skip before the page begins.",
-    ),
-) -> None:
-    """Read one conversation's transcript, in the order it was said.
-
-    **This works after the conversation itself is gone.** A conversation whose turns
-    have passed their retention window is reclaimed — ``assistant conversations`` no
-    longer lists it and ``assistant forget-conversation`` no longer knows it — and the
-    transcript is still here. That is what the archive is for.
-    """
-    code = asyncio.run(_read_transcript_conversation(conversation_id, limit=limit, offset=offset))
-    raise typer.Exit(code)
-
-
-@transcript_app.command("show")
-def transcript_show(
-    address: str = typer.Argument(
-        ..., callback=_present_id, help="The address of the turn to read, from a search hit."
-    ),
-) -> None:
-    """Read one turn whole — both halves, nothing elided.
-
-    The address comes from ``assistant transcript search`` or from
-    ``assistant transcript conversation``. It is stable: it goes on naming this turn
-    after the turn itself has left memory.
-    """
-    code = asyncio.run(_read_transcript_entry(address))
-    raise typer.Exit(code)
-
-
-@transcript_app.command("export")
-def transcript_export(
-    limit: int = typer.Option(
-        50, "--limit", callback=_positive_page_argument, help="How many turns to show at most."
-    ),
-    offset: int = typer.Option(
-        0,
-        "--offset",
-        callback=_page_argument,
-        help="How many turns to skip before the page begins.",
-    ),
-) -> None:
-    """Read every turn the archive holds, newest first — this is the export.
-
-    A paged, ordered, unfiltered read of everything held. For a store that holds text
-    and nothing else that *is* the portable snapshot, so there is no second format to
-    ask for: page through this and you have all of it.
-    """
-    code = asyncio.run(_export_transcript(limit=limit, offset=offset))
-    raise typer.Exit(code)
-
-
-@transcript_app.command("forget")
-def transcript_forget(
-    address: str = typer.Argument(
-        ..., callback=_present_id, help="The address of the turn to destroy."
-    ),
-    *,
-    yes: bool = typer.Option(
-        False, "--yes", "-y", help="Skip the prompt. The turn is still shown first."
-    ),
-) -> None:
-    """Destroy one turn's transcript, after showing you what it says.
-
-    This destroys the *transcript* and nothing else: what I believe is untouched, and
-    ``assistant forget`` is the command for that. It reaches a turn a retention window
-    is already hiding, so an address a read answers nothing for can still be destroyed
-    here.
-    """
-    code = asyncio.run(_forget_transcript_entry(address, assume_yes=yes))
-    raise typer.Exit(code)
-
-
-@transcript_app.command("forget-conversation")
-def transcript_forget_conversation(
-    conversation_id: str = typer.Argument(
-        ..., callback=_present_id, help="The id of the conversation whose transcript to destroy."
-    ),
-    *,
-    yes: bool = typer.Option(
-        False, "--yes", "-y", help="Skip the prompt. What is held is still shown first."
-    ),
-) -> None:
-    """Destroy one conversation's whole transcript, after showing you what is held.
-
-    You are shown what is readable under that id before you answer, and told that the
-    destruction reaches every turn of the conversation — including any this page did
-    not show and any a retention window is hiding. ``--yes`` skips the question, not
-    the rendering.
-
-    This destroys the *transcript*. ``assistant forget-conversation`` is the command
-    that destroys the conversation and its episodes; this one reaches a conversation
-    that command no longer knows.
-    """
-    code = asyncio.run(_forget_transcript_conversation(conversation_id, assume_yes=yes))
-    raise typer.Exit(code)
-
-
 @app.command()
 def resume(
     timeout_seconds: float = typer.Option(
@@ -2032,8 +1862,8 @@ def episode(
 ) -> None:
     """Inspect one live episode; never display an incomplete chunk assembly.
 
-    Retention expiry removes live memory; explicit forgetting also destroys its
-    archived transcript. An archive may outlive an expired episode.
+    Retention expiry, where a retention window is set, removes an episode from live
+    memory; explicit forgetting deletes it.
     """
     try:
         check_episode_detail(episode_id, None, 0, 65536)
@@ -3833,83 +3663,6 @@ async def _forget_conversation(conversation_id: str, *, assume_yes: bool) -> int
         return _EXIT_ERROR
 
     return await _drive_forget_conversation(engine, conversation_id, confirm=confirm)
-
-
-async def _search_transcript(query: str, *, limit: int, offset: int) -> int:
-    """Load settings, build the engine, search the archive, and close it (ADR-0225 §7)."""
-    try:
-        engine = await _open_engine()
-    except (AssistantError, TransportError) as exc:
-        _render_error(exc)
-        return _EXIT_ERROR
-
-    return await _drive_transcript_search(engine, query, limit=limit, offset=offset)
-
-
-async def _read_transcript_conversation(conversation_id: str, *, limit: int, offset: int) -> int:
-    """Load settings, build the engine, read one conversation's transcript, and close it."""
-    try:
-        engine = await _open_engine()
-    except (AssistantError, TransportError) as exc:
-        _render_error(exc)
-        return _EXIT_ERROR
-
-    return await _drive_transcript_conversation(engine, conversation_id, limit=limit, offset=offset)
-
-
-async def _read_transcript_entry(address: str) -> int:
-    """Load settings, build the engine, read one entry whole, and close it."""
-    try:
-        engine = await _open_engine()
-    except (AssistantError, TransportError) as exc:
-        _render_error(exc)
-        return _EXIT_ERROR
-
-    return await _drive_transcript_entry(engine, address)
-
-
-async def _export_transcript(*, limit: int, offset: int) -> int:
-    """Load settings, build the engine, enumerate the archive, and close it (ADR-0225 §7)."""
-    try:
-        engine = await _open_engine()
-    except (AssistantError, TransportError) as exc:
-        _render_error(exc)
-        return _EXIT_ERROR
-
-    return await _drive_transcript_export(engine, limit=limit, offset=offset)
-
-
-async def _forget_transcript_entry(address: str, *, assume_yes: bool) -> int:
-    """Load settings, build the engine, run the entry deletion ceremony, and close it.
-
-    ``--yes`` supplies the answer and never the rendering, on
-    :func:`_forget_conversation`'s rule: a non-interactive approval must not destroy
-    what the user never saw (ADR-0073 §5).
-    """
-    confirm: Callable[[TranscriptEntry | None], bool] = (
-        (lambda _entry: True) if assume_yes else _confirm_forget_transcript
-    )
-    try:
-        engine = await _open_engine()
-    except (AssistantError, TransportError) as exc:
-        _render_error(exc)
-        return _EXIT_ERROR
-
-    return await _drive_forget_transcript_entry(engine, address, confirm=confirm)
-
-
-async def _forget_transcript_conversation(conversation_id: str, *, assume_yes: bool) -> int:
-    """Load settings, build the engine, run the transcript deletion ceremony, and close it."""
-    confirm: Callable[[tuple[TranscriptEntry, ...]], bool] = (
-        (lambda _page: True) if assume_yes else _confirm_forget_transcript_conversation
-    )
-    try:
-        engine = await _open_engine()
-    except (AssistantError, TransportError) as exc:
-        _render_error(exc)
-        return _EXIT_ERROR
-
-    return await _drive_forget_transcript_conversation(engine, conversation_id, confirm=confirm)
 
 
 async def _resume_pending(
@@ -5845,164 +5598,6 @@ async def _drive_forget_conversation(
     return _EXIT_OK
 
 
-async def _drive_transcript_search(
-    engine: AssistantEngine, query: str, *, limit: int, offset: int
-) -> int:
-    """Search the archive, then render the hits with the size beside them (ADR-0225 §6, §7).
-
-    **Two calls, and the second is not optional** (§6): the size report is "rendered
-    beside every read, unasked", so a surface that skipped it because nothing matched
-    would leave the deferred cap's trigger a figure nobody produces, which is the
-    ADR-0162 §5 failure §6 exists to avoid.
-    """
-    try:
-        hits = await engine.transcript_search(query, limit=limit, offset=offset)
-        size = await engine.transcript_archive_size()
-    except (AssistantError, TransportError) as exc:
-        _render_error(exc)
-        return _EXIT_ERROR
-    _render_transcript_notice()
-    _render_transcript_hits(hits, limit=limit, offset=offset)
-    _render_archive_size(size)
-    return _EXIT_OK
-
-
-async def _drive_transcript_conversation(
-    engine: AssistantEngine, conversation_id: str, *, limit: int, offset: int
-) -> int:
-    """Read one conversation's transcript and render it in the order it was said."""
-    try:
-        page = await engine.transcript_conversation(conversation_id, limit=limit, offset=offset)
-        size = await engine.transcript_archive_size()
-    except (AssistantError, TransportError) as exc:
-        _render_error(exc)
-        return _EXIT_ERROR
-    _render_transcript_notice()
-    _render_transcript_entries(
-        page,
-        limit=limit,
-        offset=offset,
-        empty="No transcript is held under that id. It may never have existed, or you "
-        "may have destroyed it already.",
-    )
-    _render_archive_size(size)
-    return _EXIT_OK
-
-
-async def _drive_transcript_entry(engine: AssistantEngine, address: str) -> int:
-    """Read one entry whole and render it, or report that nothing is at that address."""
-    try:
-        entry = await engine.transcript_entry(address)
-        size = await engine.transcript_archive_size()
-    except (AssistantError, TransportError) as exc:
-        _render_error(exc)
-        return _EXIT_ERROR
-    _render_transcript_notice()
-    if entry is None:
-        _render_no_such_transcript_entry(address)
-        _render_archive_size(size)
-        return _EXIT_ERROR
-    _render_transcript_entry(entry)
-    _render_archive_size(size)
-    return _EXIT_OK
-
-
-async def _drive_transcript_export(engine: AssistantEngine, *, limit: int, offset: int) -> int:
-    """Enumerate the archive and render the page — the export ADR-0225 §7 makes a read."""
-    try:
-        page = await engine.transcript_entries(limit=limit, offset=offset)
-        size = await engine.transcript_archive_size()
-    except (AssistantError, TransportError) as exc:
-        _render_error(exc)
-        return _EXIT_ERROR
-    _render_transcript_notice()
-    _render_transcript_entries(
-        page,
-        limit=limit,
-        offset=offset,
-        empty="The archive holds nothing yet — a conversation puts turns in it.",
-    )
-    _render_archive_size(size)
-    return _EXIT_OK
-
-
-async def _drive_forget_transcript_entry(
-    engine: AssistantEngine, address: str, *, confirm: Callable[[TranscriptEntry | None], bool]
-) -> int:
-    """Show the turn, take the answer, then destroy the entry (ADR-0225 §5, ADR-0073 §5).
-
-    **The ceremony renders an archive read, so it owes §8's statement and §6's figure
-    like any other.** The clause is keyed on rendering rather than on the command's
-    name — "every surface that renders any archive read renders the figure it returns
-    beside that read, unasked" — and a deletion preview is a read of the entry it is
-    about. Dropping either here would put the one rendering a user studies hardest
-    outside both obligations.
-
-    **An address the read answers nothing for is still offered**, and that is the
-    decision rather than an oversight. ADR-0225 §6 has the destroys reach what the
-    reads hide — "a destruction is never refused on the ground that a read would not
-    have shown it" — so refusing here would put a turn a finite
-    ``transcript_archive_retention`` is hiding permanently beyond the user's reach,
-    which is ADR-0004 §6's right made conditional on a horizon. What the prompt owes
-    in that case is honesty about what it cannot show, not a refusal.
-    """
-    try:
-        entry = await engine.transcript_entry(address)
-        size = await engine.transcript_archive_size()
-        _render_transcript_notice()
-        _render_forget_transcript_prompt(address, entry)
-        _render_archive_size(size)
-        if not confirm(entry):
-            _print("[dim]Left alone. Nothing was destroyed.[/]")
-            return _EXIT_OK
-        destroyed = await engine.forget_transcript_entry(address)
-    except (AssistantError, TransportError) as exc:
-        _render_error(exc)
-        return _EXIT_ERROR
-    if not destroyed:
-        _print("[yellow]Nothing to destroy:[/] no transcript was held at that address.")
-        return _EXIT_ERROR
-    _print("[green]Destroyed.[/] That turn's transcript is gone.")
-    return _EXIT_OK
-
-
-async def _drive_forget_transcript_conversation(
-    engine: AssistantEngine,
-    conversation_id: str,
-    *,
-    confirm: Callable[[tuple[TranscriptEntry, ...]], bool],
-) -> int:
-    """Show what is held, take the answer, then destroy the conversation's transcript.
-
-    **It renders an archive read, so §8's statement and §6's figure are owed here
-    too**, on :func:`_drive_forget_transcript_entry`'s reason.
-
-    Show-then-confirm at the unit the user thinks in (ADR-0225 §5, ADR-0073 §5), and
-    the shown page is deliberately **not** claimed to be the whole of what will go:
-    the read is paged and the retention hides what the destroy still reaches, so the
-    prompt states the scope in words — every turn of this conversation — rather than
-    a count it cannot honestly produce.
-    """
-    try:
-        page = await engine.transcript_conversation(conversation_id)
-        size = await engine.transcript_archive_size()
-        _render_transcript_notice()
-        _render_forget_transcript_conversation_prompt(conversation_id, page)
-        _render_archive_size(size)
-        if not confirm(page):
-            _print("[dim]Left alone. Nothing was destroyed.[/]")
-            return _EXIT_OK
-        destroyed = await engine.forget_transcript_conversation(conversation_id)
-    except (AssistantError, TransportError) as exc:
-        _render_error(exc)
-        return _EXIT_ERROR
-    if not destroyed:
-        _print("[yellow]Nothing to destroy:[/] no transcript was held under that conversation.")
-        return _EXIT_ERROR
-    _print(f"[green]Destroyed.[/] {destroyed} turn(s) of that conversation's transcript are gone.")
-    return _EXIT_OK
-
-
 async def _drive_questions(engine: AssistantEngine, *, limit: int, offset: int) -> int:
     """Ask the façade for the two question lists and render them (ADR-0078 §8).
 
@@ -7483,10 +7078,9 @@ def _print(line: str, *, to: Console | None = None) -> None:
     **A ``\n`` in the composed string is this adapter's own**, since :func:`_safe` eats
     a value's — and no line here carries one between two pieces of content, only ahead
     of a block or after it. Those are reproduced as the blank lines they are. The
-    exception is the three sites that interpolate :func:`_safe_prose`, where a break
-    *is* the value's, and there the following lines are continuations and are marked as
-    such: a transcript entry's ``You:`` half can no longer put a second ``Conversation:``
-    field under the real one.
+    exception is a line that interpolates :func:`_safe_prose`, where a break after the
+    head *is* the value's, and there the following lines are continuations and are
+    marked as such: the value can never put a second field under the real one.
 
     **Four site classes do not take this, and each has its own answer to the same
     question.** A value printed as a block of its own is marked line by line by
@@ -9806,229 +9400,6 @@ def _confirm_forget_conversation(_digest: ConversationDigest) -> bool:
     irreversibly, and more of it.
     """
     return typer.confirm("Forget it?", default=False)
-
-
-def _render_transcript_notice() -> None:
-    """State what an archive read is, unasked (ADR-0225 §8).
-
-    §8 requires it in terms: "A surface rendering archive content states, without
-    being asked, that what it shows is a record of what was said and not what the
-    assistant believes or retrieves." It is printed on **every** archive read, an
-    empty page included, rather than only when rows come back — a notice a user sees
-    once and then stops seeing is a notice they learn to skip, and the sentence is
-    true of an empty result too.
-
-    It is not a disclaimer about accuracy. What it tells the user is which store they
-    are looking at: nothing here reaches a reply, because nothing on the turn path can
-    read it (§4).
-    """
-    _print(
-        "[dim]A record of what was said — your words and mine, as they were said. "
-        "Not what I believe, not what I retrieve, and not evidence for anything: "
-        "nothing here reaches a reply.[/]"
-    )
-
-
-def _render_archive_size(size: TranscriptArchiveSize) -> None:
-    """Show the archive's two figures beside a read, unasked (ADR-0225 §6).
-
-    **Both figures, never one and never their difference.** §6 has them answer
-    different questions and allows them to disagree — ``entries`` is what the reads
-    would return, ``stored_bytes`` is what is on the disk with hidden and unreclaimed
-    entries included — and "a report that netted the two would hide exactly the growth
-    the cap exists to catch". So they are printed side by side, unnetted, with no
-    commentary reconciling them.
-
-    This exists because ADR-0162 §5's lesson is that a trigger with no instrument
-    never fires: ADR-0225 §6 sets no size cap and defers one, and the figure that
-    would fire it is on the screen every time the user looks.
-    """
-    turns = "turn" if size.entries == 1 else "turns"
-    _print(
-        f"[dim]Archive:[/] {size.entries:,} {turns} readable, "
-        f"{_stored_bytes(size.stored_bytes)} on disk."
-    )
-
-
-def _stored_bytes(count: int) -> str:
-    """Render a byte total exactly, with a rounded figure beside it where it helps.
-
-    The exact count is always shown and is never replaced by the rounded one: what
-    ADR-0225 §6 puts on the screen is a measurement, and rounding it away at the one
-    surface that reports it would blunt the instrument the section exists to provide.
-    """
-    if count < _MIB:
-        return f"{count:,} bytes"
-    return f"{count:,} bytes ({count / _MIB:.1f} MiB)"
-
-
-def _render_transcript_hits(page: tuple[TranscriptHit, ...], *, limit: int, offset: int) -> None:
-    """Render one page of search hits (ADR-0225 §7).
-
-    A hit is a taste and an address, never the turn: §7 splits the read in two so that
-    a search matching hundreds of turns stays readable and the excerpt bound stays
-    meaningful. ``elided`` is rendered rather than dropped, so a user can tell a whole
-    short turn from a window cut out of a long one and knows when ``show`` will tell
-    them more.
-    """
-    if not page:
-        _print("[dim]Nothing matched.[/]")
-        return
-    _print(f"[bold]{len(page)} match(es)[/], newest first.")
-    for hit in page:
-        _print(f"\n  [bold cyan]{_safe(hit.address)}[/]")
-        _print(f"  [dim]When:[/] {_when(hit.occurred_at)}")
-        _print(f"  [dim]Conversation:[/] {_safe(hit.conversation_id)}")
-        _print(f"  {_safe_prose(hit.excerpt)}")
-        if hit.elided:
-            _print("  [dim]Shortened to fit — 'assistant transcript show' reads the turn whole.[/]")
-    if len(page) == limit:
-        _print(f"\n[dim]That is a full page; there may be more — try --offset {offset + limit}.[/]")
-
-
-def _render_transcript_entries(
-    page: tuple[TranscriptEntry, ...], *, limit: int, offset: int, empty: str
-) -> None:
-    """Render one page of whole entries, for both enumerating reads (ADR-0225 §7).
-
-    Whole, and elided nowhere: §7 gives the excerpt bound to the search alone and has
-    the other three reads "return entries whole, and elide, truncate and summarise
-    nothing". The two callers differ only in what they say about an empty page — one
-    is a conversation nothing is held under, the other an archive holding nothing at
-    all — which is a sentence rather than a shape.
-    """
-    if not page:
-        _print(f"[dim]{empty}[/]")
-        return
-    _print(f"[bold]{len(page)} turn(s)[/].")
-    for entry in page:
-        _render_transcript_entry(entry)
-    if len(page) == limit:
-        _print(f"\n[dim]That is a full page; there may be more — try --offset {offset + limit}.[/]")
-
-
-def _render_transcript_entry(entry: TranscriptEntry) -> None:
-    """Render one turn whole: its address, when it was, and both halves (ADR-0225 §1).
-
-    **The turn is placed in its conversation by its instant, never by an ordinal**
-    (ADR-0283 §9). The instant is rendered where the ordinal was, and the ordinal is
-    not rendered at all: an entry carries none once the writer addresses it by its
-    episode's id, and a conversation's own read orders by instant, then address.
-
-    **At the microsecond, through** :func:`_decided_at` **rather than**
-    :func:`_when`, because the instant is now the key the conversation's read is
-    ordered by. Two turns of one exchange are routinely seconds apart, so at minute
-    precision a page would render several turns at one instant — an order the reader
-    is shown and cannot account for, which is the reason ``_decided_at`` gives for a
-    record's instant. It is rendered once: a second, minute-grained ``When:`` line
-    beside it would show one value at two precisions.
-
-    **An absent half is stated rather than skipped**, because the two absences mean
-    different things and a reader can act on both: no user words is a turn the system
-    drove on its own — a parked step's resolution, whose utterance was archived at its
-    own address (§1) — and no reply is a turn that produced none.
-
-    The disposition is rendered for the reason §1 carries it: without it "a turn that
-    parked reads in the transcript as a question nobody answered".
-    """
-    _print(f"\n  [bold cyan]{_safe(entry.address)}[/]")
-    _print(
-        f"  [dim]Conversation:[/] {_safe(entry.conversation_id)} "
-        f"[dim]at[/] {_decided_at(entry.occurred_at)} [dim]·[/] {_safe(entry.disposition.value)}"
-    )
-    if entry.asked is None:
-        _print("  [dim]You said nothing on this turn.[/]")
-    else:
-        _print(f"  [bold]You:[/] {_safe_prose(entry.asked)}")
-    if entry.replied is None:
-        _print("  [dim]I said nothing on this turn.[/]")
-    else:
-        _print(f"  [bold]Me:[/] {_safe_prose(entry.replied)}")
-
-
-def _render_no_such_transcript_entry(address: str) -> None:
-    """Report an address nothing is held at (ADR-0225 §3, §6).
-
-    Never held, past a finite ``transcript_archive_retention``, or destroyed — all
-    three look the same from here on purpose, exactly as ``_render_no_such_conversation``
-    conflates its own three: a surface that told them apart would report on transcripts
-    it is meant to have evicted.
-    """
-    _print(
-        f"[yellow]No transcript is held at[/] {_safe(address)}. "
-        "It may never have existed, it may have passed the archive's retention window, "
-        "or you may have destroyed it already."
-    )
-
-
-def _render_forget_transcript_prompt(address: str, entry: TranscriptEntry | None) -> None:
-    """Show what destroying one entry will destroy (ADR-0225 §5, ADR-0073 §5).
-
-    Where the entry reads back, it is shown whole — it is one turn, which is exactly
-    what a person can judge at a prompt. Where it does not, the prompt says so and
-    still offers the destruction, because ADR-0225 §6 has the destroys reach what the
-    reads hide and a refusal here would put a hidden turn beyond the user's reach for
-    good.
-    """
-    _print("\n[bold yellow]About to destroy this turn's transcript[/]")
-    if entry is None:
-        _print(f"  [bold cyan]{_safe(address)}[/]")
-        _print(
-            "  [dim]Nothing readable is held at that address. It may be past the archive's "
-            "retention window, in which case this still destroys it.[/]"
-        )
-    else:
-        _render_transcript_entry(entry)
-    _print(
-        "\n  [yellow]This destroys the transcript of that turn and nothing else: "
-        "what I believe is untouched, and 'assistant forget' is the command for that.[/]"
-    )
-
-
-def _render_forget_transcript_conversation_prompt(
-    conversation_id: str, page: tuple[TranscriptEntry, ...]
-) -> None:
-    """Show what destroying a conversation's transcript will destroy (ADR-0225 §5).
-
-    **The page is shown and is not claimed to be the whole of it.** The read is paged
-    and a finite retention hides entries the destroy still reaches, so there is no
-    honest total to render — and ADR-0074 §8's own ceremony shows a count because
-    ``ConversationDigest`` carries one, which the archive does not. What this states
-    instead is the *scope*, in words: every turn of this conversation. Inventing a
-    count from the first page would be worse than not showing one, because the user
-    would read it as the number about to go.
-    """
-    _print("\n[bold yellow]About to destroy this conversation's transcript[/]")
-    _print(f"  [bold cyan]{_safe(conversation_id)}[/]")
-    if not page:
-        _print(
-            "  [dim]Nothing readable is held under that id. Turns past the archive's "
-            "retention window are not shown here and are still destroyed.[/]"
-        )
-    else:
-        _print(f"  [dim]The first {len(page)} turn(s) held under it:[/]")
-        for entry in page:
-            _render_transcript_entry(entry)
-    _print(
-        "\n  [yellow]This destroys every turn of this conversation's transcript — "
-        "including any not shown above, and any the archive's retention window is "
-        "hiding. What I believe is untouched.[/]"
-    )
-
-
-def _confirm_forget_transcript(_entry: TranscriptEntry | None) -> bool:
-    """Read the human's yes/no *without* rendering — the caller already displayed it.
-
-    :func:`_confirm_forget_conversation`'s sibling for the archive (I/O; ADR-0042 §6),
-    and it defaults to **no** for the same reason: the question is about destroying
-    something irreversibly.
-    """
-    return typer.confirm("Destroy it?", default=False)
-
-
-def _confirm_forget_transcript_conversation(_page: tuple[TranscriptEntry, ...]) -> bool:
-    """Read the human's yes/no for the conversation-scoped destroy, having shown it."""
-    return typer.confirm("Destroy the whole transcript?", default=False)
 
 
 def _render_disposition(disposition: Disposition, tool_id: str | None) -> None:
