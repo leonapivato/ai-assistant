@@ -7,7 +7,8 @@ decisions are unreachable from inside the layer: what a launch refusal *means*
 never opens leaves behind. A third subject joined them with issue #2139: the wait
 the second of those is asserted through, which no case that drives a page exercises
 either, because a gateway torn down by a passing drive is released long before
-anything asks.
+anything asks. A fourth is what the teardown does with a connection the context did
+not own, which a case meets only by spending thirty seconds on it.
 
 **No browser is taken here, and that is the point rather than a shortcut.** A
 module that requested ``gateway_browser`` in order to test what happens when
@@ -502,3 +503,87 @@ def test_an_unlaunchable_build_is_never_skipped_past() -> None:
             pytest.fail(f"a present-but-unlaunchable build was skipped past: {refusal_text!r}")
         except BrowserError:
             pass
+
+
+# --- A connection the context did not own ---
+
+
+class _QuietPage:
+    """A page that loads whatever it is sent to and finds whatever it waits for."""
+
+    async def goto(self, url: str) -> None:
+        del url
+
+    async def wait_for_selector(self, selector: str) -> None:
+        del selector
+
+
+class _QuietContext:
+    """A context that opens, serves one :class:`_QuietPage`, and closes."""
+
+    async def add_init_script(self, script: str) -> None:
+        del script
+
+    async def new_page(self) -> _QuietPage:
+        return _QuietPage()
+
+    async def close(self) -> None:
+        pass
+
+
+class _QuietBrowser:
+    """A browser whose drive opens and closes without opening a connection of its own.
+
+    So every connection the gateway holds at teardown is one the case opened itself,
+    which is the shape a ``route.fetch()`` leaves behind: Playwright's own HTTP client
+    runs in the driver process, and its keep-alive socket outlives the context.
+    """
+
+    async def new_context(self, **_: Any) -> _QuietContext:
+        return _QuietContext()
+
+
+@pytest.mark.integration
+async def test_a_connection_the_context_did_not_own_does_not_hold_the_teardown(
+    tmp_path: Path,
+) -> None:
+    """A client still connected at teardown is closed, not waited out.
+
+    ``wait_closed()`` waits for every accepted connection to end, and closing the
+    context ends only the browser's. A case that fetched through ``route.fetch()``
+    left the driver's keep-alive socket open, so its handler sat in its read until
+    ``gateway_read_timeout`` and the case spent thirty seconds in the ``finally``:
+    two cases in ``test_browser_authorizations.py``, 30.4s each, on the layer's one
+    serial worker.
+
+    **The idle connection is known to be accepted because a later one was served.**
+    The kernel queues the two in the order they connected and asyncio attaches each
+    transport, in that order, before the handler behind it runs — so a response on
+    the second means the first is already held. Without that, a teardown racing the
+    accept would close a listener the idle connection had never reached, and the case
+    would pass whatever the teardown did.
+
+    The exit is bounded rather than timed afterwards, so the regression fails in
+    :data:`_RELEASE_PATIENCE` instead of after the thirty seconds it is about.
+    """
+    async with asyncio.timeout(None) as deadline:
+        async with browser_drive.driving(
+            cast("Browser", _QuietBrowser()), tmp_path, admitted=False
+        ) as drive:
+            port = int(drive.origin.rsplit(":", 1)[1])
+            idle_reader, idle_writer = await asyncio.open_connection("127.0.0.1", port)
+            served_reader, served_writer = await asyncio.open_connection("127.0.0.1", port)
+            served_writer.write(f"GET / HTTP/1.1\r\nHost: 127.0.0.1:{port}\r\n\r\n".encode())
+            await served_writer.drain()
+            # Unadmitted, so the gateway closes it once the answer is written
+            # (ADR-0168 §8) and the read ends at that close.
+            answer = await served_reader.read()
+            served_writer.close()
+            assert answer.startswith(b"HTTP/1.1 "), answer
+            deadline.reschedule(asyncio.get_running_loop().time() + _RELEASE_PATIENCE)
+
+    try:
+        ended = await asyncio.wait_for(idle_reader.read(), timeout=_RELEASE_PATIENCE)
+    finally:
+        idle_writer.close()
+    assert ended == b"", "the teardown left a connection it did not own open"
