@@ -34,12 +34,25 @@ _ROOT = Path(__file__).parents[2]
 _SCRIPT = _ROOT / "scripts" / "check_citations.py"
 
 
+#: The offline tests, which all read one ``--no-tracker`` report. The cache on
+#: :func:`_report` lasts as long as the process holding it, and under ``just
+#: test-fast`` each xdist worker is its own process, so a cache alone did not stop
+#: every worker that drew one of these from running the whole checker again. The
+#: group puts them on one worker, where the first runs the checker and the rest
+#: read its answer. The tracker-backed test stays out of it: its report is a
+#: different run, it is the slowest of the module, and grouping it would only
+#: queue it behind these instead of beside them.
+_OFFLINE = pytest.mark.xdist_group("adr_citations_corpus_offline")
+
+
 @cache
 def _report(*args: str) -> dict[str, object]:
     """Run the checker over this repository and return its report.
 
     Cached: the checker parses every module under the three code roots, so the
-    two offline tests below share one ~6s run rather than paying for it twice.
+    offline tests below share one run rather than paying for it once each. That
+    is safe because they only read the report: the checker reads the checkout,
+    which no test here writes to, and none of the tests changes what it returns.
     """
     argv = [sys.executable, str(_SCRIPT), "--root", str(_ROOT), "--format", "json", *args]
     result = subprocess.run(  # noqa: S603  # fixed argv, no shell
@@ -61,6 +74,7 @@ def _tier_1(report: dict[str, object], kind: str) -> list[tuple[str, str]]:
     ]
 
 
+@_OFFLINE
 def test_no_adr_cites_a_decision_that_does_not_exist() -> None:
     """Tier 1: an ADR file is never deleted, so a citation naming a missing one is a defect.
 
@@ -89,6 +103,7 @@ def test_no_adr_cites_a_decision_that_does_not_exist() -> None:
     )
 
 
+@_OFFLINE
 @pytest.mark.parametrize("kind", ["clause", "unmarked", "duplicate-clause"])
 def test_the_record_has_no_tier_1_finding(kind: str) -> None:
     """ADR-0277 §2: its Tier 1 findings fail this test, and no gate step is added.
@@ -110,6 +125,7 @@ def test_the_record_has_no_tier_1_finding(kind: str) -> None:
     )
 
 
+@_OFFLINE
 def test_the_corpus_is_actually_being_read() -> None:
     """A check that selected nothing would pass this module silently.
 
@@ -134,6 +150,7 @@ def test_the_corpus_is_actually_being_read() -> None:
     assert counts["clause"] >= 1
 
 
+@_OFFLINE
 def test_the_record_checks_state_what_they_passed() -> None:
     """ADR-0278 §1 and §2: each narrowed check states a count of what it passed.
 

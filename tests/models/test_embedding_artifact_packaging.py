@@ -36,6 +36,7 @@ still run in a fresh clone, where ADR-0024 §4 leaves the artifact absent.
 
 from __future__ import annotations
 
+import collections.abc
 import contextlib
 import dataclasses
 import email.parser
@@ -99,9 +100,21 @@ _NOTICES = "THIRD-PARTY-NOTICES.md"
 #: test that builds or loads it does — and it is applied per test below, so that
 #: an assertion needing no model bytes still runs in a clean checkout, where
 #: ADR-0024 §4 guarantees the artifact is absent until something stages it.
-pytestmark = pytest.mark.skipif(
-    not (_PROJECT_ROOT / "pyproject.toml").is_file(), reason="not a source checkout"
-)
+pytestmark = [
+    pytest.mark.skipif(
+        not (_PROJECT_ROOT / "pyproject.toml").is_file(), reason="not a source checkout"
+    ),
+    # One worker for the whole module. `built_distributions` is session-scoped,
+    # and under `just test-fast` a session is one xdist worker: every worker that
+    # drew a test needing it digested the 321 MiB of build inputs and read the
+    # three cached distributions back byte for byte before its first assertion,
+    # which is seconds each, repeated for nothing. The cache keyed on that digest
+    # already makes the *build* once per machine; this makes the *read* once per
+    # run. The rest of the module costs milliseconds, so placing it here too
+    # takes nothing from the other workers and saves naming each test that
+    # reaches the fixture.
+    pytest.mark.xdist_group("embedding_artifact_packaging"),
+]
 
 _needs_the_staged_artifact = pytest.mark.skipif(
     bool(embedding_artifact.missing_files(packaged_artifact_dir())),
@@ -823,9 +836,42 @@ def sdist_wheel(built_distributions: _Distributions) -> Path:
     return built_distributions.sdist_wheel
 
 
+class _WheelMembers(collections.abc.Mapping[str, bytes]):
+    """A wheel's members by name, each decompressed only when it is asked for.
+
+    Each wheel carries the whole vendored artifact set, 263 MiB of it, and most
+    assertions here read one or two small members — the notices, ``METADATA``. Read
+    eagerly, every one of them decompressed the lot, which made a handful of
+    lookups the most expensive tests of the module. Every member is still listed,
+    so ``in``, iteration and a lookup answer exactly as the eager dictionary did;
+    what changes is only that the bytes of a member no assertion reads are not
+    read either.
+    """
+
+    def __init__(self, wheel: Path) -> None:
+        self._wheel = wheel
+        with zipfile.ZipFile(wheel) as archive:
+            self._names = tuple(archive.namelist())
+        self._listed = frozenset(self._names)
+
+    def __getitem__(self, name: str) -> bytes:
+        if name not in self._listed:
+            raise KeyError(name)
+        with zipfile.ZipFile(self._wheel) as archive:
+            return archive.read(name)
+
+    def __contains__(self, name: object) -> bool:
+        return name in self._listed
+
+    def __iter__(self) -> Iterator[str]:
+        return iter(self._names)
+
+    def __len__(self) -> int:
+        return len(self._names)
+
+
 def _wheel_members(wheel: Path) -> Mapping[str, bytes]:
-    with zipfile.ZipFile(wheel) as archive:
-        return {name: archive.read(name) for name in archive.namelist()}
+    return _WheelMembers(wheel)
 
 
 def _assert_carries_the_verified_artifact(members: Mapping[str, bytes], prefix: Path) -> None:

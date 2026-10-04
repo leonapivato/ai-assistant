@@ -142,8 +142,30 @@ def test_a_python_file_that_will_not_parse_binds_under_section_6() -> None:
 
 
 # --- The corpus, both directions ----------------------------------------------
+#
+# Both tests below ask one question of one tree — what this repository's Python
+# defines at `HEAD` — and answering it parses every Python file the tree carries,
+# which costs seconds a call. Asked once per parametrised case, as it used to be,
+# that was eleven full parses per process and the module's whole cost. So it is
+# asked once per module, and the two tests share a `xdist_group` so that under
+# `just test-fast` one worker asks it rather than every worker that drew a case.
+#
+# Sharing the answer cannot let a case pass against another's state. The index is
+# read from git's object store at `HEAD`, which nothing in this suite writes to —
+# every test that builds a repository builds a throwaway one under its own
+# `tmp_path` — and it is handed out as a `frozenset`, so no case can change what
+# the next one reads.
+
+_CORPUS = pytest.mark.xdist_group("floor_definition_index_corpus")
 
 
+@pytest.fixture(scope="module")
+def head_definitions() -> frozenset[str]:
+    """Every name this repository's Python defines at ``HEAD``, read once."""
+    return frozenset(defined_names(_ROOT, ["HEAD"]))
+
+
+@_CORPUS
 @pytest.mark.parametrize(
     "token",
     [
@@ -155,11 +177,14 @@ def test_a_python_file_that_will_not_parse_binds_under_section_6() -> None:
         "judge",  # a module-level `def`, in `scripts/floor_test.py` itself
     ],
 )
-def test_a_real_symbol_of_this_repository_resolves(token: str) -> None:
+def test_a_real_symbol_of_this_repository_resolves(
+    token: str, head_definitions: frozenset[str]
+) -> None:
     """The direction ADR-0209 §3 needs: a citation of real code still binds."""
-    assert token in defined_names(_ROOT, ["HEAD"])
+    assert token in head_definitions
 
 
+@_CORPUS
 @pytest.mark.parametrize(
     "token",
     [
@@ -177,7 +202,9 @@ def test_a_real_symbol_of_this_repository_resolves(token: str) -> None:
         "ai_assistant",
     ],
 )
-def test_the_corpus_boilerplate_names_no_definition(token: str) -> None:
+def test_the_corpus_boilerplate_names_no_definition(
+    token: str, head_definitions: frozenset[str]
+) -> None:
     """Issue #1799: the tokens that made ADR-0209's narrowing inert for ADR lanes.
 
     Each is backticked somewhere in nearly every ADR and written into nearly every
@@ -185,7 +212,7 @@ def test_the_corpus_boilerplate_names_no_definition(token: str) -> None:
     of them names anything this repository defines, which is what makes each an
     *evaluated* not-a-symbol rather than an unevaluable test.
     """
-    assert token not in defined_names(_ROOT, ["HEAD"])
+    assert token not in head_definitions
 
 
 # --- §4's second limb: which definition a *moved line* makes ------------------
