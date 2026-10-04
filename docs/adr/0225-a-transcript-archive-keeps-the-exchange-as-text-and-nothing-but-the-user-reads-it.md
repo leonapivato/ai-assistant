@@ -1,6 +1,6 @@
 # 225. A transcript archive keeps the exchange as text, and nothing but the user reads it
 
-- Status: Partially superseded by ADR-0248 (§1's fourth clause in its first limb alone: where the pass carried a turn, "what the user said" is the turn's own `utterance` rather than its goal statement, the user's words having become a value of their own on the turn so that a goal statement which is about to mean the assistant's interpretation can no longer stand in for them. That one limb, and nothing else in this ADR: §1's rule that the value is the user's own words, unrewritten and unrendered, binds entire and is the reason for the change; §1's routed limb, its absent limb, its parked-resolution clause, its three-capture-case partition, its assistant-half clause, its no-part-of-`content` clause and its handed-to-capture clause all bind verbatim; and §§2-16 stand entire) and ADR-0283 (§1:2's ordinal; §2:1's order; §2:4; §2:5's allocated address; §3:1's second sentence; §5:1's and §5:4's index; §7:6's last sentence; §10:12's ordinal clause; §10:13)
+- Status: Superseded by ADR-0287; partially superseded before it by ADR-0248 (§1's fourth clause in its first limb alone: where the pass carried a turn, "what the user said" is the turn's own `utterance` rather than its goal statement, the user's words having become a value of their own on the turn so that a goal statement which is about to mean the assistant's interpretation can no longer stand in for them. That one limb, and nothing else in this ADR: §1's rule that the value is the user's own words, unrewritten and unrendered, binds entire and is the reason for the change; §1's routed limb, its absent limb, its parked-resolution clause, its three-capture-case partition, its assistant-half clause, its no-part-of-`content` clause and its handed-to-capture clause all bind verbatim; and §§2-16 stand entire) and ADR-0283 (§1:2's ordinal; §2:1's order; §2:4; §2:5's allocated address; §3:1's second sentence; §5:1's and §5:4's index; §7:6's last sentence; §10:12's ordinal clause; §10:13)
 - Date: 2026-09-02
 - **Partially superseded: 2026-09-12 by ADR-0248 — §1's fourth clause in its first
   limb alone, and nothing else in this ADR.** The owner ruled on 2026-09-12 (#2255) that
@@ -30,6 +30,12 @@
   destruction rules, the search surface and the contract surface are all untouched: ADR-0248
   adds no field to an entry and changes nothing under `archive/`.
 - Partially superseded: 2026-10-01 by ADR-0283 — six scopes. An entry carries no ordinal; the episode is written first, then the archive entry, then the verification, which runs when the episode landed; the address is the episode's `activation:<activation_id>`; the reclaim and the deletion sweep are of the conversation's channel; a conversation's own read is by instant, then address. Every other clause stands. These scoped replacements take effect on ratification of ADR-0283. This reciprocal header record accompanies the numbered draft under ADR-0070 and ADR-0082; the ratified body below is preserved.
+- Superseded: 2026-10-03 by ADR-0287 — the transcript archive is retired whole, with its
+  package, its two Protocols, its types, its settings, its CLI group, its engine
+  operations and `ExchangeDisposition` (ADR-0287 §2, §3). The supersession takes effect
+  on ratification of ADR-0287. This reciprocal header record accompanies the numbered
+  draft under ADR-0070 and ADR-0082; the earlier partial supersessions stay on the
+  status line as history, and the ratified body below is preserved.
 
 ## Context
 
