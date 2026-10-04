@@ -47,6 +47,7 @@ from ai_assistant.memory import (
     SqliteMemoryStore,
     SqliteNotificationOutbox,
     SqliteNotificationStore,
+    SqliteStoryStore,
 )
 from ai_assistant.memory.conversation_store import SqliteConversationStore
 from ai_assistant.memory.health import DEFAULT_K, DEFAULT_SAMPLE, MAX_K, StoreHealthReader
@@ -989,6 +990,15 @@ def build_composition(  # noqa: PLR0915 — one statement per resource this root
         # setting would be computing a deadline `orchestration` owns.
         parked_reads = SqliteParkedReads(path=directory / "parked_reads.db")
         opened.append(parked_reads.close)
+        # **ADR-0289 §1's story store, on its own file and handed to the engine alone.**
+        # It reads no other store and no store reads it: the engine is its only
+        # caller (§4), and no stage, phase, rule or prompt is given it. Its records
+        # are identities and instants only (§2), but which activations belong
+        # together is a fact about the owner's life, so it is owner-only like every
+        # other file here. Deploying it adds the file and changes no existing record
+        # (§6), and it joins the ordered shutdown below.
+        stories = SqliteStoryStore(path=directory / "stories.db", now=_utcnow)
+        opened.append(stories.close)
         # **The sole reader of ADR-0194 §1's four spend settings, and of the fifth
         # this mechanism depends on** (ADR-0194 §5, §11). The store takes explicit
         # values and never a `Settings` read, so this is the one place the two
@@ -2248,6 +2258,9 @@ def build_composition(  # noqa: PLR0915 — one statement per resource this root
             # rather than left as a claim. There is no type that could say so — both
             # parameters take the same class — so it is a property of *this* wiring.
             parked_reads=parked_read_operations,
+            # ADR-0289 §4's nine story methods read and write this store, and nothing
+            # else the engine runs does.
+            stories=stories,
             # ADR-0254 §11's two operations and the confirmation projection, over the
             # object built above.
             authorization_operations=authorization_operations,
@@ -2707,6 +2720,10 @@ def build_composition(  # noqa: PLR0915 — one statement per resource this root
                 # of these run — so a `resume` that settles a park and dispatches its
                 # read has already finished by the time this list is walked.
                 _as_async(parked_reads.close),
+                # And the story store: no store reads it and it reads none (ADR-0289
+                # §1), so nothing constrains its position, and the façade drains any
+                # story call in flight before this list is walked.
+                _as_async(stories.close),
                 _as_async(plans.close),
                 _as_async(conversations.close),
                 # The deferral queue joins the façade's ordered shutdown (ADR-0042

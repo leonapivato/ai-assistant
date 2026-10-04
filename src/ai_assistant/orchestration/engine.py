@@ -102,6 +102,7 @@ from ai_assistant.core.errors import (
     PlanningError,
     SpeechError,
     StaleExecutionError,
+    StoryStoreError,
     TraceStoreError,
     TranscriptionFailedError,
     UnderstandingError,
@@ -208,6 +209,10 @@ from ai_assistant.core.types import (
     StageOutcome,
     StepOutcome,
     StepStatus,
+    StoryActor,
+    StoryMember,
+    StoryMemberKind,
+    StoryOutcome,
     StreamingTextReply,
     TextChannelPayload,
     TextChannelResult,
@@ -218,10 +223,12 @@ from ai_assistant.core.types import (
     UnderstandingOmission,
     WholeTextReply,
     band_of,
+    check_story_page,
     describe_untrusted,
     is_live_confirmation_park,
     rests_on_recorded_external_content,
     secret_value,
+    story_members,
 )
 from ai_assistant.orchestration.activation_coordinator import ActivationCoordinator
 from ai_assistant.orchestration.activation_state import (
@@ -323,6 +330,7 @@ from ai_assistant.orchestration.speech import (
     synthesize_within,
     transcribe_within,
 )
+from ai_assistant.orchestration.stories import fitted, resolved_view, unknown_activation
 from ai_assistant.orchestration.traces import Observation, OperationTraces
 from ai_assistant.orchestration.understanding import (
     ChannelWindow,
@@ -349,6 +357,7 @@ if TYPE_CHECKING:
         SpeechSynthesizer,
         SpeechTranscriber,
         SpendLedger,
+        StoryStore,
         TraceRetention,
         TraceSink,
     )
@@ -388,6 +397,10 @@ if TYPE_CHECKING:
         SpendTotal,
         SpokenAudio,
         SpokenDeliveryReport,
+        StoryHeader,
+        StoryLogPage,
+        StoryPage,
+        StoryView,
         UtcInstant,
     )
     from ai_assistant.orchestration.authorization_surface import AuthorizationOperations
@@ -2862,6 +2875,7 @@ class Engine:
         stage_record_limit: int = DEFAULT_STAGE_RECORD_LIMIT,
         reconciliation: ReconciliationStage | None = None,
         parked_reads: ParkedReadOperations | None = None,
+        stories: StoryStore | None = None,
         authorization_operations: AuthorizationOperations | None = None,
         authorizations: AuthorizationResolution | None = None,
         transcriber: SpeechTranscriber | None = None,
@@ -3287,6 +3301,11 @@ class Engine:
                 none behind a token, and :meth:`cancel_read` raises
                 ``UnknownContinuationError`` — which is exactly what is true of a
                 deployment on which no servicing ever writes one.
+            stories: ADR-0289 §1's story store, which the nine story methods read and
+                write and nothing else here touches — or ``None`` where this deployment
+                wired none, in which case each of those methods raises
+                ``ConfigurationError`` rather than answering as though no story existed.
+                **No stage, phase, rule or prompt reads it** (ADR-0289 §4).
             authorization_operations: ADR-0254 §11's read side — the confirmation
                 projection, the listing and the revocation — or ``None`` where this
                 deployment wired no authorization store. **Passed rather than
@@ -3645,6 +3664,7 @@ class Engine:
         self._stage_record_limit = stage_record_limit
         self._reconciliation = reconciliation
         self._parked_reads = parked_reads
+        self._stories = stories
         # ADR-0254 §11's read side. **Optional, and its absence is fail-closed**:
         # a deployment with no authorization store proposes no row (ADR-0254 §1,
         # `StepRunner._propose`), so there is no projection to render, no standing
@@ -6486,6 +6506,192 @@ class Engine:
             episode_id, version=version, offset=offset, max_bytes=max_bytes
         )
         return fit_chunk(chunk, max_bytes=self._max_payload_bytes)
+
+    # --- stories (ADR-0289 §4) ---------------------------------------------
+    #
+    # **Nine methods over the story store, and nothing else here reads it.** Every
+    # write carries the actor ``owner`` and no triggering activation. A create or a
+    # link naming an activation first reads each one's record through
+    # ``MemoryStore.get_many`` and is refused ``unknown_activation`` where none is
+    # there; a merge or a split checks no activation. The shared logic is
+    # `orchestration/stories.py`, which the canonical fake engine calls too.
+
+    def _story_store(self) -> StoryStore:
+        """The wired story store, or the refusal a deployment with none earns.
+
+        Raises:
+            ConfigurationError: If this engine was built with no story store.
+        """
+        if self._stories is None:
+            msg = "no story store is wired into this engine (ADR-0289 §1)"
+            raise ConfigurationError(msg)
+        return self._stories
+
+    async def create_story(self, members: Sequence[StoryMember]) -> StoryOutcome:
+        """Create a story holding ``members``, as the owner (ADR-0289 §§3-4)."""
+        self._reject_if_closing()
+        named = story_members(members)
+        check_arguments("create_story", max_bytes=self._max_payload_bytes, members=named)
+        stories = self._story_store()
+        return await self._tracked(
+            self._linked_story(stories, None, named), "create_story", checked=True
+        )
+
+    async def link_story(
+        self, story_id: Identifier, members: Sequence[StoryMember]
+    ) -> StoryOutcome:
+        """Add ``members`` to a story, as the owner (ADR-0289 §§3-4)."""
+        self._reject_if_closing()
+        target = identifier(story_id, name="story_id")
+        named = story_members(members)
+        check_arguments(
+            "link_story", max_bytes=self._max_payload_bytes, story_id=target, members=named
+        )
+        stories = self._story_store()
+        return await self._tracked(
+            self._linked_story(stories, target, named), "link_story", checked=True
+        )
+
+    async def _linked_story(
+        self, stories: StoryStore, story_id: str | None, members: tuple[StoryMember, ...]
+    ) -> StoryOutcome:
+        """Check each activation member's record, then create or link (ADR-0289 §4)."""
+        if members and (refusal := await unknown_activation(self._memory, members)):
+            return StoryOutcome(refusal=refusal)
+        if story_id is None:
+            return await stories.create(members, actor=StoryActor.OWNER)
+        return await stories.link(story_id, members, actor=StoryActor.OWNER)
+
+    async def unlink_story(
+        self, story_id: Identifier, members: Sequence[StoryMember]
+    ) -> StoryOutcome:
+        """Remove ``members`` from a story, as the owner (ADR-0289 §§3-4)."""
+        self._reject_if_closing()
+        target = identifier(story_id, name="story_id")
+        named = story_members(members)
+        check_arguments(
+            "unlink_story", max_bytes=self._max_payload_bytes, story_id=target, members=named
+        )
+        stories = self._story_store()
+        return await self._tracked(
+            stories.unlink(target, named, actor=StoryActor.OWNER), "unlink_story", checked=True
+        )
+
+    async def merge_stories(self, story_id: Identifier, into: Identifier) -> StoryOutcome:
+        """Merge story ``story_id`` into story ``into``, as the owner (ADR-0289 §§3-4)."""
+        self._reject_if_closing()
+        absorbed = identifier(story_id, name="story_id")
+        target = identifier(into, name="into")
+        check_arguments(
+            "merge_stories", max_bytes=self._max_payload_bytes, story_id=absorbed, into=target
+        )
+        stories = self._story_store()
+        return await self._tracked(
+            stories.merge(absorbed, target, actor=StoryActor.OWNER), "merge_stories", checked=True
+        )
+
+    async def split_story(
+        self, story_id: Identifier, members: Sequence[StoryMember]
+    ) -> StoryOutcome:
+        """Split ``members`` off a story into a new one, as the owner (ADR-0289 §§3-4)."""
+        self._reject_if_closing()
+        source = identifier(story_id, name="story_id")
+        named = story_members(members)
+        check_arguments(
+            "split_story", max_bytes=self._max_payload_bytes, story_id=source, members=named
+        )
+        stories = self._story_store()
+        return await self._tracked(
+            stories.split(source, named, actor=StoryActor.OWNER), "split_story", checked=True
+        )
+
+    async def story(
+        self,
+        story_id: Identifier,
+        *,
+        cursor: int | None = None,
+        limit: int = DEFAULT_PAGE_SIZE,
+    ) -> StoryView | None:
+        """Read a page of a story's members, resolved (ADR-0289 §4)."""
+        self._reject_if_closing()
+        target = identifier(story_id, name="story_id")
+        check_story_page(cursor, limit)
+        check_arguments(
+            "story", max_bytes=self._max_payload_bytes, story_id=target, cursor=cursor, limit=limit
+        )
+        stories = self._story_store()
+
+        async def read(size: int) -> StoryView | None:
+            return await resolved_view(stories, self._memory, target, cursor=cursor, limit=size)
+
+        return await self._tracked(
+            fitted(read, limit, max_bytes=self._max_payload_bytes, subject="the result of story()"),
+            "story",
+        )
+
+    async def story_log(
+        self,
+        story_id: Identifier,
+        *,
+        cursor: int | None = None,
+        limit: int = DEFAULT_PAGE_SIZE,
+    ) -> StoryLogPage | None:
+        """Read a page of a story's change log, oldest first (ADR-0289 §4)."""
+        self._reject_if_closing()
+        target = identifier(story_id, name="story_id")
+        check_story_page(cursor, limit)
+        check_arguments(
+            "story_log",
+            max_bytes=self._max_payload_bytes,
+            story_id=target,
+            cursor=cursor,
+            limit=limit,
+        )
+        stories = self._story_store()
+
+        async def read(size: int) -> StoryLogPage | None:
+            return await stories.log(target, cursor=cursor, limit=size)
+
+        return await self._tracked(
+            fitted(
+                read, limit, max_bytes=self._max_payload_bytes, subject="the result of story_log()"
+            ),
+            "story_log",
+        )
+
+    async def stories(
+        self, *, cursor: int | None = None, limit: int = DEFAULT_PAGE_SIZE
+    ) -> StoryPage:
+        """Read a page of every story, newest first (ADR-0289 §4)."""
+        self._reject_if_closing()
+        check_story_page(cursor, limit)
+        check_arguments("stories", max_bytes=self._max_payload_bytes, cursor=cursor, limit=limit)
+        stories = self._story_store()
+
+        async def read(size: int) -> StoryPage:
+            return await stories.stories(cursor=cursor, limit=size)
+
+        page = await self._tracked(
+            fitted(
+                read, limit, max_bytes=self._max_payload_bytes, subject="the result of stories()"
+            ),
+            "stories",
+        )
+        if page is None:  # pragma: no cover — the listing always answers a page
+            msg = "the story listing answered no page"
+            raise StoryStoreError(msg)
+        return page
+
+    async def activation_stories(self, activation_id: Identifier) -> tuple[StoryHeader, ...]:
+        """Read the stories an activation belongs to directly, newest first (ADR-0289 §4)."""
+        self._reject_if_closing()
+        named = identifier(activation_id, name="activation_id")
+        check_arguments(
+            "activation_stories", max_bytes=self._max_payload_bytes, activation_id=named
+        )
+        stories = self._story_store()
+        member = StoryMember(kind=StoryMemberKind.ACTIVATION, id=named)
+        return await self._tracked(stories.stories_of(member), "activation_stories", checked=True)
 
     async def beliefs(
         self,

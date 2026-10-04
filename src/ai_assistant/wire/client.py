@@ -68,7 +68,9 @@ from ai_assistant.core.types import (
     EpisodePage,
     ProcessingStatus,
     SpokenDeliveryState,
+    check_story_page,
     secret_value,
+    story_members,
 )
 from ai_assistant.wire import envelope as env
 from ai_assistant.wire.codec import (
@@ -150,6 +152,12 @@ if TYPE_CHECKING:
         SpokenDeliveryReport,
         SpokenReply,
         SpokenTurn,
+        StoryHeader,
+        StoryLogPage,
+        StoryMember,
+        StoryOutcome,
+        StoryPage,
+        StoryView,
         StreamingTextReply,
         TurnOutcome,
         TurnReference,
@@ -699,6 +707,100 @@ class HubClient:
             version=version,
             offset=offset,
             max_bytes=max_bytes,
+        )
+
+    # --- stories (ADR-0289 §4) ---------------------------------------------
+    #
+    # Each argument is refused here as the engine would refuse it, before any frame
+    # is written: the wire carries only ``AssistantError`` subclasses, so a
+    # ``ValueError`` raised on the hub would reach this caller as a closed connection
+    # rather than as the refusal both implementations owe.
+
+    async def create_story(self, members: Sequence[StoryMember]) -> StoryOutcome:
+        """Create a story holding ``members``, as the owner (ADR-0289 §§3-4)."""
+        named = story_members(members)
+        return await self._call("create_story", members=named)  # type: ignore[no-any-return]
+
+    async def link_story(
+        self, story_id: Identifier, members: Sequence[StoryMember]
+    ) -> StoryOutcome:
+        """Add ``members`` to a story, as the owner (ADR-0289 §§3-4)."""
+        target = identifier(story_id, name="story_id")
+        named = story_members(members)
+        return await self._call(  # type: ignore[no-any-return]  # Method adapter validates.
+            "link_story", story_id=target, members=named
+        )
+
+    async def unlink_story(
+        self, story_id: Identifier, members: Sequence[StoryMember]
+    ) -> StoryOutcome:
+        """Remove ``members`` from a story, as the owner (ADR-0289 §§3-4)."""
+        target = identifier(story_id, name="story_id")
+        named = story_members(members)
+        return await self._call(  # type: ignore[no-any-return]  # Method adapter validates.
+            "unlink_story", story_id=target, members=named
+        )
+
+    async def merge_stories(self, story_id: Identifier, into: Identifier) -> StoryOutcome:
+        """Merge story ``story_id`` into story ``into``, as the owner (ADR-0289 §§3-4)."""
+        absorbed = identifier(story_id, name="story_id")
+        target = identifier(into, name="into")
+        return await self._call(  # type: ignore[no-any-return]  # Method adapter validates.
+            "merge_stories", story_id=absorbed, into=target
+        )
+
+    async def split_story(
+        self, story_id: Identifier, members: Sequence[StoryMember]
+    ) -> StoryOutcome:
+        """Split ``members`` off a story into a new one, as the owner (ADR-0289 §§3-4)."""
+        source = identifier(story_id, name="story_id")
+        named = story_members(members)
+        return await self._call(  # type: ignore[no-any-return]  # Method adapter validates.
+            "split_story", story_id=source, members=named
+        )
+
+    async def story(
+        self,
+        story_id: Identifier,
+        *,
+        cursor: int | None = None,
+        limit: int = DEFAULT_PAGE_SIZE,
+    ) -> StoryView | None:
+        """Read a page of a story's members, resolved (ADR-0289 §4)."""
+        target = identifier(story_id, name="story_id")
+        check_story_page(cursor, limit)
+        return await self._call(  # type: ignore[no-any-return]  # Method adapter validates.
+            "story", story_id=target, cursor=cursor, limit=limit
+        )
+
+    async def story_log(
+        self,
+        story_id: Identifier,
+        *,
+        cursor: int | None = None,
+        limit: int = DEFAULT_PAGE_SIZE,
+    ) -> StoryLogPage | None:
+        """Read a page of a story's change log, oldest first (ADR-0289 §4)."""
+        target = identifier(story_id, name="story_id")
+        check_story_page(cursor, limit)
+        return await self._call(  # type: ignore[no-any-return]  # Method adapter validates.
+            "story_log", story_id=target, cursor=cursor, limit=limit
+        )
+
+    async def stories(
+        self, *, cursor: int | None = None, limit: int = DEFAULT_PAGE_SIZE
+    ) -> StoryPage:
+        """Read a page of every story, newest first (ADR-0289 §4)."""
+        check_story_page(cursor, limit)
+        return await self._call(  # type: ignore[no-any-return]  # Method adapter validates.
+            "stories", cursor=cursor, limit=limit
+        )
+
+    async def activation_stories(self, activation_id: Identifier) -> tuple[StoryHeader, ...]:
+        """Read the stories an activation belongs to directly, newest first (ADR-0289 §4)."""
+        named = identifier(activation_id, name="activation_id")
+        return await self._call(  # type: ignore[no-any-return]  # Method adapter validates.
+            "activation_stories", activation_id=named
         )
 
     async def beliefs(

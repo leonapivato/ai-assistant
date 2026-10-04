@@ -734,6 +734,21 @@ class DeferralStoreError(AssistantError):
     """
 
 
+class StoryStoreError(AssistantError):
+    """The story store could not read or write its file (ADR-0289 §3).
+
+    Its own class in the :class:`AssistantError` hierarchy because a story is none
+    of the things the existing errors name: it is a record of which experiences
+    belong to the same matter, kept in a store of its own (ADR-0289 §1).
+
+    **It is raised only for a store fault**, never for a refused write. Every
+    refusal — a write to an unknown or merged story, a loop, a self-merge, a split
+    naming a non-member, a write naming no member — is a
+    :class:`~ai_assistant.core.types.StoryOutcome` carrying a closed reason, and
+    a malformed *argument* is a ``ValueError``.
+    """
+
+
 class NotificationStoreError(AssistantError):
     """Reading from or writing to the notification store failed (ADR-0130 §9).
 

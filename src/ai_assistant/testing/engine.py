@@ -52,6 +52,7 @@ from ai_assistant.core.errors import (
     NotificationBudgetError,
     OversizedValueError,
     PlanningError,
+    StoryStoreError,
     UngrantableActError,
     UngrantableSourceError,
     UnknownContinuationError,
@@ -155,6 +156,10 @@ from ai_assistant.core.types import (
     StepExecution,
     StepOutcome,
     StepStatus,
+    StoryActor,
+    StoryMember,
+    StoryMemberKind,
+    StoryOutcome,
     StreamingTextReply,
     TextChannelPayload,
     TextChannelResult,
@@ -164,11 +169,13 @@ from ai_assistant.core.types import (
     TurnResult,
     Warrant,
     WholeTextReply,
+    check_story_page,
     describe_untrusted,
     encodable_text,
     is_live_confirmation_park,
     rests_on_recorded_external_content,
     secret_value,
+    story_members,
 )
 from ai_assistant.orchestration.authorization_surface import is_live, view_of
 from ai_assistant.orchestration.channels import (
@@ -208,6 +215,7 @@ from ai_assistant.orchestration.recipient_grants import (
     rides_an_establishing_act,
 )
 from ai_assistant.orchestration.speech import SPOKEN_PARK_SENTENCE
+from ai_assistant.orchestration.stories import fitted, resolved_view, unknown_activation
 from ai_assistant.testing.activation import FakeActivation
 from ai_assistant.testing.connections import FakeConnectionProvisioner
 from ai_assistant.testing.destination_trust import FakeDestinationTrustStore
@@ -224,6 +232,7 @@ from ai_assistant.testing.notifications import (
 from ai_assistant.testing.permissions import FakeAuditTrail
 from ai_assistant.testing.reads import FakeSourceReadTrail
 from ai_assistant.testing.recipient_grants import FakeRecipientGrantStore
+from ai_assistant.testing.stories import FakeStoryStore
 
 if TYPE_CHECKING:
     from collections.abc import AsyncIterator, Callable, Sequence
@@ -242,6 +251,10 @@ if TYPE_CHECKING:
         RoutedListing,
         SecretValue,
         SourceReadRecord,
+        StoryHeader,
+        StoryLogPage,
+        StoryPage,
+        StoryView,
         UtcInstant,
     )
 
@@ -503,6 +516,11 @@ class FakeAssistantEngine:
         self.notification_policy = FakeNotificationPolicy()
         self.beliefs_held: dict[str, Belief] = {}
         self.episode_memory = FakeMemoryStore(now=lambda: _AT)
+        #: The story store the nine story methods read and write (ADR-0289 §4),
+        #: public so a consumer can seed or inspect it. The activation checks those
+        #: methods make read :attr:`episode_memory`, which is where a consumer seeds
+        #: the episodes a story's activation members name.
+        self.story_store = FakeStoryStore(now=lambda: _AT)
         #: The placement each held belief carries (ADR-0217 §1), by record id. Held
         #: **beside** the beliefs rather than on them, because
         #: :class:`~ai_assistant.core.types.Belief` carries no placement: ADR-0217 §7
@@ -2936,6 +2954,154 @@ class FakeAssistantEngine:
             episode_id, version=version, offset=offset, max_bytes=max_bytes
         )
         return fit_chunk(chunk, max_bytes=self._max_payload_bytes)
+
+    # --- stories (ADR-0289 §4) ---------------------------------------------
+    #
+    # The same nine methods the engine carries, over :attr:`story_store` and with the
+    # activation checks read from :attr:`episode_memory`. The logic is the engine's own
+    # (`orchestration/stories.py`), named rather than copied, so the fake cannot
+    # certify a consumer against a hub that answers one of these calls differently.
+
+    async def create_story(self, members: Sequence[StoryMember]) -> StoryOutcome:
+        """Create a story holding ``members``, as the owner (ADR-0289 §§3-4)."""
+        named = story_members(members)
+        check_arguments("create_story", max_bytes=self._max_payload_bytes, members=named)
+        self.calls.append(("create_story", {"members": named}))
+        if refusal := await unknown_activation(self.episode_memory, named):
+            return StoryOutcome(refusal=refusal)
+        outcome = await self.story_store.create(named, actor=StoryActor.OWNER)
+        return self._checked(outcome, "create_story")
+
+    async def link_story(
+        self, story_id: Identifier, members: Sequence[StoryMember]
+    ) -> StoryOutcome:
+        """Add ``members`` to a story, as the owner (ADR-0289 §§3-4)."""
+        target = identifier(story_id, name="story_id")
+        named = story_members(members)
+        check_arguments(
+            "link_story", max_bytes=self._max_payload_bytes, story_id=target, members=named
+        )
+        self.calls.append(("link_story", {"story_id": target, "members": named}))
+        if named and (refusal := await unknown_activation(self.episode_memory, named)):
+            return StoryOutcome(refusal=refusal)
+        outcome = await self.story_store.link(target, named, actor=StoryActor.OWNER)
+        return self._checked(outcome, "link_story")
+
+    async def unlink_story(
+        self, story_id: Identifier, members: Sequence[StoryMember]
+    ) -> StoryOutcome:
+        """Remove ``members`` from a story, as the owner (ADR-0289 §§3-4)."""
+        target = identifier(story_id, name="story_id")
+        named = story_members(members)
+        check_arguments(
+            "unlink_story", max_bytes=self._max_payload_bytes, story_id=target, members=named
+        )
+        self.calls.append(("unlink_story", {"story_id": target, "members": named}))
+        outcome = await self.story_store.unlink(target, named, actor=StoryActor.OWNER)
+        return self._checked(outcome, "unlink_story")
+
+    async def merge_stories(self, story_id: Identifier, into: Identifier) -> StoryOutcome:
+        """Merge story ``story_id`` into story ``into``, as the owner (ADR-0289 §§3-4)."""
+        absorbed = identifier(story_id, name="story_id")
+        target = identifier(into, name="into")
+        check_arguments(
+            "merge_stories", max_bytes=self._max_payload_bytes, story_id=absorbed, into=target
+        )
+        self.calls.append(("merge_stories", {"story_id": absorbed, "into": target}))
+        outcome = await self.story_store.merge(absorbed, target, actor=StoryActor.OWNER)
+        return self._checked(outcome, "merge_stories")
+
+    async def split_story(
+        self, story_id: Identifier, members: Sequence[StoryMember]
+    ) -> StoryOutcome:
+        """Split ``members`` off a story into a new one, as the owner (ADR-0289 §§3-4)."""
+        source = identifier(story_id, name="story_id")
+        named = story_members(members)
+        check_arguments(
+            "split_story", max_bytes=self._max_payload_bytes, story_id=source, members=named
+        )
+        self.calls.append(("split_story", {"story_id": source, "members": named}))
+        outcome = await self.story_store.split(source, named, actor=StoryActor.OWNER)
+        return self._checked(outcome, "split_story")
+
+    async def story(
+        self,
+        story_id: Identifier,
+        *,
+        cursor: int | None = None,
+        limit: int = DEFAULT_PAGE_SIZE,
+    ) -> StoryView | None:
+        """Read a page of a story's members, resolved (ADR-0289 §4)."""
+        target = identifier(story_id, name="story_id")
+        check_story_page(cursor, limit)
+        check_arguments(
+            "story", max_bytes=self._max_payload_bytes, story_id=target, cursor=cursor, limit=limit
+        )
+        self.calls.append(("story", {"story_id": target, "cursor": cursor, "limit": limit}))
+
+        async def read(size: int) -> StoryView | None:
+            return await resolved_view(
+                self.story_store, self.episode_memory, target, cursor=cursor, limit=size
+            )
+
+        return await fitted(
+            read, limit, max_bytes=self._max_payload_bytes, subject="the result of story()"
+        )
+
+    async def story_log(
+        self,
+        story_id: Identifier,
+        *,
+        cursor: int | None = None,
+        limit: int = DEFAULT_PAGE_SIZE,
+    ) -> StoryLogPage | None:
+        """Read a page of a story's change log, oldest first (ADR-0289 §4)."""
+        target = identifier(story_id, name="story_id")
+        check_story_page(cursor, limit)
+        check_arguments(
+            "story_log",
+            max_bytes=self._max_payload_bytes,
+            story_id=target,
+            cursor=cursor,
+            limit=limit,
+        )
+        self.calls.append(("story_log", {"story_id": target, "cursor": cursor, "limit": limit}))
+
+        async def read(size: int) -> StoryLogPage | None:
+            return await self.story_store.log(target, cursor=cursor, limit=size)
+
+        return await fitted(
+            read, limit, max_bytes=self._max_payload_bytes, subject="the result of story_log()"
+        )
+
+    async def stories(
+        self, *, cursor: int | None = None, limit: int = DEFAULT_PAGE_SIZE
+    ) -> StoryPage:
+        """Read a page of every story, newest first (ADR-0289 §4)."""
+        check_story_page(cursor, limit)
+        check_arguments("stories", max_bytes=self._max_payload_bytes, cursor=cursor, limit=limit)
+        self.calls.append(("stories", {"cursor": cursor, "limit": limit}))
+
+        async def read(size: int) -> StoryPage:
+            return await self.story_store.stories(cursor=cursor, limit=size)
+
+        page = await fitted(
+            read, limit, max_bytes=self._max_payload_bytes, subject="the result of stories()"
+        )
+        if page is None:  # pragma: no cover — the listing always answers a page
+            msg = "the story listing answered no page"
+            raise StoryStoreError(msg)
+        return page
+
+    async def activation_stories(self, activation_id: Identifier) -> tuple[StoryHeader, ...]:
+        """Read the stories an activation belongs to directly, newest first (ADR-0289 §4)."""
+        named = identifier(activation_id, name="activation_id")
+        check_arguments(
+            "activation_stories", max_bytes=self._max_payload_bytes, activation_id=named
+        )
+        self.calls.append(("activation_stories", {"activation_id": named}))
+        member = StoryMember(kind=StoryMemberKind.ACTIVATION, id=named)
+        return self._checked(await self.story_store.stories_of(member), "activation_stories")
 
     async def beliefs(
         self,

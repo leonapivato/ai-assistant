@@ -68,14 +68,17 @@ from episode_inspection_contract import (
     INSPECTION_LIMIT,
     EpisodeInspectionSubject,
 )
+from story_surface_contract import STORY_LIMIT, STORY_SURFACE_AT, StorySurfaceSubject
 from understanding_support import VERSION_LIMIT, understanding_stage, windows_stage
 
+from ai_assistant.core.errors import ConfigurationError
 from ai_assistant.core.protocols import (
     AuditTrail,
     GoalAuthorizationStore,
     InvocationLedger,
     SpendGate,
     SpendLedger,
+    StoryStore,
 )
 from ai_assistant.core.types import (
     ActionPlan,
@@ -108,6 +111,8 @@ from ai_assistant.core.types import (
     Role,
     RoutableOperation,
     SemanticMemory,
+    StoryMember,
+    StoryMemberKind,
     ToolCost,
     ToolDefinition,
     Validity,
@@ -163,6 +168,7 @@ from ai_assistant.testing import (
     FakeSourceReadTrail,
     FakeSpeechSynthesizer,
     FakeSpeechTranscriber,
+    FakeStoryStore,
     FakeStreamingCompleter,
     FakeToolInvoker,
     FakeTraceRetention,
@@ -454,6 +460,7 @@ def _wire(  # noqa: PLR0913 — one knob per state the shared suite needs a subj
     authorizations: GoalAuthorizationStore | None = None,
     max_outstanding_confirmations: int = _DEFAULT_MAX_OUTSTANDING,
     notification_outbox: FakeNotificationOutbox | None = None,
+    stories: StoryStore | None = None,
 ) -> Engine:
     """Build one engine over in-memory fakes, wired as the composition root would.
 
@@ -670,11 +677,27 @@ def _wire(  # noqa: PLR0913 — one knob per state the shared suite needs a subj
         id_factory=_counter("tok"),
         max_payload_bytes=max_payload_bytes,
         max_outstanding_confirmations=max_outstanding_confirmations,
+        stories=stories,
     )
 
 
 class TestEngineContract(AssistantEngineContract):
     """The concrete engine, held to the shared contract."""
+
+    @pytest.fixture
+    async def story_surface(self) -> AsyncIterator[StorySurfaceSubject]:
+        """The production engine over an injected memory store and story store."""
+        memory = FakeMemoryStore(now=lambda: STORY_SURFACE_AT)
+        built = _wire(
+            memory=memory,
+            max_payload_bytes=STORY_LIMIT,
+            stories=FakeStoryStore(now=lambda: STORY_SURFACE_AT),
+        )
+        await built.start()
+        try:
+            yield StorySurfaceSubject(engine=built, memory=memory)
+        finally:
+            await built.aclose()
 
     @pytest.fixture
     async def episode_inspection(self) -> AsyncIterator[EpisodeInspectionSubject]:
@@ -1275,3 +1298,44 @@ class TestEngineContract(AssistantEngineContract):
             yield built
         finally:
             await built.aclose()
+
+
+@pytest.mark.parametrize(
+    "call",
+    [
+        "create_story",
+        "link_story",
+        "unlink_story",
+        "merge_stories",
+        "split_story",
+        "story",
+        "story_log",
+        "stories",
+        "activation_stories",
+    ],
+)
+async def test_an_engine_with_no_story_store_refuses_the_story_surface(call: str) -> None:
+    """An engine built with no story store says so rather than answering empty.
+
+    ADR-0289 §4 puts the nine methods on every engine; a deployment that wired no
+    store has no stories, and answering an empty listing would claim it had looked.
+    """
+    member = StoryMember(kind=StoryMemberKind.ACTIVATION, id="a1")
+    calls = {
+        "create_story": lambda engine: engine.create_story([member]),
+        "link_story": lambda engine: engine.link_story("story:s", [member]),
+        "unlink_story": lambda engine: engine.unlink_story("story:s", [member]),
+        "merge_stories": lambda engine: engine.merge_stories("story:a", "story:b"),
+        "split_story": lambda engine: engine.split_story("story:s", [member]),
+        "story": lambda engine: engine.story("story:s"),
+        "story_log": lambda engine: engine.story_log("story:s"),
+        "stories": lambda engine: engine.stories(),
+        "activation_stories": lambda engine: engine.activation_stories("a1"),
+    }
+    built = _wire()
+    await built.start()
+    try:
+        with pytest.raises(ConfigurationError, match="story store"):
+            await calls[call](built)
+    finally:
+        await built.aclose()

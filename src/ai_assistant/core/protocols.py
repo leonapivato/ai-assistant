@@ -244,6 +244,14 @@ if TYPE_CHECKING:
         SpokenReply,
         SpokenTurn,
         StepTransition,
+        StoryActor,
+        StoryHeader,
+        StoryLogPage,
+        StoryMember,
+        StoryOutcome,
+        StoryPage,
+        StoryView,
+        StoryViewPage,
         StreamingTextReply,
         TimeWindow,
         ToolCall,
@@ -11910,6 +11918,302 @@ class DeferralStore(Protocol):
 
 
 @runtime_checkable
+class StoryStore(Protocol):
+    """Which experiences belong to the same matter (ADR-0289 §§1-3).
+
+    A **story** is the assistant's memory of which experiences belong together. The
+    windows find what is recent, recall finds what is similar, and stories find what
+    belongs. A story is identified by a ``story:`` id this store mints, carries the
+    instant it was created and, once merged, the story it was merged into — and
+    **nothing else**: no title, summary, state, owner or text of any kind (§2).
+    What is learned about the matter is a belief about the story, kept outside it.
+
+    **Members** are exactly one of two kinds, carried with the id and never inferred
+    from it: an activation, named by its activation id, or another story (§2).
+
+    **Two records, written together.** The **clean view** is each story's current
+    members, each with the instant it was linked and the actor that linked it, in
+    link order. The **change log** is append-only: each line carries a sequence
+    number unique across the store, the story changed, what happened, the member
+    where there is one, the story on the other side of a merge or a split, the
+    actor, an optional triggering activation id and the store's clock reading. No
+    line is ever rewritten or removed, and no field of either record holds free
+    text. Every operation that changes a story writes both **in one transaction**:
+    either both change or neither does, and a refused operation writes nothing.
+
+    **The store reads no other store** (§1). It holds identities and checks only what
+    its own records decide: that a story it is asked to write to or to name as a
+    member exists and is not merged, and that no story would come to contain itself.
+    Whether an activation has an episode is the engine's check, made before a create
+    or a link (§4).
+
+    **Refusals are outcomes.** Every refused write answers a
+    :class:`~ai_assistant.core.types.StoryOutcome` carrying a
+    :class:`~ai_assistant.core.types.StoryRefusalReason`, and writes nothing. The
+    checks are made in a fixed order — no members, then the story written to
+    (unknown, then merged), then each story member named (unknown, then merged), then
+    the operation's own rule (self-merge, not a member, loop) — and the first that
+    fails is the one reported. :class:`~ai_assistant.core.errors.StoryStoreError` is
+    raised only where the store could not read or write its file, and a malformed
+    argument is a ``ValueError``.
+
+    **Merged stories are followed, never written.** A write to a merged story, or one
+    naming a merged story as a member, is refused with the story it was merged into.
+    Reading a merged story returns its header, so a caller follows it (§3).
+    """
+
+    async def create(
+        self,
+        members: Sequence[StoryMember],
+        *,
+        actor: StoryActor,
+        trigger: Identifier | None = None,
+    ) -> StoryOutcome:
+        """Mint a story holding ``members`` (ADR-0289 §3).
+
+        Logs ``created``, then each member as ``added``, in the order given; a member
+        named twice is added once. The store does not require two members: whether
+        something connects moments is the linker's judgment.
+
+        Args:
+            members: The story's first members, at least one.
+            actor: Who is creating it.
+            trigger: The activation that triggered it, where there was one.
+
+        Returns:
+            The minted story's id, or a refusal: ``no_members`` for an empty list,
+            ``unknown_story`` or ``merged_story`` for a story member that is not one
+            the store can hold.
+
+        Raises:
+            ValueError: If an argument is malformed.
+            StoryStoreError: If the store cannot be read or written.
+        """
+        ...
+
+    async def link(
+        self,
+        story_id: Identifier,
+        members: Sequence[StoryMember],
+        *,
+        actor: StoryActor,
+        trigger: Identifier | None = None,
+    ) -> StoryOutcome:
+        """Add ``members`` to a story, each logged as ``added`` (ADR-0289 §3).
+
+        A member already in the story is passed over, with no log line, and keeps its
+        entry as it was.
+
+        Args:
+            story_id: The story to add to.
+            members: The members to add, at least one.
+            actor: Who is linking.
+            trigger: The activation that triggered it, where there was one.
+
+        Returns:
+            The story's id with the count of lines appended, or a refusal:
+            ``no_members``, ``unknown_story``, ``merged_story``, or ``loop`` where a
+            story member would make some story contain itself, naming the stories
+            forming the loop. The store never merges, re-links or drops a link to
+            resolve a loop.
+
+        Raises:
+            ValueError: If an argument is malformed.
+            StoryStoreError: If the store cannot be read or written.
+        """
+        ...
+
+    async def unlink(
+        self,
+        story_id: Identifier,
+        members: Sequence[StoryMember],
+        *,
+        actor: StoryActor,
+        trigger: Identifier | None = None,
+    ) -> StoryOutcome:
+        """Remove ``members`` from a story, each logged as ``removed`` (ADR-0289 §3).
+
+        A member not in the story is passed over, with no log line. A story left with
+        no members stays as a story with no members.
+
+        Args:
+            story_id: The story to remove from.
+            members: The members to remove, at least one.
+            actor: Who is unlinking.
+            trigger: The activation that triggered it, where there was one.
+
+        Returns:
+            The story's id with the count of lines appended, or a refusal:
+            ``no_members``, ``unknown_story`` or ``merged_story``.
+
+        Raises:
+            ValueError: If an argument is malformed.
+            StoryStoreError: If the store cannot be read or written.
+        """
+        ...
+
+    async def merge(
+        self,
+        story_id: Identifier,
+        into: Identifier,
+        *,
+        actor: StoryActor,
+        trigger: Identifier | None = None,
+    ) -> StoryOutcome:
+        """Merge story A (``story_id``) into story B (``into``) (ADR-0289 §3).
+
+        Logs ``merged_into`` on A and ``absorbed`` on B, each naming the other. Each
+        of A's members is removed from A, logged ``removed`` on A, and added to B
+        where B does not already hold it, logged ``added`` on B; a member B already
+        holds keeps its existing entry, link instant, actor and place. Where B was
+        itself a member of A it is removed from A and nothing is added for it. A is
+        then removed from every story that held it, logged ``removed`` on each, and B
+        is added to each such story that does not already hold B and is not B,
+        logged ``added``. A is left with no members, and records B as the story it
+        was merged into.
+
+        Args:
+            story_id: The story absorbed, A.
+            into: The story it is merged into, B.
+            actor: Who is merging.
+            trigger: The activation that triggered it, where there was one.
+
+        Returns:
+            B's id with the count of lines appended, or a refusal: ``unknown_story``
+            or ``merged_story`` for either side, ``self_merge`` where A is B, or
+            ``loop`` where the result would leave some story containing itself.
+
+        Raises:
+            ValueError: If an argument is malformed.
+            StoryStoreError: If the store cannot be read or written.
+        """
+        ...
+
+    async def split(
+        self,
+        story_id: Identifier,
+        members: Sequence[StoryMember],
+        *,
+        actor: StoryActor,
+        trigger: Identifier | None = None,
+    ) -> StoryOutcome:
+        """Move a non-empty subset of a story's members into a new story (ADR-0289 §3).
+
+        Mints story C, removes ``members`` from A logged ``removed`` on A, and adds
+        them to C, which logs ``created`` and each as ``added``. Both log
+        ``split_off`` naming the other. The moved members keep A's link order. C is
+        not made a member of A.
+
+        Args:
+            story_id: The story split, A.
+            members: The members to move, every one a current member of A.
+            actor: Who is splitting.
+            trigger: The activation that triggered it, where there was one.
+
+        Returns:
+            C's id, or a refusal: ``no_members``, ``unknown_story``,
+            ``merged_story``, or ``not_a_member`` naming a member A does not hold.
+
+        Raises:
+            ValueError: If an argument is malformed.
+            StoryStoreError: If the store cannot be read or written.
+        """
+        ...
+
+    async def header(self, story_id: Identifier) -> StoryHeader | None:
+        """Read a story's header: its id, creation instant and merge target.
+
+        Returns:
+            The header, or ``None`` where the store holds no such story.
+
+        Raises:
+            ValueError: If the id is malformed.
+            StoryStoreError: If the store cannot be read.
+        """
+        ...
+
+    async def view(
+        self,
+        story_id: Identifier,
+        *,
+        cursor: int | None = None,
+        limit: int = DEFAULT_PAGE_SIZE,
+    ) -> StoryViewPage | None:
+        """Read a page of a story's clean view, in link order.
+
+        Args:
+            story_id: The story to read.
+            cursor: ``None`` for the first page, else a page's ``next_cursor``.
+            limit: The most entries the page holds, in ``[1, MAX_STORY_PAGE]``.
+
+        Returns:
+            The page, carrying the story's header and current member count, or
+            ``None`` where the store holds no such story.
+
+        Raises:
+            ValueError: If an argument is malformed.
+            StoryStoreError: If the store cannot be read.
+        """
+        ...
+
+    async def log(
+        self,
+        story_id: Identifier,
+        *,
+        cursor: int | None = None,
+        limit: int = DEFAULT_PAGE_SIZE,
+    ) -> StoryLogPage | None:
+        """Read a page of a story's change log, in sequence order.
+
+        Args:
+            story_id: The story to read.
+            cursor: ``None`` for the first page, else a page's ``next_cursor``.
+            limit: The most lines the page holds, in ``[1, MAX_STORY_PAGE]``.
+
+        Returns:
+            The page, or ``None`` where the store holds no such story.
+
+        Raises:
+            ValueError: If an argument is malformed.
+            StoryStoreError: If the store cannot be read.
+        """
+        ...
+
+    async def stories(
+        self,
+        *,
+        cursor: int | None = None,
+        limit: int = DEFAULT_PAGE_SIZE,
+    ) -> StoryPage:
+        """Read a page of every story the store holds, newest first.
+
+        Merged stories are listed too: each is still a story, with its header.
+
+        Args:
+            cursor: ``None`` for the first page, else a page's ``next_cursor``.
+            limit: The most stories the page holds, in ``[1, MAX_STORY_PAGE]``.
+
+        Raises:
+            ValueError: If an argument is malformed.
+            StoryStoreError: If the store cannot be read.
+        """
+        ...
+
+    async def stories_of(self, member: StoryMember) -> tuple[StoryHeader, ...]:
+        """Read the stories ``member`` belongs to directly, newest first.
+
+        The reverse lookup: the episode detail needs it now, and the forgetting
+        milestone and the readers of beliefs about a story will later (§3). A story
+        that only contains a story containing ``member`` is not among them.
+
+        Raises:
+            ValueError: If the member is malformed.
+            StoryStoreError: If the store cannot be read.
+        """
+        ...
+
+
+@runtime_checkable
 class NotificationPolicy(Protocol):
     """Rules on one notification candidate — mechanically (ADR-0130 §4, §5).
 
@@ -13923,6 +14227,131 @@ class AssistantEngine(Protocol):
         max_bytes: int = 65536,
     ) -> EpisodeChunk | None:
         """Read canonical episode bytes, preserving the exact address (ADR-0275)."""
+        ...
+
+    # --- stories (ADR-0289 §4) ---------------------------------------------
+    #
+    # **Nine methods over the story store, and no stage reads them.** Every write
+    # carries the actor ``owner`` and no triggering activation. Before a create or a
+    # link naming an activation member, the engine reads ``activation:<id>`` through
+    # ``MemoryStore.get`` for each and refuses the write with ``unknown_activation``
+    # where no record is there; an open episode is a record there (ADR-0286 §6), so a
+    # running activation can be linked. A merge or a split checks no activation. A
+    # refusal is a ``StoryOutcome``, never an exception.
+
+    async def create_story(self, members: Sequence[StoryMember]) -> StoryOutcome:
+        """Create a story holding ``members``, as the owner (ADR-0289 §§3-4).
+
+        Raises:
+            ValueError: If ``members`` is malformed.
+            StoryStoreError: If the story store cannot be read or written.
+            MemoryStoreError: If an activation's record cannot be read.
+        """
+        ...
+
+    async def link_story(
+        self, story_id: Identifier, members: Sequence[StoryMember]
+    ) -> StoryOutcome:
+        """Add ``members`` to a story, as the owner (ADR-0289 §§3-4).
+
+        Raises:
+            ValueError: If an argument is malformed.
+            StoryStoreError: If the story store cannot be read or written.
+            MemoryStoreError: If an activation's record cannot be read.
+        """
+        ...
+
+    async def unlink_story(
+        self, story_id: Identifier, members: Sequence[StoryMember]
+    ) -> StoryOutcome:
+        """Remove ``members`` from a story, as the owner (ADR-0289 §§3-4).
+
+        Raises:
+            ValueError: If an argument is malformed.
+            StoryStoreError: If the story store cannot be read or written.
+        """
+        ...
+
+    async def merge_stories(self, story_id: Identifier, into: Identifier) -> StoryOutcome:
+        """Merge story ``story_id`` into story ``into``, as the owner (ADR-0289 §§3-4).
+
+        Raises:
+            ValueError: If an argument is malformed.
+            StoryStoreError: If the story store cannot be read or written.
+        """
+        ...
+
+    async def split_story(
+        self, story_id: Identifier, members: Sequence[StoryMember]
+    ) -> StoryOutcome:
+        """Split ``members`` off a story into a new one, as the owner (ADR-0289 §§3-4).
+
+        Raises:
+            ValueError: If an argument is malformed.
+            StoryStoreError: If the story store cannot be read or written.
+        """
+        ...
+
+    async def story(
+        self,
+        story_id: Identifier,
+        *,
+        cursor: int | None = None,
+        limit: int = DEFAULT_PAGE_SIZE,
+    ) -> StoryView | None:
+        """Read a page of a story's members, resolved (ADR-0289 §4).
+
+        Each activation member carries its episode's ``EpisodeSummary``, or is marked
+        forgotten where no record is there any more; each story member carries its
+        current member count, one level deep. A page too large for the payload limit
+        is shortened, with a cursor resuming after the last member it keeps.
+
+        Returns:
+            The view, or ``None`` where the store holds no such story.
+
+        Raises:
+            ValueError: If an argument is malformed.
+            StoryStoreError: If the story store cannot be read.
+            MemoryStoreError: If an activation's record cannot be read.
+        """
+        ...
+
+    async def story_log(
+        self,
+        story_id: Identifier,
+        *,
+        cursor: int | None = None,
+        limit: int = DEFAULT_PAGE_SIZE,
+    ) -> StoryLogPage | None:
+        """Read a page of a story's change log, oldest first (ADR-0289 §4).
+
+        Returns:
+            The page, or ``None`` where the store holds no such story.
+
+        Raises:
+            ValueError: If an argument is malformed.
+            StoryStoreError: If the story store cannot be read.
+        """
+        ...
+
+    async def stories(
+        self, *, cursor: int | None = None, limit: int = DEFAULT_PAGE_SIZE
+    ) -> StoryPage:
+        """Read a page of every story, newest first (ADR-0289 §4).
+
+        Raises:
+            ValueError: If an argument is malformed.
+            StoryStoreError: If the story store cannot be read.
+        """
+        ...
+
+    async def activation_stories(self, activation_id: Identifier) -> tuple[StoryHeader, ...]:
+        """Read the stories an activation belongs to directly, newest first (ADR-0289 §4).
+
+        Raises:
+            ValueError: If the id is malformed.
+            StoryStoreError: If the story store cannot be read.
+        """
         ...
 
     async def beliefs(
