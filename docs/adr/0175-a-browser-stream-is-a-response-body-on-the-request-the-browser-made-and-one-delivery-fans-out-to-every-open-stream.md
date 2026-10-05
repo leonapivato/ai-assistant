@@ -1,6 +1,6 @@
 # 175. A browser stream is a response body on the request the browser made, and one delivery fans out to every open stream
 
-- Status: Partially superseded by ADR-0177 (§6's first clause, the closed enumeration of five browser-reachable operations)
+- Status: Partially superseded by ADR-0177 (§6's first clause, the closed enumeration of five browser-reachable operations) and ADR-0296 (§5:4's and §6:4's bars on a per-browser identifier and a per-browser scope, and §6:4's reach equal to the gateway device's, each only as it reaches a browser device)
 - Date: 2026-08-21
 - Partially superseded: 2026-08-22 by ADR-0177 — **one clause, and the clause
   beside it is what authorised the replacement.** ADR-0177 is
@@ -89,6 +89,15 @@
   to ADR-0174 §7's own named trigger (§10).
 - **Every reference below to ADR-NNNN is to its text as merged on 2026-08-21**,
   the durability form ADR-0100 established. Refs #1230.
+- Partially superseded: 2026-10-04 by ADR-0296 — one scope. §5:4's and §6:4's bars on a
+  per-browser identifier and a per-browser scope, and §6:4's *a browser reaches exactly
+  what the gateway's own device reaches*, as they reach a browser device: the gateway
+  names the browser device to the hub, and a browser device acts with its own roles
+  (ADR-0296 §1, §2). No session value crosses the wire, two browsers on one machine stay
+  one device, every browser is still the owner under ADR-0099 §1, and every other clause
+  stands. This replacement takes effect on ratification of ADR-0296. This reciprocal
+  header record accompanies the numbered draft under ADR-0070 and ADR-0082; prior
+  supersessions and the ratified body below are preserved.
 
 ## Context
 
