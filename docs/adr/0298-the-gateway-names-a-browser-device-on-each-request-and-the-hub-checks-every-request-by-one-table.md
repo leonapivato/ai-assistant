@@ -362,11 +362,20 @@ calls for it, below.
 > was recorded, and a change that sets a conversation's devices, or "my devices",
 > reaches every device in the set before it or after it.
 
-So a device sees the change that removed it (ADR-0296 §4:8) and the change that added
-it, and nothing between.
+> **Normative.** For a conversation the device does not read when the stream sends to
+> it, the stream sends only the change that removed the device and the conversation's
+> deletion, a deletion reaching every device that ever read the conversation, and never
+> a message, snapshot or current state of it.
 
-> **Normative.** The change that makes a device a conversation's end for reading reaches
-> that device in the same chunk as the conversation's snapshot, so a device that has
+So a device sees the change that removed it (ADR-0296 §4:8), and a conversation's
+devices are the user's statement of which screens may see it (ADR-0293 §3:3), which
+holds against a device that was offline when the user made it: catching up from an old
+cursor, a device gets a conversation it no longer reads as a removal or a deletion,
+with none of the content from when it did read it.
+
+> **Normative.** The change that makes a device a conversation's end for reading, where
+> the stream sends it, reaches that device in the same chunk as the conversation's
+> snapshot, so a device that has
 > applied the change, and moved its cursor past it, has the snapshot.
 
 > **Normative.** That snapshot is the conversation as it stood at that change: the
@@ -556,7 +565,10 @@ trusted (§8).
    refusal by registration, revocation ending sessions and removing memberships, and the
    wire server setting the real requesting device — the cutover.
 6. **The change stream** (`core/`, `orchestration/`, `wire/`): the streaming method,
-   its chunk class, the heartbeat and the client's idle deadline; the version.
+   its chunk class, the heartbeat and the client's idle deadline; the version, and the
+   engine-side filter over `ConversationStore.device_changes`, whose as-of membership
+   stays as merged, that keeps a conversation the device no longer reads to its removal
+   and deletion notices.
 7. **The gateway's relay** (`interfaces/gateway/`): naming browser devices, relaying the
    stream change for change, fanning a notification only to browser devices in "my
    devices" for reading.
