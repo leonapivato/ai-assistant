@@ -34,6 +34,7 @@ from test_engine import (
 
 from ai_assistant.core.errors import (
     ActivationStoppedError,
+    AuditError,
     ConversationStoreError,
     PermissionDeniedError,
     PlanningError,
@@ -50,6 +51,7 @@ from ai_assistant.core.types import (
     EpisodicMemory,
     MessageAuthor,
     NewConversation,
+    PermissionDecision,
     PermissionOutcome,
     ProcessingReason,
     ProcessingStatus,
@@ -769,3 +771,73 @@ async def test_a_stopped_resume_whose_bookkeeping_faults_after_executing_keeps_t
     with pytest.raises(PermissionDeniedError):
         await harness.engine.resume(parked.step.confirmation.token, approved=True, timeout=PATIENT)
     assert tool_handler.calls == 1
+
+
+async def test_a_stopped_resume_whose_answer_was_written_and_not_read_back_returns() -> None:
+    """The answer's append returned, so the user's answer is spent (ADR-0044 §2b); the
+    trail's read-back then failed, so nothing is acted on under it (ADR-0037 §3). A
+    stopped resume returns — no step, nothing executed, no reply — rather than raising.
+    """
+    plans = _Stopping()
+    harness, tool_handler = _resuming(plans)
+    parked = await harness.engine.converse("send it to the address in the invite", timeout=PATIENT)
+    assert parked.step is not None
+    assert parked.step.confirmation is not None
+    record, get = harness.trail.record, harness.trail.get
+    resolving: list[str] = []
+    answers: list[ActivationStop] = []
+
+    async def recording(decision: PermissionDecision) -> Any:
+        if decision.resolves is not None:
+            resolving.append(decision.id)
+        return await record(decision)
+
+    async def reading(decision_id: str) -> PermissionDecision | None:
+        if decision_id in resolving:
+            state = active_state()
+            assert state is not None
+            assert state.activation_id is not None
+            answers.append(await harness.engine.stop_activation(state.activation_id))
+            msg = "the trail cannot be read"
+            raise AuditError(msg)
+        return await get(decision_id)
+
+    harness.trail.record = recording  # type: ignore[method-assign]
+    harness.trail.get = reading  # type: ignore[method-assign]
+
+    resumed = await harness.engine.resume(
+        parked.step.confirmation.token,
+        approved=True,
+        timeout=PATIENT,
+        remember_recipients_until=_UNTIL,
+    )
+
+    assert answers == [ActivationStop.STOPPED]
+    assert len(resolving) == 1
+    assert tool_handler.calls == 0
+    assert resumed.stopped is True
+    assert resumed.reply is None
+    assert resumed.step is None
+    assert await _step_status(plans) is StepStatus.AWAITING_APPROVAL
+
+
+async def test_a_resume_no_stop_reached_still_raises_a_failed_read_back() -> None:
+    """The keep is the stop's alone: unstopped, a failed read-back raises as it always has."""
+    plans = _Stopping()
+    harness, _ = _resuming(plans)
+    parked = await harness.engine.converse("send it to the address in the invite", timeout=PATIENT)
+    assert parked.step is not None
+    assert parked.step.confirmation is not None
+    get = harness.trail.get
+
+    async def reading(decision_id: str) -> PermissionDecision | None:
+        found = await get(decision_id)
+        if found is not None and found.resolves is not None:
+            msg = "the trail cannot be read"
+            raise AuditError(msg)
+        return found
+
+    harness.trail.get = reading  # type: ignore[method-assign]
+
+    with pytest.raises(AuditError, match="cannot be read"):
+        await harness.engine.resume(parked.step.confirmation.token, approved=True, timeout=PATIENT)
