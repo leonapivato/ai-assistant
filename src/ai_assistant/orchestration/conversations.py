@@ -744,42 +744,6 @@ class ConversationLifecycle:
             forgot = await self._memory.delete(episode_id) or forgot
         return forgot
 
-    async def delete_and_forget(self, conversation_id: str) -> bool:
-        """Today's ``forget_conversation``: delete the conversation, then forget its place.
-
-        The superseded route ADR-0293 §Decision:2 keeps working until the first build
-        replaces it, composed from the two acts that replace it — :meth:`forget`, then
-        :meth:`delete` — so it destroys what it destroyed before: the conversation and
-        every episode on its place.
-
-        **Forgetting goes first, so nothing is left where no one can reach it.** A run
-        that dies part-way leaves the conversation standing, listed and with whatever
-        its place still holds, and the user's repeat finishes it; the tombstone only
-        lands once the place is empty. Deleting first would hide the conversation
-        with episodes still on its place, and since deleting forgets nothing (§2:3) no
-        sweep would ever find them. **Every capture of the conversation is told before
-        the walk** (:meth:`ActivationWriter.retiring`), so one whose admission write
-        lands after the walk passed is forgotten at its next write rather than kept;
-        an open one the walk finds is told by its address (§2:6).
-
-        Returns:
-            ``True`` if this call stamped the conversation, as :meth:`delete` answers.
-
-        Raises:
-            ConversationStoreError: If the conversation store cannot be written.
-            MemoryStoreError: If an episode could not be destroyed. The conversation
-                still stands, and a repeat finishes it.
-            AssistantError: If this conversation's parked reads could not be dropped.
-        """
-        self.activation_writer.retiring(conversation_id)
-        await self.forget(conversation_id)
-        return await self.delete(conversation_id)
-
-    async def _forget_one(self, episode_id: str) -> bool:
-        """Tell any capture in flight at the id, then destroy it (ADR-0286 §8:1)."""
-        self.activation_writer.forgetting(episode_id)
-        return await self._memory.delete(episode_id)
-
     async def delete(self, conversation_id: str) -> bool:
         """Delete a conversation: stamp, drop its parked reads, drop the record (§8).
 

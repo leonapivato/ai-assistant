@@ -5545,7 +5545,8 @@ async def test_forget_conversation_shows_the_count_and_span_before_destroying(
     assert "Turns recorded:" in rendered
     assert "2" in rendered
     assert "Forgotten." in rendered
-    assert await conversations.get(existing) is None
+    # ADR-0293 §2:4, §11:4: forgetting is memory-only, so the conversation stays.
+    assert await conversations.get(existing) is not None
 
 
 async def test_forget_conversation_leaves_it_alone_when_the_answer_is_no(

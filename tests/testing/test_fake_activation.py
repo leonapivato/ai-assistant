@@ -178,7 +178,7 @@ async def test_a_colliding_activation_id_moves_no_episode_to_the_second_conversa
     second_digest = await engine.conversation(second)
     assert second_digest is not None
     assert second_digest.recorded_turns == 0
-    assert await engine.forget_conversation(second) is True
+    assert await engine.forget_conversation(second) is False, "its place holds nothing"
     assert await engine.episode_memory.get(address) is not None
     first_digest = await engine.conversation(first)
     assert first_digest is not None
@@ -216,7 +216,7 @@ async def test_a_conversation_colliding_with_a_standalone_episode_cannot_claim_i
     digest = await engine.conversation(conversation)
     assert digest is not None
     assert digest.recorded_turns == 0
-    assert await engine.forget_conversation(conversation) is True
+    assert await engine.forget_conversation(conversation) is False, "its place holds nothing"
     assert await engine.episode_memory.get(address) is not None
 
 

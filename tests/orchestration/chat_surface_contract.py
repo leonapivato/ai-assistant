@@ -304,15 +304,16 @@ class ChatSurfaceContract:
         with pytest.raises(UnknownConversationError):
             await engine.write_message(conversation, message=said(_PHONE, "m-2", "again"))
         assert await memory.get(episode.id) is not None, "deleting forgets nothing"
-        assert await engine.forget_conversation(conversation) is False, "already deleted"
+        assert await engine.forget_conversation(conversation) is True
         assert await memory.get(episode.id) is None, "forgetting reaches the place still"
 
-    async def test_forget_conversation_deletes_it_and_forgets_its_place(
+    async def test_forgetting_a_conversation_leaves_it_and_its_transcript(
         self, chat_surface: ChatSurfaceSubject
     ) -> None:
-        """The route §Decision:2 keeps: deleted, and every episode on its place forgotten.
+        """§2:4, §5:6, §11:4: memory-only; the conversation and transcript stand.
 
-        An open episode included (§2:6), and no other place reached (§2:8).
+        Every episode on the place goes, an open one included (§2:6), and no other
+        place is reached (§2:8).
         """
         engine, memory = chat_surface.engine, chat_surface.memory
         conversation = await _started(engine, _PHONE)
@@ -326,8 +327,10 @@ class ChatSurfaceContract:
         assert await memory.get(ended.id) is None
         assert await memory.get(running.id) is None, "an open episode is forgotten too"
         assert await memory.get(elsewhere.id) is not None, "another place is not reached"
-        assert await engine.conversation(conversation) is None
-        assert await engine.transcript(conversation) is None
+        assert await engine.conversation(conversation) is not None
+        page = await engine.transcript(conversation)
+        assert page is not None
+        assert len(page.entries) == 1
         assert await engine.forget_conversation(conversation) is False
 
     # --- the current state (§8) ---------------------------------------------

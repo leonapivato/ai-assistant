@@ -865,7 +865,8 @@ async def test_a_destruction_that_lands_after_its_session_ended_opens_nothing(
         # leaves the panel just as closed, so without this the answered arm would be
         # claiming a success path it never drove (adversarial review, round 7).
         if not reaching:
-            await expect(drive.page.locator("#forget-outcome")).to_contain_text("is gone")
+            # Either account names the forgetting (memory-only, ADR-0293 §11:4).
+            await expect(drive.page.locator("#forget-outcome")).to_contain_text("forgotten")
 
         # The panel the act belonged to is closed and stays closed. Its rows are the ones
         # the listing rendered *before* the session ended -- the late continuation's own

@@ -52,12 +52,12 @@ async def test_deletion_fences_new_capture_and_keeps_the_episodes() -> None:
     assert await engine.conversation(first.channel.instance_id) is None
     assert await engine.recent_conversations() == ()
     assert await engine.episode_chunk(first.capture.episode_id) is not None
-    assert await engine.forget_conversation(first.channel.instance_id) is False, "deleted"
-    assert (await engine.episodes()).items == (), "its place is forgotten all the same"
+    assert await engine.forget_conversation(first.channel.instance_id) is True
+    assert (await engine.episodes()).items == (), "forgetting reaches the deleted place"
 
 
 async def test_a_failed_forget_can_be_retried(monkeypatch: pytest.MonkeyPatch) -> None:
-    """The conversation is deleted first, and a repeat finishes the forgetting."""
+    """ADR-0293 §2:4: forgetting leaves the conversation, and a repeat finishes it."""
     engine = FakeAssistantEngine()
     first = await _receive(engine)
     assert first.channel is not None
@@ -70,14 +70,13 @@ async def test_a_failed_forget_can_be_retried(monkeypatch: pytest.MonkeyPatch) -
     monkeypatch.setattr(engine.episode_memory, "delete", fail)
     with pytest.raises(MemoryStoreError):
         await engine.forget_conversation(first.channel.instance_id)
-    assert await engine.conversation(first.channel.instance_id) is None
+    assert await engine.conversation(first.channel.instance_id) is not None
     assert await engine.episode_chunk(first.capture.episode_id) is not None
-    with pytest.raises(UnknownConversationError):
-        await _receive(engine, first.channel)
 
     monkeypatch.setattr(engine.episode_memory, "delete", delete)
-    assert await engine.forget_conversation(first.channel.instance_id) is False
+    assert await engine.forget_conversation(first.channel.instance_id) is True
     assert (await engine.episodes()).items == ()
+    assert await engine.conversation(first.channel.instance_id) is not None
 
 
 async def test_a_capture_pending_at_deletion_cannot_join_a_new_conversation(

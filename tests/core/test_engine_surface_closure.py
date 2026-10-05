@@ -1451,8 +1451,9 @@ def test_the_promoted_surface_and_the_protocol_version_are_both_pinned() -> None
 
     **76 is ADR-0293 §11, under the first limb.** ``AssistantEngine`` gains the nine
     members of the conversation's chat space, so the method set rises to **77**: a
-    client at 76 may call an operation a hub at 75 does not answer, and
-    ``conversation``'s digest gains two members a client at 75 refuses as unknown.
+    client at 76 may call an operation a hub at 75 does not answer. ``conversation``'s
+    digest gains two members a client at 75 refuses as unknown, and
+    ``forget_conversation`` stops deleting the conversation.
 
     **ADR-0124 §9 decides no mechanical check and creates none**, saying one is
     owed and leaving its shape open. This is not that check — it is a *pin*, and

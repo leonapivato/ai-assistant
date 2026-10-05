@@ -8663,10 +8663,16 @@ async function forgetConversation(id) {
       return;
     }
     const held = digest.conversation;
+    // ADR-0293 §5:7's plain disclosure: what forgetting removes, that the
+    // conversation is still read while the owner talks there, and that only
+    // deleting removes it.
     const asked = window.confirm(
-      `Destroy conversation ${held.id}? It holds ${held.recorded_turns} recorded ` +
+      `Forget conversation ${held.id}? It holds ${held.recorded_turns} recorded ` +
         `turn(s), from ${held.started_at} to ${held.last_turn_at || "no turn yet"}. ` +
-        "The episodes its turns index are destroyed with it."
+        "Forgetting removes them from the assistant's memory, so it no longer " +
+        "recalls them anywhere else. The conversation and its transcript stay: the " +
+        "assistant still reads it while you keep talking there, and only deleting " +
+        "removes it."
     );
     if (!asked) {
       return;
@@ -8674,9 +8680,6 @@ async function forgetConversation(id) {
     const done = await relay(half, "/conversation/forget", { conversation_id: id }, "conversations");
     if (done === null) {
       return;
-    }
-    if (conversationId === id) {
-      changeConversation(null);
     }
     const read = await listConversations();
     // **After its own refresh, and only while that refresh is still the newest**
@@ -8707,21 +8710,21 @@ function sayForgotten(text) {
 
 // What the hub answered, in words.
 //
-// **`destroyed` is read rather than assumed.** `forget_conversation` "returns whether
-// a conversation was destroyed — `False` where the id named nothing live", and this
-// page had been discarding that answer: a race with a terminal or another tab
-// destroyed nothing here and reported it as a destruction. The two are different facts
-// and the honest rendering says which one happened.
+// **`destroyed` is read rather than assumed.** Since ADR-0293 §11:4
+// `forget_conversation` is memory-only and answers whether an episode was forgotten;
+// the conversation and its transcript stay either way (§2:4, §5:6). Nothing to forget
+// and something forgotten are different facts, and the honest rendering says which.
 //
-// **The count is the digest's, read before the destruction**, which is the only moment
-// it was readable — after the forget there is nothing left to count.
+// **The count is the digest's, read before the forget**, which is the only moment it
+// was readable — after the forget there is nothing left to count.
 function statedForget(id, held, destroyed) {
   if (!destroyed) {
-    return `There was no conversation ${id} left to forget, so nothing was destroyed.`;
+    return `Conversation ${id} held nothing in the assistant's memory, so nothing was forgotten.`;
   }
   return (
-    `Conversation ${id} is gone. It held ${held.recorded_turns} recorded turn(s), ` +
-    "and the episodes they index went with it."
+    `The assistant has forgotten conversation ${id}'s ${held.recorded_turns} recorded ` +
+    "turn(s), and no longer recalls them anywhere else. The conversation and its " +
+    "transcript stay; only deleting removes them."
   );
 }
 

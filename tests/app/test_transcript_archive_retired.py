@@ -176,7 +176,7 @@ async def test_forgetting_an_episode_succeeds_with_no_archive_composed(engine: E
 
 
 async def test_deleting_a_conversation_succeeds_with_no_archive_composed(engine: Engine) -> None:
-    """§2, §4, §6: deletion stamps, deletes the channel's episodes, and needs no archive."""
+    """§2, §4, §6: forgetting and deleting need no archive (ADR-0293 §2:3, §2:4)."""
     result = await _say(engine, "hello")
     assert result.channel is not None
     conversation_id = result.channel.instance_id
@@ -189,6 +189,8 @@ async def test_deleting_a_conversation_succeeds_with_no_archive_composed(engine:
     assert await engine.forget_conversation(conversation_id) is True
 
     assert await memory.channel_episode_ids(channel, limit=10) == ()
+    assert await engine.conversation(conversation_id) is not None
+    assert await engine.delete_conversation(conversation_id) is True
     assert await engine.conversation(conversation_id) is None
 
 

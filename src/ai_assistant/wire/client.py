@@ -1104,13 +1104,13 @@ class HubClient:
         return await self._call("conversation", conversation_id=named)  # type: ignore[no-any-return]
 
     async def forget_conversation(self, conversation_id: Identifier) -> bool:
-        """Destroy one conversation and the episodes on its place.
+        """Forget the episodes on a conversation's place, and leave it (ADR-0293 §2:4).
 
         Args:
             conversation_id: Which conversation.
 
         Returns:
-            Whether anything was held to destroy.
+            Whether an episode was forgotten.
         """
         named = identifier(conversation_id, name="conversation_id")
         return await self._call(  # type: ignore[no-any-return]

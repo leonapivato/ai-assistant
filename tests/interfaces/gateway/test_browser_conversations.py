@@ -20,7 +20,7 @@ from __future__ import annotations
 import asyncio
 import contextlib
 from dataclasses import dataclass
-from datetime import UTC, datetime
+from datetime import UTC, datetime, timedelta
 from typing import TYPE_CHECKING
 from urllib.parse import urlparse
 
@@ -402,17 +402,19 @@ async def test_the_resumed_line_goes_when_the_owner_leaves_the_thread(
         assert await drive.page.inner_text("#resumed") == ""
 
 
-async def test_a_forget_refreshes_the_listing_and_states_that_it_is_gone(
+async def test_a_forget_refreshes_the_listing_and_states_what_was_forgotten(
     gateway_browser: Browser, tmp_path: Path
 ) -> None:
     """#1371's third clause: "no confirmation or list refresh the owner could read".
 
-    Both halves, in the order the page performs them. The row goes — which is the
-    listing having been re-read against an engine that no longer holds it — and the
-    page says so in words, which is the half a shorter list on a phone does not
-    supply.
+    Both halves, in the order the page performs them, as ADR-0293 §11:4 leaves them:
+    forgetting is memory-only, so the listing is re-read and the row stays, and the
+    page says in words what was forgotten and that only deleting removes the
+    conversation (§5:7).
     """
     async with driving(gateway_browser, tmp_path) as drive:
+        drive.engine.hold_conversation("c-1")
+        await drive.engine.converse("hello", conversation_id="c-1", timeout=timedelta(seconds=5))
         _seed(drive, "c-1", turns=3)
         await _open_listing(drive)
         answered = _answering(drive, accept=True)
@@ -420,45 +422,42 @@ async def test_a_forget_refreshes_the_listing_and_states_that_it_is_gone(
         # The ceremony is the show-then-confirm that predates this lane, and it names
         # what the outcome will name -- so the outcome is not merely echoing the id
         # the button carried.
-        assert "Destroy conversation c-1?" in await answered
+        asked = await answered
+        assert "Forget conversation c-1?" in asked
+        assert "only deleting removes it" in asked
         await drive.page.wait_for_selector("#forget-outcome:not([hidden])")
         said = await drive.page.inner_text("#forget-outcome")
         assert said == (
-            "Conversation c-1 is gone. It held 3 recorded turn(s), "
-            "and the episodes they index went with it."
+            "The assistant has forgotten conversation c-1's 3 recorded turn(s), and no "
+            "longer recalls them anywhere else. The conversation and its transcript "
+            "stay; only deleting removes them."
         )
-        assert "No conversations yet." in await drive.page.inner_text("#conversation-list")
-        assert drive.engine.conversations_held == {}
+        await expect(drive.page.locator("#conversation-list .conversation-row")).to_have_count(1)
+        assert set(drive.engine.conversations_held) == {"c-1"}
+        assert await drive.engine.episode_memory.export() == []
 
 
 async def test_a_forget_that_destroyed_nothing_says_that_instead(
     gateway_browser: Browser, tmp_path: Path
 ) -> None:
-    """``forget_conversation`` answers *whether* there was one, and the page reads it.
+    """``forget_conversation`` answers *whether* it forgot anything, and the page reads it.
 
-    The race is real and it is the one ADR-0175 §6 leaves open by design: the
-    conversation is the hub's, so a terminal or another tab can destroy it between
-    this page's digest read and its forget. Until this lane the page discarded the
-    answer and reported a destruction that had not happened.
-
-    The engine is emptied behind the page's back at exactly that moment — after the
-    digest has been read and while the ceremony is on screen — which is not a
-    contrived state but the only one in which the two branches differ.
+    Memory-only since ADR-0293 §11:4, so the answer is ``False`` where the
+    conversation's place holds no episode — a terminal or another tab may have
+    forgotten it already — and the page says that rather than claiming a forgetting
+    that did not happen. The seeded digest reports turns its place no longer holds.
     """
     async with driving(gateway_browser, tmp_path) as drive:
         _seed(drive, "c-1", turns=3)
         await _open_listing(drive)
-
-        def emptied() -> None:
-            drive.engine.conversations_held.clear()
-            drive.engine.activity.clear()
-
-        answered = _answering(drive, accept=True, first=emptied)
+        answered = _answering(drive, accept=True)
         await _first_row(drive).get_by_role("button", name="Forget").click()
         assert await answered
         await drive.page.wait_for_selector("#forget-outcome:not([hidden])")
         said = await drive.page.inner_text("#forget-outcome")
-        assert said == "There was no conversation c-1 left to forget, so nothing was destroyed."
+        assert said == (
+            "Conversation c-1 held nothing in the assistant's memory, so nothing was forgotten."
+        )
 
 
 async def test_declining_the_ceremony_destroys_nothing_and_states_nothing(
@@ -645,7 +644,8 @@ async def test_a_refresh_that_lost_its_race_does_not_write_over_the_newer_listin
         assert await answered
         await held.reached.wait()
         await drive.page.click("#conversations-button")
-        await expect(drive.page.locator("#conversation-list .conversation-row")).to_have_count(1)
+        # Both rows: forgetting leaves the conversation listed (ADR-0293 §11:4).
+        await expect(drive.page.locator("#conversation-list .conversation-row")).to_have_count(2)
         assert await drive.page.is_hidden("#forget-outcome")
         await held.release()
         assert await drive.page.is_hidden("#forget-outcome")
