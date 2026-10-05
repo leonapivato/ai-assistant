@@ -302,14 +302,15 @@ and what the user does next decides both.
 > **Normative.** The adapter of ADR-0293 §10 writes nothing for a pass whose end entry is
 > `ControllerRule.STOPPED` — no reply, even one already composed, and no *couldn't finish*.
 
-> **Normative.** A caller awaiting a stopped pass's turn call receives
-> `ActivationStoppedError`, a new `AssistantError` subclass in `core/errors.py` carrying a
-> message and no structured state, in place of what the pass would otherwise return or
-> raise; a cancellation of the caller's own task still propagates as itself.
+> **Normative.** An `AssistantEngine` call awaiting a stopped pass — a turn call, or a
+> `resume` whose control activation was stopped — raises `ActivationStoppedError`, a new
+> `AssistantError` subclass in `core/errors.py` carrying a message and no structured
+> state, in place of what the pass would otherwise return or raise; a cancellation of the
+> caller's own task still propagates as itself.
 
 Under ADR-0293 §11:2 a conversation's text input no longer arrives on a turn call, so this
-reaches the turn calls that remain — a spoken turn's, an informational event's — and any
-caller still on a legacy route.
+reaches the calls that remain — a spoken turn's, an informational event's, a resume's —
+and any caller still on a legacy route.
 
 ### 5. The engine surface
 
