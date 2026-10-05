@@ -44,9 +44,9 @@ membership of "my devices" and of conversations, which the conversation store ke
 
 **The roster records and answers; it refuses no request.** Which request needs
 which role, and the refusal, are the wire server's and the engine's (ADR-0298 §5,
-§6), and nothing is enforced until the cutover (§9). What is here is the record
-those checks will read — synchronously, from a live view, for the reason the
-enrolments are read that way.
+§6), reading this record through :class:`~ai_assistant.service.roster.HubRoster`,
+which both listeners hold (§9:3). What is here is the record those checks read —
+synchronously, from a live view, for the reason the enrolments are read that way.
 
 **One invariant the roster keeps for itself: a device holds a role only while it is
 admitted**, by a live enrolment or a live registration. Every act that leaves a

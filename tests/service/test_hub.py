@@ -40,7 +40,14 @@ import structlog
 
 from ai_assistant.app import Composition
 from ai_assistant.core.config import Settings
-from ai_assistant.core.errors import ConfigurationError, IncompatibleStateError, TraceStoreError
+from ai_assistant.core.device_context import acting_for
+from ai_assistant.core.errors import (
+    ConfigurationError,
+    DeviceRefusal,
+    DeviceRefusedError,
+    IncompatibleStateError,
+    TraceStoreError,
+)
 from ai_assistant.core.types import EvaluationTrace, TraceKind
 from ai_assistant.orchestration.engine import DrainPhase, PurgeReport
 from ai_assistant.service import hub
@@ -49,7 +56,8 @@ from ai_assistant.service.configuration import SEAM_STARTUP
 from ai_assistant.service.exits import EXIT_DEPLOYMENT, EXIT_OK, EXIT_RESTART
 from ai_assistant.service.lock import LOCK_FILENAME, InstanceLock
 from ai_assistant.testing import FakeTraceSink
-from ai_assistant.wire.address import ADMIN_SOCKET_FILENAME
+from ai_assistant.wire import HubEngineClient
+from ai_assistant.wire.address import ADMIN_SOCKET_FILENAME, socket_path
 from ai_assistant.wire.framing import read_frame, write_frame
 
 if TYPE_CHECKING:
@@ -1733,3 +1741,76 @@ async def test_a_hub_with_no_configured_agent_socket_still_asks_for_the_defaults
 
     assert code == EXIT_DEPLOYMENT
     assert asked == [None]
+
+
+# --- ADR-0298 §9:3: the hub passes its roster to both listeners ----------------------
+
+
+async def test_the_hubs_local_socket_decides_a_relayed_requests_device(
+    settings: Settings, wired: dict[str, list[Any]], engine: FakeEngine
+) -> None:
+    """ADR-0298 §9:3: "the change that switches enforcement on is the one that makes
+    the wire server set a requesting device other than ``hub``" — through the hub's
+    own startup rather than a listener a test built.
+
+    A request a gateway on this machine relays for a browser device is refused for a
+    role the device does not hold, before the engine is called — the stand-in engine
+    here has no ``beliefs`` at all — and the device is registered under ``hub``
+    (§4:2, §4:4), which the control socket then lists. A hub that bound its local
+    socket without the roster would have served the request as its own machine.
+    """
+    control = settings.data_dir / ADMIN_SOCKET_FILENAME
+    serving = asyncio.create_task(hub.serve(settings))
+    try:
+        await _act_once_serving(control, {"act": "list"})
+        client = HubEngineClient(socket_path(settings.data_dir), read_timeout=ADMIN_TIMEOUT)
+        with acting_for("nPHONE22CNTRL"), pytest.raises(DeviceRefusedError) as refused:
+            await client.beliefs()
+        listing = await _act_once_serving(control, {"act": "list"})
+    finally:
+        os.kill(os.getpid(), signal.SIGTERM)
+        code = await serving
+
+    assert code == EXIT_OK
+    assert refused.value.reason is DeviceRefusal.NOT_ALLOWED
+    assert [(one["device"], one["gateway"]) for one in listing["registrations"]] == [
+        ("nPHONE22CNTRL", "hub")
+    ]
+
+
+async def test_the_remote_listener_holds_the_same_roster_as_the_local_socket(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """ADR-0298 §4:1 and §9:3: one roster, read by both doors. A remote listener with a
+    roster of its own would still read the one registry, but the hub hands the local
+    socket the roster it built, and this pins that the remote door is handed the same.
+    """
+    from ai_assistant.service import overlay as overlay_module  # noqa: PLC0415 - one call site
+    from ai_assistant.service.transport import (  # noqa: PLC0415 - one call site
+        ConnectionBudget,
+        DeliverySlots,
+    )
+
+    class _Agent:
+        async def hub_identity(self) -> Any:
+            return overlay_module.HubOverlayIdentity(
+                identity="nHUB", addresses=frozenset({"127.0.0.1"})
+            )
+
+    monkeypatch.setattr(hub, "local_agent", lambda socket_path=None: _Agent())
+    settings = Settings(data_dir=tmp_path).model_copy(update={"hub_remote_address": "127.0.0.1"})
+
+    devices = await hub._build_devices(
+        cast("Engine", FakeEngine()),
+        settings,
+        data_dir=tmp_path,
+        budget=ConnectionBudget(max_connections=8, max_pending_handshakes=4),
+        delivery=DeliverySlots(max_delivery_connections=4),
+    )
+    try:
+        assert devices.listener is not None
+        assert devices.listener._roster is devices.roster
+        assert devices.roster.knows("hub")
+        assert not devices.roster.knows("nHUB")
+    finally:
+        devices.store.close()

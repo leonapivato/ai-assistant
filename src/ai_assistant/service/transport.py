@@ -42,6 +42,7 @@ if TYPE_CHECKING:
 
     from ai_assistant.core.config import Settings
     from ai_assistant.core.protocols import AssistantEngine
+    from ai_assistant.wire.server import DeviceRoster
 
 _log = structlog.get_logger(__name__)
 
@@ -248,12 +249,22 @@ class Listener:
             max_pending_handshakes=settings.hub_max_pending_handshakes,
         )
         self._build = ""
+        self._roster: DeviceRoster | None = None
 
-    async def start(self, *, build: str) -> None:
+    async def start(self, *, build: str, roster: DeviceRoster | None = None) -> None:
         """Unlink any stale socket, bind, and begin accepting (ADR-0083 §3 step 6).
 
         Args:
             build: This build's identifier, published in every connect reply.
+            roster: The hub's device roster (ADR-0298 §10:7), which the hub passes
+                and which switches enforcement on for this socket (§9:3). Here the
+                connecting device is the hub's own machine: a request with no
+                ``acting_for`` holds every role (§3:2), and one a gateway on this
+                machine relays for a browser device acts with that device's roles,
+                registered under ``hub`` (§4:4, §8:2). ``None`` serves every request
+                as the hub's own machine, as before the cutover (§9:2) — kept for
+                a caller that binds this socket alone over a fake engine, never the
+                hub's choice.
 
         Raises:
             OSError: If the socket cannot be bound. Left to propagate: the raw
@@ -275,6 +286,7 @@ class Listener:
             max_connections=self._settings.hub_max_connections,
         )
         self._build = build
+        self._roster = roster
 
     async def stop_accepting(self) -> None:
         """Close the door and remove it, at the start of phase A (ADR-0084 §1)."""
@@ -346,6 +358,7 @@ class Listener:
                     ),
                     on_handshake=settled,
                     delivery=self._delivery,
+                    roster=self._roster,
                 )
         finally:
             if task is not None:

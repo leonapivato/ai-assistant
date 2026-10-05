@@ -11,12 +11,17 @@ from __future__ import annotations
 import asyncio
 import contextlib
 import stat
-from datetime import timedelta
+from datetime import UTC, datetime, timedelta
 from typing import TYPE_CHECKING
 
 import pytest
 
 from ai_assistant.core.config import Settings
+from ai_assistant.core.device_context import acting_for
+from ai_assistant.core.errors import DeviceRefusal, DeviceRefusedError
+from ai_assistant.core.types import DeviceRole
+from ai_assistant.service.enrolment import ENROLMENTS_FILENAME, DeviceRegistry, EnrolmentStore
+from ai_assistant.service.roster import HubRoster
 from ai_assistant.service.transport import Listener
 from ai_assistant.testing import FakeAssistantEngine
 from ai_assistant.wire import HubEngineClient
@@ -251,3 +256,72 @@ async def test_the_listener_lets_go_of_a_connection_nobody_closed(tmp_path: Path
     with contextlib.suppress(Exception):
         await writer.wait_closed()
     del reader
+
+
+# --- ADR-0298 §9:3: the loopback socket with the hub's roster ----------------------
+
+
+@contextlib.asynccontextmanager
+async def _enforcing(tmp_path: Path) -> AsyncIterator[tuple[Listener, DeviceRegistry]]:
+    """One loopback listener started with the hub's roster, as the hub starts it."""
+    store = EnrolmentStore(tmp_path / ENROLMENTS_FILENAME)
+    registry = DeviceRegistry(store, hub_identity=None)
+    listener = Listener(FakeAssistantEngine(), _settings(tmp_path), data_dir=tmp_path)
+    await listener.start(build="test", roster=HubRoster(registry))
+    try:
+        yield listener, registry
+    finally:
+        await listener.stop_accepting()
+        await listener.aclose()
+        store.close()
+
+
+async def test_the_hubs_own_machine_keeps_every_role_once_enforcement_is_on(
+    tmp_path: Path,
+) -> None:
+    """ADR-0298 §3:2 and §9's closing note: "the hub's own machine keeps working
+    throughout". A request on the local socket naming no browser device is served
+    whatever the roster holds — and the roster holds nothing here.
+    """
+    async with _enforcing(tmp_path) as (listener, _registry):
+        client = HubEngineClient(listener.path, read_timeout=_PATIENT)
+        assert await client.beliefs() == ()
+
+
+async def test_a_browser_device_relayed_on_the_local_socket_acts_with_its_own_roles(
+    tmp_path: Path,
+) -> None:
+    """ADR-0298 §9:3 and §9:4: once the listener holds a roster, a request a gateway on the
+    hub's machine relays for a browser device is that device's, which holds no role
+    until the owner gives it one — and its first request registers it under ``hub``
+    (§4:2, §4:4) even though the request is refused (§6:1).
+
+    The discriminating case for the cutover: a listener passed no roster would serve
+    this request as the hub's own machine, with every role.
+    """
+    async with _enforcing(tmp_path) as (listener, registry):
+        client = HubEngineClient(listener.path, read_timeout=_PATIENT)
+        with acting_for("nPHONE22CNTRL"), pytest.raises(DeviceRefusedError) as refused:
+            await client.beliefs()
+        assert refused.value.reason is DeviceRefusal.NOT_ALLOWED
+        ((registration,), _) = registry.registrations()
+        assert (registration.device_id, registration.gateway) == ("nPHONE22CNTRL", "hub")
+
+        registry.assign("nPHONE22CNTRL", DeviceRole.COMMANDS)
+        with acting_for("nPHONE22CNTRL"):
+            assert await client.beliefs() == ()
+
+
+async def test_a_revoked_browser_device_is_refused_on_the_local_socket(tmp_path: Path) -> None:
+    """ADR-0298 §4:9 and §6:2: a revoked registration is refused with the reason that
+    tells the device it was not accepted, and the gateway's naming registers nothing."""
+    async with _enforcing(tmp_path) as (listener, registry):
+        client = HubEngineClient(listener.path, read_timeout=_PATIENT)
+        with acting_for("nPHONE22CNTRL"), pytest.raises(DeviceRefusedError):
+            await client.beliefs()
+        registry.revoke_device("nPHONE22CNTRL", now=datetime.now(UTC))
+
+        with acting_for("nPHONE22CNTRL"), pytest.raises(DeviceRefusedError) as refused:
+            await client.beliefs()
+
+    assert refused.value.reason is DeviceRefusal.NOT_ACCEPTED
