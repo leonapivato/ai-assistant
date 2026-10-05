@@ -75,15 +75,15 @@ in lanes that each merge on their own, with nothing switched on. A cutover lane 
 switches the controller's rules over and deletes the old path, on a fresh data
 directory, as the M36–M41 cutovers did. The hub is not redeployed until then.
 
-What the phases reuse as they are: the step executor and its claims (ADR-0192, with
-ADR-0297's stop refusal), tool selection and the tool registry, the permission policy
-and its rulings, the fetching inside read servicing, memory, recall, understanding, the
-controller, the story store and the conversation medium.
+What the phases reuse as they are: tool selection and the tool registry, the fetching
+inside read servicing, startup recovery of running steps, memory, recall, understanding,
+the controller, the story store and the conversation medium. What they reuse **reworked**,
+because each is scoped by goals today: the step executor and its claims (ADR-0192, with
+ADR-0297's stop refusal), which claim under an attempt and resolve a goal from the plan;
+and the permission policy, which reads goal authorizations and goal quotes. The survey
+below lists the rest.
 
-What retires at the cutover: goals and attempts and goal association; the turn loop and
-the compose stage; parked confirmations with `answer`, `resume` and the pending
-confirmations list; `withdraw_clarification` and `abandon_goal`; and `converse` and
-`receive` where the retirement lane of ADR-0293 §11 has not already removed them.
+What retires at the cutover is surveyed in full under [What retires](#what-retires).
 
 **One module per phase.** Each phase is its own module in `orchestration/`,
 implementing the controller's stage interface (ADR-0280). Phases never import each
@@ -240,6 +240,71 @@ read was for. It returns evidence: what the content says that bears on the quest
 each item marked with its source. A follow-up question is another digest call on the
 same stored result; nothing is remembered between calls. **Proposed:** ADR-0252's
 evidence record is the starting point for its output.
+
+## What retires
+
+From a read-only survey of `8fe54b36` on 2026-10-05. Each is confirmed when the lane that
+removes it is written.
+
+**Engine surface.** Retires: `converse`, `converse_streaming`, `receive`,
+`receive_streaming`; `resume`, `pending_confirmations`, `cancel_read` (parked
+confirmations and parked reads, ADR-0052, ADR-0244); `goals`, `withdraw_clarification`,
+`abandon_goal`; `standing_authorizations` and `revoke_authorization` (goal
+authorizations, ADR-0254, which approval records replace); `learn`; and `answer` with
+`questions`, `interrupted_questions` and `forget_question`. **`answer` is ADR-0078's
+deferred memory question**, not the confirmation path, so retiring it takes the deferral
+store with it. Reworked: `converse_spoken`, `grantable_decisions` and
+`establish_recipient_grant` (they ride recorded confirmations), `purge_expired` and
+`start`. Unchanged: stories, episodes, beliefs and forgetting, the conversation medium,
+source and recipient grants, destination trust, connections, the trail's reads, spend
+totals and `stop_activation`.
+
+**Orchestration modules.** Retire: `loop`, `composing`, `goals`, `interpretation`,
+`questions`, `parked_reads`, `routing` (with `permissions/routing`), `reconciling`,
+`verification`, `charges`, `quotes`, `stated_bounds`, `validating`, and today's
+`authorizing` and `authorization_surface` (ADR-0254's goal authorizations, whose name the
+new phase module must not reuse); in `planning/`, `associator` and `goals`. Reworked:
+`engine`, `runner`, `executor`, `reads` (its parks and goal references), `writes` and
+`consolidation` (their deferral half), `recipient_grants`, `evidence` and `effects`
+(goal-scoped today), `disclosure` (it sits in front of today's planner), `chat` (its
+adapter writes the compose stage's reply), `conversations` (resume association),
+`activation_state` (parked binding), `speech` (the spoken park sentence), `controller`
+and `understanding`.
+
+**Stores.** Retire: the deferral store; parked reads; goal authorizations, quotes and
+coverage (`permissions/goal_authorizations`, `_coverage`); the routing trail; the
+`PlanStore` goal, attempt, interpretation, intended-action, quote and question members.
+Reworked: `save_plan`, `get_plan`, `claim_effect`, `commit_transition` and `export`
+(each tied to a goal today), and the evidence members; the permission policy; the audit
+trail's goal fields.
+
+**Types.** The goal, attempt, intended-action, quote, goal-authorization, park,
+turn-outcome, routing, deferral-question and verification families in `core/types.py`,
+with their wire codecs and canonical fakes.
+
+**Interfaces.** CLI: `ask`, `resume`, `cancel-read`, `goals`, `withdraw-clarification`,
+`abandon-goal`, `learn`, `questions`, `answer`, `forget-question`, `authorizations`,
+`revoke-authorization`. Gateway: the Ask, What happened, confirmations, questions, goals
+and authorizations panels and their routes.
+
+**Decisions the survey raises** (taken in the walk-through):
+
+1. Where a deferred memory question goes once `answer` retires: the memory policy's
+   ask-the-user ruling has no destination. Proposed: it becomes an ordinary message, and
+   the user's reply is read like any answer.
+2. `ControllerStage` and `ControllerRule` are "added to and never renamed", and eight
+   stages with their rules go dead: kept as values nothing produces, or retired by an
+   explicit exception.
+3. What follows understanding on the event path, where `informational_events`' summary
+   stage runs today: proposed, events go to planning like any activation, which may
+   decide nothing is due.
+4. The notification route, the upcoming-events producer and the delivery outbox: they
+   retire only once their replacements exist (ADR-0292 §13), and the upcoming push needs
+   the timers milestone, so they **survive this cutover**.
+5. The recipient-grant establishing act, which rides recorded confirmations, against
+   approval records.
+6. Quotes, stated bounds and charges: retired now and redone with authority by outcome,
+   or carried until then.
 
 ## What it would supersede
 
