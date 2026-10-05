@@ -1,6 +1,6 @@
 # 295. Stopping an activation is a command that starts nothing new and cuts off nothing already sent
 
-- Status: Proposed
+- Status: Accepted
 - Date: 2026-10-04
 - Scope: [#2578](https://github.com/leonapivato/ai-assistant/issues/2578), the channel redesign: stopping an activation, which ships with the conversation channel (ADR-0293 §11:8).
 - Authorization: the owner accepted proposal #2684 on 2026-10-04, at `483ae003`, and the dispatcher assigned 0295. This ADR is that proposal converted under `docs/proposals/README.md` → "When it is decided".
