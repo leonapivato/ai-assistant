@@ -2767,15 +2767,23 @@ def _stopped_resumption(  # noqa: PLR0913 — one keyword per member a resume ma
     satisfied: str | None = None,
     drive_withheld: DriveWithheld | None = None,
     read_answer: ReadAnswerOutcome | None = None,
+    search_not_serviced: SearchNotServiced | None = None,
     conversation_id: str | None = None,
 ) -> TurnOutcome:
     """The outcome of a stopped resume that raised after its answer was recorded.
 
     ADR-0297 §4: a resume whose control activation was stopped returns its outcome —
     ``stopped``, no reply, never degraded, and every other member as the resume
-    established it — wherever its answer was recorded (ADR-0235 §6:10). What the stop
-    kept it from finishing — the comparison, the composing stage, the capture — is not
-    there, so the exchange is reported unrecorded.
+    established it — wherever its answer was recorded (ADR-0235 §6:10). Every member
+    is a fact the engine already held when the raise came, carried by value and never
+    recomputed; what the stop kept the resume from finishing — the comparison, the
+    composing stage, the capture — is not there, so the exchange is reported
+    unrecorded.
+
+    **What the resolution never handed back is not here either.** A raise inside the
+    resolution itself — between the recorded answer and the runner's disposition —
+    leaves the engine holding no step outcome to return, and propagates exactly as it
+    does for every resume (:func:`_kept_if_stopped` wraps only the work after it).
     """
     state = active_state()
     return TurnOutcome(
@@ -2795,6 +2803,7 @@ def _stopped_resumption(  # noqa: PLR0913 — one keyword per member a resume ma
         satisfied_from_earlier=told_once(() if satisfied is None else (satisfied,)),
         drive_withheld=drive_withheld,
         read_answer=read_answer,
+        search_not_serviced=search_not_serviced,
         stopped=True,
     )
 
@@ -15071,8 +15080,17 @@ class Engine:
         # below the early return every non-`DISPATCHED` answer takes, and never on an
         # answer that denied, expired or lost the race.
         dispatched = park
+        # What a stopped resume returns if the work below raises (ADR-0297 §4): every
+        # fact held when the raise comes. Until the resumed read is admitted, the contact
+        # the dispatch established stands with no record admitted to a turn, so the
+        # statement is never `None` after a contact (ADR-0264 §7).
+        held_turn: TurnResult | None = None
+        held_outbound = outbound_statement(
+            search=answered.contact, egress=None, records=0, composes=False
+        )
 
         async def run_dispatched() -> TurnOutcome:
+            nonlocal held_turn, held_outbound
             await self._engage_after_the_act(dispatched.goal_id, conversation_id=conversation_id)
             goal, plan = dispatched.goal, dispatched.plan
             if goal is None or plan is None:  # pragma: no cover — an OPEN park carries both
@@ -15148,6 +15166,7 @@ class Engine:
                 records=resumed.admitted,
                 composes=True,
             )
+            held_turn, held_outbound = turn, outbound
             composed = await self._resumed_compose(
                 lambda: self._compose(
                     turn,
@@ -15193,9 +15212,12 @@ class Engine:
         return await _kept_if_stopped(
             run_dispatched(),
             lambda: _stopped_resumption(
+                turn=held_turn,
                 conversation_id=conversation_id,
                 recipient_grant=recipient_grant,
                 read_answer=answered.outcome,
+                search_not_serviced=answered.not_serviced,
+                outbound_statement=held_outbound,
             ),
         )
 

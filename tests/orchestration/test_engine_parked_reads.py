@@ -43,10 +43,12 @@ from test_loop_search import (
 
 from ai_assistant.core.errors import (
     AuditError,
+    PlanningError,
     UngrantableActError,
     UnknownContinuationError,
 )
 from ai_assistant.core.types import (
+    ActivationStop,
     ContinuationToken,
     EgressBinding,
     MemoryKind,
@@ -68,6 +70,7 @@ from ai_assistant.core.types import (
     SearchRefusal,
     SemanticMemory,
 )
+from ai_assistant.orchestration.activation_state import active_state
 from ai_assistant.orchestration.reads import SearchServicer, admitted_fourth_group
 from ai_assistant.permissions.policy import ThresholdActionPolicy
 from ai_assistant.testing import (
@@ -2083,3 +2086,42 @@ async def test_a_reprovisioned_account_leaves_an_open_park_answerable() -> None:
     settled = await wired.parks.get(park.id)
     assert settled is not None
     assert settled.disposition is ParkedReadDisposition.APPROVED
+
+
+# --- ADR-0297 §4: a resumed read stopped after its answer was recorded ---------------------
+
+
+async def test_a_stopped_read_resume_that_later_raises_returns_what_it_established() -> None:
+    """The answer was recorded and the read dispatched; a stop, then a raise in the work after.
+
+    The resume returns, stopped, with every fact it held when the raise came: the answer's
+    member, the contact the dispatch established — never ``None`` after one (ADR-0264 §7)
+    — and no reply.
+    """
+    wired = _wired()
+    parked = await wired.engine.converse(_ASKED, timeout=PATIENT)
+    assert parked.read_confirmation is not None
+    answers: list[ActivationStop] = []
+
+    async def stops_then_fails(goal_id: object, *, conversation_id: object) -> None:
+        del goal_id, conversation_id
+        state = active_state()
+        assert state is not None
+        assert state.activation_id is not None
+        answers.append(await wired.engine.stop_activation(state.activation_id))
+        msg = "the goal cannot be read"
+        raise PlanningError(msg)
+
+    wired.engine._engage_after_the_act = stops_then_fails
+
+    outcome = await wired.engine.resume(
+        parked.read_confirmation.token, approved=True, timeout=PATIENT
+    )
+
+    assert answers == [ActivationStop.STOPPED]
+    assert outcome.stopped is True
+    assert outcome.reply is None
+    assert outcome.read_answer is ReadAnswerOutcome.DISPATCHED
+    assert outcome.outbound_statement is not None
+    assert outcome.capture_degraded is True
+    assert len(wired.searcher.searched) == 1
