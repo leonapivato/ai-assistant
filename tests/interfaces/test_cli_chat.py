@@ -677,6 +677,39 @@ async def test_working_and_how_it_ended_are_shown_as_they_change(output: StringI
     assert rendered.index("working") < rendered.index("is done")
 
 
+def test_working_names_the_activation_a_stop_would_name(output: StringIO) -> None:
+    """ADR-0297 §5:7, §5:8: the id is the current state's, shown beside "working…"."""
+    view = cli._ChatView("c-1", device_id="hub", cursor=0)
+
+    view.show_state(ConversationState(working=True, activation_id="a-1"))
+
+    rendered = _flat(output.getvalue())
+    assert "The assistant is working" in rendered
+    assert "To stop it: assistant stop a-1" in rendered
+
+
+def test_working_with_no_id_offers_no_stop(output: StringIO) -> None:
+    """ADR-0297 §5's residual: an activation whose id was not minted cannot be stopped."""
+    cli._ChatView("c-1", device_id="hub", cursor=0).show_state(ConversationState(working=True))
+
+    rendered = _flat(output.getvalue())
+    assert "The assistant is working" in rendered
+    assert "assistant stop" not in rendered
+
+
+def test_a_new_activation_while_working_names_its_own_id(output: StringIO) -> None:
+    """One ended and the next began between two reads: the id shown is the running one's."""
+    view = cli._ChatView("c-1", device_id="hub", cursor=0)
+
+    view.show_state(ConversationState(working=True, activation_id="a-1"))
+    view.show_state(ConversationState(working=True, activation_id="a-1"))
+    view.show_state(ConversationState(working=True, activation_id="a-2"))
+
+    rendered = _flat(output.getvalue())
+    assert rendered.count("assistant stop a-1") == 1
+    assert rendered.count("assistant stop a-2") == 1
+
+
 @pytest.mark.parametrize(
     ("ending", "said"),
     [
