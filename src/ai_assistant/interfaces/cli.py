@@ -378,8 +378,10 @@ from ai_assistant.interfaces.gateway import Disclosure, Note, run_gateway
 from ai_assistant.secret_store import KeyringSecretStore
 from ai_assistant.wire import (
     GRANTABLE_SCOPES,
+    ConnectionClosedError,
     HubClient,
     HubEngineClient,
+    HubUnavailableError,
     LoopbackDestination,
     RemoteDestination,
     RemoteHubEngineClient,
@@ -2815,16 +2817,22 @@ async def _follow_chat(engine: AssistantEngine, view: _ChatView, *, retry_second
     """Follow the conversation on the change stream until the chat ends (ADR-0296 §6:1).
 
     Each stream is opened from the cursor and its chunks applied (:func:`_follow_stream`).
-    **Where it is lost** — the hub not reachable, or the stream ended because the hub
-    is shutting down — it is opened again from the last change applied, which is
-    the device's acknowledgement (§4:4): after ``retry_seconds``, then twice as long
-    each time up to :data:`_CHAT_RETRY_MAX_SECONDS`, saying once that it was lost and
-    once that it is followed again. Lines are still read meanwhile, so ``/quit``
-    leaves at any time.
+    **Where it is lost** — no hub listening, the connection closed under it, or the
+    stream ended because the hub is shutting down — it is opened again from the last
+    change applied, which is the device's acknowledgement (§4:4): after
+    ``retry_seconds``, then twice as long each time up to
+    :data:`_CHAT_RETRY_MAX_SECONDS`, saying once that it was lost and once that it is
+    followed again. Lines are still read meanwhile, so ``/quit`` leaves at any time.
+
+    **Only those two transport failures are waited out**, because only they can pass
+    by waiting. Every other one — a protocol fault such as a version mismatch, a
+    credential refused, an expulsion, a hub that is not the one enrolled at — says
+    something about this device or this client that another attempt cannot change,
+    so it is raised to the chat's boundary (:func:`_drive_chat`) and rendered there.
 
     **A refusal for holding no role ends the chat** (ADR-0298 §7:17): the device drops
     every conversation it holds, and this one is the only one a command line holds.
-    Every other failure is the chat's boundary's to render (:func:`_drive_chat`).
+    Every other failure is the boundary's to render as well.
 
     Returns:
         The chat's exit code, where the conversation ends for this device.
@@ -2841,7 +2849,7 @@ async def _follow_chat(engine: AssistantEngine, view: _ChatView, *, retry_second
     while True:
         try:
             ended = await _follow_stream(engine, view, opened=_opened)
-        except TransportError:
+        except HubUnavailableError, ConnectionClosedError:
             ended = None
         except DeviceRefusedError as exc:
             if exc.reason is not DeviceRefusal.NO_ROLE:
@@ -2867,16 +2875,21 @@ async def _follow_stream(
 
     A change moves the cursor once it is applied, and only one of this
     conversation's is shown; the hub's own machine is sent every conversation's.
-    The current state is shown as it is pushed (ADR-0296 §4:9), and the device's
-    roles and the heartbeat move nothing here.
+    The current state is shown as it is pushed (ADR-0296 §4:9), and the heartbeat
+    moves nothing here.
 
-    **Once the stream has sent its first chunk, the conversation is read again**
-    (:func:`_catch_up`), and ``opened`` is called: the current state is read with a
-    conversation on catch-up rather than pushed (§4:9), so what it was when the
-    stream opened is read here, and whatever it becomes after is pushed. Read after
-    the first chunk rather than before the stream is asked for, so the reading is
-    no older than the stream's own (over the wire, the first chunk is the device's
-    roles, written as the stream opens).
+    **Once the stream has sent its first chunk, and after each roles chunk, the
+    conversation is read again** (:func:`_catch_up`). The current state is read with
+    a conversation on catch-up rather than pushed (§4:9): a stream pushes only what
+    changes after it opened, so what it was when the stream opened is read here.
+    Read after the first chunk rather than before the stream is asked for, so the
+    reading is no older than the stream's own — over the wire, the first chunk is
+    the device's roles, written as the stream opens (ADR-0298 §7:9). **A roles
+    chunk is also how a reopening shows itself**: the wire client reopens a stream
+    that goes quiet past the dead-peer timeout inside the one iterator (§7:13), and
+    the reopened stream starts with the roles again, so reading on every roles
+    chunk catches up after a reopening this loop never sees. ``opened`` is called
+    once, after the first catch-up.
 
     Returns:
         The chat's exit code where the conversation ends for this device, or
@@ -2893,11 +2906,12 @@ async def _follow_stream(
                 return _EXIT_OK
             if chunk.state is not None and chunk.state.conversation_id == view.conversation_id:
                 view.show_state(chunk.state.state)
-            if not caught_up:
-                caught_up = True
+            if not caught_up or chunk.roles is not None:
                 if not await _catch_up(engine, view):
                     return _EXIT_OK
-                opened()
+                if not caught_up:
+                    caught_up = True
+                    opened()
     return None
 
 
