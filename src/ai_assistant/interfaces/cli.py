@@ -2691,11 +2691,19 @@ class _ChatView:
             case DevicesChangedChange(devices=devices):
                 _print("[dim]This conversation's devices changed:[/]")
                 _render_device_set(devices)
+                return self._still_shown(devices)
             case ConversationStartedChange():
                 pass
             case _:  # pragma: no cover — the union is closed
                 assert_never(change)
         return True
+
+    def _still_shown(self, devices: Sequence[ChatDevice]) -> bool:
+        """Whether this device is still shown the conversation, saying so where not (§3:5)."""
+        if any(one.device_id == self.device_id and one.access.reads for one in devices):
+            return True
+        _print("[yellow]This device is no longer shown this conversation.[/]")
+        return False
 
     def _added(self, message: TranscriptMessage) -> None:
         """Show a message added, unless it is one this device is sending (§4:4)."""
@@ -2749,16 +2757,20 @@ async def _open_chat(
     device_id: str,
     confirm: Callable[[], bool],
 ) -> str | int:
-    """The conversation to follow, with this device among its writing ends, or an exit code.
+    """The conversation to follow, with this device an end for both, or an exit code.
 
     A conversation is started only by asking for one (ADR-0293 §2:1, §2:2), on "my
     devices" as they stand — so where this device is not one of them it is offered
     there first, and where an existing conversation does not have it, it is offered
     for that conversation (§3:2, §3:3). Declining leaves everything as it was.
+
+    **Both reading and writing are needed**, because a chat shows the conversation
+    and writes in it: a device that may only write is not shown it, and one that may
+    only read cannot write (§3:5). Either is offered both, by the same statement.
     """
     if conversation_id is None:
         mine = await engine.my_devices()
-        if not _writes_from(mine, device_id) and not await _offer_device(
+        if not _reads_and_writes(mine, device_id) and not await _offer_device(
             engine, None, mine, device_id, confirm=confirm
         ):
             return _EXIT_OK
@@ -2769,7 +2781,7 @@ async def _open_chat(
     if digest is None:
         _render_no_such_conversation(conversation_id)
         return _EXIT_ERROR
-    if not _writes_from(digest.devices, device_id) and not await _offer_device(
+    if not _reads_and_writes(digest.devices, device_id) and not await _offer_device(
         engine, conversation_id, digest.devices, device_id, confirm=confirm
     ):
         return _EXIT_OK
@@ -2784,13 +2796,16 @@ async def _offer_device(
     *,
     confirm: Callable[[], bool],
 ) -> bool:
-    """Say what adding this device means, ask, and add it for reading and writing.
+    """Say what adding this device means, ask, and make it an end for reading and writing.
 
     Returns:
         Whether the device was added.
     """
     where = "your devices" if conversation_id is None else "this conversation's devices"
-    _print(f"\nThis device ([bold]{_safe(device_id)}[/]) is not one of {where} for writing.")
+    _print(
+        f"\nThis device ([bold]{_safe(device_id)}[/]) is not one of {where} for reading "
+        "and writing."
+    )
     _render_device_statement(conversation_id)
     added = _with_devices(
         devices, (ChatDevice(device_id=device_id, access=DeviceAccess.READ_WRITE),)
@@ -2818,6 +2833,7 @@ async def _show_chat(
         _render_no_such_conversation(conversation_id)
         return None
     view = _ChatView(conversation_id, device_id=device_id, cursor=page.as_of)
+    await _resolve_replies(engine, conversation_id, page.entries, into=view.entries)
     view.show_page(page)
     view.show_state(digest.state)
     _print(_CHAT_HELP)
@@ -2834,7 +2850,9 @@ async def _relay_lines(
     """Send each line as it is typed, until input ends, ``/quit``, or the follow ends.
 
     Whichever comes first ends the chat: the next line, or the follower finishing —
-    because the conversation was deleted, or the hub could not be read.
+    because the conversation was deleted, this device is no longer shown it, or the
+    hub could not be read. A send still waiting for its answer does not hold the end
+    off: it is abandoned, and said to be of unknown outcome.
     """
     while True:
         reading = asyncio.ensure_future(read_line())
@@ -2845,7 +2863,17 @@ async def _relay_lines(
         line = reading.result()
         if line is None:
             return _EXIT_OK
-        if not await _chat_line(engine, view, line):
+        handling = asyncio.ensure_future(_chat_line(engine, view, line))
+        await asyncio.wait({handling, follower}, return_when=asyncio.FIRST_COMPLETED)
+        if not handling.done():
+            handling.cancel()
+            with contextlib.suppress(asyncio.CancelledError):
+                await handling
+            # The send was cut off with no answer, so whether it was recorded is not
+            # known (ADR-0293 §4:4): said so, rather than reported either way.
+            _print("[yellow]Your last message may or may not have been received.[/]")
+            return follower.result()
+        if not handling.result():
             return _EXIT_OK
 
 
@@ -2974,8 +3002,13 @@ async def _poll_chat(engine: AssistantEngine, view: _ChatView) -> bool:
                 return False
             _print("[dim]The chat started afresh; here is the conversation as it stands.[/]")
             view.entries.clear()
+            await _resolve_replies(
+                engine, view.conversation_id, snapshot.entries, into=view.entries
+            )
             view.show_page(snapshot)
             break
+        added = [one.message for one in page.changes if isinstance(one, MessageAddedChange)]
+        await _resolve_replies(engine, view.conversation_id, added, into=view.entries)
         for change in page.changes:
             if not view.apply(change):
                 return False
@@ -3029,6 +3062,7 @@ async def _drive_show_conversation(
     else:
         _print("  [dim]Shown on no device.[/]")
     view = _ChatView(digest.id, device_id="", cursor=page.as_of)
+    await _resolve_replies(engine, digest.id, page.entries, into=view.entries)
     view.show_state(digest.state)
     _print("")
     view.show_page(page)
@@ -3173,9 +3207,42 @@ def _with_devices(
     return tuple(sorted(merged, key=lambda one: one.device_id))
 
 
-def _writes_from(devices: Sequence[ChatDevice], device_id: str) -> bool:
-    """Whether ``device_id`` is among ``devices`` as an end for writing (ADR-0293 §3:5)."""
-    return any(one.device_id == device_id and one.access.writes for one in devices)
+async def _resolve_replies(
+    engine: AssistantEngine,
+    conversation_id: str,
+    entries: Sequence[TranscriptMessage | DeletedMessage],
+    *,
+    into: dict[int, TranscriptMessage | DeletedMessage],
+) -> None:
+    """Read each message ``entries`` reply to that is neither among them nor known.
+
+    A reply's reference names a deleted message, shown as such (ADR-0293 §5:8), and
+    that holds where the deleted message is older than the page being shown — so its
+    entry is read, one per distinct message, and kept beside the ones shown.
+    """
+    present = {one.position for one in entries} | set(into)
+    wanted = sorted(
+        {
+            one.replies_to
+            for one in entries
+            if isinstance(one, TranscriptMessage)
+            and one.conversation_id == conversation_id
+            and one.replies_to is not None
+            and one.replies_to not in present
+        }
+    )
+    for target in wanted:
+        # A reply names an earlier message, so `target + 1` is a position too.
+        page = await engine.transcript(conversation_id, before=target + 1, limit=1)
+        if page is not None and page.entries and page.entries[-1].position == target:
+            into[target] = page.entries[-1]
+
+
+def _reads_and_writes(devices: Sequence[ChatDevice], device_id: str) -> bool:
+    """Whether ``device_id`` is among ``devices`` as an end for both (ADR-0293 §3:5)."""
+    return any(
+        one.device_id == device_id and one.access is DeviceAccess.READ_WRITE for one in devices
+    )
 
 
 def _render_chat_entry(
