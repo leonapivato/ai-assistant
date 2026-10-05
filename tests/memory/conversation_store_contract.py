@@ -43,6 +43,7 @@ from ai_assistant.core.types import (
     ConversationStartedChange,
     DeletedMessage,
     DeviceAccess,
+    DeviceConversation,
     DevicesChangedChange,
     MessageAddedChange,
     MessageAuthor,
@@ -101,6 +102,9 @@ _RIGHT_EPISODE = "activation:right"
 _PHONE = ChatDevice(device_id="phone", access=DeviceAccess.READ_WRITE)
 _WATCH = ChatDevice(device_id="watch", access=DeviceAccess.READ)
 _LAPTOP = ChatDevice(device_id="laptop", access=DeviceAccess.READ_WRITE)
+#: A device that is an end for writing alone: it writes and is not shown the
+#: conversation (ADR-0293 §3:5, ADR-0296 §4:5).
+_KEYBOARD = ChatDevice(device_id="keyboard", access=DeviceAccess.WRITE)
 
 
 def _said(
@@ -127,6 +131,23 @@ async def _chat(store: ConversationStore) -> str:
     """Put the phone and the watch in "my devices" and start a conversation on them."""
     await store.set_my_devices([_PHONE, _WATCH])
     return (await store.start()).id
+
+
+async def _seen_by(store: ConversationStore, device: str, *, after: int = 0) -> list[Any]:
+    """Every change after ``after`` that ``device`` may see, walking small pages."""
+    seen: list[Any] = []
+    cursor = after
+    while True:
+        page = await store.device_changes(device, after=cursor, limit=2)
+        seen.extend(page.changes)
+        if not page.changes:
+            return seen
+        cursor = page.next_after
+
+
+def _kinds(changes: list[Any]) -> list[str]:
+    """Each change's ``kind``, in order."""
+    return [one.kind for one in changes]
 
 
 async def _all_changes(store: ConversationStore, *, after: int = 0) -> list[Any]:
@@ -858,6 +879,67 @@ class _TakenInOp(_ChatReadOp):
         return store.taken_in(self.right, positions=[1])
 
 
+class _DeviceChangesOp(_ChatReadOp):
+    """``device_changes`` — ADR-0296 §4:5's read, its own lock site."""
+
+    name = "device_changes"
+
+    def first(self, store: ConversationStore) -> Coroutine[Any, Any, object]:
+        """Read the phone's changes — the call that is cancelled."""
+        return store.device_changes("phone", after=0)
+
+    def second(self, store: ConversationStore) -> Coroutine[Any, Any, object]:
+        """Read them again concurrently."""
+        return store.device_changes("phone", after=0, limit=1)
+
+
+class _DeviceConversationsOp(_ChatReadOp):
+    """``device_conversations`` — a device's own listing, its own lock site."""
+
+    name = "device_conversations"
+
+    def first(self, store: ConversationStore) -> Coroutine[Any, Any, object]:
+        """List the phone's conversations — the call that is cancelled."""
+        return store.device_conversations("phone")
+
+    def second(self, store: ConversationStore) -> Coroutine[Any, Any, object]:
+        """List a narrower page concurrently."""
+        return store.device_conversations("phone", limit=1)
+
+
+class _RemoveDeviceOp(_PairedOp):
+    """``remove_device`` — ADR-0296 §3:6's revocation, its own lock site."""
+
+    name = "remove_device"
+
+    async def prepare(self, store: ConversationStore) -> None:
+        """Put the phone and the watch in "my devices" and start both conversations on them."""
+        await store.set_my_devices([_PHONE, _WATCH])
+        await super().prepare(store)
+
+    def first(self, store: ConversationStore) -> Coroutine[Any, Any, object]:
+        """Remove the phone — the call that is cancelled."""
+        return store.remove_device("phone")
+
+    def second(self, store: ConversationStore) -> Coroutine[Any, Any, object]:
+        """Remove the watch concurrently."""
+        return store.remove_device("watch")
+
+    async def verify(self, store: ConversationStore) -> None:
+        """The concurrent removal landed whole; the cancelled one all-or-nothing."""
+        mine = {one.device_id for one in await store.my_devices()}
+        left = await store.conversation_devices(self.left)
+        right = await store.conversation_devices(self.right)
+        assert left is not None
+        assert right is not None
+        assert "watch" not in mine | {one.device_id for one in (*left, *right)}
+        phone_held = [
+            "phone" in mine,
+            *("phone" in {d.device_id for d in s} for s in (left, right)),
+        ]
+        assert all(phone_held) or not any(phone_held)
+
+
 #: Every locked ``ConversationStore`` operation ADR-0060's case is run against:
 #: each is a distinct ``async with self._lock`` site. The mutations came first
 #: (#370's granularity, discharged here by #487); the five reads are the same
@@ -887,6 +969,9 @@ _CANCELLATION_OPS: tuple[Callable[[], _CancellationOp], ...] = (
     _UntakenMessagesOp,
     _ConversationsAwaitingOp,
     _TakenInOp,
+    _DeviceChangesOp,
+    _DeviceConversationsOp,
+    _RemoveDeviceOp,
 )
 
 
@@ -2646,6 +2731,288 @@ class ConversationStoreContract:
                 await store.untaken_messages(conversation, limit=bad_limit)
             with pytest.raises(ValueError, match="limit"):
                 await store.conversations_awaiting(limit=bad_limit)
+
+    # --- the chat space: one device's view (ADR-0296 §3, §4) ----------------------
+
+    async def test_a_device_sees_the_changes_of_the_conversations_it_reads(
+        self, store: ConversationStore
+    ) -> None:
+        """§4:5: a reading end sees its conversation; a device that is no end does not."""
+        await store.set_my_devices([_PHONE, _WATCH])
+        shown = (await store.start()).id
+        await store.set_my_devices([_LAPTOP])
+        elsewhere = (await store.start()).id
+        await store.append_message(shown, _said("hi", message_id="m-1"))
+        await store.append_message(elsewhere, _said("not here", message_id="m-1", device="laptop"))
+
+        for device in ("phone", "watch"):
+            seen = await _seen_by(store, device)
+            assert {one.conversation_id for one in seen if one.conversation_id} == {shown}
+            assert "message_added" in _kinds(seen)
+        assert {one.conversation_id for one in await _seen_by(store, "laptop")} == {
+            None,
+            elsewhere,
+        }
+        assert await _seen_by(store, "stranger") == []
+
+    async def test_a_device_sees_the_change_that_removed_it_and_nothing_after(
+        self, store: ConversationStore
+    ) -> None:
+        """ADR-0296 §4:8: the removal reaches the removed device; later changes do not."""
+        conversation = await _chat(store)
+        await store.append_message(conversation, _said("deleted later", message_id="m-1"))
+        await store.append_message(conversation, _said("kept", message_id="m-2"))
+        await store.set_conversation_devices(conversation, [_PHONE])
+        await store.append_message(conversation, _said("after", message_id="m-3"))
+        await store.delete_message(conversation, 1)
+
+        seen = await _seen_by(store, "watch")
+
+        # The deletion took the first message's addition out of the stream (§5:10),
+        # and it came after the watch was removed, so the watch sees neither.
+        assert _kinds(seen) == [
+            "devices_changed",
+            "conversation_started",
+            "message_added",
+            "devices_changed",
+        ]
+        assert seen[2].message.position == 2
+        assert seen[-1] == DevicesChangedChange(
+            seq=seen[-1].seq, conversation_id=conversation, devices=(_PHONE,)
+        )
+        assert _kinds(await _seen_by(store, "phone"))[-4:] == [
+            "message_added",
+            "devices_changed",
+            "message_added",
+            "message_deleted",
+        ]
+
+    async def test_a_device_added_late_sees_from_the_change_that_added_it(
+        self, store: ConversationStore
+    ) -> None:
+        """ADR-0296 §4:7: nothing from before it joined; the snapshot covers that."""
+        conversation = await _chat(store)
+        await store.append_message(conversation, _said("before", message_id="m-1"))
+        await store.set_conversation_devices(conversation, [_PHONE, _WATCH, _LAPTOP])
+        await store.append_message(conversation, _said("after", message_id="m-2"))
+
+        seen = await _seen_by(store, "laptop")
+
+        assert _kinds(seen) == ["devices_changed", "message_added"]
+        assert seen[0].devices == (_LAPTOP, _PHONE, _WATCH)
+        assert seen[1].message.position == 2
+
+    async def test_whether_a_change_reaches_a_device_is_decided_as_of_that_change(
+        self, store: ConversationStore
+    ) -> None:
+        """A later change of membership does not reach back over an earlier change."""
+        conversation = await _chat(store)
+        await store.set_conversation_devices(conversation, [_PHONE])
+        await store.append_message(conversation, _said("while away", message_id="m-1"))
+        await store.set_conversation_devices(conversation, [_PHONE, _WATCH])
+        await store.append_message(conversation, _said("back", message_id="m-2"))
+
+        seen = await _seen_by(store, "watch")
+
+        added = [one.message.position for one in seen if isinstance(one, MessageAddedChange)]
+        assert added == [2]
+        assert _kinds(seen).count("devices_changed") == 3  # my devices, left, rejoined
+
+    async def test_a_writing_end_alone_is_shown_its_membership_and_nothing_said(
+        self, store: ConversationStore
+    ) -> None:
+        """§3:5: a device that only writes is not shown the conversation's messages."""
+        await store.set_my_devices([_PHONE, _KEYBOARD])
+        conversation = (await store.start()).id
+        sent = await store.append_message(
+            conversation, _said("typed", message_id="m-1", device="keyboard")
+        )
+        await store.append_message(conversation, _answered("read it"))
+
+        seen = await _seen_by(store, "keyboard")
+
+        assert sent.outcome is SendOutcome.RECORDED
+        assert _kinds(seen) == ["devices_changed", "conversation_started"]
+        assert await store.device_conversations("keyboard") == []
+
+    async def test_a_change_to_my_devices_reaches_the_devices_in_either_set(
+        self, store: ConversationStore
+    ) -> None:
+        """A device sees "my devices" change while it is in the set or as it leaves it."""
+        await store.set_my_devices([_PHONE])
+        await store.set_my_devices([_PHONE, _WATCH])
+        await store.set_my_devices([_PHONE])
+        await store.set_my_devices([_PHONE, _LAPTOP])
+
+        assert [one.devices for one in await _seen_by(store, "watch")] == [
+            (_PHONE, _WATCH),
+            (_PHONE,),
+        ]
+        assert len(await _seen_by(store, "phone")) == 4
+        assert len(await _seen_by(store, "laptop")) == 1
+
+    async def test_a_deletion_reaches_the_devices_that_read_the_conversation(
+        self, factory: ConversationStoreFactory
+    ) -> None:
+        """§2:3, §4:8: deleted or reclaimed, a conversation's readers learn it went."""
+        clock = MovableClock()
+        store = _build(factory, now=clock, new_id=ScriptedIds(["stamped", "reclaimed"]))
+        await store.set_my_devices([_PHONE, _WATCH, _KEYBOARD])
+        stamped = (await store.start()).id
+        reclaimed = (await store.start()).id
+        await store.set_conversation_devices(stamped, [_PHONE])
+        await store.set_my_devices([_LAPTOP])
+
+        assert await store.stamp_deleted(stamped) is True
+        clock.advance(_RETENTION)
+        assert await store.drop_if_eligible(reclaimed) is True
+
+        def deleted(seen: list[Any]) -> set[str]:
+            return {one.conversation_id for one in seen if one.kind == "conversation_deleted"}
+
+        assert deleted(await _seen_by(store, "phone")) == {stamped, reclaimed}
+        assert deleted(await _seen_by(store, "watch")) == {reclaimed}
+        assert deleted(await _seen_by(store, "keyboard")) == set()
+        assert deleted(await _seen_by(store, "laptop")) == set()
+
+    async def test_a_deleted_messages_addition_reaches_no_device(
+        self, store: ConversationStore
+    ) -> None:
+        """§5:12: a reader sees the marker, never the text that was deleted."""
+        conversation = await _chat(store)
+        await store.append_message(conversation, _said("oops", message_id="m-1"))
+        await store.delete_message(conversation, 1)
+
+        seen = await _seen_by(store, "watch")
+
+        assert _kinds(seen)[-1:] == ["message_deleted"]
+        assert "message_added" not in _kinds(seen)
+
+    async def test_a_devices_cursor_moves_over_what_it_does_not_see(
+        self, store: ConversationStore
+    ) -> None:
+        """ADR-0296 §4:6: a device sees gaps, and a quiet device keeps up."""
+        conversation = await _chat(store)
+        everything = await store.changes(after=0)
+        for index in range(3):
+            await store.append_message(conversation, _said(str(index), message_id=f"m-{index}"))
+        head = (await store.changes(after=0)).next_after
+
+        quiet = await store.device_changes("laptop", after=0)
+        first = await store.device_changes("watch", after=everything.next_after, limit=2)
+        rest = await store.device_changes("watch", after=first.next_after, limit=2)
+
+        assert quiet.changes == ()
+        assert quiet.next_after == head
+        assert len(first.changes) == 2
+        assert first.next_after == first.changes[-1].seq
+        assert len(rest.changes) == 1
+        assert rest.next_after == head
+        assert (await store.device_changes("watch", after=4, limit=0)).next_after == 4
+        assert (await store.device_changes("watch", after=head + 9)).next_after == head
+
+    async def test_device_scoped_reads_refuse_a_malformed_call(
+        self, store: ConversationStore
+    ) -> None:
+        """A device is a non-blank ``str``; paging carries ADR-0073 §2's posture."""
+        for bad_device in ("", "  ", 7, None):
+            with pytest.raises(ValueError, match="device_id"):
+                await store.device_changes(bad_device, after=0)  # type: ignore[arg-type]
+            with pytest.raises(ValueError, match="device_id"):
+                await store.device_conversations(bad_device)  # type: ignore[arg-type]
+            with pytest.raises(ValueError, match="device_id"):
+                await store.remove_device(bad_device)  # type: ignore[arg-type]
+        for bad in (-1, 1.5, True, 2**63):
+            with pytest.raises(ValueError, match="after"):
+                await store.device_changes("phone", after=bad)  # type: ignore[arg-type]
+            with pytest.raises(ValueError, match="limit"):
+                await store.device_changes("phone", after=0, limit=bad)  # type: ignore[arg-type]
+            with pytest.raises(ValueError, match="limit"):
+                await store.device_conversations("phone", limit=bad)  # type: ignore[arg-type]
+            with pytest.raises(ValueError, match="offset"):
+                await store.device_conversations("phone", offset=bad)  # type: ignore[arg-type]
+
+    async def test_a_device_lists_the_conversations_it_reads_as_recent_orders_them(
+        self, factory: ConversationStoreFactory
+    ) -> None:
+        """ADR-0296 §4:5, §4:7: its reading conversations, with its access, newest first."""
+        clock = MovableClock()
+        ids = ScriptedIds(["c-old", "c-tie-b", "c-tie-a", "c-gone", "c-off"])
+        store = _build(factory, now=clock, new_id=ids)
+        await store.set_my_devices([_PHONE, _WATCH])
+        old = (await store.start()).id
+        clock.advance(_HOUR)
+        tie_b = (await store.start()).id
+        tie_a = (await store.start()).id
+        gone = (await store.start()).id
+        off = (await store.start()).id
+        await store.set_conversation_devices(off, [_PHONE])
+        await store.stamp_deleted(gone)
+        assert off < tie_a
+
+        watch = await store.device_conversations("watch")
+        phone = await store.device_conversations("phone", limit=2, offset=1)
+
+        assert [one.conversation.id for one in watch] == [tie_a, tie_b, old]
+        assert {one.access for one in watch} == {DeviceAccess.READ}
+        for one in watch:
+            assert one.conversation == await store.get(one.conversation.id)
+        assert [one.conversation.id for one in phone] == [tie_a, tie_b]
+        assert {one.access for one in phone} == {DeviceAccess.READ_WRITE}
+        assert isinstance(phone[0], DeviceConversation)
+        assert await store.device_conversations("watch", limit=0) == []
+        assert await store.device_conversations("watch", offset=3) == []
+        assert await store.device_conversations("stranger") == []
+
+    async def test_removing_a_device_takes_it_out_of_every_set_and_says_so(
+        self, factory: ConversationStoreFactory
+    ) -> None:
+        """ADR-0296 §3:6: out of "my devices" and every conversation, each a change."""
+        store = _build(factory, new_id=ScriptedIds(["c-1", "c-2", "c-3", "c-4"]))
+        await store.set_my_devices([_PHONE, _WATCH])
+        first = (await store.start()).id
+        second = (await store.start()).id
+        without = (await store.start()).id
+        stamped = (await store.start()).id
+        await store.set_conversation_devices(without, [_WATCH])
+        await store.stamp_deleted(stamped)
+        cursor = (await store.changes(after=0)).next_after
+
+        assert await store.remove_device("phone") is True
+        assert await store.remove_device("phone") is False
+
+        assert await store.my_devices() == (_WATCH,)
+        for conversation in (first, second, without):
+            assert await store.conversation_devices(conversation) == (_WATCH,)
+        recorded = (await store.changes(after=cursor)).changes
+        assert recorded == (
+            DevicesChangedChange(seq=recorded[0].seq, devices=(_WATCH,)),
+            DevicesChangedChange(seq=recorded[1].seq, conversation_id=first, devices=(_WATCH,)),
+            DevicesChangedChange(seq=recorded[2].seq, conversation_id=second, devices=(_WATCH,)),
+        )
+        assert await _seen_by(store, "phone", after=cursor) == list(recorded)
+        assert await _seen_by(store, "watch", after=cursor) == list(recorded)
+        refused = await store.append_message(first, _said("still here?", message_id="m-1"))
+        assert refused.outcome is SendOutcome.NOT_AN_END
+        assert await store.device_conversations("phone") == []
+        assert await store.conversation_devices((await store.start()).id) == (_WATCH,)
+        assert await store.remove_device("stranger") is False
+
+    async def test_removing_a_device_is_one_step_against_starting_a_conversation(
+        self, store: ConversationStore
+    ) -> None:
+        """No conversation started alongside a removal keeps the removed device."""
+        await store.set_my_devices([_PHONE, _WATCH])
+        await store.start()
+
+        results = await asyncio.gather(
+            store.start(), store.remove_device("phone"), store.start(), store.start()
+        )
+
+        assert results[1] is True
+        assert await store.my_devices() == (_WATCH,)
+        for conversation in await store.recent():
+            assert await store.conversation_devices(conversation.id) == (_WATCH,)
 
     # --- the chat space: export and serialisation (ADR-0293 §5:3) -----------------
 
