@@ -1,6 +1,6 @@
 # 286. An episode is open while its activation runs, and frozen when it ends
 
-- Status: Partially superseded by ADR-0287 (§2:2's, §3:5's, §4:4's and §5:3's archive members; §8:1's discard)
+- Status: Partially superseded by ADR-0287 (§2:2's, §3:5's, §4:4's and §5:3's archive members; §8:1's discard) and ADR-0293 (§4:4's and §7:3's deletion of the episode where `record_turn` returns `None`)
 - Date: 2026-10-03
 - Scope: [M36](https://github.com/leonapivato/ai-assistant/milestone/2), reopened 2026-09-30 for [#2613](https://github.com/leonapivato/ai-assistant/issues/2613); step 3a of the plan recorded there on 2026-10-03, the open episode, behind the cutover that steps 2 and 3 share.
 - Dependency: ADR-0284 and ADR-0285, implemented at `6b41b305`.
@@ -18,6 +18,14 @@
   §8:2. These replacements take effect on ratification of ADR-0287. This reciprocal
   header record accompanies the numbered draft under ADR-0070 and ADR-0082; prior
   supersessions and the ratified body below are preserved.
+- Partially superseded: 2026-10-04 by ADR-0293 — one scope. §4:4's and §7:3's deletion
+  of the episode where `record_turn` returns `None`: a finalization, and a restart's
+  close, keep the episode when its conversation was deleted, because deleting a
+  conversation forgets nothing (ADR-0293 §2). Forgetting a conversation forgets an
+  episode still open on its place as §8 forgets an open episode, which §8 keeps
+  race-free. Every other clause stands. This replacement takes effect on ratification of
+  ADR-0293. This reciprocal header record accompanies the numbered draft under ADR-0070
+  and ADR-0082; prior supersessions and the ratified body below are preserved.
 - **Partially supersedes** [ADR-0114](0114-the-store-contract-carries-the-walk.md) — **one scope, read across two clauses.** **§1:2's *in the store's own insertion order* and §1:7's *nothing left to examine*, at an open episode alone**: a chunk examines no record at or past the lowest-keyed open episode, and a chunk that carries no position because that episode is next means nothing is left to examine for now (§6 below). Every other clause stands, §1:3's never-reissued key included.
 - **Partially supersedes** [ADR-0204](0204-a-record-carries-whether-the-supply-it-was-produced-over-held-withheld-content.md) — **one scope, read across three clauses.** **§2:5, §2:6 and §5:5, for an open episode alone**: until it freezes, an episode carries reach `OWNER` and setter `DERIVED` whatever the evaluation will find, and the write that freezes it writes the evaluation's value in place of that, clearing it where the evaluation is `False` (§6 below). The evaluation, its terms, its site and its value at freeze stand, and every other clause stands.
 - **Partially supersedes** [ADR-0217](0217-a-record-carries-who-may-receive-it-and-a-model-may-only-narrow-it.md) — **one scope, read across two clauses.** **§1:3 and §3:3, for an open episode alone**: an open episode is written with reach `OWNER` and setter `DERIVED` though no evaluation has found anything yet, and the write that freezes it replaces that placement with the derivation's, wider or not (§6 below). Every other clause stands.

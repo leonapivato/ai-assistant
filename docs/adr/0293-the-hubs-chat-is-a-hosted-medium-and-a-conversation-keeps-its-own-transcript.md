@@ -6,12 +6,13 @@
 - Authorization: the owner accepted proposal #2680 on 2026-10-04, at `f21aeb7b`, after walking it through section by section the same day, and the dispatcher assigned 0293. This ADR is that proposal converted under `docs/proposals/README.md` → "When it is decided".
 - **Partially supersedes** [ADR-0274](0274-channel-input-and-reply-contract.md) — **one scope.** **§2–§6, in so far as they govern a typed text input to the conversation and its reply**: such an input is a message written into a conversation as an act in the medium (§4 below); it names no channel, supplies no history and no replied-to item, and its reply is not returned on the request but written into a conversation by the chat's writer (§6 below). A replied-to entry survives as a message's reference into the transcript (§4 below). The spoken combination, informational events and every other clause stand. These mechanisms keep working until the first build replaces them (§11 below, ADR-0292 §13:1).
 - **Partially supersedes** [ADR-0276](0276-an-activation-is-understood-before-it-is-associated-and-the-understanding-is-retained-with-its-episode.md) — **one scope.** **§3:1's and §3:2's conversation-channel window, for every input but the quarantined spoken path's**: the conversation's window is its recent transcript, brought in by the chat's reader with the new input, its size declared by the kind (§6, §7 below); §3:2's *no per-channel history table* does not reach the transcript, which is the hosted medium's content (ADR-0292 §3:3). The quarantined spoken path keeps both clauses as they stand. Every other clause stands.
-- **Partially supersedes** [ADR-0283](0283-a-channels-history-is-its-episodes-and-the-turn-index-is-retired.md) — **three scopes.** **§4:1, for every read but the quarantined spoken path's**: a conversation's history is its transcript (§5 below). **§8:1, in what deleting a conversation removes**: its transcript, and none of the episodes on its place; deleting those episodes is forgetting the conversation, a command that leaves the conversation and its transcript (§2 below). **§8:2's condition**: reclaim also spares a conversation that holds a message, since a transcript is kept until the user deletes it (§5 below). Every other clause stands.
+- **Partially supersedes** [ADR-0283](0283-a-channels-history-is-its-episodes-and-the-turn-index-is-retired.md) — **four scopes.** **§4:1, for every read but the quarantined spoken path's**: a conversation's history is its transcript (§5 below). **§8:1, in what deleting a conversation removes**: its transcript, and none of the episodes on its place; deleting those episodes is forgetting the conversation, a command that leaves the conversation and its transcript (§2 below). **§8:2's condition**: reclaim also spares a conversation that holds a message, since a transcript is kept until the user deletes it (§5 below). **§7:2's and §7:4's deletion of the episode where the conversation is stamped or absent**: the writer keeps the episode, because deleting a conversation forgets nothing (§2 below); §7:2's verification call and every other clause stand.
 - **Partially supersedes** [ADR-0022](0022-the-closed-learning-loop.md) — **one scope.** **§1's `learn`, as the route by which the user's feedback reaches the assistant**: the user corrects the assistant by a message replying to the message it corrects (§4 below), which the chat's reader brings in as a push. `learn` retires when the first build replaces it (§11 below, ADR-0292 §13:1). Every other clause stands.
 - **Partially supersedes** [ADR-0078](0078-a-deferred-memory-decision-is-a-durable-question.md) — **one scope, which takes effect when built.** **§8's answering call, `answer(question_id, *, accept)`, as the route by which the user answers a question**: the user answers by a message naming the question and, for a button, the option (§4, §6 below). Until question messages and their answers are built, `answer` keeps working exactly as ADR-0078 decides it (ADR-0292 §13:1). What an answer authorizes, and that it is used once, are not decided here, and every other clause stands.
 - **Partially supersedes** [ADR-0074](0074-conversation-is-an-entity-and-every-turn-is-an-episode.md) — **one scope.** **§8's conversation as one deletion unit**, *"Forget this conversation" destroys the conversation's episodes and its index*: deleting a conversation removes the conversation and its transcript and none of the episodes on its place, and forgetting it destroys those episodes and leaves the conversation and its transcript (§2 below). ADR-0004 §6's right and every other clause stand.
 - **Partially supersedes** [ADR-0085](0085-the-promoted-engine-surface.md) — **one scope, which takes effect when built.** **§1's inventory, §3's signatures, §9's rows and §10's mappings, for `converse`, `learn`, `answer` and `forget_conversation`**: `converse` and `learn` leave the surface and `forget_conversation` becomes memory-only when the first build lands, and `answer` leaves it when question messages and their answers are built (§11 below); the surface gains the acts in the medium and a read of the changes after a cursor. Until then each keeps working exactly as ADR-0085 decides it (ADR-0292 §13:1). Every other method, type and clause stands.
 - **Partially supersedes** [ADR-0173](0173-an-answer-streams-as-chunks-of-one-reply-and-the-result-frame-is-still-the-answer.md) — **one scope, which takes effect when built.** **§4's `converse_streaming`, as an entry on the engine surface**: it leaves the surface when the first build lands, the conversation being carried by the acts in the medium, and a device that takes pieces of a message being sent them as they are produced (§6, §11 below). Until then it keeps working exactly as ADR-0173 decides it. The chunk and result frames, the streaming model seam and every other clause stand.
+- **Partially supersedes** [ADR-0286](0286-an-episode-is-open-while-its-activation-runs-and-frozen-when-it-ends.md) — **one scope.** **§4:4's and §7:3's deletion of the episode where `record_turn` returns `None`**: a finalization, and a restart's close, keep the episode when the conversation was deleted (§2 below). Every other clause stands, §8's forgetting of an open episode included.
 
 ## Context
 
@@ -58,7 +59,8 @@ pages differ, this ADR governs.
 | ADR-0074 | A conversation is a first-class entity; the store mints its id; the conversation is one deletion unit, its episodes destroyed with it (§8). | Kept, but for §8's deletion unit: a conversation is a place in the chat space, with that id; deleting it and forgetting it are two operations (§2). |
 | ADR-0085 §1, §3, §9, §10 | The engine surface's inventory, signatures, failures and wire mapping, `converse`, `learn`, `answer` and `forget_conversation` among them. | Partially superseded when built: those four leave or change as §11 states, and the surface gains the acts in the medium. |
 | ADR-0173 §4 | `converse_streaming`, the streamed answer as a second entry on the surface. | Partially superseded when built: it leaves the surface with `converse`; streaming to a device survives as §6 states it. |
-| ADR-0286 §2, §7 | An episode is written at admission and frozen at its end; a restart closes an open episode as interrupted. | Kept. A restart writes nothing into the conversation (§9). |
+| ADR-0283 §7:2, §7:4; ADR-0286 §4:4, §7:3 | Where `record_turn` finds the conversation deleted, the writer, at finalization or at a restart's close, deletes the episode. | Partially superseded: the episode is kept, since deleting a conversation forgets nothing (§2). |
+| ADR-0286 §2, §7, §8 | An episode is written at admission and frozen at its end; a restart closes an open episode as interrupted; forgetting an open episode deletes it at once and stops its writer. | Kept. A restart writes nothing into the conversation (§9), and forgetting a conversation forgets an open episode on its place as §8 does (§2). |
 | ADR-0280 §4, row 11 | `reply_owed`: a conversation turn with no composed reply makes `compose` due. | Not amended. The kind's description says it expects a reply (§7), and the row's rewording waits for the milestone where an event reaches a reply ([#2598](https://github.com/leonapivato/ai-assistant/issues/2598) item 3). |
 | ADR-0170 | A reply is not a tool; the turn composes its answer. | Not decided here ([#2593](https://github.com/leonapivato/ai-assistant/issues/2593)). The chat's writer adds a message, and until the phases call it today's compose stage does (§10). |
 
@@ -151,6 +153,13 @@ What belongs where, as the owner ruled it:
 
 > **Normative.** Forgetting a conversation reaches the episodes on its place whether
 > or not the conversation still stands in the medium.
+
+> **Normative.** Forgetting a conversation forgets an episode still open on its place
+> as ADR-0286 §8 forgets an open episode, so that no later write re-creates it.
+
+> **Normative.** No capture, finalization or restart path deletes an episode because
+> its conversation was deleted: where `record_turn` returns `None` for a stamped or
+> absent conversation, the writer keeps the episode.
 
 > **Normative.** No single operation both deletes and forgets. An interface may offer
 > the two side by side.
@@ -254,9 +263,13 @@ composed.
 > **Normative.** Forgetting does not reach a transcript.
 
 > **Normative.** An interface offering to forget a conversation says plainly that
-> forgetting stops the assistant recalling it anywhere else, that the assistant still
-> reads the conversation while the user keeps talking there, and that only deleting
-> removes it (ADR-0292 §3:7).
+> forgetting removes the conversation's episodes from the assistant's memory, so it no
+> longer recalls them anywhere else, that the assistant still reads the conversation
+> while the user keeps talking there, and that only deleting removes the conversation
+> (ADR-0292 §3:7).
+
+What becomes of what was derived from those episodes is memory's question
+([#2683](https://github.com/leonapivato/ai-assistant/issues/2683)).
 
 > **Normative.** Deleting a message deletes it alone: a reply to it stays, and its
 > reference names a deleted message, shown as such.
@@ -461,8 +474,8 @@ over seeding each transcript from its episodes; the implementation decides.
 ### 12. Relationship to earlier decisions
 
 > **Normative.** This ADR supersedes ADR-0274, ADR-0276, ADR-0283, ADR-0022, ADR-0078,
-> ADR-0074, ADR-0085 and ADR-0173 in the scopes its header names, and no clause of any
-> other ADR.
+> ADR-0074, ADR-0085, ADR-0173 and ADR-0286 in the scopes its header names, and no
+> clause of any other ADR.
 
 > **Normative.** This numbered draft records its replacements on the status line and in
 > a dated header note of each ADR it supersedes in part, atomically with this ADR under
@@ -477,6 +490,7 @@ over seeding each transcript from its episodes; the implementation decides.
 | ADR-0276 §3:1–§3:2, for the conversation | §6 (the window) |
 | ADR-0283 §4:1 | §5 (the transcript) |
 | ADR-0283 §8:1, §8:2 | §2 (delete and forget), §5 (kept until deleted) |
+| ADR-0283 §7:2, §7:4 and ADR-0286 §4:4, §7:3, in their deletion on a deleted conversation | §2 (deleting forgets nothing) |
 | ADR-0022 §1's `learn` | §4 (a reply), §11 |
 | ADR-0078 §8's `answer` | §4, §6 (a question and its answer), §11 |
 | ADR-0074 §8's deletion unit | §2 (delete and forget) |
