@@ -1227,7 +1227,14 @@ async def test_the_browser_reads_a_conversations_count_and_span_before_destroyin
     status, body = await harness.whole("POST", "/conversation", {"conversation_id": "c-1"})
 
     assert status == 200
-    assert set(body["conversation"]) == {"id", "started_at", "last_turn_at", "recorded_turns"}
+    assert set(body["conversation"]) == {
+        "id",
+        "started_at",
+        "last_turn_at",
+        "recorded_turns",
+        "state",
+        "devices",
+    }
 
 
 async def test_a_conversation_that_is_not_there_is_its_own_condition(harness: Harness) -> None:
@@ -1333,7 +1340,10 @@ def test_the_surface_resolves_onto_what_it_serves_and_the_gateways_own_poll() ->
     **offer the cancellation act**"; and **ADR-0250's ``- Status:`` line records "§1's
     thirty-operation enumeration alone, which gains ``goals``,
     ``withdraw_clarification`` and ``abandon_goal``"**, which §15 places on this surface
-    by name. Every other clause of §1 binds each of them exactly as it binds the thirty.
+    by name. **ADR-0296's ``- Status:`` line records "§1:1's enumeration, which gains
+    the acts in the medium and the change stream"**, ADR-0293 §11:2's acts and the read
+    of the changes after a cursor that stands for the stream until it is built. Every
+    other clause of §1 binds each of them exactly as it binds the thirty.
 
     **The count is not written down here, and that is ADR-0177's own instruction rather
     than an omission.** Its third dated note retires the figure — "do not read that as
@@ -1389,6 +1399,17 @@ def test_the_surface_resolves_onto_what_it_serves_and_the_gateways_own_poll() ->
         "abandon_goal",
         "standing_authorizations",
         "revoke_authorization",
+        # ADR-0296's record on ADR-0177 §1:1: "the acts in the medium (ADR-0293
+        # §11:2) and the change stream", whose first build is one read after a cursor.
+        "start_conversation",
+        "my_devices",
+        "set_my_devices",
+        "set_conversation_devices",
+        "write_message",
+        "delete_message",
+        "delete_conversation",
+        "transcript",
+        "chat_changes",
         "delivery-stream",
     }
 
