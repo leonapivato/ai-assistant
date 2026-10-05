@@ -42,7 +42,7 @@ from ai_assistant.wire.address import (
     sun_path_limit,
 )
 from ai_assistant.wire.client import HubClient, HubEngineClient
-from ai_assistant.wire.codec import ENVELOPE_RESERVE_BYTES, canonical_payload
+from ai_assistant.wire.codec import ENVELOPE_RESERVE_BYTES, GRANTABLE_SCOPES, canonical_payload
 from ai_assistant.wire.enrolment import (
     Enrolment,
     read_enrolment,
@@ -68,6 +68,7 @@ from ai_assistant.wire.server import ConnectionLimits, serve_connection
 
 __all__ = [
     "ENVELOPE_RESERVE_BYTES",
+    "GRANTABLE_SCOPES",
     "PROTOCOL_VERSION",
     "SOCKET_FILENAME",
     "SOCKET_MODE",

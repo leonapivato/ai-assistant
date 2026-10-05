@@ -202,6 +202,29 @@ async def test_a_grant_relays_the_source_verbatim_and_normalises_nothing() -> No
         assert engine.calls == [("grant", {"source": " calendar ", "scope": (GrantScope.FACET,)})]
 
 
+async def test_a_grant_naming_ingest_is_the_hub_s_refusal_and_records_nothing() -> None:
+    """ADR-0294 §4: a new grant may not name ``INGEST``, and the gateway relays the refusal.
+
+    The page offers no box for it, but a request is not a page. The gateway decides
+    no scope rule of its own — empty and duplicated are the promoted surface's to
+    refuse, and so is this — so the request reaches ``grant``, which refuses it
+    locally with a ``ValueError`` and records nothing. That is a malformed request
+    rather than a hub decision, so the browser is told it was rejected, with the
+    refusal's own sentence.
+    """
+    engine = FakeAssistantEngine()
+    engine.hold_source("calendar", location="/somewhere")
+    async with _harness(engine) as one:
+        status, body = await one.whole(
+            "POST", "/grant", {"source": "calendar", "scope": ["facet", "ingest"]}
+        )
+
+        assert status == 400
+        assert body["fault"] == "rejected"
+        assert "ADR-0294" in body["detail"]
+        assert engine.grants_recorded == []
+
+
 async def test_a_grant_carries_the_whole_scope_the_browser_chose() -> None:
     """ADR-0097 §8: nothing decides what the user permitted on their behalf.
 
@@ -347,7 +370,7 @@ async def test_an_amendment_reaches_the_hub_as_two_calls_in_order() -> None:
     async with _harness(engine) as one:
         withdrawn_status, _ = await one.whole("POST", "/revoke", {"source": "calendar"})
         granted_status, _ = await one.whole(
-            "POST", "/grant", {"source": "calendar", "scope": ["ingest", "notify"]}
+            "POST", "/grant", {"source": "calendar", "scope": ["facet", "notify"]}
         )
 
         assert (withdrawn_status, granted_status) == (200, 200)

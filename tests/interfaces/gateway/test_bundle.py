@@ -57,6 +57,7 @@ from ai_assistant.interfaces.gateway.server import (
     packaged_bundle,
 )
 from ai_assistant.orchestration.reads import ForecastDisposition
+from ai_assistant.wire import GRANTABLE_SCOPES
 from ai_assistant.wire.errors import TransportError
 
 _ROOT = Path(__file__).resolve().parents[3] / "src" / "ai_assistant" / "interfaces" / "gateway"
@@ -4079,30 +4080,45 @@ def test_the_page_reaches_what_the_gateway_serves_and_nothing_beyond_it() -> Non
     assert '"/observe"' not in script
 
 
-def test_the_page_offers_every_use_a_grant_may_authorise_and_no_proper_subset() -> None:
-    """ADR-0139 §3's second clause, restated at the browser by ADR-0177 §6.
+def test_the_page_offers_every_use_a_new_grant_may_name_and_no_other() -> None:
+    """ADR-0139 §3's second clause, restated at the browser by ADR-0177 §6, as
+    ADR-0294 §4 narrows the offer.
 
     "Wherever a surface offers, enumerates or explains the uses a user may choose
     among, it carries **every** member of ``GrantScope``, named in words" — a user
-    cannot choose what they are not shown, and a page is where a two-of-three
-    checkbox group is the natural mistake.
+    cannot choose what they are not shown. ADR-0294 §4 then rules that "a surface
+    offering the uses for a new grant, including an amendment's new scope, offers
+    ``FACET`` and ``NOTIFY`` and not ``INGEST``", so the offer is
+    :data:`~ai_assistant.wire.GRANTABLE_SCOPES` and the page may hold no box for the
+    member the hub refuses.
 
     Read off the shipped file against ``core``'s own vocabulary, so a fourth member
     added to the enum fails here rather than reaching a user as a silently absent
-    option.
+    option or as an unlabelled grant.
 
-    **Counted inside the declaration and not across the file**, which is issue #1332's
-    lesson applied before it bit: a whole-file count of ``label:`` was satisfied by
-    ``USES`` alone only while ``USES`` was the only vocabulary the page carried, and
-    the notification review surface's reach levels are a second one.
+    **Counted inside each declaration and not across the file**, which is issue
+    #1332's lesson: a whole-file count of ``label:`` was satisfied by one vocabulary
+    only while it was the only one the page carried.
     """
-    vocabulary = _declaration(_code("app.js"), "USES")
+    script = _code("app.js")
+    phrases = _declaration(script, "USE_PHRASES")
 
+    # Every member is named in words, ``INGEST`` included: a recorded grant naming it
+    # still renders it (ADR-0294 §4, ADR-0139 §3's third clause).
     for use in GrantScope:
-        assert f'value: "{use.value}"' in vocabulary, use.value
-    # Named in words rather than by member name: the value is what goes on the wire,
-    # and the label beside it is what the person reads.
-    assert vocabulary.count("label:") == len(GrantScope)
+        assert f'value: "{use.value}"' in phrases, use.value
+    assert phrases.count("label:") == len(GrantScope)
+
+    # The offer is that vocabulary less exactly the uses a new grant may not name.
+    retired = re.search(r"^const RETIRED_USES = \[(.*)\];$", script, re.MULTILINE)
+    assert retired is not None
+    named = set(re.findall(r'"(\w+)"', retired.group(1)))
+    assert named == {use.value for use in GrantScope} - {use.value for use in GRANTABLE_SCOPES}
+    assert "const USES = USE_PHRASES.filter((use) => !RETIRED_USES.includes(use.value));" in script
+    # And the choice is built from the offer, never from the rendering vocabulary.
+    choice = _functions(script)["offerScope"]
+    assert "USES.map" in choice
+    assert "USE_PHRASES" not in choice
 
 
 def test_the_page_never_renders_the_uses_a_grant_leaves_out() -> None:
@@ -4121,7 +4137,7 @@ def test_the_page_never_renders_the_uses_a_grant_leaves_out() -> None:
 
     # The grant branch maps the grant's own scope and reaches `USES` — the choice
     # vocabulary — nowhere. `offerScope` is the *choice* context, which is the other
-    # half of ADR-0139 §3 and where all three belong.
+    # half of ADR-0139 §3 and where the uses a new grant may name belong.
     assert "usePhrase(source.live.scope)" in rendering
     assert "USES" not in rendering
     # `renderGrantFields` is where a live grant's uses are put on screen, and

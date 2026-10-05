@@ -160,7 +160,7 @@ from ai_assistant.core.types import (
     secret_value,
 )
 from ai_assistant.orchestration.disclosure import speakable_notification_triple
-from ai_assistant.orchestration.payloads import _encode, project
+from ai_assistant.orchestration.payloads import GRANTABLE_SCOPES, _encode, project
 from ai_assistant.testing import (
     AUTHORIZATION_GOAL,
     Disclosure,
@@ -3712,7 +3712,7 @@ class AssistantEngineContract(
         """
         await granting_engine.grant(_SOURCE, scope=[GrantScope.FACET])
         with pytest.raises(InvalidGrantError):
-            await granting_engine.grant(_SOURCE, scope=[GrantScope.INGEST])
+            await granting_engine.grant(_SOURCE, scope=[GrantScope.NOTIFY])
 
     async def test_revoking_with_no_live_grant_returns_none(
         self, granting_engine: AssistantEngine
@@ -3731,14 +3731,14 @@ class AssistantEngineContract(
         transcription, which is why an implementation that got it wrong would be
         refused rather than silently recording a lie.
         """
-        granted = await granting_engine.grant(_SOURCE, scope=[GrantScope.INGEST])
+        granted = await granting_engine.grant(_SOURCE, scope=[GrantScope.NOTIFY])
         withdrawn = await granting_engine.revoke(_SOURCE)
         assert withdrawn is not None
         assert withdrawn.revokes == granted.id
         assert withdrawn.source == granted.source
         assert withdrawn.scope == granted.scope
 
-    @pytest.mark.parametrize("only", list(GrantScope))
+    @pytest.mark.parametrize("only", list(GRANTABLE_SCOPES))
     async def test_a_grant_naming_one_use_is_revocable_whichever_use_it_names(
         self, granting_engine: AssistantEngine, only: GrantScope
     ) -> None:
@@ -3761,9 +3761,40 @@ class AssistantEngineContract(
 
         One use at a time is the discriminating shape: a scope naming several
         would be found by an implementation sweeping any one of them.
+
+        **Over the uses a new grant may name** (ADR-0294 §4), since ``INGEST`` can
+        no longer be granted through the surface; the ``INGEST``-only grant a store
+        already holds is the case below, seeded rather than granted.
         """
         await granting_engine.grant(_SOURCE, scope=[only])
         assert await granting_engine.revoke(_SOURCE) is not None
+
+    async def test_a_recorded_ingest_only_grant_stays_revocable(
+        self, disagreeing_engine: AssistantEngine
+    ) -> None:
+        """ADR-0294 §4: a recorded grant naming ``INGEST`` stays revocable.
+
+        "``GrantScope`` keeps ``INGEST``. A recorded grant naming it stays readable,
+        exportable and revocable", and no grant is revoked, narrowed or rewritten
+        *because* it names it. This is the sweep above over the member the surface
+        no longer grants: a store holds such grants from before the change, and an
+        implementation that dropped ``INGEST`` from its sweep would leave every one of
+        them unrevokable while reporting success by returning ``None``.
+
+        ``disagreeing_engine`` holds exactly that record, seeded hub-side, on a
+        source no reader declares — and revocation applies no admission check
+        (ADR-0102 §4), so the held set does not stand in the way. The revoking record
+        transcribes the scope verbatim, ``INGEST`` included (ADR-0294 §4).
+        """
+        (standing,) = await disagreeing_engine.standing_grants()
+        assert standing.scope == (GrantScope.INGEST,)
+
+        withdrawn = await disagreeing_engine.revoke(_UNHELD_SOURCE)
+
+        assert withdrawn is not None
+        assert withdrawn.revokes == standing.id
+        assert withdrawn.scope == (GrantScope.INGEST,)
+        assert await disagreeing_engine.standing_grants() == ()
 
     async def test_a_grant_reaches_the_enumeration_as_live_and_a_revocation_clears_it(
         self, granting_engine: AssistantEngine
@@ -3909,9 +3940,9 @@ class AssistantEngineContract(
         await granting_engine.revoke(_SOURCE)
         assert await granting_engine.standing_grants() == ()
 
-        await granting_engine.grant(_SOURCE, scope=[GrantScope.INGEST])
+        await granting_engine.grant(_SOURCE, scope=[GrantScope.NOTIFY])
         standing = await granting_engine.standing_grants()
-        assert [(each.source, each.scope) for each in standing] == [(_SOURCE, (GrantScope.INGEST,))]
+        assert [(each.source, each.scope) for each in standing] == [(_SOURCE, (GrantScope.NOTIFY,))]
         assert len(await granting_engine.recent_grants()) == 3
 
     async def test_standing_grants_states_liveness_rather_than_deriving_it(
@@ -4003,6 +4034,33 @@ class AssistantEngineContract(
         with pytest.raises(ValueError, match=r"\w"):
             await granting_engine.grant(_SOURCE, scope=[GrantScope.FACET, GrantScope.FACET])
         assert await granting_engine.recent_grants() == ()
+
+    @pytest.mark.parametrize(
+        "scope",
+        [
+            [GrantScope.INGEST],
+            [GrantScope.FACET, GrantScope.INGEST],
+            [GrantScope.INGEST, GrantScope.NOTIFY],
+        ],
+        ids=["alone", "beside-facet", "beside-notify"],
+    )
+    async def test_a_scope_naming_ingest_is_refused_locally_and_records_nothing(
+        self, granting_engine: AssistantEngine, scope: list[GrantScope]
+    ) -> None:
+        """ADR-0294 §4's marked clause, on every implementation of the surface.
+
+        "``AssistantEngine.grant`` refuses a scope naming ``INGEST`` with
+        ``ValueError``, locally and before any I/O, as it refuses an empty one, and
+        records nothing." Beside another use as well as alone, because an
+        implementation that checked only a one-member scope would grant ``INGEST``
+        the moment a user named it with something else. Nothing is recorded and the
+        source stays ungranted, which is what "records nothing" means to a caller.
+        """
+        with pytest.raises(ValueError, match="ADR-0294"):
+            await granting_engine.grant(_SOURCE, scope=scope)
+
+        assert await granting_engine.recent_grants() == ()
+        assert (await granting_engine.grantable_sources())[0].live is None
 
     @pytest.mark.parametrize("bad", [0, -1, 2**63])
     async def test_recent_grants_refuses_a_non_positive_limit_locally(

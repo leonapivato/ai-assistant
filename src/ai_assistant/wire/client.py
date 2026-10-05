@@ -1145,9 +1145,10 @@ class HubClient:
         refuses, which is the substitutability failure §2 rejects the ``Identifier``
         annotation for.
 
-        ``scope`` is **materialised before the first ``await``** and refused empty or
-        duplicated, so a caller mutating the sequence it passed cannot change the
-        grant that is recorded (ADR-0065, ADR-0097 §2).
+        ``scope`` is **materialised before the first ``await``** and refused empty,
+        duplicated or naming ``INGEST``, so a caller mutating the sequence it passed
+        cannot change the grant that is recorded (ADR-0065, ADR-0097 §2), and a hub
+        is never sent a use a new grant may not name (ADR-0294 §4).
 
         Args:
             source: The reader's declared identity, sent byte for byte.

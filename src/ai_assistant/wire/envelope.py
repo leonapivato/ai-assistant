@@ -2419,7 +2419,9 @@ from ai_assistant.wire.errors import (
 #:     method set — ``create_story``, ``link_story``, ``unlink_story``,
 #:     ``merge_stories``, ``split_story``, ``story``, ``story_log``, ``stories`` and
 #:     ``activation_stories`` — and the story types they carry.
-PROTOCOL_VERSION: Final[int] = 74
+#: 75: ADR-0294 §4 makes ``AssistantEngine.grant`` refuse a scope naming ``INGEST``,
+#:     which a hub at 74 accepted (ADR-0124 §9:2's test, in the refusing direction).
+PROTOCOL_VERSION: Final[int] = 75
 
 #: ADR-0085 §8a: "The correlation id is a UUID string and is at most 36 bytes.
 #: Bounding it is what makes the reserve a constant rather than an aspiration; a

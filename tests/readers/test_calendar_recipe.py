@@ -28,10 +28,11 @@ from typing import Final
 import pytest
 
 from ai_assistant.core.config import Settings
-from ai_assistant.core.types import GrantScope, NotificationReach
+from ai_assistant.core.types import NotificationReach
 from ai_assistant.orchestration.upcoming import NOTIFICATION_CLASS
 from ai_assistant.readers import calendar
 from ai_assistant.readers.calendar import CALENDAR_READER_NAME
+from ai_assistant.wire import GRANTABLE_SCOPES
 
 #: The recipe under test. A module with no docstring is the one failure this file
 #: cannot report as a missing identifier, so it is asserted before anything reads it.
@@ -103,16 +104,17 @@ def test_the_recipe_names_the_reader_and_the_class_by_their_real_identifiers() -
     assert f"assistant tune --class {NOTIFICATION_CLASS}" in RECIPE
 
 
-def test_every_scope_the_recipe_offers_is_a_member_of_the_type() -> None:
+def test_every_scope_the_recipe_offers_is_one_a_new_grant_may_name() -> None:
     """ADR-0133 §6's obligation applied to the recipe that tells an operator what to type.
 
-    Every ``--scope`` the recipe spells has to be a use ``GrantScope`` actually
-    admits: a stale one is a command that fails at the door, and the two the recipe
-    walks through — ``facet`` and the ``notify`` it does not back-fill — are the
-    whole of what arming unprompted contact needs.
+    Every ``--scope`` the recipe spells has to be a use a new grant may name — a
+    member of :data:`~ai_assistant.wire.GRANTABLE_SCOPES`, which since ADR-0294 §4 is
+    ``GrantScope`` less ``INGEST``: a stale one is a command that fails at the door,
+    and the two the recipe walks through — ``facet`` and the ``notify`` it does not
+    back-fill — are the whole of what arming unprompted contact needs.
     """
     offered = set(re.findall(r"--scope (\w+)", RECIPE))
-    admitted = {scope.value for scope in GrantScope}
+    admitted = {scope.value for scope in GRANTABLE_SCOPES}
 
     assert offered, "the recipe walks an operator through granting; it names scopes"
     assert offered <= admitted, f"offered and not admitted: {sorted(offered - admitted)}"

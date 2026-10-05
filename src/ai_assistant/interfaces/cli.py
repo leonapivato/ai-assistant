@@ -360,6 +360,7 @@ from ai_assistant.interfaces import episode_inspection, story_inspection
 from ai_assistant.interfaces.gateway import Disclosure, Note, run_gateway
 from ai_assistant.secret_store import KeyringSecretStore
 from ai_assistant.wire import (
+    GRANTABLE_SCOPES,
     HubClient,
     HubEngineClient,
     LoopbackDestination,
@@ -697,6 +698,13 @@ def _distinct_scope(value: list[GrantScope]) -> list[GrantScope]:
     **Empty needs no check here**: the option is required, so Typer refuses a call
     that names no scope at all before this runs.
 
+    **A use a new grant may no longer name is refused here too** (ADR-0294 §4).
+    ``GrantScope`` keeps ``INGEST`` so that grants recorded with it still render,
+    which is why the option's *type* still parses the word; but the hub refuses it
+    with a ``ValueError``, so without this a typed ``--scope ingest`` would escape as
+    a traceback exactly as a repeated scope would. It is not offered either — see
+    :data:`_GRANT_SCOPE_OPTION`.
+
     Args:
         value: The scopes as the user repeated them.
 
@@ -705,13 +713,29 @@ def _distinct_scope(value: list[GrantScope]) -> list[GrantScope]:
         (ADR-0097 §10), not this adapter's.
 
     Raises:
-        BadParameter: If a scope is named more than once.
+        BadParameter: If a scope is named more than once, or names a use a new grant
+            may no longer name.
     """
     if len(set(value)) != len(value):
         named = ", ".join(use.value for use in value)
         msg = f"names a use more than once ({named}); each may be given at most once"
         raise typer.BadParameter(msg)
+    retired = [use for use in value if use not in GRANTABLE_SCOPES]
+    if retired:
+        offered = ", ".join(f"'{use.value}'" for use in GRANTABLE_SCOPES)
+        msg = (
+            f"'{retired[0].value}' can no longer be granted: nothing reads a source for "
+            f"that use any more. Choose from {offered}"
+        )
+        raise typer.BadParameter(msg)
     return value
+
+
+#: What the ``--scope`` option shows as its choices: the uses a new grant may name
+#: (ADR-0294 §4), rather than every member the enum still carries. Typer would
+#: otherwise list the type's members, ``ingest`` among them, beside a help string
+#: that no longer offers it.
+_SCOPE_METAVAR: Final = "<" + "|".join(use.value for use in GRANTABLE_SCOPES) + ">"
 
 
 #: ``assistant grant``'s repeatable scope flag, hoisted to module scope for the
@@ -720,39 +744,38 @@ def _distinct_scope(value: list[GrantScope]) -> list[GrantScope]:
 #: construction, and a *default* scope would be this adapter deciding what a user
 #: permitted — the one decision ADR-0097 §8 says nothing may make for them.
 #:
-#: **The help names every member of the enum, and ADR-0133 §6 forbids it naming
-#: fewer.** The option is annotated ``list[GrantScope]``, so it accepts a new
-#: member the instant it is declared; a help string still enumerating the older
-#: uses would be "a surface disagreeing with the vocabulary", which is the failure
-#: ADR-0097 §8 names when it forbids anything deciding what the user permitted on
-#: their behalf. Suppressing a member here would take an added refusal that does
-#: not exist, rather than saving one.
+#: **The help names every use a new grant may name, and no other** (ADR-0294 §4,
+#: narrowing ADR-0133 §6's every-member rule for this one offer). It is the hub's
+#: vocabulary for a *new* grant that the surface may not disagree with: offering a
+#: use the hub refuses would be the disagreement ADR-0097 §8 names, arriving from
+#: the other side. ``ingest`` is accepted by the parse — the type still carries it —
+#: and refused by :func:`_distinct_scope` with a sentence saying why.
 _GRANT_SCOPE_OPTION = typer.Option(
     ...,
     "--scope",
     callback=_distinct_scope,
+    metavar=_SCOPE_METAVAR,
     help=(
         "What this grant allows (repeatable): 'facet' to look at the source while "
-        "answering, 'ingest' to durably remember what it says, 'notify' to read it "
-        "in order to raise things with you unprompted."
+        "answering, 'notify' to read it in order to raise things with you unprompted."
     ),
 )
 
-#: The same option on ``amend``, and it carries **every** member for the same
-#: reason (ADR-0139 §3's second clause, over ADR-0133 §6's): wherever a surface
-#: offers, enumerates or explains the uses a user may choose among, it names all of
-#: them. An amendment is a choice context, so nothing here may be trimmed on the
-#: ground that the user granted a narrower set last time — that would be the
-#: surface deciding what the user permits on their behalf.
+#: The same option on ``amend``, and it carries the same uses for the same reason:
+#: an amendment's new scope is a new grant, so ADR-0294 §4 offers it ``FACET`` and
+#: ``NOTIFY`` and not ``INGEST``, and ADR-0139 §4:6 takes the new scope from that
+#: offer. Nothing here may be trimmed further on the ground that the user granted a
+#: narrower set last time — that would be the surface deciding what the user
+#: permits on their behalf (ADR-0139 §3's second clause).
 _AMEND_SCOPE_OPTION = typer.Option(
     ...,
     "--scope",
     callback=_distinct_scope,
+    metavar=_SCOPE_METAVAR,
     help=(
         "What the *new* grant allows (repeatable), replacing the old one entirely: "
-        "'facet' to look at the source while answering, 'ingest' to durably remember "
-        "what it says, 'notify' to read it in order to raise things with you "
-        "unprompted."
+        "'facet' to look at the source while answering, 'notify' to read it in "
+        "order to raise things with you unprompted."
     ),
 )
 
@@ -2314,12 +2337,11 @@ def grant(
     answer; it never skips the rendering.
 
     ``--scope facet`` lets me look at the source to answer what you are asking right
-    now, and remember nothing from it. ``--scope ingest`` lets me durably believe
-    what it says. ``--scope notify`` lets me read it in order to raise things with
-    you unprompted — it is permission to *read*, not a promise that anything
-    arrives. They are separate on purpose — "read my calendar and remember it, but
-    do not raise it with me unprompted" is a thing people mean. Name as many as you
-    mean; naming one allows only that one.
+    now, and remember nothing from it. ``--scope notify`` lets me read it in order
+    to raise things with you unprompted — it is permission to *read*, not a promise
+    that anything arrives. They are separate on purpose — "look at my calendar when
+    I ask, but do not raise it with me unprompted" is a thing people mean. Name as
+    many as you mean; naming one allows only that one.
 
     A source can have one grant at a time. To change what a grant covers, use
     'assistant amend' — or revoke and grant yourself; both acts stay on the record
