@@ -946,7 +946,7 @@ class FakeConversationStore:
                 return None
             held = self._messages[conversation_id]
             positions = [one for one in sorted(held) if before is None or one < before]
-            chosen = positions[len(positions) - limit :] if limit else []
+            chosen = positions[-limit:] if limit else []
             return TranscriptPage(
                 conversation_id=conversation_id,
                 entries=tuple(held[one] for one in chosen),

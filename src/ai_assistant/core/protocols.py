@@ -10858,7 +10858,10 @@ class ConversationStore(Protocol):
       come back (§4:3, §5:12). A reply to it stays (§5:8).
     * **Deleting a conversation** is :meth:`stamp_deleted`: its transcript, its
       devices and the reader's bookkeeping about it go in that step, the change is
-      recorded, and nothing of memory is touched (§2:3, §5:6).
+      recorded, and nothing of memory is touched from here (§2:3, §5:6). Today's
+      ``forget_conversation`` caller still deletes the episodes after stamping;
+      that is the superseded route ADR-0293 §Decision:2 keeps in force until the
+      first build separates forgetting from deleting (§11:4).
     * **"My devices"** is copied onto a conversation when it starts (§3:1); a
       conversation's devices then change only by :meth:`set_conversation_devices`
       (§3:3). Only a conversation's devices that may write can write a user's
@@ -11222,11 +11225,14 @@ class ConversationStore(Protocol):
         ``ConversationDeletedChange``. It forgets nothing: no episode is reached
         from here (§2:3, §5:6).
 
-        The caller then drops the parked reads, deletes every episode on the
-        conversation's channel, and asks
-        :meth:`drop_if_eligible` to remove the record (ADR-0283 §8:1). Those steps
-        normally run to completion in the deleting call; the tombstone is what makes
-        a crash survivable rather than final.
+        Today's ``forget_conversation`` route then drops the parked reads, deletes
+        every episode on the conversation's channel, and asks
+        :meth:`drop_if_eligible` to remove the record (ADR-0283 §8:1). That route
+        keeps working as it does until the first build replaces it (ADR-0293
+        §Decision:2), when forgetting becomes memory-only and deleting forgets
+        nothing (§2:3, §2:4, §11:4); the episode deletion is that caller's step and
+        never this method's. Those steps normally run to completion in the deleting
+        call; the tombstone is what makes a crash survivable rather than final.
 
         Returns:
             ``True`` if this call stamped it; ``False`` if it was already stamped

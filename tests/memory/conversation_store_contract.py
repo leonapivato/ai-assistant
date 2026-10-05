@@ -2335,6 +2335,13 @@ class ConversationStoreContract:
         snapshot = await store.transcript(conversation, limit=3)
         older = await store.transcript(conversation, before=3, limit=10)
         nothing = await store.transcript(conversation, limit=0)
+        # A limit above the count but below twice it, and the default: every entry.
+        wider = await store.transcript(conversation, limit=6)
+        default = await store.transcript(conversation)
+        assert wider is not None
+        assert default is not None
+        assert [one.position for one in wider.entries] == [1, 2, 3, 4, 5]
+        assert default == wider
 
         assert snapshot is not None
         assert older is not None

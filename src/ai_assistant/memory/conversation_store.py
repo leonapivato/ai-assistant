@@ -69,7 +69,7 @@ import threading
 from collections.abc import Sequence
 from datetime import UTC, datetime, timedelta
 from pathlib import Path
-from typing import TYPE_CHECKING, Any, Final
+from typing import TYPE_CHECKING, Any, Final, cast
 from uuid import uuid4
 
 from pydantic import TypeAdapter, ValidationError
@@ -730,6 +730,26 @@ def _devices_json(devices: tuple[ChatDevice, ...]) -> str:
     return json.dumps([one.model_dump(mode="json") for one in devices])
 
 
+def _json_list_of(value: object) -> list[object]:
+    """Decode a stored JSON array, refusing any other stored shape.
+
+    The container is checked as well as the text: a stored ``"yes"`` is valid JSON
+    that ``tuple()`` would read as three one-letter options, and a stored ``{}``
+    one that iterates as nothing, so either would read back as plausible data.
+
+    Raises:
+        TypeError: If the stored value is not text, or does not decode to an array.
+        ValueError: If the stored text is not JSON.
+    """
+    if type(value) is not str:
+        raise TypeError(describe_untrusted(value))
+    decoded = json.loads(value)
+    if type(decoded) is not list:
+        msg = f"a stored JSON value is not an array: {describe_untrusted(value)}"
+        raise TypeError(msg)
+    return decoded
+
+
 def _devices_from(conversation_id: object, value: object) -> tuple[ChatDevice, ...]:
     """Rebuild a change row's set of devices, surfacing corruption as this seam's error.
 
@@ -737,9 +757,8 @@ def _devices_from(conversation_id: object, value: object) -> tuple[ChatDevice, .
         ConversationStoreError: If the stored value is not a JSON list of devices.
     """
     try:
-        if type(value) is not str:
-            raise TypeError(describe_untrusted(value))
-        return checked_chat_devices([ChatDevice.model_validate(one) for one in json.loads(value)])
+        decoded = _json_list_of(value)
+        return checked_chat_devices([ChatDevice.model_validate(one) for one in decoded])
     except (ValueError, TypeError) as exc:
         described = describe_untrusted(conversation_id)
         msg = f"a stored change's devices could not be decoded for {described}"
@@ -770,9 +789,7 @@ def _message_from(row: Sequence[Any]) -> TranscriptMessage | DeletedMessage:
     try:
         if _bool_of(row[10]):
             return DeletedMessage(conversation_id=row[0], position=row[1])
-        options = row[6]
-        if type(options) is not str:
-            raise TypeError(describe_untrusted(options))
+        options = _json_list_of(row[6])
         return TranscriptMessage(
             conversation_id=row[0],
             position=row[1],
@@ -780,7 +797,7 @@ def _message_from(row: Sequence[Any]) -> TranscriptMessage | DeletedMessage:
             author=MessageAuthor(str(row[2])),
             text=row[4],
             replies_to=row[5],
-            options=tuple(json.loads(options)),
+            options=cast("tuple[str, ...]", tuple(options)),  # validated by the model
             cut_off=_bool_of(row[7]),
             device_id=row[8],
             message_id=row[9],
