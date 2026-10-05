@@ -8655,6 +8655,10 @@ const chat = {
   listing: [],
   listed: 0,
   unread: new Set(),
+  // Conversations a change has told this device it no longer reads, since the chat
+  // opened. A listing read before that change answered with them, and must not bring
+  // one back; a change that makes this device a reader again takes it off.
+  dropped: new Set(),
   selected: null,
   // Bumped on every change of selection, so a read for a conversation the owner left
   // renders nothing.
@@ -8766,6 +8770,8 @@ async function loadChat() {
   chat.era += 1;
   const mine = chat.era;
   chat.loaded = false;
+  // The listing below is read afresh, so it says what this device reads now.
+  chat.dropped = new Set();
   stopFollowing(CHAT_CATCHING_UP, false);
   fault(null, "chat");
   // Each opening read either answers or stops the chat where it is, with the control
@@ -9010,13 +9016,12 @@ async function followChat(tick) {
     cadence = usableCadence(response.headers.get(KEEP_ALIVE_HEADER));
     heard();
     // What the conversation on screen is doing now: the stream pushes a state when it
-    // changes, so one that changed while nothing here was following is read once.
+    // changes, so one that changed while nothing here was following is read once. A
+    // failure of that read is said in the panel and is not tried again, but it does not
+    // stop the stream: what the stream is about to say may be the very reason the read
+    // failed — the change that removed this device from the conversation.
     if (chat.selected !== null) {
-      void readChatDigest(chat.selected, chat.chosen).then((read) => {
-        if (!read && current() && sameSession(half, era)) {
-          stopFollowing(CHAT_STOPPED_REFUSED, true);
-        }
-      });
+      void readChatDigest(chat.selected, chat.chosen);
     }
     let terminal = null;
     for await (const value of streamValues(response)) {
@@ -9152,6 +9157,7 @@ function applyChanges(changes, snapshot) {
           renderConversationDevices();
         }
         // A conversation this device has just begun to read is listed.
+        chat.dropped.delete(change.conversation_id);
         relist = relist || snapshot !== null;
       }
     }
@@ -9176,6 +9182,7 @@ function applyChanges(changes, snapshot) {
 // A conversation this device no longer reads, dropped: out of the listing, its unsent
 // messages with it, and off the screen where it is open (ADR-0296 §4:8).
 function dropConversation(id) {
+  chat.dropped.add(id);
   chat.listing = chat.listing.filter((summary) => summary.id !== id);
   chat.unread.delete(id);
   chat.pending = chat.pending.filter((one) => one.conversation !== id);
@@ -9194,6 +9201,9 @@ function dropOnRefusal(body) {
   if (body === null || body.fault !== "device-without-role") {
     return;
   }
+  // A listing read still out was answered for a device that held something: it is
+  // dropped with the rest rather than let back in when it lands.
+  chat.listed += 1;
   chat.listing = [];
   chat.unread = new Set();
   chat.pending = [];
@@ -9255,7 +9265,9 @@ async function listChat(more) {
     if (body === null) {
       return false;
     }
-    chat.listing = more ? chat.listing.concat(body.conversations) : body.conversations;
+    // A listing read before a removal reached this page still names what was removed.
+    const held = body.conversations.filter((summary) => !chat.dropped.has(summary.id));
+    chat.listing = more ? chat.listing.concat(held) : held;
     el("chat-more").hidden = body.conversations.length < CHAT_PAGE;
     renderChatListing();
     return true;
