@@ -44,9 +44,9 @@ recommending something weaker.
 **Atomicity has nothing to offer before the first sync, so the order of the
 deployment steps is load-bearing** (#890). Run ``vdirsyncer discover calendar``
 *and* one successful ``vdirsyncer sync calendar`` **before** arming
-``ASSISTANT_CALENDAR_READER_INTERVAL`` or ``ASSISTANT_CALENDAR_UPCOMING_INTERVAL``
-and before granting the source. Until a sync has landed there is nothing whole to
-read, and this reader says so on every tick:
+``ASSISTANT_CALENDAR_UPCOMING_INTERVAL`` and before granting the source. Until a
+sync has landed there is nothing whole to read, and this reader says so on every
+read:
 
 * **Before the local side is created**, the path does not exist, ``os.open``
   raises ``FileNotFoundError``, and ``read()`` raises ``ReaderError`` reading
@@ -66,7 +66,7 @@ with zero proposals** (§8) rather than as either failure above — so the two s
 are distinguishable and neither is silently read as "no events".
 
 Neither failure needs an operator to intervene. §8 gives a read's failure both its
-postures — advisory on the facet side, and on the ingestion side ADR-0083 §7's
+postures — advisory on the facet side, and on the scheduled side ADR-0083 §7's
 "logged with its class, retried at the next due instant, never a process exit" —
 so the hub keeps running, nothing is corrupted and nothing is lost, and the first
 successful sync clears it. It is an ordering gotcha rather than a defect, and it
@@ -113,19 +113,16 @@ Run ``vdirsyncer discover calendar`` once, then ``vdirsyncer sync calendar`` on 
 timer the fetcher owns (cron or a systemd timer) — the network is the fetcher's
 and never this seam's, which is the whole point of the pattern. **One sync must
 have succeeded before the settings below are armed**, for the reason given above.
-Point the hub at its output and arm the job::
+Point the hub at its output::
 
     ASSISTANT_CALENDAR_READER_PATH=/home/you/.calendars/calendar.ics
-    ASSISTANT_CALENDAR_READER_INTERVAL=PT15M
 
-The two settings are a matrix ``Settings`` refuses to leave incoherent: an
-interval with no path fails at load (§7a). **Configuration is not consent** — the
-hub reads nothing until the user grants the source through a client, and until
-then the scheduler's job fails every tick with ``SourceNotGrantedError`` rather
-than reading (ADR-0097 §5)::
+**Configuration is not consent** — the hub reads nothing until the user grants the
+source through a client, and until then the request-path facet contributes
+nothing (ADR-0097 §5)::
 
     assistant sources                                    # shows the location
-    assistant grant calendar --scope facet --scope ingest
+    assistant grant calendar --scope facet
     assistant revoke calendar                            # prospective (ADR-0097 §6)
 
 The reader's identity is ``calendar`` and a grant keys on **that**, never on the
@@ -133,15 +130,14 @@ path (ADR-0097 §1) — so repointing the path leaves the grant standing over th
 location, which ADR-0097 §9a states and does not close.
 
 **Arming unprompted contact is three further acts, and none implies another**
-(ADR-0132 §4, ADR-0133 §3). Everything above arms *ingestion* — this file read
-into beliefs. The upcoming-event producer is a second, independent consumer of
-the same reading (ADR-0093 §3), so arming one arms neither the other nor any
-interruption. In the order they can be performed:
+(ADR-0132 §4, ADR-0133 §3). Everything above arms the *facet* — this file looked
+at while answering. Nothing reads it into beliefs: scheduled ingestion is retired
+(ADR-0294 §1). The upcoming-event producer is a second, independent consumer of
+the same source (ADR-0093 §3), so arming the facet arms neither the producer nor
+any interruption. In the order they can be performed:
 
 1. **The operator arms the producer**, in the hub's environment. It needs the
-   path above and nothing else — it does **not** need
-   ``ASSISTANT_CALENDAR_READER_INTERVAL``, and setting either changes the other
-   job's cadence in no way (ADR-0132 §4)::
+   path above and nothing else (ADR-0132 §4)::
 
        ASSISTANT_CALENDAR_READER_PATH=/home/you/.calendars/calendar.ics
        ASSISTANT_CALENDAR_UPCOMING_INTERVAL=PT5M     # unset: the producer is off
@@ -153,10 +149,10 @@ interruption. In the order they can be performed:
    thirty seconds, ``15:00`` is fifteen **hours** rather than fifteen minutes,
    and ``5:00`` is refused outright. Write the full ``HH:MM:SS`` and none of
    that arises. The wrong-by-a-factor-of-sixty form is the one that costs an
-   afternoon, because it *loads*: ``ASSISTANT_CALENDAR_READER_INTERVAL=15:00``
-   arms a read every fifteen **hours** and nothing refuses it. On the pair
-   above it happens to be refused at the defaults, but only because the lead
-   rule below catches a lead no greater than the interval — that is a
+   afternoon, because it *loads*: ``ASSISTANT_CALENDAR_WINDOW_PAST=15:00``
+   reaches fifteen **hours** back and nothing refuses it. On the producer's
+   pair above it happens to be refused at the defaults, but only because the
+   lead rule below catches a lead no greater than the interval — that is a
    coherence rule about the two settings, not a guard on the form.
 
    What is **not** accepted from the environment is a bare number of seconds:
@@ -171,16 +167,16 @@ interruption. In the order they can be performed:
    read never returns. Both are refused at load rather than discovered as a job
    that runs, logs nothing and reports health.
 
-2. **The user grants the read**, a third use of the source that ``facet`` and
-   ``ingest`` do not back-fill (ADR-0133 §3)::
+2. **The user grants the read**, a use of the source that ``facet`` does not
+   back-fill (ADR-0133 §3)::
 
        assistant grant calendar --scope notify
 
    The source is **positional**; there is no ``--source`` option. A source holds
    one grant at a time, so adding ``notify`` to a calendar already granted for
-   ingestion is ``assistant revoke calendar`` and then one ``grant`` naming every
-   scope wanted — ``--scope facet --scope ingest --scope notify`` — and both acts
-   stay on the record.
+   the facet is ``assistant revoke calendar`` and then one ``grant`` naming every
+   scope wanted — ``--scope facet --scope notify`` — and both acts stay on the
+   record.
 
 3. **The user raises the class's reach.** Every class ships at ``hold``, so a
    producer cannot interrupt on the day it ships (ADR-0130 §6)::

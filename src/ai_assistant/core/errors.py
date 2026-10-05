@@ -1650,16 +1650,16 @@ class UngrantableActError(AssistantError):
 class SourceNotGrantedError(AssistantError):
     """A source was read for a use no live grant covers (ADR-0097 §5, §10).
 
-    Raised by a **driver** — `orchestration`'s ingestion stage — not by the
-    store, when an ingestion pass finds no live ``INGEST`` grant for the reader it
-    was about to run. Nothing is opened: the source is not resolved, not opened
+    Raised by a **driver** — `orchestration`'s upcoming-event producer — not by
+    the store, when a scheduled pass finds no live grant for the use it was about
+    to read the source for. Nothing is opened: the source is not resolved, not opened
     and not parsed, because opening the user's calendar is the act the grant is
     about (ADR-0097 §5).
 
     **Never reported as a successful pass.** An ungranted pass reported as zero
     proposals is indistinguishable from "the source had nothing to say within the
     bound", which ADR-0093 §8 rules a *success* — so a deployment whose grant was
-    revoked would look healthy while ingesting nothing.
+    revoked would look healthy while reading nothing.
 
     **And never a** :class:`ReaderError`, which means "the source could not be
     read": an operator debugging a missing calendar should not be sent to the

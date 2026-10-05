@@ -40,7 +40,6 @@ from hostile_values import (
 from pydantic import ValidationError
 
 from ai_assistant.core.config import _MAX_CALENDAR_WINDOW, Settings, load_settings
-from ai_assistant.core.errors import ConfigurationError
 from ai_assistant.readers import (
     DEFAULT_CALENDAR_MAX_BYTES,
     DEFAULT_CALENDAR_MAX_CONTENT_BYTES,
@@ -71,7 +70,7 @@ def test_the_calendar_reader_ships_disabled() -> None:
     settings = Settings()
 
     assert settings.calendar_reader_path is None
-    assert settings.calendar_reader_interval is None
+    assert settings.calendar_upcoming_interval is None
 
 
 def test_the_settings_defaults_are_the_readers_defaults() -> None:
@@ -119,39 +118,22 @@ def test_a_source_path_is_expanded_but_not_required_to_exist() -> None:
     assert not str(expanded).startswith("~")
 
 
-def test_an_interval_with_no_source_is_refused_at_load(monkeypatch: pytest.MonkeyPatch) -> None:
-    """§7a's fourth state, and the only incoherent one.
+def test_the_retired_ingestion_interval_is_ignored_and_arms_nothing(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """ADR-0294 §5: the field and its load-time refusal are gone, and the variable is inert.
 
-    The alternatives are all worse and all silently different: a scheduler that
-    omits the requested job reports health while running nothing, one that arms it
-    re-runs a failing job forever, and one that treats it as a source fault turns a
-    configuration mistake into an infinite retry.
+    A deployment that set ``ASSISTANT_CALENDAR_READER_INTERVAL`` before the change
+    still starts — ``Settings`` ignores a variable that names no field — and nothing
+    reads it, including the refusal that once paired it with a path: set alone, with
+    no path beside it, it no longer fails the load.
     """
-    with pytest.raises(ValidationError, match="needs a source to read"):
-        Settings(calendar_reader_interval=timedelta(hours=1))
-
     monkeypatch.setenv("ASSISTANT_CALENDAR_READER_INTERVAL", "PT1H")
-    with pytest.raises(ConfigurationError, match="invalid configuration"):
-        load_settings()
 
+    settings = load_settings()
 
-def test_the_three_coherent_states_load() -> None:
-    """Fully disabled, facet-only (reserved), and both live (ADR-0093 §7a)."""
-    assert Settings().calendar_reader_interval is None
-    assert Settings(calendar_reader_path=_ABSOLUTE).calendar_reader_interval is None
-    both = Settings(calendar_reader_path=_ABSOLUTE, calendar_reader_interval=timedelta(hours=6))
-    assert both.calendar_reader_interval == timedelta(hours=6)
-
-
-def test_disabled_is_none_and_never_zero() -> None:
-    """ADR-0083 §7's convention, and its reason applies unmodified.
-
-    The scheduler re-arms a job from its *completion*, so an interval of zero makes
-    it due again the instant it finishes — and "off" and "as fast as possible" look
-    identical in a config file.
-    """
-    with pytest.raises(ValidationError):
-        Settings(calendar_reader_path=_ABSOLUTE, calendar_reader_interval=timedelta(0))
+    assert "calendar_reader_interval" not in Settings.model_fields
+    assert settings.calendar_reader_path is None
 
 
 # --- the ranges §7a names (ADR-0093 §7a) ------------------------------------

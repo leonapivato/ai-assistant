@@ -45,29 +45,21 @@ would state one figure across rulings made under different caps. ADR-0130 §6's
 standing settings are the different case and stay off: they are not ``Settings``
 fields at all, so no allowlist that reads ``Settings`` can carry them.
 
-**And one more is on it because ingestion has a second source** (#1083). Email
-ingestion's cadence meets the same test the calendar's meets, in the same way:
-ADR-0142 §1 rules each source armed on its own interval and derived from no
-other's, "equal in kind", so it governs how many ``MEMORY_WRITE`` records enter
-the stream per unit time exactly as its neighbour does. Nothing decided it off —
-no work order owed it, since ADR-0142's is four deliverables about stages and
-rows, and ADR-0141 §10 named the three notification fields and said so. This is
-§9's own route taken: "A later change that needs one adds it." Until it was
-taken, arming or retuning the *calendar* partitioned a measurement window and
-doing the same to *email* partitioned nothing, which is a distinction neither ADR
-draws.
+**No reader's cadence is on it** (ADR-0294 §5). The calendar's and the email
+source's scheduled ingestion were the jobs that grew the user model from a reader,
+and they are retired, so no ingestion figure is reported. A trace a store already
+holds still carries the two ``*_reader_interval_*`` keys an earlier hub recorded;
+nothing here rewrites it.
 
 **What is deliberately off it.** Paths and model identifiers, which §9's third
 clause excludes by name — ``data_dir``, ``embedder``, the model routes and their
-credentials. Both ingestion source paths fall under that clause, so "the source
-is configured at all" stays invisible for both readers rather than for one: the
-asymmetry #1083 found was between the two *intervals*, and mirroring the
-calendar's entry is what removes it. The transport's four figures, the four
-permission-gate thresholds, the deferral queue's tuning, the two readers'
-*content* bounds, the locale, the log level and the drain budget: each shapes the
-system, none shapes a quantity the leg-8 measures are computed from, and §9's
-"when in doubt, leave it off" decides the ones that are arguable. A later change
-that needs one adds it, which is the same rule §9 states for a cardinality
+credentials. Both reader source paths fall under that clause, so "the source is
+configured at all" stays invisible for both readers. The transport's four
+figures, the four permission-gate thresholds, the deferral queue's tuning, the two
+readers' *content* bounds, the locale, the log level and the drain budget: each
+shapes the system, none shapes a quantity the leg-8 measures are computed from,
+and §9's "when in doubt, leave it off" decides the ones that are arguable. A later
+change that needs one adds it, which is the same rule §9 states for a cardinality
 control added later.
 
 **A stamp that cannot be written is subordinate** (§5). Startup never fails,
@@ -160,27 +152,6 @@ CONVERSATION_SWEEP_ARMED: Final = "conversation_sweep_interval_armed"
 
 #: How often it runs, present only when armed.
 CONVERSATION_SWEEP_SECONDS: Final = "conversation_sweep_interval_seconds"
-
-#: Whether scheduled calendar ingestion is armed (ADR-0093 §7a). It is the
-#: producer of the coverage readings whose absences close validity windows
-#: (ADR-0110, ADR-0117), which is the population #824's trigger is stated over.
-CALENDAR_READER_ARMED: Final = "calendar_reader_interval_armed"
-
-#: How often it runs, present only when armed.
-CALENDAR_READER_SECONDS: Final = "calendar_reader_interval_seconds"
-
-#: Whether scheduled email ingestion is armed (ADR-0140 §12, ADR-0142 §2). The
-#: calendar entry above with the other source's name: ADR-0142 §1 rules the two
-#: cadences independent and equal in kind, so a list carrying one and not the
-#: other would make an arming datable for one source and invisible for the other
-#: (#1083). ``None`` disables the job, which is the ``armed`` word and not the
-#: ``finite`` one.
-EMAIL_READER_ARMED: Final = "email_reader_interval_armed"
-
-#: How often it runs, present only when armed. It governs how many ``MEMORY_WRITE``
-#: records one source contributes per unit time, and so every rate ADR-0120 §4,
-#: §5 and §6 computes over the accumulation.
-EMAIL_READER_SECONDS: Final = "email_reader_interval_seconds"
 
 #: Whether belief consolidation is armed (ADR-0083 §7, ADR-0111 §11). **This is
 #: the arming §9 was written for**, rather than another analogue of it: §9's own
@@ -333,10 +304,6 @@ ALLOWLIST_KEYS: Final[frozenset[str]] = frozenset(
         RETENTION_PURGE_SECONDS,
         CONVERSATION_SWEEP_ARMED,
         CONVERSATION_SWEEP_SECONDS,
-        CALENDAR_READER_ARMED,
-        CALENDAR_READER_SECONDS,
-        EMAIL_READER_ARMED,
-        EMAIL_READER_SECONDS,
         CONSOLIDATION_ARMED,
         CONSOLIDATION_SECONDS,
         SCHEDULER_RUN_BUDGET_SECONDS,
@@ -504,18 +471,6 @@ class ConfigurationStamp:
             CONVERSATION_SWEEP_SECONDS,
             settings.conversation_sweep_interval,
         )
-        _pair(
-            metrics,
-            CALENDAR_READER_ARMED,
-            CALENDAR_READER_SECONDS,
-            settings.calendar_reader_interval,
-        )
-        _pair(
-            metrics,
-            EMAIL_READER_ARMED,
-            EMAIL_READER_SECONDS,
-            settings.email_reader_interval,
-        )
         _pair(metrics, TRACE_RETENTION_FINITE, TRACE_RETENTION_SECONDS, settings.trace_retention)
         _pair(
             metrics, EPISODE_RETENTION_FINITE, EPISODE_RETENTION_SECONDS, settings.episode_retention
@@ -591,15 +546,11 @@ def _dropped(error: Exception) -> None:
 
 __all__ = [
     "ALLOWLIST_KEYS",
-    "CALENDAR_READER_ARMED",
-    "CALENDAR_READER_SECONDS",
     "CONFLICT_SEARCH_LIMIT",
     "CONSOLIDATION_ARMED",
     "CONSOLIDATION_SECONDS",
     "CONVERSATION_SWEEP_ARMED",
     "CONVERSATION_SWEEP_SECONDS",
-    "EMAIL_READER_ARMED",
-    "EMAIL_READER_SECONDS",
     "EMBEDDING_TIMEOUT_SECONDS",
     "EPISODE_RETENTION_FINITE",
     "EPISODE_RETENTION_SECONDS",

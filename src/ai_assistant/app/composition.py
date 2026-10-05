@@ -78,7 +78,6 @@ from ai_assistant.orchestration import (
     ForecastServicer,
     GrantOperations,
     HeldSource,
-    IngestionStage,
     LearningLoop,
     MemoryWriteStage,
     NotificationWriteStage,
@@ -607,9 +606,10 @@ def build_composition(  # noqa: PLR0915 — one statement per resource this root
       driver cannot do is *name* ``record``, because ``mypy --strict`` runs over
       ``src`` and ``tests`` and the attribute is not on the annotated type
       (ADR-0097 §3);
-    * the **read-only ingestion stage and the calendar context source** are wired
-      whenever a source is configured (ADR-0093 §7's disabled default), each over
-      its **own** reader instance (ADR-0096 §5) — and this is the one place a
+    * the **context sources and the upcoming-event producer** are wired whenever a
+      source is configured (ADR-0093 §7's disabled default), each over its **own**
+      reader instance (ADR-0096 §5), and no stage ingests what a reader reads
+      (ADR-0294 §1) — and this is the one place a
       concrete :class:`~ai_assistant.core.protocols.Reader` may be
       constructed at all, because ``lint-imports`` forbids ``ai_assistant.readers``
       to every subsystem and exempts only this layer (see
@@ -745,53 +745,30 @@ def build_composition(  # noqa: PLR0915 — one statement per resource this root
     reconciler_route = _reconciler_spec(settings)
     reconciler_model = _build_reconciler_provider(settings, reconciler_route)
     # The read-only sources, if this deployment configured one (ADR-0093 §7).
-    # **Three reader instances rather than one**, and ADR-0096 §5 decides it here
-    # rather than
-    # leaving the composition lane to pick by accident: ADR-0093 §7 bounds a reader
-    # at one outstanding worker *per instance*, so a shared reader would let a
-    # scheduled ingestion read suppress the request-path facet for as long as it
-    # runs — coupling a request cadence to a periodic job, in the direction that
-    # makes an advisory facet wait on it. Three instances cost three workers at
-    # most, which is still bounded, and each consumer then owns its own failure.
+    # **One reader instance per consumer**, and ADR-0096 §5 decides it here rather
+    # than leaving the composition lane to pick by accident: ADR-0093 §7 bounds a
+    # reader at one outstanding worker *per instance*, so a shared reader would let
+    # one consumer's read suppress another's for as long as it runs. Each instance
+    # costs one worker at most, which is still bounded, and each consumer then owns
+    # its own failure.
     #
-    # **The third is ADR-0132's producer, and ADR-0132 §3 requires it to be its
-    # own.** "The producer performs its own ``Reader.read()`` on its own schedule,
-    # and derives nothing from the facet path's reading or from the ingestion
-    # job's" — ADR-0093 §3's rule applied rather than stretched, because a producer
-    # reading a snapshot ingestion left behind would be reading durable
-    # cross-subsystem state §5 of that ADR forbids and would inherit a cadence
-    # chosen for a different job. The serial scheduler keeps the two scheduled
-    # reads from contending; what a deployment running both pays is duty cycle, and
-    # ADR-0132's Consequences name that rather than hide it.
+    # **The calendar has two consumers: the request-path facet and ADR-0132's
+    # producer**, and ADR-0132 §3 requires the producer's read to be its own — "The
+    # producer performs its own ``Reader.read()`` on its own schedule, and derives
+    # nothing from the facet path's reading". **Email has one, the facet**: ADR-0140
+    # §9 mints no producer for it. Neither source has an ingestion consumer, because
+    # scheduled ingestion into memory is retired (ADR-0294 §1); the count follows
+    # the consumers, which is the half a lane copying one source's block for the
+    # other gets wrong.
     #
-    # All three are built above the data directory, and they belong there for
+    # All of them are built above the data directory, and they belong there for
     # #372's reason rather than by association: constructing a reader opens nothing
-    # — it validates §7a's figures and names a daemon thread it has not started —
-    # so a calendar window or cap outside its range fails the build before any
-    # store is written.
+    # — it validates its figures (ADR-0093 §7a, ADR-0140 §12) and names a daemon
+    # thread it has not started — so a window or cap outside its range fails the
+    # build before any store is written.
     facet_reader = _build_calendar_reader(settings)
-    ingestion_reader = _build_calendar_reader(settings)
     upcoming_reader = _build_calendar_reader(settings)
-    # And the same rule applied to the **second source** (ADR-0140, ADR-0142 §3).
-    # Two instances rather than three, because email has two consumers and not
-    # three: ADR-0140 §9 mints no producer for it, so there is no upcoming-event
-    # sibling to build. The count follows the consumers rather than the calendar's
-    # shape, which is the half a lane copying the block above gets wrong.
-    #
-    # **Separate instances is ADR-0140 §13's own deliverable**, stated there rather
-    # than left to ADR-0096 §5 by inference: "both consumers above are wired into
-    # the engine on **separate** ``EmailReader`` instances, neither sharing the
-    # other's". A root injecting one reader into both wires a hub in which a
-    # running scheduled ingest makes the request-path facet raise ``ReaderError``
-    # and vanish — every presence check passing while a ratified clause is
-    # breached.
-    #
-    # Built above the data directory for the calendar readers' reason exactly
-    # (#372): constructing one opens nothing and validates ADR-0140 §12's five
-    # figures, so a window or cap outside its range fails the build before any
-    # store is written.
     email_facet_reader = _build_email_reader(settings)
-    email_ingestion_reader = _build_email_reader(settings)
     # The temporal core is built here, above the data directory, because it is what
     # *validates*: a non-conforming zone or a working-hours pair fails the build
     # before disk is touched (#372). The ``AssemblingContextProvider`` around it is
@@ -2373,83 +2350,6 @@ def build_composition(  # noqa: PLR0915 — one statement per resource this root
             # is shown resolves its conflicts against the records an answer to it
             # would actually retire.
             questions=QuestionStage(writer=writer, deferrals=deferrals, memory=memory),
-            # Leg 6's ingestion stage (ADR-0093 §6), over the *same* write stage
-            # the learn leg uses — ADR-0078 §3's one obligation reaching a second
-            # producer, so an attested proposal the
-            # policy defers parks a question the user can answer and one it stores
-            # is inspectable and forgettable through the surfaces that already
-            # exist (ADR-0028 §4).
-            #
-            # **`None` when no source is configured, which is the default** (§7).
-            # A reader ships disabled because "nothing may read a user's personal
-            # files because a default said so", so the ordinary deployment builds
-            # no stage at all and `Engine.ingest_calendar` refuses rather than
-            # reporting an
-            # empty success. Nothing calls it in that state anyway: the scheduler
-            # arms the job only on a configured interval, and `Settings` refuses an
-            # interval whose path is unset (§7a).
-            #
-            # **Wired on the path, never on the interval.** The path configures
-            # the source and the interval arms the cadence, so ADR-0093 §7a's
-            # facet-only state is one where the stage exists and no job is armed.
-            # It is no longer *also* conditional on a grant seam: ADR-0097 §5 makes
-            # a `SourceGrants` a required constructor argument and §9 puts the only
-            # holder of a store in the hub's grant operations, which had not been
-            # built — so `grants` was `None` in every deployment and no source was
-            # read at all (#684). ADR-0102 §7 opens the store here, so the seam is
-            # always present and only the *grant* decides whether anything is read.
-            # §8's consequence stands unchanged and is now the user's to answer:
-            # "An installation that has been reading a source stops reading it
-            # until the user grants."
-            #
-            # Its **own** reader, never the one the context source holds
-            # (ADR-0096 §5).
-            calendar_ingestion=(
-                None
-                if ingestion_reader is None
-                else IngestionStage(
-                    reader=ingestion_reader,
-                    writes=writes,
-                    grants=grants,
-                    reads=reads,
-                    now=_utcnow,
-                )
-            ),
-            # ADR-0140's ingestion, and the **second source's** stage rather than a
-            # second use of the first (ADR-0142 §3). It is a second construction of
-            # the same class — no new machinery at all, which is the strongest
-            # available evidence that the seam was cut in the right place at leg 6 —
-            # over the *same* write stage, so an ingested mail belief the policy
-            # defers parks a question the user can answer and one it stores is
-            # inspectable and forgettable through the surfaces that already exist.
-            #
-            # **A multiplexing stage is refused, and the reason is cadence rather
-            # than taste** (§3). One stage behind one operation is one scheduler row,
-            # and one row has one interval — so a multiplexer would have to grow a
-            # schedule of its own, which is ADR-0093 §11's registry arriving at the
-            # second source instead of the third. It would also fuse the failure
-            # modes: a `ReaderError` from one source would abort the loop and the
-            # sibling source would not be read at all that tick.
-            #
-            # **Wired on its own path and armed on its own interval** (§2), reading
-            # no field of the calendar's in either decision. Both clauses of §1 are
-            # visible right here: the stage exists whenever `email_source_path` is
-            # set, whatever the calendar is doing, and nothing defaults this
-            # source's arming from another's.
-            #
-            # Its **own** reader, never the one the context source holds
-            # (ADR-0096 §5, ADR-0140 §13).
-            email_ingestion=(
-                None
-                if email_ingestion_reader is None
-                else IngestionStage(
-                    reader=email_ingestion_reader,
-                    writes=writes,
-                    grants=grants,
-                    reads=reads,
-                    now=_utcnow,
-                )
-            ),
             # Leg 10's upcoming-event producer (ADR-0132). **The first holder of
             # ADR-0130 §3's seam**, and the reason `notification_writer` above
             # exists at all.
@@ -2459,8 +2359,7 @@ def build_composition(  # noqa: PLR0915 — one statement per resource this root
             # ADR's rule. The reader is not shared (§3, ADR-0096 §5); the read is
             # gated on `NOTIFY` and on nothing else, so a live `INGEST` or `FACET`
             # grant on this calendar authorises it not at all (§2, ADR-0133 §2);
-            # and its interval is its own field rather than a share of
-            # `calendar_reader_interval` (§4).
+            # and its interval is its own field (§4).
             #
             # **Built whenever a source is configured, and armed only by its own
             # interval.** The stage's presence answers "is there anything to read";
@@ -2502,7 +2401,7 @@ def build_composition(  # noqa: PLR0915 — one statement per resource this root
             # construction, because a run that fails does not record its chunk as
             # done, so a second recipient buys nothing.
             #
-            # **Always wired, unlike `ingestion` above**, because nothing about it
+            # **Always wired, unlike the upcoming-event producer**, because nothing about it
             # is conditional on a source or a grant: the job is armed by its
             # interval alone, which is `None` until an operator sets it. The two
             # bounds are ADR-0111 §4's `Settings` fields, so the delay this job can
@@ -2594,8 +2493,8 @@ def build_composition(  # noqa: PLR0915 — one statement per resource this root
                 store=grants,
                 sources=_held_sources(
                     settings,
-                    calendar=(facet_reader, ingestion_reader, upcoming_reader),
-                    email=(email_facet_reader, email_ingestion_reader),
+                    calendar=(facet_reader, upcoming_reader),
+                    email=(email_facet_reader,),
                 ),
                 id_factory=_uuid,
                 clock=_utcnow,
@@ -3306,13 +3205,10 @@ def _build_email_reader(settings: Settings) -> EmailReader | None:
     consent decision rather than a technical one, holds here unchanged. What is
     worth stating separately is what differs.
 
-    **Keyed on ``email_source_path`` and on nothing else.** ADR-0142 §2 is marked:
-    "A source's ingestion stage is constructed by the composition root when **that
-    source's** path field is configured … Neither decision reads any other source's
-    fields." So this function consults no calendar field and no interval — a store
-    configured with no ``email_reader_interval`` is the legal, meaningful state in
-    which the reader exists, the facet is available to a turn, and no scheduler row
-    is armed.
+    **Keyed on ``email_source_path`` and on nothing else**, so this function
+    consults no calendar field: whether one source is configured says nothing about
+    the other. A configured store is the state in which the reader exists and the
+    facet is available to a turn, and no scheduler row reads it (ADR-0294 §1).
 
     **No timezone parameter, unlike the calendar's**, and the absence is
     ``EmailReader``'s own consequence rather than an omission here: every instant it

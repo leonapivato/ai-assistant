@@ -45,7 +45,7 @@ from test_engine import Harness
 
 from ai_assistant.orchestration.engine import Engine
 from ai_assistant.permissions import SqliteSourceReadTrail
-from ai_assistant.testing import FakeReader, source_read_record
+from ai_assistant.testing import source_read_record
 
 if TYPE_CHECKING:
     from collections.abc import AsyncIterator
@@ -163,38 +163,6 @@ async def test_the_order_is_not_derived_from_the_instant_on_the_row(
     assert answered == _EXPECTED
     assert answered != tuple(record_id for record_id, _ in by_instant)
     assert answered != tuple(record_id for record_id, _ in reversed(by_instant))
-
-
-async def test_what_a_driver_recorded_is_what_the_engine_lists() -> None:
-    """The single-instance obligation, end to end through both seams.
-
-    The harness wires **one** ``FakeSourceReadTrail`` into the ingestion stages as a
-    ``SourceReadRecorder`` and into the façade as a ``SourceReadTrail``, exactly as
-    the composition root does (ADR-0185 §4, ADR-0186 §10). So driving a real
-    ingestion writes a row through the narrow seam, and the engine's own operation is
-    the only thing that reads it back.
-
-    **This is the case that says the surface is not decorative.** Every other case in
-    this lane seeds a trail directly and would pass just as well against a façade
-    wired to a second, empty store — which is the failure ADR-0042 §2 says no type
-    can catch, and the one #1485 records for the audit trail one store over: a
-    correct value with no reader.
-
-    The row is asserted from ADR-0185 §2's fields rather than by object identity,
-    because what the driver wrote and what the engine returns are two detached
-    snapshots by contract (ADR-0021 §4) and comparing objects would assert the wrong
-    thing.
-    """
-    reader = FakeReader()
-    harness = Harness(reader=reader)
-
-    report = await harness.engine.ingest_calendar()
-    listed = await harness.engine.recent_reads()
-
-    assert report.source == reader.name
-    assert [row.source for row in listed] == [reader.name]
-    assert [row.produced for row in listed] == [report.proposed]
-    assert listed == await harness.engine.export_reads()
 
 
 @pytest.mark.parametrize("operation", ["recent_reads", "export_reads"])

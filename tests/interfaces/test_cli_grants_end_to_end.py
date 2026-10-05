@@ -27,9 +27,10 @@ of the test while the commands come and go on theirs. Which is also what the
 deployment does: the hub is a resident process and the CLI is a visitor
 (ADR-0084 §6).
 
-There is no ``ingest`` on the wire, deliberately — ingestion is the hub's
-scheduled job (ADR-0093 §6), not a request a client makes — so it is driven on the
-hub's own loop, where the scheduler drives it.
+There is no ``notice_upcoming_events`` on the wire, deliberately — the
+upcoming-event producer is the hub's scheduled job (ADR-0132 §1), not a request a
+client makes — so it is driven on the hub's own loop, where the scheduler drives
+it.
 """
 
 from __future__ import annotations
@@ -283,13 +284,14 @@ def test_sources_reads_the_real_readers_and_their_real_locations(
     assert "not granted" in rendered
 
 
-def test_a_typed_grant_is_what_the_ingest_gate_reads(hub: _Hub, console_output: StringIO) -> None:
+def test_a_typed_grant_is_what_the_producer_gate_reads(hub: _Hub, console_output: StringIO) -> None:
     """The join, in one test: the command a user types, the store the gate reads.
 
     Leg 6's exit test asserts this loop over the engine's own methods (#684); this
     asserts it over the *commands*, which is the surface a person has. The
-    discriminating step is the ingest between them — it runs on the hub's loop,
-    where the scheduler runs it, and it consults ``SqliteSourceGrantStore``. A
+    discriminating step is the upcoming-event producer's pass between them — it
+    runs on the hub's loop, where the scheduler runs it, and it consults
+    ``SqliteSourceGrantStore``. A
     ``grant`` that rendered "Granted" without reaching that store passes every
     assertion in the fake-backed suite and fails here.
 
@@ -303,15 +305,17 @@ def test_a_typed_grant_is_what_the_ingest_gate_reads(hub: _Hub, console_output: 
     at all. Neither is visible in the output or in the store; both are visible here.
     """
     with pytest.raises(SourceNotGrantedError):
-        hub.run(hub.engine.ingest_calendar())
+        hub.run(hub.engine.notice_upcoming_events())
 
     granted = CliRunner().invoke(
-        cli.app, ["grant", CALENDAR_READER_NAME, "--scope", "facet", "--scope", "ingest", "--yes"]
+        cli.app, ["grant", CALENDAR_READER_NAME, "--scope", "facet", "--scope", "notify", "--yes"]
     )
     assert granted.exit_code == 0
     assert "Granted" in console_output.getvalue()
     assert hub.received == ["grantable_sources", "grant"]
-    assert hub.run(hub.engine.ingest_calendar()).stored == 1
+    # A successful pass: the event is an hour out, beyond the thirty-minute lead, so
+    # nothing is offered — and zero is a success, never a refusal (ADR-0093 §8).
+    assert hub.run(hub.engine.notice_upcoming_events()) == 0
 
     # No `--yes`, and none is accepted: ADR-0102 §4 puts nothing between a user and
     # their remedy, so a revocation that prompted would hang here rather than pass.
@@ -324,36 +328,7 @@ def test_a_typed_grant_is_what_the_ingest_gate_reads(hub: _Hub, console_output: 
     # been unconfigured.
     assert hub.received == ["revoke"]
     with pytest.raises(SourceNotGrantedError):
-        hub.run(hub.engine.ingest_calendar())
-
-
-def test_revoking_retires_nothing_the_granted_read_produced(
-    hub: _Hub, console_output: StringIO
-) -> None:
-    """ADR-0097 §6: revocation is prospective, and the CLI must not imply otherwise.
-
-    Asserted through ``beliefs`` rather than through the store, because the claim is
-    about what a user is told after they revoke. A surface that deleted what it had
-    ingested — or a ``revoke`` that read as though it had — would satisfy the
-    refusal above and still be wrong, and this is the only page a person would
-    check.
-    """
-    CliRunner().invoke(
-        cli.app, ["grant", CALENDAR_READER_NAME, "--scope", "facet", "--scope", "ingest", "--yes"]
-    )
-    assert hub.run(hub.engine.ingest_calendar()).stored == 1
-    CliRunner().invoke(cli.app, ["revoke", CALENDAR_READER_NAME])
-
-    console_output.truncate(0)
-    console_output.seek(0)
-    result = CliRunner().invoke(cli.app, ["beliefs"])
-
-    assert result.exit_code == 0
-    rendered = _flat(console_output.getvalue())
-    assert "Dentist" in rendered
-    assert "attested" in rendered
-    # ADR-0102 §9: nothing here may claim the read was stopped retroactively.
-    assert "no longer being read" not in rendered
+        hub.run(hub.engine.notice_upcoming_events())
 
 
 def test_the_grant_record_holds_both_acts_after_the_commands_run(
@@ -397,7 +372,7 @@ def test_granted_reads_the_real_store_and_amend_leaves_both_acts_on_file(
     fail here rather than read as a pass.
     """
     CliRunner().invoke(cli.app, ["grant", CALENDAR_READER_NAME, "--scope", "facet", "--yes"])
-    CliRunner().invoke(cli.app, ["amend", CALENDAR_READER_NAME, "--scope", "ingest", "--yes"])
+    CliRunner().invoke(cli.app, ["amend", CALENDAR_READER_NAME, "--scope", "notify", "--yes"])
 
     console_output.truncate(0)
     console_output.seek(0)
@@ -407,7 +382,7 @@ def test_granted_reads_the_real_store_and_amend_leaves_both_acts_on_file(
     rendered = _flat(console_output.getvalue())
     assert "1 source(s)" in rendered
     assert CALENDAR_READER_NAME in rendered
-    assert "durably remembering what it says" in rendered
+    assert "reading it to raise things with you unprompted" in rendered
     assert "looking at it while answering" not in rendered
 
     console_output.truncate(0)

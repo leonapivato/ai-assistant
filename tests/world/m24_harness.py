@@ -11,8 +11,8 @@ its own figure with its denominator.
 **What is real here and what is a double, stated once so nobody has to infer it.**
 Everything on the path the arms measure is the shipping class: the real
 :class:`~ai_assistant.permissions.reads.SqliteSourceReadTrail`, the real
-``CalendarContextSource`` and ``EmailContextSource``, the real ``IngestionStage``,
-the real ``UpcomingEventStage``, and — in arm (c), where the subject is a *path* and
+``CalendarContextSource`` and ``EmailContextSource``, the real ``UpcomingEventStage``
+(the ``INGEST`` driver is retired, ADR-0294 §1), and — in arm (c), where the subject is a *path* and
 a *configured location* — the real ``CalendarReader`` over a planted ``.ics``. The
 doubles are:
 
@@ -21,12 +21,12 @@ doubles are:
 * **the reader**, in every arm but (c), which is
   :class:`~ai_assistant.testing.FakeReader` — the "seeded reader" §11 sanctions, and
   the only way to drive ``FAILED`` from a source that failed with the bytes in hand;
-* **the collaborators the read half does not rule on** — the memory write path and
-  the notification writer — which are ``ai_assistant.testing``'s canonical fakes,
+* **the collaborator the read half does not rule on** — the notification writer —
+  which is ``ai_assistant.testing``'s canonical fakes,
   each conformance-tested against its own Protocol.
 
 ``app/composition.py`` is the production wiring this mirrors: one trail object
-passed to all three drivers as a ``SourceReadRecorder``. Where this harness diverges
+passed to every driver as a ``SourceReadRecorder``. Where this harness diverges
 from that root it is stated at the site.
 
 **The clock is controlled and moves only when told**, which is what makes arm (a)'s
@@ -64,15 +64,10 @@ from ai_assistant.core.types import (
     NotificationDispositionKind,
     ReadOutcome,
 )
-from ai_assistant.orchestration import IngestionStage, MemoryWriteStage
 from ai_assistant.orchestration.upcoming import UpcomingEventStage
 from ai_assistant.permissions import SqliteSourceReadTrail
 from ai_assistant.readers._source import OneWorker, ReadAlreadyOutstandingError
 from ai_assistant.testing import (
-    FakeDeferralStore,
-    FakeMemoryPolicy,
-    FakeMemoryStore,
-    FakeMemoryWriter,
     FakeReader,
     FakeSourceGrants,
     attested_proposal,
@@ -353,13 +348,6 @@ class World:
         """
         self.clock = clock if clock is not None else Clock()
         self.trail = SqliteSourceReadTrail(path=":memory:", max_rows=max_rows)
-        self.memory = FakeMemoryStore(now=lambda: START)
-        self.writes = MemoryWriteStage(
-            writer=FakeMemoryWriter(
-                store=self.memory, policy=FakeMemoryPolicy(), now=lambda: START
-            ),
-            deferrals=FakeDeferralStore(now=lambda: START),
-        )
         self.notifications = RecordingNotificationWriter()
 
     def close(self) -> None:
@@ -369,10 +357,11 @@ class World:
     def granted(self, source: str = CALENDAR) -> Gate:
         """A gate holding a live grant covering every use of ``source``.
 
-        ``source_grant`` names all three scopes by default, which is what lets one
-        arrangement drive the same source for ``FACET``, ``INGEST`` and ``NOTIFY`` —
-        ADR-0133 §2 keeps the three independent, and a grant naming one would refuse
-        the other two.
+        Every member of ``GrantScope`` is named, which is what lets one arrangement
+        drive the same source for ``FACET`` and ``NOTIFY`` — ADR-0133 §2 keeps the
+        uses independent, and a grant naming one would refuse the other. The store
+        seam still accepts a scope naming ``INGEST`` (ADR-0294 §4); only a new grant
+        made through ``AssistantEngine.grant`` refuses it.
         """
         return Gate(self.clock, [source_grant(source, scope=tuple(GrantScope))])
 
@@ -397,14 +386,6 @@ class World:
         if use is GrantScope.FACET:
             builder = CalendarContextSource if reader.name == CALENDAR else EmailContextSource
             return builder(reader=reader, grants=gate, reads=recorder, now=self.clock)
-        if use is GrantScope.INGEST:
-            return IngestionStage(
-                reader=reader,
-                writes=self.writes,
-                grants=gate,
-                reads=recorder,
-                now=self.clock,
-            )
         return UpcomingEventStage(
             reader=reader,
             grants=gate,
@@ -431,7 +412,7 @@ class World:
         each refusal produces, and what these arms rule on is the **trail**.
 
         Args:
-            use: Which of the three uses to drive.
+            use: Which use to drive — ``FACET`` or ``NOTIFY``.
             reader: The producer.
             gate: The grant seam, already arranged for the outcome wanted.
             outcome: What the arrangement was built to produce.
@@ -459,8 +440,6 @@ async def _run(driver: object, use: GrantScope) -> object:
     """Call the one operation the driver for ``use`` exposes."""
     if use is GrantScope.FACET:
         return await driver.contribute()  # type: ignore[attr-defined]  # the driver is the one this use names
-    if use is GrantScope.INGEST:
-        return await driver.ingest()  # type: ignore[attr-defined]
     return await driver.notice()  # type: ignore[attr-defined]
 
 

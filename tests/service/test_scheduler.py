@@ -39,12 +39,11 @@ from pydantic import ValidationError
 
 from ai_assistant.app import build_engine
 from ai_assistant.core.config import EmbedderKind, Settings, load_settings
-from ai_assistant.core.errors import ConfigurationError
 from ai_assistant.core.protocols import AssistantEngine
 from ai_assistant.core.types import GrantScope
 from ai_assistant.orchestration.consolidation import ConsolidationReport
 from ai_assistant.orchestration.engine import ENGINE_SHUTTING_DOWN, Engine
-from ai_assistant.readers import CALENDAR_READER_NAME, EMAIL_READER_NAME
+from ai_assistant.readers import CALENDAR_READER_NAME
 from ai_assistant.service.scheduler import Job, Scheduler, jobs_for
 
 if TYPE_CHECKING:
@@ -239,57 +238,41 @@ async def test_a_disabled_job_is_absent_from_the_table_not_present_and_skipped(
         await engine.aclose()
 
 
-def _reader_settings(tmp_path: Path, *, interval: timedelta | None) -> Settings:
-    """Settings that configure the calendar source, and optionally arm its job.
-
-    The path is set in both cases: ``Settings`` refuses an interval whose source is
-    unset (ADR-0093 §7a's incoherent fourth state), and an engine built without the
-    path would hold no reader for the job to reach.
-    """
-    return Settings(
-        embedder=EmbedderKind.HASHING,
-        calendar_reader_path=tmp_path / "calendar.ics",
-        calendar_reader_interval=interval,
-    )
-
-
-async def test_the_calendar_reader_job_is_absent_until_an_operator_arms_it(
-    tmp_path: Path,
+async def test_no_ingestion_job_is_scheduled_even_where_the_old_variables_are_set(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
 ) -> None:
-    """ADR-0093 §7: a reader ships disabled, and §6: enabled is then a real option.
+    """ADR-0294 §1 and §5: no job reads a source to propose what it read into memory.
 
-    The two clauses pull in different directions and both are asserted, because
-    honouring one alone is a plausible mistake in either direction. §7's default is
-    a **consent** decision — "nothing may read a user's personal files because a
-    default said so — not that anything technical is missing" — so a fresh
-    deployment arms nothing. §6 then says the reason observation ships disabled
-    "is specific to observation and does not transfer": §9's gate is ADR-0092,
-    which is ratified, so an operator who sets an interval gets a job that runs.
-    This default is a **grant** decision over a file the assistant does not own.
+    Through production composition, on the shape ADR-0285 §3's observation case
+    uses: the hub's own ``load_settings``, ``build_engine`` and ``jobs_for``, over
+    an environment that still carries the two variables a pre-change deployment set
+    to arm ingestion. ``Settings`` ignores a variable that names no field, so the
+    hub starts without an error and arms nothing from them — which is the cutover
+    ADR-0294 §5 names. Both sources are configured and every other interval is
+    armed, so the table read here is the widest a deployment can build; the check
+    is over every row's name *and* every row's bound method.
     """
-    settings = _reader_settings(tmp_path, interval=None)
+    _write_one_event_calendar(tmp_path / "calendar.ics")
+    _write_one_mail_message(tmp_path / "mail.mbox")
+    monkeypatch.setenv("ASSISTANT_CALENDAR_READER_INTERVAL", "PT6H")
+    monkeypatch.setenv("ASSISTANT_EMAIL_READER_INTERVAL", "PT6H")
+    monkeypatch.setenv("ASSISTANT_EMBEDDER", "hashing")
+    monkeypatch.setenv("ASSISTANT_CALENDAR_READER_PATH", str(tmp_path / "calendar.ics"))
+    monkeypatch.setenv("ASSISTANT_EMAIL_SOURCE_PATH", str(tmp_path / "mail.mbox"))
+    monkeypatch.setenv("ASSISTANT_CALENDAR_UPCOMING_INTERVAL", "PT5M")
+    monkeypatch.setenv("ASSISTANT_CONSOLIDATION_INTERVAL", "PT6H")
+    settings = load_settings()
     engine = build_engine(settings, data_dir=tmp_path)
     try:
-        unarmed = jobs_for(engine, settings)
-        assert [job.name for job in unarmed] == [
-            "retention_purge",
-            "conversation_sweep",
-            "notification_reconsider",
-        ]
+        jobs = jobs_for(engine, settings)
 
-        armed_settings = _reader_settings(tmp_path, interval=timedelta(hours=6))
-        armed = jobs_for(engine, armed_settings)
-        assert [job.name for job in armed] == [
-            "retention_purge",
-            "conversation_sweep",
-            "calendar_reader",
-            "notification_reconsider",
-        ]
-        assert armed[2].interval == timedelta(hours=6)
-        # The body is a **public ``Engine`` call**, by identity and not by name: a
-        # job that held a reader, a store or a subsystem import would be the shape
-        # ADR-0083 §8 forbids and ADR-0093 §6 restates.
-        assert armed[2].run == engine.ingest_calendar
+        assert "calendar_upcoming" in {job.name for job in jobs}, "the table is the armed one"
+        assert not any("reader" in job.name for job in jobs)
+        assert not any("ingest" in getattr(job.run, "__name__", "") for job in jobs)
+        assert not hasattr(engine, "ingest_calendar")
+        assert not hasattr(engine, "ingest_email")
+        assert not hasattr(settings, "calendar_reader_interval")
+        assert not hasattr(settings, "email_reader_interval")
     finally:
         await engine.aclose()
 
@@ -299,7 +282,9 @@ async def test_an_unreadable_source_is_logged_by_class_and_never_by_path(
 ) -> None:
     """ADR-0093 §6 and §8's two halves, asserted end to end over the real façade.
 
-    §6: "A failing reader job never takes the process down. It is logged with its
+    Driven through the upcoming-event producer, the one scheduled job that reads a
+    source (ADR-0132 §9 gives it the same disposition). §6: "A failing reader job
+    never takes the process down. It is logged with its
     class and retried at its next due instant" — stronger here than for the jobs
     that clause was written for, because a reader's source is a file the system
     does not own, so unreadability is an ordinary state of the world rather than a
@@ -313,14 +298,14 @@ async def test_an_unreadable_source_is_logged_by_class_and_never_by_path(
     writes rather than against the exception, because the log is where the harm
     would land.
     """
-    settings = _reader_settings(tmp_path, interval=_TICK)
+    settings = _producer_settings(tmp_path, interval=_TICK)
     # Granted below, because the subject is a *source* failure: ADR-0097 §5's
     # refusal is a different fact from ADR-0093 §8's, and an ungranted engine would
     # log a `SourceNotGrantedError` while this case asserts on the reader's own
     # class. Granted through the surface rather than through an injected fake seam,
     # which is what ADR-0102 §7 makes possible: `build_engine` opens the store.
     engine = build_engine(settings, data_dir=tmp_path)
-    await engine.grant(CALENDAR_READER_NAME, scope=[GrantScope.INGEST])
+    await engine.grant(CALENDAR_READER_NAME, scope=[GrantScope.NOTIFY])
     twice = asyncio.Event()
     attempts = 0
 
@@ -329,26 +314,26 @@ async def test_an_unreadable_source_is_logged_by_class_and_never_by_path(
         attempts += 1
         if attempts >= 2:
             twice.set()
-        return await engine.ingest_calendar()
+        return await engine.notice_upcoming_events()
 
     try:
         with structlog.testing.capture_logs() as captured:
-            await _drive(Scheduler([_job("calendar_reader", counting)]), until=twice)
+            await _drive(Scheduler([_job("calendar_upcoming", counting)]), until=twice)
     finally:
         await engine.aclose()
 
     assert attempts >= 2, "the job was not retried after its source failed"
     failures = [entry for entry in captured if entry["event"] == "hub_scheduler_job_failed"]
     assert failures, _events(captured)
-    assert failures[0]["job"] == "calendar_reader"
+    assert failures[0]["job"] == "calendar_upcoming"
     assert failures[0]["error_class"] == "ReaderError"
     rendered = repr(captured)
     assert "calendar.ics" not in rendered
     assert str(tmp_path) not in rendered
 
 
-def _write_one_event_calendar(path: Path) -> None:
-    """Put one event an hour from now at ``path`` — a source a granted job can read.
+def _write_one_event_calendar(path: Path, *, starts_in: timedelta = timedelta(hours=1)) -> None:
+    """Put one event ``starts_in`` from now at ``path`` — a source a granted job can read.
 
     Duplicated from ``tests/app/test_composition.py`` rather than shared, and
     deliberately: a test of the *scheduler* should not reach into the composition
@@ -366,7 +351,7 @@ def _write_one_event_calendar(path: Path) -> None:
     change owing its own decision; #658 names this site among those that move with
     it.
     """
-    begins = datetime.now(UTC) + timedelta(hours=1)
+    begins = datetime.now(UTC) + starts_in
     ends = begins + timedelta(minutes=30)
     stamp = "%Y%m%dT%H%M%SZ"
     path.write_bytes(
@@ -379,59 +364,52 @@ def _write_one_event_calendar(path: Path) -> None:
     )
 
 
-def _armed_calendar_job(engine: Engine, settings: Settings) -> Job:
-    """The ``calendar_reader`` job ``jobs_for`` actually builds, for driving.
+def _armed_producer_job(engine: Engine, settings: Settings) -> Job:
+    """The ``calendar_upcoming`` job ``jobs_for`` actually builds, for driving.
 
     Taken from the real table rather than assembled here, so what the loop below
-    runs is the **bound ``Engine.ingest_calendar``** a deployment arms and not a
-    stand-in
-    that happens to share its name (ADR-0083 §8).
+    runs is the **bound ``Engine.notice_upcoming_events``** a deployment arms and
+    not a stand-in that happens to share its name (ADR-0083 §8).
     """
-    return {job.name: job for job in jobs_for(engine, settings)}["calendar_reader"]
+    return {job.name: job for job in jobs_for(engine, settings)}["calendar_upcoming"]
 
 
-async def test_the_armed_job_ingests_a_granted_source_and_reports_completion(
+async def test_the_armed_producer_notices_a_granted_source_and_reports_completion(
     tmp_path: Path,
 ) -> None:
-    """Leg 6's exit test with the **scheduler** in the chain, not just the engine.
+    """The producer with the **scheduler** in the chain, not just the engine.
 
-    ``tests/app/test_composition.py`` already proves that a granted source becomes
-    a belief when ``Engine.ingest_calendar`` is called directly. What nothing exercised is
-    the leg between: that the job ADR-0083 §7 arms, driven by the real loop on a
-    real interval, gets from an ``.ics`` on disk to a belief the user can read.
-    That is the whole of what "the assistant knows something true about the user's
-    day it was never told" needs a *hub* for, and it is the one step of the chain a
-    person exercises without ever calling an engine method.
+    What this exercises is the leg between a configured interval and an offered
+    candidate: that the job ADR-0083 §7 arms, driven by the real loop on a real
+    interval, gets from an ``.ics`` on disk to a candidate offered through the
+    notification seam. It is the one step of the chain a person exercises without
+    ever calling an engine method.
 
     The success half is asserted as well as the outcome — ``hub_scheduler_job_completed``
     and **no** ``hub_scheduler_job_failed`` — because a job that raised and was
-    absorbed would leave the belief count unchanged and look identical to one that
-    never ran (ADR-0022 §4a's shape, at the scheduler).
+    absorbed would offer nothing and look identical to one that never ran
+    (ADR-0022 §4a's shape, at the scheduler).
 
     **Two ticks are awaited, and the signal is raised only once the body has
     returned** — which is the whole of what makes the second one real. Signalling
     *before* awaiting the job would wake ``_drive`` into cancelling the scheduler
-    with the second ingestion still in flight, so the test would assert over one
-    completed run while claiming two. Raising it afterwards is safe in the
-    direction that matters: ``Scheduler._run_job`` reaches its ``_log.info`` with
-    no ``await`` between the body returning and the log, and its first suspension
-    point is the ``asyncio.sleep`` after re-arming — so every completed attempt is
-    certainly logged before a cancellation can land.
-
-    That earns the second property rather than assuming it: both ingestions really
-    run, so a re-read folding into the record it already wrote — rather than
-    duplicating it — is something this asserts (ADR-0093 §5's "nothing the store
-    holds is destroyed by a re-read", from the other side).
+    with the second run still in flight, so the test would assert over one completed
+    run while claiming two. Raising it afterwards is safe in the direction that
+    matters: ``Scheduler._run_job`` reaches its ``_log.info`` with no ``await``
+    between the body returning and the log, and its first suspension point is the
+    ``asyncio.sleep`` after re-arming — so every completed attempt is certainly
+    logged before a cancellation can land.
     """
-    settings = _reader_settings(tmp_path, interval=_TICK)
-    _write_one_event_calendar(tmp_path / "calendar.ics")
+    settings = _producer_settings(tmp_path, interval=_TICK)
+    _write_one_event_calendar(tmp_path / "calendar.ics", starts_in=timedelta(minutes=10))
     engine = build_engine(settings, data_dir=tmp_path)
     # Through the surface a user uses, never an injected fake seam: ADR-0102 §7
     # opens the store in the composition root, so the grant this job is gated on is
     # a real row in ``grants.db`` (ADR-0097 §1's declared identity as the key).
-    await engine.grant(CALENDAR_READER_NAME, scope=[GrantScope.INGEST])
-    armed = _armed_calendar_job(engine, settings)
+    await engine.grant(CALENDAR_READER_NAME, scope=[GrantScope.NOTIFY])
+    armed = _armed_producer_job(engine, settings)
     twice = asyncio.Event()
+    offered: list[object] = []
     attempts = 0
 
     async def counting() -> object:
@@ -439,7 +417,9 @@ async def test_the_armed_job_ingests_a_granted_source_and_reports_completion(
         # Counted and signalled in a ``finally``, so an attempt is only "done" once
         # the job has actually returned or raised — see the docstring.
         try:
-            return await armed.run()
+            count = await armed.run()
+            offered.append(count)
+            return count
         finally:
             attempts += 1
             if attempts >= 2:
@@ -447,8 +427,7 @@ async def test_the_armed_job_ingests_a_granted_source_and_reports_completion(
 
     try:
         with structlog.testing.capture_logs() as captured:
-            await _drive(Scheduler([_job("calendar_reader", counting)]), until=twice)
-        beliefs = await engine.beliefs()
+            await _drive(Scheduler([_job("calendar_upcoming", counting)]), until=twice)
     finally:
         await engine.aclose()
 
@@ -456,12 +435,10 @@ async def test_the_armed_job_ingests_a_granted_source_and_reports_completion(
         _events(captured)
     )
     completed = [entry for entry in captured if entry["event"] == "hub_scheduler_job_completed"]
-    # Two, not one: both ingestions ran to completion, which is what makes the
-    # single belief below evidence of folding rather than of a cancelled re-read.
     assert len(completed) >= 2, _events(captured)
-    assert {entry["job"] for entry in completed} == {"calendar_reader"}
-    assert len(beliefs) == 1
-    assert "Dentist" in beliefs[0].content
+    assert {entry["job"] for entry in completed} == {"calendar_upcoming"}
+    # The occurrence inside the lead window was offered on the first run.
+    assert offered[0] == 1
 
 
 async def test_an_ungranted_source_is_refused_every_interval_and_never_by_path(
@@ -473,8 +450,10 @@ async def test_an_ungranted_source_is_refused_every_interval_and_never_by_path(
     "A deployment that revokes a grant while leaving ``calendar_reader_interval``
     set therefore logs a refusal every interval, and that is the correct behaviour
     rather than a defect to design around: it is configuration and consent
-    disagreeing out loud." The operator's fix is to unset the interval — a
-    configuration act answering a configuration fact.
+    disagreeing out loud." That interval is retired with ingestion (ADR-0294 §5);
+    the rule binds the upcoming-event producer's armed row on the same terms
+    (ADR-0133 §5), which is what is driven here. The operator's fix is to unset the
+    interval — a configuration act answering a configuration fact.
 
     **This is the test that fails if anyone re-implements "the job arms when
     configured *and* granted".** That reading is live in #675's lane-4 bullet,
@@ -488,10 +467,8 @@ async def test_an_ungranted_source_is_refused_every_interval_and_never_by_path(
 
     **Asserted against the log the scheduler actually writes rather than against
     the exception, because the log is where the harm would land** — the sibling
-    case's argument, and it transfers whole. ``tests/orchestration/test_ingestion.py``
-    already pins the message on ``SourceNotGrantedError`` itself; nothing pinned
-    what reaches an operational log, which is the place ADR-0004 §5 forbids Tier 1
-    data outright.
+    case's argument, and it transfers whole: what reaches an operational log is the
+    place ADR-0004 §5 forbids Tier 1 data outright.
 
     **The source exists and is readable here**, unlike the sibling case's missing
     file, so the refusal is provably the *grant* and not the source: ADR-0097 §5
@@ -501,7 +478,7 @@ async def test_an_ungranted_source_is_refused_every_interval_and_never_by_path(
     **"Every interval" is asserted as two refusals, and the signal is raised only
     once the job has raised.** Both halves are needed. One refusal would pass
     against a regression in which the first tick refuses and every later tick
-    returns an empty success — the "reports health while ingesting nothing" state
+    returns an empty success — the "reports health while reading nothing" state
     §5 chose an exception to prevent. And signalling *before* awaiting the job
     would wake ``_drive`` into cancelling the scheduler mid-tick, so the second
     refusal would never be logged to assert on. Raising it afterwards is sound
@@ -509,13 +486,13 @@ async def test_an_ungranted_source_is_refused_every_interval_and_never_by_path(
     between the body raising and the log, and its first suspension point is the
     ``asyncio.sleep`` after re-arming.
     """
-    settings = _reader_settings(tmp_path, interval=_TICK)
-    _write_one_event_calendar(tmp_path / "calendar.ics")
+    settings = _producer_settings(tmp_path, interval=_TICK)
+    _write_one_event_calendar(tmp_path / "calendar.ics", starts_in=timedelta(minutes=10))
     # Nothing is granted. ADR-0097 §8: no grant is minted from configuration, an
     # existing path included — "an installation that has been reading a source
     # stops reading it until the user grants".
     engine = build_engine(settings, data_dir=tmp_path)
-    armed = _armed_calendar_job(engine, settings)
+    armed = _armed_producer_job(engine, settings)
     twice = asyncio.Event()
     attempts = 0
 
@@ -532,8 +509,8 @@ async def test_an_ungranted_source_is_refused_every_interval_and_never_by_path(
 
     try:
         with structlog.testing.capture_logs() as captured:
-            await _drive(Scheduler([_job("calendar_reader", counting)]), until=twice)
-        beliefs = await engine.beliefs()
+            await _drive(Scheduler([_job("calendar_upcoming", counting)]), until=twice)
+        held = await engine.notifications()
     finally:
         await engine.aclose()
 
@@ -543,10 +520,10 @@ async def test_an_ungranted_source_is_refused_every_interval_and_never_by_path(
     failures = [entry for entry in captured if entry["event"] == "hub_scheduler_job_failed"]
     # **Two refusals, not one.** Asserting a single one would pass against a
     # regression in which the first tick refuses and every later tick returns an
-    # empty success — which is precisely the "reports health while ingesting
+    # empty success — which is precisely the "reports health while reading
     # nothing" state ADR-0022 §4a refuses and §5 chose an exception to prevent.
     assert len(failures) >= 2, _events(captured)
-    assert {entry["job"] for entry in failures} == {"calendar_reader"}
+    assert {entry["job"] for entry in failures} == {"calendar_upcoming"}
     # Never a ``ReaderError``: an operator debugging a missing calendar must not be
     # sent to the filesystem for a fault that lives in the grant store (§5).
     # Asserted over **every** refusal, not just the first: §8's clause binds the
@@ -556,14 +533,14 @@ async def test_an_ungranted_source_is_refused_every_interval_and_never_by_path(
     for failure in failures:
         cause = str(failure["cause"])
         assert CALENDAR_READER_NAME in cause
-        assert GrantScope.INGEST.value in cause
+        assert GrantScope.NOTIFY.value in cause
     # ...and nothing else. A declared identity is safe by construction (ADR-0093
     # §7); a path is the Tier 1 leak the clause exists to prevent.
     rendered = repr(captured)
     assert "calendar.ics" not in rendered
     assert str(tmp_path) not in rendered
-    # Nothing was opened, so nothing was proposed and nothing was written (§5).
-    assert not beliefs, beliefs
+    # Nothing was opened, so nothing was offered and nothing was held (§5).
+    assert not held, held
 
 
 @pytest.mark.parametrize("bad", [timedelta(0), timedelta(seconds=-1)])
@@ -1046,7 +1023,7 @@ async def test_the_armed_consolidation_row_runs_on_the_real_loop(
     Driven through the row ``jobs_for`` builds rather than through a hand-made
     :class:`Job`, so the thing under test is the table's own body. Two ticks are
     awaited, and the signal is raised only once the body has returned, for
-    ``test_the_armed_job_ingests_a_granted_source_and_reports_completion``'s reason
+    ``test_the_armed_producer_notices_a_granted_source_and_reports_completion``'s reason
     exactly.
 
     An empty store needs no model call — ``walk_records`` answers with no position
@@ -1093,9 +1070,9 @@ async def test_the_armed_consolidation_row_runs_on_the_real_loop(
 def _producer_settings(tmp_path: Path, *, interval: timedelta | None) -> Settings:
     """Settings that configure the calendar source, and optionally arm the producer.
 
-    The path is set in both cases for ``_reader_settings``' reasons exactly:
-    ``Settings`` refuses an armed producer with no source (ADR-0132 §4), and an
-    engine built without the path holds no producer stage for the job to reach.
+    The path is set in both cases: ``Settings`` refuses an armed producer with no
+    source (ADR-0132 §4), and an engine built without the path holds no producer
+    stage for the job to reach.
     """
     return Settings(
         embedder=EmbedderKind.HASHING,
@@ -1136,29 +1113,6 @@ async def test_the_upcoming_event_job_is_absent_until_an_operator_arms_it(
         await engine.aclose()
 
 
-async def test_arming_the_producer_arms_no_ingestion_and_the_reverse(tmp_path: Path) -> None:
-    """ADR-0132 §4: the two jobs over one source have two intervals.
-
-    "Arming or retuning one of these two changes ingestion's cadence in no way, and
-    arming ingestion arms no producer." The scheduler is where that independence is
-    observable, and a lane that reused ``calendar_reader_interval`` for both would
-    pass every test about either job on its own.
-    """
-    engine = build_engine(_producer_settings(tmp_path, interval=None), data_dir=tmp_path)
-    try:
-        producing = jobs_for(engine, _producer_settings(tmp_path, interval=timedelta(minutes=5)))
-        ingesting = jobs_for(engine, _reader_settings(tmp_path, interval=timedelta(hours=6)))
-
-        producing_names = [job.name for job in producing]
-        ingesting_names = [job.name for job in ingesting]
-        assert "calendar_upcoming" in producing_names
-        assert "calendar_reader" not in producing_names
-        assert "calendar_reader" in ingesting_names
-        assert "calendar_upcoming" not in ingesting_names
-    finally:
-        await engine.aclose()
-
-
 async def test_the_producer_job_can_be_disabled_but_never_by_zero(tmp_path: Path) -> None:
     """ADR-0083 §7's convention, inherited by ADR-0132 §4's new row.
 
@@ -1173,264 +1127,6 @@ async def test_the_producer_job_can_be_disabled_but_never_by_zero(tmp_path: Path
             _producer_settings(tmp_path, interval=timedelta(0))
     finally:
         await engine.aclose()
-
-
-# --- the second ingestion source (ADR-0140, ADR-0142) ----------------------
-
-
-def _mail_settings(
-    tmp_path: Path,
-    *,
-    interval: timedelta | None,
-    calendar_interval: timedelta | None = None,
-) -> Settings:
-    """Settings configuring the mail store, and optionally arming either ingestion.
-
-    ``_reader_settings``' shape for the second source. The **path is set in both
-    cases** for its reason exactly: ``Settings`` refuses an interval whose
-    ``email_source_path`` is unset (ADR-0140 §12), and an engine built without the
-    path holds no stage for the job to reach.
-
-    **The calendar is off unless a case asks for it**, and that default is the point
-    rather than convenience: ADR-0142 §1 rules that no source's arming is derived
-    from, defaulted from or conditioned on another's, so a helper that armed both
-    together would make the independence untestable from here.
-    """
-    return Settings(
-        embedder=EmbedderKind.HASHING,
-        email_source_path=tmp_path / "mail.mbox",
-        email_reader_interval=interval,
-        calendar_reader_path=tmp_path / "calendar.ics",
-        calendar_reader_interval=calendar_interval,
-    )
-
-
-async def test_both_ingestion_sources_are_armed_under_distinct_names_and_intervals(
-    tmp_path: Path,
-) -> None:
-    """ADR-0142 §9 test 1: the case every single-source test passes while broken.
-
-    #1030's failure mode 1 is a lane that satisfies ADR-0140 §13 by replacing the
-    calendar's stage and row with email's — email ingests, the calendar silently
-    stops, and every test written against one source at a time still passes. What
-    catches it is asserting the *pair*: two rows, distinct names, and each row's
-    interval its own source's.
-
-    **The two intervals are deliberately different.** Equal ones would be satisfied
-    by an implementation that read one field for both rows, which is precisely the
-    defaulting §1's second clause forbids.
-    """
-    settings = _mail_settings(
-        tmp_path, interval=timedelta(minutes=30), calendar_interval=timedelta(hours=6)
-    )
-    engine = build_engine(settings, data_dir=tmp_path)
-    try:
-        assert engine._calendar_ingestion is not None
-        assert engine._email_ingestion is not None
-
-        armed = {job.name: job for job in jobs_for(engine, settings)}
-
-        assert armed["calendar_reader"].interval == timedelta(hours=6)
-        assert armed["email_reader"].interval == timedelta(minutes=30)
-    finally:
-        await engine.aclose()
-
-
-async def test_a_configured_mail_store_with_no_interval_arms_nothing_and_disables_nothing(
-    tmp_path: Path,
-) -> None:
-    """ADR-0142 §9 test 2: the legal state §2 reserves, asserted in both halves.
-
-    §2's marked clause: "A source whose path is configured and whose interval is
-    unset is a legal, meaningful state per source: its ingestion stage exists and its
-    ingestion operation reaches that source's grant gate when called rather than
-    refusing as unwired, and no scheduler row is armed for it."
-
-    **Both halves, because a lane that keyed the stage off the interval passes the
-    first and fails the second.** No row is armed, *and* ``ingest_email`` still
-    succeeds when called directly.
-
-    **The grant is part of the arrangement rather than incidental to it.** Without
-    one the operation raises ``SourceNotGrantedError`` (§7) and this test would be
-    asserting the wrong refusal — it would pass against an implementation that built
-    no stage at all, since ADR-0142 §6's ``ConfigurationError`` and §7's refusal are
-    different facts and only one of them is the subject here.
-    """
-    settings = _mail_settings(tmp_path, interval=None)
-    _write_one_mail_message(tmp_path / "mail.mbox")
-    engine = build_engine(settings, data_dir=tmp_path)
-    try:
-        assert "email_reader" not in [job.name for job in jobs_for(engine, settings)]
-
-        await engine.grant(EMAIL_READER_NAME, scope=[GrantScope.INGEST])
-        report = await engine.ingest_email()
-        assert report.source == EMAIL_READER_NAME
-        # Not merely "did not refuse": the read reached the store and proposed from
-        # it, so the unarmed stage is a *working* stage with no caller rather than
-        # one that returns an empty success (ADR-0093 §8's two outcomes).
-        assert report.proposed == 1
-    finally:
-        await engine.aclose()
-
-
-async def test_either_ingestion_source_stands_alone(tmp_path: Path) -> None:
-    """ADR-0142 §9 test 3: neither source requires the other to be configured.
-
-    Catches "an implementation in which email ingestion requires a configured
-    calendar, or the reverse" — the coupling a lane introduces by keying one
-    source's wiring off a field that happens to be set in every fixture. Both
-    directions are asserted, because a single-direction test is passed by an
-    implementation that has the dependency the other way round.
-
-    The refusal asserted is ADR-0142 §6's ``ConfigurationError`` rather than a
-    missing row: an operation whose stage was never built is a *wiring* fault, and
-    §6 requires it to say so rather than report an empty success.
-    """
-    mail_only = Settings(
-        embedder=EmbedderKind.HASHING,
-        email_source_path=tmp_path / "mail.mbox",
-        email_reader_interval=timedelta(minutes=30),
-    )
-    engine = build_engine(mail_only, data_dir=tmp_path)
-    try:
-        assert "email_reader" in [job.name for job in jobs_for(engine, mail_only)]
-        with pytest.raises(ConfigurationError):
-            await engine.ingest_calendar()
-    finally:
-        await engine.aclose()
-
-    calendar_only = _reader_settings(tmp_path, interval=timedelta(hours=6))
-    engine = build_engine(calendar_only, data_dir=tmp_path)
-    try:
-        armed = [job.name for job in jobs_for(engine, calendar_only)]
-        assert "calendar_reader" in armed
-        assert "email_reader" not in armed
-        with pytest.raises(ConfigurationError):
-            await engine.ingest_email()
-    finally:
-        await engine.aclose()
-
-
-async def test_each_ingestion_row_holds_the_engines_own_bound_method(
-    tmp_path: Path,
-) -> None:
-    """ADR-0142 §9 test 5, scheduler half: the bound method itself, not a stand-in.
-
-    §4's second marked clause: an ingestion source's row holds that operation "as a
-    **bound method of the engine** — not a wrapper, a closure, a
-    ``functools.partial`` or any other object standing in for it".
-
-    **The shape this exists to catch satisfies ``JobBody`` and passes every
-    behavioural test in §9's list.** ``functools.partial(engine.ingest, "email")``
-    is callable, takes no arguments and ingests the right source; what it costs is
-    §4's whole argument — one seam for every source in the ``OPERATION`` trace, and a
-    wiring typo that type-checks and fails at the first tick instead of at ``mypy``.
-    So the assertion is on ``__func__`` and ``__self__`` rather than on behaviour:
-    the operation is the engine's own, and the engine is *this* one.
-    """
-    settings = _mail_settings(
-        tmp_path, interval=timedelta(minutes=30), calendar_interval=timedelta(hours=6)
-    )
-    engine = build_engine(settings, data_dir=tmp_path)
-    try:
-        armed = {job.name: job for job in jobs_for(engine, settings)}
-
-        for name, operation in (
-            ("calendar_reader", Engine.ingest_calendar),
-            ("email_reader", Engine.ingest_email),
-        ):
-            run = armed[name].run
-            assert getattr(run, "__func__", None) is operation, name
-            assert getattr(run, "__self__", None) is engine, name
-    finally:
-        await engine.aclose()
-
-
-async def test_the_armed_set_names_both_sources_and_renames_neither(
-    tmp_path: Path,
-) -> None:
-    """ADR-0142 §9 test 9: ``email_reader`` beside ``calendar_reader``, unchanged.
-
-    ``Job.name`` is "Stable identifier for the log and for ``hub_ready``'s job list",
-    so it crosses the wire to a client. ADR-0142 §5 renames the *method* and
-    deliberately leaves the row alone — "a lane that 'tidied' it to match the method
-    name would be making a wire-visible change for no reason" — and this is what
-    would catch that tidying.
-
-    The names come from :meth:`Scheduler.job_names` rather than from the table,
-    because that is the value ``hub_ready`` actually reports.
-    """
-    settings = _mail_settings(
-        tmp_path, interval=timedelta(minutes=30), calendar_interval=timedelta(hours=6)
-    )
-    engine = build_engine(settings, data_dir=tmp_path)
-    try:
-        names = Scheduler(jobs_for(engine, settings)).job_names
-
-        assert "calendar_reader" in names
-        assert "email_reader" in names
-        assert "ingest_calendar" not in names, "the row name is not the method name"
-    finally:
-        await engine.aclose()
-
-
-async def test_one_sources_failing_ingestion_leaves_the_others_job_running(
-    tmp_path: Path,
-) -> None:
-    """ADR-0142 §9 test 8: the coupling a multiplexing stage would have introduced.
-
-    §7's second marked clause: "One ingestion source's job failing, refusing for want
-    of a grant, or being unarmed neither disarms, delays beyond ADR-0083 §7's serial
-    duty cycle, nor alters the outcome of any other source's ingestion job."
-
-    **The failure is real rather than simulated**: the mail store simply does not
-    exist, which is the commonest way a reader's source fails and raises
-    ``ReaderError`` every tick. The calendar's own row is driven beside it on the
-    same loop, and what is asserted is that it keeps completing — the property a
-    single stage looping over two readers would break, because one reader's
-    ``ReaderError`` would abort the loop and the sibling would not be read at all
-    that tick.
-
-    The email body is the engine's own bound method; the calendar's is wrapped only
-    to count its runs, which is what lets the case assert that the sibling kept
-    going rather than merely that the loop stayed up. Ticking rather than the real
-    intervals, for the same reason every driven case in this module does.
-    """
-    _write_one_event_calendar(tmp_path / "calendar.ics")
-    # The mail store is deliberately absent, so every email tick raises.
-    settings = _mail_settings(tmp_path, interval=_TICK, calendar_interval=_TICK)
-    engine = build_engine(settings, data_dir=tmp_path)
-    calendar_runs = 0
-    twice = asyncio.Event()
-
-    async def counting_calendar() -> object:
-        nonlocal calendar_runs
-        calendar_runs += 1
-        if calendar_runs >= 2:
-            twice.set()
-        return await engine.ingest_calendar()
-
-    try:
-        await engine.grant(CALENDAR_READER_NAME, scope=[GrantScope.FACET, GrantScope.INGEST])
-        await engine.grant(EMAIL_READER_NAME, scope=[GrantScope.FACET, GrantScope.INGEST])
-        with structlog.testing.capture_logs() as captured:
-            await _drive(
-                Scheduler(
-                    [
-                        _job("calendar_reader", counting_calendar),
-                        _job("email_reader", engine.ingest_email),
-                    ]
-                ),
-                until=twice,
-            )
-    finally:
-        await engine.aclose()
-
-    assert calendar_runs >= 2, "the calendar's job stopped when email's failed"
-    failures = [entry for entry in captured if entry["event"] == "hub_scheduler_job_failed"]
-    assert failures, _events(captured)
-    assert {entry["job"] for entry in failures} == {"email_reader"}
-    assert failures[0]["error_class"] == "ReaderError"
 
 
 def _write_one_mail_message(path: Path) -> None:

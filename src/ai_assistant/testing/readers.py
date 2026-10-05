@@ -1,7 +1,7 @@
 """A canonical :class:`~ai_assistant.core.protocols.Reader` fake (ADR-0093 §10).
 
 The shared test double for the ``Reader`` contract, so a subsystem that drives a
-read — `orchestration`'s ingestion stage, and later `context`'s facet adapter —
+read — `orchestration`'s upcoming-event producer and `context`'s facet adapter —
 can exercise every branch of its own pipeline without a source on disk and
 without importing a concrete reader (``CLAUDE.md`` golden rule 1; ADR-0093 §2
 forbids importing ``ai_assistant.readers`` from a subsystem outright).

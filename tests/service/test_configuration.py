@@ -36,15 +36,11 @@ from ai_assistant.core.errors import TraceStoreError
 from ai_assistant.core.types import EvaluationTrace, TraceKind, TraceOutcome
 from ai_assistant.service.configuration import (
     ALLOWLIST_KEYS,
-    CALENDAR_READER_ARMED,
-    CALENDAR_READER_SECONDS,
     CONFLICT_SEARCH_LIMIT,
     CONSOLIDATION_ARMED,
     CONSOLIDATION_SECONDS,
     CONVERSATION_SWEEP_ARMED,
     CONVERSATION_SWEEP_SECONDS,
-    EMAIL_READER_ARMED,
-    EMAIL_READER_SECONDS,
     EMBEDDING_TIMEOUT_SECONDS,
     EPISODE_RETENTION_FINITE,
     NOTIFICATION_QUEUE_LIMIT,
@@ -173,21 +169,13 @@ async def test_the_declared_allowlist_is_exactly_what_two_deployments_produce(
     A declared-but-unreachable key would otherwise sit here forever, describing a
     record no operator will ever meet.
 
-    The armed deployment arms **both** ingestion sources, which is the shape
-    ADR-0142 §1 requires of anything that enumerates them: a fixture arming only
-    the calendar is what let ``email_reader_interval``'s absence from the list
-    survive to be found live (#1083). It arms **consolidation** for the same
-    reason and against the same failure: that job ships disabled, so a fixture
-    leaving it off would exercise only its ``armed`` half and let its
+    The armed deployment arms **consolidation**: that job ships disabled, so a
+    fixture leaving it off would exercise only its ``armed`` half and let its
     ``_seconds`` key be declared-but-unreachable — the state this test's other
     direction exists to refuse (#1494).
     """
     armed = Settings(
         data_dir=tmp_path / "armed",
-        calendar_reader_path=tmp_path / "calendar.ics",
-        calendar_reader_interval=timedelta(minutes=15),
-        email_source_path=tmp_path / "mail.mbox",
-        email_reader_interval=timedelta(minutes=25),
         consolidation_interval=timedelta(hours=12),
         # Stated rather than defaulted since ADR-0287 §1 moved the default to
         # ``None``: only a finite window emits ``episode_retention_seconds``.
@@ -224,8 +212,6 @@ async def test_a_default_deployment_records_its_effective_figures(settings: Sett
         RETENTION_PURGE_SECONDS: timedelta(hours=1).total_seconds(),
         CONVERSATION_SWEEP_ARMED: True,
         CONVERSATION_SWEEP_SECONDS: timedelta(hours=1).total_seconds(),
-        CALENDAR_READER_ARMED: False,
-        EMAIL_READER_ARMED: False,
         # Off on a fresh install (ADR-0083 §7, ADR-0111 §11), and recorded as off
         # rather than absent — which is the whole point of the pair for this
         # field, because the shipped default is the *baseline* half of #829's
@@ -298,8 +284,8 @@ async def test_a_disabled_job_is_recorded_as_off_and_not_as_absent(tmp_path: Pat
 async def test_an_unbounded_horizon_is_recorded_as_not_finite(tmp_path: Path) -> None:
     """``None`` on a retention horizon means *keep forever*, which is not "off".
 
-    The two nullable horizons take a ``finite`` boolean where the four job
-    intervals take an ``armed`` one, and the distinction is real: a job that never
+    The two nullable horizons take a ``finite`` boolean where the job intervals
+    take an ``armed`` one, and the distinction is real: a job that never
     runs and a trace that is never deleted are opposite facts, and one word for
     both would leave a measure guessing which it had.
     """
@@ -309,63 +295,6 @@ async def test_an_unbounded_horizon_is_recorded_as_not_finite(tmp_path: Path) ->
 
     assert metrics[TRACE_RETENTION_FINITE] is False
     assert TRACE_RETENTION_SECONDS not in metrics
-
-
-async def test_an_armed_calendar_reader_records_its_cadence(tmp_path: Path) -> None:
-    """The pair's other state, on the one interval a path has to accompany.
-
-    ``Settings`` refuses an interval whose source path is unset (ADR-0093 §7a), so
-    this is also the case that proves the armed half is reachable at all.
-    """
-    armed = Settings(
-        data_dir=tmp_path / "hub-data",
-        calendar_reader_path=tmp_path / "calendar.ics",
-        calendar_reader_interval=timedelta(minutes=15),
-    )
-
-    metrics = dict((await _recorded(armed)).metrics)
-
-    assert metrics[CALENDAR_READER_ARMED] is True
-    assert metrics[CALENDAR_READER_SECONDS] == timedelta(minutes=15).total_seconds()
-
-
-async def test_arming_email_ingestion_moves_the_mapping_as_arming_the_calendar_does(
-    tmp_path: Path,
-) -> None:
-    """#1083: the two ingestion sources partition a window alike, or the list lies.
-
-    The leg-11 QA run (#1081) drove four hub startups, changing email's arming
-    between them, and ``ai-assistant-measures`` reported "configuration unchanged"
-    across every email transition while a notification figure moving one step
-    reported "configuration CHANGED". ADR-0120 §8 partitions at every
-    ``CONFIGURATION`` trace whose metric mapping differs from its predecessor's,
-    so an interval the list omits is an intervention no measure can date.
-
-    Asserted as the *pair* of properties that made it invisible — the armed
-    cadence is recorded, and the mapping a disarmed hub emits is not the mapping
-    an armed one emits — because either alone passes on a list carrying the key
-    and never reaching it, or on a key that moves for some other reason.
-    ADR-0142 §1's "equal in kind" is what makes the calendar's own test the
-    template rather than a coincidence.
-    """
-    disarmed = dict((await _recorded(Settings(data_dir=tmp_path / "hub-data"))).metrics)
-    armed = dict(
-        (
-            await _recorded(
-                Settings(
-                    data_dir=tmp_path / "hub-data",
-                    email_source_path=tmp_path / "mail.mbox",
-                    email_reader_interval=timedelta(seconds=25),
-                )
-            )
-        ).metrics
-    )
-
-    assert disarmed[EMAIL_READER_ARMED] is False
-    assert EMAIL_READER_SECONDS not in disarmed
-    assert armed[EMAIL_READER_ARMED] is True
-    assert armed[EMAIL_READER_SECONDS] == timedelta(seconds=25).total_seconds()
-    assert armed != disarmed
 
 
 async def test_the_configuration_trace_carries_no_observation_figure(
@@ -388,6 +317,29 @@ async def test_the_configuration_trace_carries_no_observation_figure(
 
     assert not [key for key in ALLOWLIST_KEYS if "observ" in key]
     assert not [key for key in metrics if "observ" in key]
+
+
+async def test_the_configuration_trace_carries_no_ingestion_figure(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """ADR-0294 §5: "``service/configuration.py`` reports no ingestion figure."
+
+    On the observation case's shape: asserted over the declared list and over a
+    trace stamped from settings loaded where a pre-change deployment's
+    ``ASSISTANT_*_READER_INTERVAL`` variables are still set, beside the paths they
+    were paired with. ``Settings`` ignores a variable that names no field, so the
+    hub starts; a stamp that still read one would put a key on this record whatever
+    the variable said.
+    """
+    monkeypatch.setenv("ASSISTANT_CALENDAR_READER_PATH", str(tmp_path / "calendar.ics"))
+    monkeypatch.setenv("ASSISTANT_CALENDAR_READER_INTERVAL", "PT15M")
+    monkeypatch.setenv("ASSISTANT_EMAIL_SOURCE_PATH", str(tmp_path / "mail.mbox"))
+    monkeypatch.setenv("ASSISTANT_EMAIL_READER_INTERVAL", "PT15M")
+
+    metrics = dict((await _recorded(Settings(data_dir=tmp_path / "hub-data"))).metrics)
+
+    assert not [key for key in ALLOWLIST_KEYS if "reader_interval" in key]
+    assert not [key for key in metrics if "reader_interval" in key]
 
 
 async def test_an_armed_consolidation_job_dates_the_arming_9_was_written_for(
@@ -517,8 +469,7 @@ async def test_every_recorded_value_is_a_number_or_a_boolean(tmp_path: Path) -> 
     """
     armed = Settings(
         data_dir=tmp_path / "armed",
-        calendar_reader_path=tmp_path / "calendar.ics",
-        calendar_reader_interval=timedelta(minutes=15),
+        consolidation_interval=timedelta(hours=12),
     )
 
     for value in (await _recorded(armed)).metrics.values():

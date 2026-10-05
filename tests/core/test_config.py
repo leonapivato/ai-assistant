@@ -850,10 +850,10 @@ _INTEGER_FIELDS: Final = tuple(
 
 
 #: Fields a field-generic case must supply **beside** the one it is exercising,
-#: because some settings are only coherent together. ``calendar_reader_interval``
-#: and ``calendar_upcoming_interval`` are why: ADR-0093 §7a and ADR-0132 §4 each
-#: refuse an interval with no source at load, so a case that set one alone would be
-#: exercising that cross-field refusal rather than the per-field guard it means to.
+#: because some settings are only coherent together. ``calendar_upcoming_interval``
+#: is why: ADR-0132 §4 refuses an interval with no source at load, so a case that set
+#: it alone would be exercising that cross-field refusal rather than the per-field
+#: guard it means to.
 #: ``calendar_upcoming_lead`` joins them for ADR-0132 §4's other refusal — a lead
 #: must be strictly greater than the producer's interval, and the shipped
 #: thirty-minute default is *below* the one-hour value these cases use, so without a
@@ -863,10 +863,6 @@ _INTEGER_FIELDS: Final = tuple(
 #: right, a case exercising one of them overrides the companion, and no assertion
 #: below reads any of them — and it keeps the parametrisation field-agnostic, which
 #: is what makes a new setting covered without anyone editing the cases.
-#: ``email_source_path`` is here for ``calendar_reader_path``'s reason exactly:
-#: ADR-0140 §12 refuses an ``email_reader_interval`` with no source at load, so a
-#: case setting the interval alone would exercise that cross-field refusal rather
-#: than the per-field guard it means to.
 #: ``forecast_connection``, ``forecast_origin``, ``forecast_latitude`` and
 #: ``forecast_longitude`` join them for ADR-0260 §11's own cross-field refusal: the
 #: four are "one pair of pairs" and every half-set combination of them is refused at
@@ -877,7 +873,6 @@ _INTEGER_FIELDS: Final = tuple(
 _COMPANIONS: Final[dict[str, Any]] = {
     "calendar_reader_path": Path("/srv/calendars/personal.ics"),
     "calendar_upcoming_lead": timedelta(hours=2),
-    "email_source_path": Path("/srv/mail/inbox.mbox"),
     "forecast_connection": "forecast-account",
     "forecast_origin": "https://forecast.example.invalid",
     "forecast_latitude": 41.1579,
@@ -1379,14 +1374,10 @@ def test_every_duration_setting_is_discovered() -> None:
         # cap or no read deadline has exactly the failure §3 exists to prevent, so
         # 'off' is not an available value".
         "hub_read_timeout",
-        # ADR-0093 §7a's four durations. The interval follows ADR-0083 §7's
-        # convention exactly — disabled is ``None``, never ``0`` — and the two
-        # window arms are the only durations in the model bounded *above*, because
-        # ``> 0`` alone admits ``timedelta.max``, for which
+        # ADR-0093 §7a's durations, less the ingestion interval ADR-0294 §5
+        # retires. The two window arms are the only durations in the model bounded
+        # *above*, because ``> 0`` alone admits ``timedelta.max``, for which
         # ``read_at + calendar_window_future`` is not a representable instant.
-        # ``calendar_reader_interval`` is also the one field with a cross-field
-        # precondition; see :data:`_COMPANIONS`.
-        "calendar_reader_interval",
         "calendar_window_past",
         "calendar_window_future",
         "calendar_read_timeout",
@@ -1408,15 +1399,11 @@ def test_every_duration_setting_is_discovered() -> None:
         # purge, which is the instrument switched off by misconfiguration rather
         # than by a decision.
         "trace_retention",
-        # ADR-0140 §12's three durations. The interval follows ADR-0083 §7's
-        # convention exactly — disabled is ``None``, never ``0`` — and carries the
-        # same cross-field precondition ``calendar_reader_interval`` does, which
-        # is why ``email_source_path`` joins :data:`_COMPANIONS`. The window is
-        # the model's third duration bounded *above*, and it is the one bounded
-        # **open** at the bottom: ``calendar_window_past`` may be zero and its own
-        # test asserts so, while a zero email window is a reader that reads
-        # nothing while reporting health (ADR-0140 §12).
-        "email_reader_interval",
+        # ADR-0140 §12's durations, less the ingestion interval ADR-0294 §5
+        # retires. The window is the model's third duration bounded *above*, and it
+        # is the one bounded **open** at the bottom: ``calendar_window_past`` may be
+        # zero and its own test asserts so, while a zero email window is a reader
+        # that reads nothing while reporting health (ADR-0140 §12).
         "email_window_past",
         "email_read_timeout",
         # ADR-0230 §4's listing expiry, acknowledged here for the same reason: it is
@@ -2162,34 +2149,12 @@ class TestTheUpcomingEventProducerSFigures:
         """
         assert Settings().calendar_upcoming_lead == timedelta(minutes=30)
 
-    def test_the_interval_is_not_the_ingestion_job_s(self) -> None:
-        """§4: "Neither field is ``calendar_reader_interval``, and neither is
-        derived from it."
-
-        "Arming or retuning one of these two changes ingestion's cadence in no way,
-        and arming ingestion arms no producer." A shared interval would make §3's
-        independence unbuildable: ingestion's cadence is sized for how often beliefs
-        should be refreshed and this one's against the lead window, and a figure
-        good for one is routinely wrong for the other.
-        """
-        armed = Settings(
-            calendar_reader_path=self._SOURCE, calendar_reader_interval=timedelta(hours=6)
-        )
-        assert armed.calendar_upcoming_interval is None
-
-        producing = Settings(
-            calendar_reader_path=self._SOURCE, calendar_upcoming_interval=timedelta(minutes=5)
-        )
-        assert producing.calendar_reader_interval is None
-
     def test_an_armed_producer_with_no_source_is_refused_at_load(self) -> None:
         """§4: "An armed producer with no source to read is an incoherent state and
         is refused as one rather than discovered at the first tick."
 
-        Exactly as ``calendar_reader_interval`` set without a path already is, and
-        for that refusal's reasons: a scheduler that omitted the requested job would
-        report health while noticing nothing, and one that armed it would re-run a
-        failing job forever.
+        A scheduler that omitted the requested job would report health while
+        noticing nothing, and one that armed it would re-run a failing job forever.
         """
         with pytest.raises(ValidationError, match="armed producer needs a source"):
             Settings(calendar_upcoming_interval=timedelta(minutes=5))

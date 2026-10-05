@@ -2,9 +2,10 @@
 
 The shared fakes for :class:`~ai_assistant.core.protocols.SourceGrants` and
 :class:`~ai_assistant.core.protocols.SourceGrantStore`, so a subsystem that
-drives a reader — `orchestration`'s ingestion stage, `context`'s facet adapter —
-can exercise every branch of its own gate without a store on disk and without
-importing the permissions subsystem's internals (``CLAUDE.md`` golden rule 1).
+drives a reader — `orchestration`'s upcoming-event producer, `context`'s facet
+adapter — can exercise every branch of its own gate without a store on disk and
+without importing the permissions subsystem's internals (``CLAUDE.md`` golden
+rule 1).
 
 **Two fakes because the seam is two Protocols**, split by capability rather than
 by taxonomy (ADR-0097 §3). :class:`FakeSourceGrants` is the narrow one and can

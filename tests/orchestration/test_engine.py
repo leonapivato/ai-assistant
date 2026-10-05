@@ -24,13 +24,11 @@ from channel_episodes import channel_ids, channel_records
 from pydantic import SecretStr
 
 from ai_assistant.core.errors import (
-    ConfigurationError,
     ConversationStoreError,
     DeferralStoreError,
     MemoryStoreError,
     OversizedValueError,
     PlanningError,
-    ReaderError,
     TraceStoreError,
     UnknownContinuationError,
     UnknownConversationError,
@@ -112,7 +110,6 @@ from ai_assistant.orchestration import (
     ForecastServicer,
     GrantOperations,
     HeldSource,
-    IngestionStage,
     MemoryWriteStage,
     QuestionStage,
     RecipientGrantOperations,
@@ -131,7 +128,6 @@ from ai_assistant.orchestration import (
 from ai_assistant.orchestration import engine as engine_module
 from ai_assistant.orchestration.consolidation import ConsolidationReport
 from ai_assistant.orchestration.engine import ENGINE_SHUTTING_DOWN, DrainPhase
-from ai_assistant.orchestration.ingestion import IngestionReport
 from ai_assistant.orchestration.loop import LearningLoop
 from ai_assistant.orchestration.parked_reads import ParkedReadOperations
 from ai_assistant.orchestration.payloads import DEFAULT_MAX_PAYLOAD_BYTES
@@ -157,9 +153,7 @@ from ai_assistant.testing import (
     FakeModelProvider,
     FakeParkedReads,
     FakePlanStore,
-    FakeReader,
     FakeRecipientGrantStore,
-    FakeSourceGrants,
     FakeSourceGrantStore,
     FakeSourceReadTrail,
     FakeSpeechSynthesizer,
@@ -169,7 +163,6 @@ from ai_assistant.testing import (
     FakeTraceRetention,
     FakeTraceSink,
     evaluation_trace,
-    source_grant,
 )
 
 if TYPE_CHECKING:
@@ -695,8 +688,6 @@ class Harness:
         # object** to the `SearchServicer` it builds, which is ADR-0244 §18's
         # one-instance obligation held by the case rather than by this harness.
         parked_reads: FakeParkedReads | None = None,
-        reader: object | None = None,
-        email_reader: object | None = None,
         queue_limit: int = 50,
         drain_timeout: timedelta | None = None,
         traces: FakeTraceRetention | None = None,
@@ -833,70 +824,21 @@ class Harness:
         self.questions = QuestionStage(
             writer=writer, deferrals=self.deferrals, memory=self.memory, now=lambda: AT
         )
-        # Leg 6's ingestion stage over the *same* write stage (ADR-0093 §6,
-        # ADR-0078 §3), and **only when a reader is given**: a reader ships disabled
-        # by default, so the ordinary engine — and therefore almost every case in
-        # this module — is built without one.
-        self.reader = reader
-        # Granted for `INGEST`, because this module is about the *engine* rather
-        # than about ADR-0097 §5's gate: an ungranted default would make every
-        # ingestion case here refuse before reaching the code under test. The
-        # gate's own five cases live in `test_ingestion.py`, against the stage.
-        # The **second source**, on the same terms and derived from nothing the
-        # first decides (ADR-0142 §1, §3). It is its own parameter rather than a
-        # sequence, because the engine holds one stage per source and this harness
-        # should not be able to express a shape the engine cannot.
-        self.email_reader = email_reader
-        # ADR-0185 §5's recorder, one object behind both ingestion stages exactly as
-        # the grant seam is: a composition root passes one store to every driver, and
-        # a harness that gave each its own could not show a trail holding both.
-        #
-        # **A whole trail rather than the bare recorder, since ADR-0186 §10.** The
+        # ADR-0185 §5's trail. **A whole trail rather than the bare recorder, since
+        # ADR-0186 §10.** The
         # engine now holds the wide seam as well, and the composition root passes
         # *one* object into all four positions — narrowed to `SourceReadRecorder` at
         # each driver, whole at the façade. `FakeSourceReadTrail` satisfies both
         # Protocols structurally, which is ADR-0185 §4's arrangement modelled in the
         # double; a harness holding two objects here would let `recent_reads` answer
-        # about a store the ingestion stages never wrote to, which is precisely the
-        # wiring mistake no type can catch.
+        # about a store the drivers never wrote to, which is precisely the wiring
+        # mistake no type can catch.
         #
         # A knob for ``trail``'s reason, one store over: the read surface's own cases
         # need a **durable** trail, because the order ``export_reads`` reverses comes
         # from the store's ``ORDER BY`` rather than from a Python list, and a fake
         # cannot exhibit a wrong one.
         self.reads: SourceReadTrail = FakeSourceReadTrail() if reads is None else reads
-        self.grants = FakeSourceGrants(
-            [
-                # `reader` is deliberately `object` here — the duck-typed fakes this
-                # module wires are not all `Reader`s — so the identity the grant has
-                # to cover is read the same way the stage reads it.
-                source_grant(str(source.name))  # type: ignore[attr-defined]
-                for source in (reader, email_reader)
-                if source is not None
-            ]
-        )
-        self.ingestion = (
-            None
-            if reader is None
-            else IngestionStage(
-                reader=reader,  # type: ignore[arg-type]  # a duck-typed fake stands in for the Protocol
-                writes=self.writes,
-                grants=self.grants,
-                reads=self.reads,
-                now=lambda: AT,
-            )
-        )
-        self.email_ingestion = (
-            None
-            if email_reader is None
-            else IngestionStage(
-                reader=email_reader,  # type: ignore[arg-type]  # a duck-typed fake stands in for the Protocol
-                writes=self.writes,
-                grants=self.grants,
-                reads=self.reads,
-                now=lambda: AT,
-            )
-        )
         loop = LearningLoop(
             # A knob because ADR-0204 §8's sixth case needs a *placed* facet in the
             # turn's supply — the calendar — to show that a facet ADR-0199 §3 places
@@ -1063,8 +1005,6 @@ class Harness:
             trace_retention=trace_retention,
             conversations=self.conversations,
             questions=self.questions,
-            calendar_ingestion=self.ingestion,
-            email_ingestion=self.email_ingestion,
             closers=tuple(closers),  # type: ignore[arg-type]
             id_factory=(lambda: next(self.handles)) if id_factory is None else id_factory,
             # The handle epoch (#1644), a knob so a restart case can hand two engines
@@ -3198,229 +3138,6 @@ def test_the_engine_never_reads_a_trace_back() -> None:
     ]
 
     assert walks == [], "the engine reads a trace back, which ADR-0119 §7 forbids"
-
-
-# --- the ingestion operation (ADR-0093 §6) ------------------------------
-
-
-async def test_ingest_reads_the_configured_source_and_reports_what_it_proposed() -> None:
-    """The operation ADR-0093 §6 says this façade grows, and its one caller's shape.
-
-    "``Engine`` grows an ingestion operation for the job to call: new concrete
-    surface in ``orchestration``, not ``core`` contract surface." The engine rules
-    on nothing and writes nothing itself; it relays to the stage, which puts every
-    proposal through the same gate ``learn`` uses.
-    """
-    reader = FakeReader()
-    harness = Harness(reader=reader)
-
-    report = await harness.engine.ingest_calendar()
-
-    # The producer's own declared identity, relayed unchanged (ADR-0093 §7, §10).
-    assert report.source == reader.name
-    assert report.proposed == 1
-    assert report.stored == 1
-    assert len((await harness.memory.search("reported one thing", limit=10)).records) == 1
-
-
-async def test_ingest_takes_no_argument_so_the_scheduler_can_bind_it() -> None:
-    """A caller cannot widen the read, and the bound method is a legal ``JobBody``.
-
-    Both fall out of the same signature: ADR-0093 §10 gives ``read()`` no arguments
-    because "a caller able to widen the read is a caller able to defeat the bound",
-    and ADR-0083 §8's job table holds bound no-argument engine methods. A version
-    taking even an optional argument would still bind, so what is asserted is the
-    contract's half — the call site the scheduler uses takes nothing at all.
-    """
-    harness = Harness(reader=FakeReader())
-
-    assert inspect.signature(harness.engine.ingest_calendar).parameters == {}
-
-
-async def test_ingest_refuses_when_no_reader_is_configured() -> None:
-    """A wiring fault is refused, never reported as a source with nothing to say.
-
-    An empty report is a **successful** pass over an empty source (ADR-0093 §8), so
-    returning one here would make a deployment whose reader failed to wire look
-    healthy forever while ingesting nothing — the failure ADR-0022 §4a refuses, and
-    the same reason §8 makes a failed *read* raise rather than return an empty
-    reading. Unreachable from the scheduler, which arms the job only on a
-    configured interval and whose ``Settings`` refuse an interval with no source
-    (§7a); this guards the second caller and the mis-wired composition root.
-    """
-    harness = Harness()
-
-    with pytest.raises(ConfigurationError):
-        await harness.engine.ingest_calendar()
-
-
-async def test_each_ingestion_source_emits_its_own_trace_seam() -> None:
-    """ADR-0142 §9 test 10: two sources, two seams, and neither under the other's.
-
-    **The property §4 chose the whole shape for.** ``Engine._tracked``'s ``seam`` is
-    ADR-0119 §8's one wiring point for the ``OPERATION`` trace, and it is a literal
-    written at the call site. So an implementation that adds ``ingest_email`` and
-    routes it through the *first* operation's seam string passes every other test in
-    ADR-0142 §9's list — the stage is separate, the row is separate, the refusals
-    name their own sources — while leaving no ``OPERATION`` record able to say which
-    source ran or which one is failing.
-
-    **And no smaller repair exists**, which is why this is a test rather than a
-    review note. The obvious one is to put the source in the trace instead;
-    :func:`~ai_assistant.orchestration.engine._ingested` records that
-    ``IngestionReport.source`` "is deliberately left off" because ADR-0119 §2 admits
-    no runtime-read string into a trace. Distinct literal seams are what buys the
-    observability back, and asserting *both directions* — each seam present, and
-    neither operation emitting under the other's — is what pins it.
-    """
-    harness = Harness(
-        reader=FakeReader(name="calendar"),
-        email_reader=FakeReader(name="email"),
-    )
-
-    await harness.engine.ingest_calendar()
-    await harness.engine.ingest_email()
-
-    seams = [trace.seam for trace in harness.trace_sink.recorded]
-    assert seams == ["ingest_calendar", "ingest_email"]
-    assert "ingest" not in seams, "the pre-rename seam is gone, not carried alongside"
-
-
-async def test_each_ingestion_operation_takes_no_argument_at_all() -> None:
-    """ADR-0142 §9 test 5, engine half: ``self`` and nothing else, per source.
-
-    §4 is marked: "No ingestion operation takes a source argument, a source name, or
-    any argument at all." Asserted over **both** operations rather than the new one,
-    because the clause is about the shape of the family and a lane that gave only
-    the second one a selector would satisfy a test of the first.
-
-    The reason is ADR-0093 §10's, unchanged by there now being two: the reader is
-    given its own source and its own bound, so "a caller able to widen the read is a
-    caller able to defeat the bound". A source selector cannot widen a bound, but it
-    moves the choice of *what is read* from the wiring to the call site — and it
-    moves a wiring fault from ``mypy`` strict to the first tick, in a job whose
-    failure is logged and retried forever.
-    """
-    harness = Harness(reader=FakeReader(), email_reader=FakeReader(name="email"))
-
-    assert inspect.signature(harness.engine.ingest_calendar).parameters == {}
-    assert inspect.signature(harness.engine.ingest_email).parameters == {}
-
-
-async def test_neither_ingestion_operation_stands_in_for_the_other() -> None:
-    """ADR-0142 §6 at the engine: each refusal is its own source's, and only its own.
-
-    Both halves of §6's marked clause, in the two arrangements that separate them.
-    With only the calendar wired, ``ingest_email`` refuses and ``ingest_calendar``
-    **succeeds** — so the refusal is not "no ingestion is wired" being reported by an
-    engine that ingests every hour, which is §6's named trap and the state in which
-    "an operator told the wrong one looks in the wrong place". With only email
-    wired, the mirror.
-
-    The message is asserted rather than the type alone, because one shared message
-    passes every test that asserts only ``ConfigurationError``.
-    """
-    calendar_only = Harness(reader=FakeReader(name="calendar"))
-
-    assert (await calendar_only.engine.ingest_calendar()).source == "calendar"
-    with pytest.raises(ConfigurationError) as refused:
-        await calendar_only.engine.ingest_email()
-    assert "ASSISTANT_EMAIL_SOURCE_PATH" in str(refused.value)
-    assert "CALENDAR" not in str(refused.value)
-
-    email_only = Harness(email_reader=FakeReader(name="email"))
-
-    assert (await email_only.engine.ingest_email()).source == "email"
-    with pytest.raises(ConfigurationError) as refused:
-        await email_only.engine.ingest_calendar()
-    assert "ASSISTANT_CALENDAR_READER_PATH" in str(refused.value)
-    assert "EMAIL" not in str(refused.value)
-
-
-async def test_a_source_failure_reaches_the_scheduler_as_the_readers_own_error() -> None:
-    """``ReaderError`` propagates, and the façade adds nothing to it.
-
-    The scheduler logs a failed job "with its class" and retries at the next due
-    instant (ADR-0083 §7), which is only useful while the class survives the trip —
-    and the message stays payload-free by the reader's contract, which is what
-    keeps the source's path out of an operational log (ADR-0093 §8, ADR-0004 §5).
-    """
-    harness = Harness(reader=FakeReader(failure=FileNotFoundError("no such file")))
-
-    with pytest.raises(ReaderError) as raised:
-        await harness.engine.ingest_calendar()
-
-    assert isinstance(raised.value.__cause__, FileNotFoundError)
-
-
-async def test_ingest_is_tracked_so_shutdown_drains_its_write() -> None:
-    """It writes through two durable stores, so the drain must wait for it (ADR-0042 §2).
-
-    Untracked, a shutdown would close the connections underneath a write that is
-    still in flight — which is exactly what ``_tracked`` exists to prevent, and why
-    every operation that touches a store goes through it.
-    """
-    release = asyncio.Event()
-    closed = asyncio.Event()
-    closed_while_reading = False
-
-    async def close() -> None:
-        nonlocal closed_while_reading
-        closed_while_reading = not release.is_set()
-        closed.set()
-
-    reader = FakeReader()
-    harness = Harness(reader=reader, closers=(close,))
-    gate = reader.suspend_next()
-
-    ingesting = asyncio.ensure_future(harness.engine.ingest_calendar())
-    await gate.reached()
-    closing = asyncio.ensure_future(harness.engine.aclose())
-    # Several turns, so the drain task is scheduled and runs as far as it can. An
-    # untracked pass would let it reach the closers here.
-    for _ in range(5):
-        await asyncio.sleep(0)
-
-    assert not closed.is_set(), "a resource was closed while an ingestion was still running"
-    release.set()
-    gate.release()
-    await ingesting
-    await closing
-    assert closed.is_set()
-    assert closed_while_reading is False
-
-
-async def test_ingest_is_refused_once_shutdown_has_begun() -> None:
-    """The refusal the scheduler reads as *stop* rather than as a job failure (§8).
-
-    The shared constant, for :meth:`purge_expired`'s reason: two spellings of one
-    message is a seam that fails silently, leaving the scheduler retrying against
-    an engine that will never accept work again.
-    """
-    harness = Harness(reader=FakeReader())
-    await harness.engine.aclose()
-
-    with pytest.raises(RuntimeError) as raised:
-        await harness.engine.ingest_calendar()
-
-    assert str(raised.value) == ENGINE_SHUTTING_DOWN
-
-
-async def test_a_shutting_down_engine_refuses_before_it_reads_the_source() -> None:
-    """The refusal precedes the read, so a stopping hub opens no file.
-
-    ``_reject_if_closing`` runs first, which is what makes the ``RuntimeError``
-    above a *stop* rather than a fault reported after the work was already done —
-    and for this operation the work is I/O against the user's own data.
-    """
-    reader = FakeReader()
-    harness = Harness(reader=reader)
-    await harness.engine.aclose()
-
-    with pytest.raises(RuntimeError):
-        await harness.engine.ingest_calendar()
-
-    assert reader.call_count == 0
 
 
 async def test_a_colliding_handle_factory_still_yields_distinct_tokens() -> None:
@@ -5721,29 +5438,6 @@ def test_a_halted_consolidation_reads_as_incomplete() -> None:
     assert halted.metrics["chunks"] == 2
 
 
-def test_an_ingestion_trace_carries_no_string_the_reader_chose() -> None:
-    """§2's containment rule, at the one report that holds a runtime-derived string.
-
-    ``IngestionReport.source`` is a reader's declared identity — read at runtime,
-    and therefore in none of §2's four admitted categories ("an identifier… a member
-    of an enumeration… a literal constant written in the emitting module; or the
-    ``__name__`` of an exception class"). ``read_at`` is a ``datetime``, which the
-    metric map's value type does not admit at all. Neither is a loss: the seam says
-    which operation this was and ``occurred_at`` says when.
-    """
-    observation = engine_module._ingested(
-        IngestionReport(source="calendar", read_at=AT, proposed=3, stored=2, deferred=1)
-    )
-
-    assert dict(observation.metrics) == {
-        "proposed": 3,
-        "stored": 2,
-        "deferred": 1,
-        "rejected": 0,
-    }
-    assert all(isinstance(value, int | float | bool) for value in observation.metrics.values())
-
-
 async def test_a_result_too_large_to_return_records_the_refusal_not_a_success() -> None:
     """The trace and the caller's answer must agree (ADR-0119 §3, §8).
 
@@ -5778,7 +5472,7 @@ async def test_a_maintenance_report_is_not_measured_against_the_payload_limit() 
     """``checked`` is per operation, and the four maintenance ones are exempt.
 
     ADR-0085 §1 fixes the promoted ``AssistantEngine`` surface and none of
-    ``start``/``purge_expired``/``ingest_calendar``/``consolidate`` is on it: their reports
+    ``start``/``purge_expired``/``consolidate`` is on it: their reports
     go to the hub's scheduler in-process and never cross a wire (ADR-0083 §8). They
     were never measured before this lane and they are not measured now — the flag
     exists so that stays a stated fact rather than an accident of which call site
