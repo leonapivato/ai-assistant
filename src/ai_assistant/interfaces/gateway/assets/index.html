@@ -176,8 +176,90 @@
           would be a control that does nothing.
         -->
         <button type="button" id="new-conversation" hidden>Start a new conversation</button>
+        <!--
+          The chat (ADR-0293): conversations that keep their own transcript, written
+          into as the owner's acts and answered by the assistant writing a message
+          back. Opened by the owner rather than on load, because following it reads
+          the hub on a timer (ADR-0293 §11:1) and that is the owner's to start.
+        -->
+        <button type="button" id="chat-button">Chat</button>
         <button type="button" id="conversations-button">Conversations</button>
         <button type="button" id="confirmations-button">What is waiting for your answer</button>
+      </section>
+
+      <!--
+        The chat space (ADR-0293). Each conversation keeps its transcript; a message is
+        written into it as an act (§4) and is *received* once the conversation has
+        recorded it, and the assistant's reply arrives as a message of its own (§6).
+        What the assistant is doing is shown beside the transcript and never in it
+        (§8:1). Every value the hub sends is inserted as text.
+      -->
+      <section id="chat" class="panel" hidden>
+        <h2>Chat</h2>
+        <!--
+          Whether this page is following the chat, said on screen at every change of
+          it: following, paused while hidden, or stopped by a failure — and stopped it
+          stays until the owner presses the control or one of ADR-0182 §7's two events
+          comes (ADR-0182 §7, ADR-0168 §9).
+        -->
+        <p class="hint" id="chat-follow" aria-live="polite"></p>
+        <button type="button" id="chat-follow-again" hidden>Follow changes again</button>
+
+        <h3>Your devices</h3>
+        <!--
+          "My devices" (ADR-0293 §3:1): every new conversation is shown on each of
+          them. This browser is told which device it is, so it can add itself.
+        -->
+        <p class="hint" id="chat-this-device"></p>
+        <ul id="chat-my-devices" class="chat-devices"></ul>
+        <button type="button" id="chat-add-device" hidden>Add this device</button>
+
+        <h3>Conversations</h3>
+        <p class="choice">
+          <button type="button" id="chat-start">Start a conversation</button>
+        </p>
+        <ul id="chat-conversations" class="chat-conversations"></ul>
+        <button type="button" id="chat-more" hidden>Show more conversations</button>
+
+        <div id="chat-thread" class="chat-thread" hidden>
+          <h3 id="chat-heading"></h3>
+          <!--
+            The current state (ADR-0293 §8): "working…" while the assistant works on
+            something this conversation started, and how the last of those ended.
+            Informational — the box below stays open while it works (§8:2).
+          -->
+          <p class="hint" id="chat-state" aria-live="polite"></p>
+          <button type="button" id="chat-older" hidden>Show earlier messages</button>
+          <ol id="chat-transcript" class="chat-transcript"></ol>
+          <form id="chat-form">
+            <p class="hint" id="chat-replying" hidden></p>
+            <button type="button" id="chat-reply-cancel" hidden>Not a reply</button>
+            <label for="chat-text">Message</label>
+            <textarea id="chat-text" name="chat-text" rows="3" required></textarea>
+            <button type="submit" id="chat-send">Send</button>
+          </form>
+
+          <h4>Who sees this conversation</h4>
+          <!--
+            A conversation's devices (ADR-0293 §3:3), changed away from "my devices"
+            for this conversation alone. Choosing a device is the statement that its
+            screen is private (§3:4).
+          -->
+          <ul id="chat-conversation-devices" class="chat-devices"></ul>
+          <p class="choice" id="chat-device-offers"></p>
+
+          <h4>Delete or forget</h4>
+          <!--
+            Two acts side by side and never one (ADR-0293 §2:7): deleting removes the
+            conversation and forgets nothing; forgetting removes what the assistant
+            remembers of it and leaves the conversation (§5:7).
+          -->
+          <p class="choice">
+            <button type="button" id="chat-delete">Delete this conversation</button>
+            <button type="button" id="chat-forget">Forget it</button>
+          </p>
+        </div>
+        <p class="notice" id="chat-said" hidden></p>
       </section>
 
       <!--
