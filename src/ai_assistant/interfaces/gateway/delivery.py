@@ -40,9 +40,10 @@ from typing import TYPE_CHECKING, Any, Final
 
 import structlog
 
-from ai_assistant.core.errors import AssistantError, NotificationBudgetError
+from ai_assistant.core.errors import AssistantError, DeviceRefusedError, NotificationBudgetError
 from ai_assistant.core.types import SpokenAudioFormat
 from ai_assistant.interfaces.gateway import streams
+from ai_assistant.interfaces.gateway.refusals import REFUSAL_FAULTS, refusal_detail
 from ai_assistant.wire.errors import TransportError
 
 if TYPE_CHECKING:  # pragma: no cover — imported for typing alone
@@ -216,7 +217,7 @@ class DeliveryFanOut:
     resemblance".
     """
 
-    def __init__(
+    def __init__(  # noqa: PLR0913 — keyword-only, one per seam the fan-out is handed
         self,
         *,
         engine: AssistantEngine,
@@ -224,6 +225,7 @@ class DeliveryFanOut:
         acquire: Callable[[], bool],
         release: Callable[[], None],
         defer: Defer,
+        own_device: Callable[[], str | None] = lambda: None,
     ) -> None:
         """Build a fan-out holding no poll, no stream and no keep-alive.
 
@@ -248,12 +250,19 @@ class DeliveryFanOut:
                 injected rather than reached for so a test fires it instead of
                 waiting out a budget — and so the interval is observably a thing
                 this object holds and drops, which §8's lifetime clause requires.
+            own_device: The gateway's own device as the hub knows it, read when a
+                poll is refused for it (ADR-0298 §6) so the page is told which device
+                to give a role or a place in my devices. A reader rather than a
+                value, because the gateway names its device when it starts, after
+                this object is built. The poll is always the gateway's own: it names
+                no browser device (§5), so this is the device it was refused for.
         """
         self._engine = engine
         self._budget = budget
         self._acquire = acquire
         self._release = release
         self._defer = defer
+        self._own_device = own_device
         self._streams: set[DeliveryStream] = set()
         self._poll: asyncio.Task[None] | None = None
         #: The `next_notification` call currently outstanding, as a task, or ``None``
@@ -525,6 +534,15 @@ class DeliveryFanOut:
                 return streams.fault(_UNREACHABLE, detail=str(exc))
             except NotificationBudgetError as exc:
                 return streams.fault(_BUDGET_DECLINED, detail=str(exc))
+            except DeviceRefusedError as exc:
+                # The hub received the poll and refused it for the gateway's own
+                # device — "be in my devices for reading, as the connecting device"
+                # (ADR-0298 §5) — which the owner can change, so it is said as that.
+                device = self._own_device()
+                return streams.fault(
+                    REFUSAL_FAULTS[exc.reason],
+                    detail=refusal_detail(exc.reason, device=device, gateway=device),
+                )
             except AssistantError as exc:
                 return streams.fault(_DECLINED, detail=str(exc))
             finally:
