@@ -126,8 +126,7 @@ async def _ask(drive: Drive, outcome: TurnOutcome) -> str:
     """
     assert outcome.reply is not None
     drive.engine.turn_outcome = outcome
-    await drive.page.fill("#utterance", _QUESTION)
-    await drive.page.click("#ask-button")
+    await drive.ask(_QUESTION)
     await drive.page.wait_for_selector("#answer:not([hidden])")
     await drive.page.wait_for_function(
         "expected => document.getElementById('answer-body').textContent.includes(expected)",
@@ -284,8 +283,7 @@ async def test_the_statement_reaches_the_owner_through_the_fakes_own_lever(
     """
     async with driving(gateway_browser, tmp_path) as drive:
         drive.engine.drive_withheld = DriveWithheld.UNDERSTANDING_CHANGED
-        await drive.page.fill("#utterance", _QUESTION)
-        await drive.page.click("#ask-button")
+        await drive.ask(_QUESTION)
         await drive.page.wait_for_selector("#answer:not([hidden])")
         await drive.page.wait_for_function(
             "expected => document.getElementById('answer-body').textContent.includes(expected)",
@@ -319,7 +317,6 @@ async def test_a_value_outside_the_seven_is_said_rather_than_shown_raw(
     stream is switched off first so that the substituted path is the one the page asks.
     """
     async with driving(gateway_browser, tmp_path) as drive:
-        await drive.page.uncheck("#stream-answer")
         await _substitute(
             drive,
             path="/ask",
@@ -333,8 +330,7 @@ async def test_a_value_outside_the_seven_is_said_rather_than_shown_raw(
                 '"drive_withheld": "a_later_member", "authorizations": []}}'
             ),
         )
-        await drive.page.fill("#utterance", _QUESTION)
-        await drive.page.click("#ask-button")
+        await drive.ask(_QUESTION)
         await drive.page.wait_for_selector("#answer:not([hidden])")
         said = await drive.answer()
         await _stop_substituting(drive)
@@ -362,7 +358,6 @@ async def test_an_outcome_carrying_no_such_member_at_all_still_shows_the_true_no
     guard does too, over a body carrying no ``drive_withheld`` key at all.
     """
     async with driving(gateway_browser, tmp_path) as drive:
-        await drive.page.uncheck("#stream-answer")
         await _substitute(
             drive,
             path="/ask",
@@ -375,8 +370,7 @@ async def test_an_outcome_carrying_no_such_member_at_all_still_shows_the_true_no
                 '"forecast_not_read": null, "attempt_report": null, "authorizations": []}}'
             ),
         )
-        await drive.page.fill("#utterance", _QUESTION)
-        await drive.page.click("#ask-button")
+        await drive.ask(_QUESTION)
         await drive.page.wait_for_selector("#answer:not([hidden])")
         said = await drive.answer()
         await _stop_substituting(drive)

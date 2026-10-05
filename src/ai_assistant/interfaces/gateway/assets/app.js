@@ -85,7 +85,10 @@ const SESSION_HEADER = "X-Assistant-Session";
 // whole of what the gateway sent; a reader whose body ended without one has a
 // transport failure and says so — which is ADR-0168 §9's distinction reaching the
 // browser, on a carrier whose status code was written before anything went wrong.
-const TERMINAL_KINDS = new Set(["outcome", "fault"]);
+//
+// One kind since ADR-0293 §11 retired the streamed answer and the `outcome` value it
+// ended in: the delivery stream is the one stream left, and it ends only in a fault.
+const TERMINAL_KINDS = new Set(["fault"]);
 
 // The conversation the last turn ran under. The hub owns the conversation; this is
 // the id it handed back, held so the next question continues the same one rather than
@@ -404,8 +407,10 @@ function changeConversation(id) {
 // are one thing in the decision: §11 makes answering "a turn and not an operation of
 // its own, and that is the whole reason `converse` gains a keyword rather than the
 // surface gaining a fifth verb", and §13 performs the cross-conversation resumption by
-// the same keyword carrying a goal instead of a question. So this page has no answer
-// form and no resume form — it has a reference attached to the ordinary composer.
+// the same keyword carrying a goal instead of a question. So this page has one form for
+// both, beside the goals, and it sends a turn only with a reference attached: since
+// ADR-0293 §11 the ordinary turn is a message in the chat, and this is the one the chat
+// cannot yet carry.
 //
 // **It holds the object the gateway takes and not two fields**, so that the shape sent
 // is the shape the type admits: "a `question_id` and no `goal_id`, or a `goal_id` and
@@ -439,11 +444,15 @@ function setReference(value, note) {
 }
 
 // Put the hint and the control into one state, which is the only place either moves.
+//
+// **The form goes with it**: it sends only a turn carrying a reference (ADR-0293 §11),
+// so it is on screen exactly while one is attached.
 function showReference(note, offered) {
   const hint = el("referencing");
   hint.textContent = note;
   hint.hidden = note === "";
   el("clear-reference").hidden = !offered;
+  el("ask-form").hidden = reference === null;
 }
 
 // Say that the attached reference has gone out, where it is still the attached one.
@@ -615,7 +624,6 @@ function sayResumed(text) {
 function startFresh() {
   fault(null, "console");
   changeConversation(null);
-  el("utterance").focus();
 }
 
 function show(id, visible) {
@@ -948,19 +956,6 @@ const FAULTS = {
     "unreferenced credential remains.",
 };
 
-// A stream whose body ended without a terminal value (ADR-0175 §2). Not a fault the
-// gateway named — it is the connection itself going away, which is exactly what §2
-// makes the front end report as a transport failure.
-//
-// **Two of them, because they end two different things.** One message served both
-// while the delivery stream was the second reader of one wording, and it told an owner
-// whose notifications had stopped that "the connection carrying that answer" had gone.
-// The condition is the same; what was cut is not.
-const ANSWER_STREAM_CUT =
-  "The connection carrying that answer ended before the gateway finished it. What had " +
-  "been written is not the answer and was not kept, so it has been cleared rather " +
-  "than left on screen looking like one. A cut stream is asked again, not resumed.";
-
 // A delivery stream this page abandoned because it went quiet, which is an ending the
 // gateway did not name and could not: the whole condition is that nothing arrived
 // (#1442). It is stated as what it is rather than folded into the cut above — a body
@@ -1020,13 +1015,12 @@ const DELIVERY_STREAM_CUT =
   "while nothing here was listening. Start watching again.";
 
 // The same limb of ADR-0175 §2 on the delivery stream, for a line this page could not
-// read as a value on it (#2008). Its own sentence for the reason the cut above has one:
-// the condition `ANSWER_STREAM_MISFRAMED` states is the same, and what stopped is not —
-// an owner whose notifications stopped is not told about "that answer".
+// read as a value on it (#2008). Its own sentence, because an owner whose notifications
+// stopped is told about notifications and about nothing else.
 //
-// **And it is not the cut either.** "Ended before the gateway finished it" is false of a
-// gateway that wrote a whole line and had it refused here, exactly as it is on the
-// answer stream, and this ending is the one an array or a scalar on this stream reaches
+// **And it is not the cut.** "Ended before the gateway finished it" is false of a
+// gateway that wrote a whole line and had it refused here, and this ending is the one an
+// array or a scalar on this stream reaches
 // — which reached the cut's wording before the reader refused those (adversarial review,
 // round 1, `blocker`).
 const DELIVERY_STREAM_MISFRAMED =
@@ -1218,7 +1212,7 @@ function renderOutcome(outcome, chosenAt, provenance) {
   // (ADR-0198 §§1-2). It is written first because it qualifies everything below it, and
   // it is passed rather than derived because deriving it would mean reading a
   // restatement off the members the outcome does *not* carry — the inference from
-  // absence ADR-0139 §4 refuses. `ask` and `askStreaming` pass none and get none.
+  // absence ADR-0139 §4 refuses. `ask` passes none and gets none.
   if (provenance) {
     line(body, provenance, "notice");
   }
@@ -1450,7 +1444,7 @@ function renderOutcome(outcome, chosenAt, provenance) {
 // **What it does *not* decide is the ending**, which is why it reports rather than
 // announces: each caller's is its own and they differ in what the evidence licenses and
 // in what else has to be given up. `askWhole`'s head proves the turn ran and
-// `askStreaming`'s does not; `renderSpokenTurn` withholds a transcript and plays no
+// `renderSpokenTurn` withholds a transcript and plays no
 // rendering; `answerConfirmation` strands a consent token and gives up the park's row —
 // the shape #1612 spent rounds 9 and 10 reaching, folded in here whole (#2006) rather
 // than replaced by one this function chose.
@@ -1459,7 +1453,7 @@ function renderOutcome(outcome, chosenAt, provenance) {
 // records against it: it is what the *caller* knows about where the outcome came from,
 // and one caller has such a fact. A guard that dropped it would render a re-answered
 // park's outcome without the caveat that qualifies everything under it, so this passes
-// what it is given and derives nothing. `ask`, `askStreaming` and `renderSpokenTurn`
+// what it is given and derives nothing. `ask` and `renderSpokenTurn`
 // pass none and get none.
 function couldRenderOutcome(outcome, chosenAt, provenance) {
   try {
@@ -5510,8 +5504,8 @@ const SESSION_LOST_STATUS = new Map([
 // considered and is declined on three grounds:
 //
 // - **Any figure would pace something the gateway paces, and no head discloses it.**
-//   `server.py`'s `_TURN_BUDGET` gives every turn sixty seconds — `_ask` and
-//   `_pump_answer` both pass it — and it reaches the browser in no header, in no value
+//   `server.py`'s `_TURN_BUDGET` gives every turn sixty seconds — `_ask` passes it —
+//   and it reaches the browser in no header, in no value
 //   and in no setting. A page-side deadline would therefore be a second number that
 //   can silently disagree with it, which is `SILENT_CADENCES`' own argument one
 //   surface out, and deriving one from `usableCadence`'s figure would be exactly the
@@ -5524,10 +5518,9 @@ const SESSION_LOST_STATUS = new Map([
 //   answers with the outcome. A thirty-second bound there would abandon a healthy
 //   turn that was thinking, and announce that its outcome was not known — true, and
 //   useless.
-// - **It would cover one of the three places the socket can die anyway.** A black hole
-//   before the head, one between the head and the first chunk, and one mid-stream are
-//   one failure to the owner, and only a control the owner can press at any moment
-//   ends all three.
+// - **It would cover one of the places the socket can die anyway.** A black hole before
+//   the head and one mid-body are one failure to the owner, and only a control the
+//   owner can press at any moment ends both.
 //
 // The honest cost is the one thing a control cannot do: an owner who never looks is
 // never recovered. That is bounded by where the control sits — beside the greyed-out
@@ -5544,22 +5537,9 @@ const SESSION_LOST_STATUS = new Map([
 // half an answer would be announcing a state it is not in. So the record holds two
 // facts, each set at the moment its evidence arrives:
 //
-// - `heard` — something of this turn's own answer reached this browser, so the question
-//   demonstrably got past the gateway to the assistant. What sets it is not the same
-//   event on the two entries, and the difference is load-bearing: `/ask` answers only
-//   once `converse` has returned, so its response head is proof the turn ran, while
-//   `/ask/stream`'s head is written *before* the engine is called (`_write_stream`
-//   drains it, then awaits the body) and proves nothing about the assistant at all. On
-//   that entry the first chunk is the evidence.
-// - `composing` — the node this turn writes its chunks into, or `null` on the entry that
-//   has none. It is held as the **node** rather than as a flag because ownership of the
-//   answer panel is a fact about *now* and not about the past: a question asked after an
-//   answered one leaves the previous answer standing there, and a park answered while
-//   this turn is still out replaces the panel through `renderOutcome`. In both cases
-//   what is on screen belongs to something else, and clearing it would destroy a
-//   complete answer because a later request failed. A node that is still `isConnected`
-//   is this turn's panel; one that has been replaced is not, and no bookkeeping has to
-//   be kept in step to know it. Adversarial review found the flag version on round 2.
+// - `heard` — this turn's own answer reached this browser, so the question
+//   demonstrably got past the gateway to the assistant: `/ask` answers only once
+//   `converse` has returned, so its response head is proof the turn ran.
 // - `refusedWith` — the status of a refusal head, or `null` where none came back. The
 //   head is read whole before the body is touched, so a status is in hand even where the
 //   body then stalls, and for two of them the status alone names the condition
@@ -5569,10 +5549,9 @@ const SESSION_LOST_STATUS = new Map([
 //   the one shape that strands a browser holding a header half the gateway will refuse
 //   every future request from.
 //
-// `heard` and `refusedWith` are mutually exclusive by construction — one entry sets
-// `heard` on a successful head and the other sets `refusedWith` on the refusal branch it
-// returns from — and so are `composing` and `refusedWith`, since the panel is taken only
-// after a successful head. Neither pairing has to be reasoned about below.
+// `heard` and `refusedWith` are mutually exclusive by construction — a successful head
+// sets the one and a refusal head the other — so the pairing has not to be reasoned
+// about below.
 let awaited = null;
 
 // Said while a question is out. **It does not promise a deadline**, because there is
@@ -5643,19 +5622,6 @@ const ASK_ABANDONED_MIDWAY =
   "new question rather than retrying that one. " +
   WHERE_TO_LOOK;
 
-// And the clause for the screen, added only where there was something on it. It is
-// `ANSWER_STREAM_CUT`'s sentence for `ANSWER_STREAM_CUT`'s reason — ADR-0173 §3 makes
-// the terminal outcome's `reply` the answer, so an accumulated chunk sequence is not
-// "the record of what the assistant said" — and it is a separate clause because the two
-// facts it joins are independent: a whole `ask` abandoned while its body was being read
-// has been heard from and has put nothing on screen, and a stream abandoned between its
-// head and its first chunk has put an empty panel up and been heard from by nothing.
-// Saying either sentence in the other's state would be a wrong explanation rather than a
-// missing one, which is the distinction this page keeps everywhere else.
-const PARTIAL_CLEARED =
-  "What had been written into the answer is not the answer and was not kept, so it has " +
-  "been cleared rather than left on screen looking like one.";
-
 // **An answer this browser read and cannot put on screen** (#1622), which is
 // `PARK_REPLY_UNREADABLE`'s condition arriving on the ask surface. `readBody` answers an
 // unreadable `2xx` with `{}`, a well-formed object may still be missing `outcome`, and an
@@ -5681,54 +5647,6 @@ const ANSWER_UNREADABLE =
   "the answer, so what the turn did is not known. The turn itself ran: this entry " +
   "answers only once the assistant has finished with the question. Nothing was re-sent " +
   "and nothing was cancelled. " +
-  WHERE_TO_LOOK;
-
-// **The same condition on the streamed entry, claiming less** — for the reason
-// `askStreaming` records against its own head: `/ask/stream`'s head is written and
-// drained before `_pump_answer` is awaited, so it proves nothing about the assistant, and
-// the only other evidence here is the terminal value this page has just found it cannot
-// read an outcome from. Reading "the turn ran" off the `kind` member of a frame whose
-// `outcome` member is missing is the inference from an unreadable body that the sentence
-// above declines to make and that this state does not license.
-const STREAMED_ANSWER_UNREADABLE =
-  "That answer's stream ended in a value this browser could not read an outcome from, " +
-  "so what became of the turn is not known. Nothing was re-sent and nothing was " +
-  "cancelled. " +
-  WHERE_TO_LOOK;
-
-// **And the ending one line earlier than that one** (#2008): a stream that carried a
-// line this page could not read *as a value at all*, rather than a value it read and
-// could not take an outcome from. Both inputs — a line that is not JSON, and one that
-// reads as `null` — used to throw inside the read and land in `ask`'s outer catch,
-// which announced `GATEWAY_GONE`: "The gateway did not answer, so it may have stopped",
-// with a restart and a fresh bootstrap value as the remedy, about a gateway that had
-// answered and a turn that may have run. That is ADR-0139 §4's direction breached — an
-// act reported as an outcome it is known not to have, never as one of the other two —
-// and the remedy it offered threw the session away.
-//
-// **The ending is ADR-0175 §2's transport failure, and that clause is exhaustive.**
-// "Every stream ends in exactly one of two ways, and a reader tells them apart from the
-// stream alone: the gateway wrote a **terminal** value, or the body ended without one.
-// A reader that reached a terminal value has the whole of what the gateway sent; a
-// reader that did not has a transport failure and the front end reports it as one."
-// A reader stopped by a line it cannot read reached no terminal value, so it is in the
-// second limb and nothing new is decided by putting it there.
-//
-// **What §2 leaves open is the wording, and it says so.** Its third clause hands "the
-// exact framing of a value on a stream" to the implementing lane, and this page already
-// carries four sentences inside that one limb — cut, silent, stalled, and the delivery
-// half of the first — because "the condition is the same; what was cut is not". This is
-// the fifth, for the same reason and not for a new one.
-//
-// **It is specifically not `ANSWER_STREAM_CUT`.** That sentence opens "ended before the
-// gateway finished it", and a gateway that wrote a whole line of something unreadable
-// did not stop part way through writing — saying it did would be a wrong explanation
-// rather than a missing one, which is the distinction this page keeps everywhere else.
-const ANSWER_STREAM_MISFRAMED =
-  "That answer's stream carried a line this browser could not read as a value on it, so " +
-  "nothing further was read from it and what became of the turn is not known. The " +
-  "gateway did answer: what broke is the shape of what was written and not the " +
-  "connection carrying it. Nothing was re-sent and nothing was cancelled. " +
   WHERE_TO_LOOK;
 
 // **And the ending where the outcome is not unknown at all**, which adversarial review
@@ -5946,38 +5864,23 @@ function abandonAsk() {
   if (waiting.refusedWith !== null) {
     // The screen an ordinary refusal leaves, for the reason the branch above leaves it.
     show("answer", false);
-    fault(refusalAbandoned(waiting.refusedWith), "console");
+    fault(refusalAbandoned(waiting.refusedWith), "goals");
     return;
   }
-  // **The partial text goes with it, and nothing else does.** ADR-0173 §3 makes the
-  // terminal outcome's `reply` the answer, so an accumulated chunk sequence is not "the
-  // record of what the assistant said" and leaving it on screen renders a non-answer as
-  // one; there is nothing to be done with it either way, since ADR-0175 §10 declines
-  // resuming a cut stream and this one was not even cut, it was let go.
-  //
-  // **Only where the panel is still this turn's**, which is a question about now and
-  // not about the past — the two rounds of adversarial review that found this are two
-  // instances of one mistake. An owner who asks a second question and stops waiting
-  // before its head lands still has the *first* question's answer on screen; an owner
-  // who answers a park while this turn is out has that park's outcome on screen, put
-  // there by `renderOutcome`. In both cases clearing would destroy a complete answer
-  // because a later request failed. The composing node answers it without bookkeeping:
-  // it is in the document exactly while the panel is still this turn's.
-  const mine = waiting.composing !== null && waiting.composing.isConnected;
-  if (mine) {
-    clearNode(el("answer-body"));
-    show("answer", false);
-  }
-  // Which sentence is which fact, and the clause about the screen is added only where
-  // there was text on it: a stream abandoned between its head and its first chunk holds
-  // an empty node, and clearing that is not something to announce.
-  const said = waiting.heard ? ASK_ABANDONED_MIDWAY : ASK_ABANDONED;
-  fault(mine && waiting.heard ? `${said} ${PARTIAL_CLEARED}` : said, "console");
+  // Which sentence is which fact: a successful head read before the wait was stopped is
+  // the assistant having taken the question, and no head is nothing read at all.
+  fault(waiting.heard ? ASK_ABANDONED_MIDWAY : ASK_ABANDONED, "goals");
 }
 
 async function ask(event) {
   event.preventDefault();
-  fault(null, "console");
+  // The ordinary turn is the chat's (ADR-0293 §11); this form sends only a turn that
+  // answers a clarification or takes a goal up, and it is on screen only while one of
+  // the goal acts has attached the reference that says which.
+  if (reference === null) {
+    return;
+  }
+  fault(null, "goals");
   const half = headerHalf();
   if (half === null) {
     showBootstrap();
@@ -5994,7 +5897,6 @@ async function ask(event) {
     stopping: new AbortController(),
     heard: false,
     ran: false,
-    composing: null,
     refusedWith: null,
     // ADR-0250 §11's reference, held on the record of *this* ask so that whichever site
     // ends it can reconcile it: `abandonAsk` ends a wait without `ask`'s `finally` ever
@@ -6015,30 +5917,18 @@ async function ask(event) {
     if (conversationId !== null) {
       asked.conversation_id = conversationId;
     }
-    // The browser's own argument, relayed whole and carried by both entries alike,
-    // because `converse_streaming` "takes exactly `converse`'s arguments in exactly its"
-    // order (ADR-0173). It is the value read above rather than whatever is attached by
-    // the time this turn ends: what a turn may give up is the reference it *sent*.
-    if (waiting.reference !== null) {
-      asked.reference = waiting.reference.value;
-    }
+    // The browser's own argument, relayed whole. It is the value read above rather than
+    // whatever is attached by the time this turn ends: what a turn may give up is the
+    // reference it *sent*. `ask` runs only with one attached, which is what the gateway
+    // requires of `/ask` since ADR-0293 §11 (the form is shown only while one is).
+    asked.reference = waiting.reference.value;
     // From here the body is serialised and the control can no longer take it back, so
     // the page stops offering it and says so (round 2, `major`).
     referenceSent(waiting.reference);
-    // **Which entry is the owner's choice, and the gateway never chooses between
-    // them** (ADR-0175 §3). ADR-0173 §5 makes a provider that cannot stream a
-    // `ModelError` before any delta, degrading to no answer at all — so on such a
-    // build every streamed turn answers nothing while the CLI on the same machine
-    // answers normally. The non-streaming entry is the path that still works, and
-    // it is here rather than reached for automatically because a silent fallback is
-    // forbidden twice over: ADR-0168 §9 has the gateway not retry silently, and
-    // ADR-0173 §7 refuses the same fallback one layer in. A second attempt is the
-    // owner asking again, visibly.
-    if (el("stream-answer").checked) {
-      await askStreaming(half, asked, chosenAt, waiting);
-    } else {
-      await askWhole(half, asked, chosenAt, waiting);
-    }
+    // One entry, answered whole: ADR-0293 §11 retired the streamed turn with the
+    // conversation it carried, and what is left here is the turn that carries a
+    // reference (ADR-0250 §11).
+    await askWhole(half, asked, chosenAt, waiting);
   } catch (_) {
     // An abort this owner asked for is not the gateway having gone, and saying it was
     // would be a wrong explanation rather than a missing one — `readDeliveries`' own
@@ -6051,7 +5941,7 @@ async function ask(event) {
       // `fetch` rejects when the connection itself failed — the gateway is gone,
       // which is a different fault from the hub being gone and is said as one.
       show("answer", false);
-      fault(GATEWAY_GONE, "console");
+      fault(GATEWAY_GONE, "goals");
     }
   } finally {
     // **Only while this ask is still the one being waited on.** An owner who stopped
@@ -6113,8 +6003,7 @@ async function askWhole(half, asked, chosenAt, waiting) {
     body: JSON.stringify(asked),
     signal: waiting.stopping.signal,
   });
-  // **A successful head on this entry is proof the turn ran**, which is why it is the
-  // evidence here and the head of `/ask/stream` is not: `_ask` awaits `converse` and
+  // **A successful head on this entry is proof the turn ran**: `_ask` awaits `converse` and
   // answers with the outcome, so a `200` cannot come back until the assistant has
   // finished with the question. The status is carried in the head, so this is known
   // before the body — which is the read an abort lands in.
@@ -6134,8 +6023,7 @@ async function askWhole(half, asked, chosenAt, waiting) {
     waiting.heard = true;
     // And on this entry that is also proof the turn **ran**: `_ask` awaits `converse`
     // and answers with the outcome, so a `200` cannot come back until the assistant has
-    // finished with the question. A refusal is proof of nothing, which is why the two
-    // are set together here and apart on the streamed entry.
+    // finished with the question. A refusal is proof of nothing.
     waiting.ran = true;
   } else {
     waiting.refusedWith = response.status;
@@ -6158,159 +6046,13 @@ async function askWhole(half, asked, chosenAt, waiting) {
     // taken the read the owner stopped, so what is left for this branch is a body the
     // gateway did not write.
     if (!couldRenderOutcome(body.outcome, chosenAt)) {
-      fault(ANSWER_UNREADABLE, "console");
+      fault(ANSWER_UNREADABLE, "goals");
     }
     return;
   }
   show("answer", false);
   conversationLost(body, asked.conversation_id);
-  refused("console", body, response.status);
-}
-
-// One streamed turn (ADR-0175 §3): zero or more chunk values, then one terminal
-// value carrying the outcome or the fault the exchange ended in.
-//
-// **The terminal outcome is the answer** (ADR-0173 §3). The chunks are rendered as
-// they arrive so the owner sees the answer being written, and `renderOutcome` then
-// clears the panel and renders the outcome's own `reply` — so where a rendered chunk
-// sequence and the terminal reply disagree, what stands is the terminal reply. No
-// accumulated chunk sequence is kept, and none is treated as the record of what the
-// assistant said.
-async function askStreaming(half, asked, chosenAt, waiting) {
-  const response = await fetch("/ask/stream", {
-    method: "POST",
-    headers: admitted(half, true),
-    body: JSON.stringify(asked),
-    signal: waiting.stopping.signal,
-  });
-  if (!response.ok) {
-    // Recorded before the body is touched, and for `askWhole`'s reason: the head is what
-    // survives a body that stalls, and for two statuses it names the condition on its
-    // own. This entry's head proves nothing about the *assistant* — `_write_stream`
-    // drains it before `_pump_answer` is awaited — but that argument is about a
-    // successful head, and a refusal never reaches `_write_stream` at all.
-    waiting.refusedWith = response.status;
-    const body = await readBody(response);
-    // `askWhole`'s reason, on the one path here that reads a body rather than a stream:
-    // a refusal whose body the owner stopped reading is not a refusal this page can
-    // put into words, and it has already said what it did.
-    if (waiting.stopping.signal.aborted) {
-      return;
-    }
-    show("answer", false);
-    conversationLost(body, asked.conversation_id);
-    refused("console", body, response.status);
-    return;
-  }
-  const panel = el("answer-body");
-  clearNode(panel);
-  show("answer", true);
-  const composing = line(panel, "", "reply");
-  // The node this turn composes into, kept so that abandoning it can ask whether the
-  // panel is *still* this turn's rather than whether it ever was. The head alone says
-  // nothing about the assistant — the gateway writes and drains it *before*
-  // `_pump_answer` is awaited — so it takes the panel and nothing more.
-  waiting.composing = composing;
-  let terminal = null;
-  try {
-    for await (const value of streamValues(response)) {
-      if (value.kind === "chunk") {
-        // The first chunk is what proves the question reached the assistant on this
-        // entry, and it is the fact a wait abandoned from here is announced with — and
-        // the fact that lets the reference this turn carried be given up (round 2).
-        waiting.heard = true;
-        waiting.ran = true;
-        composing.textContent += value.text;
-      } else if (TERMINAL_KINDS.has(value.kind)) {
-        terminal = value;
-        break;
-      }
-      // A kind this page does not know is ignored rather than guessed at. The
-      // enumeration is closed and the gateway ships with this file, so meeting one
-      // means the two halves of one distribution disagree (ADR-0168 §10).
-    }
-  } catch (error) {
-    // **One condition is caught here and every other one is not** (#2008). A line this
-    // reader could not read is an ending this entry has words for, and it is announced
-    // where it happened rather than left to `ask`'s catch, which has only
-    // `GATEWAY_GONE` to say. Everything else a read can reject with — the owner's own
-    // abort, a connection that failed, a body the browser gave up on — is re-thrown
-    // untouched, because each of those is a different ending and `ask` is where the
-    // first of them is told from the rest.
-    if (!(error instanceof MisframedValue)) {
-      throw error;
-    }
-    // `askWhole`'s guard, on the read this entry can be abandoned in the middle of. An
-    // abort raises on the *next* read, so a line already buffered can be found
-    // unreadable after the owner has stopped waiting — and `abandonAsk` has by then
-    // cleared this panel and said what the owner did. Writing over that would replace
-    // an act with a fault, which is the one thing this page never does.
-    if (waiting.stopping.signal.aborted) {
-      return;
-    }
-    // The partial text goes where `ANSWER_STREAM_CUT` sends it and for its reason:
-    // ADR-0173 §3 makes the terminal outcome's `reply` the answer, so chunks left under
-    // a fault render a non-answer as one. The clause about the screen is added only
-    // where there was something on it — `STREAMED_ANSWER_UNREADABLE`'s own division,
-    // because a stream misframed before its first chunk cleared an empty panel and
-    // saying so would be a sentence about nothing.
-    clearNode(panel);
-    show("answer", false);
-    fault(
-      waiting.heard ? `${ANSWER_STREAM_MISFRAMED} ${PARTIAL_CLEARED}` : ANSWER_STREAM_MISFRAMED,
-      "console"
-    );
-    return;
-  }
-  if (terminal === null) {
-    // **The partial text is cleared rather than left under the fault.** A body that
-    // ended without a terminal value is a transport failure and not an answer
-    // (ADR-0175 §2), and ADR-0173 §3 makes the terminal outcome's `reply` the answer
-    // — "no front end treats an accumulated chunk sequence as the record of what the
-    // assistant said". Leaving the chunks on screen renders a non-answer exactly as
-    // ADR-0173 §6's fourth shape is rendered: an answer owed and *partly* produced,
-    // which arrives as a terminal outcome carrying `reply_degraded` and is said to be
-    // incomplete in the same breath. Losing that distinction is what this renderer
-    // spends its `renderReply` branch preventing, and a cut stream is not that shape.
-    //
-    // The alternative — label the text unmistakably as partial — was declined for the
-    // same reason: it would give a transport failure the wording of an answer the
-    // assistant did produce, and there is nothing to be done with the text either way.
-    // ADR-0175 §10 declines resuming an interrupted stream (#1314), so the whole of
-    // the recovery is asking again — and **ADR-0182 §7** states this outcome in terms:
-    // a cut answer stream "is not resumed and its partial text is not left standing as
-    // an answer". Not merged at the time of writing; it ratifies the choice rather
-    // than prompting it.
-    clearNode(panel);
-    show("answer", false);
-    fault(ANSWER_STREAM_CUT, "console");
-    return;
-  }
-  if (terminal.kind === "fault") {
-    show("answer", false);
-    conversationLost(terminal, asked.conversation_id);
-    refused("console", terminal, response.status);
-    return;
-  }
-  // A terminal **outcome** is the assistant having taken the question, whether or not a
-  // chunk preceded it: ADR-0173 §4 yields "zero or more chunks, then exactly one
-  // `TurnOutcome`", so a turn composed in one piece carries no chunk and would otherwise
-  // leave `ran` false over a turn that plainly ran (round 2). A terminal *fault* is not
-  // one, which is why the branch above returns before this line.
-  waiting.ran = true;
-  // The same reading on the streamed entry (#1622), and the partial text goes the way
-  // `ANSWER_STREAM_CUT` sends it rather than staying under a fault: ADR-0173 §3 makes the
-  // terminal outcome's `reply` the answer, so an accumulated chunk sequence left on
-  // screen renders a non-answer as one. `couldRenderOutcome` has already taken it off,
-  // and the clause is added only where there was something to take — a stream that ended
-  // in an unreadable terminal value before its first chunk cleared an empty panel, and
-  // announcing that would be a sentence about nothing.
-  if (!couldRenderOutcome(terminal.outcome, chosenAt)) {
-    const said = waiting.heard
-      ? `${STREAMED_ANSWER_UNREADABLE} ${PARTIAL_CLEARED}`
-      : STREAMED_ANSWER_UNREADABLE;
-    fault(said, "console");
-  }
+  refused("goals", body, response.status);
 }
 
 // --- push to talk (ADR-0200 §10) ---------------------------------------------
@@ -8588,7 +8330,6 @@ function renderConversation(list, summary) {
 async function resumeConversation(id) {
   fault(null, "conversations");
   changeConversation(id);
-  el("utterance").focus();
   const mine = described;
   const half = headerHalf();
   if (half === null) {
@@ -12189,7 +11930,7 @@ function offerGoalActs(item, goal) {
     answer.addEventListener("click", () => {
       setReference(
         { question_id: goal.clarification.question_id },
-        "Your next question answers the clarification on this goal, in your own words."
+        "What you send below answers the clarification on this goal."
       );
     });
     row.appendChild(answer);
@@ -12207,7 +11948,7 @@ function offerGoalActs(item, goal) {
   take.addEventListener("click", () => {
     setReference(
       { goal_id: goal.id },
-      "Your next question is about this goal, in the conversation you are in now."
+      "What you send below is about this goal, in the conversation you are in now."
     );
   });
   row.appendChild(take);
@@ -14263,7 +14004,6 @@ function showConsole() {
   // control lives in the console panel and there is nothing to offer while the
   // bootstrap panel is up.
   offerTalk();
-  el("utterance").focus();
   watchDeliveries();
   // A park outlives the page that raised it, so a browser opening onto one has to be
   // told without being asked (ADR-0177 §8). Quiet, because a load that finds nothing

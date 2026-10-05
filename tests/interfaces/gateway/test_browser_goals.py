@@ -347,8 +347,8 @@ async def test_answering_a_clarification_is_the_ordinary_turn_with_a_reference(
 
     "Answering is a turn and not an operation of its own, and that is the whole reason
     ``converse`` gains a keyword rather than the surface gaining a fifth verb." So the
-    page has no answer form: pressing the row's control attaches the reference to the
-    composer, and the next thing the owner sends carries it.
+    page has one small form beside the goals: pressing the row's control attaches the
+    reference and shows it, and what the owner sends there carries it.
     """
     async with driving(gateway_browser, tmp_path, viewport=viewport) as drive:
         drive.engine.goal_summaries = [_summary()]
@@ -413,7 +413,7 @@ async def test_a_reference_chosen_while_a_turn_is_out_survives_that_turn(
         # ``_holding`` is ``test_browser_conversations``' own device, imported rather
         # than restated: a second implementation of "one request stopped in flight" is a
         # second thing a flake could be about.
-        held = await _holding(drive, "/ask/stream", at=1)
+        held = await _holding(drive, "/ask", at=1)
 
         await _open_goals(drive)
         await drive.page.click("text=Answer this")
@@ -478,13 +478,13 @@ async def test_a_refusal_the_gateway_took_leaves_the_reference_attached(
                 body=json.dumps({"fault": "malformed-request"}),
             )
 
-        await drive.page.route(lambda url: urlparse(url).path == "/ask/stream", refuse)
+        await drive.page.route(lambda url: urlparse(url).path == "/ask", refuse)
 
         await _open_goals(drive)
         await drive.page.click("text=Answer this")
         await drive.page.fill("#utterance", "the one at Melides")
         await drive.page.click("#ask-button")
-        await expect(drive.page.locator("#console .fault")).to_be_visible()
+        await expect(drive.page.locator("#goals .fault")).to_be_visible()
 
         # Still attached, still offered, and still saying what it is for: the owner
         # presses again and the same answer goes to the same question.
@@ -518,7 +518,7 @@ async def test_a_reference_already_sent_is_not_offered_as_one_that_can_be_taken_
     """
     async with driving(gateway_browser, tmp_path) as drive:
         drive.engine.goal_summaries = [_summary()]
-        held = await _holding(drive, "/ask/stream", at=1)
+        held = await _holding(drive, "/ask", at=1)
 
         await _open_goals(drive)
         await drive.page.click("text=Answer this")
@@ -556,7 +556,7 @@ async def test_a_wait_the_owner_ended_leaves_the_reference_offered_again(
     """
     async with driving(gateway_browser, tmp_path) as drive:
         drive.engine.goal_summaries = [_summary()]
-        held = await _holding(drive, "/ask/stream", at=1)
+        held = await _holding(drive, "/ask", at=1)
 
         await _open_goals(drive)
         await drive.page.click("text=Answer this")
@@ -598,13 +598,13 @@ async def test_a_gateway_that_went_away_leaves_the_reference_offered_again(
         async def cut(route: Route) -> None:
             await route.abort()
 
-        await drive.page.route(lambda url: urlparse(url).path == "/ask/stream", cut)
+        await drive.page.route(lambda url: urlparse(url).path == "/ask", cut)
 
         await _open_goals(drive)
         await drive.page.click("text=Answer this")
         await drive.page.fill("#utterance", "the one at Melides")
         await drive.page.click("#ask-button")
-        await expect(drive.page.locator("#console .fault")).to_be_visible()
+        await expect(drive.page.locator("#goals .fault")).to_be_visible()
 
         await expect(drive.page.locator("#referencing")).to_contain_text(
             "answers the clarification"
@@ -639,12 +639,10 @@ async def test_giving_a_goal_up_takes_the_reference_to_it_with_it(
         await expect(drive.page.locator("#goal-said")).to_be_visible()
 
         await expect(drive.page.locator("#referencing")).to_be_hidden()
-        await drive.page.fill("#utterance", "what is on today")
-        await drive.page.click("#ask-button")
-        await drive.page.wait_for_selector("#answer:not([hidden])")
-
-        turns = [call for call in drive.engine.calls if call[0].startswith("converse")]
-        assert turns[-1][1]["reference"] is None
+        # And with it the form, which sends only a turn carrying a reference since
+        # ADR-0293 §11: there is nothing left on screen that could carry the old one.
+        await expect(drive.page.locator("#ask-form")).to_be_hidden()
+        assert not [call for call in drive.engine.calls if call[0].startswith("converse")]
 
 
 async def test_withdrawing_a_question_takes_the_reference_to_it_with_it(
@@ -699,43 +697,6 @@ async def test_an_act_on_one_goal_leaves_a_reference_to_another_alone(
 
         turns = [call for call in drive.engine.calls if call[0].startswith("converse")]
         assert turns[-1][1]["reference"] == TurnReference(question_id=QUESTION_ID)
-
-
-async def test_a_stream_that_ended_without_an_outcome_leaves_the_reference_offered_again(
-    gateway_browser: Browser, tmp_path: Path
-) -> None:
-    """The last ending of the reference's lifecycle, enumerated rather than waited for.
-
-    A body that ends without a terminal value is a transport failure (ADR-0175 §2), and
-    one that ends before its first chunk establishes nothing about the assistant at all:
-    ``waiting.ran`` is set by an ok head on the whole entry, by the first chunk, and by a
-    terminal outcome, and this ending reaches none of the three.
-
-    **The reference is kept, which is the conservative direction and is stated as a
-    cost.** Such a turn may have run — ADR-0175 §10 declines resuming a cut stream, so
-    what the page knows is only that it read no ending — and a second send of the same
-    reference is answered ``ALREADY_SETTLED`` and rendered as its own fixed statement
-    (ADR-0250 §11). That is an honest sentence; consuming it would be an answer that
-    silently went nowhere.
-    """
-    async with driving(gateway_browser, tmp_path) as drive:
-        drive.engine.goal_summaries = [_summary()]
-
-        async def cut(route: Route) -> None:
-            await route.fulfill(status=200, content_type="application/x-ndjson", body="")
-
-        await drive.page.route(lambda url: urlparse(url).path == "/ask/stream", cut)
-
-        await _open_goals(drive)
-        await drive.page.click("text=Answer this")
-        await drive.page.fill("#utterance", "the one at Melides")
-        await drive.page.click("#ask-button")
-        await expect(drive.page.locator("#console .fault")).to_be_visible()
-
-        await expect(drive.page.locator("#referencing")).to_contain_text(
-            "answers the clarification"
-        )
-        await expect(drive.page.locator("#clear-reference")).to_be_visible()
 
 
 @pytest.mark.parametrize(
@@ -815,12 +776,9 @@ async def test_a_reference_can_be_given_up_before_it_is_sent(
         await drive.page.click("text=Answer this")
         await drive.page.click("#clear-reference")
         await expect(drive.page.locator("#referencing")).to_be_hidden()
-        await drive.page.fill("#utterance", "something else entirely")
-        await drive.page.click("#ask-button")
-        await drive.page.wait_for_selector("#answer:not([hidden])")
-
-        turns = [call for call in drive.engine.calls if call[0].startswith("converse")]
-        assert turns[-1][1]["reference"] is None
+        # The form goes with it (ADR-0293 §11): the ordinary turn is the chat's.
+        await expect(drive.page.locator("#ask-form")).to_be_hidden()
+        assert not [call for call in drive.engine.calls if call[0].startswith("converse")]
 
 
 # --- the four members on a turn (ADR-0250 §5, §10, §11) ----------------------
@@ -836,8 +794,7 @@ async def _composed(drive: Drive) -> TurnOutcome:
 async def _ask(drive: Drive, outcome: TurnOutcome) -> str:
     """Run one turn whose outcome is scripted and return what the panel says."""
     drive.engine.turn_outcome = outcome
-    await drive.page.fill("#utterance", "book the usual campsite")
-    await drive.page.click("#ask-button")
+    await drive.ask("book the usual campsite")
     await drive.page.wait_for_selector("#answer:not([hidden])")
     return await drive.answer()
 

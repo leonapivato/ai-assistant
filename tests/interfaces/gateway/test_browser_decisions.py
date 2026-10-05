@@ -77,10 +77,6 @@ async def _listed(drive: Drive, recorded: PermissionDecision) -> str:
     submitted through the page's form, and what comes back is the routed account
     ``renderRouted`` writes below the reply (ADR-0197 §10).
 
-    **Unstreamed**, because the subject is the rendered listing and not the transport:
-    the streamed entry composes the same terminal outcome through a second path, and a
-    case waiting on chunks would be measuring that instead.
-
     Args:
         drive: The gateway, engine and page under test.
         recorded: The one ruling the routed pass lists.
@@ -91,9 +87,7 @@ async def _listed(drive: Drive, recorded: PermissionDecision) -> str:
     drive.engine.turn_outcome = _routed(
         RoutableOperation.RECENT_DECISIONS, RouteOutcome.PERFORMED, listing=(recorded,)
     )
-    await drive.page.uncheck("#stream-answer")
-    await drive.page.fill("#utterance", "what have you been allowed to do")
-    await drive.page.click("#ask-form button[type=submit]")
+    await drive.ask("what have you been allowed to do")
     await expect(drive.page.locator("#ask-button")).to_be_enabled()
     return await drive.answer()
 

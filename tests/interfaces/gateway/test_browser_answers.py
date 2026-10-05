@@ -20,10 +20,9 @@ of why the wrong sentence reached the owner. ADR-0216 §2 puts exactly that here
 read what the owner reads.
 
 **One case here is not about an answer, and it is here because it is not a second
-condition.** ``streamValues`` is read by the answer stream and by the delivery stream,
-so a line refused in that reader reaches both — and #2008's ending is therefore two
-sentences at one condition, exactly as ``ANSWER_STREAM_CUT`` and ``DELIVERY_STREAM_CUT``
-are. Driving both beside each other is what shows the pair is a pair.
+condition.** ``streamValues`` once read an answer stream as well as the delivery stream,
+and #2008's misframed-line ending was two sentences at one condition; ADR-0293 §11
+retired the answer stream, and the delivery stream's sentence is driven here still.
 
 **The gateway's own answer, with only the body replaced.** Each case lets the
 request reach the gateway, takes the response it wrote, and substitutes the body —
@@ -75,47 +74,16 @@ _BROWSERS_OWN_PROBE = "/favicon.ico"
 #: and the one the page's own reader manufactures for one.
 _NO_OUTCOME = "{}"
 
-#: A stream that ends in a terminal value of the right ``kind`` and no ``outcome``
-#: behind it, after one chunk. ``TERMINAL_KINDS`` is read off ``kind`` and never from
-#: what the value contains (ADR-0175 §2), so this is what the page accepts as the end
-#: of the answer and then finds it cannot render.
-_STREAM_WITH_A_CHUNK = '{"kind": "chunk", "text": "part of an ans"}\n{"kind": "outcome"}\n'
-
-#: The same ending reached before any chunk, which is the other arm of the sentence:
-#: nothing was written into the panel, so there is nothing to say was cleared.
-_STREAM_WITH_NO_CHUNK = '{"kind": "outcome"}\n'
-
-#: A stream line ``JSON.parse`` will not read at all (#2008). One whole line, written
-#: and terminated — which is what makes ``ANSWER_STREAM_CUT``'s "ended before the
-#: gateway finished it" false of it and its own sentence necessary.
-_STREAM_NOT_JSON = "not json at all\n"
-
-#: A line that parses and to nothing that can carry a discriminator (ADR-0175 §2). It
-#: is the other throw site: ``askStreaming`` read ``value.kind`` off it directly.
-_STREAM_OF_NULL = "null\n"
-
-#: The same, with a chunk on the screen when it lands — the arm that owes the clause
-#: about what was cleared.
-_STREAM_MISFRAMED_AFTER_A_CHUNK = '{"kind": "chunk", "text": "part of an ans"}\nnull\n'
-
 #: A line that parses to a JSON **array**, which is not one JSON object either and
 #: carries no member a discriminator could be read from. It threw nothing before #2008
-#: — ``[].kind`` is ``undefined``, so the loop simply ran out — and got
-#: ``ANSWER_STREAM_CUT``, whose opening clause is as false of it as of the two above.
+#: — ``[].kind`` is ``undefined``, so the loop simply ran out — and got the cut's
+#: sentence, whose opening clause is as false of it as of any other misframed line.
 _STREAM_OF_AN_ARRAY = "[]\n"
 
-#: One JSON object carrying a ``kind`` this page does not know, which is the case the
-#: guard must leave alone: it is a value on the stream, ignored rather than guessed at.
-_STREAM_OF_AN_UNKNOWN_KIND = '{"kind": "something-later"}\n'
-
-#: ``ANSWER_STREAM_CUT``'s opening, quoted: the sentence a misframed line must **not**
+#: ``DELIVERY_STREAM_CUT``'s opening, quoted: the sentence a misframed line must **not**
 #: get, because a gateway that wrote a whole unreadable line did not stop part way
 #: through writing one.
 _CUT = "ended before the gateway finished it"
-
-#: ``PARTIAL_CLEARED``, quoted: the clause the page adds only where a chunk had been
-#: written into the panel before the ending arrived.
-_CLEARED = "is not the answer and was not kept"
 
 #: Where the page keeps the header half (``STORAGE_KEY`` in ``app.js``). Read back so
 #: that "the session was not thrown away" is a fact about storage rather than about a
@@ -186,10 +154,9 @@ async def test_a_whole_answer_that_carries_no_outcome_is_reported_as_a_turn_that
         drive.page.on("pageerror", lambda error: thrown.append(str(error)))
         drive.page.on("console", lambda message: _note(message, complaints))
         await _substitute(drive, path="/ask", body=_NO_OUTCOME)
-        await drive.page.uncheck("#stream-answer")
-        await _ask(drive, "what is on today")
+        await drive.ask("what is on today")
 
-        said = await _fault(drive)
+        said = await _fault(drive, panel="goals")
         assert "could not read an outcome from the answer" in said
         assert "what the turn did is not known" in said
         assert "The turn itself ran" in said
@@ -199,237 +166,6 @@ async def test_a_whole_answer_that_carries_no_outcome_is_reported_as_a_turn_that
         # owner's way on from here is asking again, which is a new question.
         await expect(drive.page.locator("#answer")).to_be_hidden()
         await expect(drive.page.locator("#ask-button")).to_be_enabled()
-        assert thrown == []
-        assert complaints == []
-
-
-async def test_a_streamed_answer_that_ends_in_an_unreadable_value_clears_what_it_wrote(
-    gateway_browser: Browser, tmp_path: Path
-) -> None:
-    """``/ask/stream``'s entry, with a chunk on screen when the terminal value lands.
-
-    ADR-0173 §3 makes the terminal outcome's ``reply`` the answer, so the chunks are
-    not "the record of what the assistant said" and leaving them under a fault renders
-    a non-answer as one — ``ANSWER_STREAM_CUT``'s own reasoning, reached by a different
-    door. And the streamed sentence claims less than the whole entry's: this head is
-    written and drained before ``_pump_answer`` is awaited, so nothing here read that
-    the turn ran.
-    """
-    thrown: list[str] = []
-    complaints: list[str] = []
-    async with driving(gateway_browser, tmp_path) as drive:
-        drive.page.on("pageerror", lambda error: thrown.append(str(error)))
-        drive.page.on("console", lambda message: _note(message, complaints))
-        await _substitute(drive, path="/ask/stream", body=_STREAM_WITH_A_CHUNK)
-        await _ask(drive, "what is on today")
-
-        said = await _fault(drive)
-        assert "could not read an outcome from" in said
-        assert "what became of the turn is not known" in said
-        assert "The turn itself ran" not in said
-        assert _GATEWAY_GONE not in said
-        # The clause about the screen, because there was something on it.
-        assert "is not the answer and was not kept" in said
-        await expect(drive.page.locator("#answer")).to_be_hidden()
-        assert "part of an ans" not in await drive.answer()
-        await expect(drive.page.locator("#ask-button")).to_be_enabled()
-        assert thrown == []
-        assert complaints == []
-
-
-async def test_a_stream_unreadable_before_its_first_chunk_says_nothing_about_the_screen(
-    gateway_browser: Browser, tmp_path: Path
-) -> None:
-    """The other arm, and the reason the clause is a separate one.
-
-    A stream that ends in an unreadable terminal value before any chunk has arrived
-    put an empty panel up and nothing in it. Saying that what had been written was
-    cleared would be a sentence about nothing — the division ``abandonAsk`` keeps
-    between its two abandonment sentences, arriving on an ending that is not an
-    abandonment.
-    """
-    async with driving(gateway_browser, tmp_path) as drive:
-        await _substitute(drive, path="/ask/stream", body=_STREAM_WITH_NO_CHUNK)
-        await _ask(drive, "what is on today")
-
-        said = await _fault(drive)
-        assert "what became of the turn is not known" in said
-        assert "is not the answer and was not kept" not in said
-        assert _GATEWAY_GONE not in said
-        await expect(drive.page.locator("#answer")).to_be_hidden()
-
-
-async def test_a_stream_line_that_is_not_json_is_not_reported_as_a_gateway_that_has_gone(
-    gateway_browser: Browser, tmp_path: Path
-) -> None:
-    """#2008: a line that ``JSON.parse`` will not read, one step before the kind read.
-
-    ``streamValues`` yielded ``JSON.parse(framed)`` unguarded, so this threw inside the
-    read and escaped to ``ask``'s outer ``catch`` — ``GATEWAY_GONE``, about a gateway
-    that had written a head and a whole line of body. ADR-0175 §2's second clause is
-    exhaustive: a reader that did not reach a terminal value "has a transport failure
-    and the front end reports it as one", and a reader stopped by a line it cannot read
-    reached none.
-
-    **Where the throw landed is what only a drive can read**, which is ADR-0216 §2's own
-    ground: ``test_bundle`` can pin that the guard is written and that the sentence is
-    named at the site, and not that an exception raised two functions inside another one
-    lands there rather than in ``ask``.
-    """
-    thrown: list[str] = []
-    complaints: list[str] = []
-    async with driving(gateway_browser, tmp_path) as drive:
-        drive.page.on("pageerror", lambda error: thrown.append(str(error)))
-        drive.page.on("console", lambda message: _note(message, complaints))
-        await _substitute(drive, path="/ask/stream", body=_STREAM_NOT_JSON)
-        await _ask(drive, "what is on today")
-
-        said = await _fault(drive)
-        assert "could not read as a value on it" in said
-        assert "what became of the turn is not known" in said
-        assert "The gateway did answer" in said
-        assert _GATEWAY_GONE not in said
-        # Not the cut stream's sentence: a gateway that wrote a whole unreadable line
-        # did not stop part way through writing one.
-        assert _CUT not in said
-        # Nothing was on the screen to clear, so nothing says anything was.
-        assert _CLEARED not in said
-        await expect(drive.page.locator("#answer")).to_be_hidden()
-        await expect(drive.page.locator("#ask-button")).to_be_enabled()
-        # And the session is not thrown away, which is the half of ``GATEWAY_GONE`` that
-        # cost something: its remedy is a fresh bootstrap value.
-        await _still_admitted(drive)
-        assert thrown == []
-        assert complaints == []
-
-
-async def test_a_stream_value_that_is_null_is_not_reported_as_a_gateway_that_has_gone(
-    gateway_browser: Browser, tmp_path: Path
-) -> None:
-    """#2008's second input: a line that parses, and to nothing that can carry a kind.
-
-    ``askStreaming`` read ``value.kind`` directly, so this threw at the read rather than
-    at the parse — a different site, the same escape and the same wrong sentence. The
-    guard is in ``streamValues`` because "one JSON object per line" is that reader's own
-    contract, and ADR-0175 §2's first clause makes a value something a discriminator is
-    read *from*: ``null`` carries no member at all, so there is nothing on it a kind
-    could be resolved from.
-    """
-    thrown: list[str] = []
-    complaints: list[str] = []
-    async with driving(gateway_browser, tmp_path) as drive:
-        drive.page.on("pageerror", lambda error: thrown.append(str(error)))
-        drive.page.on("console", lambda message: _note(message, complaints))
-        await _substitute(drive, path="/ask/stream", body=_STREAM_OF_NULL)
-        await _ask(drive, "what is on today")
-
-        said = await _fault(drive)
-        assert "could not read as a value on it" in said
-        assert "The gateway did answer" in said
-        assert _GATEWAY_GONE not in said
-        assert _CUT not in said
-        assert _CLEARED not in said
-        await expect(drive.page.locator("#answer")).to_be_hidden()
-        await expect(drive.page.locator("#ask-button")).to_be_enabled()
-        await _still_admitted(drive)
-        assert thrown == []
-        assert complaints == []
-
-
-async def test_a_stream_misframed_after_a_chunk_clears_what_it_had_written(
-    gateway_browser: Browser, tmp_path: Path
-) -> None:
-    """#2008's third input, and the arm that says something about the screen.
-
-    ADR-0173 §3 makes the terminal outcome's ``reply`` the answer, so an accumulated
-    chunk sequence is not "the record of what the assistant said" and leaving it under a
-    fault renders a non-answer as one — ``ANSWER_STREAM_CUT``'s own reasoning, reached
-    by a third door. The clause is added only where there was text on the screen, which
-    is the division the two cases above read the other side of.
-    """
-    thrown: list[str] = []
-    complaints: list[str] = []
-    async with driving(gateway_browser, tmp_path) as drive:
-        drive.page.on("pageerror", lambda error: thrown.append(str(error)))
-        drive.page.on("console", lambda message: _note(message, complaints))
-        await _substitute(drive, path="/ask/stream", body=_STREAM_MISFRAMED_AFTER_A_CHUNK)
-        await _ask(drive, "what is on today")
-
-        said = await _fault(drive)
-        assert "could not read as a value on it" in said
-        assert "The gateway did answer" in said
-        assert _GATEWAY_GONE not in said
-        assert _CUT not in said
-        # The clause about the screen, because there was something on it — and the text
-        # itself is gone rather than left standing as an answer.
-        assert _CLEARED in said
-        await expect(drive.page.locator("#answer")).to_be_hidden()
-        assert "part of an ans" not in await drive.answer()
-        assert (await drive.page.locator("#answer-body").text_content()) == ""
-        await expect(drive.page.locator("#ask-button")).to_be_enabled()
-        await _still_admitted(drive)
-        assert thrown == []
-        assert complaints == []
-
-
-async def test_a_stream_line_that_is_an_array_takes_the_same_ending_as_the_rest(
-    gateway_browser: Browser, tmp_path: Path
-) -> None:
-    """The one input of the four that never threw, and it moves with them (#2008).
-
-    ``[].kind`` is ``undefined``, so nothing raised and the loop ran out — which reached
-    ``ANSWER_STREAM_CUT``, "The connection carrying that answer ended before the gateway
-    finished it". The gateway wrote a whole line and stopped writing nothing part way
-    through, so that opening is exactly as false here as on a line that will not parse.
-
-    The rule is one rule: **not one JSON object**, which is ``streamValues``' own stated
-    contract, and ADR-0175 §2's first clause makes a value something a discriminator is
-    read from. A carve-out for arrays would leave the false sentence reachable one
-    predicate away from the true one.
-    """
-    thrown: list[str] = []
-    complaints: list[str] = []
-    async with driving(gateway_browser, tmp_path) as drive:
-        drive.page.on("pageerror", lambda error: thrown.append(str(error)))
-        drive.page.on("console", lambda message: _note(message, complaints))
-        await _substitute(drive, path="/ask/stream", body=_STREAM_OF_AN_ARRAY)
-        await _ask(drive, "what is on today")
-
-        said = await _fault(drive)
-        assert "could not read as a value on it" in said
-        assert _CUT not in said
-        assert _GATEWAY_GONE not in said
-        await expect(drive.page.locator("#answer")).to_be_hidden()
-        await _still_admitted(drive)
-        assert thrown == []
-        assert complaints == []
-
-
-async def test_a_stream_value_whose_kind_is_unknown_is_still_ignored_rather_than_refused(
-    gateway_browser: Browser, tmp_path: Path
-) -> None:
-    """The line the guard must **not** catch, which is what keeps it narrow.
-
-    An object whose ``kind`` this page does not know is the two halves of one
-    distribution disagreeing (ADR-0168 §10), and every reader already ignores one rather
-    than guessing at it. So ``{}`` stays a value on the stream, the loop runs out, and
-    the ending is the body that ended without a terminal value — ``ANSWER_STREAM_CUT``,
-    unchanged. What ``frameOf`` refuses is a line that *could not* carry a kind.
-    """
-    thrown: list[str] = []
-    complaints: list[str] = []
-    async with driving(gateway_browser, tmp_path) as drive:
-        drive.page.on("pageerror", lambda error: thrown.append(str(error)))
-        drive.page.on("console", lambda message: _note(message, complaints))
-        await _substitute(drive, path="/ask/stream", body=_STREAM_OF_AN_UNKNOWN_KIND)
-        await _ask(drive, "what is on today")
-
-        said = await _fault(drive)
-        assert _CUT in said
-        assert "could not read as a value on it" not in said
-        assert _GATEWAY_GONE not in said
-        await expect(drive.page.locator("#answer")).to_be_hidden()
-        await _still_admitted(drive)
         assert thrown == []
         assert complaints == []
 
@@ -863,12 +599,6 @@ async def _sent(drive: Drive, path: str) -> list[dict[str, object]]:
     await _hold(drive)
     recorded = await drive.page.evaluate("() => window.__sent")
     return [json.loads(one["body"]) for one in recorded if one["path"] == path and one["body"]]
-
-
-async def _ask(drive: Drive, question: str) -> None:
-    """Ask one question through the page's own form, as the owner does."""
-    await drive.page.fill("#utterance", question)
-    await drive.page.click("#ask-form button[type=submit]")
 
 
 async def _still_admitted(drive: Drive) -> None:
