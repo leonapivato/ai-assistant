@@ -7,7 +7,7 @@
 - **Decides no `core` surface.** No Protocol and no type changes. The implementation of §1 is a later lane, not this change; §2 and §3 record what the gateway already serves.
 - **Partially supersedes** [ADR-0123](0123-a-backup-is-the-cold-data-directory-encrypted-to-a-passphrase-the-operator-holds.md) — **one scope.** **§3:2's exclusions, in the addition alone**: the backup also excludes `admin.sock` (§1 below). §3:3's rule that each excluded path comes from the module owning its name, §3:4's exact matching, §3:5's sidecars and every other clause stand, and bind the new entry as they bind the others.
 - **Partially supersedes** [ADR-0177](0177-the-browsers-control-surface-is-thirty-operations-and-a-credential-is-entered-only-on-a-loopback-origin.md) — **one scope.** **§1:1's enumeration**, which gains `cancel_read`, `standing_authorizations`, `revoke_authorization` and `stop_activation`, and loses `converse_streaming` (§2 below). §1:5's class of caller-owned deadlines gains no member, and every other clause stands.
-- **Partially supersedes** [ADR-0175](0175-a-browser-stream-is-a-response-body-on-the-request-the-browser-made-and-one-delivery-fans-out-to-every-open-stream.md) — **one scope.** **§3:4's *"Both turn entries reach the browser"***: one does, `converse`, and the browser reaches no streamed turn entry (§3 below). The rest of §3:4, and §3:1–§3:3 and §3:5, stand.
+- **Partially supersedes** [ADR-0175](0175-a-browser-stream-is-a-response-body-on-the-request-the-browser-made-and-one-delivery-fans-out-to-every-open-stream.md) — **one scope.** **§3:4's *"Both turn entries reach the browser"***: of those two, `converse` does and `converse_streaming` does not (§3 below). ADR-0200's `converse_spoken` is not one of the two and is untouched. The rest of §3:4, and §3:1–§3:3 and §3:5, stand.
 
 ## Context
 
@@ -115,17 +115,24 @@ retired `learn`, and ADR-0177's own header already reads the clause, without a c
 as the rule that a method stays outside the browser until an ADR puts it inside. That
 rule stays true.
 
+`follow_chat`, which the gateway serves at `POST /chat/follow`, needs no record here.
+It is the change stream, which ADR-0296's record on ADR-0177 §1:1 already adds, and
+ADR-0296 §5:1 is the clause that brings it to a browser.
+
 `converse` stays in the enumeration. ADR-0293 §11:2 replaces it for the conversation,
 but the gateway still serves it, for a turn carrying a reference. Its removal is
 recorded when it lands, not before.
 
-### 3. ADR-0175 §3:4: one turn entry reaches the browser
+### 3. ADR-0175 §3:4: of its two turn entries, one reaches the browser
 
-> **Normative.** The browser reaches one turn entry, `converse`, and no streamed turn
-> entry.
+> **Normative.** Of the two turn entries ADR-0175 §3:4 names, `converse` reaches the
+> browser and `converse_streaming` does not.
 
 This is what remains of ADR-0175 §3:4's *"Both turn entries reach the browser"* once
-`converse_streaming` has left the surface (ADR-0293 §11:2). The rest of §3:4 binds as
+`converse_streaming` has left the surface (ADR-0293 §11:2). It decides nothing about
+any other entry: `converse_spoken`, which ADR-0200 put on the browser's surface as a
+third entry, is not one of ADR-0175's two and still reaches the browser exactly as
+ADR-0200 decides. The rest of §3:4 binds as
 written: the gateway never substitutes one entry for another, and *"a turn the browser
 asked for whole is answered by `converse` and never from a stream"*. §3:1 to §3:3 govern
 a streamed turn the browser no longer reaches, and none of them becomes false. §3:5's
@@ -192,7 +199,7 @@ identically.
 | --- | --- |
 | ADR-0123 §3:2's exclusions | §1 (`admin.sock` added) |
 | ADR-0177 §1:1's enumeration | §2 (four added, `converse_streaming` removed) |
-| ADR-0175 §3:4's two turn entries | §3 (one, `converse`) |
+| ADR-0175 §3:4's two turn entries | §3 (`converse` alone of the two) |
 
 ## Consequences
 
