@@ -19,7 +19,7 @@ from typing import TYPE_CHECKING, Any, Final
 
 import pytest
 
-from ai_assistant.core.errors import ConversationStoreError
+from ai_assistant.core.errors import ConversationStoreError, DeviceRefusal, DeviceRefusedError
 from ai_assistant.core.types import ChatDevice, DeviceAccess, DeviceRole, DevicesChangedChange
 from ai_assistant.service import device
 from ai_assistant.service.admin import (
@@ -37,6 +37,7 @@ from ai_assistant.service.enrolment import (
 )
 from ai_assistant.service.exits import EXIT_DEPLOYMENT, EXIT_OK, EXIT_RESTART
 from ai_assistant.service.overlay import MAX_OVERLAY_IDENTITY_BYTES
+from ai_assistant.service.roster import HubRoster
 from ai_assistant.testing import FakeConversationStore
 from ai_assistant.wire.address import ADMIN_SOCKET_FILENAME, SOCKET_FILENAME
 from ai_assistant.wire.credential import is_well_formed, verifier_for
@@ -1184,10 +1185,16 @@ async def test_revoking_one_registration_keeps_a_device_something_else_admits(
     assert await space.my_devices() == ()
 
 
-async def test_a_removal_that_fails_reports_the_revocation_unfinished(tmp_path: Path) -> None:
-    """The record's act has taken effect — the device is refused from now on — so a
-    failure to remove it from the sets is reported as an unfinished revocation, not a
-    refused act, and the same revocation run again finishes it."""
+async def test_a_removal_that_fails_revokes_nothing(tmp_path: Path) -> None:
+    """The memberships go first, so a removal that fails leaves no half-done state: the
+    device is not revoked, the owner is told so, and the same act run again does both.
+
+    The case that ordering closes (review of PR #2727): had the record moved first, a
+    failed removal would leave a revoked phone still an end of its conversations, and
+    a second gateway's naming would register it afresh — with no role, but with every
+    membership the owner meant to take away.
+    """
+    space = await _sets_naming(_PHONE)
     attempts: list[str] = []
 
     async def _flaky(device: str) -> bool:
@@ -1195,42 +1202,66 @@ async def test_a_removal_that_fails_reports_the_revocation_unfinished(tmp_path: 
         if len(attempts) == 1:
             msg = "the conversation store could not be written"
             raise ConversationStoreError(msg)
-        return True
+        return await space.remove_device(device)
 
     async with _admin(tmp_path, remove_device=_flaky) as (listener, registry):
         registry.accept_naming("hub", _PHONE, now=_MOMENT)
         failed = await _act(listener, {"act": "revoke", "identity": _PHONE})
-        refused = registry.accept_naming("hub", _PHONE, now=_MOMENT)
+        still = registry.is_known(_PHONE)
         again = await _act(listener, {"act": "revoke", "identity": _PHONE})
+        renamed = registry.accept_naming(_DEVICE, _PHONE, now=_MOMENT)
 
-    assert failed["ok"] is True
-    assert failed["registrations"] == 1
-    assert failed["memberships"] is False
-    assert "run the same revoke again" in failed["unfinished"]
-    assert not refused.accepted
+    assert failed["ok"] is False
+    assert "nothing was revoked" in failed["error"]
+    assert still, "a failed removal revoked nothing"
+    assert again["ok"] is True
+    assert again["registrations"] == 1
     assert again["memberships"] is True
-    assert "unfinished" not in again
-    assert attempts == [_PHONE, _PHONE]
+    assert renamed.accepted, "another gateway may name it again (ADR-0298 §4:9)"
+    assert await space.my_devices() == (), "and it comes back an end of nothing"
 
 
-def test_an_unfinished_revocation_exits_restartably(capsys: pytest.CaptureFixture[str]) -> None:
-    """The command line prints what the record did, then says what did not finish, and
-    exits so that a script can tell it from a revocation that completed."""
-    code = _render(
-        {
-            "ok": True,
-            "enrolment": False,
-            "registrations": 1,
-            "roles": [],
-            "memberships": False,
-            "unfinished": "removing it did not finish; run the same revoke again to finish it",
-        },
-        "revoke",
-    )
-    captured = capsys.readouterr()
-    assert code == EXIT_RESTART
-    assert "1 registration(s) under a gateway revoked." in captured.out
-    assert "run the same revoke again" in captured.err
+async def test_a_device_being_revoked_is_refused_and_named_in_no_set(tmp_path: Path) -> None:
+    """While its memberships are removed the device cannot put itself back: the roster
+    refuses its every request and knows it as no device, until the record has moved."""
+    seen: list[tuple[bool, bool]] = []
+    held: list[HubRoster] = []
+
+    async def _observing(device: str) -> bool:
+        roster = held[0]
+        with pytest.raises(DeviceRefusedError) as refused:
+            roster.requesting_device(connecting="hub", acting_for=device)
+        seen.append((refused.value.reason is DeviceRefusal.NOT_ACCEPTED, roster.knows(device)))
+        return False
+
+    async with _admin(tmp_path, remove_device=_observing) as (listener, registry):
+        held.append(HubRoster(registry))
+        registry.accept_naming("hub", _PHONE, now=_MOMENT)
+        await _act(listener, {"act": "revoke", "identity": _PHONE})
+        withheld_after = registry.is_withheld(_PHONE)
+
+    assert seen == [(True, False)]
+    assert not withheld_after
+
+
+async def test_the_hubs_own_machine_is_refused_before_any_set_is_touched(
+    tmp_path: Path,
+) -> None:
+    """``hub`` is never revoked (ADR-0298 §3:4), and the refusal comes before the
+    removal, so "my devices" is not emptied of the hub's own machine on the way."""
+    called: list[str] = []
+
+    async def _recording(device: str) -> bool:
+        called.append(device)
+        return True
+
+    async with _admin(tmp_path, remove_device=_recording) as (listener, _):
+        whole = await _act(listener, {"act": "revoke", "identity": "hub"})
+        one = await _act(listener, {"act": "revoke", "identity": "hub", "gateway": "hub"})
+
+    assert whole["ok"] is False
+    assert one["ok"] is False
+    assert called == []
 
 
 def test_a_revocation_says_the_device_left_your_devices(

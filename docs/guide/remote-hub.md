@@ -239,7 +239,9 @@ The acts:
     is a change the other devices see.
 
   What it already received, it keeps: revocation is prospective. This is why
-  the tool needs the hub running, where the offline tools need it stopped.
+  the tool needs the hub running, where the offline tools need it stopped. If
+  removing it from your devices fails, nothing is revoked, and the tool says so.
+  Run the same command again.
 - **`ai-assistant-device revoke <identity> --gateway <gateway>`** revokes one
   registration. That gateway's naming of the machine is then refused, and
   naming it again does not register it again. The machine leaves your devices
@@ -297,18 +299,14 @@ Do these on the hub's own machine, with the new hub running:
    started before the upgrade keeps the devices it was started with. Use
    `assistant conversation-devices` to add a machine to one of those.
 
-Two things to know while you do this:
+**A refused request says why.** `DeviceRefusedError` carries one of three
+reasons:
 
-- **The older feedback route, `learn`, is not checked.** Where the hub still
-  offers it, any admitted device can call it, as every admitted device could
-  before the upgrade.
-- **A request refused for a role says which.** `DeviceRefusedError` carries one
-  of three reasons:
-  - `not_accepted`: the device's registration was revoked, it named the hub's
-    own machine, or its gateway already holds as many registrations as the hub
-    accepts.
-  - `no_role`: the device holds no role at all.
-  - `not_allowed`: its roles do not allow that request.
+- `not_accepted`: the device's registration was revoked, it named the hub's own
+  machine, its gateway already holds as many registrations as the hub accepts,
+  or you are revoking it at that moment.
+- `no_role`: the device holds no role at all.
+- `not_allowed`: its roles do not allow that request.
 
 ## What this page is not
 

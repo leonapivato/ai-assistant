@@ -37,10 +37,11 @@ naming writes one row, inside the same step.
 
 from __future__ import annotations
 
+import sqlite3
 from datetime import UTC, datetime
 from typing import TYPE_CHECKING, Final
 
-from ai_assistant.core.errors import DeviceRefusal, DeviceRefusedError
+from ai_assistant.core.errors import AssistantError, DeviceRefusal, DeviceRefusedError
 from ai_assistant.core.types import HUB_DEVICE_ID, HUB_REQUESTING_DEVICE, RequestingDevice
 from ai_assistant.service.enrolment import NamingRefusal
 
@@ -67,6 +68,10 @@ _NAMING_REFUSED: Final[Mapping[NamingRefusal, str]] = {
         "gateway; the owner can revoke one it no longer needs"
     ),
 }
+
+#: What a device the owner is revoking right now is told (:meth:`~ai_assistant.
+#: service.enrolment.DeviceRegistry.withheld`).
+_WITHHELD: Final = "the owner is revoking this device at the hub"
 
 #: What a connection admitted under the hub's own overlay identity is told.
 _HUB_IDENTITY_REFUSED: Final = (
@@ -108,17 +113,32 @@ class HubRoster:
 
         Raises:
             DeviceRefusedError: With ``NOT_ACCEPTED`` where the connection is the
-                hub's own overlay identity (#2726), or the hub does not accept the
-                name under that gateway (§6:2). A registration a first naming made
-                stands either way (§6:1).
+                hub's own overlay identity (#2726), where the owner's revocation of
+                the connecting or named device is in flight, or where the hub does
+                not accept the name under that gateway (§6:2). A registration a first
+                naming made stands either way (§6:1).
+            AssistantError: Where a first naming's registration could not be
+                written. The request has changed nothing and the connection stays
+                open, so the gateway's next request for the device tries again.
         """
         if self._is_hub_identity(connecting):
             raise DeviceRefusedError(_HUB_IDENTITY_REFUSED, reason=DeviceRefusal.NOT_ACCEPTED)
+        if self._registry.is_withheld(connecting) or (
+            acting_for is not None and self._registry.is_withheld(acting_for)
+        ):
+            raise DeviceRefusedError(_WITHHELD, reason=DeviceRefusal.NOT_ACCEPTED)
         if acting_for is None:
             if connecting == HUB_DEVICE_ID:
                 return HUB_REQUESTING_DEVICE
             return self._device(connecting)
-        verdict = self._registry.accept_naming(connecting, acting_for, now=datetime.now(UTC))
+        try:
+            verdict = self._registry.accept_naming(connecting, acting_for, now=datetime.now(UTC))
+        except sqlite3.Error as exc:
+            msg = (
+                "the hub could not record this device's registration, so the request "
+                "changed nothing; the next request for it tries again"
+            )
+            raise AssistantError(msg) from exc
         if verdict.refusal is not None:
             raise DeviceRefusedError(
                 _NAMING_REFUSED[verdict.refusal], reason=DeviceRefusal.NOT_ACCEPTED
@@ -134,9 +154,15 @@ class HubRoster:
         Returns:
             Whether it is ``hub``, an enrolled hub device whose enrolment is live, or
             a browser device with a live registration — never the hub's own overlay
-            identity, which is the hub's own machine and is named ``hub`` (§3:1).
+            identity, which is the hub's own machine and is named ``hub`` (§3:1), and
+            never a device whose revocation is in flight, so no set gains it while
+            its memberships are being removed.
         """
-        return not self._is_hub_identity(device_id) and self._registry.is_known(device_id)
+        return (
+            not self._is_hub_identity(device_id)
+            and not self._registry.is_withheld(device_id)
+            and self._registry.is_known(device_id)
+        )
 
     def _device(self, device_id: str) -> RequestingDevice:
         """One device other than the hub's own machine, with its roles as recorded."""

@@ -10,12 +10,13 @@ refusals it gives; the route table's checks over that device are pinned in
 
 from __future__ import annotations
 
+import sqlite3
 from datetime import UTC, datetime
 from typing import TYPE_CHECKING, Final
 
 import pytest
 
-from ai_assistant.core.errors import DeviceRefusal, DeviceRefusedError
+from ai_assistant.core.errors import AssistantError, DeviceRefusal, DeviceRefusedError
 from ai_assistant.core.types import HUB_DEVICE_ID, HUB_REQUESTING_DEVICE, DeviceRole
 from ai_assistant.service.enrolment import (
     ENROLMENTS_FILENAME,
@@ -239,3 +240,47 @@ def test_the_roster_knows_the_hub_and_admitted_devices_only(
 
     registry.revoke_device(_PHONE, now=_MOMENT)
     assert not roster.knows(_PHONE)
+
+
+def test_a_device_being_revoked_is_refused_and_known_as_no_device(
+    roster: HubRoster, registry: DeviceRegistry
+) -> None:
+    """While the owner's revocation removes a device from every set it is refused every
+    request — its own, and any relayed for it — and no set may name it, so it cannot
+    put itself back before the record moves (review of PR #2727)."""
+    registry.enrol(_GATEWAY, now=_MOMENT)
+    roster.requesting_device(connecting=HUB_DEVICE_ID, acting_for=_PHONE)
+
+    with registry.withheld(_PHONE), registry.withheld(_GATEWAY):
+        relayed = _refused(roster, connecting=HUB_DEVICE_ID, acting_for=_PHONE)
+        own = _refused(roster, connecting=_GATEWAY, acting_for=None)
+        known = (roster.knows(_PHONE), roster.knows(_GATEWAY))
+
+    assert relayed.reason is DeviceRefusal.NOT_ACCEPTED
+    assert own.reason is DeviceRefusal.NOT_ACCEPTED
+    assert known == (False, False)
+    assert roster.knows(_PHONE), "released once the block ends"
+
+
+def test_a_registration_the_record_cannot_write_is_a_declared_failure(
+    roster: HubRoster,
+    registry: DeviceRegistry,
+    store: EnrolmentStore,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """A first naming writes one row; a storage fault there is answered as a declared
+    failure the wire turns into an error frame, never an undeclared exception that
+    would close the gateway's connection, and nothing is registered."""
+
+    def _unwritable(*args: object, **kwargs: object) -> int:
+        msg = "attempt to write a readonly database"
+        raise sqlite3.OperationalError(msg)
+
+    monkeypatch.setattr(store, "register", _unwritable)
+
+    with pytest.raises(AssistantError) as failed:
+        roster.requesting_device(connecting=HUB_DEVICE_ID, acting_for=_PHONE)
+
+    assert not isinstance(failed.value, DeviceRefusedError)
+    assert isinstance(failed.value.__cause__, sqlite3.OperationalError)
+    assert not registry.is_known(_PHONE)

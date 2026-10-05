@@ -327,6 +327,9 @@ class DeviceRoster(Protocol):
             DeviceRefusedError: With :attr:`~ai_assistant.core.errors.DeviceRefusal.
                 NOT_ACCEPTED` where the hub does not accept the name under that
                 gateway (§6:2). A registration made in deciding it stands (§6:1).
+            AssistantError: Any other declared failure of the decision — the
+                roster failing to record a first naming — answered as an error frame
+                before dispatch, the connection left open.
         """
 
     def knows(self, device_id: str) -> bool:
@@ -1244,10 +1247,12 @@ async def _dispatch_stream(  # noqa: PLR0913 — the engine, the request, the wr
 
     try:
         device = _admitted(session, method, frame, arguments)
-    except DeviceRefusedError as exc:
+    except AssistantError as exc:
         # Refused before the engine is called, so no iterator exists to close and
         # the operation has changed nothing (ADR-0298 §6:1); the refusal is the
-        # stream's one terminal frame, as any declared failure is.
+        # stream's one terminal frame, as any declared failure is. Any declared
+        # failure, not only a refusal: the roster may fail to record a first
+        # naming, which an ordinary dispatch answers the same way.
         await emit(env.FrameKind.ERROR, error_payload(exc, max_bytes=limits.payload_limit))
         return
     # **The whole stream runs as the requesting device** (ADR-0298 §2:2): the
