@@ -32,14 +32,19 @@ ADR-0292's sense, with roles of their own:
 | Kind | Admitted by | Example |
 | --- | --- | --- |
 | **A hub device** | The hub, by ADR-0124's two facts | The machine running a gateway; a laptop using the command line remotely |
-| **A browser device** | A gateway, by the overlay identity it obtains (ADR-0174 §3) or by being on the gateway's own machine (ADR-0168 §2) | A phone's browser |
+| **A browser device** | A gateway, by the overlay identity it obtains (ADR-0174 §3) | A phone's browser |
 
+- **Listing a machine at a gateway registers it** at the hub as a browser device under that
+  gateway, with no roles *(owner, 2026-10-04)*. The listing ADR-0174 already has is the
+  registration; there is no second enrolment.
 - **A browser device is registered at the hub under its gateway.** The gateway names it on
   every request it relays, and the hub accepts the name only for a browser device registered
   under that gateway. The gateway is trusted to tell its browsers apart, as it already is to
   admit them; it is not trusted to act as any other device.
 - **The device is the machine, not the browser tab or the process.** Tabs and processes come
-  and go; roles, labels and a conversation's devices name the machine.
+  and go; roles, labels and a conversation's devices name the machine. A browser on the
+  gateway's own machine (ADR-0168 §2) is that machine's hub device, with its roles
+  *(owner)*.
 - **The hub's own machine**, through the local socket (ADR-0084, `0600`), is the user at the
   machine and holds every role. It is how the first device is given its roles.
 
@@ -56,10 +61,14 @@ gives it none.
 
 - Changing who sees a conversation is a statement about audience, so it needs the command
   role, not just being an end.
+- **Whether a device writes and reads, or only reads**, is set with its "my devices"
+  membership, and with its membership of a conversation where that differs *(owner)*: a
+  watch is added read-only.
 - **Every request is checked against the device's roles**, by the hub, by rule. A role is
   never inferred from what a device can reach.
 - **This replaces a browser carrying its gateway's whole authority** (ADR-0168 §3): a phone's
-  browser gets the roles the user gave the phone.
+  browser gets the roles the user gave the phone, and a newly admitted browser can do nothing
+  until given roles *(owner)*.
 
 ### 3. A session, not a socket
 
@@ -92,7 +101,11 @@ answer open, sending each change as it happens, in sequence order.
 - **The device's cursor is its acknowledgement.** There is no lease. A device that drops
   reconnects with the last sequence number it applied.
 - **Only what the device may see**: changes in conversations it is an end of, and changes to
-  its own roles and devices.
+  its own roles and devices. Sequence numbers run across the whole chat space, so a device
+  sees gaps; its cursor is the last number it applied *(owner)*.
+- **Gaining or losing a conversation.** When a device becomes an end of a conversation, its
+  stream sends that conversation's snapshot, as a new device gets one; when it stops being
+  one, its stream says so and the device drops the conversation *(owner)*.
 - **Current state** ("working…", how the last activation ended) is pushed on the same stream
   when it changes, and read with a conversation on catch-up. It carries no sequence number,
   because it is not history.
@@ -124,7 +137,8 @@ day is `websockets` (sans-I/O, inside the existing gateway), with `wsproto` as f
 
 The command line opens the change stream when it follows a conversation (`assistant chat`)
 and makes ordinary requests otherwise. It stays stateless between calls except for the cursor
-it is following.
+it is following. As a hub device it has its machine's roles: every role on the hub's own
+machine, the laptop's roles on a laptop.
 
 ## Options considered
 
