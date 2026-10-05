@@ -2691,14 +2691,14 @@ class _ChatView:
             case DevicesChangedChange(devices=devices):
                 _print("[dim]This conversation's devices changed:[/]")
                 _render_device_set(devices)
-                return self._still_shown(devices)
+                return self.still_shown(devices)
             case ConversationStartedChange():
                 pass
             case _:  # pragma: no cover — the union is closed
                 assert_never(change)
         return True
 
-    def _still_shown(self, devices: Sequence[ChatDevice]) -> bool:
+    def still_shown(self, devices: Sequence[ChatDevice]) -> bool:
         """Whether this device is still shown the conversation, saying so where not (§3:5)."""
         if any(one.device_id == self.device_id and one.access.reads for one in devices):
             return True
@@ -2827,17 +2827,32 @@ async def _show_chat(
     engine: AssistantEngine, conversation_id: str, *, device_id: str
 ) -> _ChatView | None:
     """Show the conversation's snapshot and current state; ``None`` where it is gone."""
-    page = await engine.transcript(conversation_id, limit=_CHAT_SNAPSHOT_LIMIT)
-    digest = await engine.conversation(conversation_id)
-    if page is None or digest is None:
-        _render_no_such_conversation(conversation_id)
+    view = _ChatView(conversation_id, device_id=device_id, cursor=0)
+    if not await _show_snapshot(engine, view):
         return None
-    view = _ChatView(conversation_id, device_id=device_id, cursor=page.as_of)
-    await _resolve_replies(engine, conversation_id, page.entries, into=view.entries)
-    view.show_page(page)
-    view.show_state(digest.state)
     _print(_CHAT_HELP)
     return view
+
+
+async def _show_snapshot(engine: AssistantEngine, view: _ChatView) -> bool:
+    """Show the conversation from a snapshot, where this device is still shown it.
+
+    The devices are read **after** the snapshot, so a change to them that the
+    snapshot's cursor already covers — and polling will therefore never deliver — is
+    still seen before anything is shown (ADR-0293 §3:5). ``False`` where the
+    conversation is gone or this device may no longer read it.
+    """
+    page = await engine.transcript(view.conversation_id, limit=_CHAT_SNAPSHOT_LIMIT)
+    digest = None if page is None else await engine.conversation(view.conversation_id)
+    if page is None or digest is None:
+        _render_no_such_conversation(view.conversation_id)
+        return False
+    if not view.still_shown(digest.devices):
+        return False
+    await _resolve_replies(engine, view.conversation_id, page.entries, into=view.entries)
+    view.show_page(page)
+    view.show_state(digest.state)
+    return True
 
 
 async def _relay_lines(
@@ -2996,17 +3011,9 @@ async def _poll_chat(engine: AssistantEngine, view: _ChatView) -> bool:
             after=view.cursor, conversation_ids=(view.conversation_id,), limit=DEFAULT_PAGE_SIZE
         )
         if page.next_after < view.cursor:
-            snapshot = await engine.transcript(view.conversation_id, limit=_CHAT_SNAPSHOT_LIMIT)
-            if snapshot is None:
-                _print("[yellow]This conversation was deleted.[/]")
-                return False
             _print("[dim]The chat started afresh; here is the conversation as it stands.[/]")
             view.entries.clear()
-            await _resolve_replies(
-                engine, view.conversation_id, snapshot.entries, into=view.entries
-            )
-            view.show_page(snapshot)
-            break
+            return await _show_snapshot(engine, view)
         added = [one.message for one in page.changes if isinstance(one, MessageAddedChange)]
         await _resolve_replies(engine, view.conversation_id, added, into=view.entries)
         for change in page.changes:
@@ -3090,8 +3097,10 @@ async def _drive_delete_message(
             "it was never written there, or it is deleted already."
         )
         return _EXIT_ERROR
+    known: dict[int, TranscriptMessage | DeletedMessage] = {}
+    await _resolve_replies(engine, conversation_id, (entry,), into=known)
     _print("\n[bold yellow]About to delete this message[/]")
-    _render_chat_entry(entry, known={})
+    _render_chat_entry(entry, known=known)
     _print(
         "\n  [yellow]It is removed from the conversation on every device, and a reply to "
         "it stays, naming a deleted message. The assistant's memory is not changed: what "
