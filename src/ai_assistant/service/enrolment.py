@@ -1268,9 +1268,13 @@ class DeviceRegistry:
     def restore_registration(self, device: str, *, gateway: str, now: datetime) -> bool:
         """Restore a registration the owner revoked — the only way one comes back (§4:9).
 
-        The device it re-admits holds no role, because the act that left it
+        A device this re-admits holds no role, because the act that left it
         unadmitted cleared them (§4:11's "holds no role until the user gives it
-        one").
+        one"); a device something else still admitted keeps the roles it held.
+
+        **Held to the gateway's bound**, as a naming is (§4:7): the bound is on the
+        *live* registrations under one gateway, and a restore that took the gateway
+        past it would leave more machines than the figure accepted under it.
 
         Args:
             device: The machine.
@@ -1281,9 +1285,10 @@ class DeviceRegistry:
             Whether a registration was restored; ``False`` where it is already live.
 
         Raises:
-            RosterActError: For the hub's own machine; and where no registration of
-                the machine under that gateway was ever revoked — restoring is not a
-                way to register a machine its gateway never named.
+            RosterActError: For the hub's own machine; where no registration of the
+                machine under that gateway was ever revoked — restoring is not a way to
+                register a machine its gateway never named; and where the gateway
+                already holds its bound of live registrations.
         """
         self._refuse_the_hub(device, act="registered or revoked")
         pair = (device, gateway)
@@ -1293,6 +1298,13 @@ class DeviceRegistry:
             msg = (
                 f"{device} has no revoked registration under {gateway} to restore; a "
                 f"machine is registered by its gateway naming it, not by an act here"
+            )
+            raise RosterActError(msg)
+        if self._per_gateway[gateway] >= self._max_per_gateway:
+            msg = (
+                f"{gateway} already holds {self._max_per_gateway} live registrations, "
+                f"the most one gateway may hold; revoke one it no longer needs, then "
+                f"restore this one"
             )
             raise RosterActError(msg)
         self._store.restore_registration(device, gateway=gateway, now=now)

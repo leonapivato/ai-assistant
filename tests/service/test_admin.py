@@ -227,6 +227,8 @@ async def test_the_listing_keeps_revoked_enrolments_and_dates_them(tmp_path: Pat
         {"act": "enrol", "identity": 7},
         {"act": "purge", "identity": _DEVICE},
         {"identity": _DEVICE},
+        {"act": [], "identity": _DEVICE},
+        {"act": {}, "identity": _DEVICE},
     ],
 )
 async def test_a_malformed_act_is_refused_and_changes_nothing(
@@ -924,7 +926,7 @@ async def test_one_registration_is_revoked_and_restored_through_the_socket(
         accepted = registry.accept_naming("hub", _PHONE, now=_MOMENT)
     assert revoked == {"ok": True, "revoked": True}
     assert not refused.accepted
-    assert restored == {"ok": True, "restored": True}
+    assert restored == {"ok": True, "restored": True, "roles": []}
     assert accepted.accepted
 
 
@@ -1010,12 +1012,30 @@ def test_the_command_says_a_revocation_that_found_nothing_changed_nothing(
     assert "nothing changed" in capsys.readouterr().out
 
 
-def test_the_command_says_a_restored_device_holds_no_role(
+async def test_a_restore_reports_the_roles_the_device_actually_holds(tmp_path: Path) -> None:
+    """A device still admitted under another gateway keeps its roles across one
+    registration's revocation and restoring, and the reply says so rather than
+    claiming it holds none."""
+    async with _admin(tmp_path) as (listener, registry):
+        registry.accept_naming("hub", _PHONE, now=_MOMENT)
+        registry.accept_naming(_DEVICE, _PHONE, now=_MOMENT)
+        registry.assign(_PHONE, Role.COMMANDS)
+        await _act(listener, {"act": "revoke", "identity": _PHONE, "gateway": "hub"})
+        restored = await _act(listener, {"act": "restore", "identity": _PHONE, "gateway": "hub"})
+    assert restored == {"ok": True, "restored": True, "roles": ["commands"]}
+
+
+def test_the_command_prints_the_roles_a_restored_device_holds(
     capsys: pytest.CaptureFixture[str],
 ) -> None:
-    """ADR-0298 §4:11, said where the owner restores it."""
-    _render({"ok": True, "restored": True}, "restore")
-    assert "holds no role" in capsys.readouterr().out
+    """ADR-0298 §4:11's "holds no role" is true only of a device the restore
+    re-admitted, so the command prints what the hub says it holds."""
+    _render({"ok": True, "restored": True, "roles": []}, "restore")
+    assert "Roles: none" in capsys.readouterr().out
+    _render({"ok": True, "restored": True, "roles": ["commands"]}, "restore")
+    printed = capsys.readouterr().out
+    assert "Roles: commands" in printed
+    assert "no role" not in printed
 
 
 def test_the_command_prints_what_a_device_holds_after_a_role_act(

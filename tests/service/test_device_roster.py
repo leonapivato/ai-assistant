@@ -419,6 +419,22 @@ def test_a_naming_beyond_the_bound_is_refused_and_registers_nothing(
     assert registry.accept_naming(_GATEWAY, "nFOUR", now=_LATER).registered
 
 
+def test_a_restore_is_held_to_the_bound_too(store: EnrolmentStore) -> None:
+    """ADR-0298 §4:7 bounds the *live* registrations under one gateway, so the owner's
+    restore cannot take a gateway past it either: refused in a sentence, with nothing
+    changed."""
+    registry = DeviceRegistry(store, hub_identity=_HUB, max_registrations_per_gateway=1)
+    registry.accept_naming(_GATEWAY, _PHONE, now=_MOMENT)
+    registry.revoke_registration(_PHONE, gateway=_GATEWAY, now=_MOMENT)
+    registry.accept_naming(_GATEWAY, _WATCH, now=_MOMENT)
+
+    with pytest.raises(RosterActError, match="live registrations"):
+        registry.restore_registration(_PHONE, gateway=_GATEWAY, now=_LATER)
+
+    assert registry.accept_naming(_GATEWAY, _PHONE, now=_LATER).refusal is NamingRefusal.REVOKED
+    assert [row.is_live for row in registry.registrations()[0]] == [True, False]
+
+
 def test_the_bound_counts_what_the_record_already_holds(tmp_path: Path) -> None:
     """The count is rebuilt from the record at start, so a restart is not a way past
     the bound."""

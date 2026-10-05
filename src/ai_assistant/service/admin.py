@@ -279,7 +279,7 @@ class AdminListener:
         act = request.get("act")
         if act == LIST:
             return self._listing()
-        if act not in _NAMING_ACTS:
+        if not isinstance(act, str) or act not in _NAMING_ACTS:
             return _failed(f"no such device act: {act!r}")
         try:
             return self._act(act, request)
@@ -335,7 +335,11 @@ class AdminListener:
             restored = self._registry.restore_registration(
                 identity, gateway=gateway, now=self._now()
             )
-            return {"ok": True, "restored": restored}
+            return {
+                "ok": True,
+                "restored": restored,
+                "roles": sorted(role.value for role in self._registry.roles_of(identity)),
+            }
         role = _role(request.get("role"))
         if act == ASSIGN:
             changed = self._registry.assign(identity, role)
