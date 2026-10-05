@@ -1001,9 +1001,12 @@ class StepRunner:
                 supplied by the driver from the activation it runs under and read for
                 nothing else here — passed to the claim's ``StepTransition`` exactly
                 as ``attempt_id`` is, and fetched by no stage. ``None`` only where that
-                activation has no id. A claim the store refuses because the activation
-                was stopped raises :class:`~ai_assistant.core.errors.ClaimStopped`,
-                which propagates.
+                activation has no id. An initial claim the store refuses because the
+                activation was stopped raises
+                :class:`~ai_assistant.core.errors.ClaimStopped`, which propagates; a
+                retry's refused re-claim ends the drive with the step the invocation
+                already committed
+                (:meth:`~ai_assistant.orchestration.executor.StepExecutor.execute`).
 
         Returns:
             What became of the step, and the durable state after it.

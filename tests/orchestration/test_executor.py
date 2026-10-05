@@ -2611,3 +2611,60 @@ async def test_the_claim_names_its_activation_and_a_stopped_one_invokes_nothing(
     assert step.status is StepStatus.PENDING
     assert step.attempts == 0
     assert implementation.calls == []
+
+
+class _StoppingInvoker(ScriptedInvoker):
+    """A scripted seam that stops ``activation`` during its first invocation."""
+
+    def __init__(
+        self,
+        definition: ToolDefinition,
+        results: Sequence[ToolResult],
+        *,
+        store: FakePlanStore,
+        activation: str,
+    ) -> None:
+        super().__init__(definition, results)
+        self._store = store
+        self._activation = activation
+
+    async def invoke(self, call: ToolCall, *, timeout: timedelta) -> ToolResult:  # noqa: ASYNC109 — the seam's signature (ADR-0029 §4)
+        if self.calls == 0:
+            await self._store.record_stop(self._activation)
+        return await super().invoke(call, timeout=timeout)
+
+
+async def test_a_stopped_retry_reclaim_ends_the_loop_with_the_committed_failure() -> None:
+    """§2, §4: a refused **re-claim** keeps the invocation that ran, as the ceiling does.
+
+    The stop lands during the first invocation, which returns a retryable failure of a
+    naturally idempotent tool, so ADR-0029 §5 would retry. The re-claim names the same
+    activation and the store refuses it; the step is already durably ``FAILED`` with the
+    tool's reason, and that state is returned rather than raised away.
+    """
+    store = FakePlanStore()
+    state = await a_claimed_execution(store)
+    activation = "0b8f8f0e-2a5c-4c55-9a6c-6a2c1f0b0d12"
+    seam = _StoppingInvoker(
+        natural(), [unavailable(), succeeded()], store=store, activation=activation
+    )
+
+    dispatch = await executor_over(store, seam).execute(
+        state,
+        step_id=STEP,
+        call=call_for(natural(), execution_id=state.id),
+        attempt_id=ATTEMPT,
+        timeout=PATIENT,
+        activation_id=activation,
+    )
+
+    assert seam.calls == 1, "the refused re-claim invokes nothing"
+    step = await stored_step(store, state)
+    assert step.status is StepStatus.FAILED
+    assert step.attempts == 1
+    assert step.failure is not None
+    assert step.failure.kind is ToolFailureKind.UNAVAILABLE
+    returned = dispatch.state.step(STEP)
+    assert returned is not None
+    assert returned.status is StepStatus.FAILED
+    assert dispatch.refused is None

@@ -35,6 +35,7 @@ from test_engine import (
 from ai_assistant.core.errors import (
     ActivationStoppedError,
     AuditError,
+    ClassifiedToolError,
     ConversationStoreError,
     PermissionDeniedError,
     PlanningError,
@@ -59,6 +60,8 @@ from ai_assistant.core.types import (
     StepStatus,
     StepTransition,
     TextChannelPayload,
+    ToolFailure,
+    ToolFailureKind,
     WholeTextReply,
 )
 from ai_assistant.orchestration.activation_state import active_state, admit_channel, admit_resume
@@ -514,6 +517,69 @@ async def test_a_resume_stopped_after_its_claim_landed_returns_the_executed_step
     export = await plans.export()
     (attempt,) = export.attempts
     assert attempt.state is not AttemptState.ENDED
+
+
+class _StoppedWhileFailing:
+    """A naturally idempotent tool whose first call is stopped and fails retryably.
+
+    The stop names the id the resumed claim carried, so ADR-0029 §5 would retry the
+    call and the retry's re-claim is the one the store refuses.
+    """
+
+    def __init__(self, plans: _Stopping) -> None:
+        self.plans = plans
+        self.calls = 0
+        self.answers: list[ActivationStop] = []
+
+    async def __call__(self, parameters: object, *, idempotency_key: str | None) -> None:
+        del parameters, idempotency_key
+        self.calls += 1
+        if self.calls == 1:
+            self.answers.append(await self.plans.engine.stop_activation(self.plans.named[-1]))
+        raise ClassifiedToolError(
+            ToolFailure(kind=ToolFailureKind.UNAVAILABLE, message="the upstream is down"),
+            effect_may_have_committed=False,
+        )
+
+
+async def test_a_resume_whose_retry_reclaim_is_stopped_returns_the_failed_step() -> None:
+    """§4:15: a refused **re-claim** keeps the step the first invocation committed.
+
+    The stop lands during the first invocation, which fails retryably; the retry's
+    re-claim names the stopped activation and is refused. The step ran once and is
+    durably ``FAILED``, so the stopped resume reports it rather than ``step=None``.
+    """
+    plans = _Stopping()
+    definition = egress_confirmable()
+    tool_handler = _StoppedWhileFailing(plans)
+    harness = Harness(
+        tools=(definition,),
+        binder=bound_binder(definition),
+        recipient_grants=FakeRecipientGrantStore(now=lambda: _NOW),
+        plans=plans,
+        tool_handler=tool_handler,
+    )
+    plans.engine = harness.engine
+    parked = await harness.engine.converse("send it to the address in the invite", timeout=PATIENT)
+    assert parked.step is not None
+    assert parked.step.confirmation is not None
+
+    resumed = await harness.engine.resume(
+        parked.step.confirmation.token,
+        approved=True,
+        timeout=PATIENT,
+        remember_recipients_until=_UNTIL,
+    )
+
+    assert tool_handler.answers == [ActivationStop.STOPPED]
+    assert tool_handler.calls == 1, "the refused re-claim invoked nothing"
+    assert plans.claims == 2, "the resumed claim, then the refused re-claim"
+    assert resumed.stopped is True
+    assert resumed.reply is None
+    assert resumed.step is not None
+    assert resumed.step.disposition is Disposition.EXECUTED
+    assert resumed.recipient_grant is not None
+    assert await _step_status(plans) is StepStatus.FAILED
 
 
 # --- ADR-0295 §3, ADR-0297 §4: the conversation a stopped activation started from -------
