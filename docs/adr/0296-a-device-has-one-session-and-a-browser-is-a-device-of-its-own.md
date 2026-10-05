@@ -145,7 +145,7 @@ device and gives it none.
 
 | Role | Allows |
 | --- | --- |
-| **The user's end of conversations**: in "my devices" (ADR-0293 §3:1), or chosen for one conversation (ADR-0293 §3:3) | In "my devices": being an end of every new conversation, and starting a conversation, which it is then an end of. In a conversation it is an end of: reading, and, unless it is an end there for reading only, writing, which is sending a message and deleting a message or the conversation (ADR-0292 §4:5) |
+| **The user's end of conversations**: in "my devices" (ADR-0293 §3:1), or chosen for one conversation (ADR-0293 §3:3) | In "my devices": being an end of every new conversation, and starting a conversation, which it is then an end of. In a conversation it is an end of: reading, where it is an end for reading, and writing, where it is an end for writing (ADR-0293 §3:5); writing is sending a message and deleting a message or the conversation (ADR-0292 §4:5) |
 | **Source of commands and queries** | Commands and queries; changing "my devices" and a conversation's devices; assigning roles |
 | **Host of spokes** | Hosting the assistant's sensors and actuators, placed on channels (ADR-0292 §2:7). None exists yet. |
 
@@ -159,8 +159,9 @@ needs the command role.
 
 As the owner ruled it:
 
-> **Normative.** Whether a device writes and reads, or only reads, is set with its "my
-> devices" membership, and with its membership of a conversation where that differs.
+> **Normative.** Whether a device writes and reads, or only reads, or only writes
+> (ADR-0293 §3:5), is set with its "my devices" membership, and with its membership
+> of a conversation where that differs.
 
 A watch is added read-only.
 
@@ -229,18 +230,18 @@ stream was the only stream.
 > lease, and a device that drops reconnects with the last sequence number it applied.
 
 > **Normative.** A device's stream carries only what the device may see: changes in
-> conversations it is an end of, and changes to its own roles and devices.
+> conversations it is an end of for reading, and changes to its own roles and devices.
 
 As the owner ruled it:
 
 > **Normative.** Sequence numbers run across the whole chat space, so a device sees
 > gaps, and its cursor is the last number it applied.
 
-> **Normative.** When a device becomes an end of a conversation, its stream sends that
-> conversation's snapshot, as a new device gets one (ADR-0293 §5:13).
+> **Normative.** When a device becomes an end of a conversation for reading, its stream
+> sends that conversation's snapshot, as a new device gets one (ADR-0293 §5:13).
 
-> **Normative.** When a device stops being an end of a conversation, its stream says
-> so, and the device drops the conversation.
+> **Normative.** When a device stops being an end of a conversation for reading, its
+> stream says so, and the device drops the conversation.
 
 > **Normative.** The current state (ADR-0293 §8), "working…" and how the last
 > activation ended, is pushed on the stream when it changes and read with a
