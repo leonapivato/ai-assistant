@@ -13,7 +13,7 @@ and the stream's end.
 from __future__ import annotations
 
 import asyncio
-from datetime import UTC, datetime
+from datetime import UTC, datetime, timedelta
 from typing import TYPE_CHECKING, Final
 
 import pytest
@@ -41,10 +41,9 @@ from ai_assistant.core.types import (
     NewMessage,
     RequestingDevice,
     TranscriptMessage,
-    TranscriptPage,
     UserMessage,
 )
-from ai_assistant.orchestration.change_stream import Activity, ChangeStream
+from ai_assistant.orchestration.change_stream import CHANGE_STREAM_PAGE, Activity, ChangeStream
 from ai_assistant.orchestration.conversations import (
     check_devices_fit,
     check_message_fits,
@@ -53,11 +52,14 @@ from ai_assistant.orchestration.conversations import (
 )
 from ai_assistant.orchestration.payloads import canonical_payload
 from ai_assistant.testing import FakeConversationStore
+from ai_assistant.wire.client import HubEngineClient
+from ai_assistant.wire.server import ConnectionLimits, serve_connection
 
 if TYPE_CHECKING:
     from collections.abc import AsyncIterator, Awaitable, Sequence
+    from pathlib import Path
 
-    from ai_assistant.core.types import CurrentState
+    from ai_assistant.core.types import CurrentState, DeviceConversation
 
 _PHONE: Final = ChatDevice(device_id="phone", access=DeviceAccess.READ_WRITE)
 _WATCH: Final = ChatDevice(device_id="watch", access=DeviceAccess.READ)
@@ -96,7 +98,11 @@ async def _tracked[T](work: Awaitable[T]) -> T:
 
 
 def _stream(
-    chat: FakeConversationStore, engine: _Engine | None = None, *, limit: int = _ROOMY
+    chat: FakeConversationStore,
+    engine: _Engine | None = None,
+    *,
+    limit: int = _ROOMY,
+    poll: float = 0.01,
 ) -> ChangeStream:
     held = engine or _Engine()
     return ChangeStream(
@@ -107,7 +113,7 @@ def _stream(
         tracked=_tracked,
         max_payload_bytes=limit,
         forgotten=lambda: held.forgotten,
-        poll_seconds=0.01,
+        poll_seconds=poll,
     )
 
 
@@ -195,7 +201,7 @@ async def test_the_change_that_adds_a_device_brings_its_snapshot_in_one_chunk() 
     joined = next(one for one in sent if isinstance(one.change, DevicesChangedChange))
     assert joined.conversation_id == conversation
     assert joined.snapshot is not None
-    assert [one.position for one in joined.snapshot.entries] == [1]
+    assert [one.position for one in joined.snapshot] == [1]
     added = [one.change for one in sent if isinstance(one.change, MessageAddedChange)]
     assert [one.message.position for one in added] == [2], "only what came after it"
 
@@ -342,7 +348,7 @@ async def test_a_snapshot_too_large_is_shortened_from_its_oldest_end() -> None:
     assert len(canonical_payload(joined)) <= limit
     assert joined.change is not None
     assert joined.change.snapshot is not None
-    positions = [one.position for one in joined.change.snapshot.entries]
+    positions = [one.position for one in joined.change.snapshot]
     assert positions, "some of it fits"
     assert positions == list(range(13 - len(positions), 13)), "the newest, ascending"
     assert len(positions) < 12
@@ -360,7 +366,7 @@ async def test_a_snapshot_that_fits_nothing_is_sent_empty() -> None:
             async for chunk in chunks:
                 assert isinstance(chunk, ChatStreamChunk)
                 if chunk.change is not None and chunk.change.snapshot is not None:
-                    assert chunk.change.snapshot.entries == ()
+                    assert chunk.change.snapshot == ()
                     break
 
 
@@ -407,6 +413,60 @@ async def test_the_stream_ends_with_its_cursor_when_the_engine_closes() -> None:
     assert last == ChatStreamEnd(next_after=head)
 
 
+async def test_closing_wakes_a_waiting_stream_to_its_end_and_waits_for_it() -> None:
+    """A stream waiting out its interval ends at once when its engine shuts down."""
+    chat = FakeConversationStore()
+    await _chat(chat, _PHONE)
+    engine = _Engine()
+    stream = _stream(chat, engine, poll=60.0)
+    async with _Following(stream.follow(PHONE, after=0)) as following:
+        await following.drain()
+        engine.closing = True
+        closing = asyncio.ensure_future(stream.close(within=_SETTLE))
+        last = await following.next(1.0)
+        await asyncio.sleep(0)
+        assert not closing.done(), "the stream is not closed until its reader closes it"
+    async with asyncio.timeout(1.0):
+        await closing
+
+    assert isinstance(last, ChatStreamEnd)
+
+
+class _ShiftingStore(FakeConversationStore):
+    """A store that deletes one conversation just after a listing's first page is read."""
+
+    def __init__(self) -> None:
+        super().__init__()
+        self.doomed: str | None = None
+
+    async def device_conversations(
+        self, device_id: str, *, limit: int = 50, offset: int = 0
+    ) -> list[DeviceConversation]:
+        page = await super().device_conversations(device_id, limit=limit, offset=offset)
+        if offset == 0 and self.doomed is not None:
+            doomed, self.doomed = self.doomed, None
+            await self.stamp_deleted(doomed)
+        return page
+
+
+async def test_a_refresh_finds_a_conversation_that_moved_pages_while_it_was_listed() -> None:
+    """Round 3's case: a deletion between two pages shifts one past the listing."""
+    chat = _ShiftingStore()
+    await chat.set_my_devices([_PHONE])
+    started = [(await chat.start()).id for _ in range(CHANGE_STREAM_PAGE + 1)]
+    engine = _Engine()
+    async with _Following(_stream(chat, engine).follow(PHONE, after=0)) as following:
+        await following.drain()
+        chat.doomed = started[-1]  # listed first, as the most recently active
+        engine.forgotten += 1
+        sent: set[str] = set()
+        while (chunk := await following.next(0.3)) is not None:
+            if isinstance(chunk, ChatStreamChunk) and chunk.state is not None:
+                sent.add(chunk.state.conversation_id)
+
+    assert sent == set(started[:-1]), "every conversation read, the deleted one aside"
+
+
 # --- through the engine -----------------------------------------------------
 
 
@@ -448,6 +508,59 @@ async def test_the_engines_stream_ends_when_it_shuts_down() -> None:
         engine.follow_chat(after=0)
 
 
+async def test_the_hub_writes_each_streams_end_before_its_listener_closes(
+    tmp_path: Path,
+) -> None:
+    """Round 3's case: the hub closes its engine, then cancels the connections it serves.
+
+    An idle stream sleeps out its interval with no engine work in flight, so a drain
+    alone would let the hub cancel its connection before it wrote its end. The engine
+    wakes its streams and waits for each to be closed, so the end is on the wire first.
+    """
+    engine = Harness(planner=NoStepPlanner(), chat_reader=False).engine
+    await engine.set_my_devices([_PHONE])
+    served: set[asyncio.Task[None]] = set()
+    limits = ConnectionLimits(
+        max_frame_bytes=1 << 20, read_timeout=timedelta(seconds=5), build="test"
+    )
+
+    async def _hub(reader: asyncio.StreamReader, writer: asyncio.StreamWriter) -> None:
+        task = asyncio.current_task()
+        assert task is not None
+        served.add(task)
+        await serve_connection(engine, reader, writer, limits=limits)
+
+    path = tmp_path / "hub.sock"
+    server = await asyncio.start_unix_server(_hub, path=str(path))
+    client = HubEngineClient(path, read_timeout=timedelta(seconds=5))
+    received: list[ChatStreamChunk | ChatStreamEnd] = []
+    changed = asyncio.Event()
+
+    async def follow() -> None:
+        async with closing_stream(client.follow_chat(after=0)) as chunks:
+            async for chunk in chunks:
+                received.append(chunk)
+                if isinstance(chunk, ChatStreamChunk) and chunk.change is not None:
+                    changed.set()
+
+    following = asyncio.ensure_future(follow())
+    try:
+        async with asyncio.timeout(_SETTLE):
+            await changed.wait()
+        await engine.aclose()
+        # The hub's own order: the engine closed, then every served connection.
+        server.close()
+        for task in served:
+            task.cancel()
+        await asyncio.gather(*served, return_exceptions=True)
+        await asyncio.gather(following, return_exceptions=True)
+    finally:
+        following.cancel()
+        await server.wait_closed()
+
+    assert isinstance(received[-1], ChatStreamEnd)
+
+
 async def test_a_snapshot_shows_a_message_deleted_since_as_its_marker() -> None:
     """§7:7: deleted since the change, so its marker; the text never reaches the device."""
     chat = FakeConversationStore()
@@ -460,10 +573,8 @@ async def test_a_snapshot_shows_a_message_deleted_since_as_its_marker() -> None:
 
     joined = next(one for one in sent if one.snapshot is not None)
     assert joined.snapshot is not None
-    assert joined.snapshot.entries == (DeletedMessage(conversation_id=conversation, position=1),)
-    assert not any(isinstance(one, TranscriptMessage) for one in joined.snapshot.entries), (
-        "no text of it"
-    )
+    assert joined.snapshot == (DeletedMessage(conversation_id=conversation, position=1),)
+    assert not any(isinstance(one, TranscriptMessage) for one in joined.snapshot), "no text of it"
 
 
 # --- every change the chat space admits fits one chunk (§7:3, §7:8) ----------
@@ -544,8 +655,7 @@ def test_a_set_of_devices_admitted_is_one_its_chunk_can_carry() -> None:
         admitted = candidate
     assert admitted, "some set fits"
     change = DevicesChangedChange(seq=_WIDEST, conversation_id=_UUID_WIDE, devices=tuple(admitted))
-    emptied = TranscriptPage(conversation_id=_UUID_WIDE, as_of=_WIDEST)
-    chunk = ChatStreamChunk(change=DeviceChange(change=change, snapshot=emptied))
+    chunk = ChatStreamChunk(change=DeviceChange(change=change, snapshot=()))
 
     assert len(canonical_payload(chunk)) <= limit
 
@@ -573,3 +683,33 @@ def test_a_message_recorded_before_the_stream_existed_fits_its_chunk() -> None:
         said = UserMessage(device_id="phone", message_id="m", text="x" * low)
         chunk = _widest_chunk(_UUID_WIDE, said.as_new_message())
         assert len(canonical_payload(chunk)) <= limit
+
+
+def test_a_set_of_devices_recorded_before_the_stream_existed_fits_its_chunk() -> None:
+    """Round 3's case: a set change admitted when only its page was measured travels.
+
+    A conversation id need not be a store's UUID — one joined from before the chat
+    space is any identifier — so the boundary is taken with a long one. A chunk carries
+    its snapshot cut to none as an empty list, with the conversation and the instant
+    the change's own, so it is no wider than the change's one-change page.
+    """
+    conversation = "c" * 128
+    for limit in (1024, 2048):
+        devices: list[ChatDevice] = []
+        for index in range(CHAT_DEVICES_MAX):
+            candidate = [
+                *devices,
+                ChatDevice(device_id=f"{index:04d}" + "d" * 88, access=DeviceAccess.READ),
+            ]
+            change = DevicesChangedChange(
+                seq=_WIDEST, conversation_id=conversation, devices=tuple(candidate)
+            )
+            if len(canonical_payload(ChatChanges(changes=(change,), next_after=_WIDEST))) > limit:
+                break
+            devices = candidate
+        change = DevicesChangedChange(
+            seq=_WIDEST, conversation_id=conversation, devices=tuple(devices)
+        )
+        chunk = ChatStreamChunk(change=DeviceChange(change=change, snapshot=()))
+        assert len(canonical_payload(chunk)) <= limit
+        assert fit_stream_chunk(chunk, max_bytes=limit) == chunk

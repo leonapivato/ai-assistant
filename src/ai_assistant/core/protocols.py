@@ -11762,13 +11762,12 @@ class ConversationStore(Protocol):
         **The change that adds the device brings the conversation's snapshot**
         (ADR-0298 §7:6, §10:4): a change setting a conversation's devices — its start
         among them — that makes the device one of its ends for reading where it was
-        not one before carries the conversation as it stood at that change (§7:7): the
-        newest :data:`~ai_assistant.core.types.CHAT_SNAPSHOT_ENTRIES` of the messages
-        recorded at or before the change's sequence number, ascending, a message
-        deleted since shown as its marker and nothing recorded after it, with the
-        change's sequence number as its ``as_of``. Read in the same reading as the
-        page, so the device that applies the change has the snapshot with it. Every
-        other change carries none.
+        not one before carries the conversation's entries as it stood at that change
+        (§7:7): the newest :data:`~ai_assistant.core.types.CHAT_SNAPSHOT_ENTRIES` of
+        the messages recorded at or before the change's sequence number, ascending, a
+        message deleted since shown as its marker and nothing recorded after it. Read
+        in the same reading as the page, so the device that applies the change has the
+        snapshot with it. Every other change carries none.
 
         The page and its cursor are :meth:`changes`' own: in sequence order, at most
         ``limit`` changes, and ``next_after`` moves across every change passed over,

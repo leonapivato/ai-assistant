@@ -2946,13 +2946,12 @@ class ConversationStoreContract:
         assert isinstance(added.change, DevicesChangedChange)
         snapshot = added.snapshot
         assert snapshot is not None
-        assert snapshot.conversation_id == conversation
-        assert snapshot.as_of == added.seq
+        assert all(one.conversation_id == conversation for one in snapshot)
         # Deleted since, so shown as its marker; recorded after, so not shown at all.
-        assert snapshot.entries[0] == DeletedMessage(conversation_id=conversation, position=1)
-        assert [one.position for one in snapshot.entries] == [1, 2]
-        assert isinstance(snapshot.entries[1], TranscriptMessage)
-        assert snapshot.entries[1].text == "kept"
+        assert snapshot[0] == DeletedMessage(conversation_id=conversation, position=1)
+        assert [one.position for one in snapshot] == [1, 2]
+        assert isinstance(snapshot[1], TranscriptMessage)
+        assert snapshot[1].text == "kept"
         assert later.snapshot is None
         assert isinstance(later.change, MessageAddedChange)
         assert deletion.snapshot is None
@@ -2966,16 +2965,14 @@ class ConversationStoreContract:
     ) -> None:
         """§7:6: a start makes its reading ends ends, and nothing was recorded before it."""
         await store.set_my_devices([_PHONE, _WATCH, _KEYBOARD])
-        conversation = (await store.start()).id
+        await store.start()
 
         for device in ("phone", "watch"):
             mine, started = await _entries_seen_by(store, device)
             assert mine.snapshot is None, "my devices belongs to no conversation"
             assert isinstance(started.change, ConversationStartedChange)
             assert started.snapshot is not None
-            assert started.snapshot.conversation_id == conversation
-            assert started.snapshot.entries == ()
-            assert started.snapshot.as_of == started.seq
+            assert started.snapshot == ()
         writing = await _entries_seen_by(store, "keyboard")
         assert [one.snapshot for one in writing] == [None, None], "a writer is shown nothing"
 
@@ -2995,7 +2992,7 @@ class ConversationStoreContract:
 
         snapshot = keyboard[-1].snapshot
         assert snapshot is not None
-        assert [one.position for one in snapshot.entries] == [1]
+        assert [one.position for one in snapshot] == [1]
         assert watch[-1].snapshot is None
 
     async def test_a_device_rejoining_gets_the_snapshot_of_its_return(
@@ -3011,7 +3008,7 @@ class ConversationStoreContract:
         seen = await _entries_seen_by(store, "watch")
         snapshots = [one.snapshot for one in seen if one.snapshot is not None]
 
-        assert [[one.position for one in page.entries] for page in snapshots] == [[], [1, 2]]
+        assert [[one.position for one in page] for page in snapshots] == [[], [1, 2]]
 
     async def test_a_snapshot_holds_the_newest_entries_it_may(
         self, store: ConversationStore
@@ -3026,7 +3023,7 @@ class ConversationStoreContract:
         (added,) = await _entries_seen_by(store, "laptop")
 
         assert added.snapshot is not None
-        positions = [one.position for one in added.snapshot.entries]
+        positions = [one.position for one in added.snapshot]
         assert positions == list(range(total - CHAT_SNAPSHOT_ENTRIES + 1, total + 1))
 
     async def test_a_deleted_messages_addition_reaches_no_device(

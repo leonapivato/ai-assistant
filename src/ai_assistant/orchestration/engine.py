@@ -9480,6 +9480,10 @@ class Engine:
             ExceptionGroup: If one or more closers raised (and none was cancelled).
                 Every closer was still attempted; the group carries each failure.
         """
+        # ADR-0298 §7: every open change stream is woken to send its end, and given a
+        # moment to be closed by its reader, before the drain — so a hub that closes
+        # its listeners once the engine is closed has written each stream's end first.
+        await self._change_stream.close()
         await self._drain()
         errors: list[Exception] = []
         cancelled: asyncio.CancelledError | None = None

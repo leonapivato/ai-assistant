@@ -1259,14 +1259,7 @@ class FakeConversationStore:
         highest = self._positions_at.get(change.seq, 0)
         held = self._messages.get(change.conversation_id, {})
         chosen = [one for one in sorted(held) if one <= highest][-CHAT_SNAPSHOT_ENTRIES:]
-        return DeviceChange(
-            change=change,
-            snapshot=TranscriptPage(
-                conversation_id=change.conversation_id,
-                entries=tuple(held[one] for one in chosen),
-                as_of=change.seq,
-            ),
-        )
+        return DeviceChange(change=change, snapshot=tuple(held[one] for one in chosen))
 
     async def device_conversations(
         self,
