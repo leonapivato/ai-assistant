@@ -1,6 +1,6 @@
 # 294. Readers no longer ingest into memory, and what they wrote stays
 
-- Status: Proposed
+- Status: Accepted
 - Date: 2026-10-04
 - Scope: [#2578](https://github.com/leonapivato/ai-assistant/issues/2578), the channel redesign: the retirement of readers' scheduled ingestion into memory that ADR-0292 §13 names, taken ahead of the readers' channels.
 - Authorization: the owner ruled on 2026-10-04, in the review ADR-0292 records, that readers' scheduled ingestion into memory retires (ADR-0292 §13's table), and directed that it go now rather than wait for the readers' channel design. The dispatcher assigned 0294.
