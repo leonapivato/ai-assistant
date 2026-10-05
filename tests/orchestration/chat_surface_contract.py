@@ -13,8 +13,9 @@ limit, and every argument refused locally.
 
 from __future__ import annotations
 
+import asyncio
 from dataclasses import dataclass
-from datetime import UTC, datetime
+from datetime import UTC, datetime, timedelta
 from typing import TYPE_CHECKING
 
 import pytest
@@ -24,6 +25,7 @@ from ai_assistant.core.types import (
     ActivationEnding,
     ChannelContext,
     ChannelIdentity,
+    ChannelInput,
     ChatDevice,
     ControllerRule,
     ConversationDeletedChange,
@@ -47,14 +49,19 @@ from ai_assistant.core.types import (
     RecordedChannelTrigger,
     RecordedTextInput,
     SendOutcome,
+    TextChannelPayload,
     TranscriptMessage,
     UnderstandingOmission,
     UserMessage,
+    WholeTextReply,
 )
 from ai_assistant.testing.activation import ended_pass
 
 if TYPE_CHECKING:
+    from collections.abc import Sequence
+
     from ai_assistant.core.protocols import AssistantEngine
+    from ai_assistant.core.types import MemoryWrite
     from ai_assistant.testing import FakeMemoryStore
 
 #: The payload limit every subject is built at: small enough that a page of a few
@@ -265,6 +272,26 @@ class ChatSurfaceContract:
         )
         assert (widest.outcome, widest.position) == (SendOutcome.NO_SUCH_REPLY, None)
 
+    async def test_a_set_of_devices_no_read_could_return_is_refused_and_not_recorded(
+        self, chat_surface: ChatSurfaceSubject
+    ) -> None:
+        """Clause 5, read forward, for devices: a recorded set is one every read returns.
+
+        The argument fits the limit, but the change recording the set — and, for "my
+        devices", every later conversation's start, and the digest carrying it — would
+        not, so a recorded copy would stop every cursor at that change.
+        """
+        engine = chat_surface.engine
+        conversation = await _started(engine, _PHONE)
+        before = await engine.chat_changes(after=0)
+        wide = ChatDevice(device_id="d" * 3800, access=DeviceAccess.READ_WRITE)
+        with pytest.raises(OversizedValueError):
+            await engine.set_my_devices([wide])
+        with pytest.raises(OversizedValueError):
+            await engine.set_conversation_devices(conversation, devices=[wide])
+        assert await engine.my_devices() == (_PHONE,)
+        assert await engine.chat_changes(after=0) == before
+
     # --- deleting, and forgetting (§2, §5) -----------------------------------
 
     async def test_deleting_a_message_leaves_its_marker_and_its_replies(
@@ -376,6 +403,51 @@ class ChatSurfaceContract:
         digest = await engine.conversation(conversation)
         assert digest is not None
         assert digest.state == ConversationState(last_ended=ActivationEnding.COULDNT_FINISH)
+
+    async def test_the_state_shows_working_while_an_activation_runs_and_not_after(
+        self, chat_surface: ChatSurfaceSubject
+    ) -> None:
+        """§8:2, ADR-0295 §1:2: "working…" with the running activation's id, then idle.
+
+        A turn on the conversation is held at its first episode write — the engine's
+        admission, the fake's capture — so it is running while the state is read.
+        """
+        engine, memory = chat_surface.engine, chat_surface.memory
+        conversation = await _started(engine, _PHONE)
+        entered, release = asyncio.Event(), asyncio.Event()
+        original = memory.write_atomic
+
+        async def held(writes: Sequence[MemoryWrite]) -> Sequence[str]:
+            if not entered.is_set():
+                entered.set()
+                await release.wait()
+            return await original(writes)
+
+        memory.write_atomic = held  # type: ignore[method-assign]
+        turn = asyncio.create_task(
+            engine.receive(
+                ChannelInput(
+                    target=ChannelIdentity(channel_type="conversation", instance_id=conversation),
+                    payload=TextChannelPayload(text="hello"),
+                ),
+                reply=WholeTextReply(),
+                timeout=timedelta(seconds=30),
+            )
+        )
+        try:
+            async with asyncio.timeout(10):
+                await entered.wait()
+            during = await engine.conversation(conversation)
+            assert during is not None
+            assert during.state.working
+            assert during.state.activation_id is not None
+        finally:
+            release.set()
+        await turn
+        after = await engine.conversation(conversation)
+        assert after is not None
+        assert not after.state.working
+        assert after.state.activation_id is None
 
     # --- the change stream (§5:10, §5:11) -----------------------------------
 

@@ -16,12 +16,14 @@ from ai_assistant.core.errors import (
     MemoryStoreError,
 )
 from ai_assistant.core.types import (
+    ActivationEnding,
     ActivationLinks,
     ChannelContext,
     ChannelIdentity,
     ChannelInput,
     ControllerRule,
     ControllerStage,
+    ConversationState,
     EpisodicMemory,
     MemoryWrite,
     MemoryWriteMode,
@@ -41,7 +43,11 @@ from ai_assistant.core.types import (
 )
 from ai_assistant.orchestration.activation_state import CaptureFacts, admit_channel
 from ai_assistant.orchestration.activation_writer import ActivationWriter
-from ai_assistant.orchestration.conversations import conversation_channel
+from ai_assistant.orchestration.conversations import (
+    conversation_channel,
+    conversation_state,
+    episodes_on_place,
+)
 from ai_assistant.testing import FakeConversationStore, FakeMemoryStore
 
 if TYPE_CHECKING:
@@ -707,6 +713,31 @@ async def test_a_close_on_a_deleted_conversation_keeps_the_episode() -> None:
     assert isinstance(closed, EpisodicMemory)
     assert closed.processing_record is not None
     assert closed.processing_record.reason is ProcessingReason.HUB_STOPPED
+
+
+async def test_a_close_puts_a_pass_that_died_unresolved_on_its_conversation() -> None:
+    """ADR-0293 §9:2: after a restart the current state shows *interrupted*.
+
+    The pass died before its conversation was resolved, so its open episode named the
+    conversation only by its target. The close puts it on the conversation's place,
+    where the state and forgetting read it, and records the turn.
+    """
+    wiring = Wiring()
+    state = await wiring.state()
+    await wiring.admit(state)
+    opened = await wiring.memory.get(_ADDRESS)
+    assert isinstance(opened, EpisodicMemory)
+    assert opened.processing_record is not None
+    assert opened.processing_record.trigger.channel is None, "the premise: unresolved"
+    conversation_id = str(state.conversation_id)
+
+    await _restarted(wiring).close_open(stage_limit=8, payload_limit=1024)
+
+    assert await wiring.on_channel(state) == [_ADDRESS]
+    assert await wiring.last_turn_at(state) is not None
+    read = await conversation_state(wiring.memory, conversation_id)
+    assert read == ConversationState(last_ended=ActivationEnding.INTERRUPTED)
+    assert await episodes_on_place(wiring.memory, conversation_id) == [_ADDRESS]
 
 
 def _restarted(wiring: Wiring) -> ActivationWriter:

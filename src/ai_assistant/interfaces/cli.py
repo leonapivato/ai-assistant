@@ -1569,23 +1569,24 @@ def conversations(
 @app.command("forget-conversation")
 def forget_conversation(
     conversation_id: str = typer.Argument(
-        ..., callback=_present_id, help="The id of the conversation to destroy."
+        ..., callback=_present_id, help="The id of the conversation whose episodes to forget."
     ),
     *,
     yes: bool = typer.Option(
         False, "--yes", "-y", help="Skip the prompt. The conversation is still shown first."
     ),
 ) -> None:
-    """Destroy one conversation and everything it recorded, after showing you what.
+    """Forget one conversation's episodes, after showing you what.
 
     You are shown how many turns it holds and when it ran — the count and span
     rather than every turn, which is what a person can actually judge at a prompt —
-    and it is destroyed only once you agree. ``--yes`` skips the question, not the
+    and they are forgotten only once you agree. ``--yes`` skips the question, not the
     rendering.
 
-    This destroys: the conversation's episodes are gone from memory, from
-    ``assistant beliefs`` and from any export. Turns already deleted or expired stay
-    gone; nothing is restored.
+    Forgetting removes the conversation's episodes from the assistant's memory, so it
+    no longer recalls them anywhere else. The conversation and its transcript stay:
+    the assistant still reads it while you keep talking there, and only deleting
+    removes it (ADR-0293 §5:7).
     """
     code = asyncio.run(_forget_conversation(conversation_id, assume_yes=yes))
     raise typer.Exit(code)
@@ -5834,7 +5835,9 @@ async def _drive_conversations(engine: AssistantEngine, *, limit: int, offset: i
 async def _drive_forget_conversation(
     engine: AssistantEngine, conversation_id: str, *, confirm: Callable[[ConversationDigest], bool]
 ) -> int:
-    """Show the conversation's count and span, take the answer, then destroy it.
+    """Show the conversation's count and span, take the answer, then forget its episodes.
+
+    Memory-only since ADR-0293 §11:4: the conversation and its transcript stay.
 
     Show-then-confirm at the unit the user thinks in (ADR-0074 §8, ADR-0073 §5).
     A refusal is a valid outcome and exits 0. An id naming no conversation this
@@ -5854,9 +5857,15 @@ async def _drive_forget_conversation(
         _render_error(exc)
         return _EXIT_ERROR
     if not destroyed:
-        _print("[yellow]Nothing to forget:[/] that conversation was already gone.")
+        _print(
+            "[yellow]Nothing to forget:[/] the assistant's memory held nothing from that "
+            "conversation."
+        )
         return _EXIT_ERROR
-    _print("[green]Forgotten.[/] That conversation and everything it recorded are gone.")
+    _print(
+        "[green]Forgotten.[/] The assistant no longer recalls that conversation anywhere "
+        "else. The conversation and its transcript stay; only deleting removes them."
+    )
     return _EXIT_OK
 
 
@@ -9612,7 +9621,7 @@ def _render_conversations(
 
 
 def _render_forget_conversation_prompt(digest: ConversationDigest) -> None:
-    """Show what a conversation deletion will destroy (ADR-0074 §8, ADR-0073 §5).
+    """Show what forgetting a conversation will forget (ADR-0074 §8, ADR-0293 §5:7).
 
     **The count and span, not every turn.** A transcript at a prompt is not
     something a person can judge, and showing nothing would be taking consent for
@@ -9631,8 +9640,10 @@ def _render_forget_conversation_prompt(digest: ConversationDigest) -> None:
             f"the last at {_when(digest.last_turn_at)}"
         )
     _print(
-        "\n  [yellow]This destroys the conversation and every episode it recorded: "
-        "they leave memory, this listing, and any export.[/]"
+        "\n  [yellow]Forgetting removes its episodes from the assistant's memory, so it "
+        "no longer recalls them anywhere else. The conversation and its transcript stay: "
+        "the assistant still reads it while you keep talking there, and only deleting "
+        "removes it.[/]"
     )
     _print(
         "  [dim]Turns already deleted or past their retention window stay gone; "

@@ -5545,6 +5545,13 @@ async def test_forget_conversation_shows_the_count_and_span_before_destroying(
     assert "Turns recorded:" in rendered
     assert "2" in rendered
     assert "Forgotten." in rendered
+    # ADR-0293 §5:7's plain disclosure, before and after: what forgetting removes,
+    # that the conversation is still read, and that only deleting removes it.
+    flat = " ".join(rendered.replace("↳", " ").split())
+    assert "removes its episodes from the assistant's memory" in flat
+    assert "still reads it while you keep talking there" in flat
+    assert "only deleting removes them." in flat
+    assert "destroys the conversation" not in flat
     # ADR-0293 §2:4, §11:4: forgetting is memory-only, so the conversation stays.
     assert await conversations.get(existing) is not None
 

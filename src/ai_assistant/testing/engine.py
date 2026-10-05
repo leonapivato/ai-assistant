@@ -193,6 +193,7 @@ from ai_assistant.orchestration.channels import (
     text_result,
 )
 from ai_assistant.orchestration.conversations import (
+    check_devices_fit,
     check_message_fits,
     conversation_state,
     episodes_on_place,
@@ -580,6 +581,9 @@ class FakeAssistantEngine:
         #: It mints the id each conversation joins it under from
         #: :attr:`_joining`, so a conversation keeps the id :attr:`conversations_held`
         #: knows it by.
+        #: The channel activations this fake is running, from admission to the end of
+        #: their finalization: what a conversation's "working…" reads (ADR-0293 §8:2).
+        self._running_activations: list[FakeActivation] = []
         self._joining: list[str] = []
         self._joining_lock = asyncio.Lock()
         self.chat = FakeConversationStore(now=lambda: _AT, new_id=self._joining_id)
@@ -1377,6 +1381,7 @@ class FakeAssistantEngine:
         self._validate_legacy_channel(supplied, capability, timeout, projection.method)
         activation = FakeActivation.channel(supplied, capability, _AT)
         activation.identify(self.activation_id_factory)
+        self._running_activations.append(activation)
         projection = ChannelProjection(projection.method, activation.report)
         result: ChannelResult | None = None
         failure: BaseException | None = None
@@ -1389,14 +1394,17 @@ class FakeAssistantEngine:
             self._check_channel_result(result, projection)
         except BaseException as exc:
             failure = exc
-        report = await activation.finish(
-            memory=self.episode_memory,
-            conversations=self.conversations_held,
-            allocate=lambda conversation: self._allocate_episode(conversation, activation),
-            max_bytes=self._max_payload_bytes,
-            failure=failure,
-            check_output=lambda: self._check_channel_result(result, projection),
-        )
+        try:
+            report = await activation.finish(
+                memory=self.episode_memory,
+                conversations=self.conversations_held,
+                allocate=lambda conversation: self._allocate_episode(conversation, activation),
+                max_bytes=self._max_payload_bytes,
+                failure=failure,
+                check_output=lambda: self._check_channel_result(result, projection),
+            )
+        finally:
+            self._ended(activation)
         self._commit_episode(activation, report)
         if failure is not None:
             raise failure
@@ -1533,6 +1541,7 @@ class FakeAssistantEngine:
         options = supplied.conversation or ConversationInputOptions()
         activation = FakeActivation.channel(supplied, StreamingTextReply(), _AT)
         activation.identify(self.activation_id_factory)
+        self._running_activations.append(activation)
         projection = ChannelProjection(projection.method, activation.report)
         result: ChannelResult | None = None
         failure: BaseException | None = None
@@ -1555,14 +1564,17 @@ class FakeAssistantEngine:
             result = text_result(outcome)
         except BaseException as exc:
             failure = exc
-        report = await activation.finish(
-            memory=self.episode_memory,
-            conversations=self.conversations_held,
-            allocate=lambda conversation: self._allocate_episode(conversation, activation),
-            max_bytes=self._max_payload_bytes,
-            failure=failure,
-            check_output=lambda: self._check_channel_result(result, projection),
-        )
+        try:
+            report = await activation.finish(
+                memory=self.episode_memory,
+                conversations=self.conversations_held,
+                allocate=lambda conversation: self._allocate_episode(conversation, activation),
+                max_bytes=self._max_payload_bytes,
+                failure=failure,
+                check_output=lambda: self._check_channel_result(result, projection),
+            )
+        finally:
+            self._ended(activation)
         # Before the first chunk is yielded: the episode has landed, and a consumer
         # that abandons the stream must leave it inside its conversation's deletion.
         self._commit_episode(activation, report)
@@ -3654,7 +3666,9 @@ class FakeAssistantEngine:
             )
             digest = digest.model_copy(
                 update={
-                    "state": await conversation_state(self.episode_memory, named),
+                    "state": await conversation_state(
+                        self.episode_memory, named, running=self._running_on(named)
+                    ),
                     "devices": devices or (),
                 }
             )
@@ -3687,6 +3701,20 @@ class FakeAssistantEngine:
         return self._checked(forgot, "forget_conversation")
 
     # --- the chat space: acts in the medium and its reads (ADR-0293 §11) ---
+
+    def _ended(self, activation: FakeActivation) -> None:
+        """Stop counting ``activation`` as running (ADR-0293 §8:2)."""
+        self._running_activations[:] = [
+            one for one in self._running_activations if one is not activation
+        ]
+
+    def _running_on(self, conversation_id: str) -> list[str | None]:
+        """The running activations started from ``conversation_id``, oldest first."""
+        return [
+            one.activation_id
+            for one in self._running_activations
+            if one.conversation_id == conversation_id
+        ]
 
     def _joining_id(self) -> str:
         """The id the chat space mints next: the conversation joining it."""
@@ -3738,6 +3766,7 @@ class FakeAssistantEngine:
         """Replace "my devices" (ADR-0293 §3:1)."""
         held = checked_chat_devices(devices)
         check_arguments("set_my_devices", max_bytes=self._max_payload_bytes, devices=held)
+        check_devices_fit(held, conversation_id=None, max_bytes=self._max_payload_bytes)
         self.calls.append(("set_my_devices", {"devices": held}))
         return self._checked(await self.chat.set_my_devices(held), "set_my_devices")
 
@@ -3753,6 +3782,7 @@ class FakeAssistantEngine:
             conversation_id=named,
             devices=held,
         )
+        check_devices_fit(held, conversation_id=named, max_bytes=self._max_payload_bytes)
         self.calls.append(("set_conversation_devices", {"conversation_id": named, "devices": held}))
         await self._joined(named)
         changed = await self.chat.set_conversation_devices(named, held)
@@ -3799,11 +3829,14 @@ class FakeAssistantEngine:
         The episodes and their membership stay, so forgetting still reaches them by the
         id (§2:5).
         """
-        held = self.conversations_held.pop(conversation_id, None) is not None
-        self.activity.pop(conversation_id, None)
-        stamped = conversation_id in self._in_chat and await self.chat.stamp_deleted(
-            conversation_id
-        )
+        # Under the joining lock, so a first read joining the conversation to the chat
+        # space either finishes before the stamp or finds it no longer held.
+        async with self._joining_lock:
+            held = self.conversations_held.pop(conversation_id, None) is not None
+            self.activity.pop(conversation_id, None)
+            stamped = conversation_id in self._in_chat and await self.chat.stamp_deleted(
+                conversation_id
+            )
         return held or stamped
 
     async def transcript(
