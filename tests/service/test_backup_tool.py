@@ -36,7 +36,7 @@ from ai_assistant.service.artifact import materialise, verify_materialised
 from ai_assistant.service.exits import EXIT_DEPLOYMENT, EXIT_OK, EXIT_RESTART
 from ai_assistant.service.lock import LOCK_FILENAME, InstanceLock
 from ai_assistant.service.refusal import RefusalError
-from ai_assistant.wire.address import SOCKET_FILENAME
+from ai_assistant.wire.address import ADMIN_SOCKET_FILENAME, SOCKET_FILENAME
 
 pytestmark = pytest.mark.integration
 
@@ -158,12 +158,69 @@ def test_the_trace_store_the_lock_and_the_socket_are_excluded(
     assert SOCKET_FILENAME not in carried
 
 
+def test_a_crashed_hubs_leftover_control_socket_does_not_refuse_the_backup(
+    settings: Settings, data_dir: Path, out_dir: Path, keyphrase_file: Path, tmp_path: Path
+) -> None:
+    """ADR-0299 §1: the backup excludes ``admin.sock``, beside the lock and ``hub.sock``.
+
+    The shape a killed hub leaves: both sockets still on disk with nothing listening
+    on either, because the hub unlinks a stale file only when it next binds. Before
+    ADR-0299 the control socket was an entry ADR-0123 §1:2 had never heard of, so
+    it refused every backup of that directory until the operator removed it by hand.
+    """
+    for name in (SOCKET_FILENAME, ADMIN_SOCKET_FILENAME):
+        listener = socket.socket(socket.AF_UNIX, socket.SOCK_STREAM)
+        listener.bind(str(data_dir / name))
+        listener.close()
+    assert stat.S_ISSOCK((data_dir / ADMIN_SOCKET_FILENAME).lstat().st_mode)
+
+    assert _run(out_dir / "a.age", keyphrase_file) == EXIT_OK
+
+    staging = tmp_path / "check"
+    staging.mkdir(mode=0o700)
+    carried = set(_contents(out_dir / "a.age", staging))
+    assert carried == {"memory.db", "notes.txt"}
+    assert ADMIN_SOCKET_FILENAME not in carried
+
+
 def test_an_excluded_paths_sidecars_are_excluded_with_it(settings: Settings) -> None:
     """§3: "A protected store's sidecars are part of the store and never enter an artifact"."""
     excluded = backup._excluded_paths(settings)
 
     assert {"traces.db", "traces.db-wal", "traces.db-shm", "traces.db-journal"} <= excluded
-    assert {LOCK_FILENAME, SOCKET_FILENAME} <= excluded
+    assert {LOCK_FILENAME, SOCKET_FILENAME, ADMIN_SOCKET_FILENAME} <= excluded
+    assert {f"{ADMIN_SOCKET_FILENAME}{suffix}" for suffix in backup.SIDECAR_SUFFIXES} <= excluded
+
+
+def test_the_exclusions_are_exactly_the_four_names_and_their_sidecars(settings: Settings) -> None:
+    """ADR-0123 §3 as ADR-0299 §1 amends it: four names, and nothing else rides in.
+
+    Adding ``admin.sock`` must widen the set by that name and its sidecars alone.
+    An exclusion is a file the backup silently leaves behind, so an entry here that
+    no decision names is a durability loss nobody sees — the reason ADR-0299 refused
+    excluding sockets by file type rather than by name.
+    """
+    names = {"traces.db", LOCK_FILENAME, SOCKET_FILENAME, ADMIN_SOCKET_FILENAME}
+
+    assert backup._excluded_paths(settings) == names | {
+        f"{name}{suffix}" for name in names for suffix in backup.SIDECAR_SUFFIXES
+    }
+
+
+def test_the_control_sockets_name_comes_from_the_wire_address_module(
+    settings: Settings, data_dir: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """ADR-0299 §1: the path is obtained from ``wire/address.py``, never restated.
+
+    Renaming the socket where it is defined moves the exclusion with it, the same
+    property ADR-0123 §3:3 asks of every excluded name.
+    """
+    monkeypatch.setattr(backup, "admin_socket_path", lambda root: root / "renamed-admin.sock")
+
+    excluded = backup._excluded_paths(settings)
+
+    assert "renamed-admin.sock" in excluded
+    assert ADMIN_SOCKET_FILENAME not in excluded
 
 
 def test_the_trace_stores_path_comes_from_the_composition_root(
