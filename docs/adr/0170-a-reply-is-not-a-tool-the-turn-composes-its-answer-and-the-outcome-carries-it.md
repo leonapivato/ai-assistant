@@ -1,6 +1,6 @@
 # 170. A reply is not a tool: the turn composes its answer, and the outcome carries it
 
-- Status: Partially superseded by ADR-0173 (§4's clause that `reply_degraded` is never `True` beside a non-`None` `reply`, and §8's clause naming `ModelProvider.complete()` as the one call an answer-owing pass originates — each only as it reaches a **streamed** pass; §4's other invariants, §8's one-call budget, and every other section stand) and ADR-0197 (§4's second `None` shape and its two clauses stated in the "`turn is None`" direction, each only as it reaches an outcome carrying `TurnOutcome.routed`) and ADR-0250 (§4's `turn`-`None` enumeration, in its count alone: the turn whose goal association came back `UNDECIDED` engaged no goal, took no relevance read, no episodic supplement and no `Planner.plan` call, so it has no `TurnResult` — a second shape beyond the recovered park, returning a `GoalDisambiguation` beside a reply `orchestration` composed from that typed value. That one scope, and nothing else in this ADR: §4's `reply` enumeration does not move, the three shapes on which `reply` is `None` staying exactly the three it names; §4's both-directions rule binds entire and the new shape is stated in both; `reply_degraded` stays `True` on the composition-failure shape and on no other and is never `True` where `turn` is `None`; §4's park clause, its recovered-park clause and its composition-failure clause are untouched; and §§1-3 and §§5-9 stand entire)
+- Status: Partially superseded by ADR-0173 (§4's clause that `reply_degraded` is never `True` beside a non-`None` `reply`, and §8's clause naming `ModelProvider.complete()` as the one call an answer-owing pass originates — each only as it reaches a **streamed** pass; §4's other invariants, §8's one-call budget, and every other section stand) and ADR-0197 (§4's second `None` shape and its two clauses stated in the "`turn is None`" direction, each only as it reaches an outcome carrying `TurnOutcome.routed`) and ADR-0250 (§4's `turn`-`None` enumeration, in its count alone: the turn whose goal association came back `UNDECIDED` engaged no goal, took no relevance read, no episodic supplement and no `Planner.plan` call, so it has no `TurnResult` — a second shape beyond the recovered park, returning a `GoalDisambiguation` beside a reply `orchestration` composed from that typed value. That one scope, and nothing else in this ADR: §4's `reply` enumeration does not move, the three shapes on which `reply` is `None` staying exactly the three it names; §4's both-directions rule binds entire and the new shape is stated in both; `reply_degraded` stays `True` on the composition-failure shape and on no other and is never `True` where `turn` is `None`; §4's park clause, its recovered-park clause and its composition-failure clause are untouched; and §§1-3 and §§5-9 stand entire) and ADR-0297 (§4:1's shapes on which `reply` is `None`, in the addition alone: a stopped resume's outcome, marked by `TurnOutcome.stopped`)
 - Date: 2026-08-21
 - **Partially superseded: 2026-08-21 by
   [ADR-0173](0173-an-answer-streams-as-chunks-of-one-reply-and-the-result-frame-is-still-the-answer.md),
@@ -124,6 +124,16 @@
   `reply_degraded` is still `True` on the composition-failure shape **and on no other**, and
   still never `True` where `turn` is `None`; §4's park clause, its recovered-park clause and
   its composition-failure clause are untouched; and §§1-3 and §§5-9 stand entire.
+
+- Partially superseded: 2026-10-05 by ADR-0297 — one scope. §4:1's shapes on which
+  `reply` is `None`, in the addition alone: a fourth, the outcome of a `resume` whose
+  control activation a stop ended, which returns because its answer was recorded
+  (ADR-0235 §6:10) and carries `TurnOutcome.stopped` `True`, `reply` `None` and
+  `reply_degraded` `False`. §4:3's validator states it in both directions. §4:2's flag
+  rule stands entire, and so does every other clause. These replacements take effect on
+  ratification of ADR-0297. This reciprocal header record accompanies the numbered draft
+  under ADR-0070 and ADR-0082; prior supersessions and the ratified body below are
+  preserved.
 
 ## Context
 

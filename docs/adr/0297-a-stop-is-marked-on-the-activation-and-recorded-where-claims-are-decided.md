@@ -7,6 +7,7 @@
 - Authorization: the dispatcher, under the owner's ruling of 2026-10-04 that how each phase honours a stop is the phases' design (ADR-0295 §2) and the owner's standing direction that mechanism design is the lanes'. The dispatcher assigned 0297. That authorizes drafting and numbering, not ratification or implementation.
 - **Partially supersedes** [ADR-0255](0255-the-driver-walks-a-plan-in-dependency-order-claims-each-step-under-its-attempt-and-stops-rather-than-acting-under-an-unfinished-one.md) — **one scope.** **§11:1's *"Nothing else"* closure over `StepTransition`, in the addition alone**: `StepTransition` gains `activation_id` (§2 below). Every other clause stands, §3's conjuncts, validator, threading and refusal classes included.
 - **Partially supersedes** [ADR-0280](0280-an-activation-controller-runs-the-stages-by-rules-and-records-every-choice-with-the-episode.md) — **two scopes, each for a pass whose stop has been taken in.** **§3:3's step**: the controller reads the stop before it evaluates the rules and once a stage's result is in hand, and leaves the loop on it (§4 below). **§5:2's fixed default**: a stage that failed or timed out after the stop was taken in ends the pass with the stop's end entry, and its error is not re-raised (§4 below). Every other clause stands, and both clauses stand entire for every pass no stop reaches.
+- **Partially supersedes** [ADR-0170](0170-a-reply-is-not-a-tool-the-turn-composes-its-answer-and-the-outcome-carries-it.md) — **one scope.** **§4:1's shapes on which `reply` is `None`, in the addition alone**: a fourth, the outcome of a resume a stop ended, marked by `TurnOutcome.stopped` and never `reply_degraded`, stated in both directions by §4:3's validator (§4 below). §4:2's flag rule stands entire: `reply_degraded` is not set on the new shape. Every other clause stands.
 - **Partially supersedes** [ADR-0275](0275-an-episode-records-one-activation-after-processing-ends.md) — **three scopes.** **§4:1's `ProcessingReason` values, in the addition alone**: `stopped`. **§5:3's table, in the addition alone**: a first row, *a stop ended the pass*, classified `interrupted / stopped`. **§5:6's *"original outward exception … remain[s] intact"*, for a stopped pass alone**: a turn call awaiting it raises `ActivationStoppedError`, and a stopped resume returns its outcome with no reply (§4 below). Every other clause stands.
 
 ## Context
@@ -62,6 +63,7 @@ its own to be refused on, keyed to the activation the stop names.**
 | ADR-0014 §5 | The store's total order decides between writes. | Applied: it decides between a stop and a claim (§1, §2). |
 | ADR-0280 §3:3, §5:2, §5:3 | The controller's step; a failed stage ends the pass and re-raises; a cancelled pass ends `interrupted` in the `finally`. | §3:3 and §5:2 partially superseded for a stopped pass; §5:3's point is where the stop's end entry is appended, as ADR-0295 §3:2 rules (§4). |
 | ADR-0275 §4:1, §5:3, §5:6 | `ProcessingReason`'s values; the ordered terminal table; outward exceptions intact. | Partially superseded: `stopped`, a first row, and the outward exception of a stopped pass (§4). |
+| ADR-0170 §4, ADR-0235 §6:10 | `reply` is `None` on exactly three shapes; `resume` returns wherever an answer was recorded. | ADR-0170 §4:1 partially superseded, in the addition: a stopped resume returns, with no reply and `stopped` set (§4). |
 | ADR-0060 | Cancellation must not orphan a resource a seam acquired. | Kept by construction: a stop cancels no task (§4). |
 | ADR-0293 §8, §10 | The current state; the adapter writes the reply or *couldn't finish*. | Applied as ADR-0295 amended it (§4, §5). |
 | ADR-0004 §6 | The user can view, export and delete their data. | Kept: the stop record is exported and cleared with the store (§1). |
@@ -319,14 +321,26 @@ failure rows); what the stopped activation finished, the user reads in the curre
 turn call, so this reaches the turn calls that remain — a spoken turn's, an informational
 event's — and any caller still on a legacy route.
 
+> **Normative.** `TurnOutcome` gains `stopped`, a `bool` defaulting to `False`, which is
+> `True` exactly on the outcome of a resume whose control activation was stopped.
+
 > **Normative.** A `resume` whose control activation is stopped returns its `TurnOutcome`
-> with `reply` `None` and every other field as the resume established it — the step's
-> outcome and the recipient-grant outcome among them — in place of a composed reply; a
+> with `stopped` `True`, `reply` `None` and `reply_degraded` `False`, and every other
+> field as the resume established it — the step's outcome and the recipient-grant outcome
+> among them — whether or not a reply had been composed when the mark was set; a
 > cancellation of the caller's own task still propagates as itself.
 
-A resume records the user's answer before it acts (ADR-0255 §3:23), and what the answer
-established is owed to the caller who gave it — the recipient-grant outcome under ADR-0235
-§6 among it — so a stop takes away only the reply it would have composed.
+A resume records the user's answer before it acts (ADR-0255 §3:23), and ADR-0235 §6:10
+rules that `resume` *"raises only where no answer was recorded, and returns wherever one
+was"*, so a stopped resume returns, and what the answer established reaches the caller who
+gave it. That is a fourth shape on which `reply` is `None`, beside ADR-0170 §4:1's three,
+and `stopped` is what lets a client tell it from the other three from the value alone, as
+§4:2 requires of `reply_degraded`.
+
+> **Normative.** `TurnOutcome`'s model validator states the fourth shape in both
+> directions (ADR-0170 §4:3): `stopped` `True` requires `reply` `None` and
+> `reply_degraded` `False`, and a `reply` of `None` with `reply_degraded` `False` on a
+> pass that has a `turn` and did not park requires `stopped` `True`.
 
 ### 5. The engine surface
 
@@ -373,9 +387,10 @@ be stopped; that is the residual of §2's no-id case, stated rather than hidden.
 
 > **Normative.** This is a breaking contract change under golden rule 5: `StepTransition`
 > gains a field, `PlanStore` a member and a refusal on `commit_transition`, `PlanExport` a
-> field, `AssistantEngine` a member, `core/types.py` `ActivationStop`,
-> `ControllerRule.STOPPED` and `ProcessingReason.STOPPED`, and `core/errors.py`
-> `ClaimStopped` and `ActivationStoppedError`.
+> field, `AssistantEngine` a member, `TurnOutcome` a field and a fourth reply-less shape,
+> `core/types.py` `ActivationStop`, `ControllerRule.STOPPED` and
+> `ProcessingReason.STOPPED`, and `core/errors.py` `ClaimStopped` and
+> `ActivationStoppedError`.
 
 > **Normative.** Each Protocol change lands with its conformance coverage and its
 > canonical fake in the same change, with its primary implementation (ADR-0137 §2): the
@@ -383,8 +398,9 @@ be stopped; that is the residual of §2's no-id case, stated rather than hidden.
 > `orchestration/`.
 
 > **Normative.** Each change that alters what crosses the wire — the engine member,
-> `ActivationStop`, `ActivationStoppedError`, and the new values of `ControllerRule` and
-> `ProcessingReason` on the episode record — advances `PROTOCOL_VERSION` in that change,
+> `ActivationStop`, `ActivationStoppedError`, `TurnOutcome.stopped`, and the new values of
+> `ControllerRule` and `ProcessingReason` on the episode record — advances
+> `PROTOCOL_VERSION` in that change,
 > on ADR-0124 §9's rule.
 
 > **Normative.** The plan store's change lands before any orchestration change that
@@ -401,16 +417,17 @@ be stopped; that is the residual of §2's no-id case, stated rather than hidden.
 > completes, records its outcome and the bookkeeping it owes, even where that outlasts the
 > pass's budget; a stop before the controller is entered, and one during a stage that
 > then fails, each end `stopped`; a stopped pass writes nothing into its conversation and
-> its waiting messages are then taken in (ADR-0295 §3:6); and each of `ALREADY_ENDED` and
-> `NO_SUCH_ACTIVATION` writes nothing.
+> its waiting messages are then taken in (ADR-0295 §3:6); a resume stopped after its
+> answer was recorded returns `stopped`, with no reply and its recipient-grant outcome;
+> and each of `ALREADY_ENDED` and `NO_SUCH_ACTIVATION` writes nothing.
 
 ### 7. Relationship to earlier decisions
 
-> **Normative.** This ADR supersedes ADR-0255, ADR-0280 and ADR-0275 in the scopes its
-> header names, and no clause of any other ADR.
+> **Normative.** This ADR supersedes ADR-0255, ADR-0280, ADR-0170 and ADR-0275 in the
+> scopes its header names, and no clause of any other ADR.
 
 > **Normative.** This numbered draft records its replacements on the status line and in
-> a dated header note of ADR-0255, ADR-0280 and ADR-0275, atomically with this ADR under
+> a dated header note of ADR-0255, ADR-0280, ADR-0170 and ADR-0275, atomically with this ADR under
 > ADR-0070 and ADR-0082, preserving their ratified bodies. The replacements take effect
 > on this ADR's ratification.
 
@@ -419,6 +436,7 @@ be stopped; that is the residual of §2's no-id case, stated rather than hidden.
 | ADR-0255 §11:1's closure over `StepTransition`, in the addition | §2 (`activation_id`) |
 | ADR-0280 §3:3's step, for a stopped pass | §4 (the mark read before the rules and after a stage) |
 | ADR-0280 §5:2's fixed default, for a stopped pass | §4 (the stop's end entry, no re-raise) |
+| ADR-0170 §4:1's reply-less shapes, in the addition | §4 (a stopped resume, `TurnOutcome.stopped`) |
 | ADR-0275 §4:1's `ProcessingReason` values, in the addition | §4 (`stopped`) |
 | ADR-0275 §5:3's table, in the addition | §4 (`interrupted / stopped`, first) |
 | ADR-0275 §5:6's outward exception, for a stopped pass | §4 (`ActivationStoppedError`; a stopped resume's reply-less outcome) |
@@ -444,7 +462,8 @@ says which of three things was true.
 **What it costs.** A stop waits for the stage in flight, a model call included, before the
 pass ends, for as long as that stage's own contracts let it run, a stop adding no
 deadline of its own. The plan store gains a member, a conjunct and an export field, and
-the engine a member, a vocabulary and an error that cross the wire. The plan store holds
+the engine a member, a vocabulary, an error and a `TurnOutcome` field that cross the
+wire. The plan store holds
 one row per stop the user ever gave, until it is cleared.
 
 **What follows from it.**
