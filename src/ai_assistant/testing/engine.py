@@ -53,6 +53,7 @@ from ai_assistant.core.errors import (
     GrantError,
     InvalidGrantError,
     InvalidRecipientGrantError,
+    MemoryStoreError,
     NotificationBudgetError,
     OversizedValueError,
     PlanningError,
@@ -3019,7 +3020,10 @@ class FakeAssistantEngine:
         named = identifier(record_id, name="record_id")
         check_arguments("forget", max_bytes=self._max_payload_bytes, record_id=named)
         self.calls.append(("forget", {"record_id": named}))
-        conversation = episode_conversation(await self.episode_memory.get(named))
+        try:  # a record that cannot be read is still destroyed, as the engine does
+            conversation = episode_conversation(await self.episode_memory.get(named))
+        except MemoryStoreError:
+            conversation = None
         removed_episode = await self.episode_memory.delete(named)
         if conversation is not None:  # its state is sent again, as the engine counts it
             self._count_change(conversation)

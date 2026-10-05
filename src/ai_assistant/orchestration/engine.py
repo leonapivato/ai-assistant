@@ -6494,7 +6494,8 @@ class Engine:
         "Kill any of them", relayed to
         :meth:`~ai_assistant.core.protocols.MemoryStore.delete`, with the record read
         first only to learn whether it is an episode whose conversation's current state
-        an open change stream must send again (ADR-0296 §4:9).
+        an open change stream must send again (ADR-0296 §4:9) — a read whose failure
+        never prevents the deletion.
         The **contract does not change and the store grows no band-conditional
         refusal**: ADR-0004 §6 gives the user an unconditional right to delete their
         data, and a store that refused because of the band it had itself assigned
@@ -6554,8 +6555,14 @@ class Engine:
         # ADR-0296 §4:9: an episode is read into its conversation's current state, so
         # the conversation it names is counted once it is destroyed, and an open change
         # stream sends that state again. Only a live episode is read into the state, and
-        # only a live record is returned here, so nothing else needs counting.
-        conversation = episode_conversation(await self._memory.get(record_id))
+        # only a live record is returned here, so nothing else needs counting. The read
+        # never stands between the user and the deletion (ADR-0073 §5): a record that
+        # cannot be read is still destroyed, and the stream's sweep sends its
+        # conversation's state instead.
+        try:
+            conversation = episode_conversation(await self._memory.get(record_id))
+        except MemoryStoreError:
+            conversation = None
         try:
             return await self._memory.delete(record_id)
         finally:
