@@ -15774,15 +15774,451 @@ class Conversation(BaseModel):
     )
 
 
+# --- the chat space: transcripts, devices and the change stream --------------
+# ADR-0293's hosted medium. A conversation keeps its own transcript of messages
+# (§5), the chat space keeps "my devices" and each conversation its own devices
+# (§3), every change to the chat space gets a sequence number (§5), and the chat's
+# reader keeps its bookkeeping beside them (§6). All frozen (ADR-0068), every
+# instant a `UtcInstant` (ADR-0023, ADR-0030). Devices are opaque identifiers here:
+# registering a device and its roles are the device session's.
+
+#: The size bound on a message's text (ADR-0293 §4:7, §7:2, §7:3), in characters. The
+#: ADR names a bound and leaves its figure to the implementation; it is carried on the
+#: type, so a message over it cannot be constructed and the refusal is the send's own
+#: error (§4:7) rather than something each store re-derives.
+TRANSCRIPT_MESSAGE_MAX_CHARS: Final = 16_000
+
+#: How many options a question message may carry (ADR-0293 §5:2's *Options* row), and
+#: how long each may be. Options are shown as buttons, so both are small.
+MESSAGE_OPTIONS_MAX: Final = 12
+MESSAGE_OPTION_MAX_CHARS: Final = 200
+
+#: How many devices one set of devices may name, "my devices" or a conversation's.
+CHAT_DEVICES_MAX: Final = 64
+
+#: One past the largest position or sequence number: the signed 64-bit ceiling a
+#: SQLite ``INTEGER`` holds (ADR-0073 §2's bound, inherited).
+_CHAT_INT_BOUND: Final = 2**63
+
+type _OptionText = Annotated[NonBlankEncodableText, Field(max_length=MESSAGE_OPTION_MAX_CHARS)]
+
+
+class MessageAuthor(StrEnum):
+    """Who wrote a transcript message (ADR-0293 §5:2, the *Author* row).
+
+    Only the user's messages start activations and can carry the user's authority
+    (ADR-0293 §4:8, §6:1); the assistant's own messages never start one.
+
+    Attributes:
+        USER: The user, established, writing from one of the conversation's devices.
+        ASSISTANT: The assistant, writing through the chat's writer.
+    """
+
+    USER = "user"
+    ASSISTANT = "assistant"
+
+
+class DeviceAccess(StrEnum):
+    """What a device may do as one of a conversation's ends (ADR-0293 §3:5).
+
+    A device may be an end for writing, for reading, or for both. A watch may only
+    read.
+
+    Attributes:
+        READ: The device reads the conversation and may not write in it.
+        WRITE: The device writes in the conversation and is not shown it.
+        READ_WRITE: The device does both.
+    """
+
+    READ = "read"
+    WRITE = "write"
+    READ_WRITE = "read_write"
+
+    @property
+    def writes(self) -> bool:
+        """Whether this access lets a device write in the conversation."""
+        return self is not DeviceAccess.READ
+
+    @property
+    def reads(self) -> bool:
+        """Whether this access lets a device be shown the conversation."""
+        return self is not DeviceAccess.WRITE
+
+
+class ChatDevice(BaseModel):
+    """One device in a set of devices: "my devices", or a conversation's (ADR-0293 §3).
+
+    The device is an opaque identifier here. What a device is, how it is registered and
+    which roles it holds are the device session's; this record says only that the user
+    chose it, and for what.
+    """
+
+    model_config = ConfigDict(extra="forbid", frozen=True)
+
+    device_id: Identifier = Field(description="The device, as the device session names it.")
+    access: DeviceAccess = Field(description="Writing, reading, or both (ADR-0293 §3:5).")
+
+
+def checked_chat_devices(devices: object) -> tuple[ChatDevice, ...]:
+    """Check a set of devices and return it in its one order, ``device_id`` ascending.
+
+    Shared by every ``ConversationStore`` implementation, so each refuses exactly the
+    same sets (ADR-0293 §3). A bare ``str`` is refused by name rather than read as its
+    characters, and the sequence is read **once**, before anything else, so a caller's
+    later edit cannot reach the result (ADR-0065).
+
+    Returns:
+        The devices, ``device_id`` ascending.
+
+    Raises:
+        ValueError: If ``devices`` is not a sequence of :class:`ChatDevice`, names one
+            device twice, or holds more than :data:`CHAT_DEVICES_MAX` devices.
+    """
+    if isinstance(devices, (str, bytes)) or not isinstance(devices, Sequence):
+        msg = f"devices must be a sequence of ChatDevice, got {describe_untrusted(devices)}"
+        raise ValueError(msg)
+    held = tuple(devices)
+    if len(held) > CHAT_DEVICES_MAX:
+        msg = f"a set of devices holds at most {CHAT_DEVICES_MAX}, got {len(held)}"
+        raise ValueError(msg)
+    for one in held:
+        if not isinstance(one, ChatDevice):
+            msg = f"devices holds something that is not a ChatDevice: {describe_untrusted(one)}"
+            raise ValueError(msg)
+    ids = [one.device_id for one in held]
+    if len(set(ids)) != len(ids):
+        msg = "a set of devices names one device more than once"
+        raise ValueError(msg)
+    return tuple(sorted(held, key=lambda one: one.device_id))
+
+
+def _check_message_shape(
+    author: MessageAuthor,
+    *,
+    cut_off: bool,
+    device_id: str | None,
+    message_id: str | None,
+    options: tuple[str, ...],
+) -> None:
+    """ADR-0293 §5:2's table, row by row, for a message new or recorded.
+
+    *Cut off* is the assistant's only, and *message id, device* the user's only and
+    then both required (§4:1). Options may not repeat, since an answer names one
+    (§6:14).
+
+    Raises:
+        ValueError: If a property is present on the author that may not carry it, or
+            absent on the one that must.
+    """
+    if author is MessageAuthor.USER:
+        if device_id is None or message_id is None:
+            msg = "a user's message carries the device it came from and that device's message id"
+            raise ValueError(msg)
+        if cut_off:
+            msg = "only the assistant's message can be cut off (ADR-0293 §5:2)"
+            raise ValueError(msg)
+    elif device_id is not None or message_id is not None:
+        msg = "an assistant message carries no device and no message id (ADR-0293 §5:2)"
+        raise ValueError(msg)
+    if len(set(options)) != len(options):
+        msg = "a question's options must be distinct, since an answer names one"
+        raise ValueError(msg)
+
+
+class NewMessage(BaseModel):
+    """A message to be written into a conversation's transcript (ADR-0293 §4, §6).
+
+    What a write carries: every property of ADR-0293 §5:2's table and nothing the store
+    decides — the position, the instant and the conversation are the store's. The
+    author is the hub's statement, never the content's (ADR-0292 §5:1).
+
+    **The size bound is on the type** (ADR-0293 §4:7): a message over
+    :data:`TRANSCRIPT_MESSAGE_MAX_CHARS` cannot be constructed, so it is refused with
+    the error on the send and nothing is recorded.
+    """
+
+    model_config = ConfigDict(extra="forbid", frozen=True)
+
+    author: MessageAuthor
+    text: NonBlankEncodableText = Field(max_length=TRANSCRIPT_MESSAGE_MAX_CHARS)
+    replies_to: int | None = Field(
+        default=None,
+        strict=True,
+        ge=1,
+        lt=_CHAT_INT_BOUND,
+        description="The position of an earlier message in the same conversation (§4:5).",
+    )
+    options: tuple[_OptionText, ...] = Field(
+        default=(),
+        max_length=MESSAGE_OPTIONS_MAX,
+        description="For a question, the options devices show as buttons (§5:2).",
+    )
+    cut_off: bool = Field(
+        default=False, strict=True, description="The assistant's only (§5:2, §6:16)."
+    )
+    device_id: Identifier | None = Field(
+        default=None, description="The user's only: the device the message came from."
+    )
+    message_id: Identifier | None = Field(
+        default=None,
+        description="The user's only: the id the device chose, unique per device (§4:1).",
+    )
+
+    @model_validator(mode="after")
+    def _the_shape_is_its_authors(self) -> Self:
+        _check_message_shape(
+            self.author,
+            cut_off=self.cut_off,
+            device_id=self.device_id,
+            message_id=self.message_id,
+            options=self.options,
+        )
+        return self
+
+
+class TranscriptMessage(BaseModel):
+    """One entry of a conversation's transcript (ADR-0293 §5:1, §5:2).
+
+    Exactly the properties §5:2's table lists, beside what places the message: the
+    conversation, its position, which is what *received* answers (§4:4), and when it
+    was written, which lets an activation tell that a message was written before the
+    reply it follows (§6). A position is assigned once and never reused, so a reply's
+    reference stays meaningful after what it names is deleted (§5:8).
+    """
+
+    model_config = ConfigDict(extra="forbid", frozen=True)
+
+    conversation_id: Identifier
+    position: int = Field(strict=True, ge=1, lt=_CHAT_INT_BOUND)
+    written_at: UtcInstant
+    author: MessageAuthor
+    text: NonBlankEncodableText = Field(max_length=TRANSCRIPT_MESSAGE_MAX_CHARS)
+    replies_to: int | None = Field(default=None, strict=True, ge=1, lt=_CHAT_INT_BOUND)
+    options: tuple[_OptionText, ...] = Field(default=(), max_length=MESSAGE_OPTIONS_MAX)
+    cut_off: bool = Field(default=False, strict=True)
+    device_id: Identifier | None = None
+    message_id: Identifier | None = None
+
+    @model_validator(mode="after")
+    def _the_shape_is_its_authors(self) -> Self:
+        _check_message_shape(
+            self.author,
+            cut_off=self.cut_off,
+            device_id=self.device_id,
+            message_id=self.message_id,
+            options=self.options,
+        )
+        if self.replies_to is not None and self.replies_to >= self.position:
+            msg = "a message replies only to an earlier message (ADR-0293 §4:5)"
+            raise ValueError(msg)
+        return self
+
+
+class DeletedMessage(BaseModel):
+    """The marker a deleted message leaves: its id and that it was deleted (ADR-0293 §5:12).
+
+    It carries no text and nothing else of the message. A reply to the message stays,
+    and its reference names this position (§5:8).
+    """
+
+    model_config = ConfigDict(extra="forbid", frozen=True)
+
+    conversation_id: Identifier
+    position: int = Field(strict=True, ge=1, lt=_CHAT_INT_BOUND)
+    deleted: Literal[True] = True
+
+
+class TranscriptPage(BaseModel):
+    """Part of a conversation's transcript, as read at one point of the change stream.
+
+    A snapshot of a conversation's recent messages, or an older range loaded as the
+    user scrolls back (ADR-0293 §5:13). ``as_of`` is the chat space's latest sequence
+    number when the page was read, so a device that takes a snapshot follows the
+    change stream from there.
+
+    A deleted message appears as its :class:`DeletedMessage` marker, so a device can
+    show a reply's reference as naming a deleted message (§5:8).
+    """
+
+    model_config = ConfigDict(extra="forbid", frozen=True)
+
+    conversation_id: Identifier
+    entries: tuple[TranscriptMessage | DeletedMessage, ...] = ()
+    as_of: int = Field(strict=True, ge=0, lt=_CHAT_INT_BOUND)
+
+    @model_validator(mode="after")
+    def _the_page_is_one_conversation_in_order(self) -> Self:
+        positions = [one.position for one in self.entries]
+        if any(later <= earlier for earlier, later in pairwise(positions)):
+            msg = "a transcript page's entries are in strictly ascending position"
+            raise ValueError(msg)
+        if any(one.conversation_id != self.conversation_id for one in self.entries):
+            msg = "a transcript page holds one conversation's entries only"
+            raise ValueError(msg)
+        return self
+
+
+class SendOutcome(StrEnum):
+    """What became of a message written into a conversation (ADR-0293 §4).
+
+    Attributes:
+        RECORDED: The conversation recorded it; the receipt's position is *received*.
+        REPEATED: The same device had already sent a message with this id to this
+            conversation, so this is that message (§4:2), deleted or not (§4:3), and
+            nothing was written.
+        NOT_AN_END: The device is not one of the conversation's ends for writing, so
+            nothing was written (§7:2).
+        NO_SUCH_REPLY: The message names, as the one it replies to, a position the
+            conversation never held, so nothing was written (§4:5).
+    """
+
+    RECORDED = "recorded"
+    REPEATED = "repeated"
+    NOT_AN_END = "not_an_end"
+    NO_SUCH_REPLY = "no_such_reply"
+
+
+class MessageReceipt(BaseModel):
+    """The answer to writing a message: its position where it is in the conversation.
+
+    A position is present exactly where the message is recorded, newly or before
+    (``RECORDED``, ``REPEATED``): that is *received* (ADR-0293 §4:4), and its absence
+    tells a device the message is not in the conversation.
+    """
+
+    model_config = ConfigDict(extra="forbid", frozen=True)
+
+    conversation_id: Identifier
+    outcome: SendOutcome
+    position: int | None = Field(default=None, strict=True, ge=1, lt=_CHAT_INT_BOUND)
+
+    @model_validator(mode="after")
+    def _a_position_exactly_where_recorded(self) -> Self:
+        recorded = self.outcome in {SendOutcome.RECORDED, SendOutcome.REPEATED}
+        if recorded != (self.position is not None):
+            msg = "a receipt carries a position exactly where the message is recorded"
+            raise ValueError(msg)
+        return self
+
+
+class MessageAddedChange(BaseModel):
+    """A message was added to a conversation (ADR-0293 §5:10)."""
+
+    model_config = ConfigDict(extra="forbid", frozen=True)
+
+    kind: Literal["message_added"] = "message_added"
+    seq: int = Field(strict=True, ge=1, lt=_CHAT_INT_BOUND)
+    message: TranscriptMessage
+
+    @property
+    def conversation_id(self) -> str:
+        """The conversation the message was added to."""
+        return self.message.conversation_id
+
+
+class MessageDeletedChange(BaseModel):
+    """A message was deleted, leaving its marker (ADR-0293 §5:10, §5:12)."""
+
+    model_config = ConfigDict(extra="forbid", frozen=True)
+
+    kind: Literal["message_deleted"] = "message_deleted"
+    seq: int = Field(strict=True, ge=1, lt=_CHAT_INT_BOUND)
+    marker: DeletedMessage
+
+    @property
+    def conversation_id(self) -> str:
+        """The conversation the message was deleted from."""
+        return self.marker.conversation_id
+
+
+class ConversationStartedChange(BaseModel):
+    """A conversation was started, shown on the devices it began with (ADR-0293 §2:1)."""
+
+    model_config = ConfigDict(extra="forbid", frozen=True)
+
+    kind: Literal["conversation_started"] = "conversation_started"
+    seq: int = Field(strict=True, ge=1, lt=_CHAT_INT_BOUND)
+    conversation_id: Identifier
+    devices: tuple[ChatDevice, ...] = Field(default=(), max_length=CHAT_DEVICES_MAX)
+
+
+class ConversationDeletedChange(BaseModel):
+    """A conversation was deleted, its transcript with it (ADR-0293 §2:3)."""
+
+    model_config = ConfigDict(extra="forbid", frozen=True)
+
+    kind: Literal["conversation_deleted"] = "conversation_deleted"
+    seq: int = Field(strict=True, ge=1, lt=_CHAT_INT_BOUND)
+    conversation_id: Identifier
+
+
+class DevicesChangedChange(BaseModel):
+    """A set of devices changed: "my devices" or one conversation's (ADR-0293 §5:10).
+
+    ``conversation_id`` is ``None`` for "my devices", the chat space's own set. The
+    change carries the whole set as it now stands, so a device added, a device removed
+    and a device's access changed are one shape.
+    """
+
+    model_config = ConfigDict(extra="forbid", frozen=True)
+
+    kind: Literal["devices_changed"] = "devices_changed"
+    seq: int = Field(strict=True, ge=1, lt=_CHAT_INT_BOUND)
+    conversation_id: Identifier | None = None
+    devices: tuple[ChatDevice, ...] = Field(default=(), max_length=CHAT_DEVICES_MAX)
+
+
+#: One change to the chat space, told apart by its ``kind`` (ADR-0293 §5:10).
+type ChatChange = Annotated[
+    MessageAddedChange
+    | MessageDeletedChange
+    | ConversationStartedChange
+    | ConversationDeletedChange
+    | DevicesChangedChange,
+    Field(discriminator="kind"),
+]
+
+
+class ChatChanges(BaseModel):
+    """The changes after a cursor, and the cursor to ask from next (ADR-0293 §5:10, §5:11).
+
+    ``next_after`` is where the next read starts: the last change returned where the
+    page is full, and otherwise the chat space's latest sequence number as read with
+    the page, so a reader whose filter matched nothing still moves forward. A
+    ``next_after`` below the cursor asked from means the chat space has fewer changes
+    than that cursor claims — a store started afresh — and the reader resynchronises
+    from snapshots.
+    """
+
+    model_config = ConfigDict(extra="forbid", frozen=True)
+
+    changes: tuple[ChatChange, ...] = ()
+    next_after: int = Field(strict=True, ge=0, lt=_CHAT_INT_BOUND)
+
+    @model_validator(mode="after")
+    def _the_changes_are_in_sequence(self) -> Self:
+        seqs = [one.seq for one in self.changes]
+        if any(later <= earlier for earlier, later in pairwise(seqs)):
+            msg = "changes are in strictly ascending sequence"
+            raise ValueError(msg)
+        if seqs and self.next_after < seqs[-1]:
+            msg = "the next cursor is never before the last change returned"
+            raise ValueError(msg)
+        return self
+
+
 class ConversationExport(BaseModel):
     """A portable snapshot of the conversation store's own state (ADR-0074 §9, ADR-0004 §6).
 
-    **The conversations and nothing else** (ADR-0283 §4:3). A conversation's
-    history is the episodes on its channel, which are ``MemoryStore`` records and
-    which that store's own export carries; repeating them here, or an index of
-    them, would put the same Tier 1 history in two exports under two retention
-    rules. The delivery rows the conversation store also keeps are bookkeeping
-    about episodes rather than a record of the conversation.
+    **The conversations and their transcripts** (ADR-0293 §5:3, ADR-0292 §3:11): a
+    transcript is the hosted medium's content and the user's data, so it is exported
+    here — every message that stands, in ``messages``, and no deleted message's
+    marker, which carries nothing of the user's. **No episode** (ADR-0283 §4:3): an
+    episode is a ``MemoryStore`` record and that store's own export carries it, and
+    the transcript and the episodes are never kept in step (ADR-0293 §5:5). The
+    delivery rows, "my devices", a conversation's devices and the reader's
+    bookkeeping are the store's bookkeeping rather than a record of what was said,
+    and are not exported.
 
     **This is the store's raw snapshot.** A conversation stamped deleted is absent
     from it (that is what the validator below enforces), but a conversation whose
@@ -15791,29 +16227,31 @@ class ConversationExport(BaseModel):
 
     Order is part of the contract and is the order the store's reads use (ADR-0074
     §9.3): ``conversations`` by ``last_active_at`` descending with ``id`` ascending
-    as the tie-break. It is asserted by the conformance suite rather than validated
-    here, so that filtering an export down — which preserves order — stays a total
-    operation.
+    as the tie-break; ``messages`` grouped by conversation in that order, each
+    conversation's in ascending position. It is asserted by the conformance suite
+    rather than validated here, so that filtering an export down — which preserves
+    order — stays a total operation.
 
-    ``schema_version`` is 5 because the :class:`Conversation` the document carries
-    loses its observation watermark (ADR-0285 §4, ADR-0014 §5); it was 4 when the
-    turns left the document (ADR-0275 §7:9 as ADR-0283 §4:3 reads it). Exports have
-    no import operation and no historical conversion path, so a version-4 document
-    is not read here.
+    ``schema_version`` is 6 because the document gains the transcripts (ADR-0293 §5,
+    ADR-0014 §5); it was 5 when the :class:`Conversation` it carries lost its
+    observation watermark (ADR-0285 §4), and 4 when the turns left the document
+    (ADR-0275 §7:9 as ADR-0283 §4:3 reads it). Exports have no import operation and
+    no historical conversion path, so an earlier document is not read here.
     """
 
     model_config = ConfigDict(extra="forbid", frozen=True)
 
-    schema_version: Literal[5] = Field(
-        default=5,
+    schema_version: Literal[6] = Field(
+        default=6,
         description=(
-            "Shape of this export, pinned to exactly 5 (ADR-0039 §10, ADR-0014 §5, "
-            "ADR-0285 §4): an export outlives the code that wrote it, so the label must "
+            "Shape of this export, pinned to exactly 6 (ADR-0039 §10, ADR-0014 §5, "
+            "ADR-0293 §5): an export outlives the code that wrote it, so the label must "
             "be a fact about the document rather than a producer's unchecked claim."
         ),
     )
     exported_at: UtcInstant
     conversations: tuple[Conversation, ...] = ()
+    messages: tuple[TranscriptMessage, ...] = ()
 
     @model_validator(mode="after")
     def _the_snapshot_is_internally_consistent(self) -> ConversationExport:
@@ -15832,6 +16270,18 @@ class ConversationExport(BaseModel):
         known = {one.id for one in self.conversations}
         if len(known) != len(self.conversations):
             msg = "export contains duplicate conversation ids"
+            raise ValueError(msg)
+
+        # A message belongs to a conversation the export carries, and names one
+        # position of it once: a transcript without its conversation would be text
+        # whose deletion the export no longer shows.
+        placed = [(one.conversation_id, one.position) for one in self.messages]
+        if len(set(placed)) != len(placed):
+            msg = "export carries one message twice"
+            raise ValueError(msg)
+        orphaned = sorted({one.conversation_id for one in self.messages} - known)
+        if orphaned:
+            msg = f"export carries messages of conversations it does not: {', '.join(orphaned)}"
             raise ValueError(msg)
 
         return self

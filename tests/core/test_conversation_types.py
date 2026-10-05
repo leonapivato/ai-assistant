@@ -82,10 +82,12 @@ def test_an_export_refuses_a_conversation_carried_twice() -> None:
         )
 
 
-def test_an_export_carries_no_history() -> None:
+def test_an_export_carries_no_episode() -> None:
     """ADR-0283 §4:3: a conversation's turns are its channel's episodes, exported there.
 
-    The document has no member for them at all, so a producer cannot hand one in.
+    The document has no member for them at all, so a producer cannot hand one in. What
+    it gains is the transcript (ADR-0293 §5:3), which is the hosted medium's content
+    and not an episode.
     """
     exported = ConversationExport(exported_at=_NOW, conversations=(_conversation(),))
 
@@ -93,8 +95,9 @@ def test_an_export_carries_no_history() -> None:
         "schema_version",
         "exported_at",
         "conversations",
+        "messages",
     }
-    assert exported.schema_version == 5
+    assert exported.schema_version == 6
     with pytest.raises(ValidationError):
         ConversationExport.model_validate({"exported_at": _NOW, "turns": ()})
 
@@ -110,17 +113,17 @@ def test_a_conversation_carries_no_observation_watermark() -> None:
         _conversation(observed_through=3)
 
 
-def test_the_export_version_moves_because_the_conversation_lost_a_member() -> None:
-    """ADR-0285 §4:4: the ``Conversation`` the document carries changed shape.
+def test_the_export_version_moves_because_the_document_gained_the_transcripts() -> None:
+    """ADR-0293 §5:3: the document carries the transcripts it did not.
 
     That is exactly what the version exists to announce (ADR-0039 §10, ADR-0014 §5),
-    so the document reads 5 where it read 4.
+    so the document reads 6 where it read 5 (and 5 where ADR-0285 §4:4 moved it from 4).
     """
-    assert ConversationExport(exported_at=_NOW).schema_version == 5
+    assert ConversationExport(exported_at=_NOW).schema_version == 6
 
 
-@pytest.mark.parametrize("version", [1, 2, 3, 4, 6])
+@pytest.mark.parametrize("version", [1, 2, 3, 4, 5, 7])
 def test_the_export_refuses_a_version_that_is_not_the_shape_it_carries(version: int) -> None:
-    """The export label describes the watermark-free ADR-0285 §4 shape exactly."""
+    """The export label describes the transcript-carrying ADR-0293 §5 shape exactly."""
     with pytest.raises(ValidationError):
         ConversationExport.model_validate({"schema_version": version, "exported_at": _NOW})

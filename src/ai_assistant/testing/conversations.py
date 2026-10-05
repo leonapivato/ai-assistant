@@ -13,6 +13,13 @@ they are written down: the per-conversation mutation exclusion, the stamped-once
 delivery rows, and the tombstone's asymmetric visibility (hidden from every
 presenting read, still enumerable by the sweeps).
 
+It holds ADR-0293's chat space as the store does: each conversation's transcript,
+"my devices" and each conversation's devices, the change stream as one list of
+changes under one counter, and the reader's bookkeeping. A change is held as the
+frozen model a read returns, so deleting a message removes its addition from the
+list and deleting a conversation leaves only its deletion there — the same stream
+the ``sqlite3`` store answers with.
+
 **Its critical sections really suspend.** Each mutation yields to the event loop
 inside its exclusion, before reading the state it is about to change. Without
 that, a fake backed by a dict would satisfy every concurrency case in the shared
@@ -48,11 +55,25 @@ from pydantic import TypeAdapter, ValidationError
 from ai_assistant.core.clock import ClockReadingError, checked_clock
 from ai_assistant.core.errors import ConversationStoreError, UnknownConversationError
 from ai_assistant.core.types import (
+    ChatChanges,
+    ChatDevice,
     Conversation,
+    ConversationDeletedChange,
     ConversationExport,
+    ConversationStartedChange,
+    DeletedMessage,
+    DevicesChangedChange,
     Identifier,
+    MessageAddedChange,
+    MessageAuthor,
+    MessageDeletedChange,
+    MessageReceipt,
+    SendOutcome,
     SpokenDeliveryState,
+    TranscriptMessage,
+    TranscriptPage,
     UtcInstant,
+    checked_chat_devices,
     describe_untrusted,
 )
 from ai_assistant.testing.cancellation import SuspendableResource
@@ -61,7 +82,7 @@ if TYPE_CHECKING:
     from collections.abc import AsyncIterator, Callable, Mapping
 
     from ai_assistant.core.clock import Clock
-    from ai_assistant.core.types import SpokenDelivery
+    from ai_assistant.core.types import ChatChange, NewMessage, SpokenDelivery
     from ai_assistant.testing.cancellation import LoopSuspension, ResourceLog
 
 #: One past the largest value a paging argument accepts — the signed 64-bit
@@ -100,6 +121,94 @@ _MAX_DELIVERY_IDS: Final = 1000
 #: exactly as the production store's do, so the two refuse the same values.
 _EPISODE_ID: Final[TypeAdapter[str]] = TypeAdapter(Identifier)
 _INSTANT: Final[TypeAdapter[datetime]] = TypeAdapter(UtcInstant)
+
+#: The most ids or positions one chat-space call takes (ADR-0293): the page bound
+#: ``deliveries`` already sets, for the same one-page-one-call reason. Duplicated from
+#: the production store rather than shared, for :data:`_PAGE_BOUND`'s reason.
+_MAX_NAMED: Final = 1000
+
+#: The page sizes the chat-space reads default to. The snapshot's is the figure
+#: ADR-0293 leaves open (What stays open), chosen by the implementation.
+_DEFAULT_TRANSCRIPT_PAGE: Final = 50
+_DEFAULT_CHANGES_PAGE: Final = 100
+_DEFAULT_AWAITING_PAGE: Final = 100
+
+
+def _check_position(name: str, value: object) -> int:
+    """Refuse a position that is not an exact ``int`` in ``[1, 2**63)``.
+
+    Duplicated from the production store rather than shared, for :data:`_PAGE_BOUND`'s
+    reason. ``bool`` is refused with the rest: ``True`` is not a position.
+
+    Raises:
+        ValueError: If ``value`` is not such an ``int``.
+    """
+    if type(value) is not int or not 1 <= value < _PAGE_BOUND:
+        msg = f"{name} must be an int in [1, 2**63), got {describe_untrusted(value)}"
+        raise ValueError(msg)
+    return value
+
+
+def _checked_positions(positions: object) -> tuple[int, ...]:
+    """Check a sequence of positions once, before anything is read (ADR-0065).
+
+    Duplicated from the production store rather than shared, for :data:`_PAGE_BOUND`'s
+    reason.
+
+    Raises:
+        ValueError: If ``positions`` is a ``str`` or not a sequence, holds more than
+            :data:`_MAX_NAMED`, or holds a value that is not a position.
+    """
+    if isinstance(positions, (str, bytes)) or not isinstance(positions, Sequence):
+        msg = f"positions must be a sequence of int, got {describe_untrusted(positions)}"
+        raise ValueError(msg)
+    held = tuple(positions)
+    if len(held) > _MAX_NAMED:
+        msg = f"positions holds {len(held)}; at most {_MAX_NAMED} are named at once"
+        raise ValueError(msg)
+    for one in held:
+        _check_position("a position", one)
+    return held
+
+
+def _checked_conversation_ids(conversation_ids: object) -> tuple[str, ...] | None:
+    """Check ``changes``' restriction once, before anything is read (ADR-0065).
+
+    Duplicated from the production store rather than shared, for :data:`_PAGE_BOUND`'s
+    reason.
+
+    Raises:
+        ValueError: If ``conversation_ids`` is a ``str`` or not a sequence, holds more
+            than :data:`_MAX_NAMED` ids, or holds an element that is not a ``str``.
+    """
+    if conversation_ids is None:
+        return None
+    if isinstance(conversation_ids, (str, bytes)) or not isinstance(conversation_ids, Sequence):
+        described = describe_untrusted(conversation_ids)
+        msg = f"conversation_ids must be a sequence of str, got {described}"
+        raise ValueError(msg)
+    held = tuple(conversation_ids)
+    if len(held) > _MAX_NAMED:
+        msg = f"conversation_ids holds {len(held)}; at most {_MAX_NAMED} are named at once"
+        raise ValueError(msg)
+    for one in held:
+        if type(one) is not str:
+            msg = f"conversation_ids holds an id that is not a str: {describe_untrusted(one)}"
+            raise ValueError(msg)
+    return held
+
+
+def _checked_activation_id(activation_id: object) -> str:
+    """Check ``take_in``'s activation through ``core``'s own identifier type.
+
+    Raises:
+        ValueError: If ``activation_id`` is not a non-blank ``str``.
+    """
+    try:
+        return _EPISODE_ID.validate_python(activation_id, strict=True)
+    except ValidationError as exc:
+        msg = f"activation_id must be a non-blank str, got {describe_untrusted(activation_id)}"
+        raise ValueError(msg) from exc
 
 
 def _utcnow() -> datetime:
@@ -292,6 +401,20 @@ class FakeConversationStore:
         #: One entry per conversation currently being mutated, and only those:
         #: :meth:`_exclusive` discards an entry once nobody holds it (#453).
         self._locks: dict[str, _Exclusion] = {}
+        #: ADR-0293 §5's transcripts: per conversation, position to the message or
+        #: the marker it left (§5:12). A position stays until the conversation goes.
+        self._messages: dict[str, dict[int, TranscriptMessage | DeletedMessage]] = {}
+        #: Per conversation, (device, message id) to position: what recognises a
+        #: repeated send, deleted message or not (§4:2, §4:3).
+        self._sent: dict[str, dict[tuple[str, str], int]] = {}
+        #: "My devices" (§3:1), and each conversation's devices (§3:3).
+        self._my_devices: tuple[ChatDevice, ...] = ()
+        self._devices: dict[str, tuple[ChatDevice, ...]] = {}
+        #: The change stream (§5:10), in sequence order, and its counter.
+        self._changes: list[ChatChange] = []
+        self._seq = 0
+        #: The reader's bookkeeping (§6:6): per conversation, position to activation.
+        self._taken: dict[str, dict[int, str]] = {}
         self._start_lock = asyncio.Lock()
         self._resource = SuspendableResource()
 
@@ -395,6 +518,40 @@ class FakeConversationStore:
             raise UnknownConversationError(msg)
         return conversation
 
+    def _next_seq(self) -> int:
+        """Draw the next sequence number of the change stream (ADR-0293 §5:10).
+
+        Drawn inside the step that makes the change and appended in the same
+        expression, with no ``await`` between, so the list stays in sequence order.
+        """
+        self._seq += 1
+        return self._seq
+
+    def _drop_changes_of(self, conversation_id: str) -> None:
+        """Remove every change of one conversation from the stream."""
+        self._changes = [one for one in self._changes if one.conversation_id != conversation_id]
+
+    def _clear_chat_of(self, conversation_id: str) -> None:
+        """Remove the transcript, devices and bookkeeping kept under a conversation."""
+        self._messages.pop(conversation_id, None)
+        self._sent.pop(conversation_id, None)
+        self._devices.pop(conversation_id, None)
+        self._taken.pop(conversation_id, None)
+
+    def _standing(self, conversation_id: str) -> list[TranscriptMessage]:
+        """The conversation's standing messages, ascending by position."""
+        held = self._messages.get(conversation_id, {})
+        return [one for _, one in sorted(held.items()) if isinstance(one, TranscriptMessage)]
+
+    def _untaken(self, conversation_id: str) -> list[TranscriptMessage]:
+        """The standing user's messages no activation has taken in, ascending."""
+        taken = self._taken.get(conversation_id, {})
+        return [
+            one
+            for one in self._standing(conversation_id)
+            if one.author is MessageAuthor.USER and one.position not in taken
+        ]
+
     # ADR-0212 §7's read-side discard has no limb this double can reach. ADR-0283 §6:6
     # leaves only "not a positive integer", and a frozen pydantic model cannot hold
     # such a value, so a dict-backed store has nowhere to keep one; the ``sqlite3``
@@ -434,6 +591,17 @@ class FakeConversationStore:
                     continue
                 self._conversations[conversation.id] = conversation
                 self._deliveries[conversation.id] = {}
+                # ADR-0293 §2:1, §3:1: empty, on "my devices" as they stand.
+                devices = self._my_devices
+                self._messages[conversation.id] = {}
+                self._sent[conversation.id] = {}
+                self._devices[conversation.id] = devices
+                self._taken[conversation.id] = {}
+                self._changes.append(
+                    ConversationStartedChange(
+                        seq=self._next_seq(), conversation_id=conversation.id, devices=devices
+                    )
+                )
                 return conversation
         msg = (
             f"could not mint an unused conversation id in {_START_RETRY_BUDGET} attempts; "
@@ -614,6 +782,13 @@ class FakeConversationStore:
             self._conversations[conversation_id] = conversation.model_copy(
                 update={"deleted_at": self._now()}
             )
+            # ADR-0293 §2:3: the conversation's transcript goes with it, and its
+            # devices learn of it from the one change left in the stream.
+            self._clear_chat_of(conversation_id)
+            self._drop_changes_of(conversation_id)
+            self._changes.append(
+                ConversationDeletedChange(seq=self._next_seq(), conversation_id=conversation_id)
+            )
             return True
 
     async def drop_if_eligible(self, conversation_id: str) -> bool:
@@ -631,17 +806,28 @@ class FakeConversationStore:
             # `now - stamp >= duration` rather than `stamp + duration <= now`:
             # equivalent, and only the first cannot overflow at a clock reading
             # near `datetime.max`, which `checked_clock` admits (ADR-0026 §3).
+            stamped = conversation.deleted_at is not None
             if conversation.deleted_at is not None:
                 eligible = now - conversation.deleted_at >= self._grace
             else:
+                # ADR-0293 §5:4: reclaim never drops a conversation holding a message.
                 eligible = (
                     self._retention is not None
                     and now - conversation.last_active_at >= self._retention
+                    and not self._standing(conversation_id)
                 )
             if not eligible:
                 return False
             self._deliveries.pop(conversation_id, None)  # ADR-0283 §6:7
+            self._clear_chat_of(conversation_id)
             del self._conversations[conversation_id]
+            if not stamped:
+                # A reclaim is a deletion as far as the conversation's devices go;
+                # a stamped one recorded its deletion when it was stamped.
+                self._drop_changes_of(conversation_id)
+                self._changes.append(
+                    ConversationDeletedChange(seq=self._next_seq(), conversation_id=conversation_id)
+                )
             return True
 
     async def export(self) -> ConversationExport:
@@ -658,4 +844,277 @@ class FakeConversationStore:
             return ConversationExport(
                 exported_at=self._now(),
                 conversations=tuple(live),
+                messages=tuple(message for one in live for message in self._standing(one.id)),
             )
+
+    # --- the chat space (ADR-0293) --------------------------------------------
+
+    async def append_message(self, conversation_id: str, message: NewMessage) -> MessageReceipt:
+        """Write one message into the transcript, under the exclusion (ADR-0293 §4, §6).
+
+        Raises:
+            UnknownConversationError: If the id names nothing or names a stamped
+                conversation.
+        """
+        async with self._exclusive(conversation_id):
+            self._live(conversation_id)
+            held = self._messages[conversation_id]
+            if message.author is MessageAuthor.USER:
+                # Narrowed by `NewMessage`'s own validator: a user's message carries both.
+                if message.device_id is None or message.message_id is None:  # pragma: no cover
+                    msg = "a user's message carries its device and message id"
+                    raise ValueError(msg)
+                sent = self._sent[conversation_id].get((message.device_id, message.message_id))
+                if sent is not None:
+                    return MessageReceipt(
+                        conversation_id=conversation_id,
+                        outcome=SendOutcome.REPEATED,
+                        position=sent,
+                    )
+                ends = {
+                    one.device_id for one in self._devices[conversation_id] if one.access.writes
+                }
+                if message.device_id not in ends:
+                    return MessageReceipt(
+                        conversation_id=conversation_id, outcome=SendOutcome.NOT_AN_END
+                    )
+            position = max(held, default=0) + 1
+            if message.replies_to is not None and message.replies_to >= position:
+                return MessageReceipt(
+                    conversation_id=conversation_id, outcome=SendOutcome.NO_SUCH_REPLY
+                )
+            recorded = TranscriptMessage(
+                conversation_id=conversation_id,
+                position=position,
+                written_at=self._now(),
+                **message.model_dump(),
+            )
+            held[position] = recorded
+            if recorded.device_id is not None and recorded.message_id is not None:
+                self._sent[conversation_id][(recorded.device_id, recorded.message_id)] = position
+            self._changes.append(MessageAddedChange(seq=self._next_seq(), message=recorded))
+            return MessageReceipt(
+                conversation_id=conversation_id, outcome=SendOutcome.RECORDED, position=position
+            )
+
+    async def delete_message(self, conversation_id: str, position: int) -> bool:
+        """Delete one message, leaving its marker, under the exclusion (ADR-0293 §5:8).
+
+        Raises:
+            ValueError: If ``position`` is not an ``int`` in ``[1, 2**63)``.
+            UnknownConversationError: If the id names nothing or names a stamped
+                conversation.
+        """
+        _check_position("position", position)
+        async with self._exclusive(conversation_id):
+            self._live(conversation_id)
+            held = self._messages[conversation_id]
+            if not isinstance(held.get(position), TranscriptMessage):
+                return False
+            marker = DeletedMessage(conversation_id=conversation_id, position=position)
+            held[position] = marker
+            self._changes = [
+                one
+                for one in self._changes
+                if not (
+                    isinstance(one, MessageAddedChange)
+                    and one.conversation_id == conversation_id
+                    and one.message.position == position
+                )
+            ]
+            self._changes.append(MessageDeletedChange(seq=self._next_seq(), marker=marker))
+            return True
+
+    async def transcript(
+        self,
+        conversation_id: str,
+        *,
+        before: int | None = None,
+        limit: int = _DEFAULT_TRANSCRIPT_PAGE,
+    ) -> TranscriptPage | None:
+        """Read the last ``limit`` entries before ``before``, ascending (ADR-0293 §5:13).
+
+        Raises:
+            ValueError: If ``before`` or ``limit`` is out of range.
+        """
+        if before is not None:
+            _check_position("before", before)
+        _check_page_bound("limit", limit)
+        async with self._resource.held():  # a locked read on the durable store (#492)
+            conversation = self._conversations.get(conversation_id)
+            if conversation is None or conversation.deleted_at is not None:
+                return None
+            held = self._messages[conversation_id]
+            positions = [one for one in sorted(held) if before is None or one < before]
+            chosen = positions[len(positions) - limit :] if limit else []
+            return TranscriptPage(
+                conversation_id=conversation_id,
+                entries=tuple(held[one] for one in chosen),
+                as_of=self._seq,
+            )
+
+    async def changes(
+        self,
+        *,
+        after: int,
+        conversation_ids: Sequence[str] | None = None,
+        limit: int = _DEFAULT_CHANGES_PAGE,
+    ) -> ChatChanges:
+        """Read every change after ``after``, in sequence order (ADR-0293 §5:10, §5:11).
+
+        Raises:
+            ValueError: If ``after`` or ``limit`` is out of range, or
+                ``conversation_ids`` is malformed.
+        """
+        _check_page_bound("after", after)
+        _check_page_bound("limit", limit)
+        named = _checked_conversation_ids(conversation_ids)
+        async with self._resource.held():  # a locked read on the durable store (#492)
+            if limit == 0:
+                return ChatChanges(next_after=after)
+            wanted = None if named is None else set(named)
+            page: list[ChatChange] = []
+            for one in self._changes:
+                if one.seq <= after:
+                    continue
+                if wanted is not None and one.conversation_id not in wanted | {None}:
+                    continue
+                page.append(one)
+                if len(page) == limit:
+                    return ChatChanges(changes=tuple(page), next_after=page[-1].seq)
+            return ChatChanges(changes=tuple(page), next_after=self._seq)
+
+    async def my_devices(self) -> tuple[ChatDevice, ...]:
+        """Return "my devices", ``device_id`` ascending (ADR-0293 §3:1)."""
+        async with self._resource.held():  # a locked read on the durable store (#492)
+            return self._my_devices
+
+    async def set_my_devices(self, devices: Sequence[ChatDevice]) -> bool:
+        """Replace "my devices", recording the change where it is one (ADR-0293 §3:1).
+
+        One step against ``start``, which copies the set: both hold the lock
+        ``start`` mints under.
+
+        Raises:
+            ValueError: If ``devices`` is malformed.
+        """
+        wanted = checked_chat_devices(devices)
+        async with self._start_lock, self._resource.held():
+            await asyncio.sleep(0)
+            if wanted == self._my_devices:
+                return False
+            self._my_devices = wanted
+            self._changes.append(DevicesChangedChange(seq=self._next_seq(), devices=wanted))
+            return True
+
+    async def conversation_devices(self, conversation_id: str) -> tuple[ChatDevice, ...] | None:
+        """Return a conversation's devices, or ``None`` if absent or stamped (§3:3)."""
+        async with self._resource.held():  # a locked read on the durable store (#492)
+            conversation = self._conversations.get(conversation_id)
+            if conversation is None or conversation.deleted_at is not None:
+                return None
+            return self._devices[conversation_id]
+
+    async def set_conversation_devices(
+        self, conversation_id: str, devices: Sequence[ChatDevice]
+    ) -> bool:
+        """Replace a conversation's devices, under the exclusion (ADR-0293 §3:3).
+
+        Raises:
+            ValueError: If ``devices`` is malformed.
+            UnknownConversationError: If the id names nothing or names a stamped
+                conversation.
+        """
+        wanted = checked_chat_devices(devices)
+        async with self._exclusive(conversation_id):
+            self._live(conversation_id)
+            if wanted == self._devices[conversation_id]:
+                return False
+            self._devices[conversation_id] = wanted
+            self._changes.append(
+                DevicesChangedChange(
+                    seq=self._next_seq(), conversation_id=conversation_id, devices=wanted
+                )
+            )
+            return True
+
+    async def take_in(
+        self, conversation_id: str, *, positions: Sequence[int], activation_id: str
+    ) -> tuple[int, ...]:
+        """Mark the named user's messages taken in, under the exclusion (ADR-0293 §6:6).
+
+        Raises:
+            ValueError: If ``positions`` or ``activation_id`` is malformed.
+            UnknownConversationError: If the id names nothing or names a stamped
+                conversation.
+        """
+        named = _checked_positions(positions)
+        activation = _checked_activation_id(activation_id)
+        async with self._exclusive(conversation_id):
+            self._live(conversation_id)
+            held = self._messages[conversation_id]
+            taken = self._taken[conversation_id]
+            marked: list[int] = []
+            for position in sorted(set(named)):
+                message = held.get(position)
+                if not isinstance(message, TranscriptMessage):
+                    continue
+                if message.author is not MessageAuthor.USER or position in taken:
+                    continue
+                taken[position] = activation
+                marked.append(position)
+            return tuple(marked)
+
+    async def untaken_messages(
+        self, conversation_id: str, *, limit: int = _DEFAULT_AWAITING_PAGE
+    ) -> tuple[TranscriptMessage, ...]:
+        """Return the user's standing messages not yet taken in (ADR-0293 §6:3, §6:9).
+
+        Raises:
+            ValueError: If ``limit`` is outside ``[0, 2**63)``.
+        """
+        _check_page_bound("limit", limit)
+        async with self._resource.held():  # a locked read on the durable store (#492)
+            conversation = self._conversations.get(conversation_id)
+            if conversation is None or conversation.deleted_at is not None:
+                return ()
+            return tuple(self._untaken(conversation_id)[:limit])
+
+    async def conversations_awaiting(
+        self, *, limit: int = _DEFAULT_AWAITING_PAGE, after_id: str | None = None
+    ) -> list[str]:
+        """Page over conversations holding an untaken user's message (ADR-0293 §6:9).
+
+        Raises:
+            ValueError: If ``limit`` is outside ``[0, 2**63)``.
+        """
+        _check_page_bound("limit", limit)
+        if limit == 0:
+            return []
+        async with self._resource.held():  # a locked read on the durable store (#492)
+            awaiting = sorted(
+                one.id
+                for one in self._conversations.values()
+                if one.deleted_at is None and self._untaken(one.id)
+            )
+        if after_id is not None:
+            awaiting = [one for one in awaiting if one > after_id]
+        return awaiting[:limit]
+
+    async def taken_in(
+        self, conversation_id: str, *, positions: Sequence[int]
+    ) -> Mapping[int, str]:
+        """Return which activation took in each named message, where one did (§6:6).
+
+        Raises:
+            ValueError: If ``positions`` is malformed.
+        """
+        named = _checked_positions(positions)
+        if not named:
+            return {}
+        async with self._resource.held():  # a locked read on the durable store (#492)
+            conversation = self._conversations.get(conversation_id)
+            if conversation is None or conversation.deleted_at is not None:
+                return {}
+            taken = self._taken[conversation_id]
+            return {one: taken[one] for one in named if one in taken}

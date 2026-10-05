@@ -137,6 +137,8 @@ if TYPE_CHECKING:
         ChannelIdentity,
         ChannelInput,
         ChannelResult,
+        ChatChanges,
+        ChatDevice,
         ClarificationWithdrawal,
         Confirmation,
         ConflictRelation,
@@ -201,6 +203,8 @@ if TYPE_CHECKING:
         MemoryUpdateProposal,
         MemoryWrite,
         Message,
+        MessageReceipt,
+        NewMessage,
         NonBlankEncodableText,
         NotificationCandidate,
         NotificationDelivery,
@@ -264,6 +268,8 @@ if TYPE_CHECKING:
         TopicLabel,
         TraceChunk,
         TracePosition,
+        TranscriptMessage,
+        TranscriptPage,
         TransportEndpoint,
         TurnOutcome,
         TurnReference,
@@ -10729,14 +10735,22 @@ class ConversationStore(Protocol):
     A Tier 1 store by ADR-0004 §1's own words ("conversation history"), so §2's
     residency clause governs it: implementations persist **locally only**.
 
-    **This store holds no history.** A conversation's turns are the episodes on its
-    channel in the ``MemoryStore`` — ``ChannelIdentity(channel_type="conversation",
-    instance_id=<conversation_id>)`` — read in number order, and membership is the
-    episode's channel (ADR-0283 §1, §4). Nothing here indexes them, allocates a
-    position for them or derives their ids: every episode's id is
-    ``activation:<activation_id>``, fixed at admission (ADR-0283 §2). What this store
-    keeps is the conversation itself and one small fact about it: the delivery rows
-    below. It keeps no observation watermark (ADR-0285 §4).
+    **This store holds no episode.** What the assistant perceived and did in a
+    conversation is the episodes on its channel in the ``MemoryStore`` —
+    ``ChannelIdentity(channel_type="conversation", instance_id=<conversation_id>)`` —
+    read in number order, and membership is the episode's channel (ADR-0283 §1, §4).
+    Nothing here indexes them, allocates a position for them or derives their ids:
+    every episode's id is ``activation:<activation_id>``, fixed at admission (ADR-0283
+    §2). It keeps no observation watermark (ADR-0285 §4).
+
+    **It holds the hub's chat space, the hosted medium** (ADR-0293 §1, ADR-0292 §3):
+    each conversation's **transcript** of messages (§5), "my devices" and each
+    conversation's devices (§3), the **change stream** every device catches up on
+    (§5), and the chat's reader's **bookkeeping** of what it has taken in (§6). The
+    transcript and the episodes are never kept in step (ADR-0293 §5:5), and
+    forgetting, which is memory's act on the episodes, never reaches anything here
+    (§5:6). Beside them it keeps the conversation itself and one small fact about an
+    episode: the delivery rows below.
 
     **What this contract does not own.** Every sequence spanning both stores —
     writing a conversational episode, finishing a user deletion, the retention
@@ -10747,10 +10761,17 @@ class ConversationStore(Protocol):
 
     **The mutation exclusion, which is this seam's obligation and not a
     caller's.** Per conversation, a :meth:`mark_active`, a :meth:`record_turn`, a
-    :meth:`record_delivery`, a :meth:`stamp_deleted` and a :meth:`drop_if_eligible`
-    **never interleave** (ADR-0283 §6:8, less the ``record_observed`` member
-    ADR-0285 §4 removes); each observes the conversation, decides, and writes as one
-    indivisible step. An ``asyncio.Lock``
+    :meth:`record_delivery`, a :meth:`stamp_deleted`, a :meth:`drop_if_eligible`, an
+    :meth:`append_message`, a :meth:`delete_message`, a
+    :meth:`set_conversation_devices` and a :meth:`take_in` **never interleave**
+    (ADR-0283 §6:8, less the ``record_observed`` member ADR-0285 §4 removes, and with
+    ADR-0293's acts in the medium added); each observes the conversation, decides, and
+    writes as one indivisible step. :meth:`set_my_devices` and :meth:`start` are
+    likewise one step each against "my devices", so a conversation is started with one
+    whole version of the set, never half of one. **The change stream is written
+    inside the same step as the change it records**, so a change and its sequence
+    number are one fact: no reader sees a change without its number, a number
+    without its change, or a later number committed before an earlier one. An ``asyncio.Lock``
     inside one engine would not discharge this — the engine already contemplates
     "another engine over the same durable stores", so two engines hold two locks and
     serialise nothing — which is why the obligation sits here (ADR-0074 §8). Each
@@ -10760,8 +10781,10 @@ class ConversationStore(Protocol):
     verification (ADR-0283 §7:2).
 
     **A conversation stamped deleted is absent from every read that presents
-    it** — :meth:`get`, :meth:`recent`, :meth:`export` and :meth:`deliveries` —
-    while :meth:`stamped_conversation_ids` still enumerates it, so the deletion
+    it** — :meth:`get`, :meth:`recent`, :meth:`export`, :meth:`deliveries`,
+    :meth:`transcript`, :meth:`conversation_devices`, :meth:`untaken_messages`,
+    :meth:`conversations_awaiting` and :meth:`taken_in` — while
+    :meth:`stamped_conversation_ids` still enumerates it, so the deletion
     sweep can find the tombstone and delete every episode on its channel (ADR-0283
     §8). That distinction is what keeps a tombstone from being a readable record of
     a deleted conversation while the deletion can still be carried out.
@@ -10810,8 +10833,38 @@ class ConversationStore(Protocol):
     Cancelling any method here is governed by this module's cancellation clause
     (ADR-0060). Input observation (ADR-0065) binds it too: every argument this seam
     takes is immutable — a ``str``, an ``int``, a ``datetime`` or a frozen model —
-    except :meth:`deliveries`' ``episode_ids``, a caller-owned sequence, which an
-    implementation reads once, before its first ``await``.
+    except the caller-owned sequences — :meth:`deliveries`' ``episode_ids``,
+    :meth:`changes`' ``conversation_ids``, the ``devices`` of
+    :meth:`set_my_devices` and :meth:`set_conversation_devices`, and the
+    ``positions`` of :meth:`take_in` and :meth:`taken_in` — which an implementation
+    reads once, before its first ``await``.
+
+    **The chat space** (ADR-0293). What follows is the contract every implementation
+    meets for it, beyond what each method states:
+
+    * **Positions.** A conversation numbers its messages from 1 in the order it
+      records them, and a position is never reused, deleted or not: a reply's
+      reference and a deleted message's marker go on naming the one message
+      (§5:8, §5:12).
+    * **The change stream.** Every change to the chat space gets a sequence number
+      from one counter across all its conversations, increasing in the order the
+      changes were made and never reused (§5:10): a message added or deleted, a
+      conversation started or deleted, and a set of devices changed. A change holds
+      what a device needs to apply it and nothing a deletion removed: once a
+      message is deleted its addition is no longer in the stream, and once a
+      conversation is deleted only its deletion is.
+    * **Deleting a message** removes its text and leaves its marker; the message's
+      id stays recognised, so a late repeat of the send is that message and does not
+      come back (§4:3, §5:12). A reply to it stays (§5:8).
+    * **Deleting a conversation** is :meth:`stamp_deleted`: its transcript, its
+      devices and the reader's bookkeeping about it go in that step, the change is
+      recorded, and nothing of memory is touched (§2:3, §5:6).
+    * **"My devices"** is copied onto a conversation when it starts (§3:1); a
+      conversation's devices then change only by :meth:`set_conversation_devices`
+      (§3:3). Only a conversation's devices that may write can write a user's
+      message in it (§7:2): the store, as the medium's host, refuses any other.
+    * **The reader's bookkeeping is not the conversation's** (§6:7): it is in no
+      transcript read and no change, and holds no text.
     """
 
     async def start(self) -> Conversation:
@@ -10837,6 +10890,11 @@ class ConversationStore(Protocol):
 
         The returned conversation has ``last_active_at`` set (creation is
         activity) and ``last_turn_at`` unset — no turn has landed yet.
+
+        **Starting is the act in the medium that creates an empty conversation**
+        (ADR-0293 §2:1). In the same step the conversation is given "my devices" as
+        they stand (§3:1) and a ``ConversationStartedChange`` carrying them is
+        recorded. Its transcript is empty.
 
         Raises:
             ConversationStoreError: If the id factory kept colliding until the
@@ -11153,10 +11211,16 @@ class ConversationStore(Protocol):
         The tombstone, and it is the conversation record itself. Stamping is
         durable, hides the conversation from every presenting read, and makes every
         later :meth:`record_turn` write nothing and answer ``None``, so a capture
-        racing the deletion learns the conversation is gone and deletes its own
-        episode (ADR-0283 §7:2). What the stamp does *not* do is remove anything:
-        the record survives, enumerable by :meth:`stamped_conversation_ids`, which
-        is what lets the sweep finish the deletion after a crash.
+        racing the deletion learns the conversation is gone. The record survives,
+        enumerable by :meth:`stamped_conversation_ids`, which is what lets the sweep
+        finish the deletion after a crash.
+
+        **It is also the act in the medium that deletes the conversation** (ADR-0293
+        §2:3), so in the same step it deletes the conversation's transcript, its
+        devices and the reader's bookkeeping about it, removes the conversation's
+        earlier changes from the change stream and records a
+        ``ConversationDeletedChange``. It forgets nothing: no episode is reached
+        from here (§2:3, §5:6).
 
         The caller then drops the parked reads, deletes every episode on the
         conversation's channel, and asks
@@ -11196,7 +11260,12 @@ class ConversationStore(Protocol):
           outlives the deletion long enough for recovery's sweep to catch an
           episode whose write committed and then died.
         * **An unstamped conversation** is eligible once its ``last_active_at`` is
-          past the retention horizon. Eligibility reads *activity*, never
+          past the retention horizon **and its transcript holds no message**: a
+          transcript is kept until the user deletes it, so reclaim never drops a
+          conversation that holds one (ADR-0293 §5:4, superseding ADR-0283 §8:2's
+          condition). A deleted message's marker is not a message. Dropping such a
+          conversation records a ``ConversationDeletedChange``, since its devices
+          are owed the news as they are for a deletion. Eligibility reads *activity*, never
           ``last_turn_at``, so a continuation that is underway protects the
           conversation before its turn lands. Where the horizon is unset —
           retention disabled, "keep the episodes forever" — reclaim is **switched
@@ -11228,7 +11297,9 @@ class ConversationStore(Protocol):
 
         **The delivery rows go with the record** (ADR-0283 §6:7), in the same
         step: a conversation's delivery rows never outlive it, and none is left for
-        a conversation minted later to inherit.
+        a conversation minted later to inherit. So does everything else this store
+        keeps under the conversation — its transcript's markers, its devices and the
+        reader's bookkeeping — and its changes but the record of its deletion.
 
         Returns:
             ``True`` if the record and its delivery rows were removed; ``False`` if
@@ -11251,17 +11322,322 @@ class ConversationStore(Protocol):
         deleted are **excluded**: they are deleted as far as every read is
         concerned.
 
-        It carries **no history** (ADR-0283 §4:3): a conversation's episodes are
-        ``MemoryStore`` records and that store's export already carries them, so
-        repeating them here would put the same Tier 1 text in two exports under two
-        retention rules. **No liveness filtering** either: this store has no way to
-        ask whether a conversation's channel still holds an episode, and no
-        business asking.
+        It carries **every transcript's standing messages** (ADR-0293 §5:3,
+        ADR-0292 §3:11) and **no episode** (ADR-0283 §4:3): a conversation's
+        episodes are ``MemoryStore`` records and that store's export already carries
+        them. **No liveness filtering** either: this store has no way to ask
+        whether a conversation's channel still holds an episode, and no business
+        asking.
 
         Ordered as :meth:`recent` is: ``last_active_at`` descending with ``id``
-        ascending.
+        ascending; the messages grouped by conversation in that order, each
+        conversation's by ascending position. The conversations and the messages
+        are read in one consistent reading.
 
         Raises:
+            ConversationStoreError: If the store cannot be read, or a stored row
+                is corrupt.
+        """
+        ...
+
+    # --- the chat space: the transcript (ADR-0293 §4, §5) ------------------------
+
+    async def append_message(self, conversation_id: str, message: NewMessage) -> MessageReceipt:
+        """Write one message into a conversation's transcript, and answer for it.
+
+        **The one write into a transcript**, for both authors: a user's message
+        arriving from a device (ADR-0293 §4) and the assistant's through the chat's
+        writer (§6). Under the per-conversation exclusion, in one step, it:
+
+        1. answers ``REPEATED`` with the earlier message's position where the
+           conversation already holds a user's message from the same device with
+           the same message id, deleted or not, and writes nothing (§4:2, §4:3) —
+           checked first, so a repeat is that message even where the device has
+           since stopped being an end;
+        2. answers ``NOT_AN_END`` and writes nothing where a user's message comes
+           from a device that is not one of the conversation's ends for writing
+           (§7:2);
+        3. answers ``NO_SUCH_REPLY`` and writes nothing where ``replies_to`` names a
+           position the conversation never held (§4:5). A position whose message
+           was deleted is one it held: a reply to it is recorded, naming it;
+        4. otherwise records the message at the next position, stamped with the
+           store's clock, records a ``MessageAddedChange``, and answers
+           ``RECORDED`` with the position, which is *received* (§4:4).
+
+        **The message's id is unique per conversation and device here.** ADR-0293
+        §4:1 has a device choose an id unique per device; a repeat is a send of the
+        same message to the same conversation, so the store keys it there and
+        leaves a device that reuses an id elsewhere its two messages.
+
+        The size bound, the author's shape and an option's bound are refused when
+        ``message`` is constructed (``NewMessage``); nothing here re-derives them.
+
+        Args:
+            conversation_id: The conversation written into.
+            message: The message. A frozen model, observed once.
+
+        Returns:
+            The receipt: the outcome, and the position where the message is
+            recorded.
+
+        Raises:
+            UnknownConversationError: If the id names nothing or names a
+                conversation stamped deleted — refused, never created (ADR-0293
+                §2:2: a conversation is never created as a side effect of a
+                message).
+            ConversationStoreError: If the store cannot be written.
+        """
+        ...
+
+    async def delete_message(self, conversation_id: str, position: int) -> bool:
+        """Delete one message, leaving its marker (ADR-0293 §5:8, §5:12).
+
+        The act in the medium the user takes on a message of either author. Under
+        the per-conversation exclusion, in one step: the message's text and every
+        other property but its id are removed, its marker stands at its position,
+        its ``MessageAddedChange`` leaves the change stream, and a
+        ``MessageDeletedChange`` is recorded. A reply to it is left as it stands
+        (§5:8). Nothing else is reached: deleting does not forget (ADR-0292 §3:10).
+
+        Args:
+            conversation_id: The conversation holding the message.
+            position: The message's position, an ``int`` of at least 1.
+
+        Returns:
+            ``True`` where this call deleted the message; ``False`` where the
+            conversation never held that position or the message was already
+            deleted — deleting is safe to repeat.
+
+        Raises:
+            ValueError: Before any I/O, if ``position`` is not an ``int`` in
+                ``[1, 2**63)``.
+            UnknownConversationError: If the id names nothing or names a
+                conversation stamped deleted.
+            ConversationStoreError: If the store cannot be written.
+        """
+        ...
+
+    async def transcript(
+        self, conversation_id: str, *, before: int | None = None, limit: int = 50
+    ) -> TranscriptPage | None:
+        """Read part of a conversation's transcript: recent messages, or older ones.
+
+        ``before=None`` is the **snapshot** a device far behind, or new, takes of a
+        conversation's recent messages; ``before=<position>`` loads the ones before
+        it as the user scrolls back (ADR-0293 §5:13). The page is the last ``limit``
+        entries with a position below ``before``, ascending, a deleted message as
+        its marker; its ``as_of`` is the change stream's latest sequence number in
+        the same reading, so a device follows the stream from there.
+
+        A read, so it takes no exclusion. ``limit`` defaults to 50, the snapshot
+        size ADR-0293 leaves open (What stays open), and carries ADR-0073 §2's range
+        posture.
+
+        Returns:
+            The page, or ``None`` where the conversation is absent or stamped
+            deleted.
+
+        Raises:
+            ValueError: Before any I/O, if ``before`` is not ``None`` or an ``int``
+                in ``[1, 2**63)``, or ``limit`` is outside ``[0, 2**63)``.
+            ConversationStoreError: If the store cannot be read, or a stored row
+                is corrupt.
+        """
+        ...
+
+    async def changes(
+        self,
+        *,
+        after: int,
+        conversation_ids: Sequence[str] | None = None,
+        limit: int = 100,
+    ) -> ChatChanges:
+        """Read every change after a cursor (ADR-0293 §5:10, §5:11).
+
+        A device keeps one cursor for the chat space and catches up with one
+        request for every change after it. The changes are in sequence order, and
+        a page holds at most ``limit`` of them; ``next_after`` is where to ask from
+        next (``ChatChanges``).
+
+        ``conversation_ids`` restricts the page to those conversations' changes —
+        the conversations a device is an end of, decided by its caller — together
+        with the changes to "my devices", which belong to no conversation. ``None``
+        reads every change. A restricted read still moves ``next_after`` across the
+        changes it passed over, so a device whose conversations are quiet keeps up.
+
+        A read, so it takes no exclusion; it answers from one consistent reading.
+
+        Args:
+            after: The cursor: the last sequence number the reader applied, ``0``
+                for none.
+            conversation_ids: At most 1000 conversation ids, or ``None``. A bare
+                ``str`` is refused rather than read as its characters.
+            limit: Page size, at most ``2**63 - 1``; ``0`` returns no change and
+                leaves ``next_after`` at ``after``.
+
+        Returns:
+            The changes, and the cursor to ask from next.
+
+        Raises:
+            ValueError: Before any I/O, if ``after`` or ``limit`` is outside
+                ``[0, 2**63)``, or ``conversation_ids`` is a ``str``, holds more
+                than 1000 ids or holds an element that is not a ``str``.
+            ConversationStoreError: If the store cannot be read, or a stored row
+                is corrupt.
+        """
+        ...
+
+    # --- the chat space: devices (ADR-0293 §3) ------------------------------------
+
+    async def my_devices(self) -> tuple[ChatDevice, ...]:
+        """Return "my devices", the chat space's own set, ``device_id`` ascending (§3:1).
+
+        Raises:
+            ConversationStoreError: If the store cannot be read, or a stored row
+                is corrupt.
+        """
+        ...
+
+    async def set_my_devices(self, devices: Sequence[ChatDevice]) -> bool:
+        """Replace "my devices" with ``devices`` (ADR-0293 §3:1, §3:2).
+
+        An act in the medium, and the user's statement that each device's screen
+        is private. A new conversation starts with the set as it stands; a
+        conversation already started keeps its own devices (§3:3). Where the set
+        changes, a ``DevicesChangedChange`` with no conversation is recorded in the
+        same step.
+
+        Returns:
+            ``True`` where the set changed; ``False`` where ``devices`` is the set
+            already held, and nothing was recorded.
+
+        Raises:
+            ValueError: Before any I/O, if ``devices`` is a ``str``, holds
+                something that is not a ``ChatDevice``, names a device twice or
+                holds more than ``CHAT_DEVICES_MAX``.
+            ConversationStoreError: If the store cannot be written.
+        """
+        ...
+
+    async def conversation_devices(self, conversation_id: str) -> tuple[ChatDevice, ...] | None:
+        """Return a conversation's devices, ``device_id`` ascending (ADR-0293 §3:3).
+
+        Returns:
+            The set, or ``None`` where the conversation is absent or stamped
+            deleted.
+
+        Raises:
+            ConversationStoreError: If the store cannot be read, or a stored row
+                is corrupt.
+        """
+        ...
+
+    async def set_conversation_devices(
+        self, conversation_id: str, devices: Sequence[ChatDevice]
+    ) -> bool:
+        """Replace a conversation's devices with ``devices`` (ADR-0293 §3:3).
+
+        An act in the medium, under the per-conversation exclusion. Where the set
+        changes, a ``DevicesChangedChange`` naming the conversation is recorded in
+        the same step. "My devices" is not touched.
+
+        Returns:
+            ``True`` where the set changed; ``False`` where it was already
+            ``devices``, and nothing was recorded.
+
+        Raises:
+            ValueError: Before any I/O, as :meth:`set_my_devices`.
+            UnknownConversationError: If the id names nothing or names a
+                conversation stamped deleted.
+            ConversationStoreError: If the store cannot be written.
+        """
+        ...
+
+    # --- the chat space: the reader's bookkeeping (ADR-0293 §6) ------------------
+
+    async def take_in(
+        self, conversation_id: str, *, positions: Sequence[int], activation_id: str
+    ) -> tuple[int, ...]:
+        """Record that ``activation_id`` took in the user's messages at ``positions``.
+
+        The reader's bookkeeping (ADR-0293 §6:6), marked when the activation is
+        admitted (§6:8). Under the per-conversation exclusion, in one step, it marks
+        each named position that holds a standing user's message not already
+        marked; a position already marked keeps the activation that took it in
+        first, so an interrupted activation's messages are not taken in again
+        (§6:9). A position holding an assistant's message, a deleted message's
+        marker, or nothing, is passed over: the assistant's own messages are never
+        input (§6:1), and a message deleted before its activation was admitted is
+        one the reader will not bring in again either way. No text is held.
+
+        Args:
+            conversation_id: The conversation the messages are in.
+            positions: At most 1000 positions, each an ``int`` in ``[1, 2**63)``;
+                duplicates are permitted.
+            activation_id: The activation that took them in.
+
+        Returns:
+            The positions this call marked, ascending.
+
+        Raises:
+            ValueError: Before any I/O, if ``positions`` is a ``str``, holds more
+                than 1000 positions or one outside ``[1, 2**63)`` or not an
+                ``int``, or ``activation_id`` is not a non-blank ``str``.
+            UnknownConversationError: If the id names nothing or names a
+                conversation stamped deleted.
+            ConversationStoreError: If the store cannot be written.
+        """
+        ...
+
+    async def untaken_messages(
+        self, conversation_id: str, *, limit: int = 100
+    ) -> tuple[TranscriptMessage, ...]:
+        """Return the user's messages not yet taken in, ascending (ADR-0293 §6:3, §6:9).
+
+        What the reader brings in as one input when the conversation's running
+        activation ends (§6:3), and after a restart (§6:9): every user's message
+        that stands and that no activation has taken in, the first ``limit`` of
+        them. A deleted message is not among them.
+
+        Returns:
+            The messages, or ``()`` where the conversation is absent or stamped
+            deleted.
+
+        Raises:
+            ValueError: Before any I/O, if ``limit`` is outside ``[0, 2**63)``.
+            ConversationStoreError: If the store cannot be read, or a stored row
+                is corrupt.
+        """
+        ...
+
+    async def conversations_awaiting(
+        self, *, limit: int = 100, after_id: str | None = None
+    ) -> list[str]:
+        """Page over the conversations holding a user's message not yet taken in.
+
+        How the reader finds, after a restart, the messages never taken in (ADR-0293
+        §6:9). Ids alone, ``id`` ascending, of conversations not stamped deleted that
+        hold at least one standing user's message no activation has taken in. The
+        cursor is placed lexically, as :meth:`stamped_conversation_ids`' is, so an
+        ``after_id`` naming no row is a good cursor.
+
+        Raises:
+            ValueError: If ``limit`` is outside ``[0, 2**63)``.
+            ConversationStoreError: If the store cannot be read.
+        """
+        ...
+
+    async def taken_in(
+        self, conversation_id: str, *, positions: Sequence[int]
+    ) -> Mapping[int, str]:
+        """Return which activation took in each named message, where one did (§6:6).
+
+        Keyed by position; a position no activation took in is simply missing, as
+        :meth:`deliveries` answers. An absent or stamped conversation answers with
+        an empty mapping. A fresh mapping on every call.
+
+        Raises:
+            ValueError: Before any I/O, as :meth:`take_in`'s ``positions``.
             ConversationStoreError: If the store cannot be read, or a stored row
                 is corrupt.
         """

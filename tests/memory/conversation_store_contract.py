@@ -1771,8 +1771,14 @@ class ConversationStoreContract:
 
         assert [one.id for one in exported.conversations] == [second.id, first.id]
         assert exported.conversations[1].last_turn_at == _NOW + _MINUTE
-        assert exported.schema_version == 5
-        assert set(exported.model_dump()) == {"schema_version", "exported_at", "conversations"}
+        assert exported.schema_version == 6
+        assert set(exported.model_dump()) == {
+            "schema_version",
+            "exported_at",
+            "conversations",
+            "messages",
+        }
+        assert exported.messages == ()
 
     async def test_export_omits_a_stamped_conversation(
         self, factory: ConversationStoreFactory

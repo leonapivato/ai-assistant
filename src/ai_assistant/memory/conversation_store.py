@@ -40,6 +40,17 @@ file written by an interim build of the same format that still carries a ``turns
 table is opened without the table being read, and its foreign key cascades away
 with each conversation that is dropped.
 
+**The chat space is five more tables** (ADR-0293 §3, §5, §6): ``messages`` (each
+conversation's transcript; a deleted message keeps its row as its marker, its text
+and every property but its id cleared), ``chat_devices`` ("my devices"),
+``conversation_devices``, ``chat_changes`` (the change stream, numbered by an
+``AUTOINCREMENT`` key, so a number is never reused even once its row is removed) and
+``taken_in`` (the reader's bookkeeping). They are created with ``IF NOT EXISTS``,
+so a file of this format written before them is brought forward on open with every
+existing conversation's transcript empty; the episode-record format marker does not
+move, because no existing row changes shape. Every write to them, and the change it
+records, is in the one ``IMMEDIATE`` transaction of the act that makes it.
+
 **There is no observation watermark** (ADR-0285 §4). The schema creates no
 ``observed_through`` column and nothing adds one to an existing file. Nothing drops
 it either: a file written by an earlier build that still carries the column is
@@ -71,12 +82,26 @@ from ai_assistant.core.errors import (
     UnknownConversationError,
 )
 from ai_assistant.core.types import (
+    ChatChanges,
+    ChatDevice,
     Conversation,
+    ConversationDeletedChange,
     ConversationExport,
+    ConversationStartedChange,
+    DeletedMessage,
+    DevicesChangedChange,
     Identifier,
+    MessageAddedChange,
+    MessageAuthor,
+    MessageDeletedChange,
+    MessageReceipt,
+    SendOutcome,
     SpokenDelivery,
     SpokenDeliveryState,
+    TranscriptMessage,
+    TranscriptPage,
     UtcInstant,
+    checked_chat_devices,
     describe_untrusted,
 )
 from ai_assistant.memory._episode_format import (
@@ -91,6 +116,7 @@ if TYPE_CHECKING:
     from contextlib import AbstractContextManager
 
     from ai_assistant.core.clock import Clock
+    from ai_assistant.core.types import ChatChange, NewMessage
 
 _OWNER_ONLY = 0o600
 
@@ -188,6 +214,53 @@ _DELIVERIES_COLUMNS: Final = (
 _SEARCH_DRAW_COLUMNS: Final = (
     "search_calls INTEGER NOT NULL DEFAULT 0, all_external_user_chosen INTEGER NOT NULL DEFAULT 0"
 )
+
+#: The chat space's tables (ADR-0293), created beside the conversation table. A
+#: ``messages`` row is a message or, ``deleted = 1``, its marker (§5:12): the marker
+#: keeps the position and the device's message id, so a late repeat is still
+#: recognised (§4:3), and nothing else. The partial unique index is what makes a
+#: device's message id name one message per conversation (§4:2). ``chat_changes`` is
+#: numbered by ``AUTOINCREMENT`` so a sequence number is never reused once its row is
+#: removed (§5:10); a change row holds no text, and a ``message_added`` row is read
+#: with the message it names. Every table but ``chat_changes`` and ``chat_devices``
+#: cascades from its conversation, and each is also cleared explicitly where a
+#: conversation goes, for the reason ``drop_if_eligible`` gives for the deliveries.
+_CHAT_SCHEMA: Final = (
+    "CREATE TABLE IF NOT EXISTS messages("
+    "conversation_id TEXT NOT NULL REFERENCES conversations(id) ON DELETE CASCADE, "
+    "position INTEGER NOT NULL, author TEXT, written_at INTEGER, text TEXT, "
+    "replies_to INTEGER, options TEXT, cut_off INTEGER NOT NULL DEFAULT 0, "
+    "device_id TEXT, message_id TEXT, deleted INTEGER NOT NULL DEFAULT 0, "
+    "PRIMARY KEY(conversation_id, position))",
+    "CREATE UNIQUE INDEX IF NOT EXISTS messages_sent "
+    "ON messages(conversation_id, device_id, message_id) WHERE device_id IS NOT NULL",
+    "CREATE TABLE IF NOT EXISTS chat_devices(device_id TEXT PRIMARY KEY, access TEXT NOT NULL)",
+    "CREATE TABLE IF NOT EXISTS conversation_devices("
+    "conversation_id TEXT NOT NULL REFERENCES conversations(id) ON DELETE CASCADE, "
+    "device_id TEXT NOT NULL, access TEXT NOT NULL, PRIMARY KEY(conversation_id, device_id))",
+    "CREATE TABLE IF NOT EXISTS chat_changes("
+    "seq INTEGER PRIMARY KEY AUTOINCREMENT, kind TEXT NOT NULL, conversation_id TEXT, "
+    "position INTEGER, devices TEXT)",
+    "CREATE INDEX IF NOT EXISTS chat_changes_conversation ON chat_changes(conversation_id, seq)",
+    "CREATE TABLE IF NOT EXISTS taken_in("
+    "conversation_id TEXT NOT NULL REFERENCES conversations(id) ON DELETE CASCADE, "
+    "position INTEGER NOT NULL, activation_id TEXT NOT NULL, "
+    "PRIMARY KEY(conversation_id, position))",
+)
+
+#: The most ids or positions one chat-space call takes: the page bound ``deliveries``
+#: already sets, for the same one-page-one-call reason. Duplicated in the canonical
+#: fake rather than shared, for :data:`_PAGE_BOUND`'s reason.
+_MAX_NAMED: Final = 1000
+
+#: The page sizes the chat-space reads default to. The snapshot's is the figure
+#: ADR-0293 leaves open (What stays open), chosen here.
+_DEFAULT_TRANSCRIPT_PAGE: Final = 50
+_DEFAULT_CHANGES_PAGE: Final = 100
+_DEFAULT_AWAITING_PAGE: Final = 100
+
+#: The activation id ``take_in`` records goes through ``core``'s identifier type.
+_ACTIVATION_ID: Final[TypeAdapter[str]] = TypeAdapter(Identifier)
 
 # **The five columns every conversation read selects.** An ordinary comment and not
 # a ``#:`` attribute block, because there is deliberately no name here to attach one
@@ -558,6 +631,209 @@ def _check_page_bound(name: str, value: object) -> None:
         raise ValueError(msg)
 
 
+def _check_position(name: str, value: object) -> int:
+    """Refuse a position that is not an exact ``int`` in ``[1, 2**63)``.
+
+    ``bool`` is refused with the rest: ``True`` is not a position.
+
+    Raises:
+        ValueError: If ``value`` is not such an ``int``.
+    """
+    if type(value) is not int or not 1 <= value < _PAGE_BOUND:
+        msg = f"{name} must be an int in [1, 2**63), got {describe_untrusted(value)}"
+        raise ValueError(msg)
+    return value
+
+
+def _checked_positions(positions: object) -> tuple[int, ...]:
+    """Check a sequence of positions once, before any I/O (ADR-0065).
+
+    Raises:
+        ValueError: If ``positions`` is a ``str`` or not a sequence, holds more than
+            :data:`_MAX_NAMED`, or holds a value that is not a position.
+    """
+    if isinstance(positions, (str, bytes)) or not isinstance(positions, Sequence):
+        msg = f"positions must be a sequence of int, got {describe_untrusted(positions)}"
+        raise ValueError(msg)
+    held = tuple(positions)
+    if len(held) > _MAX_NAMED:
+        msg = f"positions holds {len(held)}; at most {_MAX_NAMED} are named at once"
+        raise ValueError(msg)
+    for one in held:
+        _check_position("a position", one)
+    return held
+
+
+def _checked_conversation_ids(conversation_ids: object) -> tuple[str, ...] | None:
+    """Check ``changes``' restriction once, before any I/O (ADR-0065).
+
+    Raises:
+        ValueError: If ``conversation_ids`` is a ``str`` or not a sequence, holds more
+            than :data:`_MAX_NAMED` ids, or holds an element that is not a ``str``.
+    """
+    if conversation_ids is None:
+        return None
+    if isinstance(conversation_ids, (str, bytes)) or not isinstance(conversation_ids, Sequence):
+        described = describe_untrusted(conversation_ids)
+        msg = f"conversation_ids must be a sequence of str, got {described}"
+        raise ValueError(msg)
+    held = tuple(conversation_ids)
+    if len(held) > _MAX_NAMED:
+        msg = f"conversation_ids holds {len(held)}; at most {_MAX_NAMED} are named at once"
+        raise ValueError(msg)
+    for one in held:
+        if type(one) is not str:
+            msg = f"conversation_ids holds an id that is not a str: {describe_untrusted(one)}"
+            raise ValueError(msg)
+    return held
+
+
+def _checked_activation_id(activation_id: object) -> str:
+    """Check ``take_in``'s activation through ``core``'s own identifier type.
+
+    Raises:
+        ValueError: If ``activation_id`` is not a non-blank ``str``.
+    """
+    try:
+        return _ACTIVATION_ID.validate_python(activation_id, strict=True)
+    except ValidationError as exc:
+        msg = f"activation_id must be a non-blank str, got {describe_untrusted(activation_id)}"
+        raise ValueError(msg) from exc
+
+
+def _check_stored_position(value: object) -> int:
+    """Read a stored position, refusing anything that is not one.
+
+    Raises:
+        ConversationStoreError: If the stored value is not an ``int`` of at least 1.
+    """
+    if type(value) is not int or value < 1:
+        msg = f"a stored position is not usable: {describe_untrusted(value)}"
+        raise ConversationStoreError(msg)
+    return value
+
+
+def _checked_stored_activation(value: object) -> str:
+    """Read a stored activation id, refusing anything that is not a usable identifier.
+
+    Raises:
+        ConversationStoreError: If the stored value is not a non-blank ``str``.
+    """
+    if type(value) is not str or not value.strip():
+        msg = f"a stored activation id is not usable: {describe_untrusted(value)}"
+        raise ConversationStoreError(msg)
+    return value
+
+
+def _devices_json(devices: tuple[ChatDevice, ...]) -> str:
+    """Render a set of devices as the JSON a change row holds."""
+    return json.dumps([one.model_dump(mode="json") for one in devices])
+
+
+def _devices_from(conversation_id: object, value: object) -> tuple[ChatDevice, ...]:
+    """Rebuild a change row's set of devices, surfacing corruption as this seam's error.
+
+    Raises:
+        ConversationStoreError: If the stored value is not a JSON list of devices.
+    """
+    try:
+        if type(value) is not str:
+            raise TypeError(describe_untrusted(value))
+        return checked_chat_devices([ChatDevice.model_validate(one) for one in json.loads(value)])
+    except (ValueError, TypeError) as exc:
+        described = describe_untrusted(conversation_id)
+        msg = f"a stored change's devices could not be decoded for {described}"
+        raise ConversationStoreError(msg) from exc
+
+
+def _bool_of(value: object) -> bool:
+    """Read a stored ``0``/``1`` flag, refusing anything else.
+
+    Raises:
+        ConversationStoreError: If the stored value is not exactly ``0`` or ``1``.
+    """
+    if type(value) is not int or value not in {0, 1}:
+        msg = f"a stored flag is not 0 or 1: {describe_untrusted(value)}"
+        raise ConversationStoreError(msg)
+    return bool(value)
+
+
+def _message_from(row: Sequence[Any]) -> TranscriptMessage | DeletedMessage:
+    """Rebuild a message, or its marker, from the message columns.
+
+    The columns are ``conversation_id, position, author, written_at, text,
+    replies_to, options, cut_off, device_id, message_id, deleted``.
+
+    Raises:
+        ConversationStoreError: If the stored row does not decode.
+    """
+    try:
+        if _bool_of(row[10]):
+            return DeletedMessage(conversation_id=row[0], position=row[1])
+        options = row[6]
+        if type(options) is not str:
+            raise TypeError(describe_untrusted(options))
+        return TranscriptMessage(
+            conversation_id=row[0],
+            position=row[1],
+            written_at=_instant_from(row[3], what="written_at"),
+            author=MessageAuthor(str(row[2])),
+            text=row[4],
+            replies_to=row[5],
+            options=tuple(json.loads(options)),
+            cut_off=_bool_of(row[7]),
+            device_id=row[8],
+            message_id=row[9],
+        )
+    except (ValidationError, ValueError, TypeError, OverflowError) as exc:
+        msg = f"a stored message could not be decoded: {exc}"
+        raise ConversationStoreError(msg) from exc
+
+
+def _change_from(row: Sequence[Any]) -> ChatChange:
+    """Rebuild one change from its row and, for an addition, the message it names.
+
+    The columns are ``seq, kind, conversation_id, position, devices`` and then the
+    message columns of the joined row, ``NULL`` where none joined.
+
+    Raises:
+        ConversationStoreError: If the stored row does not decode, or an addition
+            names a message the transcript does not hold standing.
+    """
+    seq, kind, conversation_id = row[0], row[1], row[2]
+    try:
+        if kind == "message_added":
+            message = _message_from(row[5:])
+            if not isinstance(message, TranscriptMessage):
+                msg = "an addition names a message that was deleted"
+                raise ConversationStoreError(msg)
+            return MessageAddedChange(seq=seq, message=message)
+        if kind == "message_deleted":
+            marker = DeletedMessage(conversation_id=conversation_id, position=row[3])
+            return MessageDeletedChange(seq=seq, marker=marker)
+        if kind == "conversation_started":
+            return ConversationStartedChange(
+                seq=seq,
+                conversation_id=conversation_id,
+                devices=_devices_from(conversation_id, row[4]),
+            )
+        if kind == "conversation_deleted":
+            return ConversationDeletedChange(seq=seq, conversation_id=conversation_id)
+        if kind == "devices_changed":
+            return DevicesChangedChange(
+                seq=seq,
+                conversation_id=conversation_id,
+                devices=_devices_from(conversation_id, row[4]),
+            )
+    except ConversationStoreError:
+        raise
+    except (ValidationError, ValueError, TypeError) as exc:
+        msg = f"a stored change could not be decoded: {exc}"
+        raise ConversationStoreError(msg) from exc
+    msg = f"a stored change carries an unknown kind: {describe_untrusted(kind)}"
+    raise ConversationStoreError(msg)
+
+
 class SqliteConversationStore:
     """A persistent ``ConversationStore`` backed by ``sqlite3``."""
 
@@ -682,6 +958,9 @@ class SqliteConversationStore:
             # ADR-0283 §6's delivery rows. No turn table is created: the index is
             # retired (ADR-0283 §6, §12).
             conn.execute("CREATE TABLE IF NOT EXISTS deliveries(" + _DELIVERIES_COLUMNS + ")")
+            # ADR-0293's chat space, beside the conversation it belongs to.
+            for statement in _CHAT_SCHEMA:
+                conn.execute(statement)
             conn.execute(
                 "CREATE INDEX IF NOT EXISTS conversations_activity "
                 "ON conversations(last_active_at DESC, id)"
@@ -898,6 +1177,85 @@ class SqliteConversationStore:
         return rows[0] if rows else None
 
     @staticmethod
+    def _record_change(
+        conn: sqlite3.Connection,
+        kind: str,
+        conversation_id: str | None,
+        *,
+        position: int | None = None,
+        devices: tuple[ChatDevice, ...] | None = None,
+    ) -> None:
+        """Record one change in the stream, inside the transaction making it (§5:10)."""
+        conn.execute(
+            "INSERT INTO chat_changes(kind, conversation_id, position, devices) "
+            "VALUES (?, ?, ?, ?)",
+            (kind, conversation_id, position, None if devices is None else _devices_json(devices)),
+        )
+
+    @staticmethod
+    def _clear_chat_of(conn: sqlite3.Connection, conversation_id: str) -> None:
+        """Delete the transcript, devices, bookkeeping and changes kept under a conversation.
+
+        Explicitly rather than by the cascade, for the reason ``drop_if_eligible``
+        gives for the deliveries; the change rows have no key to cascade from.
+        """
+        conn.execute("DELETE FROM messages WHERE conversation_id = ?", (conversation_id,))
+        conn.execute(
+            "DELETE FROM conversation_devices WHERE conversation_id = ?", (conversation_id,)
+        )
+        conn.execute("DELETE FROM taken_in WHERE conversation_id = ?", (conversation_id,))
+        conn.execute("DELETE FROM chat_changes WHERE conversation_id = ?", (conversation_id,))
+
+    @classmethod
+    def _head(cls, conn: sqlite3.Connection) -> int:
+        """The change stream's latest sequence number, ``0`` before the first change.
+
+        Read from ``sqlite_sequence``, which ``AUTOINCREMENT`` keeps, so a number
+        whose row was removed still counts.
+        """
+        rows = cls._fetch(
+            conn,
+            "read the change stream's head",
+            "SELECT seq FROM sqlite_sequence WHERE name = 'chat_changes'",
+        )
+        if not rows:
+            return 0
+        head = rows[0][0]
+        if type(head) is not int or head < 0:
+            msg = f"the change stream's head is corrupt: {describe_untrusted(head)}"
+            raise ConversationStoreError(msg)
+        return head
+
+    @classmethod
+    def _devices_of(
+        cls, conn: sqlite3.Connection, conversation_id: str | None
+    ) -> tuple[ChatDevice, ...]:
+        """Read "my devices" (``None``) or one conversation's devices, ``device_id`` ascending.
+
+        Raises:
+            ConversationStoreError: If the store cannot be read, or a row is corrupt.
+        """
+        if conversation_id is None:
+            rows = cls._fetch(
+                conn,
+                "read my devices",
+                "SELECT device_id, access FROM chat_devices ORDER BY device_id ASC",
+            )
+        else:
+            rows = cls._fetch(
+                conn,
+                "read a conversation's devices",
+                "SELECT device_id, access FROM conversation_devices WHERE conversation_id = ? "
+                "ORDER BY device_id ASC",
+                (conversation_id,),
+            )
+        try:
+            return tuple(ChatDevice(device_id=row[0], access=row[1]) for row in rows)
+        except (ValidationError, TypeError) as exc:
+            msg = f"a stored device could not be decoded: {exc}"
+            raise ConversationStoreError(msg) from exc
+
+    @staticmethod
     def _unknown(conversation_id: str) -> UnknownConversationError:
         """The refusal §1 requires: an id the store does not know is not created.
 
@@ -969,6 +1327,15 @@ class SqliteConversationStore:
                     _to_micros(conversation.last_active_at),
                 ),
             )
+            # ADR-0293 §2:1, §3:1: empty, on "my devices" as they stand, and the
+            # change recorded in the same transaction.
+            devices = self._devices_of(conn, None)
+            conn.executemany(
+                "INSERT INTO conversation_devices(conversation_id, device_id, access) "
+                "VALUES (?, ?, ?)",
+                [(conversation.id, one.device_id, one.access.value) for one in devices],
+            )
+            self._record_change(conn, "conversation_started", conversation.id, devices=devices)
             return conversation
 
     async def get(self, conversation_id: str) -> Conversation | None:
@@ -1292,6 +1659,10 @@ class SqliteConversationStore:
                 "UPDATE conversations SET deleted_at = ? WHERE id = ?",
                 (_to_micros(now), conversation_id),
             )
+            # ADR-0293 §2:3: the transcript goes with the conversation, and its
+            # devices learn of it from the one change left in the stream.
+            self._clear_chat_of(conn, conversation_id)
+            self._record_change(conn, "conversation_deleted", conversation_id)
             return True
 
     async def drop_if_eligible(self, conversation_id: str) -> bool:
@@ -1324,12 +1695,20 @@ class SqliteConversationStore:
             # `checked_clock` admits a reading a day short of `datetime.max`
             # (ADR-0026 §3), and adding a horizon to one raises `OverflowError`
             # out of that same comparison.
+            stamped = conversation.deleted_at is not None
             if conversation.deleted_at is not None:
                 eligible = now - conversation.deleted_at >= self._grace
             else:
+                # ADR-0293 §5:4: reclaim never drops a conversation holding a message.
                 eligible = (
                     self._retention is not None
                     and now - conversation.last_active_at >= self._retention
+                    and not self._fetch(
+                        conn,
+                        "read a conversation's transcript",
+                        "SELECT 1 FROM messages WHERE conversation_id = ? AND deleted = 0 LIMIT 1",
+                        (conversation_id,),
+                    )
                 )
             if not eligible:
                 return False
@@ -1343,6 +1722,19 @@ class SqliteConversationStore:
             # the drop correct whatever the pragma says; the cascade then only ever
             # fires for a writer that is not this module.
             conn.execute("DELETE FROM deliveries WHERE conversation_id = ?", (conversation_id,))
+            if stamped:
+                # The stamp cleared the chat and recorded the deletion; what is left
+                # is the change that tells devices so, which stays.
+                conn.execute("DELETE FROM messages WHERE conversation_id = ?", (conversation_id,))
+                conn.execute(
+                    "DELETE FROM conversation_devices WHERE conversation_id = ?",
+                    (conversation_id,),
+                )
+                conn.execute("DELETE FROM taken_in WHERE conversation_id = ?", (conversation_id,))
+            else:
+                # A reclaim is a deletion as far as the conversation's devices go.
+                self._clear_chat_of(conn, conversation_id)
+                self._record_change(conn, "conversation_deleted", conversation_id)
             conn.execute("DELETE FROM conversations WHERE id = ?", (conversation_id,))
             return True
 
@@ -1358,13 +1750,26 @@ class SqliteConversationStore:
                 corrupt.
         """
         async with self._lock:
-            exported_at, conversation_rows = await _run_to_completion(self._export_sync)
-        return ConversationExport(
-            exported_at=exported_at,
-            conversations=tuple(self._decode_conversation(row) for row in conversation_rows),
+            exported_at, conversation_rows, message_rows = await _run_to_completion(
+                self._export_sync
+            )
+        conversations = tuple(self._decode_conversation(row) for row in conversation_rows)
+        order = {one.id: index for index, one in enumerate(conversations)}
+        messages = sorted(
+            (_message_from(row) for row in message_rows),
+            key=lambda one: (order.get(one.conversation_id, len(order)), one.position),
         )
+        try:
+            return ConversationExport(
+                exported_at=exported_at,
+                conversations=conversations,
+                messages=tuple(one for one in messages if isinstance(one, TranscriptMessage)),
+            )
+        except ValidationError as exc:
+            msg = f"the stored conversations do not make a consistent export: {exc}"
+            raise ConversationStoreError(msg) from exc
 
-    def _export_sync(self) -> tuple[datetime, list[Any]]:
+    def _export_sync(self) -> tuple[datetime, list[Any], list[Any]]:
         with self._transaction("export conversations", immediate=False) as conn:
             exported_at = self._now()
             conversations = self._fetch(
@@ -1374,4 +1779,481 @@ class SqliteConversationStore:
                 "FROM conversations c WHERE c.deleted_at IS NULL "
                 "ORDER BY c.last_active_at DESC, c.id ASC",
             )
-            return exported_at, conversations
+            messages = self._fetch(
+                conn,
+                "export transcripts",
+                "SELECT m.conversation_id, m.position, m.author, m.written_at, m.text, "
+                "m.replies_to, m.options, m.cut_off, m.device_id, m.message_id, m.deleted "
+                "FROM messages m JOIN conversations c ON c.id = m.conversation_id "
+                "WHERE c.deleted_at IS NULL AND m.deleted = 0 "
+                "ORDER BY m.conversation_id ASC, m.position ASC",
+            )
+            return exported_at, conversations, messages
+
+    # --- the chat space (ADR-0293) --------------------------------------------
+
+    async def append_message(self, conversation_id: str, message: NewMessage) -> MessageReceipt:
+        """Write one message into the transcript, in one ``IMMEDIATE`` transaction.
+
+        The repeat check, the device check, the reply check, the insert and the
+        change are one step, so two sends of one message cannot both record it and
+        a device removed concurrently either wrote before the removal or not at all.
+
+        Raises:
+            UnknownConversationError: If the id names nothing or names a stamped
+                conversation.
+            ConversationStoreError: If the store cannot be written.
+        """
+        async with self._lock:
+            return await _run_to_completion(self._append_message_sync, conversation_id, message)
+
+    def _append_message_sync(self, conversation_id: str, message: NewMessage) -> MessageReceipt:
+        with self._transaction("write a message") as conn:
+            row = self._row_of(conn, conversation_id)
+            if row is None or row[4] is not None:
+                raise self._unknown(conversation_id)
+            if message.author is MessageAuthor.USER:
+                sent = self._fetch(
+                    conn,
+                    "read a sent message",
+                    "SELECT position FROM messages WHERE conversation_id = ? "
+                    "AND device_id = ? AND message_id = ?",
+                    (conversation_id, message.device_id, message.message_id),
+                )
+                if sent:
+                    return MessageReceipt(
+                        conversation_id=conversation_id,
+                        outcome=SendOutcome.REPEATED,
+                        position=sent[0][0],
+                    )
+                ends = {
+                    one.device_id
+                    for one in self._devices_of(conn, conversation_id)
+                    if one.access.writes
+                }
+                if message.device_id not in ends:
+                    return MessageReceipt(
+                        conversation_id=conversation_id, outcome=SendOutcome.NOT_AN_END
+                    )
+            last = self._fetch(
+                conn,
+                "read a transcript's last position",
+                "SELECT COALESCE(MAX(position), 0) FROM messages WHERE conversation_id = ?",
+                (conversation_id,),
+            )[0][0]
+            if type(last) is not int or last < 0:
+                msg = f"a stored transcript position is corrupt: {describe_untrusted(last)}"
+                raise ConversationStoreError(msg)
+            position = last + 1
+            if message.replies_to is not None and message.replies_to >= position:
+                return MessageReceipt(
+                    conversation_id=conversation_id, outcome=SendOutcome.NO_SUCH_REPLY
+                )
+            try:
+                recorded = TranscriptMessage(
+                    conversation_id=conversation_id,
+                    position=position,
+                    written_at=self._now(),
+                    **message.model_dump(),
+                )
+            except ValidationError as exc:
+                msg = f"the message could not be placed at position {position}: {exc}"
+                raise ConversationStoreError(msg) from exc
+            conn.execute(
+                "INSERT INTO messages(conversation_id, position, author, written_at, text, "
+                "replies_to, options, cut_off, device_id, message_id, deleted) "
+                "VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, 0)",
+                (
+                    conversation_id,
+                    position,
+                    recorded.author.value,
+                    _to_micros(recorded.written_at),
+                    recorded.text,
+                    recorded.replies_to,
+                    json.dumps(list(recorded.options)),
+                    int(recorded.cut_off),
+                    recorded.device_id,
+                    recorded.message_id,
+                ),
+            )
+            self._record_change(conn, "message_added", conversation_id, position=position)
+            return MessageReceipt(
+                conversation_id=conversation_id, outcome=SendOutcome.RECORDED, position=position
+            )
+
+    async def delete_message(self, conversation_id: str, position: int) -> bool:
+        """Delete one message, leaving its marker, in one ``IMMEDIATE`` transaction.
+
+        Raises:
+            ValueError: If ``position`` is not an ``int`` in ``[1, 2**63)``.
+            UnknownConversationError: If the id names nothing or names a stamped
+                conversation.
+            ConversationStoreError: If the store cannot be written.
+        """
+        _check_position("position", position)
+        async with self._lock:
+            return await _run_to_completion(self._delete_message_sync, conversation_id, position)
+
+    def _delete_message_sync(self, conversation_id: str, position: int) -> bool:
+        with self._transaction("delete a message") as conn:
+            row = self._row_of(conn, conversation_id)
+            if row is None or row[4] is not None:
+                raise self._unknown(conversation_id)
+            # The marker keeps the position and the device's message id (§4:3,
+            # §5:12); the text and every other property are cleared in place.
+            deleted = conn.execute(
+                "UPDATE messages SET deleted = 1, author = NULL, written_at = NULL, "
+                "text = NULL, replies_to = NULL, options = NULL, cut_off = 0 "
+                "WHERE conversation_id = ? AND position = ? AND deleted = 0",
+                (conversation_id, position),
+            ).rowcount
+            if not deleted:
+                return False
+            conn.execute(
+                "DELETE FROM chat_changes WHERE kind = 'message_added' "
+                "AND conversation_id = ? AND position = ?",
+                (conversation_id, position),
+            )
+            self._record_change(conn, "message_deleted", conversation_id, position=position)
+            return True
+
+    async def transcript(
+        self,
+        conversation_id: str,
+        *,
+        before: int | None = None,
+        limit: int = _DEFAULT_TRANSCRIPT_PAGE,
+    ) -> TranscriptPage | None:
+        """Read the last ``limit`` entries before ``before``, in one deferred transaction.
+
+        Raises:
+            ValueError: If ``before`` or ``limit`` is out of range.
+            ConversationStoreError: If the store cannot be read, or a row is corrupt.
+        """
+        if before is not None:
+            _check_position("before", before)
+        _check_page_bound("limit", limit)
+        async with self._lock:
+            read = await _run_to_completion(self._transcript_sync, conversation_id, before, limit)
+        if read is None:
+            return None
+        rows, as_of = read
+        try:
+            return TranscriptPage(
+                conversation_id=conversation_id,
+                entries=tuple(_message_from(row) for row in reversed(rows)),
+                as_of=as_of,
+            )
+        except ValidationError as exc:
+            msg = f"a stored transcript page is inconsistent: {exc}"
+            raise ConversationStoreError(msg) from exc
+
+    def _transcript_sync(
+        self, conversation_id: str, before: int | None, limit: int
+    ) -> tuple[list[Any], int] | None:
+        with self._transaction("read a transcript", immediate=False) as conn:
+            row = self._row_of(conn, conversation_id)
+            if row is None or row[4] is not None:
+                return None
+            columns = (
+                "SELECT conversation_id, position, author, written_at, text, replies_to, "
+                "options, cut_off, device_id, message_id, deleted FROM messages "
+            )
+            if before is None:
+                rows = self._fetch(
+                    conn,
+                    "read a transcript",
+                    columns + "WHERE conversation_id = ? ORDER BY position DESC LIMIT ?",
+                    (conversation_id, limit),
+                )
+            else:
+                rows = self._fetch(
+                    conn,
+                    "read a transcript",
+                    columns
+                    + "WHERE conversation_id = ? AND position < ? ORDER BY position DESC LIMIT ?",
+                    (conversation_id, before, limit),
+                )
+            return rows, self._head(conn)
+
+    async def changes(
+        self,
+        *,
+        after: int,
+        conversation_ids: Sequence[str] | None = None,
+        limit: int = _DEFAULT_CHANGES_PAGE,
+    ) -> ChatChanges:
+        """Read every change after ``after``, in one deferred transaction (§5:10, §5:11).
+
+        Raises:
+            ValueError: If ``after`` or ``limit`` is out of range, or
+                ``conversation_ids`` is malformed.
+            ConversationStoreError: If the store cannot be read, or a row is corrupt.
+        """
+        _check_page_bound("after", after)
+        _check_page_bound("limit", limit)
+        named = _checked_conversation_ids(conversation_ids)
+        if limit == 0:
+            return ChatChanges(next_after=after)
+        async with self._lock:
+            rows, head = await _run_to_completion(self._changes_sync, after, named, limit)
+        page = tuple(_change_from(row) for row in rows)
+        try:
+            return ChatChanges(
+                changes=page, next_after=page[-1].seq if len(page) == limit else head
+            )
+        except ValidationError as exc:
+            msg = f"the stored change stream is inconsistent: {exc}"
+            raise ConversationStoreError(msg) from exc
+
+    def _changes_sync(
+        self, after: int, named: tuple[str, ...] | None, limit: int
+    ) -> tuple[list[Any], int]:
+        restriction = None if named is None else json.dumps(list(named))
+        # One statement for both forms: a ``NULL`` restriction reads every change.
+        with self._transaction("read the change stream", immediate=False) as conn:
+            rows = self._fetch(
+                conn,
+                "read the change stream",
+                "SELECT c.seq, c.kind, c.conversation_id, c.position, c.devices, "
+                "m.conversation_id, m.position, m.author, m.written_at, m.text, m.replies_to, "
+                "m.options, m.cut_off, m.device_id, m.message_id, m.deleted "
+                "FROM chat_changes c LEFT JOIN messages m ON c.kind = 'message_added' "
+                "AND m.conversation_id = c.conversation_id AND m.position = c.position "
+                "WHERE c.seq > ? AND (? IS NULL OR c.conversation_id IS NULL OR "
+                "c.conversation_id IN (SELECT value FROM json_each(?))) "
+                "ORDER BY c.seq ASC LIMIT ?",
+                (after, restriction, restriction or "[]", limit),
+            )
+            return rows, self._head(conn)
+
+    async def my_devices(self) -> tuple[ChatDevice, ...]:
+        """Return "my devices", ``device_id`` ascending (ADR-0293 §3:1).
+
+        Raises:
+            ConversationStoreError: If the store cannot be read, or a row is corrupt.
+        """
+        async with self._lock:
+            return await _run_to_completion(self._my_devices_sync)
+
+    def _my_devices_sync(self) -> tuple[ChatDevice, ...]:
+        with self._transaction("read my devices", immediate=False) as conn:
+            return self._devices_of(conn, None)
+
+    async def set_my_devices(self, devices: Sequence[ChatDevice]) -> bool:
+        """Replace "my devices" in one ``IMMEDIATE`` transaction (ADR-0293 §3:1).
+
+        Raises:
+            ValueError: If ``devices`` is malformed.
+            ConversationStoreError: If the store cannot be written.
+        """
+        wanted = checked_chat_devices(devices)
+        async with self._lock:
+            return await _run_to_completion(self._set_my_devices_sync, wanted)
+
+    def _set_my_devices_sync(self, wanted: tuple[ChatDevice, ...]) -> bool:
+        with self._transaction("set my devices") as conn:
+            if self._devices_of(conn, None) == wanted:
+                return False
+            conn.execute("DELETE FROM chat_devices")
+            conn.executemany(
+                "INSERT INTO chat_devices(device_id, access) VALUES (?, ?)",
+                [(one.device_id, one.access.value) for one in wanted],
+            )
+            self._record_change(conn, "devices_changed", None, devices=wanted)
+            return True
+
+    async def conversation_devices(self, conversation_id: str) -> tuple[ChatDevice, ...] | None:
+        """Return a conversation's devices, or ``None`` if absent or stamped (§3:3).
+
+        Raises:
+            ConversationStoreError: If the store cannot be read, or a row is corrupt.
+        """
+        async with self._lock:
+            return await _run_to_completion(self._conversation_devices_sync, conversation_id)
+
+    def _conversation_devices_sync(self, conversation_id: str) -> tuple[ChatDevice, ...] | None:
+        with self._transaction("read a conversation's devices", immediate=False) as conn:
+            row = self._row_of(conn, conversation_id)
+            if row is None or row[4] is not None:
+                return None
+            return self._devices_of(conn, conversation_id)
+
+    async def set_conversation_devices(
+        self, conversation_id: str, devices: Sequence[ChatDevice]
+    ) -> bool:
+        """Replace a conversation's devices in one ``IMMEDIATE`` transaction (§3:3).
+
+        Raises:
+            ValueError: If ``devices`` is malformed.
+            UnknownConversationError: If the id names nothing or names a stamped
+                conversation.
+            ConversationStoreError: If the store cannot be written.
+        """
+        wanted = checked_chat_devices(devices)
+        async with self._lock:
+            return await _run_to_completion(
+                self._set_conversation_devices_sync, conversation_id, wanted
+            )
+
+    def _set_conversation_devices_sync(
+        self, conversation_id: str, wanted: tuple[ChatDevice, ...]
+    ) -> bool:
+        with self._transaction("set a conversation's devices") as conn:
+            row = self._row_of(conn, conversation_id)
+            if row is None or row[4] is not None:
+                raise self._unknown(conversation_id)
+            if self._devices_of(conn, conversation_id) == wanted:
+                return False
+            conn.execute(
+                "DELETE FROM conversation_devices WHERE conversation_id = ?", (conversation_id,)
+            )
+            conn.executemany(
+                "INSERT INTO conversation_devices(conversation_id, device_id, access) "
+                "VALUES (?, ?, ?)",
+                [(conversation_id, one.device_id, one.access.value) for one in wanted],
+            )
+            self._record_change(conn, "devices_changed", conversation_id, devices=wanted)
+            return True
+
+    async def take_in(
+        self, conversation_id: str, *, positions: Sequence[int], activation_id: str
+    ) -> tuple[int, ...]:
+        """Mark the named user's messages taken in, in one ``IMMEDIATE`` transaction.
+
+        Raises:
+            ValueError: If ``positions`` or ``activation_id`` is malformed.
+            UnknownConversationError: If the id names nothing or names a stamped
+                conversation.
+            ConversationStoreError: If the store cannot be written.
+        """
+        named = _checked_positions(positions)
+        activation = _checked_activation_id(activation_id)
+        async with self._lock:
+            return await _run_to_completion(self._take_in_sync, conversation_id, named, activation)
+
+    def _take_in_sync(
+        self, conversation_id: str, named: tuple[int, ...], activation: str
+    ) -> tuple[int, ...]:
+        with self._transaction("record messages taken in") as conn:
+            row = self._row_of(conn, conversation_id)
+            if row is None or row[4] is not None:
+                raise self._unknown(conversation_id)
+            if not named:
+                return ()
+            candidates = self._fetch(
+                conn,
+                "read the messages to take in",
+                "SELECT m.position FROM messages m WHERE m.conversation_id = ? "
+                "AND m.deleted = 0 AND m.author = ? "
+                "AND m.position IN (SELECT value FROM json_each(?)) "
+                "AND NOT EXISTS (SELECT 1 FROM taken_in t WHERE t.conversation_id = "
+                "m.conversation_id AND t.position = m.position) ORDER BY m.position ASC",
+                (conversation_id, MessageAuthor.USER.value, json.dumps(sorted(set(named)))),
+            )
+            marked = tuple(_check_stored_position(one[0]) for one in candidates)
+            conn.executemany(
+                "INSERT INTO taken_in(conversation_id, position, activation_id) VALUES (?, ?, ?)",
+                [(conversation_id, one, activation) for one in marked],
+            )
+            return marked
+
+    async def untaken_messages(
+        self, conversation_id: str, *, limit: int = _DEFAULT_AWAITING_PAGE
+    ) -> tuple[TranscriptMessage, ...]:
+        """Return the user's standing messages not yet taken in (ADR-0293 §6:3, §6:9).
+
+        Raises:
+            ValueError: If ``limit`` is outside ``[0, 2**63)``.
+            ConversationStoreError: If the store cannot be read, or a row is corrupt.
+        """
+        _check_page_bound("limit", limit)
+        if limit == 0:
+            return ()
+        async with self._lock:
+            rows = await _run_to_completion(self._untaken_sync, conversation_id, limit)
+        found: list[TranscriptMessage] = []
+        for row in rows:
+            message = _message_from(row)
+            if not isinstance(message, TranscriptMessage):  # pragma: no cover — `deleted = 0`
+                msg = "an untaken message read back as deleted"
+                raise ConversationStoreError(msg)
+            found.append(message)
+        return tuple(found)
+
+    def _untaken_sync(self, conversation_id: str, limit: int) -> list[Any]:
+        with self._transaction("read untaken messages", immediate=False) as conn:
+            row = self._row_of(conn, conversation_id)
+            if row is None or row[4] is not None:
+                return []
+            return self._fetch(
+                conn,
+                "read untaken messages",
+                "SELECT m.conversation_id, m.position, m.author, m.written_at, m.text, "
+                "m.replies_to, m.options, m.cut_off, m.device_id, m.message_id, m.deleted "
+                "FROM messages m WHERE m.conversation_id = ? AND m.deleted = 0 "
+                "AND m.author = ? AND NOT EXISTS (SELECT 1 FROM taken_in t WHERE "
+                "t.conversation_id = m.conversation_id AND t.position = m.position) "
+                "ORDER BY m.position ASC LIMIT ?",
+                (conversation_id, MessageAuthor.USER.value, limit),
+            )
+
+    async def conversations_awaiting(
+        self, *, limit: int = _DEFAULT_AWAITING_PAGE, after_id: str | None = None
+    ) -> list[str]:
+        """Page over conversations holding an untaken user's message (ADR-0293 §6:9).
+
+        Raises:
+            ValueError: If ``limit`` is outside ``[0, 2**63)``.
+            ConversationStoreError: If the store cannot be read.
+        """
+        _check_page_bound("limit", limit)
+        if limit == 0:
+            return []
+        async with self._lock:
+            rows = await _run_to_completion(self._awaiting_sync, limit, after_id)
+        return [_stamped_id_of(row[0]) for row in rows]
+
+    def _awaiting_sync(self, limit: int, after_id: str | None) -> list[Any]:
+        return self._fetch(
+            self._conn,
+            "list conversations awaiting the reader",
+            "SELECT c.id FROM conversations c WHERE c.deleted_at IS NULL AND c.id > ? "
+            "AND EXISTS (SELECT 1 FROM messages m WHERE m.conversation_id = c.id "
+            "AND m.deleted = 0 AND m.author = ? AND NOT EXISTS (SELECT 1 FROM taken_in t "
+            "WHERE t.conversation_id = m.conversation_id AND t.position = m.position)) "
+            "ORDER BY c.id ASC LIMIT ?",
+            ("" if after_id is None else after_id, MessageAuthor.USER.value, limit),
+        )
+
+    async def taken_in(
+        self, conversation_id: str, *, positions: Sequence[int]
+    ) -> Mapping[int, str]:
+        """Return which activation took in each named message, where one did (§6:6).
+
+        Raises:
+            ValueError: If ``positions`` is malformed.
+            ConversationStoreError: If the store cannot be read, or a row is corrupt.
+        """
+        named = _checked_positions(positions)
+        if not named:
+            return {}
+        async with self._lock:
+            rows = await _run_to_completion(self._taken_in_sync, conversation_id, named)
+        found: dict[int, str] = {}
+        for row in rows:
+            found[_check_stored_position(row[0])] = _checked_stored_activation(row[1])
+        return found
+
+    def _taken_in_sync(self, conversation_id: str, named: tuple[int, ...]) -> list[Any]:
+        with self._transaction("read messages taken in", immediate=False) as conn:
+            row = self._row_of(conn, conversation_id)
+            if row is None or row[4] is not None:
+                return []
+            return self._fetch(
+                conn,
+                "read messages taken in",
+                "SELECT position, activation_id FROM taken_in WHERE conversation_id = ? "
+                "AND position IN (SELECT value FROM json_each(?))",
+                (conversation_id, json.dumps(sorted(set(named)))),
+            )
