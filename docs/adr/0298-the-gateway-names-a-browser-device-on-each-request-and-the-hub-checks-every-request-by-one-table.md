@@ -92,6 +92,20 @@ the 512-byte reserve.
 > **Normative.** The change that adds `acting_for` advances `PROTOCOL_VERSION`
 > (ADR-0124 §9), because an older peer refuses a frame carrying it.
 
+> **Normative.** A gateway names the browser device of a call it relays by setting an
+> outbound context value around that `AssistantEngine` call — for a streamed call,
+> around the whole iteration — and the wire client writes the value it holds when it
+> writes the request frame into that frame's `acting_for`; no `AssistantEngine` method
+> gains an argument for it.
+
+> **Normative.** The outbound value lives in the same `core` module as the requesting
+> device's context value (§2) and is distinct from it: the wire client reads the outbound
+> value and never the requesting device, and the wire server reads `acting_for` and never
+> the outbound value.
+
+So the gateway keeps reaching the hub through `AssistantEngine` alone (ADR-0168 §1:2),
+and a value set inside the hub can never leak onto an outbound frame, nor the reverse.
+
 The connect frame is not used: it is bounded at 256 bytes and decided once per
 connection, so a gateway would need a connection per browser device, and a request
 is where ADR-0296 §1:5 puts the name.
@@ -471,6 +485,10 @@ request, so it is known, and can be added to "my devices", once it has tried onc
 
 > **Normative.** `core/types.py` gains `RequestingDevice` (§2), the roles the roster
 > holds as one enum, and the change stream's chunk class (§7).
+
+> **Normative.** A `core` module of its own gains the two context values, the requesting
+> device's (§2) and the outbound name a gateway sets (§1), each with its reader and
+> setter.
 
 > **Normative.** `core/errors.py` gains `DeviceRefusedError` (§6).
 
