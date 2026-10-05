@@ -20,13 +20,16 @@ import structlog
 
 from ai_assistant.core.config import Settings
 from ai_assistant.core.errors import ConfigurationError
+from ai_assistant.core.types import DeviceRole
 from ai_assistant.service.enrolment import ENROLMENTS_FILENAME, DeviceRegistry, EnrolmentStore
 from ai_assistant.service.overlay import HubOverlayIdentity, OverlayIdentityUnavailableError
 from ai_assistant.service.remote import RemoteListener
+from ai_assistant.service.roster import HubRoster
 from ai_assistant.service.transport import ConnectionBudget, DeliverySlots, Listener
 from ai_assistant.testing import FakeAssistantEngine
 from ai_assistant.wire import HubEngineClient
 from ai_assistant.wire import envelope as env
+from ai_assistant.wire.credential import mint_credential, verifier_for
 from ai_assistant.wire.errors import HubUnavailableError
 from ai_assistant.wire.framing import read_frame, write_frame
 from ai_assistant.wire.server import CONNECTION_METHODS
@@ -185,6 +188,7 @@ async def _remote(
         the_engine,
         settings,
         registry=registry,
+        roster=HubRoster(registry),
         agent=the_agent,
         budget=the_budget,
         delivery=DeliverySlots(max_delivery_connections=settings.hub_max_delivery_connections),
@@ -299,7 +303,8 @@ async def test_the_hub_refuses_to_bind_an_address_the_agent_does_not_report(
         listener = RemoteListener(
             FakeAssistantEngine(),
             _settings(tmp_path),
-            registry=DeviceRegistry(store, hub_identity=_HUB_ID),
+            registry=(registry := DeviceRegistry(store, hub_identity=_HUB_ID)),
+            roster=HubRoster(registry),
             agent=_FakeAgent(addresses=frozenset({"100.64.0.9"})),
             budget=ConnectionBudget(max_connections=8, max_pending_handshakes=4),
             delivery=DeliverySlots(max_delivery_connections=4),
@@ -321,7 +326,8 @@ async def test_the_hub_refuses_to_bind_when_the_agent_cannot_be_asked(tmp_path: 
         listener = RemoteListener(
             FakeAssistantEngine(),
             _settings(tmp_path),
-            registry=DeviceRegistry(store, hub_identity=_HUB_ID),
+            registry=(registry := DeviceRegistry(store, hub_identity=_HUB_ID)),
+            roster=HubRoster(registry),
             agent=_FakeAgent(available=False),
             budget=ConnectionBudget(max_connections=8, max_pending_handshakes=4),
             delivery=DeliverySlots(max_delivery_connections=4),
@@ -344,7 +350,8 @@ def test_a_listener_is_not_built_without_an_address(tmp_path: Path) -> None:
             RemoteListener(
                 FakeAssistantEngine(),
                 Settings(data_dir=tmp_path),
-                registry=DeviceRegistry(store, hub_identity=_HUB_ID),
+                registry=(registry := DeviceRegistry(store, hub_identity=_HUB_ID)),
+                roster=HubRoster(registry),
                 agent=_FakeAgent(),
                 budget=ConnectionBudget(max_connections=8, max_pending_handshakes=4),
                 delivery=DeliverySlots(max_delivery_connections=4),
@@ -365,6 +372,7 @@ async def test_an_enrolled_device_presenting_its_credential_is_served(tmp_path: 
     """
     async with _remote(tmp_path) as hub:
         minted = hub.registry.enrol(_DEVICE, now=_MOMENT)
+        hub.registry.assign(_DEVICE, DeviceRole.COMMANDS)
         async with _dialling(hub) as peer:
             assert (await peer.connect(minted.credential)).kind is env.FrameKind.CONNECT_ACK
             await peer.send(
@@ -577,6 +585,7 @@ async def test_a_revocation_during_a_request_yields_no_answer_on_that_connection
     engine = _GatedEngine()
     async with _remote(tmp_path, engine=engine) as hub:
         minted = hub.registry.enrol(_DEVICE, now=_MOMENT)
+        hub.registry.assign(_DEVICE, DeviceRole.COMMANDS)
         async with _dialling(hub) as peer:
             assert (await peer.connect(minted.credential)).kind is env.FrameKind.CONNECT_ACK
             await peer.send(
@@ -600,6 +609,7 @@ async def test_revocation_is_prospective_and_the_record_keeps_what_the_owner_dec
     """
     async with _remote(tmp_path) as hub:
         minted = hub.registry.enrol(_DEVICE, now=_MOMENT)
+        hub.registry.assign(_DEVICE, DeviceRole.COMMANDS)
         async with _dialling(hub) as peer:
             assert (await peer.connect(minted.credential)).kind is env.FrameKind.CONNECT_ACK
             await peer.send(
@@ -624,7 +634,9 @@ async def test_one_devices_revocation_leaves_another_connected(tmp_path: Path) -
     agent = _FakeAgent(sequence=[_DEVICE, _STRANGER])
     async with _remote(tmp_path, agent=agent) as hub:
         laptop = hub.registry.enrol(_DEVICE, now=_MOMENT)
+        hub.registry.assign(_DEVICE, DeviceRole.COMMANDS)
         phone = hub.registry.enrol(_STRANGER, now=_MOMENT)
+        hub.registry.assign(_STRANGER, DeviceRole.COMMANDS)
         # Dialled one at a time and held open together: the agent names them in the
         # order they arrive, so serialising the *connects* is what makes the fixture
         # deterministic while both connections stay live for the revocation.
@@ -818,7 +830,8 @@ async def test_a_connection_stalled_in_the_identity_query_converges_on_shutdown(
     listener = RemoteListener(
         FakeAssistantEngine(),
         settings,
-        registry=DeviceRegistry(store, hub_identity=_HUB_ID),
+        registry=(registry := DeviceRegistry(store, hub_identity=_HUB_ID)),
+        roster=HubRoster(registry),
         agent=_StalledAgent(),
         budget=budget,
         delivery=DeliverySlots(max_delivery_connections=4),
@@ -1001,6 +1014,7 @@ async def test_a_served_device_is_recorded_as_admitted_once_the_handshake_comple
     every refusal test above and leave §6's record telling only half the story."""
     async with _remote(tmp_path) as hub:
         minted = hub.registry.enrol(_DEVICE, now=_MOMENT)
+        hub.registry.assign(_DEVICE, DeviceRole.COMMANDS)
         with structlog.testing.capture_logs() as captured:
             async with _dialling(hub) as peer:
                 assert (await peer.connect(minted.credential)).kind is env.FrameKind.CONNECT_ACK
@@ -1040,6 +1054,7 @@ async def test_a_bound_listener_answers_nothing_until_it_is_told_to_serve(
         FakeAssistantEngine(),
         settings,
         registry=registry,
+        roster=HubRoster(registry),
         agent=agent,
         budget=ConnectionBudget(max_connections=8, max_pending_handshakes=4),
         delivery=DeliverySlots(max_delivery_connections=4),
@@ -1176,6 +1191,7 @@ async def test_both_audit_reads_are_served_on_the_remote_listener(
     engine = FakeAssistantEngine()
     async with _remote(tmp_path, engine=engine) as hub:
         minted = hub.registry.enrol(_DEVICE, now=_MOMENT)
+        hub.registry.assign(_DEVICE, DeviceRole.COMMANDS)
         async with _dialling(hub) as peer:
             assert (await peer.connect(minted.credential)).kind is env.FrameKind.CONNECT_ACK
             await peer.send(
@@ -1239,6 +1255,7 @@ async def test_both_read_trail_reads_are_served_on_the_remote_listener(
     engine = FakeAssistantEngine()
     async with _remote(tmp_path, engine=engine) as hub:
         minted = hub.registry.enrol(_DEVICE, now=_MOMENT)
+        hub.registry.assign(_DEVICE, DeviceRole.COMMANDS)
         async with _dialling(hub) as peer:
             assert (await peer.connect(minted.credential)).kind is env.FrameKind.CONNECT_ACK
             await peer.send(
@@ -1300,6 +1317,7 @@ async def test_both_invocation_reads_are_served_on_the_remote_listener(
     engine = FakeAssistantEngine()
     async with _remote(tmp_path, engine=engine) as hub:
         minted = hub.registry.enrol(_DEVICE, now=_MOMENT)
+        hub.registry.assign(_DEVICE, DeviceRole.COMMANDS)
         async with _dialling(hub) as peer:
             assert (await peer.connect(minted.credential)).kind is env.FrameKind.CONNECT_ACK
             await peer.send(
@@ -1323,3 +1341,88 @@ def test_neither_invocation_read_is_a_connection_method() -> None:
 
     assert reads <= METHODS
     assert not (reads & CONNECTION_METHODS)
+
+
+# --- ADR-0298 §9: the remote listener with the hub's roster -------------------------
+
+
+def _beliefs(request_id: str, *, acting_for: str | None = None) -> env.Envelope:
+    """One request for a command-row method, optionally relayed for a browser device."""
+    return env.Envelope(
+        kind=env.FrameKind.REQUEST,
+        id=request_id,
+        payload={},
+        method="beliefs",
+        acting_for=acting_for,
+    )
+
+
+async def test_an_enrolled_device_with_no_role_is_refused_and_stays_connected(
+    tmp_path: Path,
+) -> None:
+    """ADR-0298 §9:4: "at the cutover every enrolled device … holds no role", so a
+    command is refused before dispatch (§5:6, §6:1) — and the connection stays open
+    (§6's closing note), so the same device is served once the owner gives it the role.
+    """
+    async with _remote(tmp_path) as hub:
+        minted = hub.registry.enrol(_DEVICE, now=_MOMENT)
+        async with _dialling(hub) as peer:
+            assert (await peer.connect(minted.credential)).kind is env.FrameKind.CONNECT_ACK
+            await peer.send(_beliefs("r-0"))
+            refused = await peer.receive()
+
+            hub.registry.assign(_DEVICE, DeviceRole.COMMANDS)
+            await peer.send(_beliefs("r-1"))
+            served = await peer.receive()
+
+    assert refused.kind is env.FrameKind.ERROR
+    assert refused.payload["code"] == "DeviceRefusedError"
+    assert refused.payload["details"] == {"reason": "not_allowed"}
+    assert served.kind is env.FrameKind.RESULT
+    assert [name for name, _arguments in hub.engine.calls] == ["beliefs"]
+
+
+async def test_a_remote_gateway_relays_with_the_browser_devices_roles(tmp_path: Path) -> None:
+    """ADR-0298 §8:1: "a gateway naming a browser device acts with that device's roles"
+    — not the gateway's own. The gateway here holds the command role; the browser it
+    names holds none, so the relayed request is refused while the gateway's own is not.
+    """
+    async with _remote(tmp_path) as hub:
+        minted = hub.registry.enrol(_DEVICE, now=_MOMENT)
+        hub.registry.assign(_DEVICE, DeviceRole.COMMANDS)
+        async with _dialling(hub) as peer:
+            assert (await peer.connect(minted.credential)).kind is env.FrameKind.CONNECT_ACK
+            await peer.send(_beliefs("r-0", acting_for="nPHONE22CNTRL"))
+            relayed = await peer.receive()
+            await peer.send(_beliefs("r-1"))
+            own = await peer.receive()
+
+        ((registration,), _) = hub.registry.registrations()
+
+    assert relayed.kind is env.FrameKind.ERROR
+    assert relayed.payload["details"] == {"reason": "not_allowed"}
+    assert own.kind is env.FrameKind.RESULT
+    assert (registration.device_id, registration.gateway) == ("nPHONE22CNTRL", _DEVICE)
+
+
+async def test_a_live_enrolment_of_the_hubs_own_identity_is_refused_every_request(
+    tmp_path: Path,
+) -> None:
+    """Issue #2726, end to end: a record from before ADR-0298 holds a live enrolment of
+    the hub's own overlay identity. ADR-0124's two facts still admit the connection —
+    an upgrade revokes nothing on the owner's behalf — and every request on it is
+    refused as not accepted (ADR-0298 §3:3, §6:2), until the owner revokes it.
+    """
+    credential = mint_credential()
+    earlier = EnrolmentStore(tmp_path / ENROLMENTS_FILENAME)
+    earlier.enrol(_HUB_ID, verifier=verifier_for(credential), now=_MOMENT)
+    earlier.close()
+    agent = _FakeAgent(default_peer=_HUB_ID)
+    async with _remote(tmp_path, agent=agent) as hub, _dialling(hub) as peer:
+        assert (await peer.connect(credential)).kind is env.FrameKind.CONNECT_ACK
+        await peer.send(_beliefs("r-0"))
+        refused = await peer.receive()
+
+    assert refused.kind is env.FrameKind.ERROR
+    assert refused.payload["details"] == {"reason": "not_accepted"}
+    assert hub.engine.calls == []

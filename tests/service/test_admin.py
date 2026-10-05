@@ -1083,14 +1083,16 @@ def test_the_command_line_refuses_a_role_the_roster_does_not_hold() -> None:
     assert raised.value.code == 2
 
 
-def test_the_help_says_roles_are_not_enforced_yet(
+def test_the_help_says_a_device_does_nothing_until_given_a_role(
     capsys: pytest.CaptureFixture[str],
 ) -> None:
-    """ADR-0298 §9: "No device's roles are checked until one change switches
-    enforcement on". Until then an admitted device with no role is still served, so
-    the help must not tell the owner that withholding a role restricts anything."""
+    """ADR-0298 §9:4: at the cutover every enrolled and registered device "holds no
+    role", and the hub checks every request from then on, so the help tells the owner
+    that a device without a role is refused — and no longer that roles are not enforced.
+    """
     with pytest.raises(SystemExit):
         device.main(["--help"])
     printed = " ".join(capsys.readouterr().out.split())
-    assert "recorded now and not yet enforced" in printed
-    assert "From then on, a device does nothing until it is given a role" in printed
+    assert "not yet enforced" not in printed
+    assert "A device does nothing until it is given a role" in printed
+    assert "The hub checks every request against these roles" in printed

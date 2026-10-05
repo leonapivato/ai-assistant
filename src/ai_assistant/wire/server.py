@@ -296,11 +296,12 @@ class DeviceRoster(Protocol):
     system that composes on one event loop, so no revocation lands between a role
     read and the request it allowed.
 
-    **A listener passes none until the cutover** (ADR-0298 §9). Without a roster the
-    requesting device of every request is the hub's own machine (§9:2), so the
-    checks are built and tested but refuse nothing; the change that passes one is
-    the change that makes the wire server set a requesting device other than ``hub``
-    (§9:3).
+    **Passing one is the cutover** (ADR-0298 §9:3): it is what makes the wire server
+    set a requesting device other than ``hub``. The hub passes its roster
+    (:class:`ai_assistant.service.roster.HubRoster`) on both listeners. Without one
+    the requesting device of every request is the hub's own machine (§9:2), so the
+    checks run and refuse nothing — which is what a caller serving a fake engine,
+    with no roster of its own, still gets.
     """
 
     def requesting_device(self, *, connecting: str, acting_for: str | None) -> RequestingDevice:
@@ -435,8 +436,9 @@ async def serve_connection(  # noqa: PLR0913 — the engine, the two stream halv
         delivery: The hub's one delivery registry (ADR-0131 §3), or ``None`` where
             a caller serves no delivery — which makes every ``next_notification``
             close the connection under §2 rather than silently claiming nothing.
-        roster: The device roster (ADR-0298 §10:7), or ``None`` until the cutover,
-            when every request's requesting device is the hub's own machine (§9:2).
+        roster: The device roster (ADR-0298 §10:7), which the hub passes on both
+            listeners (§9:3), or ``None``, when every request's requesting device is
+            the hub's own machine (§9:2).
     """
     claimed: list[str | None] = []
     try:

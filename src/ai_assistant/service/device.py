@@ -75,9 +75,10 @@ the first time that gateway names it. A gateway on the hub's own machine is
 named '{HUB_DEVICE}'. The roles are '{DeviceRole.COMMANDS.value}' (commands and queries)
 and '{DeviceRole.SPOKES.value}' (host of spokes).
 
-Roles are recorded now and not yet enforced: until the hub's enforcement is
-switched on, every admitted device reaches what it reaches today, whatever roles
-it holds. From then on, a device does nothing until it is given a role.
+The hub checks every request against these roles. A device does nothing until
+it is given a role: an enrolled device, and a browser device a gateway names, is
+refused until then. The hub's own machine holds every role through its local
+socket and needs none given.
 
 An enrolment prints its credential once. The hub keeps only a verifier, so a
 credential that is lost cannot be recovered — enrol the device again, which mints

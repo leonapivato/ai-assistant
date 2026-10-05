@@ -48,6 +48,7 @@ if TYPE_CHECKING:
     from ai_assistant.service.enrolment import DeviceRegistry
     from ai_assistant.service.overlay import OverlayAgent
     from ai_assistant.service.transport import ConnectionBudget, DeliverySlots
+    from ai_assistant.wire.server import DeviceRoster
 
 _log = structlog.get_logger(__name__)
 
@@ -96,6 +97,7 @@ class RemoteListener:
         settings: Settings,
         *,
         registry: DeviceRegistry,
+        roster: DeviceRoster,
         agent: OverlayAgent,
         budget: ConnectionBudget,
         delivery: DeliverySlots,
@@ -106,6 +108,11 @@ class RemoteListener:
             engine: The in-process engine this hub owns.
             settings: The deployment's ceilings, deadline and overlay address.
             registry: The enrolment record's live view (ADR-0124 §6, §8).
+            roster: The hub's device roster (ADR-0298 §10:7), the one the loopback
+                listener holds. **Required**, because on this door a request with
+                no roster would run as the hub's own machine with every role: the
+                connecting device is an enrolled device, never ``hub``, and acts
+                with the roles the owner gave it (§2:1, §9:4).
             agent: The overlay agent on this machine (§4).
             budget: The hub's shared ceilings (§7).
             delivery: The hub's one delivery registry (ADR-0131 §3). Shared with
@@ -125,6 +132,7 @@ class RemoteListener:
         self._engine = engine
         self._settings = settings
         self._registry = registry
+        self._roster = roster
         self._agent = agent
         self._budget = budget
         self._delivery = delivery
@@ -381,6 +389,7 @@ class RemoteListener:
                     # holds, which is ADR-0131 §3's "one connection registry per
                     # hub… shared by every listener".
                     delivery=self._delivery,
+                    roster=self._roster,
                 )
             finally:
                 held = self._writers.get(identity, set())

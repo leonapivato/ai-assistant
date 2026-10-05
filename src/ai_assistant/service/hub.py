@@ -78,6 +78,7 @@ from ai_assistant.service.exits import EXIT_DEPLOYMENT, EXIT_OK, EXIT_RESTART, c
 from ai_assistant.service.lock import LOCK_FILENAME, InstanceLock
 from ai_assistant.service.overlay import OverlayIdentityUnavailableError, local_agent
 from ai_assistant.service.remote import RemoteListener
+from ai_assistant.service.roster import HubRoster
 from ai_assistant.service.scheduler import Scheduler, jobs_for
 from ai_assistant.service.transport import ConnectionBudget, DeliverySlots, Listener
 
@@ -277,12 +278,16 @@ class _Devices:
     Attributes:
         store: The durable record: enrolments and the device roster.
         registry: Its live view, and where a revocation takes effect (ADR-0124 §8).
+        roster: The wire's device seam over the registry (ADR-0298 §10:7), held by
+            **both** listeners: passing it is the cutover (§9:3), and a door served
+            without it would run every request as the hub's own machine.
         admin: The hub-local entry point for the owner's acts (§6).
         listener: The remote door, or ``None`` where it is not configured.
     """
 
     store: EnrolmentStore
     registry: DeviceRegistry
+    roster: HubRoster
     admin: AdminListener
     listener: RemoteListener | None
 
@@ -688,7 +693,7 @@ async def _start_and_run(settings: Settings, stop: asyncio.Event, shutdown: _Shu
             if remote is not None:
                 await remote.start(build=__version__)
             await devices.admin.start()
-            await listener.start(build=__version__)
+            await listener.start(build=__version__, roster=devices.roster)
             if remote is not None:
                 await remote.begin_serving()
             await devices.admin.begin_serving()
@@ -785,6 +790,7 @@ async def _build_devices(
         return _Devices(
             store=store,
             registry=registry,
+            roster=HubRoster(registry),
             admin=AdminListener(registry, data_dir=data_dir),
             listener=None,
         )
@@ -802,12 +808,20 @@ async def _build_devices(
         raise ConfigurationError(msg) from exc
     store = EnrolmentStore(data_dir / ENROLMENTS_FILENAME)
     registry = DeviceRegistry(store, hub_identity=identity)
+    roster = HubRoster(registry)
     return _Devices(
         store=store,
         registry=registry,
+        roster=roster,
         admin=AdminListener(registry, data_dir=data_dir),
         listener=RemoteListener(
-            engine, settings, registry=registry, agent=agent, budget=budget, delivery=delivery
+            engine,
+            settings,
+            registry=registry,
+            roster=roster,
+            agent=agent,
+            budget=budget,
+            delivery=delivery,
         ),
     )
 
