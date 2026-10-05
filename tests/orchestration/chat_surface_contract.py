@@ -40,6 +40,7 @@ from ai_assistant.core.types import (
     ConversationDeletedChange,
     ConversationStartedChange,
     ConversationState,
+    CurrentState,
     DeletedMessage,
     DeviceAccess,
     DevicesChangedChange,
@@ -72,7 +73,7 @@ if TYPE_CHECKING:
     from collections.abc import AsyncIterator, Awaitable, Callable, Sequence
 
     from ai_assistant.core.protocols import AssistantEngine
-    from ai_assistant.core.types import ChatStreamEnd, CurrentState, DeviceChange, MemoryWrite
+    from ai_assistant.core.types import ChatStreamEnd, DeviceChange, MemoryWrite
     from ai_assistant.testing import FakeConversationStore, FakeMemoryStore
 
 #: The payload limit every subject is built at: small enough that a page of a few
@@ -751,8 +752,8 @@ async def next_change(chunks: AsyncIterator[ChatStreamChunk | ChatStreamEnd]) ->
     """The next change a change stream sends, passing over its other chunks.
 
     Roles and heartbeats are the hub's session layer's (ADR-0298 §7:10), so a client
-    sends them and an engine followed in-process does not; a state is pushed as it
-    changes. Fails rather than hangs.
+    sends them and an engine followed in-process does not; a state is sent as the
+    stream opens and pushed as it changes. Fails rather than hangs.
     """
     async with asyncio.timeout(_SETTLE):
         async for chunk in chunks:
@@ -949,6 +950,37 @@ class ChatReaderContract:
         assert running.state.activation_id is not None
         assert ended.conversation_id == conversation
         assert ended.state == ConversationState(last_ended=ActivationEnding.DONE)
+
+    async def test_following_opens_with_the_state_the_last_activation_left(
+        self, chat_reader_surface: ChatReaderSubject
+    ) -> None:
+        """#2740, ADR-0296 §4:9: the state read on catch-up is sent as the stream opens.
+
+        An activation that ended before the stream was asked for changes nothing after
+        its first reading, so the stream sends the state it is in then, before any
+        change: a device that read "working…" before following is not left showing it.
+        """
+        engine = chat_reader_surface.engine
+        conversation = await _started(engine, _PHONE)
+        await engine.write_message(conversation, message=said(_PHONE, "m-1", "hello"))
+        await _answered(engine, conversation, 1)
+
+        opening: list[CurrentState] = []
+        async with closing_stream(engine.follow_chat(after=0)) as chunks:
+            async with asyncio.timeout(_SETTLE):
+                async for chunk in chunks:
+                    assert isinstance(chunk, ChatStreamChunk)
+                    if chunk.change is not None:
+                        break
+                    if chunk.state is not None:
+                        opening.append(chunk.state)
+
+        assert opening == [
+            CurrentState(
+                conversation_id=conversation,
+                state=ConversationState(last_ended=ActivationEnding.DONE),
+            )
+        ]
 
     async def test_an_activation_between_two_readings_still_pushes_how_it_ended(
         self, chat_reader_surface: ChatReaderSubject

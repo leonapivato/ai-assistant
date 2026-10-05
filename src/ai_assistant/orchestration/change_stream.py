@@ -29,16 +29,27 @@ what it runs (:class:`Activity`) is read on each interval, and a conversation wh
 account differs from the last reading has its state read and sent, to a device that
 reads it. The account carries a count that moves at every start and end, so an
 activation that began and ended between two readings still sends the state it left;
-what a device is sent is the state as of the reading, not every state in between. A
-stream opening sends the state of each conversation running then. The state is also
-read from the episodes on the conversation's place, so the engine moves the count when
-it forgets episodes there — a conversation's forgetting, or a forget naming one of its
-episodes — and that conversation's state is sent again.
+what a device is sent is the state as of the reading, not every state in between. The
+state is also read from the episodes on the conversation's place, so the engine moves
+the count when it forgets episodes there — a conversation's forgetting, or a forget
+naming one of its episodes — and that conversation's state is sent again.
+
+**A stream opens with the current state of every conversation its device reads**, at
+its first step and before its first page: ADR-0296 §4:9's "read with a conversation on
+catch-up", taken by the stream itself. A device reading the state before it asks for
+the stream cannot order that read against the stream's first reading of what runs, and
+a stream that pushed only what changed after that reading would never send a state
+that changed in between (#2740). Sent at the first reading, the device's starting point
+and the stream's are one, so every later change is a change from what the device was
+sent. The states go in conversation-id order, one chunk each, each read and checked
+against §7:5 just before it is sent, as the sweep below sends them; the cost is the
+sweep's own — one listing of the device's conversations, paged, and one state read per
+conversation — once per stream opened, plus one small chunk per conversation.
 
 **A state no act changed is caught by a sweep.** An episode leaving its retention
 window changes the state at that instant with nothing to count, so every
 :data:`CHANGE_STREAM_SWEEP_SECONDS` the stream reads again the state of every
-conversation its device reads and sends each that differs from the last it knew. The
+conversation its device reads and sends each that differs from the last it sent. The
 listing it reads is paged and may pass over a conversation that moves while it is
 read; the next sweep reads it again, so the sweep converges rather than claiming
 completeness.
@@ -180,14 +191,13 @@ class ChangeStream:
         """
         cursor = after
         # The first reading is taken as the stream opens, so whatever runs or ends
-        # from here on differs from it; what runs at this moment is sent with the
-        # first page.
+        # from here on differs from it; the state each conversation is in at this
+        # moment is sent before the first page (`_following`).
         seen: Running = dict(self._running())
-        due = {one for one, held in seen.items() if held.running}
         self._open += 1
         self._all_closed.clear()
         try:
-            following = self._following(device, cursor, seen, due)
+            following = self._following(device, cursor, seen)
             async with closing_stream(following) as chunks:
                 async for chunk in chunks:
                     yield chunk
@@ -201,13 +211,18 @@ class ChangeStream:
         device: RequestingDevice,
         cursor: int,
         seen: Running,
-        due: set[str],
     ) -> AsyncIterator[ChatStreamChunk | ChatStreamEnd]:
         """The body of :meth:`follow`, counted open there until it is closed."""
         loop = asyncio.get_running_loop()
+        # The last state sent of each conversation, which the sweep compares against.
+        known: dict[str, ConversationState] = {}
+        due: set[str] = set()
         try:
-            # Each state as the stream opens, so the sweep sends what changes after.
-            known = await self._sweep(device, seen, {})
+            # Every state as the stream opens, before any change (#2740): against an
+            # empty `known`, the sweep sends each conversation the device reads.
+            async with closing_stream(self._sweep(device, seen, known)) as states:
+                async for chunk in states:
+                    yield chunk
             swept = loop.time()
             while not self._closing() and not self._woken.is_set():
                 page = await self._page(device, cursor)
@@ -231,11 +246,9 @@ class ChangeStream:
                 due = set()
                 if loop.time() >= swept + self._sweep_seconds:
                     swept = loop.time()
-                    for conversation_id in sorted(await self._read_conversations(device)):
-                        state = await self._state(device, conversation_id, seen)
-                        if state is not None and known.get(conversation_id) != state.state:
-                            known[conversation_id] = state.state
-                            yield ChatStreamChunk(state=state)
+                    async with closing_stream(self._sweep(device, seen, known)) as states:
+                        async for chunk in states:
+                            yield chunk
                 if len(page.changes) < CHANGE_STREAM_PAGE:
                     with contextlib.suppress(TimeoutError):
                         async with asyncio.timeout(self._poll_seconds):
@@ -246,13 +259,18 @@ class ChangeStream:
 
     async def _sweep(
         self, device: RequestingDevice, seen: Running, known: dict[str, ConversationState]
-    ) -> dict[str, ConversationState]:
-        """Every conversation the device reads, with its current state now, into ``known``."""
-        for conversation_id in await self._read_conversations(device):
+    ) -> AsyncIterator[ChatStreamChunk]:
+        """The state of each conversation the device reads that differs from ``known``.
+
+        In conversation-id order, each read and checked against §7:5 just before it is
+        sent, and recorded in ``known`` as sent. Against an empty ``known`` — the
+        stream opening — every conversation the device reads is sent its state.
+        """
+        for conversation_id in sorted(await self._read_conversations(device)):
             state = await self._state(device, conversation_id, seen)
-            if state is not None:
+            if state is not None and known.get(conversation_id) != state.state:
                 known[conversation_id] = state.state
-        return known
+                yield ChatStreamChunk(state=state)
 
     async def _read_conversations(self, device: RequestingDevice) -> set[str]:
         """Every conversation the device reads now: every one held, for the hub's.

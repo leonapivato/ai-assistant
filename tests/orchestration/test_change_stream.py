@@ -38,6 +38,7 @@ from ai_assistant.core.types import (
     ConversationDeletedChange,
     ConversationStartedChange,
     ConversationState,
+    CurrentState,
     DeletedMessage,
     DeviceAccess,
     DeviceChange,
@@ -68,7 +69,7 @@ if TYPE_CHECKING:
     from collections.abc import AsyncIterator, Awaitable, Sequence
     from pathlib import Path
 
-    from ai_assistant.core.types import CurrentState, MemoryRecord
+    from ai_assistant.core.types import MemoryRecord
 
 _PHONE: Final = ChatDevice(device_id="phone", access=DeviceAccess.READ_WRITE)
 _WATCH: Final = ChatDevice(device_id="watch", access=DeviceAccess.READ)
@@ -243,6 +244,8 @@ async def test_a_device_removed_part_way_through_a_page_is_sent_nothing_more_of_
 
     async with _Following(_stream(chat).follow(WATCH, after=0)) as following:
         first = await following.next(_SETTLE)
+        while isinstance(first, ChatStreamChunk) and first.state is not None:
+            first = await following.next(_SETTLE)  # the state it opens with (#2740)
         await chat.set_conversation_devices(conversation, [_PHONE])
         rest = await following.drain()
 
@@ -383,9 +386,98 @@ async def test_a_state_is_pushed_only_to_a_device_that_reads_the_conversation() 
         task.cancel()
     await asyncio.gather(*tasks, return_exceptions=True)
 
-    assert [one.conversation_id for one in states["phone"]] == [shown]
-    assert states["phone"][0].state.working
+    assert [one.conversation_id for one in states["phone"]] == [shown, shown], (
+        "as the stream opened, then as it changed"
+    )
+    assert all(one.state.working for one in states["phone"])
     assert states["pen"] == []
+
+
+async def _opening(stream: ChangeStream, device: RequestingDevice) -> list[ChatStreamChunk]:
+    """What a stream opened from ``0`` sends ``device`` up to its first change, inclusive."""
+    sent: list[ChatStreamChunk] = []
+    async with closing_stream(stream.follow(device, after=0)) as following:
+        async with asyncio.timeout(_SETTLE):
+            async for chunk in following:
+                assert isinstance(chunk, ChatStreamChunk)
+                sent.append(chunk)
+                if chunk.change is not None:
+                    return sent
+    msg = "the stream ended before its first change"
+    raise AssertionError(msg)
+
+
+async def test_a_stream_opens_with_each_read_conversations_state_before_any_change() -> None:
+    """#2740: ADR-0296 §4:9's catch-up read, taken by the stream as it opens.
+
+    Every conversation the device reads, in conversation-id order, ahead of the first
+    page; none it does not read (ADR-0298 §7:5); one running then sent once, not again
+    with the first page.
+    """
+    chat = FakeConversationStore()
+    first = await _chat(chat, _PHONE)
+    second = await _chat(chat, _PHONE, _WATCH)
+    await _chat(chat, _PEN)  # one the phone does not read
+    engine = _Engine()
+    engine.states[first] = ConversationState(last_ended=ActivationEnding.DONE)
+    engine.states[second] = ConversationState(working=True, activation_id="a-1")
+    engine.activity = {second: Activity(turns=1, running=("a-1",))}
+
+    async with _Following(_stream(chat, engine).follow(PHONE, after=0)) as following:
+        opening: list[ChatStreamChunk] = []
+        while (chunk := await following.next(_SETTLE)) is not None:
+            assert isinstance(chunk, ChatStreamChunk)
+            if chunk.change is not None:
+                break
+            opening.append(chunk)
+        later: list[CurrentState] = []
+        while (chunk := await following.next(0.2)) is not None:
+            if isinstance(chunk, ChatStreamChunk) and chunk.state is not None:
+                later.append(chunk.state)
+
+    expected = {one: engine.states[one] for one in sorted([first, second])}
+    assert [(one.state.conversation_id, one.state.state) for one in opening if one.state] == list(
+        expected.items()
+    )
+    assert all(one.state is not None for one in opening), "states alone, before any change"
+    assert later == [], "nothing changed since, so nothing more is sent"
+
+
+async def test_a_state_that_changed_before_the_stream_opened_is_still_sent() -> None:
+    """#2740's sequence: the device read *working*, the activation ended, then it opened.
+
+    The stream's first reading already holds the ended activation, so nothing changes
+    from its point of view; the state is sent because it opens with it.
+    """
+    chat = FakeConversationStore()
+    conversation = await _chat(chat, _PHONE)
+    engine = _Engine()
+    engine.states[conversation] = ConversationState(working=True, activation_id="a-1")
+    engine.activity = {conversation: Activity(turns=1, running=("a-1",))}
+    # 1. The device reads the state and gets "working…" — then 2. the activation ends.
+    read = await engine.state_of(conversation, ("a-1",))
+    engine.states[conversation] = ConversationState(last_ended=ActivationEnding.DONE)
+    engine.activity = {conversation: Activity(turns=2, running=())}
+
+    # 3. The stream opens, its first reading the ended activation.
+    sent = await _opening(_stream(chat, engine), PHONE)
+
+    assert read == ConversationState(working=True, activation_id="a-1")
+    assert [one.state for one in sent if one.state is not None] == [
+        CurrentState(
+            conversation_id=conversation, state=ConversationState(last_ended=ActivationEnding.DONE)
+        )
+    ]
+
+
+async def test_the_hubs_machine_opens_with_every_conversations_state() -> None:
+    """ADR-0298 §3:2: an end of every conversation, so every one's state as it opens."""
+    chat = FakeConversationStore()
+    held = sorted([await _chat(chat, _PHONE), await _chat(chat, _PEN)])
+
+    sent = await _opening(_stream(chat), HUB_REQUESTING_DEVICE)
+
+    assert [one.state.conversation_id for one in sent if one.state is not None] == held
 
 
 async def test_the_stream_ends_with_its_cursor_when_the_engine_closes() -> None:
