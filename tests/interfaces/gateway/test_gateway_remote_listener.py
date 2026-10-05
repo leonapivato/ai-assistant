@@ -126,6 +126,9 @@ class _FakeAgent:
             refuse — §3's "a connection whose overlay identity cannot be obtained".
         asked: Every question, so a case can assert that a connection the gateway
             must not serve never reached §3's query at all.
+        own: Which node the gateway's own machine is, or ``None`` to refuse — asked
+            only where the hub is on another machine (ADR-0296 §1:7).
+        own_asked: How many times ``own`` was asked for.
     """
 
     bound_at: tuple[str, int] | None = None
@@ -133,6 +136,13 @@ class _FakeAgent:
     peers: list[str] = field(default_factory=list)
     default_peer: str | None = _PHONE
     asked: list[tuple[str, int]] = field(default_factory=list)
+    own: str | None = _GATEWAY_NODE
+    own_asked: int = 0
+
+    async def own_identity(self) -> str:
+        """Which node this machine is, taken from this machine's own agent."""
+        self.own_asked += 1
+        return _named(self.own, "the overlay agent names no node for this machine")
 
     async def identify(self, host: str, port: int) -> str:
         """Who is at ``host``, taken from this machine and never from the peer."""

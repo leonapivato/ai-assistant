@@ -63,6 +63,10 @@ class _AnyAgent:
         """Never called from this module."""
         raise AssertionError(host, port)
 
+    async def own_identity(self) -> str:
+        """Never called from this module: the hub here is on this machine."""
+        raise AssertionError
+
 
 def _settings(certificate: Path | str, key: Path | str, **overrides: Any) -> Settings:
     """Settings with the remote listener on and a pair configured."""

@@ -79,6 +79,10 @@ class FakeOverlayAgent:
             raise OverlayIdentityUnavailableError(msg)
         return self.identity
 
+    async def own_identity(self) -> str:
+        """Never asked by the connection: dialling names no device of its own."""
+        raise AssertionError
+
 
 class RecordingHub:
     """A listener that records the connect frame and answers however a case asks.

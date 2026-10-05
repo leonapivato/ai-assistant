@@ -2240,7 +2240,8 @@ _CHAT_DEVICE_OPTION = typer.Option(
     metavar="DEVICE_ID",
     help=(
         "The device this command line writes as, for a hub on another machine: this "
-        "machine's overlay identity. On the hub's own machine the device is 'hub'."
+        "machine's overlay identity, read from the overlay agent when omitted. On the "
+        "hub's own machine the device is 'hub'."
     ),
 )
 _DEVICE_ADD_OPTION = typer.Option(
@@ -2523,10 +2524,20 @@ async def _chat(conversation_id: str | None, *, device: str | None) -> int:
     One error boundary over every stage (ADR-0042 §7). Lines are read from the
     terminal on a thread of their own (:class:`_TerminalLines`), so the conversation
     keeps being followed while you type.
+
+    **This device is named once per command.** Where the hub is on another machine
+    and ``--device`` names nothing, it is read from this machine's overlay agent — the
+    agent ``client_overlay_agent_socket`` locates, which is the one the connection
+    to the hub asks as well (:func:`_open_engine`).
     """
     try:
         settings = load_settings()
-        this_device = _this_device(settings, named=device)
+        agent = (
+            None
+            if settings.remote_hub_address is None
+            else local_agent(settings.client_overlay_agent_socket)
+        )
+        this_device = await _this_device(settings, named=device, agent=agent)
         engine = await _open_engine()
     except (AssistantError, TransportError) as exc:
         _render_error(exc)
