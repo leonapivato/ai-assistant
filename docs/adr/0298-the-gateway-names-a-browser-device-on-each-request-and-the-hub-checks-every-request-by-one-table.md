@@ -1,6 +1,6 @@
 # 298. The gateway names a browser device on each request, and the hub checks every request by one table
 
-- Status: Proposed
+- Status: Accepted
 - Date: 2026-10-05
 - Scope: [#2578](https://github.com/leonapivato/ai-assistant/issues/2578), the channel redesign: how the device session ADR-0296 decides is built — the browser device's name on the wire, the requesting device inside the hub, registration, the route table, the refusal, the change stream's membership and heartbeat, the trust boundary and the cutover.
 - Dependency: ADR-0296, ratified.
