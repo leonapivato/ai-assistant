@@ -76,6 +76,7 @@ from ai_assistant.core.errors import (
 from ai_assistant.core.types import (
     DEFAULT_PAGE_SIZE,
     ActionRequest,
+    ActivationStop,
     AnswerKind,
     Attestation,
     BeliefBand,
@@ -1894,3 +1895,47 @@ async def test_a_cancellation_landing_as_the_cleanup_finishes_still_cancels_the_
 
     assert landed
     assert await memory.get(landed[0]) is None
+
+
+# --- ADR-0297 §3-§5: a stop reaches a running resume ------------------------------------
+
+
+async def test_a_stop_reaches_a_resume_while_it_runs_and_it_returns_stopped() -> None:
+    """A control activation runs from its admission to its finalization, so a stop finds it.
+
+    The stop lands while the resolving answer is being written — after the resume
+    admitted its activation — and the resume then returns what it established, stopped,
+    with no reply (ADR-0297 §4).
+    """
+    engine = FakeAssistantEngine()
+    known = "7c9e6679-7425-40de-944b-e07fc1f90ae7"
+    engine.activation_id_factory = lambda: known
+    confirmed = _recorded_confirm(_binding())
+    await engine.trail.record(confirmed)
+    engine.hold_confirmation_decision("park-1", confirmed)
+    parked = engine.park("park-1", egress=_binding())
+    answers: list[ActivationStop] = []
+    record = engine.trail.record
+
+    async def stopping(decision: PermissionDecision) -> str:
+        if decision.resolves is not None:
+            answers.append(await engine.stop_activation(known))
+        return await record(decision)
+
+    engine.trail.record = stopping  # type: ignore[method-assign]
+
+    resumed = await engine.resume(
+        parked.token,
+        approved=True,
+        timeout=timedelta(seconds=30),
+        remember_recipients_until=_RECIPIENT_AT + timedelta(days=1),
+    )
+
+    assert answers == [ActivationStop.STOPPED]
+    assert resumed.stopped is True
+    assert resumed.reply is None
+    assert resumed.reply_degraded is False
+    assert resumed.step is not None
+    assert resumed.recipient_grant is not None
+    # Finalized: no longer running, and a second stop finds nothing it can mark.
+    assert await engine.stop_activation(known) is not ActivationStop.STOPPED

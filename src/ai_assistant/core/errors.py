@@ -1900,11 +1900,11 @@ class ActivationStoppedError(AssistantError):
     current state (ADR-0295 §3:5). A cancellation of the caller's own task still
     propagates as itself.
 
-    **Never raised by** ``resume``: a resume whose control activation was stopped
-    records the user's answer before it acts, so it returns its outcome with
-    ``TurnOutcome.stopped`` set (ADR-0297 §4, ADR-0235 §6:10) — save where it ended
-    on a raise and has no outcome to return, which a stop then reports in this
-    class's place.
+    **Never raised by** ``resume``, which is not a turn call: a resume whose control
+    activation was stopped returns its outcome with ``TurnOutcome.stopped`` set
+    wherever its answer was recorded (ADR-0297 §4, ADR-0235 §6:10), and one that
+    raised before any answer was recorded raises as it would have, its outward
+    exception intact (ADR-0275 §5:6).
 
     It carries a message and **no structured state**. It crosses the wire
     (ADR-0297 §6:3), reconstructed by name on the far side like every other

@@ -781,8 +781,8 @@ async def test_a_pass_ended_by_a_rule_is_not_moved_by_a_later_mark() -> None:
 async def test_a_recorded_stage_that_raises_after_the_mark_ends_stopped_and_reraises() -> None:
     """The resume path's record (ADR-0284 §5:5): the stop's end entry, the error kept.
 
-    A resume that ended on a raise has no outcome to return, so the raise continues to its
-    caller, which reports the stop in its place.
+    The raise continues to the resume, which returns what it established where its
+    answer was recorded, and raises as it would have where none was.
     """
     mark = _Mark()
     record = StageRecord()
