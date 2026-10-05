@@ -1,6 +1,6 @@
 # 296. A device has one session, and a browser is a device of its own
 
-- Status: Accepted
+- Status: Partially superseded by ADR-0298 (§1:5's acceptance of a name only for a browser device registered under that gateway, and the sentence under it that the gateway is not trusted to act as any other device, as they reach a machine a gateway names for the first time)
 - Date: 2026-10-04
 - Scope: [#2578](https://github.com/leonapivato/ai-assistant/issues/2578), the channel redesign: the device session, how a device is known to the hub, what it may do, and how ADR-0292's routes and ADR-0293's change stream reach it.
 - Authorization: the owner accepted proposal #2687 on 2026-10-04, at `099c83da`, which records the rulings of the owner's walkthrough the same day, and the dispatcher assigned 0296. This ADR is that proposal converted under `docs/proposals/README.md` → "When it is decided".
@@ -11,6 +11,19 @@
 - **Partially supersedes** [ADR-0174](0174-a-gateway-may-serve-a-browser-on-another-overlay-device-and-that-hop-is-the-fourth-egress-boundary.md) — **two scopes.** **§4:4's bars on keying any rule on the list beyond admission, on citing it toward a device-scoped permission, on recording anything durable or revoking anything, and on any browser identity crossing the wire**: listing a machine at a gateway registers it at the hub under that gateway, as a browser device with no roles where it is not already a device; the hub keeps that registration and revokes it, and checks the device's roles on every request the gateway names it on (§1–§3 below). **§3:3's *and to no other record***: the hub's registration of a browser device may keep the overlay identity that names it (§1 below). A listed device is still no enrolment under ADR-0124 §6, no ADR-0097 grant and no principal, and every other clause stands, §4:3 and §4:5 included.
 - **Partially supersedes** [ADR-0175](0175-a-browser-stream-is-a-response-body-on-the-request-the-browser-made-and-one-delivery-fans-out-to-every-open-stream.md) — **one scope.** **§5:4's and §6:4's bars on a per-browser identifier and a per-browser scope, and §6:4's *a browser reaches exactly what the gateway's own device reaches*, as they reach a browser device**: the gateway names the browser device to the hub, and a browser device acts with its own roles (§1, §2 below). No session value crosses the wire, two browsers on one machine stay one device, every browser is still the owner under ADR-0099 §1, and every other clause stands.
 - **Partially supersedes** [ADR-0177](0177-the-browsers-control-surface-is-thirty-operations-and-a-credential-is-entered-only-on-a-loopback-origin.md) — **three scopes.** **§1:1's enumeration, which gains the acts in the medium (ADR-0293 §11:2) and the change stream** (§5 below). **§1:5's closed class of what the gateway supplies of its own, which gains the name of the browser device a request comes from** (§1 below). **§1:6's *no per-browser scope* and *a browser reaches exactly what the gateway's own device reaches*, as they reach a browser device**: of the operations a browser reaches, a browser device reaches what its roles allow (§2 below). §1:6's single principal stands, and every other clause stands, §1:3 included.
+- Partially superseded: 2026-10-05 by ADR-0298 — one scope. §1:5's *"the hub accepts the
+  name only for a browser device registered under that gateway"*, read with the sentence
+  under it that the gateway "is not trusted to act as any other device", as they reach a
+  machine a gateway names for the first time. The hub cannot see a gateway's listing, so
+  a gateway's first naming of a machine is that listing reaching the hub and registers it
+  under that gateway (ADR-0298 §4); the hub refuses a gateway's name only for a
+  registration the owner revoked under it, for the hub's own machine, or beyond the
+  gateway's bound; and a gateway is trusted for its listing, so it can act as any device
+  it names that the hub accepts, with that device's roles (ADR-0298 §8). §1:3 and §1:4,
+  the owner's rulings, stand as written, and every other clause stands. This
+  replacement takes effect on ratification of ADR-0298. This reciprocal header record
+  accompanies the numbered draft under ADR-0070 and ADR-0082; the ratified body below is
+  preserved.
 
 ## Context
 
