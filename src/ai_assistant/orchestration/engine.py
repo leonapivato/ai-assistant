@@ -106,6 +106,7 @@ from ai_assistant.core.errors import (
     UngrantableActError,
     UnknownContinuationError,
 )
+from ai_assistant.core.streams import closing_stream
 from ai_assistant.core.types import (
     DEFAULT_PAGE_SIZE,
     MAX_ASSOCIATION_CANDIDATES,
@@ -236,6 +237,7 @@ from ai_assistant.orchestration.activation_state import (
 )
 from ai_assistant.orchestration.activation_writer import capture_loss
 from ai_assistant.orchestration.authorization_surface import projection_of
+from ai_assistant.orchestration.change_stream import Activity, ChangeStream
 from ai_assistant.orchestration.channels import (
     ChannelProjection,
     ResolvedChannelInput,
@@ -347,7 +349,7 @@ from ai_assistant.orchestration.understanding import (
 from ai_assistant.orchestration.verification import Comparison, compare
 
 if TYPE_CHECKING:
-    from collections.abc import Sequence
+    from collections.abc import AsyncIterator, Sequence
 
     from ai_assistant.core.clock import Clock
     from ai_assistant.core.protocols import (
@@ -373,6 +375,8 @@ if TYPE_CHECKING:
         BeliefBand,
         ChatChanges,
         ChatDevice,
+        ChatStreamChunk,
+        ChatStreamEnd,
         ConnectedAccount,
         ConnectionAct,
         Conversation,
@@ -3587,6 +3591,10 @@ class Engine:
         #: end of its finalization: what a conversation's current state reads its
         #: "working…" from (ADR-0293 §8:2), whether or not its episode survives.
         self._running: list[ActivationScope] = []
+        #: Per conversation, how many activations started from it have ended: with
+        #: :attr:`_running`, the engine's account the change stream pushes a
+        #: conversation's current state from (ADR-0296 §4:9).
+        self._activation_turns: dict[str, int] = {}
         self._activation_coordinator = ActivationCoordinator(
             writer=conversations.activation_writer,
             register=self._register_capture,
@@ -3831,6 +3839,18 @@ class Engine:
             )
             if chat_reader
             else None
+        )
+        # ADR-0298 §7: the engine's half of the change stream, over the same chat
+        # space and the same account of what runs as ``conversation`` reads.
+        self._change_stream = ChangeStream(
+            chat=conversations.chat_space,
+            running=self._activity,
+            state_of=lambda conversation_id, running: self._conversations.state(
+                conversation_id, running=running
+            ),
+            closing=lambda: self._closing,
+            tracked=self._stream_read,
+            max_payload_bytes=max_payload_bytes,
         )
 
     @property
@@ -7350,21 +7370,61 @@ class Engine:
         self._reject_if_closing()
         named = identifier(conversation_id, name="conversation_id")
         check_arguments("conversation", max_bytes=self._max_payload_bytes, conversation_id=named)
-        running = [
-            one.state.activation_id
-            for one in self._running
-            if one.state is not None and one.state.conversation_id == named
-        ]
-        # ADR-0293 §8:2: an activation the reader started shows "working…" until the
-        # message answering it is written, which is after its own run has ended.
-        if self._chat_reader is not None and (
-            (reading := self._chat_reader.working(named)) is not None and reading not in running
-        ):
-            running.append(reading)
+        running = list(self._running_conversations().get(named, ()))
         device = current_requesting_device()
         return await self._tracked(
             self._digest(device, named, running=running), "conversation", checked=True
         )
+
+    def _running_conversations(self) -> dict[str, tuple[str | None, ...]]:
+        """What this engine runs, per conversation it was started from (ADR-0293 §8:2).
+
+        Each running activation started from a conversation, oldest first, by its id
+        — ``None`` for one whose id the factory failed to mint (ADR-0297 §5) — and
+        the activation the chat's reader has an input in for, which shows "working…"
+        until the message answering it is written, after its own run has ended. Read
+        by :meth:`conversation` and by the change stream (ADR-0296 §4:9).
+        """
+        running: dict[str, list[str | None]] = {}
+        for one in self._running:
+            if one.state is not None and one.state.conversation_id is not None:
+                running.setdefault(one.state.conversation_id, []).append(one.state.activation_id)
+        if self._chat_reader is not None:
+            for conversation_id, (_, reading) in self._chat_reader.activity().items():
+                if reading is None:
+                    continue
+                held = running.setdefault(conversation_id, [])
+                if reading not in held:
+                    held.append(reading)
+        return {conversation_id: tuple(held) for conversation_id, held in running.items()}
+
+    def _count_end(self, scope: ActivationScope) -> None:
+        """Count an activation's end against the conversation it was started from.
+
+        ADR-0296 §4:9: an end the change stream can see, even where the activation
+        began and ended between two of its readings (:meth:`_activity`).
+        """
+        if scope.state is not None and (ended := scope.state.conversation_id) is not None:
+            self._activation_turns[ended] = self._activation_turns.get(ended, 0) + 1
+
+    def _activity(self) -> dict[str, Activity]:
+        """What this engine runs per conversation, with a count of its starts and ends.
+
+        The change stream's reading (ADR-0296 §4:9): :meth:`_running_conversations`,
+        beside a count that moves when an activation started from the conversation
+        ends, or when the chat's reader admits one or writes its reply.
+        """
+        running = self._running_conversations()
+        reader = {} if self._chat_reader is None else self._chat_reader.activity()
+        named = running.keys() | self._activation_turns.keys() | reader.keys()
+        return {
+            conversation_id: Activity(
+                turns=self._activation_turns.get(conversation_id, 0)
+                + reader.get(conversation_id, (0, None))[0],
+                running=running.get(conversation_id, ()),
+            )
+            for conversation_id in named
+        }
 
     async def _digest(
         self, device: RequestingDevice, conversation_id: str, *, running: Sequence[str | None]
@@ -7676,6 +7736,55 @@ class Engine:
                 limit=limit,
             )
         return fit_changes(page, max_bytes=self._max_payload_bytes)
+
+    def follow_chat(self, *, after: int) -> AsyncIterator[ChatStreamChunk | ChatStreamEnd]:
+        """Follow the chat space's change stream from a cursor (ADR-0296 §4, ADR-0298 §7).
+
+        ADR-0298 §5 "Reading many": a device other than the hub's own machine must
+        hold a role, checked as the stream's first step, and is sent only what it may
+        see (:class:`~ai_assistant.orchestration.change_stream.ChangeStream`). Every
+        read the stream makes, its role check included, is tracked for the drain and
+        traced by none (:meth:`_stream_read`).
+
+        Raises:
+            RuntimeError: If the engine is shutting down.
+            ValueError: If ``after`` is outside ``[0, 2**63)``.
+            OversizedValueError: If the arguments exceed the contract limit.
+        """
+        self._reject_if_closing()
+        cursor = check_chat_cursor(after, name="after")
+        check_arguments("follow_chat", max_bytes=self._max_payload_bytes, after=cursor)
+        device = current_requesting_device()
+        return self._following(device, cursor)
+
+    async def _following(
+        self, device: RequestingDevice, cursor: int
+    ) -> AsyncIterator[ChatStreamChunk | ChatStreamEnd]:
+        """Check the device's role, then relay its stream."""
+        if not device.is_hub:
+            await self._stream_read(self._device_checks.reading_many(device, "follow_chat"))
+        async with closing_stream(self._change_stream.follow(device, after=cursor)) as chunks:
+            async for chunk in chunks:
+                yield chunk
+
+    async def _stream_read[T](self, work: Awaitable[T]) -> T:
+        """Run one read of an open change stream as a task shutdown drains, untraced.
+
+        A change stream is no one operation: it reads the chat space on an interval for
+        as long as its device follows it (ADR-0298 §7), so a trace per read would be a
+        trace per interval per open stream, recording no operation anyone asked for.
+        Each read is still registered for the drain (ADR-0042 §2), and is not
+        shielded: a device that stops following stops the read. Once shutdown has
+        begun a read is refused, as every public call is, so none is registered after
+        the drain has looked; the stream ends on that refusal.
+
+        Raises:
+            RuntimeError: If the engine is shutting down.
+        """
+        if self._closing and isinstance(work, Coroutine):
+            work.close()  # never started, so never awaited
+        self._reject_if_closing()
+        return await self._track(work, "follow_chat", traced=False)
 
     async def pending_confirmations(self) -> tuple[Confirmation, ...]:
         """Recover, from durable state, every confirmation a user may still answer (ADR-0052 §1).
@@ -9675,6 +9784,7 @@ class Engine:
                 return cast("T", value), report
             finally:
                 self._running[:] = [one for one in self._running if one is not scope]
+                self._count_end(scope)
                 CURRENT_ACTIVATION.reset(token)
 
         # Eager start enters run's finally and reaches only the closed barrier.

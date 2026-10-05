@@ -286,6 +286,10 @@ class ChatReader:
         # The activation each conversation's read has admitted for an input, until its
         # reply is written.
         self._current: dict[str, str] = {}
+        # Per conversation, how many times its entry in `_current` was set or cleared:
+        # what lets a reader of `activity` tell that an activation began and ended
+        # between two of its readings (ADR-0296 §4:9).
+        self._turns: dict[str, int] = {}
 
     def notice(self, conversation_id: str) -> None:
         """Tell the reader a user's message was written into a conversation (§6:1).
@@ -333,6 +337,17 @@ class ChatReader:
         until the message answering it is in the transcript (§8:2).
         """
         return self._current.get(conversation_id)
+
+    def activity(self) -> dict[str, tuple[int, str | None]]:
+        """Per conversation this reader has read for, a count of changes and its activation.
+
+        The count moves each time an activation is admitted for the conversation and
+        each time its reply is written, and the activation is :meth:`working`'s. What
+        the change stream reads to push a conversation's current state when it changes
+        (ADR-0296 §4:9): a count that moved between two readings is a change even where
+        the activation began and ended between them. A fresh mapping on every call.
+        """
+        return {one: (turns, self._current.get(one)) for one, turns in self._turns.items()}
 
     async def take_in(self, taken: ChatInput, *, into: list[int]) -> None:
         """Mark the input's messages taken in by its activation (§6:6, §6:8).
@@ -400,6 +415,7 @@ class ChatReader:
         window = await self._window(conversation_id, waiting)
         activation_id = self._mint()
         self._current[conversation_id] = activation_id
+        self._turns[conversation_id] = self._turns.get(conversation_id, 0) + 1
         try:
             return await self._activate(
                 ChatInput(
@@ -411,6 +427,7 @@ class ChatReader:
             )
         finally:
             self._current.pop(conversation_id, None)
+            self._turns[conversation_id] = self._turns.get(conversation_id, 0) + 1
 
     async def _window(
         self, conversation_id: str, waiting: Sequence[TranscriptMessage]

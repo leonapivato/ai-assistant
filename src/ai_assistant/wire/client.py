@@ -63,8 +63,10 @@ from pydantic import ValidationError
 from ai_assistant.core.channel_validation import snapshot
 from ai_assistant.core.device_context import current_acting_for
 from ai_assistant.core.episode_encoding import check_detail, check_list
+from ai_assistant.core.streams import closing_stream
 from ai_assistant.core.types import (
     DEFAULT_PAGE_SIZE,
+    ChatStreamChunk,
     EpisodeChunk,
     EpisodePage,
     ProcessingStatus,
@@ -123,6 +125,7 @@ if TYPE_CHECKING:
         ChannelResult,
         ChatChanges,
         ChatDevice,
+        ChatStreamEnd,
         ClarificationWithdrawal,
         Confirmation,
         ConnectedAccount,
@@ -423,7 +426,9 @@ class HubClient:
             delivery=delivery,
         )
 
-    async def _stream_call(self, method: str, payload: dict[str, object]) -> AsyncIterator[Any]:
+    async def _stream_call(
+        self, method: str, payload: dict[str, object], *, idle: timedelta | None = None
+    ) -> AsyncIterator[Any]:
         """Read one streamed exchange: chunk frames, then one terminal frame.
 
         The order is :meth:`_call`'s, with the last step turned into a loop:
@@ -443,6 +448,10 @@ class HubClient:
         ADR-0173 §11 restates ADR-0085 §8c for a method with no single result, and
         the clause binds both halves so a client is never silently less capable than
         the engine it stands in for.
+
+        ``idle`` is the change stream's: where it passes with no frame, the stream is
+        hung up and :class:`_StreamIdleError` raised, so the caller can reopen it
+        (ADR-0298 §7:13). ``None`` waits as long as the hub works, as a reply does.
         """
         relayed_for = _outbound_name()
         reader, writer, limit = await self._connect()
@@ -463,9 +472,17 @@ class HubClient:
                 max_frame_bytes=limit + ENVELOPE_RESERVE_BYTES,
             )
             while True:
-                reply = await self._read(
-                    reader, limit=limit + ENVELOPE_RESERVE_BYTES, idle=None, expecting=method
-                )
+                try:
+                    async with asyncio.timeout(None if idle is None else idle.total_seconds()):
+                        reply = await self._read(
+                            reader,
+                            limit=limit + ENVELOPE_RESERVE_BYTES,
+                            idle=None,
+                            expecting=method,
+                        )
+                except TimeoutError as exc:
+                    msg = f"{method}() carried no frame for {idle}"
+                    raise _StreamIdleError(msg) from exc
                 if reply.id != correlation:
                     msg = (
                         f"the hub answered with correlation id {reply.id!r} while "
@@ -1159,6 +1176,47 @@ class HubClient:
         return await self._call(  # type: ignore[no-any-return]  # Method adapter validates.
             "chat_changes", after=cursor, conversation_ids=named, limit=limit
         )
+
+    def follow_chat(self, *, after: int) -> AsyncIterator[ChatStreamChunk | ChatStreamEnd]:
+        """Follow the hub's change stream from a cursor (ADR-0296 §4, ADR-0298 §7).
+
+        One streamed exchange on a connection of its own, as every call here is, read
+        with the dead-peer timeout as its idle deadline: where that passes with no
+        frame — the hub writes a heartbeat at least every
+        :data:`~ai_assistant.wire.envelope.CHANGE_STREAM_HEARTBEAT` — the stream is
+        closed and reopened with the cursor (§7:13). **The cursor is the last change
+        the caller applied**: it moves past a change once the caller asks for the
+        chunk after it, so a change handed over and not yet taken is asked for again.
+        Every other failure is the caller's to see, as on any call.
+
+        Returns:
+            An async iterator over the stream's chunks, roles and heartbeats among
+            them, ending only with the hub's ``ChatStreamEnd``. Close it to stop
+            following (:func:`contextlib.aclosing`).
+
+        Raises:
+            ValueError: If ``after`` is outside ``[0, 2**63)`` — refused here,
+                before any I/O.
+        """
+        cursor = check_chat_cursor(after, name="after")
+        project(arguments_object(after=cursor))
+        return self._following(cursor)
+
+    async def _following(self, cursor: int) -> AsyncIterator[ChatStreamChunk | ChatStreamEnd]:
+        """Relay one change stream, reopening it from the cursor when it goes quiet."""
+        while True:
+            opened = self._stream_call(
+                "follow_chat", arguments_object(after=cursor), idle=env.CHANGE_STREAM_DEAD_PEER
+            )
+            try:
+                async with closing_stream(opened) as values:
+                    async for value in values:
+                        yield value
+                        if isinstance(value, ChatStreamChunk) and value.change is not None:
+                            cursor = value.change.seq
+                    return
+            except _StreamIdleError:
+                continue
 
     async def pending_confirmations(self) -> tuple[Confirmation, ...]:
         """Every parked confirmation the hub can currently resolve.
@@ -2261,6 +2319,14 @@ def _raise_handshake_error(payload: object) -> None:
         code = token if isinstance(token, str) else ""
     rendered = message or "the hub refused the connection without saying why"
     raise ProtocolError(f"{rendered} [{code}]" if code else rendered)
+
+
+class _StreamIdleError(Exception):
+    """A stream read with an idle deadline carried no frame within it (ADR-0298 §7:13).
+
+    Private: :meth:`HubClient.follow_chat` reopens the stream on it, and no caller
+    sees it.
+    """
 
 
 def _raise_reply_error(payload: object) -> None:

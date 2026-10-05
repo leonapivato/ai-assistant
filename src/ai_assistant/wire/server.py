@@ -33,6 +33,7 @@ from __future__ import annotations
 
 import asyncio
 import contextlib
+import socket
 from dataclasses import dataclass
 from typing import TYPE_CHECKING, Any, Final, Protocol
 
@@ -42,9 +43,10 @@ from ai_assistant.core.channel_validation import validate_combination
 from ai_assistant.core.device_context import serving_device
 from ai_assistant.core.errors import AssistantError, DeviceRefusal, DeviceRefusedError
 from ai_assistant.core.streams import closing_stream
-from ai_assistant.core.types import HUB_DEVICE_ID, HUB_REQUESTING_DEVICE
+from ai_assistant.core.types import HUB_DEVICE_ID, HUB_REQUESTING_DEVICE, ChatStreamChunk
 from ai_assistant.wire import envelope as env
 from ai_assistant.wire.codec import ENVELOPE_RESERVE_BYTES
+from ai_assistant.wire.envelope import CHANGE_STREAM_DEAD_PEER, CHANGE_STREAM_HEARTBEAT
 from ai_assistant.wire.errors import (
     ConnectionClosedError,
     CredentialNotSupportedError,
@@ -72,7 +74,7 @@ if TYPE_CHECKING:
     from datetime import timedelta
 
     from ai_assistant.core.protocols import AssistantEngine
-    from ai_assistant.core.types import RequestingDevice
+    from ai_assistant.core.types import DeviceRole, RequestingDevice
 
 _log = structlog.get_logger(__name__)
 
@@ -1255,6 +1257,21 @@ async def _dispatch_stream(  # noqa: PLR0913 — the engine, the request, the wr
         # naming, which an ordinary dispatch answers the same way.
         await emit(env.FrameKind.ERROR, error_payload(exc, max_bytes=limits.payload_limit))
         return
+    if chunk is ChatStreamChunk:
+        # ADR-0298 §7:10: a change stream's chunks are the engine's, and its roles and
+        # heartbeat the session layer's, which this one stream writes besides.
+        await _serve_change_stream(
+            engine,
+            frame,
+            writer,
+            watcher,
+            call=(method, positional, keyword),
+            limits=limits,
+            admission=admission,
+            session=session,
+            device=device,
+        )
+        return
     # **The whole stream runs as the requesting device** (ADR-0298 §2:2): the
     # engine's iterator is created, driven and closed inside the block.
     with serving_device(device):
@@ -1270,6 +1287,202 @@ async def _dispatch_stream(  # noqa: PLR0913 — the engine, the request, the wr
                     )
             except AssistantError as exc:
                 await emit(env.FrameKind.ERROR, error_payload(exc, max_bytes=limits.payload_limit))
+
+
+def _roles_chunk(device: RequestingDevice) -> ChatStreamChunk:
+    """The chunk telling a device its own roles (ADR-0298 §7:9)."""
+    return ChatStreamChunk(roles=tuple(sorted(device.roles)))
+
+
+def _bound_user_timeout(writer: asyncio.StreamWriter) -> None:
+    """Set a TCP connection's user timeout to the dead-peer timeout (ADR-0298 §7:14).
+
+    A heartbeat leaves unacknowledged data whenever the peer is gone, so the user
+    timeout turns a silent peer into a closed connection within the timeout. Where
+    the connection is not TCP — the local socket, on which the kernel reports a
+    closed peer at once — or the platform offers no such option, nothing is set.
+    """
+    held = writer.get_extra_info("socket")
+    option = getattr(socket, "TCP_USER_TIMEOUT", None)
+    if held is None or option is None or held.family not in {socket.AF_INET, socket.AF_INET6}:
+        return
+    milliseconds = int(CHANGE_STREAM_DEAD_PEER.total_seconds() * 1000)
+    with contextlib.suppress(OSError):
+        held.setsockopt(socket.IPPROTO_TCP, option, milliseconds)
+
+
+@dataclass(slots=True)
+class _ChangeStreamWriter:
+    """The session layer's half of one change stream (ADR-0298 §7:10).
+
+    Writes the frames — the engine's chunks as relayed, and its own roles and
+    heartbeats — and keeps the two instants the heartbeat and the roster's re-check
+    are due from.
+    """
+
+    frame: env.Envelope
+    writer: asyncio.StreamWriter
+    watcher: asyncio.Future[env.Envelope]
+    limits: ConnectionLimits
+    admission: Admission | None
+    session: _Session
+    roles: frozenset[DeviceRole]
+    written: float = 0.0
+    checked: float = 0.0
+
+    async def emit(self, kind: env.FrameKind, payload: Any) -> None:
+        """Write one frame, as a stream does, abandoning a write that does not drain.
+
+        Raises:
+            ProtocolError: If the peer wrote a frame while the stream was open.
+            ConnectionClosedError: If the write did not drain within the dead-peer
+                timeout (ADR-0298 §7:14), or the peer had gone.
+        """
+        if await _peek(self.watcher):
+            raise ProtocolError(_OVERLAPPED)
+        _check_live(self.admission)
+        try:
+            async with asyncio.timeout(CHANGE_STREAM_DEAD_PEER.total_seconds()):
+                await write_frame(
+                    self.writer,
+                    env.encode_envelope(env.Envelope(kind=kind, id=self.frame.id, payload=payload)),
+                    max_frame_bytes=self.limits.max_frame_bytes,
+                )
+        except TimeoutError as exc:
+            msg = "a change stream's write did not drain within the dead-peer timeout"
+            raise ConnectionClosedError(msg) from exc
+        if kind is env.FrameKind.CHUNK:
+            self.written = asyncio.get_running_loop().time()
+
+    async def fail(self, exc: AssistantError) -> None:
+        """End the stream with a declared failure as its terminal frame."""
+        await self.emit(
+            env.FrameKind.ERROR, error_payload(exc, max_bytes=self.limits.payload_limit)
+        )
+
+    async def relay(self, step: asyncio.Future[Any]) -> bool:
+        """Write what the engine's finished step gave; ``False`` once the stream ended."""
+        try:
+            value = step.result()
+        except StopAsyncIteration:
+            return False
+        except AssistantError as exc:
+            await self.fail(exc)
+            return False
+        if not isinstance(value, ChatStreamChunk):
+            await self.emit(env.FrameKind.RESULT, value)
+            return False
+        await self.emit(env.FrameKind.CHUNK, value)
+        return True
+
+    async def tick(self, now: float) -> bool:
+        """Ask the roster again and write a heartbeat, where each is due.
+
+        Returns:
+            ``False`` once the stream ended: the roster no longer accepts its device.
+        """
+        interval = CHANGE_STREAM_HEARTBEAT.total_seconds()
+        if now >= self.checked + interval:
+            self.checked = now
+            try:
+                current = _requesting_device(self.session, self.frame.acting_for)
+            except AssistantError as exc:
+                await self.fail(exc)
+                return False
+            if current.roles != self.roles:
+                self.roles = current.roles
+                await self.emit(env.FrameKind.CHUNK, _roles_chunk(current))
+        if asyncio.get_running_loop().time() >= self.written + interval:
+            await self.emit(env.FrameKind.CHUNK, ChatStreamChunk(heartbeat=True))
+        return True
+
+    def due(self, now: float) -> float:
+        """Seconds until the heartbeat or the roster's re-check is next due."""
+        return max(
+            min(self.written, self.checked) + CHANGE_STREAM_HEARTBEAT.total_seconds() - now, 0
+        )
+
+
+async def _serve_change_stream(  # noqa: PLR0913 — the engine, the request, the write half, the overlap watcher, and one keyword per policy the connection carries
+    engine: AssistantEngine,
+    frame: env.Envelope,
+    writer: asyncio.StreamWriter,
+    watcher: asyncio.Future[env.Envelope],
+    *,
+    call: tuple[str, tuple[Any, ...], dict[str, Any]],
+    limits: ConnectionLimits,
+    admission: Admission | None,
+    session: _Session,
+    device: RequestingDevice,
+) -> None:
+    """Serve one change stream: the engine's chunks, the device's roles and a heartbeat.
+
+    ADR-0298 §7:10 divides the writing: **the changes, their snapshots and the
+    current state are the engine's**, relayed here as they come, and **the device's
+    roles and the heartbeat are the hub's session layer's**, written here over the
+    roster. The roles are sent when the stream opens (§7:9); the roster is asked
+    again every :data:`~ai_assistant.wire.envelope.CHANGE_STREAM_HEARTBEAT`, so a
+    change of roles is sent within that, and a browser device whose registration the
+    owner revoked has the stream ended with ``DeviceRefusedError`` (§7:16). A
+    heartbeat is written whenever that interval passes with no chunk (§7:12).
+
+    **The engine's next chunk is awaited in a task of its own and never cancelled
+    for a heartbeat.** Cancelling an async generator's step ends the generator, so a
+    deadline on each step would end the stream at the first quiet interval; instead
+    the step stays pending across heartbeats and is cancelled once, when the stream
+    ends, before the iterator is closed.
+
+    **The stream ends** when its device hangs up, when it writes another frame
+    (ADR-0084 §3's serial rule, a close), when the roster refuses its device, when a
+    write does not drain within the dead-peer timeout (§7:14, a close), and when the
+    engine ends it — with ``ChatStreamEnd`` on shutdown, or a declared failure.
+
+    Raises:
+        ProtocolError: If the peer wrote a frame while the stream was open.
+        ConnectionClosedError: If a write did not drain within the dead-peer timeout.
+    """
+    method, positional, keyword = call
+    _bound_user_timeout(writer)
+    loop = asyncio.get_running_loop()
+    stream = _ChangeStreamWriter(
+        frame=frame,
+        writer=writer,
+        watcher=watcher,
+        limits=limits,
+        admission=admission,
+        session=session,
+        roles=device.roles,
+        checked=loop.time(),
+    )
+    await stream.emit(env.FrameKind.CHUNK, _roles_chunk(device))
+    with serving_device(device):
+        started: AsyncIterator[Any] = getattr(engine, method)(*positional, **keyword)
+        async with closing_stream(started) as values:
+            step: asyncio.Future[Any] | None = None
+            try:
+                while True:
+                    if step is None:
+                        step = asyncio.ensure_future(anext(values))
+                    await asyncio.wait(
+                        {step, watcher},
+                        timeout=stream.due(loop.time()),
+                        return_when=asyncio.FIRST_COMPLETED,
+                    )
+                    if watcher.done():
+                        if await _peek(watcher):
+                            raise ProtocolError(_OVERLAPPED)
+                        return  # the device hung up: it ends its stream (§7:15)
+                    if step.done():
+                        taken, step = step, None
+                        if not await stream.relay(taken):
+                            return
+                    if not await stream.tick(loop.time()):
+                        return
+            finally:
+                if step is not None and not step.done():
+                    step.cancel()
+                    with contextlib.suppress(asyncio.CancelledError, Exception):
+                        await step
 
 
 def _decode_arguments(method: str, payload: object) -> dict[str, Any]:

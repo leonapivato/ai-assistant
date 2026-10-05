@@ -1551,6 +1551,7 @@ def test_fresh_conversation_initialization_rolls_back_and_can_retry(
 # --- the chat space (ADR-0293) ------------------------------------------------
 
 _PHONE = ChatDevice(device_id="phone", access=DeviceAccess.READ_WRITE)
+_LAPTOP = ChatDevice(device_id="laptop", access=DeviceAccess.READ)
 
 
 def _said(text: str, message_id: str) -> NewMessage:
@@ -1816,10 +1817,45 @@ async def test_a_deletion_recorded_before_its_readers_were_kept_reaches_no_devic
 
         for device in ("phone", "stranger"):
             seen = (await store.device_changes(device, after=0)).changes
-            assert [one for one in seen if one.kind == "conversation_deleted"] == []
+            assert [one for one in seen if one.change.kind == "conversation_deleted"] == []
         assert [one.kind for one in (await store.changes(after=0)).changes][-1] == (
             "conversation_deleted"
         )
+    finally:
+        store.close()
+
+
+@pytest.mark.integration
+async def test_a_set_change_recorded_before_its_position_was_kept_snapshots_conservatively(
+    tmp_path: Path,
+) -> None:
+    """A set change with no position kept is read at its last standing addition (§7:7).
+
+    A row written before the change kept the conversation's highest position has none,
+    so the snapshot it gives is read at the highest position of a standing message
+    added at or before it. A message deleted since whose addition came after that is
+    left out: the snapshot may then lack a marker, and never shows anything recorded
+    after the change.
+    """
+    path = tmp_path / "conversations.db"
+    store = SqliteConversationStore(path=path, now=_fixed_now)
+    try:
+        await store.set_my_devices([_PHONE])
+        conversation = (await store.start()).id
+        await store.append_message(conversation, _said("one", "m-1"))
+        await store.append_message(conversation, _said("two", "m-2"))
+        await store.append_message(conversation, _said("three", "m-3"))
+        await store.set_conversation_devices(conversation, [_PHONE, _LAPTOP])
+        await store.append_message(conversation, _said("after", "m-4"))
+        await store.delete_message(conversation, 3)
+        store._conn.execute(
+            "UPDATE chat_changes SET position = NULL WHERE kind = 'devices_changed'"
+        )
+
+        (added, _, _) = (await store.device_changes("laptop", after=0)).changes
+
+        assert added.snapshot is not None
+        assert [one.position for one in added.snapshot.entries] == [1, 2]
     finally:
         store.close()
 

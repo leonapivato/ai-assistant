@@ -791,8 +791,12 @@ def test_the_surface_carries_the_methods_the_adrs_fixed() -> None:
     to the acts in the medium, and ``learn`` to a reply — so the count falls to
     seventy-five. ``converse`` stays for the turn that carries a reference until
     question messages do (the owner's cut (a), 2026-10-05).
+
+    **ADR-0298 §10:5 adds one**, the change stream, ``follow_chat`` — so the count
+    rises to seventy-six. The gateway relays it in its own lane (ADR-0298's lane 7),
+    so ADR-0177 §1's enumeration does not move here.
     """
-    assert len(_method_names()) == 75
+    assert len(_method_names()) == 76
 
 
 def test_a_streaming_method_declares_its_union_chunk_first_terminal_last() -> None:
@@ -808,19 +812,24 @@ def test_a_streaming_method_declares_its_union_chunk_first_terminal_last() -> No
 
     So it is pinned here, beside the Protocol, rather than left to be discovered.
     The set is read off the surface, so a streaming method is covered the day it
-    lands. **The set is empty**: ADR-0293 §11 retired ``converse_streaming`` and
-    ``receive_streaming``, the two that streamed, and ADR-0296 §4's change stream is
-    the next; the lane that adds it names it here and pins its chunk-first order,
-    whose chunk ADR-0296 §4 makes something other than ``ReplyChunk``.
+    lands. ADR-0293 §11 retired ``converse_streaming`` and ``receive_streaming``, the
+    two that streamed, and ADR-0296 §4's change stream, ``follow_chat``, is the one
+    that streams now, its chunk ``ChatStreamChunk`` rather than ``ReplyChunk``
+    (ADR-0298 §7:3).
     """
     from ai_assistant.wire.surface import STREAMING_METHODS  # noqa: PLC0415 — asserted about
 
-    assert frozenset() == STREAMING_METHODS
+    expected = {
+        # ADR-0298 §7:3: the change stream's one chunk class, and its end.
+        "follow_chat": (core_types.ChatStreamChunk, core_types.ChatStreamEnd),
+    }
+    assert set(expected) == STREAMING_METHODS
     for name in sorted(STREAMING_METHODS):
         annotation = get_type_hints(getattr(AssistantEngine, name), globalns=_NAMESPACE)["return"]
         assert get_origin(annotation) is AsyncIterator
         members = get_args(get_args(annotation)[0])
         assert len(members) == 2, f"{name}() yields {len(members)} types; §4's union has two"
+        assert members == expected[name]
 
 
 def test_the_promoted_surface_and_the_protocol_version_are_both_pinned() -> None:
@@ -1479,6 +1488,12 @@ def test_the_promoted_surface_and_the_protocol_version_are_both_pinned() -> None
     ``LearnOutcome``, ``IngestSummary``, ``LearnDecision``, ``QueuedQuestion`` and
     ``QueueOutcome`` leave the surface with ``learn``.
 
+    **80 is ADR-0298 §7, under the first limb.** ``AssistantEngine`` gains the change
+    stream, ``follow_chat``, so the method set rises to **76**: a client at 79 may call
+    an operation a hub at 79 does not answer. ``ChatStreamChunk`` and
+    ``ChatStreamEnd`` cross with it, and the heartbeat interval and dead-peer timeout
+    both ends read are protocol constants (§7:11).
+
     **ADR-0124 §9 decides no mechanical check and creates none**, saying one is
     owed and leaving its shape open. This is not that check — it is a *pin*, and
     a deliberately crude one: it fails when either number moves, which is the
@@ -1487,7 +1502,7 @@ def test_the_promoted_surface_and_the_protocol_version_are_both_pinned() -> None
     """
     from ai_assistant.wire.envelope import PROTOCOL_VERSION  # noqa: PLC0415 — asserted about
 
-    assert (len(_method_names()), PROTOCOL_VERSION) == (75, 79), (
+    assert (len(_method_names()), PROTOCOL_VERSION) == (76, 80), (
         "the promoted method set and the protocol version are pinned together "
         "(ADR-0124 §9); move either and this pin makes you name the limb you are "
         "under — the method set, or a wire-carried core type"
