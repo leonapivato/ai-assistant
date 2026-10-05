@@ -1760,3 +1760,93 @@ async def test_a_forgotten_capture_whose_write_commits_then_cancels_leaves_no_ep
 
     assert landed, "the write committed before it was cancelled"
     assert await memory.get(landed[0]) is None
+
+
+def _hello(conversation: str) -> ChannelInput:
+    return ChannelInput(
+        target=ChannelIdentity(channel_type="conversation", instance_id=conversation),
+        payload=TextChannelPayload(text="hello"),
+    )
+
+
+async def test_a_cancelled_insert_never_withdraws_another_conversations_episode() -> None:
+    """ADR-0293 §2:8: forgetting reaches that conversation's episodes alone.
+
+    Conversation A holds an episode at the address B's turn reuses. B's insert is
+    cancelled before it reaches the store's collision check, and B was forgotten
+    meanwhile: the record at the address is A's, so nothing is deleted (#2696 r6).
+    """
+    engine = FakeAssistantEngine()
+    engine.activation_id_factory = lambda: "00000000-0000-4000-8000-0000000000cc"
+    first = (await engine.start_conversation()).id
+    await engine.receive(_hello(first), reply=WholeTextReply(), timeout=timedelta(seconds=5))
+    address = "activation:00000000-0000-4000-8000-0000000000cc"
+    assert await engine.episode_memory.get(address) is not None
+    second = (await engine.start_conversation()).id
+    memory = engine.episode_memory
+    entered, release = asyncio.Event(), asyncio.Event()
+
+    async def cancelled_before_the_check(writes: Sequence[MemoryWrite]) -> Sequence[str]:
+        entered.set()
+        await release.wait()
+        raise asyncio.CancelledError
+
+    memory.write_atomic = cancelled_before_the_check  # type: ignore[method-assign]
+    turn = asyncio.create_task(
+        engine.receive(_hello(second), reply=WholeTextReply(), timeout=timedelta(seconds=5))
+    )
+    await entered.wait()
+    await engine.forget_conversation(second)
+    release.set()
+    with pytest.raises(asyncio.CancelledError):
+        await turn
+
+    assert await memory.get(address) is not None, "A's episode is not B's to withdraw"
+
+
+async def test_a_forgotten_captures_cleanup_outlasts_its_callers_cancellation() -> None:
+    """ADR-0293 §2:6, ADR-0275 §8:11: the withdrawal runs to its end, then cancels.
+
+    The capture's write lands after its conversation was forgotten; its withdrawal is
+    held, and the turn is cancelled twice while it waits. The episode is still gone
+    once the withdrawal is released, and the turn ends cancelled (#2696 r6).
+    """
+    engine = FakeAssistantEngine()
+    conversation = (await engine.start_conversation()).id
+    memory = engine.episode_memory
+    writing, write_go = asyncio.Event(), asyncio.Event()
+    deleting, delete_go = asyncio.Event(), asyncio.Event()
+    write, delete = memory.write_atomic, memory.delete
+    landed: list[str] = []
+
+    async def held_write(writes: Sequence[MemoryWrite]) -> Sequence[str]:
+        writing.set()
+        await write_go.wait()
+        landed.extend(one.record.id for one in writes)
+        return await write(writes)
+
+    async def held_delete(record_id: str) -> bool:
+        deleting.set()
+        await delete_go.wait()
+        return await delete(record_id)
+
+    memory.write_atomic = held_write  # type: ignore[method-assign]
+    turn = asyncio.create_task(
+        engine.receive(_hello(conversation), reply=WholeTextReply(), timeout=timedelta(seconds=5))
+    )
+    await writing.wait()
+    await engine.forget_conversation(conversation)
+    memory.delete = held_delete  # type: ignore[method-assign]
+    write_go.set()
+    await deleting.wait()
+    turn.cancel()
+    await asyncio.sleep(0)
+    turn.cancel()
+    await asyncio.sleep(0)
+    assert not turn.done(), "the withdrawal holds the turn until it is done"
+    delete_go.set()
+    with pytest.raises(asyncio.CancelledError):
+        await turn
+
+    assert landed
+    assert await memory.get(landed[0]) is None

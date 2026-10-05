@@ -54,7 +54,7 @@ from ai_assistant.core.types import (
 )
 
 if TYPE_CHECKING:
-    from collections.abc import Callable, Mapping
+    from collections.abc import Callable, Coroutine, Mapping
     from datetime import datetime
 
     from ai_assistant.core.protocols import MemoryStore
@@ -91,6 +91,50 @@ def ended_pass(
             outcome=StageOutcome.DONE,
         ),
     )
+
+
+async def _withdraw(memory: MemoryStore, record: EpisodicMemory) -> None:
+    """Delete ``record``'s address where the record stored there is this one.
+
+    An insert whose outcome is not known may never have reached the store's
+    collision check, so the address may hold another activation's record — another
+    conversation's — which forgetting this one must not reach (ADR-0293 §2:8). Only
+    a stored record carrying this one's trigger is this capture's, and only that is
+    deleted.
+    """
+    stored = await memory.get(record.id)
+    if (
+        isinstance(stored, EpisodicMemory)
+        and stored.processing_record is not None
+        and record.processing_record is not None
+        and stored.processing_record.trigger == record.processing_record.trigger
+    ):
+        await memory.delete(record.id)
+
+
+async def _drained(cleanup: Coroutine[object, object, None]) -> None:
+    """Run ``cleanup`` to its end through any cancellation, then pass a cancellation on.
+
+    A forgotten capture's compensation is safety work (ADR-0275 §8:11): cancelling
+    the caller must not cut it short and leave a forgotten episode stored. A failure
+    of the cleanup itself is dropped, as the engine's compensation logs and drops
+    one; the cancellation it outlived is raised once it is done.
+    """
+    task = asyncio.ensure_future(cleanup)
+    cancelled = False
+    while not task.done():
+        try:
+            await asyncio.shield(task)
+        except asyncio.CancelledError:
+            if not task.done():
+                cancelled = True
+        except Exception:  # noqa: S110 — the cleanup's own failure is dropped, as above
+            pass
+    if not task.cancelled():
+        with contextlib.suppress(Exception):
+            task.result()
+    if cancelled:
+        raise asyncio.CancelledError
 
 
 @dataclass
@@ -457,13 +501,12 @@ class FakeActivation:
                 # forgotten meanwhile, the write may have committed, so the episode is
                 # deleted before the failure goes on (ADR-0293 §2:6, ADR-0286 §8:2).
                 if self.was_forgotten():
-                    with contextlib.suppress(Exception):
-                        await memory.delete(address)
+                    await _drained(_withdraw(memory, record))
                 raise
             if self.was_forgotten():
                 # Forgotten while the write was on its way: as ADR-0286 §8:2's next
                 # write after the mark, the episode is deleted rather than kept.
-                await memory.delete(address)
+                await _drained(_withdraw(memory, record))
                 return forgotten()
             if self.conversation_id is not None and self.conversation_id not in conversations:
                 # Kept, as the engine keeps it where ``record_turn`` answers ``None``
