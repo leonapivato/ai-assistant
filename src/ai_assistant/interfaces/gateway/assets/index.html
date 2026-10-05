@@ -229,6 +229,8 @@
             Informational — the box below stays open while it works (§8:2).
           -->
           <p class="hint" id="chat-state" aria-live="polite"></p>
+          <!-- Offered where the transcript could not be read; nothing reads it again unasked. -->
+          <button type="button" id="chat-reread" hidden>Read this conversation again</button>
           <button type="button" id="chat-older" hidden>Show earlier messages</button>
           <ol id="chat-transcript" class="chat-transcript"></ol>
           <form id="chat-form">
