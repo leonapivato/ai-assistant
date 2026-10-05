@@ -404,8 +404,7 @@ def _render(reply: Any, act: str) -> int:
         print("the hub keeps only a verifier it cannot be recovered from.")
         return EXIT_OK
     if act == REVOKE:
-        _render_revocation(reply)
-        return EXIT_OK
+        return _render_revocation(reply)
     held = ", ".join(reply.get("roles", [])) or "none"
     if act == RESTORE:
         if reply.get("restored"):
@@ -423,18 +422,37 @@ def _render(reply: Any, act: str) -> int:
     return EXIT_OK
 
 
-def _render_revocation(reply: dict[str, Any]) -> None:
-    """Print what a revocation did, of a whole device or of one registration."""
+def _render_revocation(reply: dict[str, Any]) -> int:
+    """Print what a revocation did, of a whole device or of one registration.
+
+    Returns:
+        The process exit code: restartable where the record's act took effect and
+        the device's removal from "my devices" and its conversations did not finish,
+        because running the same revocation again finishes it.
+    """
+    _render_revoked(reply)
+    unfinished = reply.get("unfinished")
+    if unfinished:
+        print(f"device: the device is revoked, but {unfinished}", file=sys.stderr)
+        return EXIT_RESTART
+    return EXIT_OK
+
+
+def _render_revoked(reply: dict[str, Any]) -> None:
+    """Print what the record's half of a revocation did."""
     if "revoked" in reply:
         if reply["revoked"]:
             print("Revoked. That gateway's naming of it is refused until you restore it.")
         else:
             print("That device had no live registration under that gateway; nothing changed.")
+        _render_memberships(reply)
         return
     registrations = int(reply.get("registrations", 0))
     roles = ", ".join(reply.get("roles", []))
-    if not reply.get("enrolment") and not registrations and not roles:
-        print("That device had no live enrolment, registration or role; nothing changed.")
+    memberships = bool(reply.get("memberships"))
+    if not reply.get("enrolment") and not registrations and not roles and not memberships:
+        print("That device had no live enrolment, registration, role or place in a")
+        print("conversation; nothing changed.")
         return
     if reply.get("enrolment"):
         print("Its enrolment is revoked: its credential now verifies against nothing and its")
@@ -443,7 +461,14 @@ def _render_revocation(reply: dict[str, Any]) -> None:
         print(f"{registrations} registration(s) under a gateway revoked.")
     if roles:
         print(f"Roles cleared: {roles}.")
+    _render_memberships(reply)
     print("What it already received, it keeps — revocation is prospective.")
+
+
+def _render_memberships(reply: dict[str, Any]) -> None:
+    """Say that a revoked device left "my devices" and its conversations, where it did."""
+    if reply.get("memberships"):
+        print("Removed from your devices and from every conversation it was shown on.")
 
 
 def _render_listing(reply: dict[str, Any]) -> None:

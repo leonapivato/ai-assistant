@@ -19,9 +19,15 @@ from typing import TYPE_CHECKING, Any, Final
 
 import pytest
 
-from ai_assistant.core.types import DeviceRole
+from ai_assistant.core.errors import ConversationStoreError
+from ai_assistant.core.types import ChatDevice, DeviceAccess, DeviceRole, DevicesChangedChange
 from ai_assistant.service import device
-from ai_assistant.service.admin import ADMIN_FRAME_BYTES, ADMIN_TIMEOUT, AdminListener
+from ai_assistant.service.admin import (
+    ADMIN_FRAME_BYTES,
+    ADMIN_TIMEOUT,
+    AdminListener,
+    RemoveDevice,
+)
 from ai_assistant.service.device import _perform, _render
 from ai_assistant.service.enrolment import (
     ENROLMENTS_FILENAME,
@@ -31,6 +37,7 @@ from ai_assistant.service.enrolment import (
 )
 from ai_assistant.service.exits import EXIT_DEPLOYMENT, EXIT_OK, EXIT_RESTART
 from ai_assistant.service.overlay import MAX_OVERLAY_IDENTITY_BYTES
+from ai_assistant.testing import FakeConversationStore
 from ai_assistant.wire.address import ADMIN_SOCKET_FILENAME, SOCKET_FILENAME
 from ai_assistant.wire.credential import is_well_formed, verifier_for
 from ai_assistant.wire.errors import ProtocolError
@@ -50,12 +57,20 @@ def _clock() -> datetime:
     return _MOMENT
 
 
+async def _nothing_to_remove(device: str) -> bool:
+    """A removal from the chat space's sets that finds the device in none of them."""
+    del device
+    return False
+
+
 @contextlib.asynccontextmanager
-async def _admin(tmp_path: Path) -> AsyncIterator[tuple[AdminListener, DeviceRegistry]]:
+async def _admin(
+    tmp_path: Path, *, remove_device: RemoveDevice = _nothing_to_remove
+) -> AsyncIterator[tuple[AdminListener, DeviceRegistry]]:
     """One control socket, bound and unbound around the body."""
     store = EnrolmentStore(tmp_path / ENROLMENTS_FILENAME)
     registry = DeviceRegistry(store, hub_identity=_HUB_ID)
-    listener = AdminListener(registry, data_dir=tmp_path, now=_clock)
+    listener = AdminListener(registry, data_dir=tmp_path, remove_device=remove_device, now=_clock)
     await listener.start()
     await listener.begin_serving()
     try:
@@ -184,7 +199,13 @@ async def test_a_revocation_through_the_socket_reaches_the_running_hubs_record(
         registry.when_expelled(lambda identity, reason: expelled.append((identity, reason)))
         await _act(listener, {"act": "enrol", "identity": _DEVICE})
         reply = await _act(listener, {"act": "revoke", "identity": _DEVICE})
-        assert reply == {"ok": True, "enrolment": True, "registrations": 0, "roles": []}
+        assert reply == {
+            "ok": True,
+            "enrolment": True,
+            "registrations": 0,
+            "roles": [],
+            "memberships": False,
+        }
         assert expelled == [(_DEVICE, "revoked")]
 
 
@@ -197,6 +218,7 @@ async def test_revoking_a_device_that_holds_nothing_says_so(tmp_path: Path) -> N
             "enrolment": False,
             "registrations": 0,
             "roles": [],
+            "memberships": False,
         }
 
 
@@ -405,7 +427,9 @@ async def test_a_listing_stays_inside_one_frame_however_long_the_record_is(
     verifier = verifier_for("x" * 43)
     store.enrol(_long_record_identity(0), verifier=verifier, now=_MOMENT)
     registry = DeviceRegistry(store, hub_identity=_HUB_ID)
-    listener = AdminListener(registry, data_dir=tmp_path, now=_clock)
+    listener = AdminListener(
+        registry, data_dir=tmp_path, remove_device=_nothing_to_remove, now=_clock
+    )
     await listener.start()
     await listener.begin_serving()
     try:
@@ -841,7 +865,9 @@ async def test_a_full_listing_of_the_longest_identities_still_fits_one_frame(
             store.assign_role(enrolled, role)
         store.revoke_registration(browser, gateway=gateway, now=_MOMENT)
     registry = DeviceRegistry(store, hub_identity=_HUB_ID)
-    listener = AdminListener(registry, data_dir=tmp_path, now=_clock)
+    listener = AdminListener(
+        registry, data_dir=tmp_path, remove_device=_nothing_to_remove, now=_clock
+    )
     await listener.start()
     await listener.begin_serving()
     try:
@@ -924,7 +950,7 @@ async def test_one_registration_is_revoked_and_restored_through_the_socket(
         refused = registry.accept_naming("hub", _PHONE, now=_MOMENT)
         restored = await _act(listener, {"act": "restore", "identity": _PHONE, "gateway": "hub"})
         accepted = registry.accept_naming("hub", _PHONE, now=_MOMENT)
-    assert revoked == {"ok": True, "revoked": True}
+    assert revoked == {"ok": True, "revoked": True, "memberships": False}
     assert not refused.accepted
     assert restored == {"ok": True, "restored": True, "roles": []}
     assert accepted.accepted
@@ -962,7 +988,9 @@ async def test_a_hub_with_no_remote_listener_refuses_an_enrolment_and_performs_r
     sentence naming the setting — and the roster's acts work."""
     store = EnrolmentStore(tmp_path / ENROLMENTS_FILENAME)
     registry = DeviceRegistry(store, hub_identity=None)
-    listener = AdminListener(registry, data_dir=tmp_path, now=_clock)
+    listener = AdminListener(
+        registry, data_dir=tmp_path, remove_device=_nothing_to_remove, now=_clock
+    )
     await listener.start()
     await listener.begin_serving()
     try:
@@ -1096,3 +1124,122 @@ def test_the_help_says_a_device_does_nothing_until_given_a_role(
     assert "not yet enforced" not in printed
     assert "A device does nothing until it is given a role" in printed
     assert "The hub checks every request against these roles" in printed
+
+
+# --- ADR-0298 §4:10: revocation removes the device from every set ----------------------
+
+
+async def _sets_naming(device: str) -> FakeConversationStore:
+    """A chat space whose "my devices" and one conversation's devices name ``device``."""
+    space = FakeConversationStore()
+    named = ChatDevice(device_id=device, access=DeviceAccess.READ_WRITE)
+    await space.set_my_devices((named,))
+    started = await space.start()
+    await space.set_conversation_devices(started.id, (named,))
+    return space
+
+
+async def test_revoking_a_device_removes_it_from_every_set(tmp_path: Path) -> None:
+    """ADR-0298 §4:10: revoking a device "removes it from 'my devices' and from every
+    conversation's devices", each a change the other devices see (ADR-0296 §3:6).
+
+    Over the canonical chat space, so what is asserted is the sets afterwards and the
+    changes recorded, not that some function was called.
+    """
+    space = await _sets_naming(_PHONE)
+    async with _admin(tmp_path, remove_device=space.remove_device) as (listener, registry):
+        registry.accept_naming("hub", _PHONE, now=_MOMENT)
+        reply = await _act(listener, {"act": "revoke", "identity": _PHONE})
+
+    assert reply["ok"] is True
+    assert reply["memberships"] is True
+    assert await space.my_devices() == ()
+    (conversation,) = await space.recent()
+    assert await space.conversation_devices(conversation.id) == ()
+    removals = [
+        change
+        for change in (await space.changes(after=0)).changes
+        if isinstance(change, DevicesChangedChange) and change.devices == ()
+    ]
+    assert len(removals) == 2
+
+
+async def test_revoking_one_registration_keeps_a_device_something_else_admits(
+    tmp_path: Path,
+) -> None:
+    """A phone listed at two gateways keeps its place in the conversations it reads when
+    one of them is revoked — the rule the record keeps for roles, applied to the sets —
+    and leaves them once the last registration goes."""
+    space = await _sets_naming(_PHONE)
+    async with _admin(tmp_path, remove_device=space.remove_device) as (listener, registry):
+        registry.accept_naming("hub", _PHONE, now=_MOMENT)
+        registry.accept_naming(_DEVICE, _PHONE, now=_MOMENT)
+        first = await _act(listener, {"act": "revoke", "identity": _PHONE, "gateway": "hub"})
+        kept = await space.my_devices()
+        last = await _act(listener, {"act": "revoke", "identity": _PHONE, "gateway": _DEVICE})
+
+    assert first == {"ok": True, "revoked": True, "memberships": False}
+    assert [one.device_id for one in kept] == [_PHONE]
+    assert last == {"ok": True, "revoked": True, "memberships": True}
+    assert await space.my_devices() == ()
+
+
+async def test_a_removal_that_fails_reports_the_revocation_unfinished(tmp_path: Path) -> None:
+    """The record's act has taken effect — the device is refused from now on — so a
+    failure to remove it from the sets is reported as an unfinished revocation, not a
+    refused act, and the same revocation run again finishes it."""
+    attempts: list[str] = []
+
+    async def _flaky(device: str) -> bool:
+        attempts.append(device)
+        if len(attempts) == 1:
+            msg = "the conversation store could not be written"
+            raise ConversationStoreError(msg)
+        return True
+
+    async with _admin(tmp_path, remove_device=_flaky) as (listener, registry):
+        registry.accept_naming("hub", _PHONE, now=_MOMENT)
+        failed = await _act(listener, {"act": "revoke", "identity": _PHONE})
+        refused = registry.accept_naming("hub", _PHONE, now=_MOMENT)
+        again = await _act(listener, {"act": "revoke", "identity": _PHONE})
+
+    assert failed["ok"] is True
+    assert failed["registrations"] == 1
+    assert failed["memberships"] is False
+    assert "run the same revoke again" in failed["unfinished"]
+    assert not refused.accepted
+    assert again["memberships"] is True
+    assert "unfinished" not in again
+    assert attempts == [_PHONE, _PHONE]
+
+
+def test_an_unfinished_revocation_exits_restartably(capsys: pytest.CaptureFixture[str]) -> None:
+    """The command line prints what the record did, then says what did not finish, and
+    exits so that a script can tell it from a revocation that completed."""
+    code = _render(
+        {
+            "ok": True,
+            "enrolment": False,
+            "registrations": 1,
+            "roles": [],
+            "memberships": False,
+            "unfinished": "removing it did not finish; run the same revoke again to finish it",
+        },
+        "revoke",
+    )
+    captured = capsys.readouterr()
+    assert code == EXIT_RESTART
+    assert "1 registration(s) under a gateway revoked." in captured.out
+    assert "run the same revoke again" in captured.err
+
+
+def test_a_revocation_says_the_device_left_your_devices(
+    capsys: pytest.CaptureFixture[str],
+) -> None:
+    """ADR-0298 §4:10's second half, reported to the owner who asked for it."""
+    code = _render(
+        {"ok": True, "enrolment": False, "registrations": 0, "roles": [], "memberships": True},
+        "revoke",
+    )
+    assert code == EXIT_OK
+    assert "Removed from your devices" in capsys.readouterr().out

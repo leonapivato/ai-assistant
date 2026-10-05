@@ -1201,10 +1201,12 @@ class DeviceRegistry:
 
         ADR-0298 §4:10. Its removal from "my devices" and from every conversation's
         devices, and the end of its open change streams, are the same clause's other
-        half; they belong to the conversation store and the session, and arrive with
-        the enforcement that reads this record (§9). A revoked enrolment closes the
-        device's connections here, as ADR-0124 §8 requires, after the record and the
-        live view have both moved.
+        half, and belong to the conversation store and the session: the owner's act
+        (:class:`~ai_assistant.service.admin.AdminListener`) removes it from the sets
+        once this has returned, and a browser device's next request is refused here
+        (:meth:`accept_naming`). A revoked enrolment closes the device's connections
+        here, as ADR-0124 §8 requires, after the record and the live view have both
+        moved.
 
         Args:
             device: The device.

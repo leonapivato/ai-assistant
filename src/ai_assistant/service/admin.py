@@ -37,6 +37,15 @@ performs every roster act. ADR-0124 §2:3's "binds only ADR-0084 §1's loopback
 socket" is read as the network posture it states: this socket is §6's hub-local
 entry point, on the hub's own machine and owner-only, and no door off it.
 
+**Revoking a device removes it from "my devices" and from every conversation's
+devices** (ADR-0298 §4:10, ADR-0296 §3:6), each removal a change the other devices
+see. The record's act comes first and is synchronous — the commit, the live view's
+transition and the close of the device's connections are one step (ADR-0124 §8) —
+so the device is refused from that instant; the removal from the sets follows, on
+the conversation store through the engine, and is safe to repeat. Where it fails,
+the reply says the device is revoked and that running the same revocation again
+finishes it.
+
 **The credential crosses this socket exactly once and is never stored.** ADR-0124
 §6 mints it, discloses it "to the owner once at enrolment and never again", and
 the hub retains only a verifier. The value travels from
@@ -51,12 +60,14 @@ import asyncio
 import contextlib
 import json
 import os
+from collections.abc import Awaitable, Callable
 from datetime import UTC, datetime, timedelta
 from typing import TYPE_CHECKING, Any, Final
 
 import structlog
 
 from ai_assistant.core.clock import checked_clock
+from ai_assistant.core.errors import AssistantError
 from ai_assistant.core.types import DeviceRole
 from ai_assistant.service.enrolment import RosterActError
 from ai_assistant.service.overlay import MAX_OVERLAY_IDENTITY_BYTES
@@ -100,6 +111,10 @@ ADMIN_FRAME_BYTES: Final[int] = 1024 * 1024
 #: work between them is a handful of SQLite rows.
 ADMIN_TIMEOUT: Final[timedelta] = timedelta(seconds=10)
 
+#: Removes a revoked device from "my devices" and every conversation's devices,
+#: answering whether any set named it (ADR-0298 §4:10). The hub passes the engine's.
+type RemoveDevice = Callable[[str], Awaitable[bool]]
+
 #: The acts. ``list`` is not one of ADR-0124's normative requirements and is here
 #: for ADR-0083's ruling 4: an owner who cannot see which devices are enrolled, and
 #: which were revoked and when, cannot check what §6's record says they decided. It
@@ -121,17 +136,29 @@ class AdminListener:
         path: ``<data_dir>/admin.sock``.
     """
 
-    def __init__(self, registry: DeviceRegistry, *, data_dir: Path, now: Clock = _utcnow) -> None:
+    def __init__(
+        self,
+        registry: DeviceRegistry,
+        *,
+        data_dir: Path,
+        remove_device: RemoveDevice,
+        now: Clock = _utcnow,
+    ) -> None:
         """Prepare the listener; nothing is bound until :meth:`start`.
 
         Args:
             registry: The enrolment record the acts operate on.
             data_dir: The directory the hub owns, which locates the socket.
+            remove_device: What removes a revoked device from "my devices" and every
+                conversation's devices (ADR-0298 §4:10). **Required**: a revocation
+                that left the device an end of its conversations would be half of
+                the act the owner asked for.
             now: The clock an enrolment and a revocation are dated from, guarded by
                 :func:`~ai_assistant.core.clock.checked_clock` like every other
                 injected clock in this tree (ADR-0026 §7).
         """
         self._registry = registry
+        self._remove_device = remove_device
         self._now = checked_clock(now, owner="AdminListener")
         self.path = admin_socket_path(data_dir)
         self._server: asyncio.Server | None = None
@@ -230,7 +257,7 @@ class AdminListener:
                     timeout=ADMIN_TIMEOUT,
                     idle_timeout=ADMIN_TIMEOUT,
                 )
-                reply = self._perform(body)
+                reply = await self._perform(body)
                 await write_frame(
                     writer,
                     json.dumps(reply).encode("utf-8"),
@@ -257,13 +284,14 @@ class AdminListener:
             with contextlib.suppress(ConnectionError, OSError, asyncio.CancelledError):
                 await writer.wait_closed()
 
-    def _perform(self, body: bytes) -> dict[str, Any]:
+    async def _perform(self, body: bytes) -> dict[str, Any]:
         """Decode one request and carry out the act it names.
 
-        Synchronous, and every act inside it is (:mod:`ai_assistant.service.enrolment`
+        Every act on the record is synchronous (:mod:`ai_assistant.service.enrolment`
         says why): a revocation's commit, the live view's transition and the close of
         the device's connections are one uninterrupted step, which is ADR-0124 §8's
-        indivisibility.
+        indivisibility. The one suspension is after it: a revocation's removal of
+        the device from "my devices" and its conversations (ADR-0298 §4:10).
 
         Args:
             body: The request frame's bytes.
@@ -283,11 +311,11 @@ class AdminListener:
         if not isinstance(act, str) or act not in _NAMING_ACTS:
             return _failed(f"no such device act: {act!r}")
         try:
-            return self._act(act, request)
+            return await self._act(act, request)
         except (_MalformedError, RosterActError) as exc:
             return _failed(str(exc))
 
-    def _act(self, act: str, request: dict[str, Any]) -> dict[str, Any]:
+    async def _act(self, act: str, request: dict[str, Any]) -> dict[str, Any]:
         """Perform one act that names a device.
 
         Args:
@@ -320,17 +348,7 @@ class AdminListener:
                 "rotated": minted.rotated,
             }
         if act == REVOKE:
-            if request.get("gateway") is None:
-                revocation = self._registry.revoke_device(identity, now=self._now())
-                return {
-                    "ok": True,
-                    "enrolment": revocation.enrolment,
-                    "registrations": revocation.registrations,
-                    "roles": sorted(role.value for role in revocation.roles),
-                }
-            gateway = _name(request.get("gateway"), what="the gateway's device")
-            revoked = self._registry.revoke_registration(identity, gateway=gateway, now=self._now())
-            return {"ok": True, "revoked": revoked}
+            return await self._revoke(identity, request)
         if act == RESTORE:
             gateway = _name(request.get("gateway"), what="the gateway's device")
             restored = self._registry.restore_registration(
@@ -351,6 +369,81 @@ class AdminListener:
             "changed": changed,
             "roles": sorted(held.value for held in self._registry.roles_of(identity)),
         }
+
+    async def _revoke(self, identity: str, request: dict[str, Any]) -> dict[str, Any]:
+        """Revoke a whole device, or one registration of it, and its memberships.
+
+        ADR-0298 §4:10: revoking a device revokes its enrolment and every
+        registration of it, clears its roles, and removes it from "my devices" and
+        every conversation's devices. Revoking **one** registration removes the
+        memberships only where it leaves the device admitted by nothing — the rule the
+        record keeps for roles (a device holds a role only while something admits
+        it), applied to the sets: a phone still listed at a second gateway keeps its
+        place in the conversations it reads.
+
+        Args:
+            identity: The device.
+            request: The decoded request, which may name a gateway.
+
+        Returns:
+            The reply's members.
+
+        Raises:
+            _MalformedError: If a gateway member is present and malformed.
+            RosterActError: For ``hub``, which is never revoked (§3:4).
+        """
+        if request.get("gateway") is None:
+            revocation = self._registry.revoke_device(identity, now=self._now())
+            reply: dict[str, Any] = {
+                "ok": True,
+                "enrolment": revocation.enrolment,
+                "registrations": revocation.registrations,
+                "roles": sorted(role.value for role in revocation.roles),
+            }
+            return await self._removed_from_sets(identity, reply)
+        gateway = _name(request.get("gateway"), what="the gateway's device")
+        revoked = self._registry.revoke_registration(identity, gateway=gateway, now=self._now())
+        reply = {"ok": True, "revoked": revoked, "memberships": False}
+        if self._registry.is_known(identity):
+            return reply
+        return await self._removed_from_sets(identity, reply)
+
+    async def _removed_from_sets(self, identity: str, reply: dict[str, Any]) -> dict[str, Any]:
+        """Remove a revoked device from every set, adding what that did to the reply.
+
+        The record's act has already taken effect, so a failure here is reported as
+        what it is — a revocation whose second half did not finish, in ``unfinished``
+        — rather than as a refused act: the device is refused from now on either way,
+        and removing is safe to repeat, so the same revocation run again finishes it.
+
+        Args:
+            identity: The revoked device.
+            reply: The record's half of the reply.
+
+        Returns:
+            The reply, with ``memberships`` saying whether any set named the device,
+            and ``unfinished`` saying why not where the removal failed.
+        """
+        try:
+            removed = await self._remove_device(identity)
+        except (AssistantError, RuntimeError, ValueError) as exc:
+            _log.warning(
+                "hub_admin_device_memberships_unremoved",
+                device=identity,
+                reason=str(exc),
+                error_class=type(exc).__name__,
+            )
+            return {
+                **reply,
+                "memberships": False,
+                "unfinished": (
+                    f"removing it from your devices and its conversations did not finish "
+                    f"({type(exc).__name__}: {exc}); run the same revoke again to finish it"
+                ),
+            }
+        if removed:
+            _log.info("hub_admin_device_memberships_removed", device=identity)
+        return {**reply, "memberships": removed}
 
     def _listing(self) -> dict[str, Any]:
         """The newest enrolments, devices and registrations, and this hub's identity.
