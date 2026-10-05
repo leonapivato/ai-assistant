@@ -45,7 +45,7 @@ only through its Protocol (CLAUDE.md golden rule 1).
 from __future__ import annotations
 
 import asyncio
-from dataclasses import dataclass
+from dataclasses import dataclass, replace
 from datetime import timedelta
 from typing import TYPE_CHECKING, Final
 
@@ -139,6 +139,18 @@ class ChatInput:
     def text(self) -> str:
         """The input: the messages' text, in the order they were written (§6:3)."""
         return _INPUT_SEPARATOR.join(message.text for message in self.messages)
+
+    def narrowed(self, positions: Sequence[int]) -> ChatInput:
+        """The input as its activation took it in: only the messages at ``positions``.
+
+        A message read as waiting and not marked — deleted, or taken in elsewhere, in
+        between — is neither input nor window (§6:6).
+        """
+        kept = frozenset(positions)
+        messages = tuple(message for message in self.messages if message.position in kept)
+        return replace(
+            self, messages=messages, window=replace(self.window, input_messages=messages)
+        )
 
 
 def chat_effects(
@@ -322,31 +334,34 @@ class ChatReader:
         """
         return self._current.get(conversation_id)
 
-    async def take_in(self, taken: ChatInput) -> tuple[int, ...]:
+    async def take_in(self, taken: ChatInput, *, into: list[int]) -> None:
         """Mark the input's messages taken in by its activation (§6:6, §6:8).
 
         Called by the activation once it is admitted, so the marking and the episode
         that records the activation stand or fall together. Every message of the input
-        is marked under the one id, in as many calls as the store's bound needs.
+        is marked under the one id, in as many calls as the store's bound needs, and
+        each call's positions are added to ``into`` as it returns: a call that fails
+        after an earlier one committed leaves ``into`` holding what is marked, so the
+        caller can tell an input partly taken in from one not taken in at all.
 
-        Returns:
-            The positions this activation marked, ascending. A message deleted, or
-            taken in elsewhere, since it was read as waiting is not among them.
+        Args:
+            taken: The input.
+            into: Where the positions this activation marked are added. A message
+                deleted, or taken in elsewhere, since it was read as waiting is not
+                among them.
 
         Raises:
             ConversationStoreError: If the store cannot be written.
         """
         positions = [message.position for message in taken.messages]
-        marked: list[int] = []
         for start in range(0, len(positions), _MARK_CHUNK):
-            marked.extend(
+            into.extend(
                 await self._conversations.take_in(
                     taken.conversation_id,
                     positions=positions[start : start + _MARK_CHUNK],
                     activation_id=taken.activation_id,
                 )
             )
-        return tuple(sorted(marked))
 
     async def _read(self, conversation_id: str) -> None:
         """Take in what waits in one conversation, one input at a time, until none does."""

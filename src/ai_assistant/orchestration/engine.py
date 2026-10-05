@@ -9506,13 +9506,18 @@ class Engine:
             id_factory=lambda: taken.activation_id,
             stage_limit=self._stage_record_limit,
         )
-        marked: list[tuple[int, ...]] = []
+        marked: list[int] = []
 
         async def turn() -> TurnOutcome:
-            marked.append(await reader.take_in(taken))
-            if not marked[0]:
+            await reader.take_in(taken, into=marked)
+            if not marked:
                 raise _NothingTakenInError
-            return await self._chat_turn(taken)
+            # §6:6: the pass runs on what it took in alone. A message read as waiting
+            # and not marked — deleted, or taken in elsewhere, in between — reaches no
+            # stage. The episode keeps the text the activation was admitted with: an
+            # open episode is only ever extended (ADR-0286 §3:4, §12:2), and what an
+            # episode records is never kept in step with the transcript (ADR-0293 §5:5).
+            return await self._chat_turn(taken.narrowed(marked))
 
         deadline = asyncio.get_running_loop().time() + self._chat_turn_budget.total_seconds()
         task = self._activation_task(
@@ -9528,7 +9533,7 @@ class Engine:
         except asyncio.CancelledError:
             raise
         except Exception:  # every failure of the pass is §10:2's ending
-            if not (marked and marked[0]):
+            if not marked:
                 _log.warning("chat_input_not_taken_in", stage="chat_reader", exc_info=True)
                 return False
             _log.warning("chat_activation_failed", stage="chat_reader", exc_info=True)
