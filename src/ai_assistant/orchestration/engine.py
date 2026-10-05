@@ -261,7 +261,11 @@ from ai_assistant.orchestration.controller import (
     Verdict,
     run_recorded,
 )
-from ai_assistant.orchestration.conversations import fit_changes, fit_transcript
+from ai_assistant.orchestration.conversations import (
+    check_message_fits,
+    fit_changes,
+    fit_transcript,
+)
 from ai_assistant.orchestration.disclosure import (
     BoundedAudienceSupply,
     TurnSupply,
@@ -3464,6 +3468,10 @@ class Engine:
         # instant and the purge's horizon are read through one seam (ADR-0026 §7).
         self._operation_traces = OperationTraces(sink=trace_sink, now=self._clock)
         self._conversations = conversations
+        #: Every activation this engine is running, from before its admission to the
+        #: end of its finalization: what a conversation's current state reads its
+        #: "working…" from (ADR-0293 §8:2), whether or not its episode survives.
+        self._running: list[ActivationScope] = []
         self._activation_coordinator = ActivationCoordinator(
             writer=conversations.activation_writer,
             register=self._register_capture,
@@ -7340,7 +7348,14 @@ class Engine:
         self._reject_if_closing()
         named = identifier(conversation_id, name="conversation_id")
         check_arguments("conversation", max_bytes=self._max_payload_bytes, conversation_id=named)
-        return await self._tracked(self._conversations.digest(named), "conversation", checked=True)
+        running = [
+            one.state.activation_id
+            for one in self._running
+            if one.state is not None and one.state.conversation_id == named
+        ]
+        return await self._tracked(
+            self._conversations.digest(named, running=running), "conversation", checked=True
+        )
 
     async def forget_conversation(self, conversation_id: Identifier) -> bool:
         """Destroy a conversation and every episode on its place (ADR-0074 §8).
@@ -7348,10 +7363,10 @@ class Engine:
         ADR-0004 §6's right at the unit the user thinks in. **The route ADR-0293
         §Decision:2 keeps working until the first build replaces it**: it becomes
         memory-only (§11:4) when the interfaces move to :meth:`delete_conversation`,
-        and until then it is composed from the two acts that replace it — the
-        conversation deleted, then the episodes on its place forgotten, an open one
-        told first so no later write re-creates it (§2:6). Unconditional, like every
-        other deletion on this façade.
+        and until then it is composed from the two acts that replace it — the episodes
+        on its place forgotten, every capture of it told first so no later write
+        re-creates one (§2:6), then the conversation deleted. Unconditional, like
+        every other deletion on this façade.
 
         Args:
             conversation_id: The conversation the user named, taken as opaque.
@@ -7363,8 +7378,8 @@ class Engine:
         Raises:
             RuntimeError: If the engine is shutting down.
             ConversationStoreError: If the conversation could not be deleted.
-            MemoryStoreError: If an episode could not be destroyed. The conversation is
-                deleted by then, and a repeat finishes the forgetting.
+            MemoryStoreError: If an episode could not be destroyed. The conversation
+                still stands, and a repeat finishes it.
         """
         self._reject_if_closing()
         named = identifier(conversation_id, name="conversation_id")
@@ -7460,6 +7475,7 @@ class Engine:
         check_arguments(
             "write_message", max_bytes=self._max_payload_bytes, conversation_id=named, message=sent
         )
+        check_message_fits(named, sent, max_bytes=self._max_payload_bytes)
         return await self._tracked(
             self._conversations.write(named, sent), "write_message", checked=True
         )
@@ -9376,6 +9392,7 @@ class Engine:
 
         async def run() -> tuple[T, EpisodeCaptureReport | None]:
             token = CURRENT_ACTIVATION.set(scope)
+            self._running.append(scope)
             value: T | None = None
             failure: BaseException | None = None
             report: EpisodeCaptureReport | None = None
@@ -9408,6 +9425,7 @@ class Engine:
                     raise failure
                 return cast("T", value), report
             finally:
+                self._running[:] = [one for one in self._running if one is not scope]
                 CURRENT_ACTIVATION.reset(token)
 
         # Eager start enters run's finally and reaches only the closed barrier.

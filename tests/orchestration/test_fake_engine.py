@@ -1663,3 +1663,16 @@ async def test_a_streamed_turn_carries_the_reference_it_was_given() -> None:
     assert [one["reference"] for one in streamed] == [None, reference]
     spoken_for = next(arguments for name, arguments in engine.calls if name == "converse")
     assert spoken_for["reference"] == reference, "and the two entries record it alike"
+
+
+async def test_two_first_reads_of_a_held_conversation_join_the_chat_space_once() -> None:
+    """A held conversation joins the chat space once, however many first reads race."""
+    engine = FakeAssistantEngine()
+    engine.hold_conversation("c")
+
+    first, second = await asyncio.gather(engine.transcript("c"), engine.transcript("c"))
+
+    assert first is not None
+    assert second is not None
+    started = (await engine.chat_changes(after=0)).changes
+    assert [type(one).__name__ for one in started] == ["ConversationStartedChange"]
