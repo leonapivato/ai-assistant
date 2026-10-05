@@ -80,10 +80,12 @@ from ai_assistant.core.channel_validation import snapshot
 from ai_assistant.core.clock import ClockReadingError, checked_clock
 from ai_assistant.core.episode_encoding import check_detail, check_list
 from ai_assistant.core.errors import (
+    ActivationStoppedError,
     AuthorizationError,
     ChannelProcessingError,
     ChannelProcessingTimeoutError,
     ClaimRefused,
+    ClaimStopped,
     ConfigurationError,
     ConversationStoreError,
     MemoryStoreError,
@@ -108,6 +110,7 @@ from ai_assistant.core.types import (
     MAX_ASSOCIATION_CANDIDATES,
     TERMINAL_ATTEMPT_STATES,
     ActivationRecall,
+    ActivationStop,
     AttemptOutcome,
     AttemptPhase,
     AttemptReport,
@@ -237,6 +240,7 @@ from ai_assistant.orchestration.activation_state import (
     active_state,
     admit_channel,
     admit_resume,
+    canonical_activation_id,
 )
 from ai_assistant.orchestration.activation_writer import capture_loss
 from ai_assistant.orchestration.authorization_surface import projection_of
@@ -2097,7 +2101,7 @@ class _Settled:
 
 @dataclass(frozen=True, slots=True)
 class _WithheldResumption:
-    """A resolution whose claim a user act refused (ADR-0261 §7).
+    """A resolution whose claim a user act refused (ADR-0261 §7), or a stop (ADR-0297 §2).
 
     An `orchestration`-local carrier and **not** promoted surface: it travels between two
     methods of this module, crosses no subsystem boundary and adds no member to any
@@ -2112,8 +2116,11 @@ class _WithheldResumption:
 
     #: The park this token named, which still stands.
     parked: _Parked
-    #: Where the goal stands, as §7's ordered read established it.
-    withheld: DriveWithheld
+    #: Where the goal stands, as §7's ordered read established it — or ``None`` where
+    #: the store refused the claim because the control activation was stopped
+    #: (:class:`~ai_assistant.core.errors.ClaimStopped`), which moves no goal state
+    #: and so has none to report (ADR-0297 §2).
+    withheld: DriveWithheld | None
     #: What the drive that raised established: ADR-0264 §2's contribution, and ADR-0235
     #: §2's establishing pair where the resolution collected one.
     outbound: DriveObservation
@@ -2664,6 +2671,89 @@ def _announcement_lead(engagement: GoalEngagement | None) -> str | None:
     """
     announcement = announcement_of(engagement)
     return None if announcement is None else f"{announcement}\n\n"
+
+
+#: What :class:`ActivationStoppedError` says, from every site that raises it.
+_STOPPED_MESSAGE: Final = "the activation was stopped before it finished (ADR-0297 §4)"
+
+
+class _OnceMinted:
+    """An activation id factory that mints once and answers that one value every call.
+
+    A resume's control activation is admitted inside the runner, ahead of its claim,
+    and the claim must name it (ADR-0297 §2:2), so the id is minted before either and
+    both are handed it. A factory that raised raises the same error again, so the
+    admission degrades exactly as it would have (ADR-0275 §6:1).
+    """
+
+    def __init__(self, factory: Callable[[], str]) -> None:
+        self._factory = factory
+        self._minted: str | None = None
+        self._failure: Exception | None = None
+        self._called = False
+
+    def __call__(self) -> str:
+        """The one minted value, or the one failure, every time."""
+        if not self._called:
+            self._called = True
+            try:
+                self._minted = self._factory()
+            except Exception as exc:
+                self._failure = exc
+        if self._failure is not None:
+            raise self._failure
+        return cast("str", self._minted)
+
+    def for_claim(self) -> str | None:
+        """The id the admission will take, or ``None`` where it will take none."""
+        try:
+            minted = self()
+        except Exception:
+            return None
+        return minted if canonical_activation_id(minted) else None
+
+
+def _stopped_failure(
+    state: ActivationState | None, failure: BaseException | None
+) -> BaseException | None:
+    """What a call awaiting ``state``'s pass is answered with, once it has ended.
+
+    ADR-0297 §4: a turn call awaiting a stopped pass raises
+    :class:`ActivationStoppedError` in place of what the pass would otherwise return
+    or raise; a stopped resume returns its outcome (:meth:`Engine.resume`), unless it
+    ended on a raise and has none to return. A cancellation still propagates as
+    itself, and a pass no stop reached is answered as it ended.
+    """
+    if state is None or not state.stopped or isinstance(failure, asyncio.CancelledError):
+        return failure
+    if failure is None and isinstance(state.trigger, RecordedResumeTrigger):
+        return None
+    stopped = ActivationStoppedError(_STOPPED_MESSAGE)
+    stopped.__cause__ = failure
+    return stopped
+
+
+def _marked() -> bool:
+    """Whether the activation this worker runs under has its stop mark set (ADR-0297 §3)."""
+    state = active_state()
+    return state is not None and state.stopped
+
+
+def _resume_stopped() -> bool:
+    """Whether this worker runs a resume whose control activation was stopped (ADR-0297 §4)."""
+    state = active_state()
+    return state is not None and state.stopped and isinstance(state.trigger, RecordedResumeTrigger)
+
+
+def _running_activation_id() -> str | None:
+    """The id of the activation this worker runs under, which its claims name.
+
+    ADR-0297 §2: every claim made under an activation that has an id names that id,
+    and one names none only where the activation has none — no admitted activation,
+    or one whose id factory failed (ADR-0275 §6:1).
+    """
+    state = active_state()
+    return None if state is None else state.activation_id
 
 
 def _produced[T: ComposedReply | None](composed: T) -> T:
@@ -5580,6 +5670,15 @@ class Engine:
         result, report = await asyncio.shield(task)
         if report is not None and report.state != "recorded":
             result = result.model_copy(update={"capture_degraded": True})
+        if scope.state is not None and scope.state.stopped:
+            # ADR-0297 §4: the control activation was stopped — the pass has ended, so
+            # the mark can no longer move — and its outcome is the fourth reply-less
+            # shape whenever the mark was set, a mark set after the outcome was built
+            # included: no reply, never degraded, and every other member as the resume
+            # established it.
+            result = result.model_copy(
+                update={"stopped": True, "reply": None, "reply_degraded": False}
+            )
         return result
 
     async def _admit_control(  # noqa: PLR0913 — existing resolution facts, never authority
@@ -5593,6 +5692,7 @@ class Engine:
         goal_id: str | None = None,
         attempt_id: str | None = None,
         derived_from_external: bool | None = None,
+        id_factory: Callable[[], str] | None = None,
     ) -> None:
         """Observe only a validated unsettled resolution, before its processing awaits.
 
@@ -5601,6 +5701,10 @@ class Engine:
         conversation is not resolved writes none. ``derived_from_external`` is the
         parked turn's retained ADR-0223 value where the resume continues a parked
         step (§3:3), which the pass then holds from its admission (ADR-0286 §4:3).
+
+        ``id_factory`` is the id the activation is admitted with, where the caller
+        minted it ahead of the admission so that a claim made after it can name it
+        (ADR-0297 §2:2); the engine's own factory otherwise.
         """
         scope = CURRENT_ACTIVATION.get()
         if scope is None or scope.state is not None:
@@ -5609,7 +5713,7 @@ class Engine:
             approved=approved,
             remember_recipients_until=remember_recipients_until,
             clock=self._now,
-            id_factory=self._activation_id_factory,
+            id_factory=self._activation_id_factory if id_factory is None else id_factory,
         )
         scope.state = state
         state.relate(parked=binding, goal_id=goal_id, attempt_id=attempt_id)
@@ -5736,6 +5840,66 @@ class Engine:
             )
             raise UnknownContinuationError(msg)
         return await operations.cancel(park_id)
+
+    async def stop_activation(self, activation_id: Identifier, /) -> ActivationStop:
+        """Stop one running activation: its mark, then its stop record (ADR-0297 §3, §5).
+
+        **The mark is set first, in one synchronous step with the test of whether the
+        activation has ended** (:meth:`ActivationState.stop`), and only then is the
+        stop record written. Every end entry is appended in a synchronous step of its
+        own on this one event loop, so either the mark lands first and the pass's end
+        entry is the stop's, or the end entry landed first and the activation is
+        answered ``ALREADY_ENDED`` with nothing written. The running activations are
+        the ones this engine holds in process (§3:1, ADR-0255 §4:4): there is no
+        cross-process signal, no queue and no lease.
+
+        **No task is cancelled** (§4): the pass ends before its next stage, the store
+        refuses every later claim made under it, and a stage already running runs to
+        its own end under its own deadlines.
+
+        Where the engine holds no running activation by that id, an episode at its
+        address, ``activation:<activation_id>`` (ADR-0283 §2), says it ran and ended —
+        a restart's close included (ADR-0286 §7) — and nothing standing there says
+        nothing ran that the hub still knows of. Neither writes anything.
+
+        Raises:
+            RuntimeError: If the engine is shutting down.
+            ValueError: If ``activation_id`` is not an identifier.
+            PlanningError: If the stop record cannot be written. The mark stays set
+                (§3:7), and a repeated stop while the activation still runs writes the
+                record again.
+            MemoryStoreError: If the episode cannot be read.
+        """
+        self._reject_if_closing()
+        named = identifier(activation_id, name="activation_id")
+        check_arguments("stop_activation", max_bytes=self._max_payload_bytes, activation_id=named)
+        return await self._tracked(self._stop(named), "stop_activation", checked=True)
+
+    async def _stop(self, activation_id: str) -> ActivationStop:
+        """The two writes of :meth:`stop_activation`, in their order (ADR-0297 §3).
+
+        Everything up to the mark runs before the first ``await``: the running
+        activation is found and its mark set in the one synchronous step that tests
+        whether it has ended.
+        """
+        running = next(
+            (
+                one.state
+                for one in self._running
+                if one.state is not None and one.state.activation_id == activation_id
+            ),
+            None,
+        )
+        if running is not None:
+            if not running.stop():
+                return ActivationStop.ALREADY_ENDED
+            # §3:4: only once the mark is set is the record written.
+            await self._plans.record_stop(activation_id)
+            return ActivationStop.STOPPED
+        episode = await self._memory.get(f"activation:{activation_id}")
+        return (
+            ActivationStop.NO_SUCH_ACTIVATION if episode is None else ActivationStop.ALREADY_ENDED
+        )
 
     # --- goals, and the two acts on one (ADR-0250 §§12, 15) ---------------
     #
@@ -9484,6 +9648,10 @@ class Engine:
         re-raised before the adapter is reached, the activation's episode is closed
         interrupted, and the conversation's state reads *interrupted* (§8:3).
 
+        **Nor does a stop** (ADR-0295 §3:3, ADR-0297 §4): the pass ends with the stop's
+        end entry, the awaited task raises ``ActivationStoppedError``, nothing is
+        written, and the conversation's state reads *stopped*.
+
         Returns:
             Whether the activation marked anything taken in; ``False`` too where the
             engine was already closing, and nothing was admitted.
@@ -9532,6 +9700,13 @@ class Engine:
             outcome, _report = await task
         except asyncio.CancelledError:
             raise
+        except ActivationStoppedError:
+            # ADR-0295 §3:3, ADR-0297 §4: a stopped activation writes nothing into the
+            # conversation — no reply, even one already composed, no *couldn't finish*
+            # and no message saying it stopped. What it marked is taken in; what waited
+            # meanwhile is taken in by the reader's next look, as after any activation
+            # (ADR-0295 §3:6).
+            return bool(marked)
         except Exception:  # every failure of the pass is §10:2's ending
             if not marked:
                 _log.warning("chat_input_not_taken_in", stage="chat_reader", exc_info=True)
@@ -9628,6 +9803,7 @@ class Engine:
                             raise
                     except Exception:
                         capture_loss("terminal", "failed")
+                failure = _stopped_failure(state, failure)
                 if failure is not None:
                     raise failure
                 return cast("T", value), report
@@ -9851,23 +10027,37 @@ class Engine:
 
     async def _resumed_compose[T](
         self, compose: Callable[[], Awaitable[T]], *, composes: bool = True
-    ) -> T:
+    ) -> T | None:
         """Compose a resume's reply, recording the ``compose`` stage where it composes.
 
         ADR-0284 §5:4: an entry for ``compose``, due ``reply_owed``, where the resume
         composes. A resumed step whose parked turn did not survive a restart composes
         nothing (ADR-0052 §3), and then no entry is recorded.
+
+        **The stop mark is read here, before compose begins, and nowhere else in the
+        resume** (ADR-0297 §4): once it is set the resume composes nothing, records no
+        ``compose`` entry, and answers ``None``. A reply composed while the mark was
+        set is dropped too — a stopped resume carries none, whether or not one had
+        been composed when the stop landed.
         """
+        if _marked():
+            return None
         if not composes:
-            return await compose()
-        return await run_recorded(
-            self._resume_record,
-            ControllerStage.COMPOSE,
-            ControllerRule.REPLY_OWED,
-            clock=self._clock,
-            body=compose,
-            appended=self._episode_appended,
-        )
+            composed = await compose()
+        else:
+            composed = await run_recorded(
+                self._resume_record,
+                ControllerStage.COMPOSE,
+                ControllerRule.REPLY_OWED,
+                clock=self._clock,
+                body=compose,
+                appended=self._episode_appended,
+                stopped=_marked,
+            )
+        if _marked() and (state := active_state()) is not None:
+            state.composition(None, degraded=False, timed_out=False)
+            return None
+        return composed
 
     def _resume_record(self) -> StageRecord | None:
         """The stage record a resume appends to, once its activation is admitted.
@@ -12150,8 +12340,16 @@ class Engine:
         if state is not None:
             state.working = working
         await ActivationController(
-            stages=stages, clock=self._clock, appended=self._episode_appended
+            stages=stages,
+            clock=self._clock,
+            appended=self._episode_appended,
+            stopped=None if state is None else (lambda: state.stopped),
         ).run(working, record)
+        if state is not None and state.stopped:
+            # ADR-0297 §4: the controller left its loop on the stop and appended the
+            # stop's end entry; nothing after the stages runs — no capture, no
+            # composing — and the turn call awaiting the pass raises in its place.
+            raise ActivationStoppedError(_STOPPED_MESSAGE)
 
     async def _windows_stage(self, working: _ActivationPass) -> None:
         """ADR-0282 §3: assemble the pass's windows before recall and understanding.
@@ -12981,6 +13179,9 @@ class Engine:
                     origin=planned.origin,
                     on_ruled=ruled,
                     outbound=observed,
+                    # ADR-0297 §2: the claim names the activation this drive runs
+                    # under, so a stop recorded for it refuses the claim in the store.
+                    activation_id=_running_activation_id(),
                 )
                 # ADR-0284 §5:2: retained before any further fallible work, so the
                 # `drive` entry carries what the step reached even where that raises.
@@ -13684,6 +13885,7 @@ class Engine:
                 body=lambda: self._resume_routed(park, approved=approved),
                 verdict=_resumed_route_verdict,
                 appended=self._episode_appended,
+                stopped=_marked,
             )
             return park, routed
 
@@ -14582,8 +14784,16 @@ class Engine:
         )
         # `resumed_from` is read above the resolution, so the ledger counts this pass's
         # own work and not the interval the park spent waiting for the user (§5).
-        report = await self._finished_attempt(
-            step, composed, since=resumed_from, allowed_by=allowed_by, verified=verified
+        # ADR-0297 §4: a stopped resume composed no answer, or had the one it composed
+        # dropped, so the commit "once the answer exists" is not made — the attempt
+        # stands as the work already under way left it, and what the user does next
+        # decides it (ADR-0295 §4:1).
+        report = (
+            None
+            if _marked()
+            else await self._finished_attempt(
+                step, composed, since=resumed_from, allowed_by=allowed_by, verified=verified
+            )
         )
         return await self._capture_resumption(
             parked,
@@ -15017,6 +15227,20 @@ class Engine:
                 allowed_by = decision.id
                 await self._authorized_attempt(resumed, decision.id)
 
+            # ADR-0297 §2:2: the resumed claim names the control activation that
+            # resolves the park. That activation is admitted at the resolution point,
+            # inside the runner and ahead of the claim, so its id is minted here, once,
+            # and both the admission and the claim are handed the one value.
+            control = _OnceMinted(self._activation_id_factory)
+            scope = CURRENT_ACTIVATION.get()
+            claim_activation_id = (
+                None
+                if scope is None
+                else control.for_claim()
+                if scope.state is None
+                else scope.state.activation_id
+            )
+
             async def resolving() -> None:
                 await self._admit_control(
                     approved=approved,
@@ -15026,6 +15250,7 @@ class Engine:
                     attempt_id=owner.id,
                     # ADR-0223 §3:3: the parking turn's value, retained with the park.
                     derived_from_external=parked.derived_from_external,
+                    id_factory=control,
                 )
 
             observed = DriveObservation()
@@ -15043,7 +15268,16 @@ class Engine:
                         on_ruled=ruled,
                         on_resolving=resolving,
                         outbound=observed,
+                        activation_id=claim_activation_id,
                     )
+                except ClaimStopped:
+                    # ADR-0297 §2, §4: the store refused this resolution's claim because
+                    # its control activation was stopped — the stop record landed first,
+                    # so nothing was invoked and the step keeps its entry status. The
+                    # answer was recorded before the claim (ADR-0255 §3:23), so the
+                    # resume returns rather than raising (ADR-0235 §6:10), and it ends as
+                    # stopped. The park stands as it does after any refused claim.
+                    return _WithheldResumption(parked=parked, withheld=None, outbound=observed)
                 except ClaimRefused:
                     # ADR-0261 §7 on the resumption, which is the case it is most likely to
                     # be met in: a user parks a step, changes their mind about the goal, and
@@ -15081,6 +15315,7 @@ class Engine:
                 body=drive,
                 verdict=_resumed_drive_verdict,
                 appended=self._episode_appended,
+                stopped=_marked,
             )
             if isinstance(driven, _WithheldResumption):
                 return driven
@@ -15297,10 +15532,15 @@ class Engine:
             capture_loss("association", "failed")
             origin = None
         if origin is None:
+            # ADR-0297 §4, as at the captured path: a stopped resume carries no reply.
+            stopped = _resume_stopped()
+            if stopped:
+                composed = None
             return TurnOutcome(
                 turn=parked.turn,
                 step=step,
                 capture_degraded=True,
+                stopped=stopped,
                 reply=None if composed is None else composed.text,
                 reply_degraded=composed is not None and composed.degraded,
                 recipient_grant=recipient_grant,
@@ -15475,7 +15715,16 @@ class Engine:
         it hoists above its branch, :meth:`_capture_resumption` from the value the
         park retained, and :meth:`_compose_and_capture_routed` with ``False``, which
         is true of an episode rendering no turn rather than a fallback.
+
+        **A stopped resume carries no reply** (ADR-0297 §4): where its control
+        activation's mark is set when the outcome is built, ``composed`` is dropped —
+        from the outcome and from the episode alike — and the outcome says
+        ``stopped``. :meth:`resume` applies the same once the pass has ended, for a
+        mark set after this point.
         """
+        stopped = _resume_stopped()
+        if stopped:
+            composed = None
         state = active_state()
         if state is not None:
             state.facts = CaptureFacts(
@@ -15572,6 +15821,8 @@ class Engine:
             # driver *skip* never sets it — that reaches composing through the undriven
             # set (ADR-0255 §11).
             drive_withheld=drive_withheld,
+            # ADR-0297 §4: the fourth reply-less shape, a resume the user stopped.
+            stopped=stopped,
         )
         if state is not None:
             state.observe_result(result)

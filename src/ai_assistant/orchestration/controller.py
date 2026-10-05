@@ -471,6 +471,7 @@ async def run_recorded[T](  # noqa: PLR0913 — where to record, which stage and
     body: Callable[[], Awaitable[T]],
     verdict: Callable[[T], Verdict] | None = None,
     appended: Callable[[], Awaitable[None]] | None = None,
+    stopped: Callable[[], bool] | None = None,
 ) -> T:
     """Run one stage the controller does not run, and record it (ADR-0284 §5:4-§5:5).
 
@@ -499,6 +500,11 @@ async def run_recorded[T](  # noqa: PLR0913 — where to record, which stage and
         appended: Awaited once the stage's entry is appended, so the episode is
             extended as the stage ends (ADR-0286 §3, §9). It never raises but for a
             cancellation.
+        stopped: Whether the activation's stop mark is set (ADR-0297 §4). A resume
+            that raised once its mark is set ends with the stop's end entry rather
+            than ``stage_failed`` or ``stage_timed_out``, and the error is still
+            re-raised: the resume has no outcome to return, and its caller reports
+            the stop in its place.
 
     Returns:
         What the body returned.
@@ -525,10 +531,13 @@ async def run_recorded[T](  # noqa: PLR0913 — where to record, which stage and
             )
             if appended is not None:
                 await appended()
-            target.end(
-                ControllerRule.STAGE_TIMED_OUT if timed_out else ControllerRule.STAGE_FAILED,
-                clock(),
-            )
+            if stopped is not None and stopped():
+                target.end(ControllerRule.STOPPED, clock())
+            else:
+                target.end(
+                    ControllerRule.STAGE_TIMED_OUT if timed_out else ControllerRule.STAGE_FAILED,
+                    clock(),
+                )
         raise
     target = record()
     if target is not None and not target.ended:
@@ -559,6 +568,7 @@ class ActivationController[P: PassFacts]:
         clock: Clock,
         rules: Sequence[Rule] = ACTIVATION_RULES,
         appended: Callable[[], Awaitable[None]] | None = None,
+        stopped: Callable[[], bool] | None = None,
     ) -> None:
         """Hold the stages, the clock, the rule table and what follows each entry.
 
@@ -566,6 +576,10 @@ class ActivationController[P: PassFacts]:
         extended as the stage ends (ADR-0286 §3). It never raises but for a
         cancellation, and the end entry is not followed by it: that entry is the
         freeze's (§4).
+
+        ``stopped`` reads the activation's stop mark (ADR-0297 §3, §4), the one thing
+        the controller reads besides the pass's state; a pass with no activation to
+        stop leaves it ``None``, and is never marked.
         """
         self._stages: Mapping[ControllerStage, ControllerStageRun[P]] = {
             stage.name: stage for stage in stages
@@ -573,6 +587,10 @@ class ActivationController[P: PassFacts]:
         self._clock = clock
         self._rules = tuple(rules)
         self._appended = appended
+        self._stopped = stopped
+
+    def _marked(self) -> bool:
+        return self._stopped is not None and self._stopped()
 
     def _due(self, state: P) -> Rule:
         for rule in self._rules:
@@ -581,7 +599,7 @@ class ActivationController[P: PassFacts]:
         msg = "no rule answered: the table ends with one that always does (ADR-0280 §4)"
         raise RuntimeError(msg)
 
-    async def run(self, state: P, record: StageRecord) -> None:
+    async def run(self, state: P, record: StageRecord) -> None:  # noqa: C901 — §3's one step, with ADR-0297 §4's two readings of the stop mark in it
         """Run the pass to its end entry.
 
         Ends with the rule that ended it; with ``stage_repeated`` where the first
@@ -592,12 +610,25 @@ class ActivationController[P: PassFacts]:
         evaluated again (ADR-0281 §5); and with ``interrupted`` where the pass is
         cancelled or interrupted while the controller runs.
 
+        **A stopped pass leaves the loop** (ADR-0297 §4). The stop mark is read before
+        each evaluation of the rules and again once each stage's result is in hand,
+        before the fixed default; where it is set, the loop is left without evaluating
+        the rules, running a stage or appending an end entry, and the ``finally``
+        appends ``stopped`` where it would append ``interrupted``. A stage that failed
+        or timed out once the mark was set ends the pass with the stop's end entry, and
+        its error is **not** re-raised: the stop was taken in first, so it is what
+        ended the pass. No task is cancelled, and a cancellation that reaches a marked
+        pass still propagates, its end entry still the stop's.
+
         Raises:
-            Exception: The error a stage that failed or timed out carried.
+            Exception: The error a stage that failed or timed out carried, on a pass
+                whose stop mark was not set when its result was in hand.
         """
         ran: set[ControllerStage] = set()
         try:
             while True:
+                if self._marked():
+                    return
                 rule = self._due(state)
                 stage = rule.makes_due
                 if stage is ControllerStage.END:
@@ -626,6 +657,8 @@ class ActivationController[P: PassFacts]:
                 )
                 if self._appended is not None:
                     await self._appended()
+                if self._marked():
+                    return
                 if result.outcome is StageOutcome.DONE:
                     continue
                 if result.tolerated and not state.deadline_passed:
@@ -640,4 +673,7 @@ class ActivationController[P: PassFacts]:
                 raise result.error
         finally:
             if not record.ended:
-                record.end(ControllerRule.INTERRUPTED, self._clock())
+                record.end(
+                    ControllerRule.STOPPED if self._marked() else ControllerRule.INTERRUPTED,
+                    self._clock(),
+                )

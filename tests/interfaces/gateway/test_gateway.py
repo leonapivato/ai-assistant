@@ -1061,6 +1061,16 @@ def test_a_new_member_of_a_turn_outcome_cannot_reach_the_page_unnoticed() -> Non
     which is ADR-0168 §6's enumeration discipline: what may appear on the page is decided
     in ``_outcome_view`` rather than in the renderer that reads it.
 
+    **``stopped`` is ADR-0297 §4's member, and the decision taken here is "not
+    rendered".** It is ``True`` on exactly one shape, a ``resume`` whose control
+    activation the user stopped, and every turn route this page sends is a turn call,
+    which a stop answers with ``ActivationStoppedError`` rather than an outcome. A
+    stopped resume's outcome reaches this page as the reply-less card it already draws
+    for a recovered park, and what the stopped activation finished the user reads in
+    the conversation's current state (ADR-0295 §3:5). ADR-0297 §6:4 lands the
+    gateway's stop control last, in its own lane, and whether the page says
+    "stopped" on such a card is that lane's to decide.
+
     **This assertion is the tripwire firing as designed**, which is what the test's own
     name says: a member reaching the page unnoticed is what it exists to prevent, and a
     lane that adds one names it here and states which way the decision went. Nothing
@@ -1088,6 +1098,7 @@ def test_a_new_member_of_a_turn_outcome_cannot_reach_the_page_unnoticed() -> Non
         "drive_withheld",
         "satisfied_from_earlier",
         "attempt_report",
+        "stopped",
     }
 
 

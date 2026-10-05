@@ -2428,7 +2428,11 @@ from ai_assistant.wire.errors import (
 #:     ``chat_changes`` — and the chat types they carry; ``conversation``'s digest
 #:     gains the current state and the conversation's devices, and
 #:     ``forget_conversation`` becomes memory-only.
-PROTOCOL_VERSION: Final[int] = 76
+#: 77: ADR-0297 §6:3 adds ``stop_activation`` to the promoted ``AssistantEngine`` method
+#:     set, answering ``ActivationStop``; adds ``ActivationStoppedError`` to the error
+#:     mapping and ``TurnOutcome.stopped``; and adds ``stopped`` to ``ControllerRule`` and
+#:     to ``ProcessingReason`` on the wire-carried episode record.
+PROTOCOL_VERSION: Final[int] = 77
 
 #: ADR-0085 §8a: "The correlation id is a UUID string and is at most 36 bytes.
 #: Bounding it is what makes the reserve a constant rather than an aspiration; a

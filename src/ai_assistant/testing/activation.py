@@ -147,6 +147,18 @@ class FakeActivation:
     #: nothing, and an episode already on its way is deleted once it lands.
     forgotten: bool = False
     understood: bool = False
+    #: ADR-0297 §3: the stop mark, set by the fake's ``stop_activation`` on an
+    #: activation that has not ended, and never cleared.
+    stopped: bool = False
+    #: The finalization reading was taken: for a stop, the activation has ended.
+    ended: bool = False
+
+    def stop(self) -> bool:
+        """Set the stop mark unless the activation has ended, as the engine does (§3:3)."""
+        if self.ended:
+            return False
+        self.stopped = True
+        return True
 
     @classmethod
     def channel(
@@ -257,6 +269,9 @@ class FakeActivation:
 
     def status(self, failure: BaseException | None) -> tuple[ProcessingStatus, ProcessingReason]:  # noqa: C901, PLR0911 — independent ordered fake classification
         """Classify the outcomes this deterministic fake can produce."""
+        if self.stopped:
+            # ADR-0297 §4: ahead of every other row, a cancellation's included.
+            return ProcessingStatus.INTERRUPTED, ProcessingReason.STOPPED
         if isinstance(failure, asyncio.CancelledError):
             return ProcessingStatus.INTERRUPTED, ProcessingReason.CANCELLED
         if isinstance(failure, ChannelProcessingTimeoutError):
@@ -330,10 +345,11 @@ class FakeActivation:
         The fake runs no controller. It records the one stage entry that carries a
         verdict where its scripted result reached one — ``routing`` with the route's
         outcome, or ``drive`` with the step's disposition (§5:2) — and the pass's one
-        end entry, choosing the rule from what it knows: ``interrupted`` on a
-        cancellation; ``no_text_input`` for speech with no words or a failed
-        transcription; ``stage_failed`` on any other failure; ``route_taken`` for a
-        routed turn; and ``nothing_due`` otherwise.
+        end entry, choosing the rule from what it knows: ``stopped`` where its stop
+        mark is set (ADR-0297 §4); ``interrupted`` on a cancellation;
+        ``no_text_input`` for speech with no words or a failed transcription;
+        ``stage_failed`` on any other failure; ``route_taken`` for a routed turn; and
+        ``nothing_due`` otherwise.
 
         **A resume records its stages** (§5:4): the continued stage, due
         ``park_answered`` with its verdict, then ``compose`` due ``reply_owed`` where
@@ -368,7 +384,9 @@ class FakeActivation:
             )
         if resume and outcome is not None and outcome.reply is not None:
             entries.append(self._entry(ControllerStage.COMPOSE, ControllerRule.REPLY_OWED))
-        if isinstance(failure, asyncio.CancelledError):
+        if self.stopped:
+            rule = ControllerRule.STOPPED
+        elif isinstance(failure, asyncio.CancelledError):
             rule = ControllerRule.INTERRUPTED
         elif not resume and (self.no_words or isinstance(failure, TranscriptionFailedError)):
             rule = ControllerRule.NO_TEXT_INPUT
@@ -441,6 +459,8 @@ class FakeActivation:
         check_output: Callable[[], object],
     ) -> EpisodeCaptureReport:
         """Insert once and report only confirmed live capture; never retry processing."""
+        # ADR-0297 §3:2: the finalization reading ends the activation, for a stop.
+        self.ended = True
 
         def forgotten() -> EpisodeCaptureReport:
             self.episode_id = None

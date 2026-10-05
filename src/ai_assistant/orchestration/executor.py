@@ -432,6 +432,7 @@ class StepExecutor:
         attempt_id: str,
         timeout: timedelta,  # noqa: ASYNC109 — the seam owns the deadline (ADR-0029 §4)
         reach: CallableReach | None = None,
+        activation_id: str | None = None,
     ) -> Dispatch:
         """Claim ``step_id``, run ``call``, and commit the outcome.
 
@@ -461,6 +462,12 @@ class StepExecutor:
                 ``PlanStore`` read it did not already have (ADR-0058, ADR-0254 §13).
             timeout: How long the seam may wait, per attempt. The caller's
                 budget, not the tool's property (ADR-0029 §4).
+            activation_id: The activation every claim this executor makes is made
+                under (ADR-0297 §2), each re-claim included, or ``None`` only where
+                that activation has no id. Threaded exactly as ``attempt_id`` is:
+                passed to the ``StepTransition`` and read for nothing else, so the
+                store refuses a claim of a stopped activation with
+                :class:`~ai_assistant.core.errors.ClaimStopped`, which propagates.
             reach: ADR-0264 §2's pre-callable observer, written through as the drive
                 runs (:class:`CallableReach`). ``None``, the default, observes nothing
                 and changes no behaviour — it is what every caller that does not carry
@@ -550,7 +557,7 @@ class StepExecutor:
         if settled is not None:
             return settled
 
-        state = await self._claim(state, step_id, authorised, attempt_id)
+        state = await self._claim(state, step_id, authorised, attempt_id, activation_id)
         # Read *after* the claim, because ADR-0029 §5 measures from "the first
         # attempt of this call" — a slow `commit_transition` is not part of the
         # window, and counting it could consume one before the tool was reached.
@@ -583,7 +590,7 @@ class StepExecutor:
             if result is None or not self._may_retry(result, trusted, started):
                 return Dispatch(state)
             try:
-                state = await self._claim(state, step_id, authorised, attempt_id)
+                state = await self._claim(state, step_id, authorised, attempt_id, activation_id)
             except RetriesExhaustedError:
                 # The ceiling is the tracker's (ADR-0014 §4), and hitting it is
                 # an ordinary end to this loop rather than a fault: the step is
@@ -833,7 +840,12 @@ class StepExecutor:
     # --- the transitions ------------------------------------------------
 
     async def _claim(
-        self, state: ExecutionState, step_id: str, call: ToolCall, attempt_id: str
+        self,
+        state: ExecutionState,
+        step_id: str,
+        call: ToolCall,
+        attempt_id: str,
+        activation_id: str | None,
     ) -> ExecutionState:
         """Commit the ``→ RUNNING`` claim that must precede the call.
 
@@ -861,6 +873,7 @@ class StepExecutor:
             step_id: The step being claimed.
             call: The authorised call, already detached and revalidated.
             attempt_id: The attempt the claim is made under (ADR-0255 §3).
+            activation_id: The activation the claim is made under (ADR-0297 §2).
 
         Raises:
             CancelledError: If the executing task was cancelled while the claim
@@ -878,6 +891,7 @@ class StepExecutor:
                 bound_tool=call.request.tool.id,
                 approval_ref=call.decision.id,
                 attempt_id=attempt_id,
+                activation_id=activation_id,
             )
         )
         if not cancelled:

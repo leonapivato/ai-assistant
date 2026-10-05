@@ -110,6 +110,7 @@ if TYPE_CHECKING:
     from pydantic import TypeAdapter
 
     from ai_assistant.core.types import (
+        ActivationStop,
         AnswerOutcome,
         AuthorizationSettlement,
         AuthorizationView,
@@ -612,6 +613,25 @@ class HubClient:
             Which of ADR-0244 §11's three states the hub reached.
         """
         return await self._call("cancel_read", token=token)  # type: ignore[no-any-return]
+
+    async def stop_activation(self, activation_id: Identifier, /) -> ActivationStop:
+        """Relay a stop of one running activation (ADR-0297 §5).
+
+        **The client relays and decides nothing**, exactly as :meth:`cancel_read`
+        does: whether the activation was running, had ended or was never known is a
+        fact about the hub's own process, the only place the running activations are
+        held (ADR-0297 §3:1).
+
+        Args:
+            activation_id: The activation to stop, as the conversation's current state
+                named it.
+
+        Returns:
+            Which of ADR-0297 §5's three answers the hub reached.
+        """
+        return await self._call(  # type: ignore[no-any-return]
+            "stop_activation", activation_id=activation_id
+        )
 
     async def goals(
         self, *, limit: int = DEFAULT_PAGE_SIZE, offset: int = 0

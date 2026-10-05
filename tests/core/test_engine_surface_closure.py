@@ -785,8 +785,13 @@ def test_the_surface_carries_the_methods_the_adrs_fixed() -> None:
     ``my_devices``, ``transcript`` and ``chat_changes`` as its reads — so the count
     rises to seventy-seven. The gateway serves none of them yet: that is ADR-0296
     §5's, whose browser enumeration gains them when the interfaces move.
+
+    **ADR-0297 §5 adds one**, ``stop_activation``, the stop command ADR-0295 §1
+    decides — so the count rises to seventy-eight. The gateway's stop control beside
+    "working…" lands last, in its own lane (ADR-0297 §6:4), so ADR-0177 §1's
+    enumeration does not move here.
     """
-    assert len(_method_names()) == 77
+    assert len(_method_names()) == 78
 
 
 def test_a_streaming_method_declares_its_union_chunk_first_terminal_last() -> None:
@@ -1455,6 +1460,13 @@ def test_the_promoted_surface_and_the_protocol_version_are_both_pinned() -> None
     digest gains two members a client at 75 refuses as unknown, and
     ``forget_conversation`` stops deleting the conversation.
 
+    **77 is ADR-0297 §6:3, under the first limb and the second.** ``AssistantEngine``
+    gains ``stop_activation``, so the method set rises to **78**: a client at 77 may
+    call an operation a hub at 76 does not answer. ``ActivationStop``,
+    ``ActivationStoppedError`` and ``TurnOutcome.stopped`` cross with it, and
+    ``ControllerRule`` and ``ProcessingReason`` each gain ``stopped`` on the
+    wire-carried episode record, which a peer at 76 refuses as unknown.
+
     **ADR-0124 §9 decides no mechanical check and creates none**, saying one is
     owed and leaving its shape open. This is not that check — it is a *pin*, and
     a deliberately crude one: it fails when either number moves, which is the
@@ -1463,7 +1475,7 @@ def test_the_promoted_surface_and_the_protocol_version_are_both_pinned() -> None
     """
     from ai_assistant.wire.envelope import PROTOCOL_VERSION  # noqa: PLC0415 — asserted about
 
-    assert (len(_method_names()), PROTOCOL_VERSION) == (77, 76), (
+    assert (len(_method_names()), PROTOCOL_VERSION) == (78, 77), (
         "the promoted method set and the protocol version are pinned together "
         "(ADR-0124 §9); move either and this pin makes you name the limb you are "
         "under — the method set, or a wire-carried core type"

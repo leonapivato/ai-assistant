@@ -115,6 +115,7 @@ if TYPE_CHECKING:
         ActionQuote,
         ActionQuoteMinting,
         ActionRequest,
+        ActivationStop,
         AnswerOutcome,
         AttemptTransition,
         Authorization,
@@ -14655,6 +14656,51 @@ class AssistantEngine(Protocol):
             RuntimeError: If the engine is shutting down.
             UnknownContinuationError: If ``token`` names no park this engine holds,
                 exactly as :meth:`resume` raises it for a token it does not hold.
+        """
+        ...
+
+    async def stop_activation(self, activation_id: Identifier, /) -> ActivationStop:
+        """Stop one running activation (ADR-0297 §5, ADR-0295 §1).
+
+        The stop command, naming exactly one activation by the id a device read from
+        its conversation's current state while it showed "working…". **Two writes in
+        a fixed order** (ADR-0297 §3): the activation's in-process stop mark, set in
+        one synchronous step that first tests whether its end entry is appended, and
+        then its stop record in the plan store, against which the store refuses every
+        later claim made under that activation (§2). **No task is cancelled**: a stage
+        already running runs to its own end under its own deadlines, and an effect
+        already sent finishes and records its outcome (§4). The stopped pass then ends
+        with the stop's end entry, writes nothing into its conversation, and a turn
+        call awaiting it raises
+        :class:`~ai_assistant.core.errors.ActivationStoppedError`; a stopped resume
+        returns its outcome with ``TurnOutcome.stopped`` set.
+
+        **It checks no device role itself** (§5:7): it is reached only as a command,
+        and which devices may send one is decided where every command's sender is
+        checked.
+
+        Args:
+            activation_id: The activation to stop.
+
+        Returns:
+            :attr:`~ai_assistant.core.types.ActivationStop.STOPPED` where the mark
+            was set, or found already set, on an activation whose end entry was not
+            yet appended, and its stop record was written;
+            :attr:`~ai_assistant.core.types.ActivationStop.ALREADY_ENDED`, writing
+            nothing, where its end entry was already appended or no running
+            activation has that id but an episode stands at
+            ``activation:<activation_id>``; and
+            :attr:`~ai_assistant.core.types.ActivationStop.NO_SUCH_ACTIVATION`,
+            writing nothing, where neither holds.
+
+        Raises:
+            RuntimeError: If the engine is shutting down.
+            ValueError: If ``activation_id`` is not an identifier.
+            PlanningError: If the stop record cannot be written. The mark stays set,
+                so the activation still ends as stopped and starts nothing new, and a
+                repeated stop writes the record again (§3:7).
+            MemoryStoreError: If the episode store cannot be read to tell an ended
+                activation from one that never ran.
         """
         ...
 

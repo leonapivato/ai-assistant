@@ -3195,6 +3195,12 @@ class ProcessingReason(StrEnum):
     (ADR-0286 §7). It is paired with :attr:`ProcessingStatus.INTERRUPTED` and with
     the end entry's :attr:`ControllerRule.HUB_STOPPED`, and says nothing about how
     far processing got: nothing recorded when it stopped."""
+    STOPPED = "stopped"
+    """The user stopped the activation (ADR-0297 §4, ADR-0295 §3). It is paired with
+    :attr:`ProcessingStatus.INTERRUPTED` and with the end entry's
+    :attr:`ControllerRule.STOPPED`, and it is classified ahead of every other row of
+    ADR-0275 §5:3's table, a cancellation's included: a pass the user stopped is
+    told apart from a crash, a restart and an interruption."""
 
 
 class RecordedTextInput(BaseModel):
@@ -3548,6 +3554,11 @@ class ControllerRule(StrEnum):
     """The process ended while the pass was open, and a restart's close appended the
     end entry (ADR-0286 §7). It ends a pass, so it is in
     :data:`ENDING_CONTROLLER_RULES`."""
+    STOPPED = "stopped"
+    """The user stopped the activation (ADR-0297 §4): the end entry of a stop, which
+    ADR-0295 §3:1 added and left unnamed. Appended where ``interrupted`` would be
+    (ADR-0280 §5:3, §5:4) for a pass whose stop mark is set. It ends a pass, so it is
+    in :data:`ENDING_CONTROLLER_RULES`."""
 
 
 #: The rules that end a pass rather than make a stage due (ADR-0280 §4, §5).
@@ -3562,6 +3573,7 @@ ENDING_CONTROLLER_RULES: Final[frozenset[ControllerRule]] = frozenset(
         ControllerRule.INTERRUPTED,
         ControllerRule.ENDED_BEFORE_CONTROLLER,
         ControllerRule.HUB_STOPPED,
+        ControllerRule.STOPPED,
     }
 )
 
@@ -16435,6 +16447,27 @@ class ActivationEnding(StrEnum):
     STOPPED = "stopped"
 
 
+class ActivationStop(StrEnum):
+    """What a stop of one activation found (ADR-0297 §5, ADR-0295 §1).
+
+    A **closed** enumeration, valued by lower-cased member name, added to and never
+    renamed.
+
+    Attributes:
+        STOPPED: The activation was running and its end entry was not yet appended:
+            its stop mark is set (or was already) and its stop record is written.
+        ALREADY_ENDED: The activation had already ended — its end entry was
+            appended, or the engine holds no running activation by that id but an
+            episode stands at its address — and nothing was written.
+        NO_SUCH_ACTIVATION: The engine holds no running activation by that id and no
+            episode stands at its address, and nothing was written.
+    """
+
+    STOPPED = "stopped"
+    ALREADY_ENDED = "already_ended"
+    NO_SUCH_ACTIVATION = "no_such_activation"
+
+
 class ConversationState(BaseModel):
     """What a conversation's devices are shown about the assistant (ADR-0293 §8).
 
@@ -28880,6 +28913,19 @@ class TurnOutcome(BaseModel):
             three ``reply``-``None`` shapes nor its one ``reply_degraded`` shape, so
             no clause of ADR-0170 is superseded, narrowed or read more widely, and the
             value it adds to ADR-0198 §2's enumeration changes no value that fixes.
+        stopped: Whether this is the outcome of a ``resume`` whose control activation
+            the user stopped (ADR-0297 §4). ``True`` exactly there, and ``False`` on
+            every other outcome. **The fourth shape on which** :attr:`reply` **is**
+            ``None``, beside ADR-0170 §4:1's three — ADR-0297 partially supersedes
+            that clause, in the addition alone: a stopped resume composes nothing
+            once the mark is set and carries no reply even where one had been
+            composed, and :attr:`reply_degraded` stays ``False`` (§4:2's flag rule is
+            untouched). Every other member is as the resume established it — the
+            step's outcome and the recipient-grant outcome among them — because the
+            answer was recorded before the resume acted (ADR-0235 §6:10). This member
+            is what lets a client tell the fourth shape from the other three from the
+            value alone. A turn call awaiting a stopped pass returns no outcome at
+            all: it raises :class:`~ai_assistant.core.errors.ActivationStoppedError`.
 
     Note:
         ADR-0085 §4's Group A table lists this type's four fields as promoted; the
@@ -29085,6 +29131,15 @@ class TurnOutcome(BaseModel):
             "satisfied and names the act it was satisfied from."
         ),
     )
+    stopped: bool = Field(
+        default=False,
+        strict=True,
+        description=(
+            "Whether this is the outcome of a resume whose control activation the user "
+            "stopped (ADR-0297 §4): the fourth shape on which reply is None, never "
+            "beside reply_degraded."
+        ),
+    )
 
     @model_validator(mode="after")
     def _a_satisfaction_report_is_never_empty(self) -> TurnOutcome:
@@ -29263,9 +29318,21 @@ class TurnOutcome(BaseModel):
         relaxed; it is scoped to the shape its own argument reaches, for the second
         time, and every other shape refuses a reply exactly as before.
 
+        **A stopped resume is the fourth shape, and it is stated in both directions
+        too** (ADR-0297 §4): :attr:`stopped` requires :attr:`reply` ``None`` and
+        :attr:`reply_degraded` ``False``, and a ``None`` reply with the flag clear on
+        a pass that has a :attr:`turn` and did not park — or on a routed pass that
+        did not park — requires :attr:`stopped`.
+
         Raises:
             ValueError: If the outcome describes a pass that could not have happened.
         """
+        if self.stopped and (self.reply is not None or self.reply_degraded):
+            msg = (
+                "a stopped resume composes nothing once the stop is taken in, so it "
+                "carries no reply and composing one cannot have degraded (ADR-0297 §4)"
+            )
+            raise ValueError(msg)
         if self.disambiguation is not None:
             return self._undecided_pass_is_coherent()
         if self.routed is not None:
@@ -29294,10 +29361,11 @@ class TurnOutcome(BaseModel):
                     "context to compose from — so composing one cannot have degraded"
                 )
                 raise ValueError(msg)
-        elif self.reply is None and not parked and self.turn is not None:
+        elif self.reply is None and not parked and self.turn is not None and not self.stopped:
             msg = (
-                "this outcome owed an answer and carries none: set reply, or set "
-                "reply_degraded to say composing one failed"
+                "this outcome owed an answer and carries none: set reply, set "
+                "reply_degraded to say composing one failed, or set stopped to say the "
+                "user stopped the resume (ADR-0297 §4)"
             )
             raise ValueError(msg)
         return self
@@ -29432,10 +29500,11 @@ class TurnOutcome(BaseModel):
             )
             raise ValueError(msg)
         if routed.outcome is not RouteOutcome.AWAITING_CONFIRMATION:
-            if self.reply is None and not self.reply_degraded:
+            if self.reply is None and not self.reply_degraded and not self.stopped:
                 msg = (
-                    "this routed pass owed an answer and carries none: set reply, or set "
-                    "reply_degraded to say composing one failed (ADR-0197 §8, §10)"
+                    "this routed pass owed an answer and carries none: set reply, set "
+                    "reply_degraded to say composing one failed, or set stopped to say "
+                    "the user stopped the resume (ADR-0197 §8, §10, ADR-0297 §4)"
                 )
                 raise ValueError(msg)
             return self

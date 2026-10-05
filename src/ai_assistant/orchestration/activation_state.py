@@ -162,7 +162,41 @@ class ActivationState:
     derived_from_external: bool | None = None
     #: The writer's account of this activation's episode, from its admission write.
     capture: EpisodeProgress | None = field(default=None, repr=False)
+    #: ADR-0297 §3: the stop mark, set by :meth:`stop` and never cleared. The
+    #: controller reads it before each evaluation of the rules and once each stage's
+    #: result is in hand (§4), and a resume reads it before it composes.
+    stopped: bool = field(default=False, init=False)
+    #: The finalization reading was taken (ADR-0280 §6:2): an activation the
+    #: controller never ended gains its end entry there, so for a stop it has ended
+    #: from that reading on, whether or not the record carries the entry yet.
+    _finalized: bool = field(default=False, init=False, repr=False)
     _last_understanding_version: int = field(default=0, init=False, repr=False)
+
+    @property
+    def ended(self) -> bool:
+        """Its end entry is appended, by the controller or at finalization (ADR-0297 §3:2)."""
+        return self.stages.ended or self._finalized
+
+    def stop(self) -> bool:
+        """Set the stop mark, unless the activation has ended (ADR-0297 §3:3).
+
+        The test and the set are **one synchronous step with no await between them**,
+        and every end entry is appended in a synchronous step of its own on the same
+        event loop, so the two are totally ordered: either the mark is set first and
+        the pass's end entry will be the stop's, or the end entry was appended first
+        and this finds the activation ended. A mark already set on an activation
+        still running is found set, which is a repeated stop's retry of the record
+        (§3:7); once the end entry is appended, the activation has ended whatever the
+        mark says.
+
+        Returns:
+            Whether the activation was still running, its mark now set — ``False``
+            exactly where its end entry was already appended, and nothing changed.
+        """
+        if self.ended:
+            return False
+        self.stopped = True
+        return True
 
     def holds_external(self, *, value: bool) -> None:
         """Record ADR-0223's value as the pass now holds it (ADR-0286 §4:3)."""
@@ -262,6 +296,11 @@ class ActivationState:
         self, ended_at: datetime, failure: BaseException | None
     ) -> EpisodeProcessingRecord:
         """Build an immutable terminal record only when admission metadata is complete."""
+        # ADR-0297 §3:2: the finalization reading ends the activation for a stop. Set
+        # before anything here can raise, in the same synchronous step as the reading
+        # of the mark below, so a stop either lands first and this reading is the
+        # stop's, or finds the activation ended.
+        self._finalized = True
         if self.activation_id is None or self.started_at is None:
             raise ValueError("activation admission metadata is incomplete")
         status, reason = terminal_status(self, failure)
@@ -336,10 +375,17 @@ class ActivationState:
         that raised outside a recorded stage, classified as a stage's raise is. A
         resume that continued no stage records the end entry alone.
 
+        **A marked pass ends with the stop's end entry** (ADR-0297 §4), ahead of
+        every other reading, a cancellation's included — at the point ADR-0280 §5:4
+        appends ``interrupted``, for a channel activation ended before the controller
+        was entered, and as a resume's end entry, whatever ended it.
+
         The state itself is not changed, so a second finalization reading builds the
         same record, and no exception, status or reason moves.
         """
-        if isinstance(failure, asyncio.CancelledError):
+        if self.stopped:
+            rule = ControllerRule.STOPPED
+        elif isinstance(failure, asyncio.CancelledError):
             rule = ControllerRule.INTERRUPTED
         elif isinstance(self.trigger, RecordedResumeTrigger):
             if failure is None:
@@ -508,13 +554,23 @@ def admit_resume(
     )
 
 
+def canonical_activation_id(minted: object) -> bool:
+    """Whether ``minted`` is canonical UUID4 text, which an activation id is (ADR-0275 §6:1)."""
+    if not isinstance(minted, str):
+        return False
+    try:
+        value = UUID(minted)
+    except ValueError:
+        return False
+    return value.version == 4 and str(value) == minted  # noqa: PLR2004 — mandated UUID version
+
+
 def _metadata(clock: Clock, id_factory: Callable[[], str]) -> tuple[str | None, datetime | None]:
     activation_id = None
     started_at = None
     try:
         minted = id_factory()
-        value = UUID(minted)
-        if value.version != 4 or str(value) != minted:  # noqa: PLR2004 — mandated UUID version
+        if not canonical_activation_id(minted):
             raise ValueError("activation IDs require canonical UUID4 text")
         activation_id = minted
     except Exception:
@@ -529,7 +585,14 @@ def _metadata(clock: Clock, id_factory: Callable[[], str]) -> tuple[str | None, 
 def terminal_status(  # noqa: C901, PLR0911, PLR0912 — ADR-0275's ordered terminal branches, and ADR-0276 §6's row among them
     state: ActivationState, failure: BaseException | None
 ) -> tuple[ProcessingStatus, ProcessingReason]:
-    """Apply ADR-0275's ordered terminal conditions without interpreting response prose."""
+    """Apply ADR-0275's ordered terminal conditions without interpreting response prose.
+
+    A pass whose end entry is the stop's — whose mark is set, which is the same fact
+    (ADR-0297 §3:3) — is ``interrupted / stopped``, ahead of every other row, the
+    cancellation row included (ADR-0297 §4).
+    """
+    if state.stopped:
+        return ProcessingStatus.INTERRUPTED, ProcessingReason.STOPPED
     if isinstance(failure, asyncio.CancelledError):
         return ProcessingStatus.INTERRUPTED, ProcessingReason.CANCELLED
     if (

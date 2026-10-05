@@ -918,6 +918,7 @@ class StepRunner:
         origin: SelectionOrigin,
         on_ruled: Ruled | None = None,
         outbound: DriveObservation | None = None,
+        activation_id: str | None = None,
     ) -> StepDisposition:
         """Select a tool for ``step_id``, rule on it, and run it if allowed.
 
@@ -980,6 +981,13 @@ class StepRunner:
                 one included** — which is what carries it out of a claim ADR-0261 §7
                 refused, where there is no disposition to carry it. ``None``, the
                 default, observes nothing and changes no behaviour.
+            activation_id: The activation the claim is made under (ADR-0297 §2),
+                supplied by the driver from the activation it runs under and read for
+                nothing else here — passed to the claim's ``StepTransition`` exactly
+                as ``attempt_id`` is, and fetched by no stage. ``None`` only where that
+                activation has no id. A claim the store refuses because the activation
+                was stopped raises :class:`~ai_assistant.core.errors.ClaimStopped`,
+                which propagates.
 
         Returns:
             What became of the step, and the durable state after it.
@@ -1084,6 +1092,7 @@ class StepRunner:
                 attempt_id=attempt_id,
                 timeout=timeout,
                 outbound=outbound,
+                activation_id=activation_id,
             )
 
         if decision.ruling.outcome is PermissionOutcome.CONFIRM:
@@ -1124,6 +1133,7 @@ class StepRunner:
         on_ruled: Ruled | None = None,
         on_resolving: Callable[[], Awaitable[None]] | None = None,
         outbound: DriveObservation | None = None,
+        activation_id: str | None = None,
     ) -> StepDisposition:
         """Answer a parked ``CONFIRM`` and continue the step (ADR-0037 §4).
 
@@ -1192,6 +1202,8 @@ class StepRunner:
                 pending (ADR-0235 §2), and nothing was answered.
             outbound: As :meth:`run` (:class:`DriveObservation`), and on this path it also
                 carries ADR-0235 §2's establishing pair, published before the claim.
+            activation_id: As :meth:`run`: the control activation that resolves the
+                park, which the resumed claim names (ADR-0297 §2:2).
 
         Returns:
             ``EXECUTED`` or ``DENIED``, and the durable state after it. A
@@ -1365,6 +1377,7 @@ class StepRunner:
                 attempt_id=attempt_id,
                 timeout=timeout,
                 outbound=outbound,
+                activation_id=activation_id,
             )
         else:
             disposition = await self._deny(state, step, decision, confirmed.tool)
@@ -2505,6 +2518,7 @@ class StepRunner:
         attempt_id: str,
         timeout: timedelta,  # noqa: ASYNC109 — passed through to the seam, which owns the deadline (ADR-0029 §4)
         outbound: DriveObservation | None = None,
+        activation_id: str | None = None,
     ) -> StepDisposition:
         """Hand the executor an authorised call and report what it committed.
 
@@ -2515,7 +2529,7 @@ class StepRunner:
         find (ADR-0037 §3).
 
         ``attempt_id`` is threaded on to the claim the executor makes and read for
-        nothing else (ADR-0255 §3).
+        nothing else (ADR-0255 §3), and so is ``activation_id`` (ADR-0297 §2).
 
         **ADR-0264 §2's egress contribution is computed here and nowhere else.** This
         stage holds both halves of it: the request, which says whether the step was an
@@ -2583,6 +2597,7 @@ class StepRunner:
                 attempt_id=attempt_id,
                 timeout=timeout,
                 reach=reach,
+                activation_id=activation_id,
             )
         finally:
             # **Published on every exit, including the exceptional one**
