@@ -4072,6 +4072,9 @@ _FETCH_SITES: Final = {
     "startSession": "startSession",
     "askWhole": "ask",
     "readDeliveries": "readDeliveries",
+    # The change stream (ADR-0298 §7), its own `fetch` for `readDeliveries`' reason: a
+    # stream is read value by value, which `relay` does not do.
+    "followChat": "followChat",
     "relay": "listConversations",
     # The spoken entry (ADR-0200 §10). Its own guard rather than one shared with `ask`,
     # because it is not reached from there: a press is its own act and the page never
@@ -4288,13 +4291,14 @@ def _timeouts(script: str) -> list[str]:
 def _page_clocks(script: str) -> list[str]:
     """The page's clocks **other than the chat's**, which a test of its own pins.
 
-    ADR-0293 §11:1 has a device read the changes after its cursor until the change
-    stream is built, and the chat's ``scheduleFollow`` is where the page does that. Every
-    claim below about "the one clock" is about the delivery stream's and the owner's
-    waits, and stays exactly as strict: the chat's clock is taken out by where it is
-    declared, and nowhere else may a second one appear.
+    The chat follows the change stream (ADR-0296 §4, ADR-0298 §7), and ``followChat``
+    bounds that stream exactly as ``readDeliveries`` bounds the delivery stream: a
+    deadline on the head and one on silence, opening nothing. Every claim below about
+    "the one clock" is about the delivery stream's and the owner's waits, and stays
+    exactly as strict: the chat's clock is taken out by where it is declared, and
+    nowhere else may a second one appear.
     """
-    follow = _functions(script)["scheduleFollow"]
+    follow = _functions(script)["followChat"]
     return [call for call in _timeouts(script) if call not in follow]
 
 
@@ -9290,45 +9294,56 @@ def test_a_reference_already_sent_is_not_offered_as_one_that_can_be_taken_back()
         assert barred not in said.lower(), barred
 
 
-def test_the_chat_is_followed_on_a_clock_that_reads_and_retries_nothing() -> None:
-    """ADR-0293 §11:1 and ADR-0182 §7, read together (PR #2701 records the reading).
+def test_the_chat_follows_the_stream_and_reopens_it_only_on_an_event() -> None:
+    """ADR-0296 §4 and ADR-0182 §7, read together (the PR description records the reading).
 
-    Until the change stream is built a device fetches the changes after its cursor, so
-    the chat has a clock of its own. What keeps it inside ADR-0182 §7 is pinned here:
-    it reads the changes after the cursor and does nothing else — it opens no stream,
-    writes nothing and re-arms nothing; a read that fails **stops** the following and
-    says so rather than being tried again; and what starts it again of the page's own
-    motion is §7's two events alone, each announced.
+    The chat follows the change stream and no clock reads it: ``chat_changes`` is read
+    once, for the cursor the chat opens from, and nowhere else. What keeps the stream
+    inside ADR-0182 §7 is pinned here: its clocks end it and open nothing; every ending
+    **stops** the following and says so rather than reopening it; one stream is held at
+    a time, and following stopping releases it; and what opens it again of the page's
+    own motion is §7's two events alone, each announced — from the cursor the page last
+    applied (§4:4).
     """
     script = _code("app.js")
     functions = _functions(script)
-    follow = functions["scheduleFollow"]
-    clock = [call for call in _timeouts(script) if call in follow]
+    follow = functions["followChat"]
+    clocks = [call for call in _timeouts(script) if call in follow]
 
-    assert len(clock) == 1
-    assert "void followChat();" in clock[0]
-    for opener in ("fetch(", "relay(", "watchDeliveries(", "rearm(", "deliverChat("):
-        assert opener not in clock[0], opener
-        assert opener not in follow, opener
-    # One read is out at a time, and what it asks is the changes after the cursor and the
-    # state of the conversation on screen — nothing else.
-    assert "if (chat.reading === tick) {" in functions["followChat"]
-    assert "if (chat.reading === chat.ticks) {" in follow
-    assert "relay(" not in functions["followChat"]
-    reading = functions["readChanges"]
-    assert reading.count("await relay(") == 1
-    assert 'await relay(half, "/chat/changes", { after: after }, "chat")' in reading
-    assert "await readChatDigest(" in reading
-    # A failure of either read stops it, says why, and hands the owner the control: no
-    # retry. Both stopping sentences are in the read, and nowhere else schedules one.
-    assert "stopFollowing(CHAT_STOPPED_GONE, true);" in reading
-    assert reading.count("stopFollowing(CHAT_STOPPED_REFUSED, true);") == 2
-    assert {name for name, body in functions.items() if "scheduleFollow(" in body} == {
-        "scheduleFollow",
-        "startFollowing",
-        "followChat",
-        "deliverChat",
+    assert clocks
+    for clock in clocks:
+        assert "reader.abort();" in clock
+        for opener in ("fetch(", "relay(", "followChat(", "startFollowing(", "rearm("):
+            assert opener not in clock, opener
+    # The stream is asked for from the cursor, and the changes are read for the cursor
+    # alone: no clock reads them.
+    assert 'await fetch("/chat/follow", {' in follow
+    assert "body: JSON.stringify({ after: chat.cursor })," in follow
+    assert {name for name, body in functions.items() if '"/chat/changes"' in body} == {
+        "readChatCursor"
     }
+    # Every ending stops the following, says why, and hands the owner the control.
+    for ending in (
+        "CHAT_STOPPED_REFUSED",
+        "CHAT_STREAM_CUT",
+        "CHAT_HUB_ENDED",
+        "CHAT_STREAM_STALLED",
+        "CHAT_STREAM_SILENT",
+        "CHAT_STREAM_MISFRAMED",
+        "CHAT_STOPPED_GONE",
+    ):
+        assert f"stopFollowing({ending}, true);" in follow, ending
+    # One stream at a time: only starting opens one, starting is refused while following,
+    # and stopping releases the one held.
+    assert {name for name, body in functions.items() if "followChat(" in body} == {
+        "followChat",
+        "startFollowing",
+    }
+    assert "if (!chat.open || chat.following ||" in functions["startFollowing"]
+    assert "releaseChatStream();" in functions["stopFollowing"]
+    # A change moves the cursor once it is applied; nothing else moves it forward but the
+    # hub's own ending.
+    assert "chat.cursor = value.change.seq;" in functions["applyStreamed"]
     # And only ADR-0182 §7's two events start it again of the page's own motion.
     assert 'document.addEventListener("visibilitychange", chatVisibility);' in script
     assert 'window.addEventListener("online", chatOnline);' in script
@@ -9342,3 +9357,28 @@ def test_the_chat_is_followed_on_a_clock_that_reads_and_retries_nothing() -> Non
     assert "startFollowing(CHAT_NETWORK_BACK);" in functions["chatOnline"]
     # Hiding the page pauses it, and says so.
     assert "stopFollowing(CHAT_PAUSED, false);" in functions["chatVisibility"]
+
+
+def test_a_device_drops_what_it_held_on_removal_and_on_holding_no_role() -> None:
+    """ADR-0296 §4:8 and ADR-0298 §7:13, as the page's code states them.
+
+    A change that leaves this device no reader of a conversation drops that
+    conversation; a refusal for holding no role — of the stream, or of the changes read
+    — drops every one; and no other refusal does, since a device refused for a role
+    that does not allow an act still reads what it reads.
+    """
+    script = _code("app.js")
+    functions = _functions(script)
+
+    assert "dropConversation(change.conversation_id);" in functions["applyChanges"]
+    assert "if (!readsHere(change.devices)) {" in functions["applyChanges"]
+    dropping = functions["dropOnRefusal"]
+    assert 'body.fault !== "device-without-role"' in dropping
+    assert "chat.listing = [];" in dropping
+    assert {name for name, body in functions.items() if "dropOnRefusal(" in body} == {
+        "dropOnRefusal",
+        "followChat",
+        "readChatCursor",
+    }
+    # The hub's own machine reads every conversation, so it is never dropped from one.
+    assert "named === HUB_DEVICE" in functions["readsHere"]

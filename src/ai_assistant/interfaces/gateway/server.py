@@ -370,9 +370,8 @@ _FORGET_CONVERSATION_PATH: Final = "/conversation/forget"
 #: ADR-0293 §11:2's acts in the medium and the read of the changes after a cursor,
 #: which ADR-0296's record on ADR-0177 §1:1 adds to the browser's enumeration ("§1:1's
 #: enumeration, which gains the acts in the medium (ADR-0293 §11:2) and the change
-#: stream"). **The change stream itself is a later lane's**: until the hub serves one
-#: (ADR-0296 §4), a device catches up by asking for every change after its cursor
-#: (ADR-0293 §5:11, §11:1), and :data:`_CHAT_CHANGES_PATH` is that one request.
+#: stream"). :data:`_CHAT_CHANGES_PATH` is the read of every change after a cursor
+#: (ADR-0293 §5:11), and :data:`_CHAT_FOLLOW_PATH` below the change stream itself.
 #:
 #: One path per operation, the verb last for :data:`_CANCEL_READ_PATH`'s reason. The
 #: listing and the digest are not repeated here: ``recent_conversations`` and
@@ -1235,6 +1234,11 @@ class _Streamed:
             and :meth:`_OpenStream._name_the_ending` reads it — so the two facts a
             session's ending turns on are held in one place rather than in two the
             body and the ending could disagree about.
+        ends_when_the_peer_leaves: Whether the body is ended the moment the browser
+            closes the connection, rather than at the next write that finds it gone.
+            The change stream's: it holds a hub stream and a hub connection for the
+            browser, and a page that lets it go — hidden, or following stopped — gives
+            both back at once rather than a keep-alive cadence later.
     """
 
     handle: SessionHandle
@@ -1243,6 +1247,7 @@ class _Streamed:
     release: Callable[[], None]
     ending: _Ending
     delivery: DeliveryStream | None = None
+    ends_when_the_peer_leaves: bool = False
 
 
 class Gateway:
@@ -2108,7 +2113,7 @@ class Gateway:
             closing = answer.head.close if isinstance(answer, _Streamed) else answer.close
             closing = closing or not connection.admitted
             if isinstance(answer, _Streamed):
-                if not await self._write_stream(writer, answer, closing=closing):
+                if not await self._write_stream(reader, writer, answer, closing=closing):
                     return
             else:
                 try:
@@ -2125,7 +2130,12 @@ class Gateway:
                 return
 
     async def _write_stream(
-        self, writer: asyncio.StreamWriter, answer: _Streamed, *, closing: bool
+        self,
+        reader: asyncio.StreamReader,
+        writer: asyncio.StreamWriter,
+        answer: _Streamed,
+        *,
+        closing: bool,
     ) -> bool:
         """Write one streamed response whole (ADR-0175 §1).
 
@@ -2136,6 +2146,8 @@ class Gateway:
         browser rather than looking like a stream that finished with nothing to say.
 
         Args:
+            reader: The connection's reader, watched for the browser leaving where
+                ``answer`` asks for that (:attr:`_Streamed.ends_when_the_peer_leaves`).
             writer: The connection's writer.
             answer: What to stream.
             closing: Whether the connection is closed once this completes.
@@ -2160,6 +2172,7 @@ class Gateway:
         delivery stream is open" broken by an error path rather than by a rule.
 
         Args:
+            reader: The connection's reader.
             writer: The connection's writer.
             answer: What to stream.
             closing: Whether the connection is closed once this completes.
@@ -2178,7 +2191,11 @@ class Gateway:
         try:
             writer.write(render_stream_head(replace(answer.head, close=closing), policy=_POLICY))
             await writer.drain()
-            await answer.body(writer)
+            if answer.ends_when_the_peer_leaves:
+                if not await _while_the_peer_stays(answer.body(writer), reader):
+                    return False
+            else:
+                await answer.body(writer)
             writer.write(render_stream_end())
             await writer.drain()
         except ConnectionError, OSError:
@@ -2928,6 +2945,7 @@ class Gateway:
             ),
             release=self._give_hub_slot,
             ending=ending,
+            ends_when_the_peer_leaves=True,
         )
 
     async def _follow_chat(
@@ -3207,10 +3225,10 @@ class Gateway:
     async def _chat_changes(self, request: Request) -> Response:
         """Read every change to the chat space after the browser's cursor (§5:11).
 
-        One request, answered at once (ADR-0293 §11:1): following the changes as they
-        happen is the change stream's, a later lane's (ADR-0296 §4). The cursor is the
-        browser's own — "a device keeps one cursor for the chat space" — and this
-        gateway holds none.
+        One request, answered at once: following the changes as they happen is the
+        change stream's (:meth:`_change_stream`, ADR-0296 §4). The page reads this once,
+        for the cursor it opens the stream from. The cursor is the browser's own — "a
+        device keeps one cursor for the chat space" — and this gateway holds none.
         """
         payload = _payload(request)
         after = _required_cursor(payload, "after")
@@ -6247,6 +6265,42 @@ def _stream_value(chunk: ChatStreamChunk) -> dict[str, Any]:
             "roles": [one.value for one in chunk.roles],
         }
     return streams.alive()
+
+
+async def _while_the_peer_stays(body: Awaitable[None], reader: asyncio.StreamReader) -> bool:
+    """Run a stream's body until it ends or the browser leaves, whichever is first.
+
+    A browser sends nothing on a connection whose response it is still reading, so
+    anything the reader returns — the end of the stream above all — is the browser
+    having gone: a page that aborts its ``fetch`` closes the connection. Leaving it to
+    the next write to find that out holds what the body holds for as long as the body
+    writes nothing.
+
+    Args:
+        body: The stream's body, not yet started.
+        reader: The connection's reader.
+
+    Returns:
+        Whether the body ran to its end. ``False`` where the browser left first, and the
+        body was cancelled.
+
+    Raises:
+        ConnectionError: Whatever the body raised, as it raised it.
+        OSError: Likewise.
+    """
+    running = asyncio.ensure_future(body)
+    leaving = asyncio.ensure_future(reader.read(1))
+    try:
+        await asyncio.wait({running, leaving}, return_when=asyncio.FIRST_COMPLETED)
+        if running.done():
+            await running
+            return True
+        return False
+    finally:
+        for pending in (running, leaving):
+            pending.cancel()
+            with contextlib.suppress(asyncio.CancelledError, Exception):
+                await pending
 
 
 def _stream_fault(refused: Response) -> dict[str, Any]:

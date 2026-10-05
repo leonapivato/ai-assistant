@@ -31,6 +31,7 @@ browser's own. What is asserted is still what Chromium did.
 
 from __future__ import annotations
 
+import asyncio
 import contextlib
 from base64 import b64encode
 from dataclasses import dataclass
@@ -43,19 +44,35 @@ from gateway_mint import bootstrap_value
 from gateway_timing import Clock, Timers
 
 from ai_assistant.core.config import Settings
-from ai_assistant.core.types import GoalStatus, GoalSummary, SpokenAudio, SpokenAudioFormat
+from ai_assistant.core.device_context import serving_device
+from ai_assistant.core.errors import DeviceRefusal, DeviceRefusedError
+from ai_assistant.core.types import (
+    ChatStreamChunk,
+    ConversationState,
+    CurrentState,
+    DeviceRole,
+    GoalStatus,
+    GoalSummary,
+    RequestingDevice,
+    SpokenAudio,
+    SpokenAudioFormat,
+)
 from ai_assistant.interfaces.gateway.server import Gateway, packaged_bundle
 from ai_assistant.models.speech_container import encode_mono
 from ai_assistant.testing import FakeAssistantEngine
 
 if TYPE_CHECKING:
-    import asyncio
     from collections.abc import AsyncIterator
     from pathlib import Path
 
     from playwright.async_api import Browser, BrowserContext, Page, ViewportSize
 
-    from ai_assistant.core.types import Identifier, SpokenDeliveryReport, SpokenTurn
+    from ai_assistant.core.types import (
+        ChatStreamEnd,
+        Identifier,
+        SpokenDeliveryReport,
+        SpokenTurn,
+    )
     from ai_assistant.core.types import SpokenAudio as SpokenAudioType
 
 #: The rate the renderings below are synthesised at. Any rate the encoder accepts
@@ -238,6 +255,77 @@ class SpeakingEngine(FakeAssistantEngine):
         super().__init__()
         self.renderings = renderings
         self.rendered = 0
+        #: The device the change stream is followed as (ADR-0298 §2), or ``None`` for
+        #: the hub's own machine — which is what an engine followed in-process is
+        #: otherwise asked as, and which is sent every change and no snapshot.
+        self.follow_as: RequestingDevice | None = None
+        #: The reason the change stream's first step refuses the device for, or
+        #: ``None`` (ADR-0298 §5's "Reading many").
+        self.refuse_following: DeviceRefusal | None = None
+        self._pushes: set[asyncio.Queue[ChatStreamChunk | ChatStreamEnd | Exception]] = set()
+
+    @property
+    def open_streams(self) -> int:
+        """How many change streams are open on this engine now."""
+        return len(self._pushes)
+
+    def push(self, chunk: ChatStreamChunk | ChatStreamEnd | Exception) -> None:
+        """Put one chunk, or a failure, on every open change stream.
+
+        What the engine does when a conversation's activity changes (ADR-0296 §4:9),
+        put in the case's hands: an engine followed in-process pushes a state only
+        when something it runs starts or ends, which a drive cannot hold still.
+        """
+        for queue in tuple(self._pushes):
+            queue.put_nowait(chunk)
+
+    def push_state(self, conversation_id: str, state: ConversationState) -> None:
+        """Push one conversation's current state on every open change stream."""
+        self.push(ChatStreamChunk(state=CurrentState(conversation_id=conversation_id, state=state)))
+
+    def follow_chat(self, *, after: int) -> AsyncIterator[ChatStreamChunk | ChatStreamEnd]:
+        """The fake's own change stream, as :attr:`follow_as`, with :meth:`push` merged in.
+
+        Args:
+            after: The cursor.
+
+        Returns:
+            The stream.
+        """
+        if self.follow_as is None:
+            inner = super().follow_chat(after=after)
+        else:
+            with serving_device(self.follow_as):
+                inner = super().follow_chat(after=after)
+        return self._following(inner)
+
+    async def _following(
+        self, inner: AsyncIterator[ChatStreamChunk | ChatStreamEnd]
+    ) -> AsyncIterator[ChatStreamChunk | ChatStreamEnd]:
+        if self.refuse_following is not None:
+            await inner.aclose()  # type: ignore[attr-defined]  # an async generator
+            msg = "reading many needs a role"
+            raise DeviceRefusedError(msg, reason=self.refuse_following)
+        queue: asyncio.Queue[ChatStreamChunk | ChatStreamEnd | Exception] = asyncio.Queue()
+        self._pushes.add(queue)
+
+        async def pump() -> None:
+            async for chunk in inner:
+                queue.put_nowait(chunk)
+
+        pumping = asyncio.ensure_future(pump())
+        try:
+            while True:
+                item = await queue.get()
+                if isinstance(item, Exception):
+                    raise item
+                yield item
+        finally:
+            self._pushes.discard(queue)
+            pumping.cancel()
+            with contextlib.suppress(asyncio.CancelledError, Exception):
+                await pumping
+            await inner.aclose()  # type: ignore[attr-defined]  # an async generator
 
     async def converse_spoken(
         self,
@@ -274,6 +362,26 @@ class SpeakingEngine(FakeAssistantEngine):
         return turn.model_copy(
             update={"spoken": SpokenAudio(content=chosen, media_type=SpokenAudioFormat.WEBM_OPUS)}
         )
+
+
+class _OwnNode:
+    """The overlay agent of a gateway whose hub is on another machine, naming this one.
+
+    All a loopback drive asks of it: which node this machine is (ADR-0296 §1:7), so
+    the page is a device other than the hub's own machine.
+    """
+
+    def __init__(self, node: str) -> None:
+        self.node = node
+
+    async def identify(self, host: str, port: int) -> str:  # pragma: no cover — no remote door
+        """Never asked: a drive binds no remote listener."""
+        msg = f"no peer is identified in a drive ({host}:{port})"
+        raise AssertionError(msg)
+
+    async def own_identity(self) -> str:
+        """This machine's node."""
+        return self.node
 
 
 @dataclass
@@ -406,13 +514,14 @@ class Drive:
 
 
 @contextlib.asynccontextmanager
-async def driving(
+async def driving(  # noqa: PLR0913 — keyword-only, one per thing a case sets about the drive
     browser: Browser,
     tmp_path: Path,
     *,
     renderings: tuple[str, ...] = (),
     admitted: bool = True,
     viewport: ViewportSize | None = None,
+    device: str | None = None,
 ) -> AsyncIterator[Drive]:
     """Bind a gateway, open a page on it, and exchange a session (ADR-0216 §4).
 
@@ -436,12 +545,24 @@ async def driving(
             the page "at a desktop width and at a phone-class viewport" — and the
             context is where a viewport is set, because this layer shares one
             browser (ADR-0216 §3).
+        device: The node this machine is, for a page that is a device of its own
+            rather than the hub's machine: the gateway is told its hub is elsewhere,
+            names this browser ``device``, and the engine's change stream is followed
+            as that device holding the commands role. ``None`` for the hub's machine.
 
     Yields:
         The page, the gateway and the engine behind it.
     """
-    settings = Settings(gateway_port=gateway_ports.free_port(), data_dir=tmp_path)
+    settings = Settings(
+        gateway_port=gateway_ports.free_port(),
+        data_dir=tmp_path,
+        remote_hub_address=None if device is None else "100.64.0.1",
+    )
     engine = SpeakingEngine(renderings or (rendering_of(8.0),))
+    if device is not None:
+        engine.follow_as = RequestingDevice(
+            device_id=device, roles=frozenset({DeviceRole.COMMANDS})
+        )
     clock, timers = Clock(), Timers()
     gateway = Gateway(
         settings=settings,
@@ -449,6 +570,7 @@ async def driving(
         now=clock,
         defer=timers,
         bundle=packaged_bundle(),
+        agent=None if device is None else _OwnNode(device),
     )
     server: asyncio.Server = await gateway.start()
     origin = f"http://127.0.0.1:{settings.gateway_port}"

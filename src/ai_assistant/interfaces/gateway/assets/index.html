@@ -61,8 +61,8 @@
           is about, in "What I am working on" (ADR-0250 §11, §13).
         -->
         <!--
-          Opened by the owner rather than on load, because following the chat reads
-          the hub on a timer (ADR-0293 §11:1) and that is the owner's to start.
+          Opened by the owner rather than on load, because following the chat holds a
+          stream to the hub open (ADR-0296 §4) and that is the owner's to start.
         -->
         <p class="choice">
           <button type="button" id="chat-button">Chat</button>
@@ -169,10 +169,11 @@
       <section id="chat" class="panel" hidden>
         <h2>Chat</h2>
         <!--
-          Whether this page is following the chat, said on screen at every change of
-          it: following, paused while hidden, or stopped by a failure — and stopped it
-          stays until the owner presses the control or one of ADR-0182 §7's two events
-          comes (ADR-0182 §7, ADR-0168 §9).
+          Whether this page is following the chat on its change stream, said on screen
+          at every change of it: following, paused while hidden, or stopped by the
+          stream's ending — and stopped it stays until the owner presses the control or
+          one of ADR-0182 §7's two events comes (ADR-0182 §7, ADR-0168 §9). Following
+          again carries on from the last change this page applied (ADR-0296 §4:4).
         -->
         <p class="hint" id="chat-follow" aria-live="polite"></p>
         <button type="button" id="chat-follow-again" hidden>Follow changes again</button>

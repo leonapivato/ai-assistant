@@ -8,9 +8,9 @@ the router reaches the engine for each with the browser's arguments and nothing 
 except the device a message is written from, which is the gateway's naming and which no
 body member can supply.
 
-**The change stream is not here.** Until the hub serves one (ADR-0296 §4) a device
-catches up with one request for every change after its cursor (ADR-0293 §5:11, §11:1),
-and that request is what ``/chat/changes`` relays.
+**The change stream is not here**: ``test_gateway_follow`` has it. ``/chat/changes``
+relays the one request for every change after a cursor (ADR-0293 §5:11), which the
+page makes once to learn the cursor it opens the stream from.
 """
 
 from __future__ import annotations

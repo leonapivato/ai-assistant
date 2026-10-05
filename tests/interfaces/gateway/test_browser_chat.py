@@ -1,12 +1,15 @@
 """The chat, driven (ADR-0293 §11, ADR-0216 §2).
 
 What the page *does* over time, which the bundle's text cannot say: a message is
-*received*, the assistant's reply then arrives by following the changes after the
-page's cursor, a send the conversation refuses offers what would let it through, a
-read that fails stops the following rather than retrying it, and a hidden page pauses
-and says so. The engine is the canonical fake; the assistant's reply is written into
-the chat space the way the chat's writer writes one (ADR-0293 §6), so nothing about the
-reply is fabricated at the page.
+*received*, the assistant's reply then arrives on the change stream (ADR-0296 §4,
+ADR-0298 §7), a send the conversation refuses offers what would let it through, a
+stream that ends stops the following rather than reopening it, a hidden page pauses and
+says so, and a device removed from a conversation — or refused for holding no role —
+drops what it held. The engine is the canonical fake, whose change stream is the
+engine's own; the assistant's reply is written into the chat space the way the chat's
+writer writes one (ADR-0293 §6), so nothing about the reply is fabricated at the page.
+A conversation's current state is pushed onto the stream by the case
+(:meth:`SpeakingEngine.push_state`), as the engine pushes it when its activity changes.
 """
 
 from __future__ import annotations
@@ -15,12 +18,13 @@ import asyncio
 from typing import TYPE_CHECKING, Any, Final
 
 import pytest
-from browser_drive import driving
+from browser_drive import DESKTOP, PHONE, driving
 from playwright.async_api import expect
 
-from ai_assistant.core.errors import ConversationStoreError
+from ai_assistant.core.errors import ConversationStoreError, DeviceRefusal
 from ai_assistant.core.types import (
     ChatDevice,
+    ChatStreamEnd,
     ConversationState,
     DeviceAccess,
     MessageAuthor,
@@ -41,11 +45,24 @@ pytestmark = [
     pytest.mark.asyncio(loop_scope="session"),
 ]
 
-#: Long enough for a quick follow (two seconds) and its digest read to land twice.
+#: Long enough for a change to reach the page: the fake reads its store every quarter
+#: second, and the gateway relays at once.
 _FOLLOWED: Final = 10_000
 
-#: Longer than one idle follow (ten seconds), for a case that has sent nothing.
+#: The same, for a case that waits on an ending rather than on a change.
 _IDLE_FOLLOWED: Final = 15_000
+
+#: A device of its own, rather than the hub's machine (ADR-0296 §1).
+_LAPTOP: Final = "nLAPTOP01CNTRL"
+
+
+def _follows(drive: Drive) -> list[int]:
+    """The cursor of every change stream the page opened, in order."""
+    return [
+        int(str(arguments["after"]))
+        for name, arguments in drive.engine.calls
+        if name == "follow_chat"
+    ]
 
 
 async def _open(drive: Drive, *, devices: tuple[str, ...] = ("hub",)) -> str:
@@ -56,9 +73,17 @@ async def _open(drive: Drive, *, devices: tuple[str, ...] = ("hub",)) -> str:
     started = await drive.engine.start_conversation()
     await drive.page.click("#chat-button")
     await expect(drive.page.locator("#chat-follow")).to_contain_text("Following this chat")
+    await _streaming(drive)
     await drive.page.locator("#chat-conversations button", has_text="Open").click()
     await expect(drive.page.locator("#chat-heading")).to_have_text(f"Conversation {started.id}")
+    # The conversation's opening reads have landed: its state is the last of them.
+    await drive.page.wait_for_function("() => chat.state !== null")
     return started.id
+
+
+async def _streaming(drive: Drive) -> None:
+    """Wait until the page's change stream is open: the gateway answered its head."""
+    await drive.page.wait_for_function("() => chat.stream !== null && chat.stream.headed")
 
 
 async def _send(drive: Drive, text: str) -> None:
@@ -81,27 +106,23 @@ async def test_a_message_is_received_and_the_reply_arrives_by_following(
         message = written["message"]
         assert message.device_id == "hub"  # type: ignore[attr-defined]
 
-        held = drive.engine.conversation
-
-        async def working(conversation_id: str) -> Any:
-            digest = await held(conversation_id)
-            assert digest is not None
-            return digest.model_copy(update={"state": ConversationState(working=True)})
-
-        drive.engine.conversation = working  # type: ignore[method-assign]
+        drive.engine.push_state(conversation, ConversationState(working=True))
         await expect(drive.page.locator("#chat-state")).to_contain_text(
             "working on this", timeout=_FOLLOWED
         )
 
-        drive.engine.conversation = held  # type: ignore[method-assign]
         await drive.engine.chat.append_message(
             conversation,
             NewMessage(author=MessageAuthor.ASSISTANT, text="Pinecrest, Friday.", replies_to=1),
         )
+        drive.engine.push_state(conversation, ConversationState())
         reply = transcript.locator("li.from-assistant")
         await expect(reply).to_contain_text("Pinecrest, Friday.", timeout=_FOLLOWED)
         await expect(reply).to_contain_text("In reply to: “Book the usual campsite.”")
         await expect(drive.page.locator("#chat-state")).to_be_hidden(timeout=_FOLLOWED)
+        # One stream carried all of it: the page asked nothing on a clock.
+        assert len(_follows(drive)) == 1
+        assert not [name for name, _ in drive.engine.calls if name == "chat_changes"][1:]
 
 
 async def test_a_send_from_a_device_that_is_not_an_end_says_how_to_add_it(
@@ -133,31 +154,41 @@ async def test_a_send_from_a_device_that_is_not_an_end_says_how_to_add_it(
         assert writes[0]["message"] == writes[1]["message"]
 
 
-async def test_a_follow_read_that_fails_stops_and_waits_for_the_owner(
+async def test_a_stream_that_fails_stops_and_follows_again_from_its_cursor_when_asked(
     gateway_browser: Browser, tmp_path: Path
 ) -> None:
-    """ADR-0182 §7: nothing is re-issued of the page's own motion after a failure."""
+    """ADR-0182 §7: nothing is reopened of the page's own motion after a failure; and
+    ADR-0296 §4:4: the stream the owner's press opens starts from the last change the
+    page applied, so a message written meanwhile arrives and nothing is replayed."""
     async with driving(gateway_browser, tmp_path) as drive:
-        await _open(drive)
-        held = drive.engine.chat_changes
-        failed: list[int] = []
+        drive.engine.chat_reader = False
+        conversation = await _open(drive)
+        await drive.engine.chat.append_message(
+            conversation, NewMessage(author=MessageAuthor.ASSISTANT, text="Before the failure.")
+        )
+        transcript = drive.page.locator("#chat-transcript")
+        await expect(transcript).to_contain_text("Before the failure.", timeout=_FOLLOWED)
+        applied = await drive.page.evaluate("chat.cursor")
 
-        async def failing(**arguments: Any) -> Any:
-            failed.append(1)
-            raise ConversationStoreError("the store is unreadable")
-
-        drive.engine.chat_changes = failing  # type: ignore[method-assign]
+        drive.engine.push(ConversationStoreError("the store is unreadable"))
         follow = drive.page.locator("#chat-follow")
         await expect(follow).to_contain_text("Stopped following", timeout=_IDLE_FOLLOWED)
         await expect(drive.page.locator("#chat-follow-again")).to_be_visible()
-        stopped_at = len(failed)
-        await drive.page.wait_for_timeout(5_000)
-        assert len(failed) == stopped_at
+        await expect(drive.page.locator("#chat .fault")).to_contain_text("declined")
+        await drive.engine.chat.append_message(
+            conversation, NewMessage(author=MessageAuthor.ASSISTANT, text="While stopped.")
+        )
+        await drive.page.wait_for_timeout(3_000)
+        assert len(_follows(drive)) == 1
+        assert drive.engine.open_streams == 0
+        await expect(transcript).not_to_contain_text("While stopped.")
 
-        drive.engine.chat_changes = held  # type: ignore[method-assign]
         await drive.page.click("#chat-follow-again")
         await expect(follow).to_contain_text("because you asked")
         await expect(drive.page.locator("#chat-follow-again")).to_be_hidden()
+        await expect(transcript).to_contain_text("While stopped.", timeout=_FOLLOWED)
+        assert _follows(drive)[1] == applied
+        await expect(transcript.locator("li", has_text="Before the failure.")).to_have_count(1)
 
 
 async def test_a_hidden_page_pauses_and_follows_again_when_it_comes_back(
@@ -175,7 +206,13 @@ async def test_a_hidden_page_pauses_and_follows_again_when_it_comes_back(
         )
         follow = drive.page.locator("#chat-follow")
         await expect(follow).to_contain_text("Paused while this page is hidden")
-        assert await drive.page.evaluate("chat.timer === null && !chat.following")
+        assert await drive.page.evaluate("chat.stream === null && !chat.following")
+        # The stream went with it, and its hub connection with that.
+        for _ in range(50):
+            if drive.engine.open_streams == 0:
+                break
+            await asyncio.sleep(0.1)
+        assert drive.engine.open_streams == 0
 
         await drive.page.evaluate(
             """() => {
@@ -185,6 +222,8 @@ async def test_a_hidden_page_pauses_and_follows_again_when_it_comes_back(
             }"""
         )
         await expect(follow).to_contain_text("You came back")
+        await drive.page.wait_for_function("() => chat.stream !== null")
+        assert len(_follows(drive)) == 2
 
 
 async def test_a_deleted_message_leaves_its_reply_naming_a_deleted_message(
@@ -252,30 +291,13 @@ async def test_a_send_whose_answer_was_lost_is_shown_once_it_is_recorded(
         await expect(drive.page.locator("#chat-transcript li.from-user")).to_have_count(1)
 
 
-async def test_a_state_read_that_fails_while_working_stops_the_following(
-    gateway_browser: Browser, tmp_path: Path
-) -> None:
-    """ADR-0182 §7: the state read is not tried again of the page's own motion either."""
-    async with driving(gateway_browser, tmp_path) as drive:
-        await _open(drive)
-        held = drive.engine.conversation
-        reads: list[str] = []
-
-        async def working_then_failing(conversation_id: str) -> Any:
-            reads.append(conversation_id)
-            if len(reads) > 1:
-                raise ConversationStoreError("the index is unreadable")
-            digest = await held(conversation_id)
-            assert digest is not None
-            return digest.model_copy(update={"state": ConversationState(working=True)})
-
-        drive.engine.conversation = working_then_failing  # type: ignore[method-assign]
-        await _send(drive, "Start something.")
-        follow = drive.page.locator("#chat-follow")
-        await expect(follow).to_contain_text("Stopped following", timeout=_IDLE_FOLLOWED)
-        stopped_at = len(reads)
-        await drive.page.wait_for_timeout(5_000)
-        assert len(reads) == stopped_at
+_HIDE_AND_SHOW = """() => {
+  for (const state of ["hidden", "visible"]) {
+    Object.defineProperty(document, "visibilityState", {
+      configurable: true, get: () => state });
+    document.dispatchEvent(new Event("visibilitychange"));
+  }
+}"""
 
 
 async def test_a_reload_keeps_the_conversation_the_chat_was_reading(
@@ -349,24 +371,27 @@ async def test_a_transcript_read_before_a_deletion_does_not_bring_the_message_ba
         await expect(drive.page.locator("#chat-transcript li.from-user")).to_have_count(0)
 
 
-async def test_a_send_never_puts_a_second_changes_read_beside_one_in_flight(
+async def test_the_page_holds_one_stream_whatever_asks_for_one_meanwhile(
     gateway_browser: Browser, tmp_path: Path
 ) -> None:
-    """One read of the changes at a time, whatever asks for the next one meanwhile."""
+    """One change stream at a time (ADR-0182 §7's third clause, for this stream too): a
+    send, the network coming back and the page being seen again open no second one."""
     async with driving(gateway_browser, tmp_path) as drive:
         await _open(drive)
-        await drive.page.evaluate(_HOLDING, "/chat/changes")
-        await drive.page.wait_for_function("() => window.__held.reached", timeout=_IDLE_FOLLOWED)
-        await _send(drive, "While a read is out.")
-        await expect(drive.page.locator("#chat-transcript li.pending")).to_contain_text("Received.")
-        await drive.page.wait_for_timeout(3_000)
-        assert await drive.page.evaluate("window.__held.most") == 1
-
-        await drive.page.evaluate("window.__held.release()")
-        await expect(drive.page.locator("#chat-transcript li.pending")).to_have_count(
-            0, timeout=_FOLLOWED
+        await drive.page.wait_for_function("() => chat.stream !== null")
+        await _send(drive, "While a stream is open.")
+        await expect(drive.page.locator("#chat-transcript li.from-user")).to_contain_text(
+            "While a stream is open.", timeout=_FOLLOWED
         )
-        assert await drive.page.evaluate("window.__held.most") == 1
+        await drive.page.evaluate(
+            """() => {
+              document.dispatchEvent(new Event("visibilitychange"));
+              window.dispatchEvent(new Event("online"));
+            }"""
+        )
+        await drive.page.wait_for_timeout(1_000)
+        assert len(_follows(drive)) == 1
+        assert drive.engine.open_streams == 1
 
 
 async def test_a_state_read_that_fails_on_opening_stops_the_following(
@@ -398,22 +423,27 @@ async def test_a_state_read_that_fails_on_opening_stops_the_following(
 async def test_following_again_reads_the_state_whose_read_failed(
     gateway_browser: Browser, tmp_path: Path
 ) -> None:
-    """The owner's recovery reads the state again even when no change has come since."""
+    """The state read made as following starts again is not retried when it fails, and
+    the owner's recovery reads it again even when no change has come since."""
     async with driving(gateway_browser, tmp_path) as drive:
-        conversation = await _open(drive)
+        await _open(drive)
         held = drive.engine.conversation
+        reads: list[str] = []
 
         async def failing(conversation_id: str) -> Any:
+            reads.append(conversation_id)
             raise ConversationStoreError("the index is unreadable")
 
         drive.engine.conversation = failing  # type: ignore[method-assign]
-        # Another device writes, so the following reads the state and that read fails.
-        await drive.engine.chat.append_message(
-            conversation, NewMessage(author=MessageAuthor.ASSISTANT, text="A notice.")
-        )
+        # Following starts again on the page being seen again, and reads the state once,
+        # since it may have changed while nothing here followed; that read fails.
+        await drive.page.evaluate(_HIDE_AND_SHOW)
         await expect(drive.page.locator("#chat-follow")).to_contain_text(
             "Stopped following", timeout=_IDLE_FOLLOWED
         )
+        # ADR-0182 §7: it is not read again of the page's own motion.
+        await drive.page.wait_for_timeout(3_000)
+        assert len(reads) == 1
 
         async def working(conversation_id: str) -> Any:
             digest = await held(conversation_id)
@@ -425,25 +455,27 @@ async def test_following_again_reads_the_state_whose_read_failed(
         await expect(drive.page.locator("#chat-state")).to_contain_text("working on this")
 
 
-async def test_a_new_session_follows_though_the_old_ones_read_was_still_out(
+async def test_a_new_session_follows_though_the_old_ones_stream_was_still_out(
     gateway_browser: Browser, tmp_path: Path
 ) -> None:
-    """A read left over from an ended session does not stand in for the new one's."""
+    """A stream left over from an ended session does not stand in for the new one's,
+    and its ending — the gateway ended it with the session — stops nothing."""
     async with driving(gateway_browser, tmp_path) as drive:
-        await _open(drive)
-        await drive.page.evaluate(_HOLDING, "/chat/changes")
+        await drive.page.evaluate(_HOLDING, "/chat/follow")
+        await drive.page.click("#chat-button")
         await drive.page.wait_for_function("() => window.__held.reached", timeout=_IDLE_FOLLOWED)
+        assert await drive.page.evaluate("() => chat.stream !== null && !chat.stream.headed")
         drive.expire_sessions()
         await drive.page.click("#chat-start")
         await drive.page.wait_for_selector("#bootstrap:not([hidden])")
         await drive.admit()
+        await drive.page.click("#chat-button")
         await expect(drive.page.locator("#chat-follow")).to_contain_text("Following this chat")
 
         await drive.page.evaluate("window.__held.release()")
         await drive.page.wait_for_timeout(500)
-        assert await drive.page.evaluate(
-            "() => chat.following && (chat.timer !== null || chat.reading === chat.ticks)"
-        )
+        assert await drive.page.evaluate("() => chat.following && chat.stream !== null")
+        await expect(drive.page.locator("#chat-follow")).to_contain_text("Following this chat")
 
 
 async def test_a_state_change_with_no_transcript_change_reaches_an_idle_page(
@@ -457,20 +489,15 @@ async def test_a_state_change_with_no_transcript_change_reaches_an_idle_page(
         await drive.page.wait_for_function(
             "() => chat.state !== null && !chat.state.working && chat.following"
         )
-        held = drive.engine.conversation
-        reads: list[str] = []
+        conversation = await drive.page.evaluate("chat.selected")
+        reads = [name for name, _ in drive.engine.calls if name == "conversation"]
 
-        async def working(conversation_id: str) -> Any:
-            reads.append(conversation_id)
-            digest = await held(conversation_id)
-            assert digest is not None
-            return digest.model_copy(update={"state": ConversationState(working=True)})
-
-        drive.engine.conversation = working  # type: ignore[method-assign]
+        drive.engine.push_state(conversation, ConversationState(working=True))
         await expect(drive.page.locator("#chat-state")).to_contain_text(
             "working on this", timeout=_IDLE_FOLLOWED
         )
-        assert reads
+        # Pushed, not read: no read of the conversation was made for it (ADR-0296 §4:9).
+        assert [name for name, _ in drive.engine.calls if name == "conversation"] == reads
 
 
 async def test_a_transcript_that_could_not_be_read_is_offered_again(
@@ -520,7 +547,7 @@ async def test_a_chat_opened_on_a_hidden_page_waits_to_be_seen(
         await drive.page.evaluate("window.__held.release()")
         follow = drive.page.locator("#chat-follow")
         await expect(follow).to_contain_text("Paused while this page is hidden")
-        assert await drive.page.evaluate("() => !chat.following && chat.timer === null")
+        assert await drive.page.evaluate("() => !chat.following && chat.stream === null")
 
         await drive.page.evaluate(
             """() => {
@@ -572,13 +599,14 @@ async def test_a_devices_read_that_fails_on_opening_is_read_again_on_the_owners_
         await expect(drive.page.locator("#chat-follow")).to_contain_text("Following this chat")
 
 
-async def test_a_read_the_gateway_answered_late_applies_every_change_it_carries(
+async def test_a_stream_the_gateway_opened_late_applies_every_change_since_the_cursor(
     gateway_browser: Browser, tmp_path: Path
 ) -> None:
     """§5:10: the change stream is the authority, so no change it carries is skipped.
 
-    The read leaves the page before two changes to "my devices" and reaches the gateway
-    after both, so it carries both; the page applies both, in order.
+    The stream is asked for from the cursor read when the chat opened, and reaches the
+    gateway after two changes to "my devices"; it carries both, and the page applies
+    both, in order.
     """
     async with driving(gateway_browser, tmp_path) as drive:
         await drive.engine.set_my_devices(
@@ -588,11 +616,6 @@ async def test_a_read_the_gateway_answered_late_applies_every_change_it_carries(
                 ChatDevice(device_id="nPHONE", access=DeviceAccess.READ),
             ]
         )
-        await drive.page.click("#chat-button")
-        devices = drive.page.locator("#chat-my-devices li")
-        await expect(devices).to_have_count(3)
-        await expect(drive.page.locator("#chat-follow")).to_contain_text("Following this chat")
-
         loop = asyncio.get_running_loop()
         held: asyncio.Future[Route] = loop.create_future()
 
@@ -602,7 +625,10 @@ async def test_a_read_the_gateway_answered_late_applies_every_change_it_carries(
                 return
             await route.continue_()
 
-        await drive.page.route("**/chat/changes", hold)
+        await drive.page.route("**/chat/follow", hold)
+        await drive.page.click("#chat-button")
+        devices = drive.page.locator("#chat-my-devices li")
+        await expect(devices).to_have_count(3)
         try:
             route = await asyncio.wait_for(held, timeout=_IDLE_FOLLOWED / 1000)
             await drive.engine.set_my_devices(
@@ -617,7 +643,7 @@ async def test_a_read_the_gateway_answered_late_applies_every_change_it_carries(
             await route.continue_()
             await expect(devices).to_have_count(1, timeout=_FOLLOWED)
         finally:
-            await drive.page.unroute("**/chat/changes", hold)
+            await drive.page.unroute("**/chat/follow", hold)
 
 
 async def test_an_event_does_not_resume_a_chat_whose_opening_read_failed(
@@ -908,3 +934,105 @@ async def test_a_lookups_marker_removes_a_loaded_message_whatever_the_next_looku
         await expect(
             drive.page.locator("#chat-transcript li", has_text="About 1.")
         ).to_contain_text("In reply to a message that was deleted.")
+
+
+# --- what the device holds, and what it drops (ADR-0296 §4:7-§4:8, ADR-0298 §7) ------
+
+
+async def test_a_device_removed_from_a_conversation_drops_it(
+    gateway_browser: Browser, tmp_path: Path
+) -> None:
+    """ADR-0296 §4:8: "When a device stops being an end of a conversation for reading, its
+    stream says so, and the device drops the conversation" — off the screen it was open
+    on and out of the listing, said on the page. Driven at both widths."""
+    for viewport in (DESKTOP, PHONE):
+        async with driving(gateway_browser, tmp_path, device=_LAPTOP, viewport=viewport) as drive:
+            conversation = await _open(drive, devices=(_LAPTOP,))
+            await expect(drive.page.locator("#chat-this-device")).to_contain_text(_LAPTOP)
+
+            # The owner, at the command line, leaves this device out of it.
+            await drive.engine.set_conversation_devices(conversation, devices=[])
+
+            said = drive.page.locator("#chat-said")
+            await expect(said).to_contain_text(
+                f"This device no longer reads conversation {conversation}", timeout=_FOLLOWED
+            )
+            await expect(drive.page.locator("#chat-thread")).to_be_hidden()
+            await expect(drive.page.locator("#chat-conversations")).not_to_contain_text(
+                f"Conversation {conversation}"
+            )
+            await expect(drive.page.locator("#chat-follow")).to_contain_text("Following this chat")
+            assert await drive.page.evaluate(
+                "() => document.documentElement.scrollWidth <= document.documentElement.clientWidth"
+            )
+
+
+async def test_a_device_added_to_a_conversation_is_listed_it_with_its_snapshot(
+    gateway_browser: Browser, tmp_path: Path
+) -> None:
+    """ADR-0298 §7:6: the change that makes this device a reader arrives with the
+    conversation's snapshot; the page lists the conversation, and opening it shows what
+    was written before the device could read it."""
+    async with driving(gateway_browser, tmp_path, device=_LAPTOP) as drive:
+        await drive.page.click("#chat-button")
+        await expect(drive.page.locator("#chat-follow")).to_contain_text("Following this chat")
+        started = await drive.engine.start_conversation()
+        await drive.engine.chat.append_message(
+            started.id, NewMessage(author=MessageAuthor.ASSISTANT, text="Written before.")
+        )
+        await drive.engine.set_conversation_devices(
+            started.id, devices=[ChatDevice(device_id=_LAPTOP, access=DeviceAccess.READ_WRITE)]
+        )
+
+        listing = drive.page.locator("#chat-conversations")
+        await expect(listing).to_contain_text(f"Conversation {started.id}", timeout=_FOLLOWED)
+        await drive.page.locator("#chat-conversations button", has_text="Open").click()
+        await expect(drive.page.locator("#chat-transcript")).to_contain_text("Written before.")
+
+
+async def test_a_device_refused_for_holding_no_role_drops_every_conversation(
+    gateway_browser: Browser, tmp_path: Path
+) -> None:
+    """ADR-0298 §7:13: a device refused the change stream for holding no role drops every
+    conversation it holds, as if it had seen the change that removed it from each — and
+    says why, with the remedy, and reopens nothing of its own motion."""
+    async with driving(gateway_browser, tmp_path, device=_LAPTOP) as drive:
+        conversation = await _open(drive, devices=(_LAPTOP,))
+        drive.engine.refuse_following = DeviceRefusal.NO_ROLE
+        # The owner hides the page and comes back, which opens the stream again.
+        await drive.page.evaluate(_HIDE_AND_SHOW)
+
+        await expect(drive.page.locator("#chat-said")).to_contain_text(
+            "holding no role", timeout=_FOLLOWED
+        )
+        await expect(drive.page.locator("#chat .fault")).to_contain_text(
+            f"ai-assistant-device assign {_LAPTOP} commands"
+        )
+        await expect(drive.page.locator("#chat-thread")).to_be_hidden()
+        await expect(drive.page.locator("#chat-conversations")).not_to_contain_text(
+            f"Conversation {conversation}"
+        )
+        await expect(drive.page.locator("#chat-follow")).to_contain_text("Stopped following")
+        await expect(drive.page.locator("#chat-follow-again")).to_be_visible()
+        opened = len(_follows(drive))
+        await drive.page.wait_for_timeout(2_000)
+        assert len(_follows(drive)) == opened
+
+
+async def test_a_hub_shutting_down_stops_the_following_and_it_carries_on_after(
+    gateway_browser: Browser, tmp_path: Path
+) -> None:
+    """``ChatStreamEnd`` is the hub going away, said as that rather than as a failure;
+    following again starts from the cursor it carried."""
+    async with driving(gateway_browser, tmp_path) as drive:
+        await _open(drive)
+        await drive.page.wait_for_function("() => chat.stream !== null")
+        cursor = await drive.page.evaluate("chat.cursor")
+        drive.engine.push(ChatStreamEnd(next_after=cursor + 5))
+
+        follow = drive.page.locator("#chat-follow")
+        await expect(follow).to_contain_text("the hub is shutting down", timeout=_FOLLOWED)
+        await expect(drive.page.locator("#chat .fault")).to_be_hidden()
+        await drive.page.click("#chat-follow-again")
+        await expect(follow).to_contain_text("because you asked")
+        assert _follows(drive)[-1] == cursor + 5

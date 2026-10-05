@@ -1115,8 +1115,8 @@ def test_the_surface_resolves_onto_what_it_serves_and_the_gateways_own_poll() ->
     thirty-operation enumeration alone, which gains ``goals``,
     ``withdraw_clarification`` and ``abandon_goal``"**, which §15 places on this surface
     by name. **ADR-0296's ``- Status:`` line records "§1:1's enumeration, which gains
-    the acts in the medium and the change stream"**, ADR-0293 §11:2's acts and the read
-    of the changes after a cursor that stands for the stream until it is built.
+    the acts in the medium and the change stream"**, ADR-0293 §11:2's acts, the read of
+    the changes after a cursor, and since ADR-0298 §7 built it the change stream itself.
     **ADR-0297 §6:4 rules that "the command line and the gateway's stop control land
     last"**, which places ``stop_activation`` here by the governing decision's own text,
     as ADR-0244 §13 placed ``cancel_read``; the header record it owes ADR-0177 is issue
@@ -1188,6 +1188,8 @@ def test_the_surface_resolves_onto_what_it_serves_and_the_gateways_own_poll() ->
         "delete_conversation",
         "transcript",
         "chat_changes",
+        # ...and the change stream itself, now that the hub serves one (ADR-0298 §7).
+        "follow_chat",
         # ADR-0297 §6:4: the gateway's stop control beside "working…" (#2714).
         "stop_activation",
         "delivery-stream",
@@ -1281,6 +1283,7 @@ def _decide(one: Harness) -> Any:
 async def _fail_the_head(one: Harness) -> bool:
     """Decide one delivery stream, then lose the peer before its head lands."""
     return await one.gateway._write_stream(
+        asyncio.StreamReader(),
         _GoneWriter(),  # type: ignore[arg-type] # a writer is what it writes
         _decide(one),
         closing=False,
@@ -1328,6 +1331,7 @@ async def test_a_session_that_dies_while_the_head_is_written_still_ends_the_stre
 
         driving = asyncio.ensure_future(
             one.gateway._write_stream(
+                asyncio.StreamReader(),
                 writer,  # type: ignore[arg-type] # a writer is what it writes
                 decided,
                 closing=False,

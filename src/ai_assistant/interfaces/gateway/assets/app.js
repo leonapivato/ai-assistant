@@ -86,9 +86,10 @@ const SESSION_HEADER = "X-Assistant-Session";
 // transport failure and says so — which is ADR-0168 §9's distinction reaching the
 // browser, on a carrier whose status code was written before anything went wrong.
 //
-// One kind since ADR-0293 §11 retired the streamed answer and the `outcome` value it
-// ended in: the delivery stream is the one stream left, and it ends only in a fault.
-const TERMINAL_KINDS = new Set(["fault"]);
+// A fault ends either stream. The change stream has one ending of its own besides: `end`,
+// the hub shutting down, with the cursor to follow again from (ADR-0298 §7) — the same
+// partition as `streams.TERMINAL_KINDS`, stated on both halves of one distribution.
+const TERMINAL_KINDS = new Set(["fault", "end"]);
 
 // The conversation the last turn ran under. The hub owns the conversation; this is
 // the id it handed back, held so the next question continues the same one rather than
@@ -8499,16 +8500,17 @@ function statedForget(id, held, destroyed) {
 // conversation's current state, read with it and shown beside the transcript, never in
 // it (§8:1).
 //
-// **Following is a read after a cursor, on this page's second clock** (ADR-0293 §5:11,
-// §11:1). Until the hub serves the change stream (ADR-0296 §4) a device catches up by
-// asking for every change after the last one it applied, and keeps asking. The page
-// does that while the chat is open and the page is visible, **and says so on screen**.
-// It never retries a failure: a read that fails stops the following, says why, and
-// nothing resumes it but the owner's press or one of ADR-0182 §7's two events — the
-// page becoming visible, or the network coming back — each announced. A read whose
-// cursor moves forward is a new question rather than §7:5's re-issue of one already
-// asked, and it is the only request this clock makes: it writes nothing and opens no
-// stream (PR #2701 records the reading).
+// **Following is the change stream** (ADR-0296 §4, ADR-0298 §7). The page reads the
+// chat space's latest sequence number once when the chat opens, then holds one stream
+// open from it, through the gateway, and applies each change as it arrives — with the
+// snapshot a change carries where it makes this device a reader, the current state of
+// a conversation as it is pushed, and this device's roles. It does that while the chat
+// is open and the page is visible, **and says so on screen**. A stream that ends —
+// refused, cut, gone silent, or ended by a hub shutting down — stops the following and
+// says why; nothing opens it again but the owner's press or one of ADR-0182 §7's two
+// events, the page becoming visible or the network coming back, each announced. The
+// stream it opens then starts **from the last change this page applied** (§4:4), so
+// nothing is missed and nothing applied is asked for again.
 //
 // **The device is the gateway's to name** (ADR-0296's record on ADR-0177 §1:5). This
 // page is told which device it is, so it can offer to add itself, and never sends a
@@ -8519,14 +8521,12 @@ function statedForget(id, held, destroyed) {
 const CHAT_OPEN_KEY = "assistant.session.chat-open";
 const CHAT_CONVERSATION_KEY = "assistant.session.chat-conversation";
 
-// How often the page asks for the changes after its cursor: quickly while an answer is
-// expected — a message was just received, or the assistant is working — and slowly
-// otherwise. A full page is followed at once, since more is already waiting.
-const FOLLOW_QUICK_MILLISECONDS = 2000;
-const FOLLOW_IDLE_MILLISECONDS = 10000;
-const QUICK_AFTER_SENDING_MILLISECONDS = 120000;
 // The surface's own page size (`DEFAULT_PAGE_SIZE`), which is what a full page holds.
 const CHAT_PAGE = 50;
+
+// The hub's own machine, as a device (ADR-0298 §3:1). It is an end of every
+// conversation, so no change removes it from one and this page never drops one for it.
+const HUB_DEVICE = "hub";
 
 const CHAT_CATCHING_UP = "Reading the chat…";
 const CHAT_FOLLOWING =
@@ -8542,6 +8542,32 @@ const CHAT_STOPPED_GONE =
 const CHAT_STOPPED_REFUSED =
   "Stopped following the chat: the last read was refused, for the reason above. " +
   "Nothing is retried on its own.";
+// How a stream that carried something ended, each its own sentence for the reason the
+// delivery stream's are (ADR-0175 §2): a cut, a silence and a head that never came are
+// different evidence, and the hub shutting down is no failure at all.
+const CHAT_STREAM_CUT =
+  "Stopped following the chat: the connection closed with no ending from the gateway. " +
+  "Nothing is retried on its own — follow again when you are ready, and this page " +
+  "carries on from the last change it showed.";
+const CHAT_STREAM_SILENT =
+  `Stopped following the chat: nothing arrived — not even the gateway's keep-alive — ` +
+  `for ${SILENT_CADENCES} times the keep-alive cadence the gateway stated, so this ` +
+  "browser let the connection go. Follow again when you are ready, and this page " +
+  "carries on from the last change it showed.";
+const CHAT_STREAM_STALLED =
+  `Stopped following the chat: nothing answered the request to follow it for ` +
+  `${HEAD_DEADLINE_MILLISECONDS / 1000} seconds, so this browser let it go. Follow ` +
+  "again when you are ready.";
+const CHAT_STREAM_MISFRAMED =
+  "Stopped following the chat: the gateway wrote a line this browser could not read, " +
+  "so it read no further. Follow again when you are ready.";
+const CHAT_HUB_ENDED =
+  "Stopped following the chat: the hub is shutting down. Follow again once it is back, " +
+  "and this page carries on from the last change it showed.";
+// What the page says when it drops what it held (ADR-0298 §7:13, ADR-0296 §4:8).
+const CHAT_DROPPED_NO_ROLE =
+  "The hub refused this device for holding no role, so this page has let go of every " +
+  "conversation it showed. Once the device is given a role, follow again.";
 
 // The current state (ADR-0293 §8), in words. "Working" is informational: the box stays
 // open, and a message written meanwhile waits for the assistant (§6:2).
@@ -8613,21 +8639,18 @@ const chat = {
   // The last sequence number this page applied (ADR-0296 §4:4's cursor).
   cursor: null,
   following: false,
-  // Bumped whenever following starts or stops, so a read in flight across either
-  // schedules nothing when it comes back.
+  // Bumped whenever following starts or stops, so a stream left over from before either
+  // applies nothing more when its next value comes.
   ticks: 0,
-  // The `ticks` generation whose read of the changes is out, or `null`. One at a time
-  // within a generation: two reads overlapping would each answer from a cursor the other
-  // has moved. A read left over from an earlier generation blocks nothing: its answer is
-  // dropped when it comes back.
-  reading: null,
-  // Whether the state of the conversation on screen is owed a read, because the last one
-  // failed or following has just started again; the next read of the changes makes it.
-  digestDue: false,
-  timer: null,
-  quickUntil: 0,
+  // The one change stream this page holds, or `null`: its abort controller, and whether
+  // this page released it — an ending the page performed, which says nothing about the
+  // gateway. One at a time, so no two streams apply changes against one cursor.
+  stream: null,
   // `undefined` until read; `null` where the gateway cannot name this browser's device.
   thisDevice: undefined,
+  // This device's roles, as the hub's stream last sent them (ADR-0298 §7:9), or
+  // `undefined` until it has; an engine followed in-process sends none.
+  roles: undefined,
   myDevices: [],
   listing: [],
   listed: 0,
@@ -8726,6 +8749,7 @@ function closeChat() {
   chat.era += 1;
   stopFollowing(null, false);
   chat.cursor = null;
+  chat.roles = undefined;
   chat.selected = null;
   chat.entries = new Map();
   chat.deleted = new Set();
@@ -8780,18 +8804,24 @@ async function readChatCursor() {
   }
   const era = sessionEra;
   let after = 0;
+  let refusal = null;
   try {
     for (;;) {
       const body = await relay(
         half,
         "/chat/changes",
         { after: after, conversation_ids: [] },
-        "chat"
+        "chat",
+        undefined,
+        (said) => {
+          refusal = said;
+        }
       );
       if (!sameSession(half, era)) {
         return false;
       }
       if (body === null) {
+        dropOnRefusal(refusal);
         return false;
       }
       after = body.next_after;
@@ -8864,47 +8894,32 @@ function startFollowing(said) {
   }
   chat.following = true;
   chat.ticks += 1;
-  // What the conversation's state was is not known across a stop or a pause, and a read
-  // of it may be what failed: the first read after starting makes it whatever changed.
-  chat.digestDue = true;
   sayFollowing(said);
   el("chat-follow-again").hidden = true;
-  scheduleFollow(0);
+  void followChat(chat.ticks);
 }
 
 // `said` is what the page now says about following, or `null` to leave it; `offer` is
-// whether the owner is handed the control that starts it again.
+// whether the owner is handed the control that starts it again. The stream goes with
+// it: a page that is not following holds none, and gives its hub connection back.
 function stopFollowing(said, offer) {
   chat.following = false;
   chat.ticks += 1;
-  if (chat.timer !== null) {
-    window.clearTimeout(chat.timer);
-    chat.timer = null;
-  }
+  releaseChatStream();
   if (said !== null) {
     sayFollowing(said);
   }
   el("chat-follow-again").hidden = !offer;
 }
 
-function scheduleFollow(delay) {
-  // The read in flight schedules the next one itself, when it is back.
-  if (chat.reading === chat.ticks) {
+function releaseChatStream() {
+  const open = chat.stream;
+  if (open === null) {
     return;
   }
-  if (chat.timer !== null) {
-    window.clearTimeout(chat.timer);
-  }
-  // The page's second clock, and all it does is read the changes after the cursor: it
-  // opens no stream and re-issues nothing that failed (ADR-0182 §7).
-  chat.timer = window.setTimeout(() => {
-    chat.timer = null;
-    void followChat();
-  }, delay);
-}
-
-function followingQuickly() {
-  return Date.now() < chat.quickUntil || (chat.state !== null && chat.state.working);
+  chat.stream = null;
+  open.released = true;
+  open.reader.abort();
 }
 
 // The owner pressing "Follow changes again": the chat opened again where an opening read
@@ -8918,97 +8933,180 @@ function followAgain() {
   startFollowing(CHAT_ASKED_AGAIN);
 }
 
-// One read of the changes after the cursor, and the next one scheduled. One read is out
-// at a time (`chat.reading`), so no answer is ever read against a cursor another read
-// has moved; whatever wanted a read meanwhile gets it when this one is back.
-async function followChat() {
-  const tick = chat.ticks;
-  if (chat.reading === tick) {
-    return;
-  }
-  chat.reading = tick;
-  let next = null;
-  try {
-    next = await readChanges(tick);
-  } finally {
-    if (chat.reading === tick) {
-      chat.reading = null;
-    }
-  }
-  if (next !== null && chat.following && tick === chat.ticks) {
-    scheduleFollow(next);
-  }
-}
-
-// The read itself. Answers the delay before the next read, or `null` where there is none
-// for this read to schedule: following stopped, or it was stopped and started again while
-// this read was out — the new start scheduled its own read, and this answer is dropped.
-async function readChanges(tick) {
+// The change stream, from the last change this page applied, until it ends or this page
+// lets it go. It opens nothing else and retries nothing: every ending stops the
+// following and says why (ADR-0182 §7). Its deadlines are the delivery stream's, for
+// that stream's reasons (`readDeliveries`): one on the head's arrival, and once the head
+// has stated the gateway's keep-alive cadence, one on silence.
+async function followChat(tick) {
   const half = headerHalf();
   if (half === null) {
     stopFollowing(null, false);
-    return null;
+    return;
   }
   const era = sessionEra;
-  const after = chat.cursor;
-  let body;
+  const reader = new AbortController();
+  // `headed` once the gateway has answered with the stream's head: the stream is open.
+  const open = { reader, released: false, headed: false };
+  chat.stream = open;
+  let cadence = null;
+  let silent = false;
+  let stalled = false;
+  let deadline = null;
+  const arm = (at) => {
+    deadline = window.setTimeout(
+      () => {
+        if (performance.now() < at) {
+          arm(at);
+          return;
+        }
+        if (cadence === null) {
+          stalled = true;
+        } else {
+          silent = true;
+        }
+        reader.abort();
+      },
+      Math.min(at - performance.now(), TIMER_SEGMENT)
+    );
+  };
+  const hush = () => {
+    window.clearTimeout(deadline);
+    deadline = null;
+  };
+  const heard = () => {
+    hush();
+    if (cadence !== null) {
+      arm(performance.now() + cadence * SILENT_CADENCES);
+    }
+  };
+  // A stream released by this page, or one that following has since stopped or started
+  // again without, says nothing: what superseded it has already said what is true. One
+  // that outlived its session says nothing either (#2455), asked at each ending below.
+  const current = () => !open.released && tick === chat.ticks;
+  arm(performance.now() + HEAD_DEADLINE_MILLISECONDS);
   try {
-    body = await relay(half, "/chat/changes", { after: after }, "chat");
-  } catch (_) {
-    if (!sameSession(half, era)) {
-      return null;
-    }
-    if (tick !== chat.ticks) {
-      return null;
-    }
-    stopFollowing(CHAT_STOPPED_GONE, true);
-    fault(GATEWAY_GONE, "chat");
-    return null;
-  }
-  if (!sameSession(half, era)) {
-    return null;
-  }
-  if (tick !== chat.ticks) {
-    return null;
-  }
-  if (body === null) {
-    stopFollowing(CHAT_STOPPED_REFUSED, true);
-    return null;
-  }
-  // A chat space with fewer changes than the cursor this read was sent with was started
-  // afresh, so what is on screen describes nothing that exists: read it all again.
-  if (body.next_after < after) {
-    chat.cursor = null;
-    void loadChat();
-    return null;
-  }
-  applyChanges(body.changes);
-  chat.cursor = body.next_after;
-  // The state is read with the changes, on every read while a conversation is open: it
-  // changes without a change to the transcript — an activation started elsewhere, or a
-  // restart (§8:3) — so it is followed as the transcript is (§8:1, "pushed when it
-  // changes"). A failure of that read stops the following exactly as a failure of the
-  // changes does: nothing is tried again of its own motion.
-  if (chat.selected !== null) {
-    const read = await readChatDigest(chat.selected, chat.chosen);
-    if (tick !== chat.ticks) {
-      return null;
-    }
-    if (!read) {
+    const response = await fetch("/chat/follow", {
+      method: "POST",
+      headers: admitted(half, true),
+      body: JSON.stringify({ after: chat.cursor }),
+      signal: reader.signal,
+    });
+    hush();
+    if (!response.ok) {
+      const body = await readBody(response);
+      if (!sameSession(half, era)) {
+        return;
+      }
+      if (!current()) {
+        return;
+      }
+      dropOnRefusal(body);
       stopFollowing(CHAT_STOPPED_REFUSED, true);
-      return null;
+      refused("chat", body, response.status);
+      return;
     }
+    open.headed = true;
+    cadence = usableCadence(response.headers.get(KEEP_ALIVE_HEADER));
+    heard();
+    // What the conversation on screen is doing now: the stream pushes a state when it
+    // changes, so one that changed while nothing here was following is read once.
+    if (chat.selected !== null) {
+      void readChatDigest(chat.selected, chat.chosen).then((read) => {
+        if (!read && current() && sameSession(half, era)) {
+          stopFollowing(CHAT_STOPPED_REFUSED, true);
+        }
+      });
+    }
+    let terminal = null;
+    for await (const value of streamValues(response)) {
+      if (!current() || !sameSession(half, era)) {
+        return;
+      }
+      heard();
+      if (TERMINAL_KINDS.has(value.kind)) {
+        terminal = value;
+        break;
+      }
+      applyStreamed(value);
+    }
+    if (!sameSession(half, era)) {
+      return;
+    }
+    if (!current()) {
+      return;
+    }
+    if (terminal === null) {
+      stopFollowing(CHAT_STREAM_CUT, true);
+    } else if (terminal.kind === "end") {
+      // Where the hub would have the stream opened again from (`ChatStreamEnd`).
+      chat.cursor = Math.max(chat.cursor, terminal.next_after);
+      stopFollowing(CHAT_HUB_ENDED, true);
+    } else {
+      dropOnRefusal(terminal);
+      stopFollowing(CHAT_STOPPED_REFUSED, true);
+      report("chat", terminal, describe(terminal, response.status));
+    }
+  } catch (error) {
+    if (!current() || !sameSession(half, era)) {
+      return;
+    }
+    if (stalled) {
+      stopFollowing(CHAT_STREAM_STALLED, true);
+    } else if (silent) {
+      stopFollowing(CHAT_STREAM_SILENT, true);
+    } else if (error instanceof MisframedValue) {
+      stopFollowing(CHAT_STREAM_MISFRAMED, true);
+    } else {
+      stopFollowing(CHAT_STOPPED_GONE, true);
+      fault(GATEWAY_GONE, "chat");
+    }
+  } finally {
+    if (chat.stream === open) {
+      chat.stream = null;
+    }
+    window.clearTimeout(deadline);
   }
-  if (body.changes.length >= CHAT_PAGE) {
-    return 0;
+}
+
+// One value of the stream that is not its ending. A change moves the cursor once it is
+// applied (ADR-0296 §4:4); the other kinds carry no sequence number and move nothing.
+function applyStreamed(value) {
+  if (value.kind === "change") {
+    applyChanges([value.change], value.snapshot);
+    chat.cursor = value.change.seq;
+  } else if (value.kind === "state") {
+    // Always applied: the stream is the authority (`seen`'s comment).
+    if (value.conversation_id === chat.selected) {
+      chat.seen.state += 1;
+      chat.state = value.state;
+      renderChatState();
+    }
+  } else if (value.kind === "roles") {
+    chat.roles = value.roles;
+    renderMyDevices();
   }
-  return followingQuickly() ? FOLLOW_QUICK_MILLISECONDS : FOLLOW_IDLE_MILLISECONDS;
+  // `alive` is the keep-alive: it restarts the silence deadline, and that is all.
+}
+
+// Whether this device reads a conversation whose devices are `devices`, or whether the
+// page cannot tell: the hub's own machine reads every conversation, and a device the
+// gateway could not name has nothing to look for in the set.
+function readsHere(devices) {
+  const named = chat.thisDevice;
+  if (named === undefined || named === null || named === HUB_DEVICE) {
+    return true;
+  }
+  return devices.some(
+    (one) => one.device_id === named && (one.access === "read" || one.access === "read_write")
+  );
 }
 
 // Apply changes in sequence order (ADR-0293 §5:10). Each is safe to apply twice, since a
-// snapshot read after the cursor may already hold it. Answers whether the conversation
-// on screen changed.
-function applyChanges(changes) {
+// read made after the cursor may already hold it. `snapshot` is the conversation's
+// entries where the change makes this device one of its readers (ADR-0298 §7:6), and
+// `null` otherwise. Answers whether the conversation on screen changed.
+function applyChanges(changes, snapshot) {
   let touched = false;
   let relist = false;
   changes.forEach((change) => {
@@ -9043,11 +9141,25 @@ function applyChanges(changes) {
         chat.myDevices = change.devices;
         renderMyDevices();
         renderConversationDevices();
-      } else if (change.conversation_id === chat.selected) {
-        chat.seen.devices += 1;
-        chat.devices = change.devices;
-        renderConversationDevices();
+      } else if (!readsHere(change.devices)) {
+        // The change that removed this device: it drops the conversation (ADR-0296
+        // §4:8), and nothing of it stays on screen.
+        dropConversation(change.conversation_id);
+      } else {
+        if (change.conversation_id === chat.selected) {
+          chat.seen.devices += 1;
+          chat.devices = change.devices;
+          renderConversationDevices();
+        }
+        // A conversation this device has just begun to read is listed.
+        relist = relist || snapshot !== null;
       }
+    }
+    // The conversation as it stood at the change that added this device, for the one
+    // on screen; any other is read whole when it is opened (ADR-0293 §5:13).
+    if (snapshot !== null && change.conversation_id === chat.selected) {
+      snapshot.forEach((entry) => applyEntry(entry, chat.entries));
+      touched = true;
     }
   });
   if (touched) {
@@ -9059,6 +9171,34 @@ function applyChanges(changes) {
     void relistChat();
   }
   return touched;
+}
+
+// A conversation this device no longer reads, dropped: out of the listing, its unsent
+// messages with it, and off the screen where it is open (ADR-0296 §4:8).
+function dropConversation(id) {
+  chat.listing = chat.listing.filter((summary) => summary.id !== id);
+  chat.unread.delete(id);
+  chat.pending = chat.pending.filter((one) => one.conversation !== id);
+  if (id === chat.selected) {
+    chatGone(`This device no longer reads conversation ${id}, so this page has let it go.`);
+    return;
+  }
+  renderChatListing();
+}
+
+// A refusal of the change stream or of the changes read for holding no role drops every
+// conversation this page holds, as if it had seen the change that removed it from each
+// (ADR-0298 §7:13). Only that reason: a device refused for a role that does not allow an
+// act still reads what it reads.
+function dropOnRefusal(body) {
+  if (body === null || body.fault !== "device-without-role") {
+    return;
+  }
+  chat.listing = [];
+  chat.unread = new Set();
+  chat.pending = [];
+  el("chat-more").hidden = true;
+  chatGone(CHAT_DROPPED_NO_ROLE);
 }
 
 // The listing read again because the stream said a conversation came or went. A failure
@@ -9432,10 +9572,8 @@ async function readChatDigest(id, mine) {
       return true;
     }
     if (body === null) {
-      chat.digestDue = true;
       return false;
     }
-    chat.digestDue = false;
     if (settle("state", stateBefore)) {
       chat.state = body.conversation.state;
     }
@@ -9450,7 +9588,6 @@ async function readChatDigest(id, mine) {
       return true;
     }
     if (mine === chat.chosen) {
-      chat.digestDue = true;
       fault(GATEWAY_GONE, "chat");
       return false;
     }
@@ -9810,10 +9947,6 @@ async function deliverChat(one) {
       // *Received* (§4:4): the conversation holds it at this position.
       one.status = "received";
       one.position = body.receipt.position;
-      chat.quickUntil = Date.now() + QUICK_AFTER_SENDING_MILLISECONDS;
-      if (chat.following) {
-        scheduleFollow(FOLLOW_QUICK_MILLISECONDS);
-      }
     } else if (outcome === "not_an_end") {
       one.status = "not-an-end";
     } else {
@@ -9975,6 +10108,10 @@ function renderMyDevices() {
       "Adding a device says its screen is private, and every conversation started from " +
       `then on is shown on it: assistant my-devices --add ${chat.thisDevice}`;
   }
+  // The roles the hub's stream last sent (ADR-0298 §7:9), said beside the device.
+  if (chat.roles !== undefined && said.textContent !== "") {
+    said.textContent += ` ${rolesSaid(chat.roles)}`;
+  }
   if (chat.myDevices.length === 0) {
     const none = document.createElement("li");
     none.className = "hint";
@@ -9982,6 +10119,14 @@ function renderMyDevices() {
     list.appendChild(none);
   }
   chat.myDevices.forEach((device) => renderDevice(list, device));
+}
+
+function rolesSaid(roles) {
+  if (roles.length === 0) {
+    return "The hub has given it no role yet, so it can do nothing until it is given one.";
+  }
+  const named = roles.join(" and ");
+  return `The hub gives it the ${named} role${roles.length === 1 ? "" : "s"}.`;
 }
 
 function renderConversationDevices() {
