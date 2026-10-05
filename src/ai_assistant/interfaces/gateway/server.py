@@ -141,10 +141,12 @@ from typing import TYPE_CHECKING, Any, Final
 import structlog
 from pydantic import SecretStr, ValidationError
 
+from ai_assistant.core.device_context import acting_for, current_acting_for
 from ai_assistant.core.errors import (
     AssistantError,
     ConfigurationError,
     ConnectionStoreError,
+    DeviceRefusedError,
     DisplacedProvisioningError,
     IncompleteProvisioningError,
     ProvisioningOutcomeUnknownError,
@@ -251,6 +253,7 @@ from ai_assistant.interfaces.gateway.records import (
     RefusalCondition,
     RequestClass,
 )
+from ai_assistant.interfaces.gateway.refusals import REFUSAL_FAULTS, refusal_detail
 from ai_assistant.interfaces.gateway.sessions import (
     Admission,
     BootstrapMint,
@@ -1319,6 +1322,7 @@ class Gateway:
             acquire=self._take_hub_slot,
             release=self._give_hub_slot,
             defer=defer,
+            own_device=lambda: self._own_device,
         )
         self._bootstrap = BootstrapMint(
             ttl=settings.gateway_bootstrap_ttl, defer=defer, mint_value=mint_value
@@ -2447,18 +2451,74 @@ class Gateway:
         if barred is not None:
             return barred
         try:
-            if request.path in self._named:
-                return await self._named[request.path](request, self._browser_device(connection))
-            if shape not in _STREAMED_SHAPES:
+            if shape in _STREAMED_SHAPES:
+                # **The delivery stream names nothing** (ADR-0298 §5): it is served from
+                # the gateway's own poll, ``next_notification`` "is the connecting
+                # device's own", and a poll carrying ``acting_for`` is refused. So it is
+                # opened outside :meth:`_relaying_for`, and the poll's task, which
+                # copies the context it is started in, never holds a browser's name.
+                handle = None if header_half is None else self._sessions.handle(header_half)
+                if handle is None:  # pragma: no cover — admitted means a session verified it
+                    return self._refuse(
+                        RequestClass.ASSISTANT, RefusalCondition.NO_LIVE_SESSION, connection
+                    )
+                return self._delivery_stream(handle)
+            with self._relaying_for(connection):
+                if request.path in self._named:
+                    return await self._named[request.path](
+                        request, self._browser_device(connection)
+                    )
                 return await self._unary[request.path](request)
-            handle = None if header_half is None else self._sessions.handle(header_half)
-            if handle is None:  # pragma: no cover — admitted means a session verified it
-                return self._refuse(
-                    RequestClass.ASSISTANT, RefusalCondition.NO_LIVE_SESSION, connection
-                )
-            return self._delivery_stream(handle)
         except _Refused as refused:
             return refused.response
+
+    def _acting_for(self, connection: _Connection) -> str | None:
+        """The browser device a relayed call names to the hub, or ``None`` (ADR-0298 §1).
+
+        **Read off :meth:`_browser_device`, so there is one source of truth.** The
+        device a message names as ``UserMessage.device_id`` is the device the hub
+        binds it to (§2:7), and the hub binds it to the requesting device: the one
+        ``acting_for`` names, or the connecting device where it names none. Deriving
+        both from the one method is what keeps them equal.
+
+        * **On the remote listener**, the browser device ADR-0174 §3 obtained for the
+          connection: the gateway names it on every request it relays for it
+          (ADR-0296 §1:5).
+        * **On the loopback listener**, nothing. That browser is the gateway's own
+          machine (ADR-0296 §1:7), which is the connecting device, and ``acting_for``
+          "is absent where the request is the connecting device's own" (ADR-0298
+          §1:2).
+        * **On the remote listener, where the browser is the gateway's own machine**,
+          nothing either, for the same clause: a browser reaching this gateway over
+          the overlay from the machine it runs on is still that machine.
+
+        Args:
+            connection: The connection the request arrived on.
+
+        Returns:
+            The name, or ``None`` where the call is the connecting device's own.
+        """
+        if not connection.remote:
+            return None
+        device = self._browser_device(connection)
+        return None if device == self._own_device else device
+
+    def _relaying_for(self, connection: _Connection) -> contextlib.AbstractContextManager[object]:
+        """Name the browser device around one relayed call (ADR-0298 §1:5).
+
+        The outbound context value is set around the handler, so the one
+        ``AssistantEngine`` call each handler makes runs inside it and the wire client
+        writes it into that call's frame. No handler takes the name as an argument and
+        no engine method gains one.
+
+        Args:
+            connection: The connection the request arrived on.
+
+        Returns:
+            The block to run the handler in.
+        """
+        name = self._acting_for(connection)
+        return contextlib.nullcontext() if name is None else acting_for(name)
 
     def _browser_device(self, connection: _Connection) -> str | None:
         """The device a browser request comes from, as the gateway names it (ADR-0296 §1).
@@ -2611,10 +2671,41 @@ class Gateway:
             raise _Refused(_ceiling())
         try:
             return await call()
+        except DeviceRefusedError as exc:
+            # Ahead of every caller's own naming: a refusal for the device is the same
+            # condition whichever operation met it (ADR-0298 §6).
+            raise _Refused(self._device_refused(exc)) from exc
         except (TransportError, AssistantError, ValueError) as exc:
             raise _Refused(named(exc)) from exc
         finally:
             self._give_hub_slot()
+
+    def _device_refused(self, exc: DeviceRefusedError) -> Response:
+        """One request the hub refused for its device, as the page reads it (ADR-0298 §6).
+
+        The device is the one the request was made for, read back off the outbound
+        name the call ran inside (:meth:`_relaying_for`) — the very value the frame
+        carried — and otherwise the gateway's own, which is the connecting device the
+        hub decided where the frame named none (§2:1).
+
+        Args:
+            exc: The refusal.
+
+        Returns:
+            The response: the reason's own fault name, and this gateway's sentence.
+        """
+        named = current_acting_for()
+        return _fault(
+            422,
+            "Unprocessable Content",
+            REFUSAL_FAULTS[exc.reason],
+            detail=refusal_detail(
+                exc.reason,
+                device=self._own_device if named is None else named,
+                gateway=self._own_device,
+            ),
+            close=False,
+        )
 
     async def _ask(self, request: Request) -> Response:
         """Relay one turn carrying a reference to the hub, and render what came back.

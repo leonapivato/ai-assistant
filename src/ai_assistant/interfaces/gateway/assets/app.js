@@ -899,6 +899,13 @@ const FAULTS = {
   // gateway's `detail` says what the bound is, or why it has no name to give.
   "message-too-long": "That message is too long to send, so nothing was sent.",
   "device-unnamed": "This browser cannot write a message through this gateway.",
+  // ADR-0298 §6: the hub refused the request for the device this browser is, before
+  // it changed anything. One name per reason, so each reads as its own condition; the
+  // gateway's `detail` names the device and the command that changes the answer.
+  "device-not-accepted":
+    "The hub does not accept this device through this gateway, so nothing was done.",
+  "device-without-role": "The hub has not given this device a role yet, so nothing was done.",
+  "device-not-allowed": "This device's roles do not allow that, so nothing was done.",
   "no-such-belief":
     "No live belief has that id. It may never have existed, or it may have been " +
     "revised or forgotten already — this surface shows and destroys only beliefs " +
