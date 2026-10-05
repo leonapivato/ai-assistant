@@ -1,6 +1,6 @@
 # 177. The browser's control surface is thirty operations, and a credential is entered only on a loopback origin
 
-- Status: Partially superseded by ADR-0178 (§8's four-member rendering clause, and §8's no-claim clause, each only as it reaches a surface rendering a `Confirmation` that carries that decision's §1 egress member) and ADR-0200 (§1's thirty-operation enumeration, which gains `converse_spoken`, and §1's deadline carve-out, which gains that operation's turn budget) and ADR-0250 (§1's thirty-operation enumeration alone, which gains `goals`, `withdraw_clarification` and `abandon_goal`. That one scope, and nothing else in this ADR: §1's every-argument-the-browser-owns clause, its caller-owned-deadline class — which gains no member, because none of the three takes a turn budget — its `learn`-is-unreached clause and its single-principal clause bind entire, and §§2-13 are untouched) and ADR-0285 (§1:1's `observe` member) and ADR-0296 (§1:1's enumeration, which gains the acts in the medium and the change stream; §1:5's class of what the gateway supplies of its own, which gains a browser device's name; and §1:6's bar on a per-browser scope and its reach equal to the gateway device's, as it reaches a browser device)
+- Status: Partially superseded by ADR-0178 (§8's four-member rendering clause, and §8's no-claim clause, each only as it reaches a surface rendering a `Confirmation` that carries that decision's §1 egress member) and ADR-0200 (§1's thirty-operation enumeration, which gains `converse_spoken`, and §1's deadline carve-out, which gains that operation's turn budget) and ADR-0250 (§1's thirty-operation enumeration alone, which gains `goals`, `withdraw_clarification` and `abandon_goal`. That one scope, and nothing else in this ADR: §1's every-argument-the-browser-owns clause, its caller-owned-deadline class — which gains no member, because none of the three takes a turn budget — its `learn`-is-unreached clause and its single-principal clause bind entire, and §§2-13 are untouched) and ADR-0285 (§1:1's `observe` member) and ADR-0296 (§1:1's enumeration, which gains the acts in the medium and the change stream; §1:5's class of what the gateway supplies of its own, which gains a browser device's name; and §1:6's bar on a per-browser scope and its reach equal to the gateway device's, as it reaches a browser device) and ADR-0299 (§1:1's enumeration, which gains `cancel_read`, `standing_authorizations`, `revoke_authorization` and `stop_activation` and loses `converse_streaming`)
 - Date: 2026-08-22
 - Amended: 2026-08-24 by ADR-0186 — **§1's third clause again, by the same count,
   and this note retires the count rather than correcting it.** The change carrying
@@ -238,6 +238,15 @@
   stands, §1:3 included. These replacements take effect on ratification of ADR-0296.
   This reciprocal header record accompanies the numbered draft under ADR-0070 and
   ADR-0082; prior supersessions and the ratified body below are preserved.
+- Partially superseded: 2026-10-05 by ADR-0299 — one scope. §1:1's enumeration gains
+  `cancel_read` (ADR-0244 §13:4), `standing_authorizations` and `revoke_authorization`
+  (ADR-0254 §11:7, §20:1) and `stop_activation` (ADR-0297 §6:4), and loses
+  `converse_streaming` (ADR-0293 §11:2). Those decisions made the moves without a record
+  here, and ADR-0299 §2 states each against this clause. §1:5's class of caller-owned
+  deadlines gains no member, and every other clause stands. This replacement takes
+  effect on ratification of ADR-0299. This reciprocal header record accompanies the
+  numbered draft under ADR-0070 and ADR-0082; prior supersessions and the ratified body
+  below are preserved.
 
 ## Context
 
