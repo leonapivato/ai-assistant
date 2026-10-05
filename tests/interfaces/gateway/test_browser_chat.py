@@ -1,0 +1,217 @@
+"""The chat, driven (ADR-0293 §11, ADR-0216 §2).
+
+What the page *does* over time, which the bundle's text cannot say: a message is
+*received*, the assistant's reply then arrives by following the changes after the
+page's cursor, a send the conversation refuses offers what would let it through, a
+read that fails stops the following rather than retrying it, and a hidden page pauses
+and says so. The engine is the canonical fake; the assistant's reply is written into
+the chat space the way the chat's writer writes one (ADR-0293 §6), so nothing about the
+reply is fabricated at the page.
+"""
+
+from __future__ import annotations
+
+import asyncio
+from typing import TYPE_CHECKING, Any, Final
+
+import pytest
+from browser_drive import driving
+from playwright.async_api import expect
+
+from ai_assistant.core.errors import ConversationStoreError
+from ai_assistant.core.types import (
+    ChatDevice,
+    ConversationState,
+    DeviceAccess,
+    MessageAuthor,
+    NewMessage,
+)
+
+if TYPE_CHECKING:
+    from pathlib import Path
+
+    from browser_drive import Drive
+    from playwright.async_api import Browser, Dialog
+
+pytestmark = [
+    pytest.mark.integration,
+    pytest.mark.browser,
+    pytest.mark.xdist_group("gateway_browser"),
+    pytest.mark.asyncio(loop_scope="session"),
+]
+
+#: Long enough for a quick follow (two seconds) and its digest read to land twice.
+_FOLLOWED: Final = 10_000
+
+#: Longer than one idle follow (ten seconds), for a case that has sent nothing.
+_IDLE_FOLLOWED: Final = 15_000
+
+
+async def _open(drive: Drive, *, devices: tuple[str, ...] = ("hub",)) -> str:
+    """Put ``devices`` in "my devices", start a conversation, and open it in the chat."""
+    await drive.engine.set_my_devices(
+        [ChatDevice(device_id=one, access=DeviceAccess.READ_WRITE) for one in devices]
+    )
+    started = await drive.engine.start_conversation()
+    await drive.page.click("#chat-button")
+    await expect(drive.page.locator("#chat-follow")).to_contain_text("Following this chat")
+    await drive.page.locator("#chat-conversations button", has_text="Open").click()
+    await expect(drive.page.locator("#chat-heading")).to_have_text(f"Conversation {started.id}")
+    return started.id
+
+
+async def _send(drive: Drive, text: str) -> None:
+    await drive.page.fill("#chat-text", text)
+    await drive.page.click("#chat-send")
+
+
+async def test_a_message_is_received_and_the_reply_arrives_by_following(
+    gateway_browser: Browser, tmp_path: Path
+) -> None:
+    """§4:4's *received*, then §6's reply reaching the page as a change, with §8's state."""
+    async with driving(gateway_browser, tmp_path) as drive:
+        conversation = await _open(drive)
+        await _send(drive, "Book the usual campsite.")
+
+        transcript = drive.page.locator("#chat-transcript")
+        await expect(transcript.locator("li").last).to_contain_text("Book the usual campsite.")
+        (written,) = [one for name, one in drive.engine.calls if name == "write_message"]
+        message = written["message"]
+        assert message.device_id == "hub"  # type: ignore[attr-defined]
+
+        held = drive.engine.conversation
+
+        async def working(conversation_id: str) -> Any:
+            digest = await held(conversation_id)
+            assert digest is not None
+            return digest.model_copy(update={"state": ConversationState(working=True)})
+
+        drive.engine.conversation = working  # type: ignore[method-assign]
+        await expect(drive.page.locator("#chat-state")).to_contain_text(
+            "working on this", timeout=_FOLLOWED
+        )
+
+        drive.engine.conversation = held  # type: ignore[method-assign]
+        await drive.engine.chat.append_message(
+            conversation,
+            NewMessage(author=MessageAuthor.ASSISTANT, text="Pinecrest, Friday.", replies_to=1),
+        )
+        reply = transcript.locator("li.from-assistant")
+        await expect(reply).to_contain_text("Pinecrest, Friday.", timeout=_FOLLOWED)
+        await expect(reply).to_contain_text("In reply to: “Book the usual campsite.”")
+        await expect(drive.page.locator("#chat-state")).to_be_hidden(timeout=_FOLLOWED)
+
+
+async def test_a_send_from_a_device_that_is_not_an_end_offers_to_add_it(
+    gateway_browser: Browser, tmp_path: Path
+) -> None:
+    """§7:2: only a conversation's devices write in it; the page says so and offers the fix.
+
+    The resend carries the same message id, so the conversation records it once (§4:2).
+    """
+    async with driving(gateway_browser, tmp_path) as drive:
+        conversation = await _open(drive, devices=())
+        await _send(drive, "Hello?")
+
+        pending = drive.page.locator("#chat-transcript li.pending")
+        await expect(pending).to_contain_text("not one of this conversation's devices")
+        await pending.locator("button", has_text="Add this device").click()
+
+        await expect(pending).to_have_count(0, timeout=_FOLLOWED)
+        await expect(drive.page.locator("#chat-transcript li.from-user")).to_contain_text("Hello?")
+        writes = [one for name, one in drive.engine.calls if name == "write_message"]
+        assert len(writes) == 2
+        assert writes[0]["message"] == writes[1]["message"]
+        assert (await drive.engine.conversation(conversation)) is not None
+
+
+async def test_a_follow_read_that_fails_stops_and_waits_for_the_owner(
+    gateway_browser: Browser, tmp_path: Path
+) -> None:
+    """ADR-0182 §7: nothing is re-issued of the page's own motion after a failure."""
+    async with driving(gateway_browser, tmp_path) as drive:
+        await _open(drive)
+        held = drive.engine.chat_changes
+        failed: list[int] = []
+
+        async def failing(**arguments: Any) -> Any:
+            failed.append(1)
+            raise ConversationStoreError("the store is unreadable")
+
+        drive.engine.chat_changes = failing  # type: ignore[method-assign]
+        follow = drive.page.locator("#chat-follow")
+        await expect(follow).to_contain_text("Stopped following", timeout=_IDLE_FOLLOWED)
+        await expect(drive.page.locator("#chat-follow-again")).to_be_visible()
+        stopped_at = len(failed)
+        await drive.page.wait_for_timeout(5_000)
+        assert len(failed) == stopped_at
+
+        drive.engine.chat_changes = held  # type: ignore[method-assign]
+        await drive.page.click("#chat-follow-again")
+        await expect(follow).to_contain_text("because you asked")
+        await expect(drive.page.locator("#chat-follow-again")).to_be_hidden()
+
+
+async def test_a_hidden_page_pauses_and_follows_again_when_it_comes_back(
+    gateway_browser: Browser, tmp_path: Path
+) -> None:
+    """Hiding pauses the following, and coming back resumes it — each said on screen."""
+    async with driving(gateway_browser, tmp_path) as drive:
+        await _open(drive)
+        await drive.page.evaluate(
+            """() => {
+              Object.defineProperty(document, "visibilityState", {
+                configurable: true, get: () => "hidden" });
+              document.dispatchEvent(new Event("visibilitychange"));
+            }"""
+        )
+        follow = drive.page.locator("#chat-follow")
+        await expect(follow).to_contain_text("Paused while this page is hidden")
+        assert await drive.page.evaluate("chat.timer === null && !chat.following")
+
+        await drive.page.evaluate(
+            """() => {
+              Object.defineProperty(document, "visibilityState", {
+                configurable: true, get: () => "visible" });
+              document.dispatchEvent(new Event("visibilitychange"));
+            }"""
+        )
+        await expect(follow).to_contain_text("You came back")
+
+
+async def test_a_deleted_message_leaves_its_reply_naming_a_deleted_message(
+    gateway_browser: Browser, tmp_path: Path
+) -> None:
+    """§5:8: deleting deletes that message alone, and a reply to it says what it named."""
+    async with driving(gateway_browser, tmp_path) as drive:
+        conversation = await _open(drive)
+        await _send(drive, "Ericeira.")
+        await expect(drive.page.locator("#chat-transcript li.from-user")).to_contain_text(
+            "Ericeira."
+        )
+        await drive.engine.chat.append_message(
+            conversation,
+            NewMessage(author=MessageAuthor.ASSISTANT, text="Booked.", replies_to=1),
+        )
+        reply = drive.page.locator("#chat-transcript li.from-assistant")
+        await expect(reply).to_contain_text("Booked.", timeout=_FOLLOWED)
+
+        # Registered before the click: `window.confirm` blocks the page's script, so a
+        # handler that is already standing is what keeps the click from waiting on it.
+        loop = asyncio.get_running_loop()
+        answered: asyncio.Future[str] = loop.create_future()
+        running: list[asyncio.Task[None]] = []
+
+        async def accept(dialog: Dialog) -> None:
+            await dialog.accept()
+            answered.set_result(dialog.message)
+
+        drive.page.once("dialog", lambda dialog: running.append(loop.create_task(accept(dialog))))
+        await drive.page.locator("#chat-transcript li.from-user button", has_text="Delete").click()
+        assert "forgets nothing" in await answered
+
+        await expect(drive.page.locator("#chat-transcript li.from-user")).to_have_count(0)
+        await expect(reply).to_contain_text("In reply to a message that was deleted.")
+        assert ("delete_message", {"conversation_id": conversation, "position": 1}) in (
+            drive.engine.calls
+        )

@@ -698,8 +698,13 @@ def test_the_header_half_is_held_in_origin_scoped_storage_shared_across_tabs() -
     # The page now stores one other thing, and it is **not** a session half: which
     # conversation this view is reading, which is the tab's rather than the origin's.
     # So the clause is asserted where it is about — no half of a session is ever in
-    # tab-scoped storage — and the one key that is, is named.
-    assert set(re.findall(r"window\.sessionStorage\.\w+\((\w+)", script)) == {"CONVERSATION_KEY"}
+    # tab-scoped storage — and the keys that are, are named: the conversation the ask
+    # continues, and whether this tab has the chat open and which conversation it reads.
+    assert set(re.findall(r"window\.sessionStorage\.\w+\((\w+)", script)) == {
+        "CONVERSATION_KEY",
+        "CHAT_OPEN_KEY",
+        "CHAT_CONVERSATION_KEY",
+    }
 
 
 def test_the_front_end_never_reads_the_cookie_half() -> None:
@@ -2559,7 +2564,7 @@ def test_the_recording_this_page_holds_is_bounded_and_bounded_without_a_clock() 
     assert "if (said === LISTENING || said === SENDING) {" in _functions(script)["releaseTalk"]
     # No clock of its own reaches this control, and the file's one `setTimeout` is still
     # the delivery stream's.
-    assert len(_timeouts(script)) == 1
+    assert len(_page_clocks(script)) == 1
     for name in ("startTalking", "stopTalking", "sendRecording", "abandonSpoken", "releaseTalk"):
         body = _functions(script)[name]
         for clock in ("setTimeout", "setInterval", "HEAD_DEADLINE_MILLISECONDS"):
@@ -2724,7 +2729,7 @@ def test_the_wait_is_ended_by_the_owner_and_by_no_clock_of_the_pages_own() -> No
 
     # Still one clock, and still the delivery stream's. A second `setTimeout` would be
     # the page taking motion over a request ADR-0182 §7 makes the owner's.
-    assert len(_timeouts(script)) == 1
+    assert len(_page_clocks(script)) == 1
     assert "setInterval" not in script
     # And no deadline reaches the ask at all: neither the delivery bound nor a new one.
     for function in ("ask", "abandonAsk", "askWhole", "askStreaming", "releaseAsk"):
@@ -2733,8 +2738,8 @@ def test_the_wait_is_ended_by_the_owner_and_by_no_clock_of_the_pages_own() -> No
             assert clock not in body, (function, clock)
     # The one clock there is cannot reach the abandonment either, so the wait is ended
     # by the owner and by nothing this page schedules.
-    assert "abandonAsk" not in _timeouts(script)[0]
-    assert "releaseAsk" not in _timeouts(script)[0]
+    assert "abandonAsk" not in _page_clocks(script)[0]
+    assert "releaseAsk" not in _page_clocks(script)[0]
 
 
 def test_a_settled_ask_does_not_hand_back_a_control_a_later_question_took() -> None:
@@ -3320,7 +3325,7 @@ def test_the_page_says_whether_it_is_watching_rather_than_retrying_unseen() -> N
     # clothes; a timer that stops waiting on a socket nothing is coming out of is the
     # opposite — it is what makes the visible control reachable again.
     assert "setInterval" not in script
-    calls = _timeouts(script)
+    calls = _page_clocks(script)
     assert len(calls) == 1
     for opener in ("fetch(", "watchDeliveries(", "rearm(", "readDeliveries("):
         assert opener not in calls[0], opener
@@ -3357,7 +3362,7 @@ def test_the_delivery_stream_is_re_armed_on_two_events_and_on_no_timer() -> None
         "rearm(NETWORK_BACK)",
         "rearm(held)",
     ]
-    assert "rearm(" not in _timeouts(script)[0]
+    assert "rearm(" not in _page_clocks(script)[0]
 
 
 def test_a_delivery_stream_that_stops_saying_anything_is_abandoned_on_a_bound() -> None:
@@ -3381,7 +3386,7 @@ def test_a_delivery_stream_that_stops_saying_anything_is_abandoned_on_a_bound() 
     script = _code("app.js")
     read = _functions(script)["readDeliveries"]
     watch = _functions(script)["watchDeliveries"]
-    calls = _timeouts(script)
+    calls = _page_clocks(script)
 
     assert len(calls) == 1
     # Derived from what this gateway stated, and from no figure of this page's own: a
@@ -3472,6 +3477,11 @@ def test_the_cadence_is_read_off_the_streams_own_head_and_kept_nowhere() -> None
     # Nothing about the cadence is stored, so there is no stale figure to be held to:
     # the roster of what this page keeps is pinned whole rather than by absence.
     assert sorted(re.findall(r"(?:local|session)Storage\.\w+\((\w+)", script)) == [
+        "CHAT_CONVERSATION_KEY",
+        "CHAT_CONVERSATION_KEY",
+        "CHAT_CONVERSATION_KEY",
+        "CHAT_OPEN_KEY",
+        "CHAT_OPEN_KEY",
         "CONVERSATION_KEY",
         "CONVERSATION_KEY",
         "CONVERSATION_KEY",
@@ -4299,6 +4309,7 @@ _FAULT_PANELS: Final = frozenset(
         "connections",
         "connection-log",
         "authorizations",
+        "chat",
     }
 )
 
@@ -4436,6 +4447,19 @@ def _timeouts(script: str) -> list[str]:
             index += 1
         calls.append(script[opened.end() : index])
     return calls
+
+
+def _page_clocks(script: str) -> list[str]:
+    """The page's clocks **other than the chat's**, which a test of its own pins.
+
+    ADR-0293 §11:1 has a device read the changes after its cursor until the change
+    stream is built, and the chat's ``scheduleFollow`` is where the page does that. Every
+    claim below about "the one clock" is about the delivery stream's and the owner's
+    waits, and stays exactly as strict: the chat's clock is taken out by where it is
+    declared, and nowhere else may a second one appear.
+    """
+    follow = _functions(script)["scheduleFollow"]
+    return [call for call in _timeouts(script) if call not in follow]
 
 
 def _declaration(script: str, name: str) -> str:
@@ -6870,7 +6894,7 @@ def test_a_park_answer_that_never_settles_is_ended_by_the_owner_and_by_no_clock(
     functions = _functions(script)
 
     # Still one clock, and still the delivery stream's.
-    assert len(_timeouts(script)) == 1
+    assert len(_page_clocks(script)) == 1
     assert "setInterval" not in script
     assert "AbortSignal" not in script
     for name in ("relay", "answerConfirmation", "offerApproval", "parkWords"):
@@ -9438,3 +9462,44 @@ def test_a_reference_already_sent_is_not_offered_as_one_that_can_be_taken_back()
     assert "no longer be taken back" in said
     for barred in ("stop", "cancel", "abandon", "undo"):
         assert barred not in said.lower(), barred
+
+
+def test_the_chat_is_followed_on_a_clock_that_reads_and_retries_nothing() -> None:
+    """ADR-0293 §11:1 and ADR-0182 §7, read together (PR #2701 records the reading).
+
+    Until the change stream is built a device fetches the changes after its cursor, so
+    the chat has a clock of its own. What keeps it inside ADR-0182 §7 is pinned here:
+    it reads the changes after the cursor and does nothing else — it opens no stream,
+    writes nothing and re-arms nothing; a read that fails **stops** the following and
+    says so rather than being tried again; and what starts it again of the page's own
+    motion is §7's two events alone, each announced.
+    """
+    script = _code("app.js")
+    functions = _functions(script)
+    follow = functions["scheduleFollow"]
+    clock = [call for call in _timeouts(script) if call in follow]
+
+    assert len(clock) == 1
+    assert "void followChat();" in clock[0]
+    for opener in ("fetch(", "relay(", "watchDeliveries(", "rearm(", "deliverChat("):
+        assert opener not in clock[0], opener
+        assert opener not in follow, opener
+    following = functions["followChat"]
+    assert following.count("await relay(") == 1
+    assert 'await relay(half, "/chat/changes", { after: chat.cursor }, "chat")' in following
+    # A failure stops it, says why, and hands the owner the control: no retry.
+    assert "stopFollowing(CHAT_STOPPED_GONE, true);" in following
+    assert "stopFollowing(CHAT_STOPPED_REFUSED, true);" in following
+    # And only ADR-0182 §7's two events start it again of the page's own motion.
+    assert 'document.addEventListener("visibilitychange", chatVisibility);' in script
+    assert 'window.addEventListener("online", chatOnline);' in script
+    starters = {
+        name
+        for name, body in functions.items()
+        if "startFollowing(" in body and name != "startFollowing"
+    }
+    assert starters == {"loadChat", "chatVisibility", "chatOnline", "followAgain"}
+    assert "startFollowing(CHAT_CAME_BACK);" in functions["chatVisibility"]
+    assert "startFollowing(CHAT_NETWORK_BACK);" in functions["chatOnline"]
+    # Hiding the page pauses it, and says so.
+    assert "stopFollowing(CHAT_PAUSED, false);" in functions["chatVisibility"]

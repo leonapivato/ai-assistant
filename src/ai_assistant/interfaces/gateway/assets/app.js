@@ -44,13 +44,15 @@
 // stream costs the browser "a reconnect — which is free, because a session outlives
 // its connections" (ADR-0175 §4).
 //
-// **There is one clock here and it opens nothing** (#1442). `setInterval` does not
-// appear at all, and the single `setTimeout` bounds how long a delivery stream may
-// say *nothing* before this page abandons it — it ends a stream, restores the
-// owner's own control, and re-establishes nothing. ADR-0182 §7 forbids re-arming "on
-// a timer, on a schedule, or on the failure itself", and re-arming is exactly what
-// this clock does not do: after it fires the page holds no stream, and what opens
-// the next one is one of §7's two events or the owner's click.
+// **There are two clocks here and neither opens a stream** (#1442). `setInterval` does
+// not appear at all. The first `setTimeout` bounds how long a delivery stream may say
+// *nothing* before this page abandons it — it ends a stream, restores the owner's own
+// control, and re-establishes nothing. ADR-0182 §7 forbids re-arming "on a timer, on a
+// schedule, or on the failure itself", and re-arming is exactly what this clock does
+// not do: after it fires the page holds no stream, and what opens the next one is one
+// of §7's two events or the owner's click. The second follows the chat (ADR-0293
+// §11:1): it reads the changes after the page's cursor while the chat is open, and a
+// read that fails stops it rather than being tried again.
 
 "use strict";
 
@@ -878,6 +880,10 @@ const FAULTS = {
     "A delivery stream holds one of them for as long as it is open.",
   "request-too-large": "That request was larger than the gateway will read.",
   "no-such-conversation": "There is no conversation of that name.",
+  // ADR-0293 §4:7 and the gateway's own naming of a browser's device (ADR-0296 §1). The
+  // gateway's `detail` says what the bound is, or why it has no name to give.
+  "message-too-long": "That message is too long to send, so nothing was sent.",
+  "device-unnamed": "This browser cannot write a message through this gateway.",
   "no-such-belief":
     "No live belief has that id. It may never have existed, or it may have been " +
     "revised or forgotten already — this surface shows and destroys only beliefs " +
@@ -8728,6 +8734,1234 @@ function statedForget(id, held, destroyed) {
   );
 }
 
+// --- the chat (ADR-0293) -----------------------------------------------------
+//
+// **Conversations that keep their own transcript.** A message is written into a
+// conversation as the owner's act in the medium (§4) and is *received* once the
+// conversation has recorded it; the assistant answers by writing a message of its own
+// (§6), which reaches this page as a change. What the assistant is doing is the
+// conversation's current state, read with it and shown beside the transcript, never in
+// it (§8:1).
+//
+// **Following is a read after a cursor, on this page's second clock** (ADR-0293 §5:11,
+// §11:1). Until the hub serves the change stream (ADR-0296 §4) a device catches up by
+// asking for every change after the last one it applied, and keeps asking. The page
+// does that while the chat is open and the page is visible, **and says so on screen**.
+// It never retries a failure: a read that fails stops the following, says why, and
+// nothing resumes it but the owner's press or one of ADR-0182 §7's two events — the
+// page becoming visible, or the network coming back — each announced. A read whose
+// cursor moves forward is a new question rather than §7:5's re-issue of one already
+// asked, and it is the only request this clock makes: it writes nothing and opens no
+// stream (PR #2701 records the reading).
+//
+// **The device is the gateway's to name** (ADR-0296's record on ADR-0177 §1:5). This
+// page is told which device it is, so it can offer to add itself, and never sends a
+// device of its own.
+
+// Which chat this tab has open, and which conversation it is reading. The tab's, in
+// `sessionStorage`, for `CONVERSATION_KEY`'s reason: two tabs are two views.
+const CHAT_OPEN_KEY = "assistant.session.chat-open";
+const CHAT_CONVERSATION_KEY = "assistant.session.chat-conversation";
+
+// How often the page asks for the changes after its cursor: quickly while an answer is
+// expected — a message was just received, or the assistant is working — and slowly
+// otherwise. A full page is followed at once, since more is already waiting.
+const FOLLOW_QUICK_MILLISECONDS = 2000;
+const FOLLOW_IDLE_MILLISECONDS = 10000;
+const QUICK_AFTER_SENDING_MILLISECONDS = 120000;
+// The surface's own page size (`DEFAULT_PAGE_SIZE`), which is what a full page holds.
+const CHAT_PAGE = 50;
+
+const CHAT_CATCHING_UP = "Reading the chat…";
+const CHAT_FOLLOWING =
+  "Following this chat: messages appear here as they are written, from any of your " +
+  "devices.";
+const CHAT_PAUSED = "Paused while this page is hidden. It follows again when you come back.";
+const CHAT_CAME_BACK = "You came back, so this page is following the chat again.";
+const CHAT_NETWORK_BACK = "The network is back, so this page is following the chat again.";
+const CHAT_ASKED_AGAIN = "Following the chat again, because you asked.";
+const CHAT_STOPPED_GONE =
+  "Stopped following the chat: the gateway did not answer. Nothing is retried on its " +
+  "own — follow again when you are ready.";
+const CHAT_STOPPED_REFUSED =
+  "Stopped following the chat: the last read was refused, for the reason above. " +
+  "Nothing is retried on its own.";
+
+// The current state (ADR-0293 §8), in words. "Working" is informational: the box stays
+// open, and a message written meanwhile waits for the assistant (§6:2).
+const CHAT_WORKING =
+  "The assistant is working on this… You can keep writing; what you send waits for it.";
+const CHAT_ENDINGS = {
+  done: "The assistant finished what you last asked here.",
+  couldnt_finish: "The assistant couldn't finish what you last asked here.",
+  interrupted:
+    "The assistant was interrupted before it finished what you last asked here. Send " +
+    "it again if you still want an answer.",
+  stopped: "What you last asked here was stopped.",
+};
+
+// A device's access, as a conversation's end (ADR-0293 §3:5).
+const CHAT_ACCESS = [
+  { value: "read_write", label: "Reads and writes" },
+  { value: "read", label: "Reads only" },
+  { value: "write", label: "Writes only" },
+];
+
+// What each act says before it is taken. Deleting and forgetting are two acts and the
+// page offers them side by side, never as one (ADR-0293 §2:7); forgetting's sentence
+// is §5:7's disclosure.
+const CHAT_DELETE_MESSAGE =
+  "Delete this message? It is removed from this conversation on every device. A reply " +
+  "to it stays, and deleting forgets nothing the assistant remembers.";
+const CHAT_DELETE_CONVERSATION =
+  "Delete this conversation and its transcript, on every device? This forgets " +
+  "nothing: what the assistant remembers from it stays until you forget it.";
+const CHAT_FORGET =
+  "Forget this conversation? Forgetting removes its episodes from the assistant's " +
+  "memory, so it no longer recalls them anywhere else. The assistant still reads the " +
+  "conversation while you keep talking there, and only deleting removes the conversation.";
+
+// The pending message's state, in words.
+const CHAT_SENT_STATES = {
+  sending: "Sending…",
+  received: "Received.",
+  unknown:
+    "No answer came back, so it is not known whether this arrived. Sending it again is " +
+    "safe: it is the same message, and it is recorded once.",
+  "not-an-end":
+    "Not sent: this device is not one of this conversation's devices for writing.",
+  "no-such-reply": "Not sent: the message it replies to is not in this conversation.",
+  gone: "Not sent: this conversation no longer exists.",
+  refused: "Not sent: the gateway refused it, for the reason above.",
+};
+
+const chat = {
+  open: false,
+  // Bumped on every load, so a load that has been superseded stops where it is.
+  era: 0,
+  // The last sequence number this page applied (ADR-0296 §4:4's cursor).
+  cursor: null,
+  following: false,
+  // Bumped whenever following starts or stops, so a read in flight across either
+  // schedules nothing when it comes back.
+  ticks: 0,
+  timer: null,
+  quickUntil: 0,
+  // `undefined` until read; `null` where the gateway cannot name this browser's device.
+  thisDevice: undefined,
+  myDevices: [],
+  listing: [],
+  listed: 0,
+  unread: new Set(),
+  selected: null,
+  // Bumped on every change of selection, so a read for a conversation the owner left
+  // renders nothing.
+  chosen: 0,
+  entries: new Map(),
+  deleted: new Set(),
+  oldest: null,
+  state: null,
+  devices: null,
+  pending: [],
+  replyTo: null,
+};
+
+function chatWasOpen() {
+  try {
+    return window.sessionStorage.getItem(CHAT_OPEN_KEY) !== null;
+  } catch (_) {
+    return false;
+  }
+}
+
+function storedChatConversation() {
+  try {
+    return window.sessionStorage.getItem(CHAT_CONVERSATION_KEY);
+  } catch (_) {
+    return null;
+  }
+}
+
+function rememberChat() {
+  try {
+    window.sessionStorage.setItem(CHAT_OPEN_KEY, "open");
+    if (chat.selected === null) {
+      window.sessionStorage.removeItem(CHAT_CONVERSATION_KEY);
+    } else {
+      window.sessionStorage.setItem(CHAT_CONVERSATION_KEY, chat.selected);
+    }
+  } catch (_) {
+    // A browser that will not store keeps the chat open until it reloads, which is all
+    // this was for.
+  }
+}
+
+// The owner opening the chat, or a reload restoring the chat this tab had open.
+function openChat() {
+  show("chat", true);
+  rememberChat();
+  if (!chat.open) {
+    chat.open = true;
+    if (chat.selected === null) {
+      chat.selected = storedChatConversation();
+    }
+    void loadChat();
+  }
+}
+
+// The session ended: the chat stops following and forgets what it held.
+function closeChat() {
+  chat.open = false;
+  chat.era += 1;
+  stopFollowing(null, false);
+  chat.cursor = null;
+  chat.selected = null;
+  chat.entries = new Map();
+  chat.deleted = new Set();
+  chat.pending = [];
+  el("chat-thread").hidden = true;
+}
+
+// Catch up from nothing: the cursor first, then what the page shows, then follow. Each
+// read after the cursor may already hold a change the cursor is before, and applying a
+// change twice changes nothing — so the order is safe.
+async function loadChat() {
+  chat.era += 1;
+  const mine = chat.era;
+  stopFollowing(CHAT_CATCHING_UP, false);
+  fault(null, "chat");
+  if (!(await readChatCursor())) {
+    if (mine === chat.era && chat.open) {
+      stopFollowing(CHAT_STOPPED_REFUSED, true);
+    }
+    return;
+  }
+  if (mine !== chat.era) {
+    return;
+  }
+  await readMyDevices();
+  await listChat(false);
+  if (mine !== chat.era) {
+    return;
+  }
+  if (chat.selected !== null) {
+    await selectChat(chat.selected);
+  }
+  if (mine === chat.era) {
+    startFollowing(CHAT_FOLLOWING);
+  }
+}
+
+// The chat space's latest sequence number, read as the changes to no conversation: the
+// answer's `next_after` is the latest number where the page is not full.
+async function readChatCursor() {
+  const half = headerHalf();
+  if (half === null) {
+    showBootstrap();
+    return false;
+  }
+  const era = sessionEra;
+  let after = 0;
+  try {
+    for (;;) {
+      const body = await relay(
+        half,
+        "/chat/changes",
+        { after: after, conversation_ids: [] },
+        "chat"
+      );
+      if (!sameSession(half, era)) {
+        return false;
+      }
+      if (body === null) {
+        return false;
+      }
+      after = body.next_after;
+      if (body.changes.length < CHAT_PAGE) {
+        break;
+      }
+    }
+  } catch (_) {
+    if (!sameSession(half, era)) {
+      return false;
+    }
+    fault(GATEWAY_GONE, "chat");
+    return false;
+  }
+  chat.cursor = after;
+  return true;
+}
+
+async function readMyDevices() {
+  const half = headerHalf();
+  if (half === null) {
+    showBootstrap();
+    return;
+  }
+  const era = sessionEra;
+  try {
+    const body = await relay(half, "/chat/devices", {}, "chat");
+    if (!sameSession(half, era)) {
+      return;
+    }
+    if (body === null) {
+      return;
+    }
+    chat.myDevices = body.devices;
+    chat.thisDevice = body.this_device;
+    renderMyDevices();
+    renderConversationDevices();
+  } catch (_) {
+    if (!sameSession(half, era)) {
+      return;
+    }
+    fault(GATEWAY_GONE, "chat");
+  }
+}
+
+// --- following ----------------------------------------------------------------
+
+function sayFollowing(text) {
+  el("chat-follow").textContent = text;
+}
+
+function startFollowing(said) {
+  if (!chat.open || chat.following || chat.cursor === null) {
+    return;
+  }
+  chat.following = true;
+  chat.ticks += 1;
+  sayFollowing(said);
+  el("chat-follow-again").hidden = true;
+  scheduleFollow(0);
+}
+
+// `said` is what the page now says about following, or `null` to leave it; `offer` is
+// whether the owner is handed the control that starts it again.
+function stopFollowing(said, offer) {
+  chat.following = false;
+  chat.ticks += 1;
+  if (chat.timer !== null) {
+    window.clearTimeout(chat.timer);
+    chat.timer = null;
+  }
+  if (said !== null) {
+    sayFollowing(said);
+  }
+  el("chat-follow-again").hidden = !offer;
+}
+
+function scheduleFollow(delay) {
+  if (chat.timer !== null) {
+    window.clearTimeout(chat.timer);
+  }
+  // The page's second clock, and all it does is read the changes after the cursor: it
+  // opens no stream and re-issues nothing that failed (ADR-0182 §7).
+  chat.timer = window.setTimeout(() => {
+    chat.timer = null;
+    void followChat();
+  }, delay);
+}
+
+function followingQuickly() {
+  return Date.now() < chat.quickUntil || (chat.state !== null && chat.state.working);
+}
+
+// The owner pressing "Follow changes again", or a cursor the chat space no longer has.
+function followAgain() {
+  if (chat.cursor === null) {
+    void loadChat();
+    return;
+  }
+  fault(null, "chat");
+  startFollowing(CHAT_ASKED_AGAIN);
+}
+
+// One read of the changes after the cursor, and the next one scheduled.
+async function followChat() {
+  const tick = chat.ticks;
+  const half = headerHalf();
+  if (half === null) {
+    stopFollowing(null, false);
+    return;
+  }
+  const era = sessionEra;
+  let body;
+  try {
+    body = await relay(half, "/chat/changes", { after: chat.cursor }, "chat");
+  } catch (_) {
+    if (!sameSession(half, era)) {
+      return;
+    }
+    if (tick === chat.ticks) {
+      stopFollowing(CHAT_STOPPED_GONE, true);
+      fault(GATEWAY_GONE, "chat");
+    }
+    return;
+  }
+  if (!sameSession(half, era) || tick !== chat.ticks) {
+    return;
+  }
+  if (body === null) {
+    stopFollowing(CHAT_STOPPED_REFUSED, true);
+    return;
+  }
+  // A chat space with fewer changes than this page's cursor claims was started afresh,
+  // so what is on screen describes nothing that exists: read it all again.
+  if (body.next_after < chat.cursor) {
+    chat.cursor = null;
+    void loadChat();
+    return;
+  }
+  const touched = applyChanges(body.changes);
+  chat.cursor = body.next_after;
+  if (chat.selected !== null && (touched || followingQuickly())) {
+    await readChatDigest(chat.selected, chat.chosen);
+  }
+  if (tick !== chat.ticks) {
+    return;
+  }
+  if (body.changes.length >= CHAT_PAGE) {
+    scheduleFollow(0);
+  } else {
+    scheduleFollow(followingQuickly() ? FOLLOW_QUICK_MILLISECONDS : FOLLOW_IDLE_MILLISECONDS);
+  }
+}
+
+// Apply changes in sequence order (ADR-0293 §5:10). Each is safe to apply twice, since a
+// snapshot read after the cursor may already hold it. Answers whether the conversation
+// on screen changed.
+function applyChanges(changes) {
+  let touched = false;
+  let relist = false;
+  changes.forEach((change) => {
+    if (change.kind === "message_added") {
+      if (change.conversation_id === chat.selected) {
+        chat.entries.set(change.message.position, change.message);
+        touched = true;
+      } else {
+        chat.unread.add(change.conversation_id);
+        relist = true;
+      }
+    } else if (change.kind === "message_deleted") {
+      // §5:12: a device removes the message on seeing its marker.
+      if (change.conversation_id === chat.selected) {
+        chat.entries.delete(change.position);
+        chat.deleted.add(change.position);
+        touched = true;
+      }
+    } else if (change.kind === "conversation_started") {
+      relist = true;
+    } else if (change.kind === "conversation_deleted") {
+      relist = true;
+      chat.unread.delete(change.conversation_id);
+      if (change.conversation_id === chat.selected) {
+        chatGone(`Conversation ${change.conversation_id} was deleted.`);
+      }
+    } else if (change.kind === "devices_changed") {
+      if (change.conversation_id === null) {
+        chat.myDevices = change.devices;
+        renderMyDevices();
+        renderConversationDevices();
+      } else if (change.conversation_id === chat.selected) {
+        chat.devices = change.devices;
+        renderConversationDevices();
+      }
+    }
+  });
+  if (touched) {
+    renderTranscript();
+  }
+  if (relist) {
+    void listChat(false);
+  }
+  return touched;
+}
+
+// ADR-0182 §7's two events, and nothing else, start following again of the page's own
+// motion — each announced. Hiding the page pauses it, and says so.
+function chatVisibility() {
+  if (!chat.open) {
+    return;
+  }
+  if (document.visibilityState === "visible") {
+    startFollowing(CHAT_CAME_BACK);
+  } else if (chat.following) {
+    stopFollowing(CHAT_PAUSED, false);
+  }
+}
+
+function chatOnline() {
+  if (chat.open && document.visibilityState === "visible") {
+    startFollowing(CHAT_NETWORK_BACK);
+  }
+}
+
+// --- the conversations --------------------------------------------------------
+
+async function listChat(more) {
+  chat.listed += 1;
+  const mine = chat.listed;
+  const half = headerHalf();
+  if (half === null) {
+    showBootstrap();
+    return;
+  }
+  const era = sessionEra;
+  const offset = more ? chat.listing.length : 0;
+  try {
+    const body = await relay(half, "/conversations", { offset: offset }, "chat");
+    if (!sameSession(half, era)) {
+      return;
+    }
+    if (body === null || mine !== chat.listed) {
+      return;
+    }
+    chat.listing = more ? chat.listing.concat(body.conversations) : body.conversations;
+    el("chat-more").hidden = body.conversations.length < CHAT_PAGE;
+    renderChatListing();
+  } catch (_) {
+    if (!sameSession(half, era)) {
+      return;
+    }
+    if (mine === chat.listed) {
+      fault(GATEWAY_GONE, "chat");
+    }
+  }
+}
+
+// An instant, as the hub wrote it: the date and the minute, and the zone it is in. No
+// `Date` is built and no zone database consulted (ADR-0194 §5's reach, which this page
+// keeps everywhere); how the page shows instants in the owner's own zone is #1392's.
+function chatTime(iso) {
+  const shaped = /^(\d{4}-\d{2}-\d{2})T(\d{2}:\d{2})[^+Z-]*(Z|[+-]\d{2}:\d{2})$/.exec(iso);
+  if (shaped === null) {
+    return iso;
+  }
+  const zone = shaped[3] === "Z" || shaped[3] === "+00:00" ? "UTC" : `UTC${shaped[3]}`;
+  return `${shaped[1]} ${shaped[2]} ${zone}`;
+}
+
+function renderChatListing() {
+  const list = el("chat-conversations");
+  clearNode(list);
+  if (chat.listing.length === 0) {
+    const item = document.createElement("li");
+    item.className = "hint";
+    item.textContent = "No conversations yet.";
+    list.appendChild(item);
+    return;
+  }
+  chat.listing.forEach((summary) => {
+    const item = document.createElement("li");
+    item.className = "chat-conversation-row";
+    line(item, `Conversation ${summary.id}`, "conversation-name");
+    const when = `Started ${chatTime(summary.started_at)}`;
+    line(item, chat.unread.has(summary.id) ? `${when} · new messages` : when, "hint");
+    if (summary.id === chat.selected) {
+      line(item, "Open below.", "hint");
+    } else {
+      const open = document.createElement("button");
+      open.type = "button";
+      open.textContent = "Open";
+      open.addEventListener("click", () => {
+        void selectChat(summary.id);
+      });
+      item.appendChild(open);
+    }
+    list.appendChild(item);
+  });
+}
+
+async function startChat() {
+  const half = headerHalf();
+  if (half === null) {
+    showBootstrap();
+    return;
+  }
+  const era = sessionEra;
+  try {
+    const body = await relay(half, "/chat/start", {}, "chat");
+    if (!sameSession(half, era)) {
+      return;
+    }
+    if (body === null) {
+      return;
+    }
+    sayChat(null);
+    void listChat(false);
+    await selectChat(body.conversation.id);
+    el("chat-text").focus();
+  } catch (_) {
+    if (!sameSession(half, era)) {
+      return;
+    }
+    fault(GATEWAY_GONE, "chat");
+  }
+}
+
+// Read one conversation: its recent transcript (§5:13), then its state and devices.
+async function selectChat(id) {
+  chat.chosen += 1;
+  const mine = chat.chosen;
+  chat.selected = id;
+  chat.entries = new Map();
+  chat.deleted = new Set();
+  chat.oldest = null;
+  chat.state = null;
+  chat.devices = null;
+  chat.unread.delete(id);
+  setReplyTo(null);
+  sayChat(null);
+  rememberChat();
+  el("chat-thread").hidden = false;
+  el("chat-heading").textContent = `Conversation ${id}`;
+  renderChatListing();
+  renderTranscript();
+  renderChatState();
+  renderConversationDevices();
+  await readTranscript(id, mine, null);
+  if (mine === chat.chosen) {
+    await readChatDigest(id, mine);
+  }
+}
+
+// The conversation on screen is gone — deleted here, elsewhere, or never there.
+function chatGone(said) {
+  chat.chosen += 1;
+  chat.selected = null;
+  chat.entries = new Map();
+  chat.deleted = new Set();
+  chat.state = null;
+  chat.devices = null;
+  setReplyTo(null);
+  rememberChat();
+  el("chat-thread").hidden = true;
+  sayChat(said);
+  renderChatListing();
+}
+
+function sayChat(text) {
+  const slot = el("chat-said");
+  slot.textContent = text === null ? "" : text;
+  slot.hidden = text === null;
+}
+
+async function readTranscript(id, mine, before) {
+  const half = headerHalf();
+  if (half === null) {
+    showBootstrap();
+    return;
+  }
+  const era = sessionEra;
+  let refusal = null;
+  const payload = before === null ? { conversation_id: id } : { conversation_id: id, before: before };
+  try {
+    const body = await relay(half, "/chat/transcript", payload, "chat", undefined, (said) => {
+      refusal = said;
+    });
+    if (!sameSession(half, era)) {
+      return;
+    }
+    if (mine !== chat.chosen) {
+      return;
+    }
+    if (body === null) {
+      if (refusal !== null && refusal.fault === "no-such-conversation") {
+        chatGone(`Conversation ${id} no longer exists.`);
+      }
+      return;
+    }
+    const entries = body.transcript.entries;
+    entries.forEach((entry) => {
+      if (entry.deleted) {
+        chat.deleted.add(entry.position);
+      } else {
+        chat.entries.set(entry.position, entry);
+      }
+    });
+    if (entries.length > 0) {
+      const first = entries[0].position;
+      chat.oldest = chat.oldest === null ? first : Math.min(chat.oldest, first);
+    } else if (before !== null) {
+      chat.oldest = 1;
+    }
+    renderTranscript(before === null);
+  } catch (_) {
+    if (!sameSession(half, era)) {
+      return;
+    }
+    if (mine === chat.chosen) {
+      fault(GATEWAY_GONE, "chat");
+    }
+  }
+}
+
+async function readChatDigest(id, mine) {
+  const half = headerHalf();
+  if (half === null) {
+    return;
+  }
+  const era = sessionEra;
+  try {
+    const body = await relay(half, "/conversation", { conversation_id: id }, "chat");
+    if (!sameSession(half, era)) {
+      return;
+    }
+    if (body === null || mine !== chat.chosen) {
+      return;
+    }
+    chat.state = body.conversation.state;
+    chat.devices = body.conversation.devices;
+    renderChatState();
+    renderConversationDevices();
+  } catch (_) {
+    if (!sameSession(half, era)) {
+      return;
+    }
+    if (mine === chat.chosen) {
+      fault(GATEWAY_GONE, "chat");
+    }
+  }
+}
+
+function renderChatState() {
+  const slot = el("chat-state");
+  let said = "";
+  if (chat.state !== null) {
+    said = chat.state.working ? CHAT_WORKING : CHAT_ENDINGS[chat.state.last_ended] || "";
+  }
+  slot.textContent = said;
+  slot.hidden = said === "";
+}
+
+// --- the transcript -----------------------------------------------------------
+
+// Where a reply points: the message itself, a deleted message (§5:8), or one this page
+// has not loaded.
+function quoted(position) {
+  const held = chat.entries.get(position);
+  if (held !== undefined) {
+    const text = held.text.length > 120 ? `${held.text.slice(0, 120)}…` : held.text;
+    return `In reply to: “${text}”`;
+  }
+  if (chat.deleted.has(position)) {
+    return "In reply to a message that was deleted.";
+  }
+  return `In reply to message ${position}.`;
+}
+
+// `toEnd` scrolls to the newest message; otherwise the view stays where the owner is
+// unless they were already at the end.
+function renderTranscript(toEnd) {
+  const list = el("chat-transcript");
+  const atEnd = list.scrollHeight - list.scrollTop - list.clientHeight < 80;
+  clearNode(list);
+  // A pending message the conversation has since recorded is shown as the record.
+  chat.pending = chat.pending.filter(
+    (one) => one.position === null || !(one.conversation === chat.selected && chat.entries.has(one.position))
+  );
+  const positions = [...chat.entries.keys()].sort((a, b) => a - b);
+  const waiting = chat.pending.filter((one) => one.conversation === chat.selected);
+  if (positions.length === 0 && waiting.length === 0) {
+    const empty = document.createElement("li");
+    empty.className = "hint";
+    empty.textContent = "No messages yet.";
+    list.appendChild(empty);
+  }
+  positions.forEach((position) => list.appendChild(renderChatMessage(chat.entries.get(position))));
+  waiting.forEach((one) => list.appendChild(renderPending(one)));
+  el("chat-older").hidden = chat.oldest === null || chat.oldest <= 1;
+  if (toEnd === true || atEnd) {
+    list.scrollTop = list.scrollHeight;
+  }
+}
+
+function chatButton(parent, label, act) {
+  const button = document.createElement("button");
+  button.type = "button";
+  button.textContent = label;
+  button.addEventListener("click", act);
+  parent.appendChild(button);
+  return button;
+}
+
+function renderChatMessage(message) {
+  const item = document.createElement("li");
+  const mine = message.author === "user";
+  item.className = mine ? "chat-message from-user" : "chat-message from-assistant";
+  let who = mine ? "You" : "Assistant";
+  if (mine && message.device_id !== chat.thisDevice) {
+    who = `You, on ${message.device_id}`;
+  }
+  const meta = document.createElement("p");
+  meta.className = "hint chat-meta";
+  meta.textContent = `${who} · `;
+  const when = document.createElement("time");
+  when.dateTime = message.written_at;
+  when.textContent = chatTime(message.written_at);
+  meta.appendChild(when);
+  item.appendChild(meta);
+  if (message.replies_to !== null) {
+    line(item, quoted(message.replies_to), "hint chat-quote");
+  }
+  line(item, message.text, "chat-text");
+  // §6:16: a cut-off message is never read as a complete answer.
+  if (message.cut_off) {
+    line(item, "This message was cut off before it finished.", "notice");
+  }
+  // Question messages and their answers are not built (ADR-0293 §11:5), so the options
+  // are said and not offered as buttons that could answer nothing.
+  if (message.options.length > 0) {
+    line(item, `It offered: ${message.options.join(" · ")}`, "hint");
+  }
+  const acts = document.createElement("p");
+  acts.className = "choice chat-acts";
+  // A reply is also how the assistant is corrected (§4:5).
+  chatButton(acts, "Reply", () => {
+    setReplyTo(message.position);
+    el("chat-text").focus();
+  });
+  const conversation = chat.selected;
+  chatButton(acts, "Delete", () => {
+    void deleteChatMessage(conversation, message.position);
+  });
+  item.appendChild(acts);
+  return item;
+}
+
+function renderPending(one) {
+  const item = document.createElement("li");
+  item.className = "chat-message from-user pending";
+  line(item, `You · ${CHAT_SENT_STATES[one.status]}`, one.status === "received" || one.status === "sending" ? "hint chat-meta" : "notice chat-meta");
+  if (one.repliesTo !== null) {
+    line(item, quoted(one.repliesTo), "hint chat-quote");
+  }
+  line(item, one.text, "chat-text");
+  const acts = document.createElement("p");
+  acts.className = "choice chat-acts";
+  if (one.status === "unknown") {
+    chatButton(acts, "Send again", () => {
+      void deliverChat(one);
+    });
+  }
+  if (one.status === "not-an-end" && typeof chat.thisDevice === "string" && chat.devices !== null) {
+    chatButton(acts, "Add this device to the conversation and send again", () => {
+      void addThisDeviceAndSend(one);
+    });
+  }
+  if (one.status === "no-such-reply") {
+    chatButton(acts, "Send it without the reply", () => {
+      one.repliesTo = null;
+      void deliverChat(one);
+    });
+  }
+  if (one.status !== "sending" && one.status !== "received") {
+    chatButton(acts, "Dismiss", () => {
+      chat.pending = chat.pending.filter((held) => held !== one);
+      renderTranscript();
+    });
+  }
+  if (acts.firstChild !== null) {
+    item.appendChild(acts);
+  }
+  return item;
+}
+
+function setReplyTo(position) {
+  chat.replyTo = position;
+  const said = el("chat-replying");
+  said.textContent = position === null ? "" : quoted(position);
+  said.hidden = position === null;
+  el("chat-reply-cancel").hidden = position === null;
+}
+
+// --- writing ------------------------------------------------------------------
+
+// A message id this device chose, unique per device (§4:1). Kept with the message, so
+// sending again is the same message (§4:2).
+function newMessageId() {
+  if (window.crypto && typeof window.crypto.randomUUID === "function") {
+    return window.crypto.randomUUID();
+  }
+  const bytes = new Uint8Array(16);
+  window.crypto.getRandomValues(bytes);
+  return [...bytes].map((one) => one.toString(16).padStart(2, "0")).join("");
+}
+
+function sendChat(event) {
+  event.preventDefault();
+  const box = el("chat-text");
+  const text = box.value;
+  if (text.trim() === "" || chat.selected === null) {
+    return;
+  }
+  const one = {
+    conversation: chat.selected,
+    messageId: newMessageId(),
+    text: text,
+    repliesTo: chat.replyTo,
+    status: "sending",
+    position: null,
+  };
+  chat.pending.push(one);
+  box.value = "";
+  setReplyTo(null);
+  void deliverChat(one);
+}
+
+// Write one message, or write it again: the same id, so the conversation records it
+// once whichever send it was that arrived (§4:2).
+async function deliverChat(one) {
+  const half = headerHalf();
+  if (half === null) {
+    showBootstrap();
+    return;
+  }
+  const era = sessionEra;
+  one.status = "sending";
+  renderTranscript(true);
+  let refusal = null;
+  try {
+    const body = await relay(
+      half,
+      "/chat/message/write",
+      {
+        conversation_id: one.conversation,
+        message_id: one.messageId,
+        text: one.text,
+        replies_to: one.repliesTo,
+      },
+      "chat",
+      undefined,
+      (said) => {
+        refusal = said;
+      }
+    );
+    if (!sameSession(half, era)) {
+      return;
+    }
+    if (body === null) {
+      const gone = refusal !== null && refusal.fault === "no-such-conversation";
+      one.status = gone ? "gone" : "refused";
+      if (refusal !== null && refusal.fault === "hub-unreachable") {
+        // The hub may have recorded it before the connection failed.
+        one.status = "unknown";
+      }
+      renderTranscript();
+      return;
+    }
+    const outcome = body.receipt.outcome;
+    if (outcome === "recorded" || outcome === "repeated") {
+      // *Received* (§4:4): the conversation holds it at this position.
+      one.status = "received";
+      one.position = body.receipt.position;
+      chat.quickUntil = Date.now() + QUICK_AFTER_SENDING_MILLISECONDS;
+      if (chat.following) {
+        scheduleFollow(FOLLOW_QUICK_MILLISECONDS);
+      }
+    } else if (outcome === "not_an_end") {
+      one.status = "not-an-end";
+    } else {
+      one.status = "no-such-reply";
+    }
+    renderTranscript();
+  } catch (_) {
+    if (!sameSession(half, era)) {
+      return;
+    }
+    one.status = "unknown";
+    renderTranscript();
+  }
+}
+
+async function addThisDeviceAndSend(one) {
+  const devices = (chat.devices || []).filter((held) => held.device_id !== chat.thisDevice);
+  devices.push({ device_id: chat.thisDevice, access: "read_write" });
+  if (await setConversationDevices(devices)) {
+    await deliverChat(one);
+  }
+}
+
+// --- deleting and forgetting --------------------------------------------------
+
+async function deleteChatMessage(id, position) {
+  if (!window.confirm(CHAT_DELETE_MESSAGE)) {
+    return;
+  }
+  const half = headerHalf();
+  if (half === null) {
+    showBootstrap();
+    return;
+  }
+  const era = sessionEra;
+  try {
+    const body = await relay(
+      half,
+      "/chat/message/delete",
+      { conversation_id: id, position: position },
+      "chat"
+    );
+    if (!sameSession(half, era)) {
+      return;
+    }
+    if (body === null || chat.selected !== id) {
+      return;
+    }
+    chat.entries.delete(position);
+    chat.deleted.add(position);
+    if (chat.replyTo === position) {
+      setReplyTo(null);
+    }
+    renderTranscript();
+  } catch (_) {
+    if (!sameSession(half, era)) {
+      return;
+    }
+    fault(GATEWAY_GONE, "chat");
+  }
+}
+
+async function deleteChat() {
+  const id = chat.selected;
+  if (id === null || !window.confirm(CHAT_DELETE_CONVERSATION)) {
+    return;
+  }
+  const half = headerHalf();
+  if (half === null) {
+    showBootstrap();
+    return;
+  }
+  const era = sessionEra;
+  try {
+    const body = await relay(half, "/chat/conversation/delete", { conversation_id: id }, "chat");
+    if (!sameSession(half, era)) {
+      return;
+    }
+    if (body === null) {
+      return;
+    }
+    if (chat.selected === id) {
+      chatGone(
+        body.deleted
+          ? `Conversation ${id} was deleted. Nothing was forgotten.`
+          : `Conversation ${id} was already gone.`
+      );
+    }
+    void listChat(false);
+  } catch (_) {
+    if (!sameSession(half, era)) {
+      return;
+    }
+    fault(GATEWAY_GONE, "chat");
+  }
+}
+
+async function forgetChat() {
+  const id = chat.selected;
+  if (id === null || !window.confirm(CHAT_FORGET)) {
+    return;
+  }
+  const half = headerHalf();
+  if (half === null) {
+    showBootstrap();
+    return;
+  }
+  const era = sessionEra;
+  try {
+    const body = await relay(half, "/conversation/forget", { conversation_id: id }, "chat");
+    if (!sameSession(half, era)) {
+      return;
+    }
+    if (body === null) {
+      return;
+    }
+    sayChat(
+      body.destroyed
+        ? `The assistant has forgotten conversation ${id}: it no longer recalls it anywhere ` +
+            "else. The conversation and its transcript stay; only deleting removes them."
+        : `Conversation ${id} held nothing in the assistant's memory, so nothing was forgotten.`
+    );
+  } catch (_) {
+    if (!sameSession(half, era)) {
+      return;
+    }
+    fault(GATEWAY_GONE, "chat");
+  }
+}
+
+// --- devices ------------------------------------------------------------------
+
+function deviceName(device) {
+  return device.device_id === chat.thisDevice
+    ? `${device.device_id} (this device)`
+    : device.device_id;
+}
+
+// One device of a set, with its access and a way to take it out. `write` sends the whole
+// set the owner now wants (§3), since the surface replaces a set rather than editing it.
+function renderDevice(list, device, set, write) {
+  const item = document.createElement("li");
+  item.className = "chat-device";
+  const row = document.createElement("p");
+  row.className = "choice";
+  const name = document.createElement("span");
+  name.className = "chat-device-name";
+  name.textContent = deviceName(device);
+  row.appendChild(name);
+  const access = document.createElement("select");
+  access.setAttribute("aria-label", `What ${device.device_id} may do`);
+  CHAT_ACCESS.forEach((one) => {
+    const option = document.createElement("option");
+    option.value = one.value;
+    option.textContent = one.label;
+    access.appendChild(option);
+  });
+  access.value = device.access;
+  access.addEventListener("change", () => {
+    void write(
+      set.map((one) =>
+        one.device_id === device.device_id ? { device_id: one.device_id, access: access.value } : one
+      )
+    );
+  });
+  row.appendChild(access);
+  chatButton(row, "Remove", () => {
+    void write(set.filter((one) => one.device_id !== device.device_id));
+  });
+  item.appendChild(row);
+  list.appendChild(item);
+}
+
+function renderMyDevices() {
+  const list = el("chat-my-devices");
+  clearNode(list);
+  const said = el("chat-this-device");
+  const held = chat.myDevices.some((one) => one.device_id === chat.thisDevice);
+  if (chat.thisDevice === null) {
+    said.textContent =
+      "This gateway cannot name this browser's device, so it cannot add itself or " +
+      "write a message from here.";
+  } else if (chat.thisDevice === undefined) {
+    said.textContent = "";
+  } else if (held) {
+    said.textContent = `This browser is device ${chat.thisDevice}, one of your devices.`;
+  } else {
+    said.textContent =
+      `This browser is device ${chat.thisDevice}, which is not one of your devices. ` +
+      "Adding a device says its screen is private: every conversation started from then " +
+      "on is shown on it.";
+  }
+  if (chat.myDevices.length === 0) {
+    const none = document.createElement("li");
+    none.className = "hint";
+    none.textContent = "None yet, so a new conversation is shown on no device.";
+    list.appendChild(none);
+  }
+  chat.myDevices.forEach((device) => renderDevice(list, device, chat.myDevices, setMyDevices));
+  el("chat-add-device").hidden = typeof chat.thisDevice !== "string" || held;
+}
+
+function addThisDevice() {
+  const devices = chat.myDevices.filter((one) => one.device_id !== chat.thisDevice);
+  devices.push({ device_id: chat.thisDevice, access: "read_write" });
+  void setMyDevices(devices);
+}
+
+async function setMyDevices(devices) {
+  const half = headerHalf();
+  if (half === null) {
+    showBootstrap();
+    return;
+  }
+  const era = sessionEra;
+  try {
+    const body = await relay(half, "/chat/devices/set", { devices: devices }, "chat");
+    if (!sameSession(half, era)) {
+      return;
+    }
+    if (body === null) {
+      return;
+    }
+    chat.myDevices = devices;
+    renderMyDevices();
+    renderConversationDevices();
+  } catch (_) {
+    if (!sameSession(half, era)) {
+      return;
+    }
+    fault(GATEWAY_GONE, "chat");
+  }
+}
+
+function renderConversationDevices() {
+  const list = el("chat-conversation-devices");
+  const offers = el("chat-device-offers");
+  clearNode(list);
+  clearNode(offers);
+  if (chat.devices === null) {
+    return;
+  }
+  if (chat.devices.length === 0) {
+    const none = document.createElement("li");
+    none.className = "hint";
+    none.textContent = "No device: nothing can write in this conversation until you add one.";
+    list.appendChild(none);
+  }
+  chat.devices.forEach((device) =>
+    renderDevice(list, device, chat.devices, setConversationDevices)
+  );
+  const held = new Set(chat.devices.map((one) => one.device_id));
+  const offered = chat.myDevices.map((one) => one.device_id);
+  if (typeof chat.thisDevice === "string" && !offered.includes(chat.thisDevice)) {
+    offered.unshift(chat.thisDevice);
+  }
+  offered
+    .filter((id) => !held.has(id))
+    .forEach((id) => {
+      const label = id === chat.thisDevice ? "Add this device" : `Add ${id}`;
+      chatButton(offers, label, () => {
+        void setConversationDevices(chat.devices.concat([{ device_id: id, access: "read_write" }]));
+      });
+    });
+}
+
+// Answers whether the set was written, so a send waiting on it knows to go ahead.
+async function setConversationDevices(devices) {
+  const id = chat.selected;
+  const half = headerHalf();
+  if (half === null) {
+    showBootstrap();
+    return false;
+  }
+  const era = sessionEra;
+  try {
+    const body = await relay(
+      half,
+      "/chat/conversation/devices/set",
+      { conversation_id: id, devices: devices },
+      "chat"
+    );
+    if (!sameSession(half, era)) {
+      return false;
+    }
+    if (body === null) {
+      return false;
+    }
+    if (chat.selected === id) {
+      chat.devices = devices;
+      renderConversationDevices();
+    }
+    return true;
+  } catch (_) {
+    if (!sameSession(half, era)) {
+      return false;
+    }
+    fault(GATEWAY_GONE, "chat");
+    return false;
+  }
+}
+
 // --- the grant surface (ADR-0177 §6, §7; ADR-0139) ---------------------------
 //
 // Two questions and they are never answered with each other (ADR-0139 §1, §3's
@@ -12699,6 +13933,9 @@ const CONTROL_PANELS = [
   // reason: what it shows is one goal's standing authorities, which is exactly the
   // content a page with no session may not be showing.
   "authorizations",
+  // ADR-0293's chat: the owner's messages and the assistant's, which a page with no
+  // session may not be showing. `closeChat` stops its following with it.
+  "chat",
 ];
 
 // `because` is the re-entry sentence (ADR-0182 §6), and **omitting it leaves whatever
@@ -12716,6 +13953,7 @@ function showBootstrap(because) {
   show("conversations", false);
   show("notifications", false);
   CONTROL_PANELS.forEach((panel) => show(panel, false));
+  closeChat();
 }
 
 function showConsole() {
@@ -12750,6 +13988,11 @@ function showConsole() {
   // told without being asked (ADR-0177 §8). Quiet, because a load that finds nothing
   // waiting has nothing to say.
   readPending(true);
+  // The chat this tab had open before a reload, opened again; a tab that never opened
+  // it reads nothing of it until the owner presses Chat.
+  if (chatWasOpen()) {
+    openChat();
+  }
 }
 
 el("bootstrap-form").addEventListener("submit", startSession);
@@ -12804,6 +14047,29 @@ el("new-conversation").addEventListener("click", startFresh);
 el("watch-button").addEventListener("click", () => watchDeliveries());
 el("fault-dismiss").addEventListener("click", () => fault(null));
 el("conversations-button").addEventListener("click", listConversations);
+el("chat-button").addEventListener("click", openChat);
+el("chat-follow-again").addEventListener("click", followAgain);
+el("chat-add-device").addEventListener("click", addThisDevice);
+el("chat-start").addEventListener("click", startChat);
+el("chat-more").addEventListener("click", () => listChat(true));
+el("chat-older").addEventListener("click", () => {
+  if (chat.selected !== null && chat.oldest !== null) {
+    void readTranscript(chat.selected, chat.chosen, chat.oldest);
+  }
+});
+el("chat-form").addEventListener("submit", sendChat);
+// Control-Enter (Command-Enter) sends; Enter alone is a new line in the message.
+el("chat-text").addEventListener("keydown", (event) => {
+  if (event.key === "Enter" && (event.ctrlKey || event.metaKey)) {
+    event.preventDefault();
+    el("chat-form").requestSubmit();
+  }
+});
+el("chat-reply-cancel").addEventListener("click", () => setReplyTo(null));
+el("chat-delete").addEventListener("click", deleteChat);
+el("chat-forget").addEventListener("click", forgetChat);
+document.addEventListener("visibilitychange", chatVisibility);
+window.addEventListener("online", chatOnline);
 el("confirmations-button").addEventListener("click", listPending);
 el("sources-button").addEventListener("click", listSources);
 el("standing-button").addEventListener("click", listStanding);

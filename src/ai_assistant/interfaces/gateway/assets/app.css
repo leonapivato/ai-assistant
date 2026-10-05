@@ -482,6 +482,105 @@ code {
 }
 
 /*
+ * The chat (ADR-0293). The transcript scrolls in its own box so the box to write in
+ * stays near it, and each message is a row of its own: the owner's set off from the
+ * assistant's by a rule on the side it was written from, never by colour alone. The
+ * text keeps the breaks it was written with (`pre-wrap`), as the composed answer does.
+ */
+/* The chat's sub-headings sit under its `h2`, so they are no larger than it is. */
+#chat h3,
+#chat h4 {
+  font-size: 0.95rem;
+  margin: 1.1rem 0 0.3rem;
+}
+
+#chat h4 {
+  color: var(--muted);
+}
+
+.chat-conversations,
+.chat-devices,
+.chat-transcript {
+  list-style: none;
+  margin: 0.4rem 0;
+  padding: 0;
+}
+
+.chat-conversation-row,
+.chat-device {
+  border-top: 1px solid var(--line);
+  padding: 0.5rem 0;
+}
+
+.chat-conversation-row .hint,
+.chat-device p {
+  margin: 0.2rem 0;
+}
+
+.chat-device-name {
+  flex: 1 1 12rem;
+  font-weight: 600;
+}
+
+.chat-thread {
+  border-top: 1px solid var(--line);
+  margin-top: 1rem;
+}
+
+.chat-transcript {
+  max-height: 60vh;
+  overflow-y: auto;
+  border: 1px solid var(--line);
+  border-radius: 7px;
+  padding: 0.3rem 0.7rem;
+}
+
+.chat-message {
+  padding: 0.5rem 0 0.5rem 0.7rem;
+  border-bottom: 1px solid var(--line);
+}
+
+.chat-message:last-child {
+  border-bottom: 0;
+}
+
+.chat-message.from-user {
+  border-left: 3px solid var(--muted);
+}
+
+.chat-message.from-assistant {
+  border-left: 3px solid var(--ink);
+}
+
+.chat-message p {
+  margin: 0.15rem 0;
+}
+
+.chat-text {
+  white-space: pre-wrap;
+}
+
+.chat-quote {
+  font-style: italic;
+}
+
+/*
+ * A message's own controls and a device's are outlined rather than filled: they sit on
+ * every row, and the acts on offer for the conversation are the filled ones.
+ */
+.chat-acts button,
+.chat-device button {
+  margin-top: 0.2rem;
+  background: transparent;
+  color: var(--ink);
+  border: 1px solid var(--line);
+}
+
+#chat-form {
+  margin-top: 0.8rem;
+}
+
+/*
  * The control surface (ADR-0177). Each row is one subject — a source, a standing
  * grant, a history record, a belief, a question — stacked rather than laid out in
  * a flex line, because these rows carry several sentences each and a person reads
