@@ -1,347 +1,286 @@
 # The conversation channel
 
-**The question.** What is the most basic channel for talking with the user, text in
-and text out, now that a channel is a medium the hub holds (ADR-0290) and keeps its
-own record where its kind chooses to (ADR-0291)?
+**The question.** How does the most basic channel for talking with the user work, text
+in and text out, under the rethought channel model (ADR-0292,
+[#2682](https://github.com/leonapivato/ai-assistant/pull/2682))?
 
-This is the second of four proposals for the channel redesign
-([#2578](https://github.com/leonapivato/ai-assistant/issues/2578)). It designs one
-channel kind, **`conversation`**, against two accepted decisions:
+This applies ADR-0292 to one channel: the hub's chat. ADR-0292 fixes the general model
+(spokes, channels, places, hosted media, authors, push and pull, audience, window,
+activations side by side, what retires). This proposal decides what the chat is, what its
+conversations keep, how a message gets in and out, and what is built first. How a device's
+connection carries it is the device session's; stopping an activation is its own proposal.
 
-- **ADR-0290:** a channel is needed exactly where something crosses the hub's edge.
-  New input arrives on a channel through a sensor, output that leaves goes out
-  through an actuator, and hub operations come from devices with no channel.
-- **ADR-0291:** a channel's record is its own, separate from memory, and what it
-  keeps is its kind's choice. Forgetting never reaches it, and deleting from it is
-  the channel's operation.
-
-How a device's connection carries all this is the third proposal, the device
-session. How a running activation is stopped is the fourth.
+Rulings the owner made on earlier drafts of this proposal (2026-10-04) carry over and are
+marked *(owner)*.
 
 ## Baseline
 
 Wiki pages, read at wiki revision
-[`9a979ef`](https://github.com/leonapivato/ai-assistant/wiki/Channels/9a979ef6c46adff551e4f787e6bd7fc099284dd4):
+[`b95617b`](https://github.com/leonapivato/ai-assistant/wiki/Channels/b95617b24abc2f1bbef5997ecf4b36eb6056bbc6):
 [Channels](https://github.com/leonapivato/ai-assistant/wiki/Channels),
-[Channel window](https://github.com/leonapivato/ai-assistant/wiki/Channel-window),
-[External sensors](https://github.com/leonapivato/ai-assistant/wiki/External-sensors),
-[Actuators](https://github.com/leonapivato/ai-assistant/wiki/Actuators) and
-[Episodes](https://github.com/leonapivato/ai-assistant/wiki/Episodes).
-
-What the code does at `main`, and the ADRs that decide it:
+[Channel window](https://github.com/leonapivato/ai-assistant/wiki/Channel-window) and
+[Episodes](https://github.com/leonapivato/ai-assistant/wiki/Episodes). ADR-0292 replaces
+much of what the Channels pages describe.
 
 | ADR | What it decides today | What this proposal would do |
 | --- | --- | --- |
-| ADR-0274 §2–§4, §6 | A `ChannelInput` names its target channel (`conversation`, with the conversation id as instance) and declares the reply it accepts; the reply returns on the same request. | Supersede for the conversation: input arrives on the conversation through the device's sensor on it and names no channel, and the assistant's output is a message on a conversation, not the answer to the request. |
-| ADR-0274 §5 | The caller may supply context: history items and a replied-to item. | Supersede for the conversation: the hub holds the transcript, so a device supplies no history. "This replies to item X" stays, as a reference into the transcript. |
-| ADR-0276 §3:1–§3:2 | The conversation's window is its tail as history reads it from episodes; *"the assistant keeps no per-channel history table"*. | Supersede for the conversation: its window is read from its transcript (§4), which is a per-channel record. ADR-0291 names this supersession as owed. |
-| ADR-0283 §4:1 | A conversation's history is the episodes on its channel. | Supersede: its history is its transcript. |
-| ADR-0283 §8:1 | Deleting a conversation destroys every episode on its channel. | Supersede: deleting a conversation deletes its transcript; forgetting is memory's own command (§1). |
-| ADR-0074 | A conversation is a first-class entity; the store mints its id. | Kept. A conversation is a channel instance with that id. |
-| ADR-0286 §2–§4, §6, §7 | An episode opens at admission, each stage appends, the end entry freezes it; a restart closes an open episode as interrupted. | Kept. A message sent mid-activation is appended to the open episode as it is sent; a restart's close sends nothing (§9). |
-| ADR-0280 §4, row 11 | `reply_owed`: a conversation turn with no composed reply makes `compose` due. | Not amended here. The kind declares it expects a reply (§7); rewording row 11 waits for the first milestone where an event can reach a reply ([#2598](https://github.com/leonapivato/ai-assistant/issues/2598) item 3). |
-| ADR-0170 | A reply is not a tool; the turn composes its answer. | Not decided here ([#2593](https://github.com/leonapivato/ai-assistant/issues/2593)). The kind offers *send a message*; until the phases call it, today's compose stage does (§10). |
+| ADR-0274 §2–§6 | A `ChannelInput` names its channel (`conversation`, the conversation id as instance) and the reply it accepts; the reply returns on the request; the caller may supply history and a replied-to item. | Supersede for the conversation: a message is an act in the hosted chat space, names no channel, and supplies no history; the assistant's output is a message written into a conversation. "Replies to entry X" stays, as a reference into the transcript. |
+| ADR-0276 §3:1–§3:2 | The conversation's window is its tail as read from episodes; *"no per-channel history table"*. | Supersede for the conversation: its window is its recent transcript, brought in by the chat's sensor (ADR-0292's window rule). |
+| ADR-0283 §4:1, §8:1 | A conversation's history is the episodes on its channel; deleting a conversation destroys them. | Supersede: its history is its transcript; deleting a conversation deletes the transcript; forgetting is memory's command (§2). |
+| ADR-0283 §1 (as amended by ADR-0292) | Episodes indexed by channel and place. | Applied: the chat's episodes are indexed by (the chat, the conversation). |
+| ADR-0074 | A conversation is a first-class entity; the store mints its id. | Kept: a conversation is a place in the chat space, with that id. |
+| ADR-0286 §2, §7 | An episode opens at admission and is frozen at its end; a restart closes an open episode as interrupted. | Kept. A restart sends nothing into the conversation (§10). |
+| ADR-0280 §4, row 11 | `reply_owed`: a conversation turn with no composed reply makes `compose` due. | Not amended here; the kind's description says it expects a reply (§8), and the row's rewording waits for the milestone where an event reaches a reply ([#2598](https://github.com/leonapivato/ai-assistant/issues/2598) item 3). |
+| ADR-0170 | A reply is not a tool; the turn composes its answer. | Not decided here ([#2593](https://github.com/leonapivato/ai-assistant/issues/2593)). The chat's actuator writes a message; until the phases call it, today's compose stage does (§11). |
 
-Unchanged: the spoken path (`converse_spoken`), which stays fenced at the channel's
-edge until voice returns as its own kind; informational events (`receive`); and every
+Unchanged: the spoken path, quarantined until voice returns as its own channels;
+informational events (`receive`), until ADR-0292's per-source channels replace them; every
 other query and command of the engine surface.
 
 ## The change
 
-### 1. A conversation is a channel instance the hub holds
+### 1. The chat
 
-`conversation` is an **activating** channel kind. Each conversation is one instance,
-a conversation in ADR-0074's sense with the id the store mints. It exists in the hub
-whether or not any device is connected to it, and outlives every device. It carries
-**text only**.
+| | The chat |
+| --- | --- |
+| **Channel** | `conversation`, one, built in |
+| **Medium** | The hub's chat space, a hosted medium |
+| **Places** | Conversations, each with its ADR-0074 id |
+| **Spokes** | In the hub: a reader (sensor) and a writer (actuator) |
+| **Push** | A new message or feedback by the user starts an activation |
+| **Pull** | Earlier messages, in any conversation |
 
-The operations on conversations themselves are **hub operations** (ADR-0290 §7), not
-conversation input:
+The chat space exists whether or not any device is connected and outlives every device.
+It carries **text only**.
 
-| Operation | Sort | What it does |
+### 2. Conversations and what can be done with them
+
+| Operation | Route (ADR-0292) | What it does |
 | --- | --- | --- |
-| Start a conversation | command | Creates an empty conversation. No longer a side effect of the first message. |
-| List conversations | query | As `recent_conversations` today. |
-| Read a conversation | query | Its transcript after a cursor, and its current state (§9). |
-| Delete a conversation | command | Deletes its transcript. Forgets nothing (ADR-0291 §5). |
-| Delete a message | command | Deletes one entry of the transcript (§4). |
-| Forget a conversation | command | Forgets what the assistant remembers of it: its episodes. Leaves the transcript (ADR-0291 §4). |
+| Start a conversation | Act in the medium | Creates an empty conversation. No longer a side effect of the first message. |
+| Choose a conversation's devices | Act in the medium | Sets which of the user's devices show it and can write in it (§3). |
+| Write a message; give feedback | Act in the medium | §4 |
+| List conversations; read one after a cursor | Read of the medium | As `recent_conversations` and `conversation` today, plus the current state (§9) |
+| Delete a message | Act in the medium | Deletes that entry alone (§5) |
+| Delete a conversation | Act in the medium | Deletes its transcript. Forgets nothing. |
+| Forget a conversation | Command | Forgets the episodes on that place. Leaves the transcript. |
 
-Deleting and forgetting stay **two commands**: there is no single command doing both
-(owner, 2026-10-04). An interface may offer them side by side.
+**No single operation deletes and forgets** *(owner)*; an interface may offer both side by
+side. Who may start a conversation, and which device becomes its first, is the device
+session's.
 
-### 2. Devices connect a sensor and an actuator to a conversation
+### 3. Devices
 
-A device reaches a conversation by connecting the conversation's **sensor**, its
-**actuator**, or both, on that device:
+A conversation is shown on the devices the user chose for it, and each is the user's end
+of it. ADR-0292's rules apply as they stand:
 
-- A device may be connected to many conversations: a browser gateway connects one
-  per open tab.
-- A conversation may be connected from many devices: a phone and a laptop can be in
-  the same conversation at once.
-- The hub accepts a connection only for an admitted device and a conversation that
-  exists.
-- A connection carries a **label** the device declares, such as "iPhone" or "laptop
-  browser". It is shown to the user and grants nothing.
+- **Choosing a device is the user's statement that its screen is private**, whatever the
+  device *(owner)*. The assistant has no action that adds a device.
+- **A device may write, read, or both**: a watch may only read.
+- **A device carries a label** it declares ("iPhone", "laptop browser"), shown to the user;
+  it grants nothing.
+- A device may be an end of many conversations, and a conversation may have many devices.
 
-**Which conversation a message is on is decided by the sensor it arrived through.**
-The order is: a message arrives through a device's sensor on a conversation; the
-message is on that conversation; the conversation starts an activation, which then
-carries it. The activation cannot be where the conversation comes from, because it
-does not exist until the message is on a conversation. And the message never names
-its conversation (ADR-0290 §1): nothing typed can move it to another one.
+### 4. A message in
 
-Which conversation a person types into is the interface's choice: a conversation list
-in the browser, `assistant chat --conversation <id>` on the command line.
+A message is an act in the medium from one of the conversation's devices. It carries its
+text and a **message id the device chose**.
 
-```mermaid
-flowchart LR
-    subgraph Devices
-        L["Laptop browser tab"]
-        P["Phone browser tab"]
-        C["Command line"]
-    end
-    subgraph H["Hub"]
-        C7(["Conversation 7"])
-        C9(["Conversation 9"])
-    end
-    L <-->|"sensor + actuator"| C7
-    P <-->|"sensor + actuator"| C7
-    C <-->|"sensor + actuator"| C9
-```
+- **Sending is safe to repeat.** A message sent again with the same id is the same
+  message: one entry, one activation. A deleted message keeps its id, so a late repeat is
+  still recognized and does not come back.
+- **Received is the answer to the send.** Once the chat space has recorded the entry, it
+  answers with the entry's position. That lets a device stop showing *sending*; its absence
+  tells the device to send again. *Received* means in the conversation, not yet understood.
+- **A reply reference.** A message may name one earlier entry it replies to.
+- **Size.** A message over the bound is refused, with the error on the send, and not
+  recorded.
+- **Its author** is the user, established, and it is sent as an instruction, so it can
+  carry the user's authority (ADR-0292 §5).
 
-### 3. A message in
+**Feedback** is the same kind of act: the user marks an assistant entry (a correction, a
+thumbs-down with words) and it is recorded against that entry. Withdrawing it is another
+act. Feedback is input the assistant perceives (§6), which is how `learn` is replaced.
 
-A message from a device's sensor carries its text and a **message id the device
-chose**.
+### 5. The transcript
 
-- **Sending is safe to repeat.** A device that does not know whether its message
-  arrived sends it again with the same id, and the hub treats a repeat as the same
-  message: one admission, one entry, one episode.
-- **Received is the answer to the send.** When the hub has admitted the message,
-  written its transcript entry and opened its episode (ADR-0286 §2), it answers the
-  send with the entry's place in the transcript. That answer is what lets a device
-  stop showing *sending*, and its absence is what tells it to send again. It is not
-  a receipt kept in the transcript.
-- **A reply reference.** A message may name one earlier entry of the transcript it
-  replies to.
-- **Size.** A message over the kind's bound is refused, not cut.
-
-### 4. The transcript
-
-Each conversation keeps a **transcript**: its own ordered record of what was said on
-it, held inside the hub and separate from the assistant's memory (ADR-0291 §2).
+Each conversation keeps a **transcript**, the chat space's own ordered record of what was
+said in it, under ADR-0292's rules for a hosted medium.
 
 | Entry | Holds |
 | --- | --- |
-| A user message | Its text, message id, the connection it came from, and the entry it replies to, if any |
-| An assistant message | Its text, and the entry it replies to, if any |
-| A refused message | A message sent while an activation on this conversation was running, and that it was refused (§9) |
-| Couldn't finish | The fixed message sent when an activation started on this conversation ended without sending one (§9) |
+| A user message | Text, message id, the device it came from, the entry it replies to |
+| An assistant message | Text, the entry it replies to; a question carries its options (§7) |
+| A cut-off assistant message | The text streamed before it was cut off (§7) |
+| Couldn't finish | The fixed message sent when an activation ended without writing one (§10) |
+| Feedback | The entry it is about, its text, the device it came from |
 
-- **Order.** The hub assigns each entry a sequence number, increasing across every
-  conversation the hub holds. A device following any set of conversations keeps **one
-  cursor**, "the last entry I have is N", and catching up is one request for
-  everything after N. A cursor too old to replay in full is answered with a
+- **Order.** Every entry gets a sequence number increasing across the whole chat space. A
+  device following any set of conversations keeps **one cursor**, and catching up is one
+  request for everything after it. A cursor too old to replay is answered with a
   **snapshot** of each conversation's recent entries, then new entries from there.
-- **The window.** Understanding's "what came before on this conversation" is read
-  **from the transcript** (ADR-0291 §3), not rebuilt from episodes.
-- **Not memory.** An activation's episode still records what the assistant perceived
-  and did, so a message's text is in both places. ADR-0291 §2 accepts that: the two
-  are never kept in step. Forgetting an episode leaves the transcript as it was, so
-  forgotten content can come back through the window; the interface shows that
-  rather than hiding it (ADR-0291 §4).
-- **Kept until deleted.** The transcript is kept until the user deletes it, a message
-  at a time or the whole conversation. Deleting the user's data purges it
-  (ADR-0291 §6).
-- **Deleting a message deletes that entry alone.** The assistant's reply to it stays,
-  and its reply reference then names a deleted entry, which the interface shows as
-  such (owner, 2026-10-04). The assistant has no action that deletes (ADR-0291 §5).
+- **Kept until deleted**, an entry or the whole conversation at a time, and purged with
+  the user's data.
+- **Not memory.** An activation's episode still records what the assistant perceived and
+  did, so a message's text is in both; the two are never kept in step.
+- **Forgetting does not reach it.** The interface says so plainly: forgetting a
+  conversation stops the assistant recalling it anywhere else, but it still reads the
+  conversation while the user keeps talking there; only deleting removes it *(owner)*.
+- **Deleting a message deletes that entry alone.** The assistant's reply to it stays, and
+  its reference then names a deleted entry, shown as such *(owner)*.
 
-### 5. A message out
+### 6. Taking messages in
 
-An assistant message is output on a conversation: the action **send a message**,
-carried by the conversation's actuator.
+The chat's sensor notices new **user messages and feedback** and brings them in as a push.
+The assistant's own entries never start an activation.
 
-- **Planning chooses the conversation.** *Send a message* names its target
-  conversation. Replying on the conversation the input came from is the usual case,
-  not a rule (owner, 2026-10-04). The target's requirements apply wherever it is sent
-  (§7), and authorizing checks the action like any other.
-- **Any activation may send.** An activation not started on a conversation, by a
-  timer or an event, may send into one. The assistant starting a conversation's next
-  message on its own is the same action.
+**One activation at a time per conversation, for now** (ADR-0292 §11's interim). A message
+written while an activation started from that conversation is running lands in the
+transcript at once and waits. When the activation ends, everything waiting is taken in
+together as **one input**, which starts the next activation. Nothing is refused or queued
+out of sight: the transcript shows what was written and when, so the next activation can
+tell a message was written before the reply it follows. In the end state each message is
+taken in at once and activations run side by side; that changes only when the sensor takes
+messages in.
 
-When it runs:
+**The window** is the conversation's recent transcript, brought in by the sensor with the
+new input. Each entry keeps its author, so the window informs and never authorizes. The
+kind declares how many entries it holds.
 
-1. the message is appended to the sending activation's open episode;
-2. an *assistant message* entry is added to the target's transcript;
-3. it is pushed to every connected actuator on the target.
+**Processing bookkeeping.** The chat keeps, per conversation, which entries have been taken
+in and by which activation. It is not a record of what was said and holds no text.
+- An entry is marked taken in when its activation is admitted.
+- After a restart, entries already taken in by an interrupted activation are **not** taken
+  in again, since the activation may have acted on them. Entries never taken in are taken
+  in as usual.
 
-**The action is done when steps 1–3 have happened.** Whether anyone saw it is not
-tracked (Out of scope). An activation may send more than one message: "looking into
-it" and then the answer. A message may name the entry it replies to.
+### 7. A message out
 
-### 6. Streaming
+The chat's actuator writes an assistant message into a conversation: *send a message*.
 
-An actuator may declare that it takes a message in pieces. It is then sent the pieces
-as they are produced and the finished message at the end. **Only the finished message
-enters the transcript.** A stream cut off before the end is recorded as cut off, with
-the text that was sent, and never as a complete message.
+- **Planning chooses the conversation** *(owner)*. Replying where the input came from is the
+  usual case, not a rule. Any activation may send, including one not started from a
+  conversation, such as a timer's; that is how the assistant writes first, and how
+  notifications become messages (ADR-0292 §7).
+- **Sent means recorded.** The message is sent once the chat space has recorded it, whatever
+  devices are showing the conversation; devices get it as it is recorded or when they catch
+  up.
+- **Several messages per activation** are allowed: "looking into it", then the answer.
+- **A message may reply to an entry**, and **a question** may carry its options, so a
+  device can show them as buttons. A user message answering a question names the question
+  entry and, for a button, the option. What an answer authorizes, and that it is used once,
+  are authorizing's; the conversation only keeps the binding exact.
+- **Streaming.** A device that takes pieces is sent them as they are produced. Only the
+  finished message enters the transcript; one cut off is recorded as cut off, with what was
+  sent.
+- **A stopped activation writes no new output** into a conversation.
 
-### 7. What the kind declares
+### 8. What the kind declares
 
-- **Its description**, given to planning: a private text conversation with the user,
-  in which the user's own messages are input that carries their authority, and which
-  expects a reply, a question or a notice to each of them.
-- **Its requirements**, enforced by rule whatever a model produces:
-  - **Audience: the owner only.** What may be said on a conversation is what may be
-    said to the owner (ADR-0199). A connection may declare a narrower audience, never
-    a wider one; a conversation others can see is a different kind.
-  - **Size.** A message in or out is bounded; over the bound it is refused, not cut.
-  - **Turns** (§9).
-- **What it keeps** (ADR-0291 §3): the transcript of §4, ordered by sequence number,
-  kept until deleted, with the window read from it.
-- **What it allows deleting** (ADR-0291 §5): a single entry, or the whole
-  conversation, by the user's command.
+- **Description**, given to planning: a private text conversation with the user, whose own
+  messages carry their authority, which expects a reply, a question or a notice to each.
+- **The medium's rules**, enforced by the hub as host: only a conversation's devices write in
+  it; a message has a size bound.
+- **The channel's rules**, enforced at the actuator: text only; a size bound. **Audience** is
+  read from the conversation's devices, bounded by the user's choice, and what may be said
+  for it is ADR-0199's, withheld at supply.
+- **Its window size**, and that **an entry or a conversation may be deleted**.
 
-### 8. A conversation's current state
+### 9. Current state
 
-Whether an activation started on a conversation is running is the conversation's
-**current state**, not history. It is not kept in the transcript; it is derived from
-whether such an activation is running, and is:
+Whether an activation started from a conversation is running is the conversation's
+**current state**: derived from what is running, never written into the transcript
+*(owner)*. It is read with the conversation and pushed to its devices when it changes, as a
+"working…" indicator. It is informational: the user's input stays open (§6).
 
-- **queryable**, as part of reading a conversation (§1); and
-- **pushed** to connected devices when it changes, so every device locks and unlocks
-  its input together. How it is pushed is the device session's.
+### 10. Endings
 
-### 9. Turns
+- **An activation started from a conversation that ends having written nothing** writes
+  the fixed *couldn't finish* entry, listing any effects that did happen.
+- **A restart writes nothing.** It closes the open episode as interrupted (ADR-0286 §7),
+  which keeps the record of what happened; the conversation's state is idle again. Writing
+  the fixed message on restart is left for later.
 
-**The user may send on a conversation when no activation started on it is running.**
+### 11. Until the phases send messages
 
-- An activation may send any number of messages. The user's turn opens when it ends.
-- A message the user sends while one runs is **refused**, not queued, with a status
-  the interface can show, and is recorded as a refused entry. Queuing would break the
-  alternation; whether a new message should take over the running work is the
-  concurrency milestone's.
-- **The turn rule limits the user's sends, not the assistant's.** A message the
-  assistant sends into a conversation (§5) is allowed whatever that conversation's
-  state, and does not change it: it is the user's turn there before and after.
-- **An activation started on a conversation that ends having sent nothing** sends the
-  fixed message: it could not finish, listing any effects that did happen.
-- **A restart sends nothing.** A restart closes an open episode as interrupted
-  (ADR-0286 §7), so the record of what happened is there to inspect. Nothing is
-  running afterwards, so the conversation's state is the user's turn without any step
-  taken. Posting the fixed message on restart is left for later: it would add a write
-  into the conversation from recovery, for a rare case.
+Planning choosing *send a message*, authorizing checking it and acting running it are not
+built, and whether a reply is delivered as an action is open (#2593). So the first build
+uses an **adapter**: the reply today's compose stage produces is written as one assistant
+message into the conversation the input came from, and the adapter writes *couldn't
+finish* when a pass ends without one. The controller work replaces the adapter without
+changing the chat. Sending into another conversation, and sending from an activation not
+started from one, arrive with the phases; the kind permits them from the start.
 
-Stopping a running activation is a hub command, the fourth proposal's subject.
-Interrupting or cancelling with words is out of scope.
+### 12. What the engine surface becomes
 
-```mermaid
-sequenceDiagram
-    participant L as Laptop
-    participant P as Phone
-    participant H as Hub: conversation 7
-    L->>H: message m1 "book the campsite"
-    H-->>L: received m1 (entry 41)
-    H-->>P: entry 41: user message m1
-    H-->>L: state: working
-    H-->>P: state: working
-    H-->>L: entry 42: assistant message
-    H-->>P: entry 42: assistant message
-    H-->>L: state: your turn
-    H-->>P: state: your turn
-```
+- `converse` and `converse_streaming` are replaced, for the conversation, by the acts in the
+  medium (start, choose devices, write, feedback, delete) and reading after a cursor. How
+  they travel to a device is the device session's.
+- `recent_conversations` and `conversation` remain reads; reading a conversation gains its
+  current state.
+- `forget_conversation` becomes memory-only: it forgets the conversation's episodes and no
+  longer deletes the conversation.
+- `learn` retires once feedback entries are built; `answer` retires once question entries and
+  their answers are built (ADR-0292 §13). Both are in this proposal's scope.
 
-### 10. Until the phases send messages
+These change `AssistantEngine` and the conversation store's Protocol, which gains the
+transcript and the processing bookkeeping, so the ADR is a contract change: its triad
+lands with the transcript's primary implementation (ADR-0137 §2).
 
-Under the wiki's direction, planning chooses *send a message*, authorizing checks it
-and acting runs it. None of that is built, and whether a reply is delivered as an
-action is open (#2593). So the first build uses an **adapter**: the reply today's
-compose stage produces is sent as one assistant message on the conversation the input
-came from, and the adapter sends the fixed message when a pass ends without one.
+### 13. Moving today's conversations
 
-The conversation therefore works before the phases are rebuilt, and the controller
-work replaces the adapter without changing the conversation. Sending into another
-conversation, and sending from an activation not started on one, need planning to
-choose the target, so they arrive with the phases; the kind permits them from the
-start.
-
-### What the engine surface becomes
-
-- `converse` and `converse_streaming` are replaced, for the conversation, by
-  connecting to a conversation, sending a message, and reading the transcript after a
-  cursor. How those travel to a device is the device session proposal's; this
-  proposal fixes what they are.
-- New commands: start a conversation, delete a conversation, delete a message.
-- `recent_conversations` and `conversation` remain queries; reading a conversation
-  gains its current state.
-- `forget_conversation` becomes the memory-side command: it forgets the
-  conversation's episodes and no longer deletes the conversation.
-
-These are changes to `AssistantEngine` and to the conversation store's Protocol, which
-gains the transcript, so the ADR this becomes is a contract change. Its triad
-(Protocol, conformance suite, canonical fake) lands in one change with the
-transcript's primary implementation (ADR-0137 §2).
+Today's conversations hold their history in episodes and have no transcript. The cutover
+either seeds each transcript once from its episodes, or starts on a fresh data directory.
+The lean is a fresh data directory, as the recent milestones' cutovers did; the
+implementation decides.
 
 ## Options considered
 
-**History read from episodes, with a text-less log pointing into them** (this
-proposal's first draft). One copy of every message's text. Superseded by ADR-0291: a
-conversation's history is its own, and receipts and refused messages, which are not
-activations, could not live in episodes.
+**Refuse a message sent while the assistant works** (this proposal's earlier turn rule).
+Declined (owner, 2026-10-04): it has the assistant's state block a shared medium, and the
+later takeover needs a correction to land.
 
-**Turn state as transcript entries.** Every device replays when the assistant was
-working. Declined (owner, 2026-10-04): it is the conversation's current state, derived
-from what is running, and keeping it would fill the history with entries that carry
-no message.
+**History read from episodes, with a text-less log pointing into them** (the first draft).
+Declined: the conversation is a hosted medium and keeps its own text (ADR-0292 §3).
 
-**Delete-and-forget as one command.** One step for "make this gone". Declined (owner,
-2026-10-04): deleting and forgetting are different acts, and a combined command makes
-one quietly imply the other.
+**Turn state as transcript entries.** Declined (owner): it is current state, not history.
 
-**Deleting a message takes its reply with it.** Avoids a reply to nothing. Declined
-(owner, 2026-10-04): the user deletes exactly what they pick.
+**Delete-and-forget as one command.** Declined (owner): different acts, and a combined
+command makes one quietly imply the other.
 
-**Send only on the activation's own conversation.** Simplest to reason about.
-Declined (owner, 2026-10-04): the assistant may message any conversation, and
-excluding it would need a rule rather than removing one.
+**Deleting a message takes its reply with it.** Declined (owner): the user deletes exactly
+what they pick.
 
-**One cursor per conversation instead of one per device.** Simpler sequence numbers,
-but a device following ten conversations would track ten cursors and make ten
-catch-up requests.
+**Send only into the activation's own conversation.** Declined (owner): the assistant may
+write into any conversation.
 
-**Queue a message sent while the assistant works.** Friendlier in the moment, but the
-queued message would be processed against a reply the user had not seen when they
-wrote it. Declined until the concurrency milestone can judge takeovers.
+**One cursor per conversation.** Declined: a device following ten conversations would keep
+ten cursors and make ten catch-up requests.
 
-**Keep the reply on the request.** No transport change. Declined: the reply would
-reach only the device that sent the message, input and output stay welded, and the
-assistant could not send on its own.
+**Keep the reply on the request.** Declined: the reply would reach only the sending device,
+and the assistant could not write first.
 
 ## Out of scope
 
-- **Receipts beyond *received*.** *Shown* and *read* are deferred (owner,
-  2026-10-04). ADR-0291 lets the kind add them to its transcript later.
-- **Posting the fixed message on restart** (§9).
-- Voice, and the spoken path generally; interrupting or cancelling with words.
-- Editing a message; composing while offline; typing indicators.
-- More than one person in a conversation; a native phone app and push notifications.
-- Merging notifications into conversations.
-- [#2520](https://github.com/leonapivato/ai-assistant/issues/2520)'s question of
-  separate conversations versus one continuous one. One conversation stays one channel
-  instance.
+- Receipts beyond *received*; *shown* and *read* are deferred *(owner)*.
+- Writing the fixed message on restart.
+- Voice; interrupting or cancelling with words.
+- Editing a message; composing offline; typing indicators.
+- More than one person in a conversation; a native phone app and OS push notifications.
+- [#2520](https://github.com/leonapivato/ai-assistant/issues/2520)'s separate versus
+  continuous conversations.
+- Activations side by side and takeover: the concurrency milestone.
+
+**Sequencing.** Under the interim of §6, a correction waits for the running activation to
+end, so it cannot prevent the action it corrects. Stopping an activation (its own
+proposal) therefore ships with this channel's milestone, as the way to halt work before it
+acts.
 
 ## What it leaves open
 
-- **Snapshot size.** How much of a conversation's transcript a snapshot carries.
-- **What a device sees of a running activation.** The user's own message and the
-  assistant's sent messages are shown at once; the rest of an open episode stays
-  owner-only inspection (ADR-0286 §6). Whether anything else is shown in the
-  conversation, a progress line for example, is left open; the lean is none for now.
-- **The cutover.** Existing conversations hold their history in episodes and have no
-  transcript. Whether the cutover seeds each transcript once from its episodes or
-  starts on a fresh data directory is the implementation's.
-- **The spoken path's place.** A spoken turn runs on the conversation channel today
-  and reads its tail from episodes; it is not added to the transcript. Where speech
-  lands is voice's own kind.
+- **Snapshot size.**
+- **What a device sees of a running activation** beyond the "working…" indicator; the lean
+  is nothing more for now.
+- **Who may start a conversation and choose its devices**: the device session's.
+- **What an answer authorizes and that it is used once**: authorizing's (§7 keeps only the
+  binding).
