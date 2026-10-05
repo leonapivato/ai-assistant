@@ -535,6 +535,41 @@ async def test_a_reference_already_sent_is_not_offered_as_one_that_can_be_taken_
         await expect(drive.page.locator("#referencing")).to_be_hidden()
 
 
+async def test_giving_a_reference_up_mid_wait_leaves_the_way_out_of_that_wait(
+    gateway_browser: Browser, tmp_path: Path
+) -> None:
+    """The form stays while a turn it sent is out, whatever is attached by then.
+
+    ``Stop waiting`` is built inside the form, and the form is shown while a reference is
+    attached — so sending against one goal, taking up a second while that request is
+    held, and then pressing "Never mind that one" hid the only control that ends the
+    first turn's wait. Adversarial review, round 1, ``major``. The form is put away once
+    the wait ends and nothing is attached.
+    """
+    async with driving(gateway_browser, tmp_path) as drive:
+        drive.engine.goal_summaries = [
+            _summary(),
+            _summary(asking=False).model_copy(update={"id": OTHER_ID}),
+        ]
+        held = await _holding(drive, "/ask", at=1)
+
+        await _open_goals(drive)
+        await drive.page.click("text=Answer this")
+        await drive.page.fill("#utterance", "the one at Melides")
+        await drive.page.click("#ask-button")
+        await held.reached.wait()
+        await drive.page.locator("#goal-list > div").nth(1).get_by_text("Take this up here").click()
+        await drive.page.click("#clear-reference")
+
+        await expect(drive.page.locator("#referencing")).to_be_hidden()
+        await expect(drive.page.locator("#stop-waiting")).to_be_visible()
+        await drive.page.click("#stop-waiting")
+        await held.release()
+
+        await expect(drive.page.locator("#ask-form")).to_be_hidden()
+        await expect(drive.page.locator("#goals .fault")).to_be_visible()
+
+
 async def test_a_wait_the_owner_ended_leaves_the_reference_offered_again(
     gateway_browser: Browser, tmp_path: Path
 ) -> None:
