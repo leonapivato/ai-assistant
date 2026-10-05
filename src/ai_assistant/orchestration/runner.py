@@ -542,6 +542,14 @@ class DriveObservation:
     #: establishing act, and on a ``resume`` supplying no ``remember_recipients_until``.
     establishing: EstablishingAnswer | None = None
 
+    #: The resolving answer's append returned: the user's answer is durable on the trail,
+    #: whatever then becomes of the read-back, the settlement or the claim after it. A
+    #: confirmation is answerable once (ADR-0044 §2b), so this is the boundary past which
+    #: a ``resume`` has spent the user's answer (ADR-0235 §6:10) — set before the
+    #: read-back, which guards what is *acted on* and not whether the answer was given.
+    #: ``False`` on :meth:`StepRunner.run`, which records no resolving answer.
+    answered: bool = False
+
     #: The executed step's disposition, published as soon as it is assembled and before
     #: the bookkeeping that follows it (ADR-0267 §4's quote mint), which can raise. A
     #: resume whose control activation was stopped returns its outcome wherever its
@@ -1344,7 +1352,9 @@ class StepRunner:
         ruling = await self._policy.resolve(confirmed.model_copy(deep=True), approved=approved)
         # ``proposed`` is always ``None`` here: a `CONFIRM` carrying ``resolves`` is the
         # *resolution* of a question and proposes nothing (:meth:`_propose`).
-        decision, _ = await self._record(request, ruling, resolves=confirmed.id, at=establishing_at)
+        decision, _ = await self._record(
+            request, ruling, resolves=confirmed.id, at=establishing_at, observed=outbound
+        )
         # ADR-0254 §1: the answer settles the row the question was proposed with.
         # It runs after the resolving decision is recorded, so ``settled_at`` is that
         # decision's own instant and the two records agree; and before the claim, so
@@ -1789,6 +1799,7 @@ class StepRunner:
         *,
         resolves: str | None = None,
         at: datetime | None = None,
+        observed: DriveObservation | None = None,
     ) -> _Ruled:
         """Bind ``ruling`` to ``request``, append it, and return the trail's copy.
 
@@ -1863,6 +1874,9 @@ class StepRunner:
             resolves: The recorded ``CONFIRM`` this decision answers, if any.
             at: The reading to stamp, where a caller has already taken and used one
                 (ADR-0235 §1); ``None`` to read the clock here.
+            observed: The drive's observation, told the answer was appended
+                (:attr:`DriveObservation.answered`) as soon as the append returns and
+                before the read-back. ``None`` observes nothing.
 
         Raises:
             AuditError: If the trail refused the append — a duplicate id, or a
@@ -1884,6 +1898,8 @@ class StepRunner:
             expires_at=self._deadline(ruling, decided_at),
         )
         await self._trail.record(decision)
+        if observed is not None:
+            observed.answered = True
         recorded = await self._recorded(decision.id)
         if recorded != decision:
             msg = (

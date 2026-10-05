@@ -2807,7 +2807,7 @@ def _stopped_resumption(  # noqa: PLR0913 — one keyword per member a resume ma
 
 
 def _kept_resolution(
-    parked: _Parked, observed: DriveObservation, *, recorded: bool
+    parked: _Parked, observed: DriveObservation
 ) -> StepDisposition | _WithheldResumption | None:
     """What a stopped resume keeps of a resolution that raised after its answer.
 
@@ -2819,12 +2819,14 @@ def _kept_resolution(
     the park still holds. No disposition the runner did not assemble is invented, and
     either way the park is not settled: the runner did not return (ADR-0198 §3).
 
-    **"Recorded" is the runner's own boundary**: ``on_ruled`` fires once the trail has
-    handed back the record it was given (``StepRunner._record``'s read-back). A write
-    the trail accepted and could not hand back is not an answer the runner may act on
-    or the engine may report as given, so a raise there propagates as before.
+    **"Recorded" is the answer's append** (:attr:`DriveObservation.answered`): once the
+    trail accepted it, the user's answer is spent (ADR-0044 §2b), whether or not the
+    read-back, the settlement or the claim after it then succeeds. The read-back still
+    guards what is acted on — a resolution whose read-back failed executed nothing, and
+    is kept as the resolution that acted on nothing — and never decides whether the
+    answer was given.
     """
-    if not (recorded and _marked()):
+    if not (observed.answered and _marked()):
         return None
     if observed.executed is not None:
         return replace(observed.executed, establishing=observed.establishing)
@@ -15376,9 +15378,6 @@ class Engine:
             # available and is taken; act 3's is not (:meth:`_engage_after_the_act`).
             await self._engage_execution(parked.execution_id, parked.step_id)
             allowed_by: str | None = None
-            # Whether the resolving answer is on the trail: the boundary past which a
-            # stopped resume returns rather than raises (ADR-0297 §4, ADR-0235 §6:10).
-            recorded = False
             resumed = state
 
             async def ruled(decision: PermissionDecision) -> None:
@@ -15396,9 +15395,8 @@ class Engine:
                 store refuses does not also lose what the step was allowed by: the
                 finishing commit records it instead (:meth:`_finished_attempt`).
                 """
-                nonlocal allowed_by, recorded
+                nonlocal allowed_by
                 allowed_by = decision.id
-                recorded = True
                 await self._authorized_attempt(resumed, decision.id)
 
             # ADR-0297 §2:2: the resumed claim names the control activation that
@@ -15497,7 +15495,7 @@ class Engine:
                 # ADR-0297 §4: past the recorded answer, a stopped resume returns what it
                 # established. The stage's failure stays recorded — ``drive`` failed, the
                 # stop's end entry after it — and nothing is retried.
-                kept = _kept_resolution(parked, observed, recorded=recorded)
+                kept = _kept_resolution(parked, observed)
                 if kept is None:
                     raise
                 driven, runner_returned = kept, False
