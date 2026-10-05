@@ -329,7 +329,12 @@ class ChatReader:
                     if self._reading[conversation_id]:
                         continue
                     return
-                await self._take_in(conversation_id, waiting)
+                taken = await self._take_in(conversation_id, waiting)
+                if not taken and not self._reading[conversation_id]:
+                    # Nothing was marked: what was read as waiting was deleted, or taken
+                    # in elsewhere, in between. Stop rather than re-read in a loop; a
+                    # later notice or sweep looks again.
+                    return
         except asyncio.CancelledError:
             raise
         except ConversationStoreError:
@@ -340,8 +345,12 @@ class ChatReader:
         finally:
             self._reading.pop(conversation_id, None)
 
-    async def _take_in(self, conversation_id: str, waiting: Sequence[TranscriptMessage]) -> None:
-        """Mark the waiting messages taken in, then run their activation (§6:6-§6:8)."""
+    async def _take_in(self, conversation_id: str, waiting: Sequence[TranscriptMessage]) -> bool:
+        """Mark the waiting messages taken in, then run their activation (§6:6-§6:8).
+
+        Returns:
+            Whether any message was marked, and so an activation run.
+        """
         window = await self._window(conversation_id, waiting)
         activation_id = self._mint()
         marked = frozenset(
@@ -353,8 +362,7 @@ class ChatReader:
         )
         taken = tuple(message for message in waiting if message.position in marked)
         if not taken:
-            # Deleted, or taken in elsewhere, since the read: nothing for this activation.
-            return
+            return False
         self._current[conversation_id] = activation_id
         try:
             await self._activate(
@@ -367,6 +375,7 @@ class ChatReader:
             )
         finally:
             self._current.pop(conversation_id, None)
+        return True
 
     async def _window(
         self, conversation_id: str, waiting: Sequence[TranscriptMessage]
