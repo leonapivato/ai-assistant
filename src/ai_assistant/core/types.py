@@ -16468,6 +16468,32 @@ class ConversationState(BaseModel):
         return self
 
 
+class DeviceConversation(BaseModel):
+    """A conversation one device reads, with the access it holds there (ADR-0296 §2, §4).
+
+    What a device's listing of its conversations answers with: the conversation, and
+    whether the device only reads it or also writes in it (ADR-0293 §3:5), as the
+    conversation's devices hold that now. A device that only writes in a conversation
+    is not shown it (ADR-0296 §4:5), so ``access`` always reads, and a conversation
+    stamped deleted is listed to no device.
+    """
+
+    model_config = ConfigDict(extra="forbid", frozen=True)
+
+    conversation: Conversation
+    access: DeviceAccess
+
+    @model_validator(mode="after")
+    def _the_device_reads_a_standing_conversation(self) -> Self:
+        if not self.access.reads:
+            msg = "a device is listed only the conversations it reads (ADR-0296 §4:5)"
+            raise ValueError(msg)
+        if self.conversation.deleted_at is not None:
+            msg = "a conversation stamped deleted is listed to no device"
+            raise ValueError(msg)
+        return self
+
+
 class ConversationExport(BaseModel):
     """A portable snapshot of the conversation store's own state (ADR-0074 §9, ADR-0004 §6).
 

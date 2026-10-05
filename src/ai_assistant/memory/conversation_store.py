@@ -89,6 +89,8 @@ from ai_assistant.core.types import (
     ConversationExport,
     ConversationStartedChange,
     DeletedMessage,
+    DeviceAccess,
+    DeviceConversation,
     DevicesChangedChange,
     Identifier,
     MessageAddedChange,
@@ -222,7 +224,16 @@ _SEARCH_DRAW_COLUMNS: Final = (
 #: device's message id name one message per conversation (§4:2). ``chat_changes`` is
 #: numbered by ``AUTOINCREMENT`` so a sequence number is never reused once its row is
 #: removed (§5:10); a change row holds no text, and a ``message_added`` row is read
-#: with the message it names. Every table but ``chat_changes`` and ``chat_devices``
+#: with the message it names. A ``devices_changed`` or ``conversation_started`` row
+#: holds the whole set it set, so a conversation's devices as of any change are the
+#: set of the latest such row before it (ADR-0296 §4:5); a ``conversation_deleted``
+#: row holds the ends the conversation had when it was deleted, which no read presents
+#: and only :meth:`SqliteConversationStore.device_changes` consults, because the
+#: deletion clears every earlier row it could be read from. ``NULL`` there is a row
+#: written before it was kept, read as reaching every device: a deletion carries an id
+#: alone, and a device left holding a deleted conversation is the worse error. The
+#: ``conversation_devices_device`` index serves a device's own reads and its removal.
+#: Every table but ``chat_changes`` and ``chat_devices``
 #: cascades from its conversation, and each is also cleared explicitly where a
 #: conversation goes, for the reason ``drop_if_eligible`` gives for the deliveries.
 _CHAT_SCHEMA: Final = (
@@ -238,6 +249,8 @@ _CHAT_SCHEMA: Final = (
     "CREATE TABLE IF NOT EXISTS conversation_devices("
     "conversation_id TEXT NOT NULL REFERENCES conversations(id) ON DELETE CASCADE, "
     "device_id TEXT NOT NULL, access TEXT NOT NULL, PRIMARY KEY(conversation_id, device_id))",
+    "CREATE INDEX IF NOT EXISTS conversation_devices_device "
+    "ON conversation_devices(device_id, conversation_id)",
     "CREATE TABLE IF NOT EXISTS chat_changes("
     "seq INTEGER PRIMARY KEY AUTOINCREMENT, kind TEXT NOT NULL, conversation_id TEXT, "
     "position INTEGER, devices TEXT)",
@@ -261,6 +274,55 @@ _DEFAULT_AWAITING_PAGE: Final = 100
 
 #: The activation id ``take_in`` records goes through ``core``'s identifier type.
 _ACTIVATION_ID: Final[TypeAdapter[str]] = TypeAdapter(Identifier)
+
+#: The device a device-scoped read or a removal names goes through the same type a
+#: ``ChatDevice`` holds its id in, so a name no set could hold is refused before I/O.
+_DEVICE_ID: Final[TypeAdapter[str]] = TypeAdapter(Identifier)
+
+#: The access values that make a device one of a conversation's ends for reading
+#: (ADR-0293 §3:5), as the JSON array the device-scoped reads bind.
+_READING_ACCESS: Final = json.dumps(sorted(one.value for one in DeviceAccess if one.reads))
+
+#: The read behind :meth:`SqliteConversationStore.device_changes` (ADR-0296 §4:5), one
+#: statement so the filter and the page bound apply together. Each change is tested
+#: against the set it was recorded under: the latest row before it that set the same
+#: conversation's devices, or "my devices" where ``conversation_id`` is ``NULL`` (``IS``
+#: matches the two ``NULL``s); a started conversation has none before it. A change that
+#: sets a set reaches every device in it before or after; a deletion reaches the ends
+#: that read the conversation when it was deleted, kept on its own row; every other
+#: change is in a conversation and reaches the ends that read it then. Written out as
+#: one literal, for the reason the module gives for its column lists (ruff ``S608``).
+#: Its parameters are the cursor, the device four times with the reading access twice
+#: between, and the page bound.
+_DEVICE_CHANGES_SQL: Final = (
+    "SELECT c.seq, c.kind, c.conversation_id, c.position, c.devices, "
+    "m.conversation_id, m.position, m.author, m.written_at, m.text, m.replies_to, "
+    "m.options, m.cut_off, m.device_id, m.message_id, m.deleted "
+    "FROM chat_changes c LEFT JOIN messages m ON c.kind = 'message_added' "
+    "AND m.conversation_id = c.conversation_id AND m.position = c.position "
+    "WHERE c.seq > ? AND CASE "
+    "WHEN c.kind IN ('conversation_started', 'devices_changed') THEN "
+    "EXISTS (SELECT 1 FROM json_each(c.devices) d "
+    "WHERE json_extract(d.value, '$.device_id') = ?) "
+    "OR EXISTS (SELECT 1 FROM json_each((SELECT p.devices FROM chat_changes p "
+    "WHERE p.conversation_id IS c.conversation_id "
+    "AND p.kind IN ('conversation_started', 'devices_changed') AND p.seq < c.seq "
+    "ORDER BY p.seq DESC LIMIT 1)) d WHERE json_extract(d.value, '$.device_id') = ?) "
+    "WHEN c.kind = 'conversation_deleted' THEN c.devices IS NULL "
+    "OR EXISTS (SELECT 1 FROM json_each(c.devices) d "
+    "WHERE json_extract(d.value, '$.device_id') = ? "
+    "AND json_extract(d.value, '$.access') IN (SELECT value FROM json_each(?))) "
+    "ELSE EXISTS (SELECT 1 FROM json_each((SELECT p.devices FROM chat_changes p "
+    "WHERE p.conversation_id IS c.conversation_id "
+    "AND p.kind IN ('conversation_started', 'devices_changed') AND p.seq < c.seq "
+    "ORDER BY p.seq DESC LIMIT 1)) d WHERE json_extract(d.value, '$.device_id') = ? "
+    "AND json_extract(d.value, '$.access') IN (SELECT value FROM json_each(?))) "
+    "END ORDER BY c.seq ASC LIMIT ?"
+)
+
+#: The page size :meth:`SqliteConversationStore.device_conversations` defaults to:
+#: ``recent``'s, since it is ``recent`` for one device.
+_DEFAULT_DEVICE_CONVERSATIONS_PAGE: Final = 50
 
 # **The five columns every conversation read selects.** An ordinary comment and not
 # a ``#:`` attribute block, because there is deliberately no name here to attach one
@@ -698,6 +760,19 @@ def _checked_activation_id(activation_id: object) -> str:
         return _ACTIVATION_ID.validate_python(activation_id, strict=True)
     except ValidationError as exc:
         msg = f"activation_id must be a non-blank str, got {describe_untrusted(activation_id)}"
+        raise ValueError(msg) from exc
+
+
+def _checked_device_id(device_id: object) -> str:
+    """Check the device a device-scoped call names, before any I/O.
+
+    Raises:
+        ValueError: If ``device_id`` is not a non-blank ``str``.
+    """
+    try:
+        return _DEVICE_ID.validate_python(device_id, strict=True)
+    except ValidationError as exc:
+        msg = f"device_id must be a non-blank str, got {describe_untrusted(device_id)}"
         raise ValueError(msg) from exc
 
 
@@ -1677,9 +1752,11 @@ class SqliteConversationStore:
                 (_to_micros(now), conversation_id),
             )
             # ADR-0293 §2:3: the transcript goes with the conversation, and its
-            # devices learn of it from the one change left in the stream.
+            # devices learn of it from the one change left in the stream, which
+            # keeps who they were (ADR-0296 §4:5).
+            ends = self._devices_of(conn, conversation_id)
             self._clear_chat_of(conn, conversation_id)
-            self._record_change(conn, "conversation_deleted", conversation_id)
+            self._record_change(conn, "conversation_deleted", conversation_id, devices=ends)
             return True
 
     async def drop_if_eligible(self, conversation_id: str) -> bool:
@@ -1750,8 +1827,9 @@ class SqliteConversationStore:
                 conn.execute("DELETE FROM taken_in WHERE conversation_id = ?", (conversation_id,))
             else:
                 # A reclaim is a deletion as far as the conversation's devices go.
+                ends = self._devices_of(conn, conversation_id)
                 self._clear_chat_of(conn, conversation_id)
-                self._record_change(conn, "conversation_deleted", conversation_id)
+                self._record_change(conn, "conversation_deleted", conversation_id, devices=ends)
             conn.execute("DELETE FROM conversations WHERE id = ?", (conversation_id,))
             return True
 
@@ -2274,3 +2352,133 @@ class SqliteConversationStore:
                 "AND position IN (SELECT value FROM json_each(?))",
                 (conversation_id, json.dumps(sorted(set(named)))),
             )
+
+    # --- the chat space: one device's view (ADR-0296 §3, §4) ------------------
+
+    async def device_changes(
+        self, device_id: str, *, after: int, limit: int = _DEFAULT_CHANGES_PAGE
+    ) -> ChatChanges:
+        """Read the changes after ``after`` that ``device_id`` may see (ADR-0296 §4:5).
+
+        One statement in one deferred transaction: each change is tested against
+        the devices of the latest row before it that set its conversation's devices
+        (or "my devices"), which is the set as it stood when the change was recorded,
+        so the filter and the page bound apply together and a page is full of
+        changes the device may see.
+
+        Raises:
+            ValueError: If ``device_id`` is malformed, or ``after`` or ``limit`` is
+                out of range.
+            ConversationStoreError: If the store cannot be read, or a row is corrupt.
+        """
+        device = _checked_device_id(device_id)
+        _check_page_bound("after", after)
+        _check_page_bound("limit", limit)
+        if limit == 0:
+            return ChatChanges(next_after=after)
+        async with self._lock:
+            rows, head = await _run_to_completion(self._device_changes_sync, device, after, limit)
+        page = tuple(_change_from(row) for row in rows)
+        try:
+            return ChatChanges(
+                changes=page, next_after=page[-1].seq if len(page) == limit else head
+            )
+        except ValidationError as exc:
+            msg = f"the stored change stream is inconsistent: {exc}"
+            raise ConversationStoreError(msg) from exc
+
+    def _device_changes_sync(self, device: str, after: int, limit: int) -> tuple[list[Any], int]:
+        with self._transaction("read a device's changes", immediate=False) as conn:
+            rows = self._fetch(
+                conn,
+                "read a device's changes",
+                _DEVICE_CHANGES_SQL,
+                (after, device, device, device, _READING_ACCESS, device, _READING_ACCESS, limit),
+            )
+            return rows, self._head(conn)
+
+    async def device_conversations(
+        self,
+        device_id: str,
+        *,
+        limit: int = _DEFAULT_DEVICE_CONVERSATIONS_PAGE,
+        offset: int = 0,
+    ) -> list[DeviceConversation]:
+        """List the unstamped conversations ``device_id`` reads, as ``recent`` orders them.
+
+        Raises:
+            ValueError: If ``device_id`` is malformed, or ``limit`` or ``offset`` is
+                out of range.
+            ConversationStoreError: If the store cannot be read, or a row is corrupt.
+        """
+        device = _checked_device_id(device_id)
+        _check_page_bound("limit", limit)
+        _check_page_bound("offset", offset)
+        if limit == 0:
+            return []
+        async with self._lock:
+            rows = await _run_to_completion(self._device_conversations_sync, device, limit, offset)
+        listed: list[DeviceConversation] = []
+        for row in rows:
+            conversation = self._decode_conversation(row)
+            try:
+                listed.append(DeviceConversation(conversation=conversation, access=row[5]))
+            except ValidationError as exc:
+                msg = f"a stored device could not be decoded: {exc}"
+                raise ConversationStoreError(msg) from exc
+        return listed
+
+    def _device_conversations_sync(self, device: str, limit: int, offset: int) -> list[Any]:
+        return self._fetch(
+            self._conn,
+            "list a device's conversations",
+            "SELECT c.id, c.started_at, c.last_active_at, c.last_turn_at, c.deleted_at, "
+            "d.access FROM conversations c JOIN conversation_devices d "
+            "ON d.conversation_id = c.id WHERE c.deleted_at IS NULL AND d.device_id = ? "
+            "AND d.access IN (SELECT value FROM json_each(?)) "
+            "ORDER BY c.last_active_at DESC, c.id ASC LIMIT ? OFFSET ?",
+            (device, _READING_ACCESS, limit, offset),
+        )
+
+    async def remove_device(self, device_id: str) -> bool:
+        """Remove a device from every set of devices, in one ``IMMEDIATE`` transaction.
+
+        One transaction is the exclusion against "my devices" and every
+        conversation at once (ADR-0296 §3:6): no act lands between two removals.
+
+        Raises:
+            ValueError: If ``device_id`` is malformed.
+            ConversationStoreError: If the store cannot be written.
+        """
+        device = _checked_device_id(device_id)
+        async with self._lock:
+            return await _run_to_completion(self._remove_device_sync, device)
+
+    def _remove_device_sync(self, device: str) -> bool:
+        with self._transaction("remove a device") as conn:
+            removed = False
+            mine = self._devices_of(conn, None)
+            if any(one.device_id == device for one in mine):
+                conn.execute("DELETE FROM chat_devices WHERE device_id = ?", (device,))
+                kept = tuple(one for one in mine if one.device_id != device)
+                self._record_change(conn, "devices_changed", None, devices=kept)
+                removed = True
+            # A stamped conversation's devices went with its stamp; the join is the
+            # same guarantee read rather than assumed.
+            ends = self._fetch(
+                conn,
+                "read the conversations a device is an end of",
+                "SELECT d.conversation_id FROM conversation_devices d JOIN conversations c "
+                "ON c.id = d.conversation_id WHERE d.device_id = ? AND c.deleted_at IS NULL "
+                "ORDER BY d.conversation_id ASC",
+                (device,),
+            )
+            for (conversation_id,) in ends:
+                conn.execute(
+                    "DELETE FROM conversation_devices WHERE conversation_id = ? AND device_id = ?",
+                    (conversation_id, device),
+                )
+                kept = self._devices_of(conn, conversation_id)
+                self._record_change(conn, "devices_changed", conversation_id, devices=kept)
+                removed = True
+            return removed
