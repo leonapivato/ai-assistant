@@ -335,11 +335,29 @@ def check_message_fits(conversation_id: str, message: UserMessage, *, max_bytes:
     )
 
 
-def _fits(conversation_id: str, message: NewMessage, *, max_bytes: int) -> bool:
-    """Whether both one-entry pages holding ``message``'s record fit ``max_bytes``."""
+def _prefix_fits(conversation_id: str, message: NewMessage, length: int, *, max_bytes: int) -> bool:
+    """Whether the record of ``message`` cut to ``length`` characters fits ``max_bytes``.
+
+    Measured on the record as the probe builds it, but **unvalidated**, so a prefix
+    that is blank — which no message may be — is still measured: the size grows with
+    the length whatever the characters, and the search over it has to see every
+    length to stay a search (a blank prefix is refused afterwards, not here).
+    """
+    page, _ = _widest_records(conversation_id, message)
+    (entry,) = page.entries
+    assert isinstance(entry, TranscriptMessage)  # noqa: S101 — the probe holds one message
+    cut = TranscriptMessage.model_construct(
+        **{**dict(entry), "text": message.text[:length], "cut_off": True}
+    )
     return all(
         len(canonical_payload(one)) <= max_bytes
-        for one in _widest_records(conversation_id, message)
+        for one in (
+            page.model_copy(update={"entries": (cut,)}),
+            ChatChanges.model_construct(
+                changes=(MessageAddedChange.model_construct(seq=_WIDEST_NUMBER, message=cut),),
+                next_after=_WIDEST_NUMBER,
+            ),
+        )
     )
 
 
@@ -351,30 +369,25 @@ def fitted_message(conversation_id: str, message: NewMessage, *, max_bytes: int)
     return by this, for :func:`check_message_fits`' reason — a recorded message no read
     could return would stop every device's cursor at it. A message that is cut is
     marked cut off, so it is never read as a complete answer (§5:2, §6:16). The
-    longest prefix that fits is found by bisection over its length, each probe one
-    encoding of at most the message itself.
+    longest prefix that fits is found by bisection over its length — the record's size
+    only grows with it — each probe one encoding of at most the message itself.
 
     Raises:
-        OversizedValueError: If not even one character of the text fits, which only a
-            limit too small for any message's frame can bring about.
+        OversizedValueError: If the longest prefix that fits is blank, which no message
+            may be — only a limit too small for a message's own frame brings it about.
     """
-    if _fits(conversation_id, message, max_bytes=max_bytes):
+    page, changes = _widest_records(conversation_id, message)
+    if all(len(canonical_payload(one)) <= max_bytes for one in (page, changes)):
         return message
+    # `low` always fits (the empty prefix is the frame alone); `high` never does.
     low, high = 0, len(message.text)
     while high - low > 1:
         middle = (low + high) // 2
-        candidate = message.text[:middle]
-        cut = (
-            message.model_copy(update={"text": candidate, "cut_off": True})
-            if candidate.strip()
-            else None
-        )
-        if cut is not None and _fits(conversation_id, cut, max_bytes=max_bytes):
+        if _prefix_fits(conversation_id, message, middle, max_bytes=max_bytes):
             low = middle
         else:
             high = middle
-    if low == 0 or not message.text[:low].strip():
-        page, changes = _widest_records(conversation_id, message)
+    if not message.text[:low].strip():
         check_payload(page, max_bytes=max_bytes, subject="the assistant's message")
         check_payload(changes, max_bytes=max_bytes, subject="the assistant's message")
         raise AssertionError("an oversized message was unexpectedly admitted")

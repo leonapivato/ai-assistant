@@ -5294,6 +5294,12 @@ class _TrackedScan(ast.NodeVisitor):
                 assert seam.attr == "method"
                 assert isinstance(seam.value, ast.Name)
                 assert seam.value.id == "projection"
+            elif self._scope[-1] == "_read_in":
+                # ADR-0293 §6: the chat's reader admits its activation from no public
+                # call — it is the channel's own spoke — so the seam it is traced under
+                # is the reader's, a literal, and is no public operation's.
+                assert isinstance(seam, ast.Constant)
+                assert seam.value == "chat_reader"
             else:
                 literal = seam.value if isinstance(seam, ast.Constant) else None
                 self.found.append((self._scope[-1], literal if isinstance(literal, str) else None))

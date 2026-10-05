@@ -30,6 +30,7 @@ from ai_assistant.core.types import (
     EpisodicMemory,
     ExecutionState,
     MessageAuthor,
+    NewMessage,
     ProcessingStatus,
     RecordedChannelTrigger,
     RecordedTextInput,
@@ -45,6 +46,7 @@ from ai_assistant.orchestration.chat import (
     couldnt_finish,
 )
 from ai_assistant.orchestration.composing import ComposingStage
+from ai_assistant.orchestration.conversations import fitted_message
 from ai_assistant.testing import (
     FakeConversationStore,
     FakeMemoryStore,
@@ -468,3 +470,98 @@ async def test_a_reader_switched_off_leaves_the_message_waiting() -> None:
 
 async def store_untaken(harness: Harness, conversation_id: str) -> tuple[TranscriptMessage, ...]:
     return await harness.conversation_store.untaken_messages(conversation_id)
+
+
+# --- review regressions ---------------------------------------------------------------
+
+
+class _MarksThenWaits(FakeConversationStore):
+    """A store whose ``take_in`` commits, then waits: SQLite's commit-then-cancel shape."""
+
+    def __init__(self) -> None:
+        super().__init__(now=lambda: AT)
+        self.marking = asyncio.Event()
+        self.gate = asyncio.Event()
+
+    async def take_in(
+        self, conversation_id: str, *, positions: Sequence[int], activation_id: str
+    ) -> tuple[int, ...]:
+        marked = await super().take_in(
+            conversation_id, positions=positions, activation_id=activation_id
+        )
+        self.marking.set()
+        await self.gate.wait()
+        return marked
+
+
+async def test_a_shutdown_while_marking_leaves_an_interrupted_activation() -> None:
+    """§6:8, §6:9: cancelled as its marking commits, the activation is still recorded,
+    interrupted, and its messages are not taken in again."""
+    store = _MarksThenWaits()
+    memory = FakeMemoryStore(now=lambda: AT)
+    harness = _harness(store=store, memory=memory, drain_timeout=timedelta(milliseconds=10))
+    conversation = await _conversation(harness)
+    await harness.engine.write_message(conversation, message=_said("m-1", "hi"))
+    await asyncio.wait_for(store.marking.wait(), _SETTLE)
+    await harness.engine.aclose()
+    assert [one.author for one in await _messages(store, conversation)] == [MessageAuthor.USER]
+    (episode,) = await _episodes(memory)
+    assert episode.processing_record is not None
+    assert episode.processing_record.status is ProcessingStatus.INTERRUPTED
+    taken = await store.taken_in(conversation, positions=[1])
+    assert taken == {1: episode.id.removeprefix("activation:")}
+    assert await store.untaken_messages(conversation) == ()
+
+
+async def test_a_backlog_past_one_marking_call_is_still_one_input() -> None:
+    """§6:3: every waiting message is taken in together, whatever the store's bound."""
+    composer = _GatedModel()
+    harness = _harness(composer=composer)
+    conversation = await _conversation(harness)
+    await harness.engine.write_message(conversation, message=_said("m-0", "first"))
+    await asyncio.wait_for(composer.entered.wait(), _SETTLE)
+    for n in range(1, 1002):
+        await harness.engine.write_message(conversation, message=_said(f"m-{n}", f"w{n}"))
+    composer.gate.set()
+    await _answered(harness, conversation, 2)
+    inputs = sorted((_input_of(one) for one in await _episodes(harness.memory)), key=len)
+    assert inputs[0] == "first"
+    assert inputs[1].split("\n\n") == [f"w{n}" for n in range(1, 1002)]
+
+
+async def test_each_input_message_carries_the_message_it_replies_to() -> None:
+    """§4:5: two corrections alike in words are told apart by what they reply to."""
+    model = FakeModelProvider(STATED_PROPOSAL)
+    harness = _harness(understanding=understanding_stage(model=model))
+    conversation = await _conversation(harness)
+    await harness.engine.write_message(conversation, message=_said("m-1", "Book it."))
+    await _answered(harness, conversation, 1)
+    await harness.engine.write_message(conversation, message=_said("m-2", "And dinner."))
+    await _answered(harness, conversation, 2)
+    await harness.engine.write_message(conversation, message=_said("m-3", "No.", replies_to=2))
+    await _answered(harness, conversation, 3)
+    first = json.loads(model.calls[-1].messages[1].content)["input"]["messages"]
+    await harness.engine.write_message(conversation, message=_said("m-4", "No.", replies_to=4))
+    await _answered(harness, conversation, 4)
+    second = json.loads(model.calls[-1].messages[1].content)["input"]["messages"]
+    assert [(one["position"], one["text"], one["replies_to"]) for one in first] == [(5, "No.", 2)]
+    assert [(one["position"], one["text"], one["replies_to"]) for one in second] == [(7, "No.", 4)]
+
+
+def test_the_writer_fits_a_message_with_leading_whitespace_and_wide_characters() -> None:
+    """§7:3: the longest prefix one read can return, found whatever the text holds."""
+    conversation = "0" * 36
+    padded = NewMessage(author=MessageAuthor.ASSISTANT, text=" " * 9000 + "x" * 7000)
+    fitted = fitted_message(conversation, padded, max_bytes=12000)
+    assert fitted.cut_off
+    assert fitted.text.strip()
+    assert padded.text.startswith(fitted.text)
+    wide = NewMessage(author=MessageAuthor.ASSISTANT, text='é"\n' * 5000)
+    fitted = fitted_message(conversation, wide, max_bytes=4096)
+    assert fitted.cut_off
+    assert wide.text.startswith(fitted.text)
+    longer = NewMessage(author=MessageAuthor.ASSISTANT, text=wide.text[: len(fitted.text) + 1])
+    # The longest: one more character no longer fits.
+    assert fitted_message(conversation, longer, max_bytes=4096) is not longer
+    short = NewMessage(author=MessageAuthor.ASSISTANT, text="fits")
+    assert fitted_message(conversation, short, max_bytes=4096) is short

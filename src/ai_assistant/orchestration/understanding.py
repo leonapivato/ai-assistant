@@ -255,9 +255,11 @@ class TranscriptWindow:
         conversation: The conversation channel, rendered as each item's source.
         messages: The conversation's recent messages, ascending, without the input's
             own and without a deleted message's marker.
-        input_positions: The positions of the messages taken in as the input, so an
-            item written after the earliest of them is marked as such: the transcript
-            shows what was written and when (§6).
+        input_messages: The messages taken in as the input, ascending. The input is
+            rendered with each one's position, instant and the message it replies to,
+            so a correction names the message it corrects (§4:5); and an item written
+            after the earliest of them is marked as such, since the transcript shows
+            what was written and when (§6).
         replied_to: Each earlier message an input message replies to that
             ``messages`` does not already show, ascending — a deleted one as its
             marker (§4:5, §5:8).
@@ -265,7 +267,7 @@ class TranscriptWindow:
 
     conversation: ChannelIdentity
     messages: tuple[TranscriptMessage, ...]
-    input_positions: tuple[int, ...] = ()
+    input_messages: tuple[TranscriptMessage, ...] = ()
     replied_to: tuple[TranscriptMessage | DeletedMessage, ...] = ()
 
 
@@ -658,8 +660,11 @@ class UnderstandingStage:
             )
             rendered_episodes.append(projected.rendering(label))
             labels[label] = projected.referent()
+        received = _input_rendering(text, channel)
+        if isinstance(window, TranscriptWindow) and window.input_messages:
+            received["messages"] = [_input_message(one) for one in window.input_messages]
         payload = {
-            "input": _input_rendering(text, channel),
+            "input": received,
             "channel_window": rendered_items
             or "missing: no recent context accompanies this input on its channel",
             "episode_window": (
@@ -844,10 +849,27 @@ def _transcript_items(window: TranscriptWindow) -> list[_ChannelItem]:
     was written before the reply it follows (ADR-0293 §6).
     """
     source = _channel_text(window.conversation)
-    first = min(window.input_positions, default=None)
+    first = min((one.position for one in window.input_messages), default=None)
     items = [_message_item(one, source, _TRANSCRIPT_ITEM, first) for one in window.messages]
     items.extend(_message_item(one, source, _REPLIED_TO_ITEM, first) for one in window.replied_to)
     return items
+
+
+def _input_message(message: TranscriptMessage) -> dict[str, object]:
+    """One message of the input as the medium holds it: where it is, what it answers.
+
+    Its ``replies_to`` is the position of the window item, or of another message of
+    the input, it replies to (ADR-0293 §4:5), so a correction is tied to the message
+    it corrects rather than left to its words.
+    """
+    rendered: dict[str, object] = {
+        "position": message.position,
+        "written_at": message.written_at.isoformat(),
+        "text": message.text,
+    }
+    if message.replies_to is not None:
+        rendered["replies_to"] = message.replies_to
+    return rendered
 
 
 def _message_item(
