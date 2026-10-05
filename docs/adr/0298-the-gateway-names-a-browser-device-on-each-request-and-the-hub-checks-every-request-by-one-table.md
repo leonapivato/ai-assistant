@@ -124,9 +124,16 @@ is where ADR-0296 §1:5 puts the name.
 Without this, a background task copies the context it was created in, and the
 assistant's own work would be checked as the phone that wrote the message.
 
-> **Normative.** The engine binds `UserMessage.device_id` to the requesting device: a
-> message naming another device is refused (§6), and one naming none is recorded as
-> the requesting device's.
+> **Normative.** Where the requesting device is not `hub`, the engine binds
+> `UserMessage.device_id` to it: a message naming another device is refused (§6), and
+> one naming none is recorded as the requesting device's.
+
+> **Normative.** Where the requesting device is `hub`, a message keeps the device it
+> names, and one naming none is recorded as `hub`'s.
+
+The local socket is the user at the machine, and until the cutover (§9) every request
+is `hub`'s, so this keeps every message's attribution, and with it ADR-0293 §4:2's
+repeat identity, exactly as the peer gives it until the hub can name the real device.
 
 ADR-0293 §4:1 makes a message id unique per device and ADR-0292 §5:1 states an author
 by the hub, never by content; the conversation's surface as lane B builds it takes the
@@ -227,7 +234,7 @@ remote listener, and those browser devices need roles.
 
 > **Normative.** Every method on the promoted surface is classified in exactly one row
 > of the table below — except `receive` and `receive_streaming`, which the kind of the
-> input's payload places in one of two — and the request needs what its row requires
+> input's target places in one of two — and the request needs what its row requires
 > of the requesting device.
 
 | Class | The requesting device must | Methods |
@@ -239,8 +246,8 @@ remote listener, and those browser devices need roles.
 | **Writing** | be the named conversation's end for writing | `write_message`, `delete_message`, `delete_conversation` |
 | **Reading one** | be the named conversation's end for reading | `transcript`, `conversation` |
 | **Reading many** | hold a role; the answer holds only conversations the device reads (§7) | `recent_conversations`, `chat_changes`, the change stream |
-| **A legacy turn** | where the call names an existing conversation, be its end for writing and for reading; otherwise be in "my devices" for writing and for reading | `converse`, `converse_streaming`, `converse_spoken`, `answer`, `learn`, and `receive` and `receive_streaming` with conversational text or speech |
-| **Spoke traffic** | hold the role of host of spokes, which no device holds until the first device-hosted spoke (ADR-0296 §3:4) | `receive` and `receive_streaming` with any other input |
+| **A legacy turn** | where the call names an existing conversation, be its end for writing and for reading; otherwise be in "my devices" for writing and for reading | `converse`, `converse_streaming`, `converse_spoken`, `answer`, `learn`, and `receive` and `receive_streaming` whose input's target is a `NewConversation`, or a `ChannelIdentity` whose `channel_type` is `conversation` |
+| **Spoke traffic** | hold the role of host of spokes, which no device holds until the first device-hosted spoke (ADR-0296 §3:4) | `receive` and `receive_streaming` whose input's target is any other channel, an informational event included |
 | **Notification poll** | be in "my devices" for reading, as the connecting device | `next_notification` |
 
 The methods the conversation's surface adds are named as lane B names them; a method
@@ -253,8 +260,12 @@ assistant's reply. `resume` answers a parked confirmation with the user's author
 and stays a command until question messages are built (ADR-0293 §6).
 
 > **Normative.** A request's kind (ADR-0296 §3:5) is its envelope `method`, and for
-> `receive` and `receive_streaming` also the structured kind of the input's payload;
-> no row is chosen by any other part of a request.
+> `receive` and `receive_streaming` also the input's target — its `kind`, and a
+> channel's `channel_type` — as validated; no row is chosen by any other part of a
+> request.
+
+ADR-0274 gives conversational text and an informational event the same payload
+(`modality="text"`); what tells them apart is the target, which is a structured field.
 
 > **Normative.** A method in no row is refused for every requesting device but `hub`.
 
@@ -284,13 +295,16 @@ hub's own machine, and ADR-0177 keeps a credential to a loopback origin.
 ### 6. The refusal
 
 > **Normative.** A request refused under this ADR fails with `DeviceRefusedError`, a new
-> `AssistantError` subclass in `core/errors.py`, and is not dispatched.
+> `AssistantError` subclass in `core/errors.py`, before it has changed anything.
 
-> **Normative.** `DeviceRefusedError` carries, as a public attribute, why: that the
-> device named is not accepted under that gateway (a revoked registration, `hub`, the
-> hub's own overlay identity, or a naming beyond §4's bound), or that the device's roles
-> do not allow the request — so the owner can tell "this phone was revoked" from
-> "this phone has no role for that".
+> **Normative.** `DeviceRefusedError` carries, as a public attribute, one of three
+> reasons: the device named is not accepted under that gateway (a revoked registration,
+> `hub`, the hub's own overlay identity, or a naming beyond §4's bound); the device holds
+> no role; or its roles do not allow the request.
+
+The owner can then tell "this phone was revoked" from "this phone has no role yet" from
+"this phone has no role for that", and a device can tell when to drop what it holds
+(§7).
 
 ADR-0085 §10a makes the code the class name and the details its public attributes,
 so the error crosses the wire with no table to keep.
@@ -337,6 +351,13 @@ it, and nothing between.
 > messages recorded at or before its sequence number, a message deleted since shown as
 > its marker (ADR-0293 §5:12), and nothing recorded after it.
 
+> **Normative.** The snapshot holds the newest of those messages that fit, with the
+> change, within the contract limit (ADR-0085 §8c), shortened from its oldest end and
+> to none if need be, and the device loads older messages by reading the transcript
+> (ADR-0293 §5:13).
+
+So the chunk always fits, and a cursor never stops on a snapshot too large to send.
+
 A device catching up from far behind therefore receives, for each interval in which it
 read a conversation, the snapshot at the interval's start, the changes inside it, and
 the change that ended it, and nothing recorded while it was not an end. A device whose
@@ -372,9 +393,19 @@ A heartbeat leaves unacknowledged data whenever the peer is gone, so the user ti
 turns a silent peer into a closed connection within the timeout; on the local socket
 the kernel reports a closed peer at once.
 
-> **Normative.** Revoking a device ends each of its open change streams with
-> `DeviceRefusedError`, and a gateway relaying one for a browser device ends that
-> browser device's streams (ADR-0296 §3:7).
+> **Normative.** Revoking a hub device closes its connections with no further frame,
+> its change streams' among them, as ADR-0124 §8 rules.
+
+> **Normative.** Revoking a browser device ends each of its change streams on a
+> gateway's connection that is still admitted with `DeviceRefusedError`, and the
+> gateway ends that browser device's streams (ADR-0296 §3:7).
+
+> **Normative.** A device refused the change stream or `chat_changes` with the reason that
+> it holds no role drops every conversation it holds, as if it had seen the change that removed it
+> from each (ADR-0296 §4:8).
+
+So a device that lost its last role while disconnected still drops what it held, and
+§2:6's "can do nothing until given roles" holds for it.
 
 > **Normative.** A change stream already open filters each change as this section
 > rules and is ended only by revocation, by the dead-peer timeout or by its device.
