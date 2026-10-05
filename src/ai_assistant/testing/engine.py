@@ -203,6 +203,7 @@ from ai_assistant.orchestration.conversations import (
     check_devices_fit,
     check_message_fits,
     conversation_state,
+    episode_conversation,
     episodes_on_place,
     fit_changes,
     fit_transcript,
@@ -592,10 +593,9 @@ class FakeAssistantEngine:
         #: The channel activations this fake is running, from admission to the end of
         #: their finalization: what a conversation's "working…" reads (ADR-0293 §8:2).
         self._running_activations: list[FakeActivation] = []
-        #: Per conversation, how many activations started from it have ended (§8:2).
+        #: Per conversation, how many activations started from it have ended and how many
+        #: times episodes on its place were forgotten, as the engine counts them (§8:2).
         self._activation_turns: dict[str, int] = {}
-        #: How many times this fake has destroyed episodes, as the engine counts it.
-        self._episodes_forgotten = 0
         self._joining: list[str] = []
         self._joining_lock = asyncio.Lock()
         self.chat = FakeConversationStore(now=lambda: _AT, new_id=self._joining_id)
@@ -1003,7 +1003,6 @@ class FakeAssistantEngine:
             closing=lambda: False,
             tracked=lambda work: work,
             max_payload_bytes=max_payload_bytes,
-            forgotten=lambda: self._episodes_forgotten,
         )
 
     # --- the two turn calls -----------------------------------------------
@@ -3020,8 +3019,10 @@ class FakeAssistantEngine:
         named = identifier(record_id, name="record_id")
         check_arguments("forget", max_bytes=self._max_payload_bytes, record_id=named)
         self.calls.append(("forget", {"record_id": named}))
+        conversation = episode_conversation(await self.episode_memory.get(named))
         removed_episode = await self.episode_memory.delete(named)
-        self._episodes_forgotten += 1  # the change stream sends its states again
+        if conversation is not None:  # its state is sent again, as the engine counts it
+            self._count_change(conversation)
         # The placement goes with the record: `forget` destroys rather than retires,
         # so leaving the entry would let a later belief minted at a recycled id
         # inherit a placement nobody set on it.
@@ -3535,7 +3536,7 @@ class FakeAssistantEngine:
                 forgot = True
             self._episode_conversations.pop(episode, None)
             self.deliveries.pop(episode, None)
-        self._episodes_forgotten += 1  # the change stream sends its states again
+        self._count_change(named)  # its state is sent again, as the engine counts it
         digest = self.conversations_held.get(named)
         if digest is not None:
             self.conversations_held[named] = digest.model_copy(update={"recorded_turns": 0})
@@ -3549,7 +3550,11 @@ class FakeAssistantEngine:
             one for one in self._running_activations if one is not activation
         ]
         if (ended := activation.conversation_id) is not None:
-            self._activation_turns[ended] = self._activation_turns.get(ended, 0) + 1
+            self._count_change(ended)
+
+    def _count_change(self, conversation_id: str) -> None:
+        """Move the count the change stream reads a conversation's state changes by."""
+        self._activation_turns[conversation_id] = self._activation_turns.get(conversation_id, 0) + 1
 
     def _activity(self) -> dict[str, Activity]:
         """What this fake runs, per conversation, as the engine reads its own (§8:2).

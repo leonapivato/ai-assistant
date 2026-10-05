@@ -43,7 +43,7 @@ from ai_assistant.core.types import (
     TranscriptMessage,
     UserMessage,
 )
-from ai_assistant.orchestration.change_stream import CHANGE_STREAM_PAGE, Activity, ChangeStream
+from ai_assistant.orchestration.change_stream import Activity, ChangeStream
 from ai_assistant.orchestration.conversations import (
     check_devices_fit,
     check_message_fits,
@@ -59,7 +59,7 @@ if TYPE_CHECKING:
     from collections.abc import AsyncIterator, Awaitable, Sequence
     from pathlib import Path
 
-    from ai_assistant.core.types import CurrentState, DeviceConversation
+    from ai_assistant.core.types import CurrentState
 
 _PHONE: Final = ChatDevice(device_id="phone", access=DeviceAccess.READ_WRITE)
 _WATCH: Final = ChatDevice(device_id="watch", access=DeviceAccess.READ)
@@ -79,7 +79,6 @@ class _Engine:
     def __init__(self) -> None:
         self.activity: dict[str, Activity] = {}
         self.closing = False
-        self.forgotten = 0
         self.states: dict[str, ConversationState] = {}
         #: Where set, a state read waits on it, having set ``reading``.
         self.gate: asyncio.Event | None = None
@@ -112,7 +111,6 @@ def _stream(
         closing=lambda: held.closing,
         tracked=_tracked,
         max_payload_bytes=limit,
-        forgotten=lambda: held.forgotten,
         poll_seconds=poll,
     )
 
@@ -266,25 +264,6 @@ async def test_a_device_removed_while_its_state_is_read_is_not_sent_it() -> None
     ], "its removal alone"
 
 
-async def test_destroyed_episodes_send_every_read_conversations_state_again() -> None:
-    """ADR-0296 §4:9: a forget changes the state with nothing running, and it is sent."""
-    chat = FakeConversationStore()
-    shown = await _chat(chat, _PHONE)
-    elsewhere = await _chat(chat, _PEN)
-    engine = _Engine()
-    engine.states[shown] = ConversationState()
-    async with _Following(_stream(chat, engine).follow(PHONE, after=0)) as following:
-        await following.drain()
-        engine.forgotten += 1
-        sent: list[CurrentState] = []
-        while (chunk := await following.next(0.2)) is not None:
-            if isinstance(chunk, ChatStreamChunk) and chunk.state is not None:
-                sent.append(chunk.state)
-
-    assert [one.conversation_id for one in sent] == [shown], f"not {elsewhere}, unread"
-    assert sent[0].state == ConversationState()
-
-
 async def test_a_deletion_reaches_a_former_reader_and_nothing_before_it() -> None:
     """§7:5: a deletion reaches every device that ever read the conversation."""
     chat = FakeConversationStore()
@@ -430,41 +409,6 @@ async def test_closing_wakes_a_waiting_stream_to_its_end_and_waits_for_it() -> N
         await closing
 
     assert isinstance(last, ChatStreamEnd)
-
-
-class _ShiftingStore(FakeConversationStore):
-    """A store that deletes one conversation just after a listing's first page is read."""
-
-    def __init__(self) -> None:
-        super().__init__()
-        self.doomed: str | None = None
-
-    async def device_conversations(
-        self, device_id: str, *, limit: int = 50, offset: int = 0
-    ) -> list[DeviceConversation]:
-        page = await super().device_conversations(device_id, limit=limit, offset=offset)
-        if offset == 0 and self.doomed is not None:
-            doomed, self.doomed = self.doomed, None
-            await self.stamp_deleted(doomed)
-        return page
-
-
-async def test_a_refresh_finds_a_conversation_that_moved_pages_while_it_was_listed() -> None:
-    """Round 3's case: a deletion between two pages shifts one past the listing."""
-    chat = _ShiftingStore()
-    await chat.set_my_devices([_PHONE])
-    started = [(await chat.start()).id for _ in range(CHANGE_STREAM_PAGE + 1)]
-    engine = _Engine()
-    async with _Following(_stream(chat, engine).follow(PHONE, after=0)) as following:
-        await following.drain()
-        chat.doomed = started[-1]  # listed first, as the most recently active
-        engine.forgotten += 1
-        sent: set[str] = set()
-        while (chunk := await following.next(0.3)) is not None:
-            if isinstance(chunk, ChatStreamChunk) and chunk.state is not None:
-                sent.add(chunk.state.conversation_id)
-
-    assert sent == set(started[:-1]), "every conversation read, the deleted one aside"
 
 
 # --- through the engine -----------------------------------------------------

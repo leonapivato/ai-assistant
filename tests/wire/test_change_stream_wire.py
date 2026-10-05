@@ -506,6 +506,46 @@ async def test_a_peer_that_stops_reading_is_abandoned_at_the_dead_peer_timeout(
         await server.wait_closed()
 
 
+async def test_a_shutdown_cancelling_a_stalled_write_does_not_wait_on_it(
+    tmp_path: Path,
+) -> None:
+    """Round 4's case: the hub cancels a connection whose write is stalled on its peer.
+
+    Cancelled mid-write, the write is abandoned as a timed-out one is, so the hang-up
+    after it does not wait for the bytes the peer will never read.
+    """
+    path = tmp_path / "s.sock"
+    accepted: asyncio.Future[tuple[asyncio.StreamReader, asyncio.StreamWriter]] = (
+        asyncio.get_running_loop().create_future()
+    )
+
+    async def _accept(reader: asyncio.StreamReader, writer: asyncio.StreamWriter) -> None:
+        accepted.set_result((reader, writer))
+
+    server = await asyncio.start_unix_server(_accept, path=str(path))
+    reader, writer = await asyncio.open_unix_connection(str(path))
+    hub_reader, hub_writer = await accepted
+    served = asyncio.ensure_future(
+        serve_connection(_Flooding(), hub_reader, hub_writer, limits=_LIMITS)
+    )
+    try:
+        peer = _Peer(reader, writer)
+        await peer.handshake()
+        await peer.send(_follow("r-1"))
+        await asyncio.sleep(0.2)  # long enough for the writes to fill the socket
+        assert not served.done()
+        served.cancel()
+        done, _ = await asyncio.wait({served}, timeout=_PATIENT.total_seconds() / 4)
+        assert done, "the cancelled connection ended rather than waiting on its write"
+    finally:
+        with contextlib.suppress(Exception):
+            writer.close()
+        served.cancel()
+        await asyncio.gather(served, return_exceptions=True)
+        server.close()
+        await server.wait_closed()
+
+
 def test_the_two_figures_are_the_ones_the_adr_fixed() -> None:
     """§7:11: 15 seconds and 45, protocol constants both ends read."""
     assert timedelta(seconds=15) == env.CHANGE_STREAM_HEARTBEAT
