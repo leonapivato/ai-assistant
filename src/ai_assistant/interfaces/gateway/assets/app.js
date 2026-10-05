@@ -8872,11 +8872,19 @@ const chat = {
   devices: null,
   pending: [],
   replyTo: null,
-  // Whether an edit of "my devices", or of the conversation's devices, is out. One edit
-  // of a set at a time: each sends the whole set, so two built from the same set would
-  // each undo the other.
+  // Whether an edit of "my devices", or of the conversation's devices, is unsettled. One
+  // edit of a set at a time: each sends the whole set, so two built from the same set
+  // would each undo the other. **An edit settles when the stream has caught up past it**,
+  // not when its own answer lands: a read of the changes sent before the answer can still
+  // bring an older set back on screen, and a set an edit is then built from has to be
+  // the one the hub holds. So a landed edit holds its set's controls until a read sent
+  // after its answer has been applied (`confirmMine`, `confirmDevices`: the count of
+  // reads sent when the answer landed, or `null`); a failed one releases them at once.
   editingMine: false,
   editingConversation: false,
+  reads: 0,
+  confirmMine: null,
+  confirmDevices: null,
   // **The change stream is the authority on every set of devices** (ADR-0293 §5:10):
   // a change is applied always, in sequence order, and is never skipped. Anything else
   // that sets a subject — a snapshot read, or an edit's own answer — is applied only
@@ -8950,6 +8958,10 @@ function openChat() {
 function closeChat() {
   chat.open = false;
   chat.era += 1;
+  chat.editingMine = false;
+  chat.editingConversation = false;
+  chat.confirmMine = null;
+  chat.confirmDevices = null;
   stopFollowing(null, false);
   chat.cursor = null;
   chat.selected = null;
@@ -9175,6 +9187,8 @@ async function readChanges(tick) {
   }
   const era = sessionEra;
   const after = chat.cursor;
+  chat.reads += 1;
+  const sentAs = chat.reads;
   let body;
   try {
     body = await relay(half, "/chat/changes", { after: after }, "chat");
@@ -9208,6 +9222,7 @@ async function readChanges(tick) {
   }
   applyChanges(body.changes);
   chat.cursor = body.next_after;
+  settleEdits(sentAs);
   // The state is read with the changes, on every read while a conversation is open: it
   // changes without a change to the transcript — an activation started elsewhere, or a
   // restart (§8:3) — so it is followed as the transcript is (§8:1, "pushed when it
@@ -9280,6 +9295,22 @@ function applyChanges(changes) {
     void listChat(false);
   }
   return touched;
+}
+
+// A read sent after an edit's answer has been applied, so that edit is settled and the
+// set's controls are built again from what the stream says.
+function settleEdits(sentAs) {
+  if (chat.confirmMine !== null && sentAs > chat.confirmMine) {
+    chat.confirmMine = null;
+    chat.editingMine = false;
+    renderMyDevices();
+    renderConversationDevices();
+  }
+  if (chat.confirmDevices !== null && sentAs > chat.confirmDevices) {
+    chat.confirmDevices = null;
+    chat.editingConversation = false;
+    renderConversationDevices();
+  }
 }
 
 // ADR-0182 §7's two events, and nothing else, start following again of the page's own
@@ -9422,9 +9453,12 @@ async function selectChat(id) {
   chat.oldest = null;
   chat.state = null;
   chat.devices = null;
-  // Nothing read for the conversation left behind may set this one's.
+  // Nothing read for the conversation left behind may set this one's, and an edit of its
+  // devices still settling is not this one's to hold.
   chat.seen.devices += 1;
   chat.seen.state += 1;
+  chat.editingConversation = false;
+  chat.confirmDevices = null;
   chat.unread.delete(id);
   setReplyTo(null);
   sayChat(null);
@@ -10064,18 +10098,21 @@ async function setMyDevices(devices) {
       return;
     }
     // Only where nothing has set the set since the edit went out; the stream's change
-    // for this edit follows either way.
+    // for this edit follows either way, and settles it (`settleEdits`).
     if (settle("mine", before)) {
       chat.myDevices = devices;
     }
+    chat.confirmMine = chat.reads;
   } catch (_) {
     if (!sameSession(half, era)) {
       return;
     }
     fault(GATEWAY_GONE, "chat");
   } finally {
-    // The controls come back built from the set as it now stands, confirmed or not.
-    chat.editingMine = false;
+    // An edit that did not land releases its set at once; one that did waits to settle.
+    if (chat.confirmMine === null) {
+      chat.editingMine = false;
+    }
     renderMyDevices();
     renderConversationDevices();
   }
@@ -10145,6 +10182,9 @@ async function setConversationDevices(devices) {
     if (chat.selected === id && settle("devices", before)) {
       chat.devices = devices;
     }
+    if (chat.selected === id) {
+      chat.confirmDevices = chat.reads;
+    }
     return true;
   } catch (_) {
     if (!sameSession(half, era)) {
@@ -10153,7 +10193,9 @@ async function setConversationDevices(devices) {
     fault(GATEWAY_GONE, "chat");
     return false;
   } finally {
-    chat.editingConversation = false;
+    if (chat.confirmDevices === null) {
+      chat.editingConversation = false;
+    }
     renderConversationDevices();
   }
 }

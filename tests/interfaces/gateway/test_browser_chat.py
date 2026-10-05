@@ -716,3 +716,38 @@ async def test_an_event_does_not_resume_a_chat_whose_opening_read_failed(
         )
         await expect(drive.page.locator("#chat-follow-again")).to_be_visible()
         assert await drive.page.evaluate("() => !chat.following")
+
+
+async def test_a_landed_edit_holds_its_set_until_the_stream_has_caught_up_past_it(
+    gateway_browser: Browser, tmp_path: Path
+) -> None:
+    """A read sent before an edit landed may bring an older set back; nothing is built on it.
+
+    The set's controls stay held until a read sent after the edit's answer is applied, so
+    the next edit is built from the set the hub holds, and the hub ends with what the
+    owner chose.
+    """
+    async with driving(gateway_browser, tmp_path) as drive:
+        await drive.engine.set_my_devices(
+            [
+                ChatDevice(device_id="hub", access=DeviceAccess.READ_WRITE),
+                ChatDevice(device_id="nTABLET", access=DeviceAccess.READ),
+                ChatDevice(device_id="nPHONE", access=DeviceAccess.READ),
+            ]
+        )
+        await drive.page.click("#chat-button")
+        devices = drive.page.locator("#chat-my-devices li")
+        await expect(devices).to_have_count(3)
+
+        await devices.filter(has_text="nTABLET").locator("button", has_text="Remove").click()
+        await expect(devices).to_have_count(2)
+        phone = devices.filter(has_text="nPHONE").locator("button", has_text="Remove")
+        await drive.page.evaluate(_HOLDING, "/chat/changes")
+        await drive.page.wait_for_function("() => window.__held.reached", timeout=_IDLE_FOLLOWED)
+        await expect(phone).to_be_disabled()
+
+        await drive.page.evaluate("window.__held.release()")
+        await expect(phone).to_be_enabled()
+        await phone.click()
+        await expect(devices).to_have_count(1)
+        assert [one.device_id for one in await drive.engine.my_devices()] == ["hub"]
