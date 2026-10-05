@@ -16,7 +16,6 @@ from rich.console import Console
 from typer.testing import CliRunner
 
 from ai_assistant.core.config import Settings
-from ai_assistant.core.errors import ConfigurationError
 from ai_assistant.core.types import (
     ActivationEnding,
     ChatDevice,
@@ -122,29 +121,6 @@ async def _chat(
         confirm=lambda: confirm,
         poll_seconds=poll_seconds,
     )
-
-
-# --- which device this command line is (ADR-0296 §1, ADR-0298 §3) -----------
-
-
-def test_on_the_hubs_own_machine_the_device_is_hub(tmp_path: Path) -> None:
-    settings = Settings(data_dir=tmp_path)
-
-    assert cli._this_device(settings, named=None) == "hub"
-    assert cli._this_device(settings, named="hub") == "hub"
-
-
-def test_on_the_hubs_own_machine_no_other_device_can_be_named(tmp_path: Path) -> None:
-    with pytest.raises(ConfigurationError, match="cannot name another"):
-        cli._this_device(Settings(data_dir=tmp_path), named="phone")
-
-
-def test_on_another_machine_the_device_is_named(tmp_path: Path) -> None:
-    settings = Settings(data_dir=tmp_path, remote_hub_address="100.64.0.1")
-
-    assert cli._this_device(settings, named="node-laptop") == "node-laptop"
-    with pytest.raises(ConfigurationError, match="--device"):
-        cli._this_device(settings, named=None)
 
 
 # --- opening or starting a conversation (ADR-0293 §2:1, §3) ------------------

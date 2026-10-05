@@ -9486,8 +9486,8 @@ def test_the_chat_is_followed_on_a_clock_that_reads_and_retries_nothing() -> Non
         assert opener not in follow, opener
     # One read is out at a time, and what it asks is the changes after the cursor and the
     # state of the conversation on screen — nothing else.
-    assert "if (chat.reading) {" in functions["followChat"]
-    assert "if (chat.reading) {" in follow
+    assert "if (chat.reading === tick) {" in functions["followChat"]
+    assert "if (chat.reading === chat.ticks) {" in follow
     assert "relay(" not in functions["followChat"]
     reading = functions["readChanges"]
     assert reading.count("await relay(") == 1

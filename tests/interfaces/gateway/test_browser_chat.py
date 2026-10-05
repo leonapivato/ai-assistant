@@ -359,3 +359,110 @@ async def test_a_send_never_puts_a_second_changes_read_beside_one_in_flight(
             0, timeout=_FOLLOWED
         )
         assert await drive.page.evaluate("window.__held.most") == 1
+
+
+async def test_a_state_read_that_fails_on_opening_stops_the_following(
+    gateway_browser: Browser, tmp_path: Path
+) -> None:
+    """The read made on opening a conversation is not tried again by the following."""
+    async with driving(gateway_browser, tmp_path) as drive:
+        await drive.engine.set_my_devices(
+            [ChatDevice(device_id="hub", access=DeviceAccess.READ_WRITE)]
+        )
+        await drive.engine.start_conversation()
+        reads: list[str] = []
+
+        async def failing(conversation_id: str) -> Any:
+            reads.append(conversation_id)
+            raise ConversationStoreError("the index is unreadable")
+
+        drive.engine.conversation = failing  # type: ignore[method-assign]
+        await drive.page.click("#chat-button")
+        await expect(drive.page.locator("#chat-follow")).to_contain_text("Following this chat")
+        await drive.page.locator("#chat-conversations button", has_text="Open").click()
+
+        await expect(drive.page.locator("#chat-follow")).to_contain_text("Stopped following")
+        stopped_at = len(reads)
+        await drive.page.wait_for_timeout(5_000)
+        assert len(reads) == stopped_at == 1
+
+
+async def test_following_again_reads_the_state_whose_read_failed(
+    gateway_browser: Browser, tmp_path: Path
+) -> None:
+    """The owner's recovery reads the state again even when no change has come since."""
+    async with driving(gateway_browser, tmp_path) as drive:
+        conversation = await _open(drive)
+        held = drive.engine.conversation
+
+        async def failing(conversation_id: str) -> Any:
+            raise ConversationStoreError("the index is unreadable")
+
+        drive.engine.conversation = failing  # type: ignore[method-assign]
+        # Another device writes, so the following reads the state and that read fails.
+        await drive.engine.chat.append_message(
+            conversation, NewMessage(author=MessageAuthor.ASSISTANT, text="A notice.")
+        )
+        await expect(drive.page.locator("#chat-follow")).to_contain_text(
+            "Stopped following", timeout=_IDLE_FOLLOWED
+        )
+
+        async def working(conversation_id: str) -> Any:
+            digest = await held(conversation_id)
+            assert digest is not None
+            return digest.model_copy(update={"state": ConversationState(working=True)})
+
+        drive.engine.conversation = working  # type: ignore[method-assign]
+        await drive.page.click("#chat-follow-again")
+        await expect(drive.page.locator("#chat-state")).to_contain_text("working on this")
+
+
+async def test_a_new_session_follows_though_the_old_ones_read_was_still_out(
+    gateway_browser: Browser, tmp_path: Path
+) -> None:
+    """A read left over from an ended session does not stand in for the new one's."""
+    async with driving(gateway_browser, tmp_path) as drive:
+        await _open(drive)
+        await drive.page.evaluate(_HOLDING, "/chat/changes")
+        await drive.page.wait_for_function("() => window.__held.reached", timeout=_IDLE_FOLLOWED)
+        drive.expire_sessions()
+        await drive.page.click("#chat-start")
+        await drive.page.wait_for_selector("#bootstrap:not([hidden])")
+        await drive.admit()
+        await expect(drive.page.locator("#chat-follow")).to_contain_text("Following this chat")
+
+        await drive.page.evaluate("window.__held.release()")
+        await drive.page.wait_for_timeout(500)
+        assert await drive.page.evaluate(
+            "() => chat.following && (chat.timer !== null || chat.reading === chat.ticks)"
+        )
+
+
+async def test_one_edit_of_a_device_set_is_out_at_a_time(
+    gateway_browser: Browser, tmp_path: Path
+) -> None:
+    """Two removals built from one set would undo each other, so the second waits."""
+    async with driving(gateway_browser, tmp_path) as drive:
+        await drive.engine.set_my_devices(
+            [
+                ChatDevice(device_id="hub", access=DeviceAccess.READ_WRITE),
+                ChatDevice(device_id="nTABLET", access=DeviceAccess.READ),
+                ChatDevice(device_id="nPHONE", access=DeviceAccess.READ),
+            ]
+        )
+        await drive.page.click("#chat-button")
+        devices = drive.page.locator("#chat-my-devices li")
+        await expect(devices).to_have_count(3)
+        await drive.page.evaluate(_HOLDING, "/chat/devices/set")
+
+        await devices.filter(has_text="nTABLET").locator("button", has_text="Remove").click()
+        await drive.page.wait_for_function("() => window.__held.reached")
+        await expect(
+            devices.filter(has_text="nPHONE").locator("button", has_text="Remove")
+        ).to_be_disabled()
+
+        await drive.page.evaluate("window.__held.release()")
+        await expect(devices).to_have_count(2)
+        await devices.filter(has_text="nPHONE").locator("button", has_text="Remove").click()
+        await expect(devices).to_have_count(1)
+        assert [one.device_id for one in await drive.engine.my_devices()] == ["hub"]
