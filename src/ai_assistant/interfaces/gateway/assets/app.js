@@ -8800,6 +8800,21 @@ const CHAT_ENDINGS = {
   stopped: "What you last asked here was stopped.",
 };
 
+// What a stop found (ADR-0297 §5), in words: only what each answer means. "Stopped"
+// never says the work halted at once — what it was in the middle of finishes first
+// (ADR-0297 §4) and anything already sent is not called back (ADR-0295 §2) — and the
+// two answers that wrote nothing say so (§5:5, §5:6).
+const CHAT_STOPPING = "Stopping…";
+const CHAT_STOP_ANSWERS = {
+  stopped:
+    "Stopped. Nothing new starts in this, and nothing more is written here for it. " +
+    "What it was in the middle of finishes first, and anything it already sent is not " +
+    "called back.",
+  already_ended: "That had already ended, so nothing was stopped.",
+  no_such_activation: "The assistant holds nothing that says this ran, so nothing was stopped.",
+};
+const CHAT_STOP_UNKNOWN = "The stop was answered in a way this page cannot put into words.";
+
 // A device's access, as a conversation's end (ADR-0293 §3:5).
 const CHAT_ACCESS = [
   { value: "read_write", label: "Reads and writes" },
@@ -8876,6 +8891,9 @@ const chat = {
   resolveAgain: false,
   oldest: null,
   state: null,
+  // The stop this page sent for the activation the state names, or `null`: the id it
+  // named, whether its request is out, and the answer once read (`renderChatStop`).
+  stop: null,
   devices: null,
   pending: [],
   replyTo: null,
@@ -9439,6 +9457,7 @@ async function selectChat(id) {
   chat.unfound = new Set();
   chat.oldest = null;
   chat.state = null;
+  chat.stop = null;
   chat.devices = null;
   // Nothing read for the conversation left behind may set this one's.
   chat.seen.devices += 1;
@@ -9476,6 +9495,7 @@ function chatGone(said) {
   chat.referenced = new Map();
   chat.unfound = new Set();
   chat.state = null;
+  chat.stop = null;
   chat.devices = null;
   setReplyTo(null);
   rememberChat();
@@ -9690,6 +9710,89 @@ function renderChatState() {
   }
   slot.textContent = said;
   slot.hidden = said === "";
+  renderChatStop();
+}
+
+// The activation the state says is running, where it names one; `null` otherwise —
+// nothing running, or running with no id, which cannot be stopped (ADR-0297 §5's
+// residual of a failed id factory) and is offered no control.
+function runningActivation() {
+  if (chat.state === null || !chat.state.working) {
+    return null;
+  }
+  const id = chat.state.activation_id;
+  return typeof id === "string" && id !== "" ? id : null;
+}
+
+// The control and what the stop answered. **The answer is about one activation**, and is
+// shown while the state still names that one: once it ends, the state's own ending says
+// how (`CHAT_ENDINGS.stopped` for a stop that landed), and a later activation starts with
+// no answer beside it. After "stopped" the control is withdrawn, the stop having landed;
+// after either answer that wrote nothing it stays, since the state still says working.
+function renderChatStop() {
+  const running = runningActivation();
+  if (chat.stop !== null && chat.stop.id !== running) {
+    chat.stop = null;
+  }
+  const stop = chat.stop;
+  const landed = stop !== null && stop.answer === "stopped";
+  el("chat-stop-row").hidden = running === null || landed;
+  el("chat-stop").disabled = stop !== null && stop.sending;
+  let said = "";
+  if (stop !== null) {
+    if (stop.sending) {
+      said = CHAT_STOPPING;
+    } else if (Object.prototype.hasOwnProperty.call(CHAT_STOP_ANSWERS, stop.answer)) {
+      said = CHAT_STOP_ANSWERS[stop.answer];
+    } else {
+      said = CHAT_STOP_UNKNOWN;
+    }
+  }
+  const slot = el("chat-stop-said");
+  slot.textContent = said;
+  slot.hidden = said === "";
+}
+
+// The owner pressing **Stop**: one request naming the activation the state named, and
+// its answer said beside the control (ADR-0297 §5). Nothing is decided here — whether it
+// was running, had ended or was never known is the hub's answer — and nothing is retried:
+// a refusal is on screen where `relay` put it, and the control is offered again.
+async function stopActivation() {
+  const id = runningActivation();
+  if (id === null || (chat.stop !== null && chat.stop.sending)) {
+    return;
+  }
+  const half = headerHalf();
+  if (half === null) {
+    showBootstrap();
+    return;
+  }
+  const era = sessionEra;
+  const mine = { id: id, sending: true, answer: null };
+  chat.stop = mine;
+  renderChatStop();
+  try {
+    const body = await relay(half, "/activation/stop", { activation_id: id }, "chat");
+    if (!sameSession(half, era) || chat.stop !== mine) {
+      return;
+    }
+    if (body === null) {
+      chat.stop = null;
+    } else {
+      mine.sending = false;
+      mine.answer = body.stop;
+    }
+    renderChatStop();
+  } catch (_) {
+    if (!sameSession(half, era)) {
+      return;
+    }
+    if (chat.stop === mine) {
+      chat.stop = null;
+      renderChatStop();
+    }
+    fault(GATEWAY_GONE, "chat");
+  }
 }
 
 // --- the transcript -----------------------------------------------------------
@@ -14249,6 +14352,9 @@ el("chat-text").addEventListener("keydown", (event) => {
   }
 });
 el("chat-reply-cancel").addEventListener("click", () => setReplyTo(null));
+el("chat-stop").addEventListener("click", () => {
+  void stopActivation();
+});
 el("chat-delete").addEventListener("click", deleteChat);
 el("chat-forget").addEventListener("click", forgetChat);
 document.addEventListener("visibilitychange", chatVisibility);

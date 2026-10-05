@@ -391,6 +391,23 @@ _CHAT_DELETE_CONVERSATION_PATH: Final = "/chat/conversation/delete"
 _CHAT_TRANSCRIPT_PATH: Final = "/chat/transcript"
 _CHAT_CHANGES_PATH: Final = "/chat/changes"
 
+#: ADR-0297 §5's stop command, reached by the chat's stop control beside "working…"
+#: (ADR-0295 §1:2), which §6:4 lands last with ``assistant stop``.
+#:
+#: **ADR-0177 §1's closed enumeration is widened by this and ADR-0297's own
+#: ``- Status:`` line does not record it** (issue #2714; #2274 and #2394 are the same
+#: shape). ADR-0297 §6:4 rules that "the command line and the gateway's stop control
+#: land last", and its Consequences give the interfaces lane "the gateway's stop control
+#: beside 'working…', built on the current state's id" — so the route follows the
+#: governing decision, as :data:`_CANCEL_READ_PATH` and :data:`_AUTHORIZATIONS_PATH`
+#: did, and the reciprocal header record on ADR-0177 is ADR-0297's to make.
+#:
+#: **Not under** ``/chat/``: the act names an activation, not a conversation, and the
+#: answer says nothing about any conversation — a conversation's devices learn how it
+#: ended from its current state (ADR-0293 §8), which the page already reads. The verb
+#: comes last for :data:`_CANCEL_READ_PATH`'s reason.
+_STOP_ACTIVATION_PATH: Final = "/activation/stop"
+
 #: ADR-0177 §6's grant surface. **Five paths for five operations, and the two
 #: readings are two paths rather than one answered twice**: ADR-0139 §3's fourth
 #: clause forbids a view presenting a source's configuration state as part of a
@@ -563,6 +580,7 @@ _ASSISTANT_PATHS: Final[Mapping[tuple[str, str], str]] = {
     ("POST", _CHAT_DELETE_CONVERSATION_PATH): "delete_conversation",
     ("POST", _CHAT_TRANSCRIPT_PATH): "transcript",
     ("POST", _CHAT_CHANGES_PATH): "chat_changes",
+    ("POST", _STOP_ACTIVATION_PATH): "stop_activation",
     ("POST", _SOURCES_PATH): "grantable_sources",
     ("POST", _GRANT_PATH): "grant",
     ("POST", _REVOKE_PATH): "revoke",
@@ -1383,6 +1401,7 @@ class Gateway:
             _CHAT_DELETE_CONVERSATION_PATH: self._delete_conversation,
             _CHAT_TRANSCRIPT_PATH: self._transcript,
             _CHAT_CHANGES_PATH: self._chat_changes,
+            _STOP_ACTIVATION_PATH: self._stop_activation,
             _SOURCES_PATH: self._grantable_sources,
             _GRANT_PATH: self._grant,
             _REVOKE_PATH: self._revoke,
@@ -3012,6 +3031,34 @@ class Gateway:
         if page is None:
             return _fault(404, "Not Found", "no-such-conversation", close=False)
         return _rendered({"transcript": _transcript_view(page)})
+
+    async def _stop_activation(self, request: Request) -> Response:
+        """Stop one running activation, named by the browser (ADR-0297 §5, ADR-0295 §1).
+
+        **The id is the browser's own argument and is relayed whole**: the page names
+        the activation its conversation's current state named while it showed
+        "working…" (ADR-0297 §5:7), and nothing here reads a state to choose one, so
+        a page cannot be made to stop an activation it did not name. Whether the id
+        names a running activation, an ended one or nothing the hub knows is the hub's
+        answer (§5:4-§5:6), relayed as its own value; none of the three is a fault.
+
+        **No device role is checked here** (§5:7): which devices may send a command
+        is decided where every command's sender is checked, not in an adapter.
+
+        Args:
+            request: The admitted request, carrying ``activation_id``.
+
+        Returns:
+            Which of :class:`~ai_assistant.core.types.ActivationStop`'s three answers
+            the stop reached, as its own value.
+        """
+        stopped = await self._relayed(
+            partial(
+                self._engine.stop_activation,
+                _required_string(_payload(request), "activation_id"),
+            )
+        )
+        return _rendered({"stop": stopped.value})
 
     async def _chat_changes(self, request: Request) -> Response:
         """Read every change to the chat space after the browser's cursor (§5:11).
