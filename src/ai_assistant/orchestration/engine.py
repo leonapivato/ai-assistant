@@ -2720,21 +2720,83 @@ def _stopped_failure(
 
     ADR-0297 §4: a turn call awaiting a stopped pass raises
     :class:`ActivationStoppedError` in place of what the pass would otherwise return
-    or raise; a stopped resume returns its outcome (:meth:`Engine.resume`), unless it
-    ended on a raise and has none to return. A cancellation still propagates as
-    itself, and a pass no stop reached is answered as it ended.
+    or raise. A resume is not a turn call: a stopped one returns its outcome wherever
+    its answer was recorded (:func:`_stopped_resumption`), and one that raised before
+    any answer was recorded raises as it would have (ADR-0235 §6:10, ADR-0275 §5:6),
+    which is what tells its caller the park still stands. A cancellation still
+    propagates as itself, and a pass no stop reached is answered as it ended.
     """
     if (
         state is None
         or not state.stopped
         or isinstance(failure, asyncio.CancelledError | ActivationStoppedError)
+        or isinstance(state.trigger, RecordedResumeTrigger)
     ):
         return failure
-    if failure is None and isinstance(state.trigger, RecordedResumeTrigger):
-        return None
     stopped = ActivationStoppedError(_STOPPED_MESSAGE)
     stopped.__cause__ = failure
     return stopped
+
+
+async def _kept_if_stopped(
+    work: Awaitable[TurnOutcome], established: Callable[[], TurnOutcome]
+) -> TurnOutcome:
+    """Await a resume's work after its answer; where it raises once stopped, keep what stood.
+
+    ADR-0297 §4 over ADR-0235 §6:10: a resume whose control activation was stopped
+    returns its outcome wherever its answer was recorded, so a raise from the work the
+    stop kept it from finishing is answered with ``established`` — the outcome of what
+    the resume did establish — rather than propagated. A resume no stop reached raises
+    as it always has, and a cancellation is not an ``Exception`` and propagates.
+    """
+    try:
+        return await work
+    except Exception:
+        if not _marked():
+            raise
+        return established()
+
+
+def _stopped_resumption(  # noqa: PLR0913 — one keyword per member a resume may have established
+    *,
+    turn: TurnResult | None = None,
+    step: StepOutcome | None = None,
+    routed: RoutedOperation | None = None,
+    recipient_grant: RecipientGrantOutcome | None = None,
+    outbound_statement: OutboundStatement | None = None,
+    satisfied: str | None = None,
+    drive_withheld: DriveWithheld | None = None,
+    read_answer: ReadAnswerOutcome | None = None,
+    conversation_id: str | None = None,
+) -> TurnOutcome:
+    """The outcome of a stopped resume that raised after its answer was recorded.
+
+    ADR-0297 §4: a resume whose control activation was stopped returns its outcome —
+    ``stopped``, no reply, never degraded, and every other member as the resume
+    established it — wherever its answer was recorded (ADR-0235 §6:10). What the stop
+    kept it from finishing — the comparison, the composing stage, the capture — is not
+    there, so the exchange is reported unrecorded.
+    """
+    state = active_state()
+    return TurnOutcome(
+        turn=turn,
+        step=step,
+        routed=routed,
+        conversation_id=(
+            conversation_id
+            if conversation_id is not None
+            else None
+            if state is None
+            else state.conversation_id
+        ),
+        capture_degraded=True,
+        recipient_grant=recipient_grant,
+        outbound_statement=outbound_statement,
+        satisfied_from_earlier=told_once(() if satisfied is None else (satisfied,)),
+        drive_withheld=drive_withheld,
+        read_answer=read_answer,
+        stopped=True,
+    )
 
 
 def _marked() -> bool:
@@ -14663,7 +14725,12 @@ class Engine:
         )
         if answered is not None:
             park, routed = answered
-            return await self._compose_and_capture_routed(park, routed)
+            # ADR-0297 §4: the answer was recorded and the operation performed, so a
+            # stopped resume returns what it established rather than a later raise.
+            return await _kept_if_stopped(
+                self._compose_and_capture_routed(park, routed),
+                lambda: _stopped_resumption(routed=routed, conversation_id=park.conversation_id),
+            )
         # ADR-0249 §12: the attempt leaves waiting inside the resolution, at the moment
         # the answer is recorded and the step claimed under it, and what comes back here
         # is the ruling it was recorded under rather than the moved row — the finishing
@@ -14704,17 +14771,33 @@ class Engine:
                 remember_recipients_until=remember_recipients_until,
             )
             parked_turn = resolution.parked.turn
-            composed = await self._resumed_compose(
-                lambda: self._compose(parked_turn, None, deliveries={}, outbound=withheld_outbound),
-                composes=parked_turn is not None,
-            )
-            return await self._capture_resumption(
-                resolution.parked,
-                None,
-                composed,
-                recipient_grant=recipient_grant,
-                outbound_statement=withheld_outbound,
-                drive_withheld=resolution.withheld,
+            withheld = resolution
+
+            async def answered_without_acting() -> TurnOutcome:
+                composed = await self._resumed_compose(
+                    lambda: self._compose(
+                        parked_turn, None, deliveries={}, outbound=withheld_outbound
+                    ),
+                    composes=parked_turn is not None,
+                )
+                return await self._capture_resumption(
+                    withheld.parked,
+                    None,
+                    composed,
+                    recipient_grant=recipient_grant,
+                    outbound_statement=withheld_outbound,
+                    drive_withheld=withheld.withheld,
+                )
+
+            # ADR-0297 §4, as on the path that drove: the answer was recorded.
+            return await _kept_if_stopped(
+                answered_without_acting(),
+                lambda: _stopped_resumption(
+                    turn=parked_turn,
+                    recipient_grant=recipient_grant,
+                    outbound_statement=withheld_outbound,
+                    drive_withheld=withheld.withheld,
+                ),
             )
         parked, step, establishing, allowed_by, egress, satisfied = resolution
         if parked is None:
@@ -14771,42 +14854,62 @@ class Engine:
         # The attempt is read here for the comparison; the commit reads it again, which
         # is what lets it record the facts a refused boundary write did not
         # (:meth:`_finished_attempt`).
-        verified = (
-            None if allowed_by is None else await self._compared(await self._attempt_of(step.state))
-        )
-        composed = await self._resumed_compose(
-            lambda: self._compose(
-                parked.turn,
-                step,
-                deliveries={},
-                outbound=outbound,
-                # ADR-0262 §6's two values, given to the stage exactly as they are on a
-                # turn's own two branches.
-                goal=_GoalPass(facts=self._pass_to_composing(verified, GoalFacts())),
-            ),
-            composes=parked.turn is not None,
-        )
-        # `resumed_from` is read above the resolution, so the ledger counts this pass's
-        # own work and not the interval the park spent waiting for the user (§5).
-        # ADR-0297 §4: a stopped resume composed no answer, or had the one it composed
-        # dropped, so the commit "once the answer exists" is not made — the attempt
-        # stands as the work already under way left it, and what the user does next
-        # decides it (ADR-0295 §4:1).
-        report = (
-            None
-            if _marked()
-            else await self._finished_attempt(
-                step, composed, since=resumed_from, allowed_by=allowed_by, verified=verified
+        resolved = parked
+
+        async def finish_resolved() -> TurnOutcome:
+            verified = (
+                None
+                if allowed_by is None
+                else await self._compared(await self._attempt_of(step.state))
             )
-        )
-        return await self._capture_resumption(
-            parked,
-            step,
-            composed,
-            recipient_grant=recipient_grant,
-            outbound_statement=outbound,
-            satisfied=satisfied,
-            attempt_report=report,
+            composed = await self._resumed_compose(
+                lambda: self._compose(
+                    parked.turn,
+                    step,
+                    deliveries={},
+                    outbound=outbound,
+                    # ADR-0262 §6's two values, given to the stage exactly as they are on a
+                    # turn's own two branches.
+                    goal=_GoalPass(facts=self._pass_to_composing(verified, GoalFacts())),
+                ),
+                composes=parked.turn is not None,
+            )
+            # `resumed_from` is read above the resolution, so the ledger counts this pass's
+            # own work and not the interval the park spent waiting for the user (§5).
+            # ADR-0297 §4: a stopped resume composed no answer, or had the one it composed
+            # dropped, so the commit "once the answer exists" is not made — the attempt
+            # stands as the work already under way left it, and what the user does next
+            # decides it (ADR-0295 §4:1).
+            report = (
+                None
+                if _marked()
+                else await self._finished_attempt(
+                    step, composed, since=resumed_from, allowed_by=allowed_by, verified=verified
+                )
+            )
+            return await self._capture_resumption(
+                parked,
+                step,
+                composed,
+                recipient_grant=recipient_grant,
+                outbound_statement=outbound,
+                satisfied=satisfied,
+                attempt_report=report,
+            )
+
+        # ADR-0297 §4: a resume whose control activation was stopped returns its outcome
+        # wherever its answer was recorded (ADR-0235 §6:10) — the step's outcome and the
+        # recipient-grant outcome as it established them — and a later raise of what the
+        # stop kept it from finishing does not discard them.
+        return await _kept_if_stopped(
+            finish_resolved(),
+            lambda: _stopped_resumption(
+                turn=resolved.turn,
+                step=step,
+                recipient_grant=recipient_grant,
+                outbound_statement=outbound,
+                satisfied=satisfied,
+            ),
         )
 
     async def _resume_read(
@@ -14967,115 +15070,133 @@ class Engine:
         # (ADR-0249 §11), **on the path that dispatches**". So it is stamped here,
         # below the early return every non-`DISPATCHED` answer takes, and never on an
         # answer that denied, expired or lost the race.
-        await self._engage_after_the_act(park.goal_id, conversation_id=conversation_id)
-        goal, plan = park.goal, park.plan
-        if goal is None or plan is None:  # pragma: no cover — an OPEN park carries both
-            msg = (
-                "a park answered from this engine carried no goal or plan, which its "
-                "own validator refuses on an open record (ADR-0244 §2)"
+        dispatched = park
+
+        async def run_dispatched() -> TurnOutcome:
+            await self._engage_after_the_act(dispatched.goal_id, conversation_id=conversation_id)
+            goal, plan = dispatched.goal, dispatched.plan
+            if goal is None or plan is None:  # pragma: no cover — an OPEN park carries both
+                msg = (
+                    "a park answered from this engine carried no goal or plan, which its "
+                    "own validator refuses on an open record (ADR-0244 §2)"
+                )
+                raise PlanningError(msg)
+            # **ADR-0248 §3's one fallback, and this is the only site in the system that
+            # may take it.** The parked turn's request is the park's own `utterance`; a
+            # park carries none only where it was written before that field existed, and
+            # every such park's `Goal.statement` was minted by `_goal_from` from the user's
+            # own stripped words. So the fallback reads the right bytes for every row it
+            # can ever see — including after the goal's meaning changes, because a park
+            # written under any later meaning always carries its own `utterance` — and it
+            # therefore needs no removal to stay correct.
+            #
+            # **No lane widens it**: not to a park that carries an `utterance`, not to a
+            # blank one, not to any other reader of §5's table, and not to any other site.
+            # It may be deleted only once `expires_at` has retired every park predating
+            # ADR-0248's deployment *and* something has decided what a resumed read
+            # composes when the pass has no request at all — `TurnResult.utterance` is
+            # required (§1), so deleting it before that leaves this path with no valid turn
+            # to build (§11).
+            utterance = goal.outcome if dispatched.utterance is None else dispatched.utterance
+            history = await self._conversations.history(dispatched.conversation_id)
+            # **ADR-0204 §2's evaluation, on this pass's own supply** (ADR-0244 §8's "the
+            # exchange is captured as a turn's exchange is captured"). A resume is a
+            # bounded-audience operation exactly as `converse` is, so it mints the same
+            # applier: the evaluation is made on every conversational operation and
+            # subtracted on none but a spoken one, and what its capture records is whether
+            # content ADR-0199 §3 withholds stood in *this* turn's warrant.
+            #
+            # **This pass's own value and not the parked turn's**, which is where a read
+            # resume differs from a step's. A step's resolution renders the *parked* turn's
+            # goal and plan from a pass that retrieves nothing, so ADR-0204 §2's fourth
+            # clause has that pass carry the parked turn's boolean; this pass retrieves a
+            # supply of its own and composes over it, so the value it records is the one it
+            # computed — and a hardcoded `False` here would state that nothing was withheld
+            # from a rendering that may have been assembled over material ADR-0199 §3 holds
+            # back.
+            supply = BoundedAudienceSupply(
+                speakable_attested_sources=self._speakable_attested_sources
             )
-            raise PlanningError(msg)
-        # **ADR-0248 §3's one fallback, and this is the only site in the system that
-        # may take it.** The parked turn's request is the park's own `utterance`; a
-        # park carries none only where it was written before that field existed, and
-        # every such park's `Goal.statement` was minted by `_goal_from` from the user's
-        # own stripped words. So the fallback reads the right bytes for every row it
-        # can ever see — including after the goal's meaning changes, because a park
-        # written under any later meaning always carries its own `utterance` — and it
-        # therefore needs no removal to stay correct.
-        #
-        # **No lane widens it**: not to a park that carries an `utterance`, not to a
-        # blank one, not to any other reader of §5's table, and not to any other site.
-        # It may be deleted only once `expires_at` has retired every park predating
-        # ADR-0248's deployment *and* something has decided what a resumed read
-        # composes when the pass has no request at all — `TurnResult.utterance` is
-        # required (§1), so deleting it before that leaves this path with no valid turn
-        # to build (§11).
-        utterance = goal.outcome if park.utterance is None else park.utterance
-        history = await self._conversations.history(park.conversation_id)
-        # **ADR-0204 §2's evaluation, on this pass's own supply** (ADR-0244 §8's "the
-        # exchange is captured as a turn's exchange is captured"). A resume is a
-        # bounded-audience operation exactly as `converse` is, so it mints the same
-        # applier: the evaluation is made on every conversational operation and
-        # subtracted on none but a spoken one, and what its capture records is whether
-        # content ADR-0199 §3 withholds stood in *this* turn's warrant.
-        #
-        # **This pass's own value and not the parked turn's**, which is where a read
-        # resume differs from a step's. A step's resolution renders the *parked* turn's
-        # goal and plan from a pass that retrieves nothing, so ADR-0204 §2's fourth
-        # clause has that pass carry the parked turn's boolean; this pass retrieves a
-        # supply of its own and composes over it, so the value it records is the one it
-        # computed — and a hardcoded `False` here would state that nothing was withheld
-        # from a rendering that may have been assembled over material ADR-0199 §3 holds
-        # back.
-        supply = BoundedAudienceSupply(speakable_attested_sources=self._speakable_attested_sources)
-        resumed = await self._loop.resumed_read(
-            goal,
-            plan,
-            # ADR-0248 §3: the **parked** pass's request, taken from the park above
-            # with its one fallback already applied. The loop is handed the value and
-            # takes no view of where it came from.
-            utterance=utterance,
-            records=answered.records,
-            # ADR-0238 §8's two folds are this pass's, over this conversation: a resumed
-            # turn admits records to it exactly as any other does, and a pass that
-            # folded neither would leave the flag standing over a supply that had just
-            # carried external content.
-            conversation_id=park.conversation_id,
-            history=history.records,
-            history_degraded=history.degraded,
-            narrow=supply,
-        )
-        turn = resumed.turn
-        # ADR-0264 §6's assembly on ADR-0244 §7's resume, which is the shape §6 names
-        # in terms: "the first two are two different sites and the engine is where they
-        # are brought together". The **contact** is the dispatch's, computed at the site
-        # that performed the call; the **count** is the resume's own admission, which
-        # applied ADR-0226 §7's deduplication and §6's budget. Neither is recomputed
-        # here, and nothing is inferred at this point. This pass drives no step, so the
-        # egress contribution is `None`, and it composes.
-        outbound = outbound_statement(
-            search=answered.contact,
-            egress=None,
-            records=resumed.admitted,
-            composes=True,
-        )
-        composed = await self._resumed_compose(
-            lambda: self._compose(
-                turn,
-                None,
-                deliveries=_paired_deliveries(history.deliveries, turn.memories),
-                # ADR-0244 §8: "where the dispatched read yielded no records … the turn
-                # still composes, and ADR-0242 §6's carrier gives the composing stage its
-                # member exactly as it does on any other turn". The member is the one
-                # the dispatch computed, by value and never a second computation.
+            resumed = await self._loop.resumed_read(
+                goal,
+                plan,
+                # ADR-0248 §3: the **parked** pass's request, taken from the park above
+                # with its one fallback already applied. The loop is handed the value and
+                # takes no view of where it came from.
+                utterance=utterance,
+                records=answered.records,
+                # ADR-0238 §8's two folds are this pass's, over this conversation: a resumed
+                # turn admits records to it exactly as any other does, and a pass that
+                # folded neither would leave the flag standing over a supply that had just
+                # carried external content.
+                conversation_id=dispatched.conversation_id,
+                history=history.records,
+                history_degraded=history.degraded,
+                narrow=supply,
+            )
+            turn = resumed.turn
+            # ADR-0264 §6's assembly on ADR-0244 §7's resume, which is the shape §6 names
+            # in terms: "the first two are two different sites and the engine is where they
+            # are brought together". The **contact** is the dispatch's, computed at the site
+            # that performed the call; the **count** is the resume's own admission, which
+            # applied ADR-0226 §7's deduplication and §6's budget. Neither is recomputed
+            # here, and nothing is inferred at this point. This pass drives no step, so the
+            # egress contribution is `None`, and it composes.
+            outbound = outbound_statement(
+                search=answered.contact,
+                egress=None,
+                records=resumed.admitted,
+                composes=True,
+            )
+            composed = await self._resumed_compose(
+                lambda: self._compose(
+                    turn,
+                    None,
+                    deliveries=_paired_deliveries(history.deliveries, turn.memories),
+                    # ADR-0244 §8: "where the dispatched read yielded no records … the turn
+                    # still composes, and ADR-0242 §6's carrier gives the composing stage its
+                    # member exactly as it does on any other turn". The member is the one
+                    # the dispatch computed, by value and never a second computation.
+                    search_not_serviced=answered.not_serviced,
+                    # ADR-0264 §6's fragment on this pass exactly as on any other unrouted
+                    # one: it composes, so it is given one.
+                    outbound=outbound,
+                )
+            )
+            return await self._capture(
+                dispatched.conversation_id,
+                turn=turn,
+                step=None,
+                composed=composed,
+                # ADR-0204 §2's evaluation, read off the one applier this pass minted and
+                # never recomputed: the value the capture records is the one the filter
+                # returned over the supply the reply was composed from.
+                supplied_withheld=supply.withheld,
+                modality=Modality.TEXT,
+                # ADR-0223 §1: computed over the resumed turn's **final** supply, which
+                # carries the minted records — this pass's own disjunction and not the
+                # parked turn's.
+                derived_from_external=SelectionOrigin.over(
+                    turn.memories
+                ).planned_with_external_content,
+                recipient_grant=recipient_grant,
+                # ADR-0242 §9's field, on the resumed turn exactly as on any other: the
+                # member the dispatch computed, by value.
                 search_not_serviced=answered.not_serviced,
-                # ADR-0264 §6's fragment on this pass exactly as on any other unrouted
-                # one: it composes, so it is given one.
-                outbound=outbound,
+                # ADR-0264 §7's field, on the same terms and from the assembly above.
+                outbound_statement=outbound,
+                read_answer=answered.outcome,
             )
-        )
-        return await self._capture(
-            park.conversation_id,
-            turn=turn,
-            step=None,
-            composed=composed,
-            # ADR-0204 §2's evaluation, read off the one applier this pass minted and
-            # never recomputed: the value the capture records is the one the filter
-            # returned over the supply the reply was composed from.
-            supplied_withheld=supply.withheld,
-            modality=Modality.TEXT,
-            # ADR-0223 §1: computed over the resumed turn's **final** supply, which
-            # carries the minted records — this pass's own disjunction and not the
-            # parked turn's.
-            derived_from_external=SelectionOrigin.over(turn.memories).planned_with_external_content,
-            recipient_grant=recipient_grant,
-            # ADR-0242 §9's field, on the resumed turn exactly as on any other: the
-            # member the dispatch computed, by value.
-            search_not_serviced=answered.not_serviced,
-            # ADR-0264 §7's field, on the same terms and from the assembly above.
-            outbound_statement=outbound,
-            read_answer=answered.outcome,
+
+        # ADR-0297 §4: the answer was recorded and the read dispatched, so a resume whose
+        # control activation was stopped returns what it established.
+        return await _kept_if_stopped(
+            run_dispatched(),
+            lambda: _stopped_resumption(
+                conversation_id=conversation_id,
+                recipient_grant=recipient_grant,
+                read_answer=answered.outcome,
+            ),
         )
 
     async def _establish_recipients(

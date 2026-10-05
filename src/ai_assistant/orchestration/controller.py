@@ -503,8 +503,8 @@ async def run_recorded[T](  # noqa: PLR0913 — where to record, which stage and
         stopped: Whether the activation's stop mark is set (ADR-0297 §4). A resume
             that raised once its mark is set ends with the stop's end entry rather
             than ``stage_failed`` or ``stage_timed_out``, and the error is still
-            re-raised: the resume has no outcome to return, and its caller reports
-            the stop in its place.
+            re-raised: what the resume does about it — return what it established
+            where its answer was recorded, or raise — is its caller's.
 
     Returns:
         What the body returned.

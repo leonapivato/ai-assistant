@@ -42,20 +42,25 @@ from ai_assistant.core.types import (
     ActivationStop,
     AttemptPhase,
     AttemptState,
+    ChannelInput,
     ControllerRule,
     ControllerStage,
     Disposition,
     EpisodicMemory,
     MessageAuthor,
+    NewConversation,
     PermissionOutcome,
     ProcessingReason,
     ProcessingStatus,
     StageOutcome,
     StepStatus,
     StepTransition,
+    TextChannelPayload,
+    WholeTextReply,
 )
-from ai_assistant.orchestration.activation_state import active_state
+from ai_assistant.orchestration.activation_state import active_state, admit_channel, admit_resume
 from ai_assistant.orchestration.conversations import activation_ending
+from ai_assistant.orchestration.engine import _stopped_failure
 from ai_assistant.testing import (
     FakeMemoryStore,
     FakePlanStore,
@@ -65,7 +70,7 @@ from ai_assistant.testing import (
 if TYPE_CHECKING:
     from collections.abc import Sequence
 
-    from ai_assistant.core.types import Conversation, ExecutionState, MemoryWrite
+    from ai_assistant.core.types import ActionPlan, Conversation, ExecutionState, MemoryWrite
 
 _ASKED: Final = "send the note"
 
@@ -92,6 +97,16 @@ class _Stopping(FakePlanStore):
         self.answers: list[ActivationStop] = []
         self.named: list[str | None] = []
         self.claims = 0
+        #: Once a claim has landed the plan can no longer be read, so the comparison a
+        #: resume runs after its step was driven raises.
+        self.unreadable_after_claim = False
+        self.landed = False
+
+    async def get_plan(self, plan_id: str) -> ActionPlan | None:
+        if self.unreadable_after_claim and self.landed:
+            msg = "the plan cannot be read"
+            raise PlanningError(msg)
+        return await super().get_plan(plan_id)
 
     async def commit_transition(self, transition: StepTransition) -> ExecutionState:
         claiming = transition.to_status is StepStatus.RUNNING
@@ -102,6 +117,8 @@ class _Stopping(FakePlanStore):
             self.before = False
             self.answers.append(await self.engine.stop_activation(transition.activation_id))
         landed = await super().commit_transition(transition)
+        if claiming:
+            self.landed = True
         if claiming and self.after and transition.activation_id is not None:
             self.after = False
             self.answers.append(await self.engine.stop_activation(transition.activation_id))
@@ -207,32 +224,42 @@ async def test_a_stop_during_the_drive_refuses_the_claim_and_the_pass_ends_stopp
 async def test_an_effect_claimed_before_the_stop_completes_and_records_its_outcome() -> None:
     """§2:10, §4:10-§4:11: the claim landed first, so the effect runs to its own end.
 
-    **And it outlasts the pass's budget.** The planner spends most of the budget, so the
-    drive's call starts close to the pass's deadline and finishes past it, under its own
-    per-attempt budget (ADR-0029 §4): a stop neither shortens nor lengthens any deadline,
-    and what the effect owes — its disposal, the attempt's ``EXECUTE`` stamp — is written
-    before the stage returns.
+    **And it outlasts the pass's budget.** The planner spends the whole of it — the pass's
+    deadline is moved to the instant the plan is returned, which is a controlled stand-in
+    for a slow planner rather than a race against the clock — so the drive's claim, the
+    stop and the call all come after the pass's deadline. The call still runs to its own
+    end under its own per-attempt budget (ADR-0029 §4): a stop neither shortens nor
+    lengthens any deadline, and what the effect owes — its disposal, the attempt's
+    ``EXECUTE`` stamp — is written before the stage returns.
     """
-    budget = 0.6
+    passes: list[Any] = []
 
-    class _Slow(OneStepPlanner):
+    class _SpendsTheBudget(OneStepPlanner):
         async def plan(self, *args: Any, **kwargs: Any) -> Any:
-            await asyncio.sleep(budget * 0.6)
-            return await super().plan(*args, **kwargs)
+            planned = await super().plan(*args, **kwargs)
+            state = active_state()
+            assert state is not None
+            working = state.working
+            working.deadline = asyncio.get_running_loop().time()  # type: ignore[attr-defined]  # the engine's own pass, typed object on the state
+            passes.append(working)
+            return planned
 
     plans = _Stopping(after=True)
-    tool_handler = _Counting(takes=budget * 0.6)
-    harness = Harness(planner=_Slow(), plans=plans, tools=(tool(),), tool_handler=tool_handler)
+    tool_handler = _Counting()
+    harness = Harness(
+        planner=_SpendsTheBudget(), plans=plans, tools=(tool(),), tool_handler=tool_handler
+    )
     plans.engine = harness.engine
-    deadline = asyncio.get_running_loop().time() + budget
 
     with pytest.raises(ActivationStoppedError):
-        await harness.engine.converse(_ASKED, timeout=timedelta(seconds=budget))
+        await harness.engine.converse(_ASKED, timeout=PATIENT)
 
+    (working,) = passes
+    deadline = working.deadline
     assert plans.answers == [ActivationStop.STOPPED]
     assert tool_handler.calls == 1
     assert tool_handler.finished_at is not None
-    assert tool_handler.finished_at > deadline
+    assert tool_handler.finished_at >= deadline
     assert await _step_status(plans) is StepStatus.SUCCEEDED
     export = await plans.export()
     (attempt,) = export.attempts
@@ -566,3 +593,77 @@ async def test_what_waited_behind_a_stopped_activation_is_then_taken_in() -> Non
     assert taken[1] == running
     assert taken[2] == second.id.removeprefix("activation:")
     assert await harness.conversation_store.untaken_messages(conversation) == ()
+
+
+async def test_a_stopped_resume_keeps_what_it_established_when_later_work_raises() -> None:
+    """§4:15 over ADR-0235 §6:10: the answer was recorded, the step executed and the grant
+    established, so a raise from the work the stop kept the resume from finishing — here
+    the comparison's plan read — does not discard them: the resume returns them, stopped.
+    """
+    plans = _Stopping()
+    harness, tool_handler = _resuming(plans)
+    parked = await harness.engine.converse("send it to the address in the invite", timeout=PATIENT)
+    assert parked.step is not None
+    assert parked.step.confirmation is not None
+    plans.after = True
+    plans.unreadable_after_claim = True
+
+    resumed = await harness.engine.resume(
+        parked.step.confirmation.token,
+        approved=True,
+        timeout=PATIENT,
+        remember_recipients_until=_UNTIL,
+    )
+
+    assert plans.answers == [ActivationStop.STOPPED]
+    assert tool_handler.calls == 1
+    assert resumed.stopped is True
+    assert resumed.reply is None
+    assert resumed.step is not None
+    assert resumed.step.disposition is Disposition.EXECUTED
+    assert resumed.recipient_grant is not None
+    assert resumed.recipient_grant.established is not None
+    assert resumed.capture_degraded is True
+
+
+async def test_a_resume_no_stop_reached_still_raises_what_its_later_work_raised() -> None:
+    """The keep is the stop's alone: an unstopped resume raises as it always has."""
+    plans = _Stopping()
+    harness, _ = _resuming(plans)
+    parked = await harness.engine.converse("send it to the address in the invite", timeout=PATIENT)
+    assert parked.step is not None
+    assert parked.step.confirmation is not None
+    plans.unreadable_after_claim = True
+
+    with pytest.raises(PlanningError, match="cannot be read"):
+        await harness.engine.resume(parked.step.confirmation.token, approved=True, timeout=PATIENT)
+
+
+def test_only_a_turn_call_is_answered_with_the_stop_and_a_resume_keeps_its_raise() -> None:
+    """§4:9 is stated over a turn call; a resume's own raise stays intact (ADR-0275 §5:6).
+
+    A resume raising before any answer was recorded raises what it raised — which is what
+    tells its caller the park still stands — whether or not its activation was stopped.
+    """
+    channel = admit_channel(
+        ChannelInput(target=NewConversation(), payload=TextChannelPayload(text="hi")),
+        WholeTextReply(),
+        clock=lambda: AT,
+        id_factory=lambda: "0b8f8f0e-2a5c-4c55-9a6c-6a2c1f0b0d11",
+    )
+    control = admit_resume(
+        approved=True,
+        remember_recipients_until=None,
+        clock=lambda: AT,
+        id_factory=lambda: "5d1c7a3e-9b0f-4f6a-8c2d-1e3f5a7b9c0d",
+    )
+    raised = PlanningError("refused before any answer")
+    cancelled = asyncio.CancelledError()
+    for state in (channel, control):
+        assert _stopped_failure(state, raised) is raised
+        assert state.stop()
+        assert _stopped_failure(state, cancelled) is cancelled
+    assert isinstance(_stopped_failure(channel, raised), ActivationStoppedError)
+    assert isinstance(_stopped_failure(channel, None), ActivationStoppedError)
+    assert _stopped_failure(control, raised) is raised
+    assert _stopped_failure(control, None) is None

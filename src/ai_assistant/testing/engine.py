@@ -2046,6 +2046,9 @@ class FakeAssistantEngine:
                     at=_AT,
                 )
                 activation.identify(self.activation_id_factory)
+                # ADR-0297 §3:1: a control activation is running from its admission to
+                # its finalization, as a channel one is, so a stop can reach it.
+                self._running_activations.append(activation)
 
         result: TurnOutcome | None = None
         failure: BaseException | None = None
@@ -2055,16 +2058,25 @@ class FakeAssistantEngine:
             failure = exc
         if activation is not None:
             admitted = activation
+            if result is not None and admitted.stopped:
+                # ADR-0297 §4: a stopped resume composes nothing and carries no reply,
+                # every other member as it established them.
+                result = result.model_copy(
+                    update={"stopped": True, "reply": None, "reply_degraded": False}
+                )
             if result is not None:
                 admitted.observe(result)
-            report = await admitted.finish(
-                memory=self.episode_memory,
-                conversations=self.conversations_held,
-                allocate=lambda conversation: self._allocate_episode(conversation, admitted),
-                max_bytes=self._max_payload_bytes,
-                failure=failure,
-                check_output=lambda: self._checked(result, "resume"),
-            )
+            try:
+                report = await admitted.finish(
+                    memory=self.episode_memory,
+                    conversations=self.conversations_held,
+                    allocate=lambda conversation: self._allocate_episode(conversation, admitted),
+                    max_bytes=self._max_payload_bytes,
+                    failure=failure,
+                    check_output=lambda: self._checked(result, "resume"),
+                )
+            finally:
+                self._ended(admitted)
             self._commit_episode(admitted, report)
             if result is not None:
                 result = result.model_copy(
@@ -2072,6 +2084,8 @@ class FakeAssistantEngine:
                         "capture_degraded": result.capture_degraded or report.state != "recorded"
                     }
                 )
+        # A resume is not a turn call: one that raised raises as it would have, stopped or
+        # not (ADR-0297 §4, ADR-0275 §5:6), and a stopped one that returned returns.
         if failure is not None:
             raise failure
         assert result is not None  # noqa: S101 — a successful control resolution
@@ -2811,10 +2825,11 @@ class FakeAssistantEngine:
         The fake holds its running channel activations in process, as the engine
         does, and a stop sets the mark of one whose end entry is not appended, in one
         synchronous step with that test; the pass then ends with the stop's end entry
-        and a turn call awaiting it raises ``ActivationStoppedError``. **It holds no
-        plan store**, so no stop record is written: no claim this fake makes could be
-        refused on one. A control activation (``resume``) is not among the running
-        ones here, and is answered by its episode as one that ended. Where none runs,
+        and a turn call awaiting it raises ``ActivationStoppedError``; a control
+        activation (``resume``) is running from its admission to its finalization too,
+        and a stopped one returns its outcome with ``stopped`` set and no reply. **It
+        holds no plan store**, so no stop record is written: no claim this fake makes
+        could be refused on one. Where none runs,
         an episode at ``activation:<activation_id>`` says it ran and ended, and no
         episode there says nothing ran that this fake knows of; neither writes
         anything.
