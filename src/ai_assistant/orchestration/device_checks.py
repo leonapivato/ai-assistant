@@ -29,9 +29,9 @@ device refused ``chat_changes`` with ``NO_ROLE`` drop every conversation it hold
 device that reads any conversation is never told it holds no role. A device that is
 only a writing end of conversations outside "my devices" holds the user's end too
 (ADR-0296 §2), and the conversation store lists a device's conversations by reading
-alone (``device_conversations``), so that last case is found by walking the
-conversations' devices — only for a device that holds no other role, which is the
-path a refusal takes.
+alone (``device_conversations``), so that last case is found by replaying the set
+changes that reach the device — only for a device that holds no other role, which is
+the path a refusal takes.
 
 **Not here.** The command role, the role of host of spokes and the known-device check
 are the wire server's (:mod:`ai_assistant.wire.routes`). ``forget_conversation``'s
@@ -46,7 +46,13 @@ from __future__ import annotations
 from typing import TYPE_CHECKING, Final, NoReturn
 
 from ai_assistant.core.errors import DeviceRefusal, DeviceRefusedError
-from ai_assistant.core.types import ChannelIdentity, ChatChanges, NewConversation
+from ai_assistant.core.types import (
+    ChannelIdentity,
+    ChatChanges,
+    ConversationStartedChange,
+    DevicesChangedChange,
+    NewConversation,
+)
 
 if TYPE_CHECKING:
     from collections.abc import Sequence
@@ -58,8 +64,8 @@ if TYPE_CHECKING:
 #: ``receive`` a legacy turn rather than spoke traffic (ADR-0298 §5's table).
 CONVERSATION_CHANNEL: Final = "conversation"
 
-#: How many conversations one page of :meth:`DeviceChecks._an_end_anywhere`'s walk reads.
-_WALK_PAGE: Final = 50
+#: How many changes one page of :meth:`DeviceChecks._replay` reads.
+_REPLAY_PAGE: Final = 100
 
 
 def _access(devices: Sequence[ChatDevice] | None, device_id: str) -> DeviceAccess | None:
@@ -232,7 +238,7 @@ class DeviceChecks:
 
         A roster role, or the user's end of conversations: in "my devices", or an end
         of a conversation the store holds, for reading or for writing. The cheap
-        reads come first; the walk for a writing end is the last resort.
+        reads come first; the replay for a writing end is the last resort.
         """
         if device.is_hub or device.roles:
             return True
@@ -245,18 +251,46 @@ class DeviceChecks:
     async def _an_end_anywhere(self, device_id: str) -> bool:
         """Whether ``device_id`` is an end of any conversation the store holds.
 
-        A walk over every conversation's devices, page by page, stopping at the first
-        that names the device: the store offers no listing of the conversations a
-        device writes in.
+        The store lists a device's conversations by reading alone, so a writing end
+        is found from the chat space's own sequence, which is stable where a listing
+        by activity is not: ``device_changes`` reaches a device with every change that
+        sets a set it is in before or after (ADR-0298 §7:4), so replaying them gives
+        the device's membership of each conversation as of the cursor. A conversation
+        still holding the device there is then read as it stands now: one deleted
+        since holds no ends, and one whose devices changed since sends the replay on
+        from the cursor, until no candidate has moved.
         """
-        offset = 0
-        while page := await self._conversations.recent(limit=_WALK_PAGE, offset=offset):
-            for one in page:
-                devices = await self._conversations.conversation_devices(one.id)
-                if _access(devices, device_id) is not None:
+        member: dict[str, bool] = {}
+        after = 0
+        while True:
+            after = await self._replay(device_id, member, after=after)
+            moved = False
+            for conversation_id in [one for one, held in member.items() if held]:
+                devices = await self._conversations.conversation_devices(conversation_id)
+                if devices is None:
+                    member[conversation_id] = False
+                elif _access(devices, device_id) is not None:
                     return True
-            offset += len(page)
-        return False
+                else:
+                    moved = True
+            if not moved:
+                return False
+
+    async def _replay(self, device_id: str, member: dict[str, bool], *, after: int) -> int:
+        """Apply every set change reaching the device after ``after``; the new cursor."""
+        while True:
+            page = await self._conversations.device_changes(
+                device_id, after=after, limit=_REPLAY_PAGE
+            )
+            for one in page.changes:
+                if (
+                    isinstance(one, (ConversationStartedChange, DevicesChangedChange))
+                    and one.conversation_id is not None
+                ):
+                    member[one.conversation_id] = _access(one.devices, device_id) is not None
+            if len(page.changes) < _REPLAY_PAGE or page.next_after <= after:
+                return max(after, page.next_after)
+            after = page.next_after
 
     async def _refuse(self, device: RequestingDevice, message: str) -> NoReturn:
         """Refuse a membership row, with the reason §6:2 gives this device."""

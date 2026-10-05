@@ -10249,8 +10249,12 @@ class Engine:
             The registered task. It is *not* awaited here, and it is not shielded —
             a caller that wants either does it itself.
         """
-        task: asyncio.Task[_T] = asyncio.ensure_future(
-            self._operation_traces.observing(seam, work, observe) if traced else work
+        # ADR-0298 §2:6: the task may outlive the request — a shielded one runs on
+        # after its caller is cancelled — so it starts with the requesting device
+        # unset. A check it runs was handed the device the façade read at the call.
+        task: asyncio.Task[_T] = without_requesting_device().run(
+            asyncio.ensure_future,
+            self._operation_traces.observing(seam, work, observe) if traced else work,
         )
         self._inflight.add(task)
         task.add_done_callback(self._inflight.discard)
@@ -10272,7 +10276,7 @@ class Engine:
         Returns:
             Whatever ``coro`` returned.
         """
-        task: asyncio.Task[_T] = asyncio.ensure_future(coro)
+        task: asyncio.Task[_T] = without_requesting_device().run(asyncio.ensure_future, coro)
         self._inflight.add(task)
         task.add_done_callback(self._inflight.discard)
         return await asyncio.shield(task)

@@ -48,6 +48,7 @@ from ai_assistant.orchestration.conversations import ConversationLifecycle
 from ai_assistant.orchestration.device_checks import DeviceChecks, device_page
 from ai_assistant.testing import (
     FakeConversationStore,
+    FakeFeedbackProcessor,
     FakeMemoryStore,
     FakeModelProvider,
     FakeNotificationOutbox,
@@ -57,7 +58,7 @@ from ai_assistant.testing import (
 if TYPE_CHECKING:
     from collections.abc import Awaitable, Callable, Sequence
 
-    from ai_assistant.core.types import Message
+    from ai_assistant.core.types import FeedbackEvent, MemoryUpdateProposal, Message
     from ai_assistant.orchestration.engine import Engine
 
 _PHONE: Final = ChatDevice(device_id="phone", access=DeviceAccess.READ_WRITE)
@@ -456,3 +457,55 @@ async def test_a_turn_does_not_run_as_the_device_that_asked_for_it() -> None:
     await _as(PHONE, lambda: engine.converse("hello", timeout=_TIMEOUT))
     assert witness.seen
     assert all(one == HUB_REQUESTING_DEVICE for one in witness.seen)
+
+
+class _GatedWitness(FakeFeedbackProcessor):
+    """A feedback processor that waits on a gate and records the requesting device."""
+
+    def __init__(self) -> None:
+        super().__init__()
+        self.entered = asyncio.Event()
+        self.release = asyncio.Event()
+        self.seen: list[RequestingDevice] = []
+
+    async def process(self, event: FeedbackEvent) -> Sequence[MemoryUpdateProposal]:
+        self.entered.set()
+        await self.release.wait()
+        self.seen.append(current_requesting_device())
+        return await super().process(event)
+
+
+async def test_work_a_cancelled_request_leaves_running_does_not_run_as_its_device() -> None:
+    """§2:6: a shielded operation runs on past its caller, with the device unset."""
+    witness = _GatedWitness()
+    harness = Harness(planner=NoStepPlanner(), chat_reader=False, feedback=witness)
+    engine = harness.engine
+    await engine.set_my_devices([_PHONE])
+    with serving_device(PHONE):
+        call = asyncio.ensure_future(engine.learn(feedback()))
+    await witness.entered.wait()
+    call.cancel()
+    with pytest.raises(asyncio.CancelledError):
+        await call
+    witness.release.set()
+    await engine.aclose()
+    assert witness.seen == [HUB_REQUESTING_DEVICE]
+
+
+async def test_a_writing_end_is_found_wherever_the_listing_puts_it() -> None:
+    """ADR-0296 §2: membership is replayed, so no activity order hides a writing end."""
+    harness = _harness()
+    engine = harness.engine
+    await engine.set_my_devices([_PEN])
+    oldest = (await engine.start_conversation()).id
+    await engine.set_my_devices([_PHONE])
+    for _ in range(60):
+        await engine.start_conversation()
+    await engine.set_my_devices([])
+    assert await _as(PEN, engine.recent_conversations) == ()
+    await engine.set_conversation_devices(oldest, devices=[_PHONE])
+    await _refused(PEN, engine.recent_conversations, DeviceRefusal.NO_ROLE)
+    await engine.set_conversation_devices(oldest, devices=[_PEN])
+    assert await _as(PEN, engine.recent_conversations) == ()
+    assert await engine.delete_conversation(oldest)
+    await _refused(PEN, engine.recent_conversations, DeviceRefusal.NO_ROLE)
