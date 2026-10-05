@@ -3595,6 +3595,8 @@ class Engine:
         #: :attr:`_running`, the engine's account the change stream pushes a
         #: conversation's current state from (ADR-0296 §4:9).
         self._activation_turns: dict[str, int] = {}
+        #: How many times this engine has destroyed episodes (:meth:`_forgetting`).
+        self._episodes_forgotten = 0
         self._activation_coordinator = ActivationCoordinator(
             writer=conversations.activation_writer,
             register=self._register_capture,
@@ -3851,6 +3853,7 @@ class Engine:
             closing=lambda: self._closing,
             tracked=self._stream_read,
             max_payload_bytes=max_payload_bytes,
+            forgotten=lambda: self._episodes_forgotten,
         )
 
     @property
@@ -4157,7 +4160,7 @@ class Engine:
         saturates rather than overflowing, because the arithmetic runs on
         configuration this system accepts (:func:`_horizon`).
         """
-        records = await self._memory.purge_expired()
+        records = await self._forgetting(self._memory.purge_expired())
         questions = await self._deferrals.purge()
         traces = (
             None
@@ -6547,7 +6550,21 @@ class Engine:
         (§8:2), and it reads no store.
         """
         self._conversations.activation_writer.forgetting(record_id)
-        return await self._memory.delete(record_id)
+        return await self._forgetting(self._memory.delete(record_id))
+
+    async def _forgetting[T](self, work: Awaitable[T]) -> T:
+        """Destroy episodes, then count it for the change stream (ADR-0296 §4:9).
+
+        A conversation's current state is read from the episodes on its place, so a
+        destruction of episodes may change it with no activation running; the count
+        moving is what tells an open change stream to send again the state of every
+        conversation its device reads. Counted however the work ends, since a walk
+        that failed part-way may still have destroyed some.
+        """
+        try:
+            return await work
+        finally:
+            self._episodes_forgotten += 1
 
     async def guard(self, record_id: Identifier) -> Placement | None:
         """Keep the record ``record_id`` names for the owner alone (ADR-0217 §7).
@@ -7461,7 +7478,9 @@ class Engine:
             "forget_conversation", max_bytes=self._max_payload_bytes, conversation_id=named
         )
         return await self._tracked(
-            self._conversations.forget(named), "forget_conversation", checked=True
+            self._forgetting(self._conversations.forget(named)),
+            "forget_conversation",
+            checked=True,
         )
 
     # --- the chat space: acts in the medium and its reads (ADR-0293 §11) ---

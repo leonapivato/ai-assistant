@@ -13,15 +13,17 @@ and the stream's end.
 from __future__ import annotations
 
 import asyncio
+from datetime import UTC, datetime
 from typing import TYPE_CHECKING, Final
 
 import pytest
 from test_engine import Harness, NoStepPlanner
 
 from ai_assistant.core.device_context import serving_device
-from ai_assistant.core.errors import DeviceRefusal, DeviceRefusedError
+from ai_assistant.core.errors import DeviceRefusal, DeviceRefusedError, OversizedValueError
 from ai_assistant.core.streams import closing_stream
 from ai_assistant.core.types import (
+    CHAT_DEVICES_MAX,
     HUB_REQUESTING_DEVICE,
     ChatDevice,
     ChatStreamChunk,
@@ -38,8 +40,16 @@ from ai_assistant.core.types import (
     NewMessage,
     RequestingDevice,
     TranscriptMessage,
+    TranscriptPage,
+    UserMessage,
 )
 from ai_assistant.orchestration.change_stream import Activity, ChangeStream
+from ai_assistant.orchestration.conversations import (
+    check_devices_fit,
+    check_message_fits,
+    fit_stream_chunk,
+    fitted_message,
+)
 from ai_assistant.orchestration.payloads import canonical_payload
 from ai_assistant.testing import FakeConversationStore
 
@@ -66,6 +76,7 @@ class _Engine:
     def __init__(self) -> None:
         self.activity: dict[str, Activity] = {}
         self.closing = False
+        self.forgotten = 0
         self.states: dict[str, ConversationState] = {}
 
     async def state_of(self, conversation_id: str, running: Sequence[str | None]) -> object:
@@ -88,6 +99,7 @@ def _stream(
         closing=lambda: held.closing,
         tracked=_tracked,
         max_payload_bytes=limit,
+        forgotten=lambda: held.forgotten,
         poll_seconds=0.01,
     )
 
@@ -197,6 +209,43 @@ async def test_a_conversation_no_longer_read_is_sent_only_its_removal() -> None:
         seq=held[0].seq, conversation_id=conversation, devices=(_PHONE,)
     )
     assert held[0].snapshot is None
+
+
+async def test_a_device_removed_part_way_through_a_page_is_sent_nothing_more_of_it() -> None:
+    """§7:5 at the moment of sending: read again after each chunk, not once a page."""
+    chat = FakeConversationStore()
+    conversation = await _chat(chat, _PHONE, _WATCH)
+    for index in range(3):
+        await chat.append_message(conversation, _said("held back", f"m-{index}"))
+
+    async with _Following(_stream(chat).follow(WATCH, after=0)) as following:
+        first = await following.next(_SETTLE)
+        await chat.set_conversation_devices(conversation, [_PHONE])
+        rest = await following.drain()
+
+    assert isinstance(first, ChatStreamChunk)
+    assert first.change is not None
+    assert first.change.conversation_id is None, "my devices, before the removal"
+    assert [type(one.change) for one in rest] == [DevicesChangedChange], "its removal alone"
+
+
+async def test_destroyed_episodes_send_every_read_conversations_state_again() -> None:
+    """ADR-0296 §4:9: a forget changes the state with nothing running, and it is sent."""
+    chat = FakeConversationStore()
+    shown = await _chat(chat, _PHONE)
+    elsewhere = await _chat(chat, _PEN)
+    engine = _Engine()
+    engine.states[shown] = ConversationState()
+    async with _Following(_stream(chat, engine).follow(PHONE, after=0)) as following:
+        await following.drain()
+        engine.forgotten += 1
+        sent: list[CurrentState] = []
+        while (chunk := await following.next(0.2)) is not None:
+            if isinstance(chunk, ChatStreamChunk) and chunk.state is not None:
+                sent.append(chunk.state)
+
+    assert [one.conversation_id for one in sent] == [shown], f"not {elsewhere}, unread"
+    assert sent[0].state == ConversationState()
 
 
 async def test_a_deletion_reaches_a_former_reader_and_nothing_before_it() -> None:
@@ -384,3 +433,87 @@ async def test_a_snapshot_shows_a_message_deleted_since_as_its_marker() -> None:
     assert not any(isinstance(one, TranscriptMessage) for one in joined.snapshot.entries), (
         "no text of it"
     )
+
+
+# --- every change the chat space admits fits one chunk (§7:3, §7:8) ----------
+
+_WIDEST: Final = 2**63 - 1
+_WIDEST_AT: Final = datetime(9999, 12, 31, 23, 59, 59, 999999, tzinfo=UTC)
+_UUID_WIDE: Final = "0" * 36
+
+
+def _widest_chunk(conversation_id: str, message: NewMessage) -> ChatStreamChunk:
+    """The chunk carrying ``message`` recorded at the widest values it could take."""
+    recorded = TranscriptMessage(
+        conversation_id=conversation_id,
+        position=_WIDEST,
+        written_at=_WIDEST_AT,
+        **message.model_dump(),
+    )
+    return ChatStreamChunk(
+        change=DeviceChange(change=MessageAddedChange(seq=_WIDEST, message=recorded))
+    )
+
+
+def _longest_admitted(limit: int) -> int:
+    """The longest text ``check_message_fits`` admits at ``limit``, by bisection."""
+    low, high = 1, limit
+    while high - low > 1:
+        middle = (low + high) // 2
+        message = UserMessage(device_id="phone", message_id="m", text="x" * middle)
+        try:
+            check_message_fits(_UUID_WIDE, message, max_bytes=limit)
+        except OversizedValueError:
+            high = middle
+        else:
+            low = middle
+    return low
+
+
+@pytest.mark.parametrize("limit", [1024, 2048, 4096])
+def test_a_message_admitted_is_one_its_chunk_can_carry(limit: int) -> None:
+    """A message the conversation records is never one the stream cannot send.
+
+    The adversarial round's case: a message whose transcript page and change page fit
+    the limit while the chunk carrying it, one wrapper wider, did not, so every stream
+    reaching it failed at it for good. The chunk is measured at admission too.
+    """
+    longest = _longest_admitted(limit)
+    admitted = UserMessage(device_id="phone", message_id="m", text="x" * longest)
+    chunk = _widest_chunk(_UUID_WIDE, admitted.as_new_message())
+
+    assert len(canonical_payload(chunk)) <= limit
+    assert fit_stream_chunk(chunk, max_bytes=limit) == chunk
+
+
+def test_an_assistant_message_is_cut_to_what_its_chunk_can_carry() -> None:
+    """The writer's fitting measures the chunk too, so a reply never stops a stream."""
+    limit = 2048
+    reply = NewMessage(author=MessageAuthor.ASSISTANT, text="y" * 4000)
+
+    fitted = fitted_message(_UUID_WIDE, reply, max_bytes=limit)
+
+    assert fitted.cut_off
+    assert len(canonical_payload(_widest_chunk(_UUID_WIDE, fitted))) <= limit
+
+
+def test_a_set_of_devices_admitted_is_one_its_chunk_can_carry() -> None:
+    """A set the chat space records travels in one chunk, its snapshot cut to none."""
+    limit = 2048
+    admitted: list[ChatDevice] = []
+    for index in range(CHAT_DEVICES_MAX):
+        candidate = [
+            *admitted,
+            ChatDevice(device_id=f"device-{index:04d}-" + "d" * 40, access=DeviceAccess.READ),
+        ]
+        try:
+            check_devices_fit(candidate, conversation_id=_UUID_WIDE, max_bytes=limit)
+        except OversizedValueError:
+            break
+        admitted = candidate
+    assert admitted, "some set fits"
+    change = DevicesChangedChange(seq=_WIDEST, conversation_id=_UUID_WIDE, devices=tuple(admitted))
+    emptied = TranscriptPage(conversation_id=_UUID_WIDE, as_of=_WIDEST)
+    chunk = ChatStreamChunk(change=DeviceChange(change=change, snapshot=emptied))
+
+    assert len(canonical_payload(chunk)) <= limit

@@ -1336,7 +1336,8 @@ class _ChangeStreamWriter:
         Raises:
             ProtocolError: If the peer wrote a frame while the stream was open.
             ConnectionClosedError: If the write did not drain within the dead-peer
-                timeout (ADR-0298 §7:14), or the peer had gone.
+                timeout (ADR-0298 §7:14), the connection then aborted, or the peer
+                had gone.
         """
         if await _peek(self.watcher):
             raise ProtocolError(_OVERLAPPED)
@@ -1349,6 +1350,10 @@ class _ChangeStreamWriter:
                     max_frame_bytes=self.limits.max_frame_bytes,
                 )
         except TimeoutError as exc:
+            # Aborted rather than closed: a close waits for the buffered bytes to
+            # drain, which is the wait that just timed out, so a peer that stopped
+            # reading would hold the connection open through the hang-up as well.
+            self.writer.transport.abort()
             msg = "a change stream's write did not drain within the dead-peer timeout"
             raise ConnectionClosedError(msg) from exc
         if kind is env.FrameKind.CHUNK:

@@ -14,8 +14,9 @@ That is the latency a change reaches a following device with, and its cost is on
 read per open stream per interval.
 
 **What one device is sent** is ``ConversationStore.device_changes``' as-of
-membership, kept by one more rule at the moment of sending (ADR-0298 §7:5): for a
-conversation the device does not read when the stream sends to it, the stream sends
+membership, kept by one more rule at the moment of sending (ADR-0298 §7:5), read
+again before each chunk about a conversation is sent: for a conversation the device
+does not read when the stream sends to it, the stream sends
 only the change that removed the device and the conversation's deletion, and never a
 message, a snapshot or a current state of it. So a device catching up from an old
 cursor gets a conversation it no longer reads as a removal or a deletion, with none
@@ -29,7 +30,10 @@ account differs from the last reading has its state read and sent, to a device t
 reads it. The account carries a count that moves at every start and end, so an
 activation that began and ended between two readings still sends the state it left;
 what a device is sent is the state as of the reading, not every state in between. A
-stream opening sends the state of each conversation running then.
+stream opening sends the state of each conversation running then. The state is also
+read from the episodes on the conversation's place, so when the engine destroys
+episodes — a forget, a conversation's forgetting, a retention sweep — the state of
+every conversation the device reads is sent again.
 """
 
 from __future__ import annotations
@@ -84,6 +88,10 @@ class Activity(NamedTuple):
 type Running = Mapping[str, Activity]
 
 
+class _EngineClosingError(Exception):
+    """A read the engine refused because it had begun shutting down."""
+
+
 class ChangeStream:
     """One engine's change streams over its chat space (ADR-0298 §7).
 
@@ -99,6 +107,7 @@ class ChangeStream:
         closing: Callable[[], bool],
         tracked: Callable[[Awaitable[object]], Awaitable[object]],
         max_payload_bytes: int,
+        forgotten: Callable[[], int] = lambda: 0,
         poll_seconds: float = CHANGE_STREAM_POLL_SECONDS,
     ) -> None:
         """Read the chat space and the engine's account of what it runs.
@@ -113,6 +122,10 @@ class ChangeStream:
                 ``RuntimeError`` once ``closing`` holds ends the stream as shutdown
                 does.
             max_payload_bytes: The contract limit a chunk is fitted to (§7:8).
+            forgotten: A count that moves whenever the engine destroys episodes a
+                conversation's current state is read from — a forget, a
+                conversation's forgetting, a retention sweep — so every state the
+                device may have been shown is sent again as it now reads.
             poll_seconds: The interval; :data:`CHANGE_STREAM_POLL_SECONDS` but in a
                 test that steps it.
         """
@@ -122,6 +135,7 @@ class ChangeStream:
         self._closing = closing
         self._tracked = tracked
         self._max_payload_bytes = max_payload_bytes
+        self._forgotten = forgotten
         self._poll_seconds = poll_seconds
 
     async def follow(
@@ -129,8 +143,11 @@ class ChangeStream:
     ) -> AsyncIterator[ChatStreamChunk | ChatStreamEnd]:
         """Send ``device`` every change after ``after`` it may see, then each as it happens.
 
-        Ends only when the engine shuts down, with the cursor to reopen from; the
-        device ends it otherwise, by closing the iterator.
+        **Whether the device reads a conversation is read again before each chunk
+        about it is sent** (ADR-0298 §7:5), after the iterator has resumed from the
+        chunk before: a device removed while it was being sent a page is sent nothing
+        more of it but its removal. Ends only when the engine shuts down, with the
+        cursor to reopen from; the device ends it otherwise, by closing the iterator.
 
         Raises:
             ConversationStoreError: If the chat space cannot be read.
@@ -141,28 +158,35 @@ class ChangeStream:
         # from here on differs from it; what runs at this moment is sent with the
         # first page.
         seen: Running = dict(self._running())
-        opening = {one for one, held in seen.items() if held.running}
-        while not self._closing():
-            try:
+        due = {one for one, held in seen.items() if held.running}
+        forgotten = self._forgotten()
+        try:
+            while not self._closing():
                 page = await self._page(device, cursor)
-                visible = await self._visible(device, page.changes)
-                seen, states = await self._states(device, seen, also=opening)
-            except RuntimeError:
-                # A read the engine refused because it began shutting down after the
-                # loop looked: the stream ends as shutdown ends it.
-                if self._closing():
-                    break
-                raise
-            for entry in visible:
-                yield fit_stream_chunk(
-                    ChatStreamChunk(change=entry), max_bytes=self._max_payload_bytes
-                )
-            cursor = page.next_after
-            opening = set()
-            for state in states:
-                yield ChatStreamChunk(state=state)
-            if len(page.changes) < CHANGE_STREAM_PAGE:
-                await asyncio.sleep(self._poll_seconds)
+                reading: dict[str, bool] = {}
+                for entry in page.changes:
+                    if not await self._sendable(device, entry, reading):
+                        continue
+                    yield fit_stream_chunk(
+                        ChatStreamChunk(change=entry), max_bytes=self._max_payload_bytes
+                    )
+                    reading.clear()  # resumed: read again before the next one
+                cursor = page.next_after
+                now = dict(self._running())
+                due |= {one for one in now.keys() | seen.keys() if now.get(one) != seen.get(one)}
+                seen = now
+                if (moved := self._forgotten()) != forgotten:
+                    forgotten = moved
+                    due |= await self._read_conversations(device)
+                for conversation_id in sorted(due):
+                    state = await self._state(device, conversation_id, seen)
+                    if state is not None:
+                        yield ChatStreamChunk(state=state)
+                due = set()
+                if len(page.changes) < CHANGE_STREAM_PAGE:
+                    await asyncio.sleep(self._poll_seconds)
+        except _EngineClosingError:
+            pass
         yield ChatStreamEnd(next_after=cursor)
 
     async def _page(self, device: RequestingDevice, cursor: int) -> DeviceChanges:
@@ -178,8 +202,18 @@ class ChangeStream:
         )
 
     async def _read[T](self, work: Awaitable[T]) -> T:
-        """Run one read so shutdown drains it."""
-        return await self._tracked(work)  # type: ignore[return-value]
+        """Run one read so shutdown drains it.
+
+        Raises:
+            _EngineClosingError: If the engine refused the read because it had begun
+                shutting down, which ends the stream as shutdown does.
+        """
+        try:
+            return await self._tracked(work)  # type: ignore[return-value]
+        except RuntimeError:
+            if self._closing():
+                raise _EngineClosingError from None
+            raise
 
     async def _reads(self, device: RequestingDevice, conversation_id: str) -> bool:
         """Whether the device is one of the conversation's ends for reading now."""
@@ -190,55 +224,60 @@ class ChangeStream:
             return True
         return any(one.device_id == device.device_id and one.access.reads for one in devices)
 
-    async def _visible(
-        self, device: RequestingDevice, entries: Sequence[DeviceChange]
-    ) -> list[DeviceChange]:
-        """The page as sent, kept by what the device reads now (ADR-0298 §7:5).
+    async def _sendable(
+        self, device: RequestingDevice, entry: DeviceChange, reading: dict[str, bool]
+    ) -> bool:
+        """Whether ``entry`` is sent to the device now (ADR-0298 §7:5).
 
         A change belonging to no conversation — "my devices" — is sent. A change in a
         conversation the device reads now is sent as the store gave it. For any other
         conversation, only its deletion and a change to its devices that leaves the
         device no reader — the change that removed it — are sent, never with a
-        snapshot.
+        snapshot. ``reading`` holds what was read since the stream last resumed.
         """
-        if device.is_hub:
-            return list(entries)
-        reading: dict[str, bool] = {}
-        for entry in entries:
-            named = entry.conversation_id
-            if named is not None and named not in reading:
-                reading[named] = await self._reads(device, named)
-        return [
-            entry
-            for entry in entries
-            if entry.conversation_id is None
-            or reading[entry.conversation_id]
-            or _ends_reading(device.device_id, entry)
-        ]
+        named = entry.conversation_id
+        if device.is_hub or named is None:
+            return True
+        if named not in reading:
+            reading[named] = await self._reads(device, named)
+        return reading[named] or _ends_reading(device.device_id, entry)
 
-    async def _states(
-        self, device: RequestingDevice, seen: Running, *, also: set[str]
-    ) -> tuple[Running, list[CurrentState]]:
-        """The current state of each conversation whose activity changed since ``seen``.
+    async def _read_conversations(self, device: RequestingDevice) -> set[str]:
+        """Every conversation the device reads now: every one held, for the hub's."""
+        found: set[str] = set()
+        offset = 0
+        while True:
+            if device.is_hub:
+                page = [
+                    one.id
+                    for one in await self._read(
+                        self._chat.recent(limit=CHANGE_STREAM_PAGE, offset=offset)
+                    )
+                ]
+            else:
+                page = [
+                    one.conversation.id
+                    for one in await self._read(
+                        self._chat.device_conversations(
+                            device.device_id, limit=CHANGE_STREAM_PAGE, offset=offset
+                        )
+                    )
+                ]
+            found.update(page)
+            if len(page) < CHANGE_STREAM_PAGE:
+                return found
+            offset += CHANGE_STREAM_PAGE
 
-        ``seen`` is the last reading, returned replaced by this one; ``also`` names
-        conversations sent their state whether or not it changed — what was running
-        when the stream opened. A conversation the device does not read, or one no
-        longer held, is not sent its state.
-        """
-        now = dict(self._running())
-        changed = sorted(
-            {one for one in now.keys() | seen.keys() if now.get(one) != seen.get(one)} | also
-        )
-        sent: list[CurrentState] = []
-        for conversation_id in changed:
-            if not await self._reads(device, conversation_id):
-                continue
-            held = now.get(conversation_id)
-            running = () if held is None else held.running
-            state = await self._read(self._state_of(conversation_id, running))
-            sent.append(CurrentState(conversation_id=conversation_id, state=state))
-        return now, sent
+    async def _state(
+        self, device: RequestingDevice, conversation_id: str, now: Running
+    ) -> CurrentState | None:
+        """The conversation's current state, where the device reads it now, else ``None``."""
+        if not await self._reads(device, conversation_id):
+            return None
+        held = now.get(conversation_id)
+        running = () if held is None else held.running
+        state = await self._read(self._state_of(conversation_id, running))
+        return CurrentState(conversation_id=conversation_id, state=state)
 
 
 def _ends_reading(device_id: str, entry: DeviceChange) -> bool:
