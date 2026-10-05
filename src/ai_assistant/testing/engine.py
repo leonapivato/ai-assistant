@@ -39,7 +39,7 @@ from dataclasses import dataclass
 from datetime import UTC, datetime, timedelta
 from itertools import count
 from typing import TYPE_CHECKING, Final, assert_never, cast
-from uuid import UUID
+from uuid import UUID, uuid4
 
 from ai_assistant.core.channel_validation import snapshot
 from ai_assistant.core.clock import ClockReadingError, checked_clock
@@ -194,6 +194,13 @@ from ai_assistant.orchestration.channels import (
     spoken_result,
     text_result,
 )
+from ai_assistant.orchestration.chat import (
+    ChatInput,
+    ChatReader,
+    ChatWriter,
+    chat_effects,
+    chat_reply,
+)
 from ai_assistant.orchestration.conversations import (
     check_devices_fit,
     check_message_fits,
@@ -252,7 +259,7 @@ from ai_assistant.testing.recipient_grants import FakeRecipientGrantStore
 from ai_assistant.testing.stories import FakeStoryStore
 
 if TYPE_CHECKING:
-    from collections.abc import AsyncIterator, Callable, Sequence
+    from collections.abc import AsyncIterator, Callable, Coroutine, Sequence
 
     from ai_assistant.core.protocols import AuditTrail, SourceReadTrail, SpendLedger
     from ai_assistant.core.types import (
@@ -487,6 +494,7 @@ class FakeAssistantEngine:
         *,
         max_payload_bytes: int = DEFAULT_MAX_PAYLOAD_BYTES,
         max_outstanding_confirmations: int = _DEFAULT_MAX_OUTSTANDING,
+        chat_reader: bool = True,
     ) -> None:
         """Create an engine holding nothing.
 
@@ -513,6 +521,9 @@ class FakeAssistantEngine:
                 surfaces later and as something else: ``1.5`` would bound the
                 retention at two, and ``0`` would discard from an empty table on the
                 first settlement.
+            chat_reader: Whether a message written into a conversation is answered
+                (ADR-0293 §6, §10), as the engine's ``chat_reader`` says the same; the
+                initial value of :attr:`chat_reader`.
 
         Raises:
             TypeError: If ``max_outstanding_confirmations`` or ``max_payload_bytes``
@@ -956,6 +967,29 @@ class FakeAssistantEngine:
         #: (ADR-0151 §6): this list is read by tests and printed by failures, and a
         #: secret in it would be a disclosure path through the test double.
         self.calls: list[tuple[str, dict[str, object]]] = []
+        #: Whether a message written into a conversation is answered (ADR-0293 §6,
+        #: §10). Public, so a case built on a fixture that made this engine for it can
+        #: still turn the answering off before it writes: ``False`` leaves every
+        #: written message recorded and waiting, so no assistant message lands in a
+        #: transcript or the change stream behind the case's back.
+        self.chat_reader = chat_reader
+        #: ADR-0293 §6's reader and §10's adapter. **The engine's own reader and
+        #: writer** over this fake's chat space, so the interim — one activation at a
+        #: time per conversation, and everything that waited taken in together as one
+        #: input — and the bookkeeping are the engine's by construction rather than a
+        #: copy kept in step by hand; what this fake supplies is the activation
+        #: (:meth:`_read_in`), which runs as its turn calls do and answers with
+        #: :attr:`turn_outcome` where one is scripted. Its reads are tasks held here,
+        #: so none is collected mid-run.
+        self._chat_reads: set[asyncio.Task[None]] = set()
+        self._chat_writer = ChatWriter(conversations=self.chat, max_payload_bytes=max_payload_bytes)
+        self._reader = ChatReader(
+            conversations=self.chat,
+            activate=self._read_in,
+            spawn=self._spawn_read,
+            closing=lambda: False,
+            mint=self._chat_activation_id,
+        )
 
     # --- the two turn calls -----------------------------------------------
 
@@ -3703,6 +3737,11 @@ class FakeAssistantEngine:
         self.calls.append(("conversation", {"conversation_id": named}))
         digest = self.conversations_held.get(named)
         if digest is not None:
+            running = self._running_on(named)
+            # ADR-0293 §8:2: an activation the reader started shows "working…" until the
+            # message answering it is written, which is after its own run has ended.
+            if (reading := self._reader.working(named)) is not None and reading not in running:
+                running.append(reading)
             # The state is read off the episodes as the engine reads it (ADR-0293 §8),
             # by the one function both use.
             devices = (
@@ -3712,9 +3751,7 @@ class FakeAssistantEngine:
             )
             digest = digest.model_copy(
                 update={
-                    "state": await conversation_state(
-                        self.episode_memory, named, running=self._running_on(named)
-                    ),
+                    "state": await conversation_state(self.episode_memory, named, running=running),
                     "devices": devices or (),
                 }
             )
@@ -3852,7 +3889,112 @@ class FakeAssistantEngine:
         self.calls.append(("write_message", {"conversation_id": named, "message": sent}))
         await self._joined(named)
         receipt = await self.chat.append_message(named, sent.as_new_message())
+        # The reader is told after the record, as the engine tells it (ADR-0293 §6:1),
+        # a repeat included: the message it repeats may still be waiting.
+        if receipt.position is not None and self.chat_reader:
+            self._reader.notice(named)
         return self._checked(receipt, "write_message")
+
+    def _spawn_read(self, read: Coroutine[None, None, None]) -> None:
+        """Start one of the reader's reads as a task this fake holds (ADR-0293 §6)."""
+        task = asyncio.get_running_loop().create_task(read)
+        self._chat_reads.add(task)
+        task.add_done_callback(self._chat_reads.discard)
+
+    def _chat_activation_id(self) -> str:
+        """The id a reader's input is marked taken in by, and admitted with (§6:6).
+
+        :attr:`activation_id_factory`'s, as every other activation here; one that is
+        not canonical UUID4 text is replaced by a fresh one, as the engine replaces
+        it, because a message the reader marks must name the activation that took it in.
+        """
+        try:
+            minted = self.activation_id_factory()
+            parsed = UUID(minted)
+        except Exception:
+            return str(uuid4())
+        if parsed.version == 4 and str(parsed) == minted:  # noqa: PLR2004 — UUID version from ADR-0275
+            return minted
+        return str(uuid4())
+
+    async def _read_in(self, taken: ChatInput) -> bool:
+        """Admit one activation for the reader's input, then write what it ends with.
+
+        The input is admitted as a typed message on the conversation's channel, with
+        the id the reader minted, and is running — "working…", and reachable by a
+        stop — from then on. **Its first step marks the messages taken in** (ADR-0293
+        §6:8); it then runs on what it marked alone, as a turn call here runs, and its
+        episode is captured as theirs is. What it ends with is written into the
+        conversation by the engine's own adapter and writer: the reply, or *couldn't
+        finish* listing what did happen (§10:1, §10:2).
+
+        An activation that marked nothing wrote nothing, a stopped one writes nothing
+        (ADR-0295 §3:3), and a cancelled one writes nothing and passes the
+        cancellation on (§9:2).
+
+        Returns:
+            Whether the activation marked anything taken in.
+
+        Raises:
+            CancelledError: If the read was cancelled.
+        """
+        conversation_id = taken.conversation_id
+        supplied = ChannelInput(
+            target=ChannelIdentity(channel_type="conversation", instance_id=conversation_id),
+            payload=TextChannelPayload(text=taken.text),
+        )
+        activation = FakeActivation.channel(supplied, WholeTextReply(), _AT)
+        activation.identify(lambda: taken.activation_id)
+        self._running_activations.append(activation)
+        marked: list[int] = []
+        outcome: TurnOutcome | None = None
+        failure: BaseException | None = None
+        try:
+            await self._reader.take_in(taken, into=marked)
+            if not marked:
+                msg = "the reader's input was not taken in"
+                raise RuntimeError(msg)
+            outcome = self._chat_outcome(taken.narrowed(marked), activation)
+        except BaseException as exc:
+            failure = exc
+        try:
+            report = await activation.finish(
+                memory=self.episode_memory,
+                conversations=self.conversations_held,
+                allocate=lambda conversation: self._allocate_episode(conversation, activation),
+                max_bytes=self._max_payload_bytes,
+                failure=failure,
+                check_output=lambda: None,
+            )
+        finally:
+            self._ended(activation)
+        self._commit_episode(activation, report)
+        if isinstance(failure, asyncio.CancelledError):
+            raise failure
+        if not marked or activation.stopped:
+            return bool(marked)
+        reply = chat_reply(None if failure is not None else outcome, effects=chat_effects(outcome))
+        await self._chat_writer.send(conversation_id, reply)
+        return True
+
+    def _chat_outcome(self, taken: ChatInput, activation: FakeActivation) -> TurnOutcome:
+        """The turn the reader's input runs as: :attr:`turn_outcome`, or a composed reply."""
+        conversation_id = taken.conversation_id
+        activation.resolved(conversation_id)
+        if conversation_id in self.activity:
+            self.activity[conversation_id] = self._tick()
+        activation.understand()
+        text = taken.text
+        outcome = self.turn_outcome or TurnOutcome(
+            turn=_turn(text),
+            conversation_id=conversation_id,
+            reply=f"This fake engine composed no real answer to {text.strip()!r}.",
+        )
+        if outcome.conversation_id is None:
+            outcome = outcome.model_copy(update={"conversation_id": conversation_id})
+        outcome = self._stating(outcome)
+        activation.observe(outcome)
+        return outcome
 
     async def delete_message(self, conversation_id: Identifier, *, position: int) -> bool:
         """Delete one message, leaving its marker (ADR-0293 §5:8)."""
