@@ -7742,6 +7742,8 @@ def _id_invocations(value: str) -> tuple[tuple[str, list[str]], ...]:
         ("my-devices --remove", ["my-devices", "--remove", value]),
         ("conversation-devices", ["conversation-devices", value]),
         ("conversation-devices --add", ["conversation-devices", "c-1", "--add", value]),
+        # ADR-0297 §5:8's stop, naming the activation the current state named.
+        ("stop", ["stop", value]),
     )
 
 
@@ -7907,6 +7909,7 @@ def test_every_id_parameter_on_the_surface_carries_an_id_callback() -> None:
         "revoke-destination-trust:record_id": True,
         "revoke-authorization:authorization_id": True,
         "revoke-recipient-grant:grant_id": True,
+        "stop:activation_id": True,
         "trust-destinations:decision_id": True,
         "withdraw-clarification:question_id": True,
     }
