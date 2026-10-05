@@ -7,8 +7,9 @@ Add new, specific subclasses rather than raising bare ``Exception``.
 
 from __future__ import annotations
 
+import json
 from enum import StrEnum
-from typing import TYPE_CHECKING, ClassVar
+from typing import TYPE_CHECKING, ClassVar, Final
 
 from ai_assistant.core.types import SpeechFailure, encodable_text
 
@@ -1933,6 +1934,14 @@ class DeviceRefusal(StrEnum):
     NOT_ALLOWED = "not_allowed"
 
 
+#: The longest message a :class:`DeviceRefusedError` carries, in bytes as the codec
+#: writes it — escapes included, the surrounding quotation marks not. The rest of the
+#: error payload is at most 94 bytes, so the whole fits ADR-0085 §8d's floor, whose
+#: contract limit is 512 bytes, with room to spare: the payload is never reduced and
+#: the reason always crosses.
+DEVICE_REFUSAL_MESSAGE_BYTES: Final = 384
+
+
 class DeviceRefusedError(AssistantError):
     """A request was refused for the device it was served for (ADR-0298 §6:1).
 
@@ -1945,11 +1954,14 @@ class DeviceRefusedError(AssistantError):
     never reduced.** ADR-0085 §10a's reduction drops ``details`` from an error
     payload that does not fit the contract limit, and a reconstruction of a reduced
     payload calls this type with the message alone, which a required keyword
-    refuses. The refusals this project writes are short, fixed sentences, and
-    ``tests/wire/test_device_gate.py`` pins that every one of them, carrying an id at
-    ADR-0298 §1:3's bound, fits at ADR-0085 §8d's floor unreduced. A default would
-    instead mislabel a refusal: :attr:`DeviceRefusal.NO_ROLE` tells a device to drop
-    what it holds (§7), so no reason is safe to assume.
+    refuses. So the constructor bounds the message instead: at most
+    :data:`DEVICE_REFUSAL_MESSAGE_BYTES` bytes as the codec writes it, which with the
+    code, the reason and the member names is inside the 512-byte contract limit at
+    ADR-0085 §8d's floor, so no legal hub ever reduces one.
+    ``tests/wire/test_device_gate.py`` pins that arithmetic against the wire's own
+    measurement. A default reason would instead mislabel a refusal:
+    :attr:`DeviceRefusal.NO_ROLE` tells a device to drop what it holds (§7), so no
+    reason is safe to assume.
 
     Attributes:
         reason: Which of ADR-0298 §6:2's three reasons refused the request.
@@ -1967,9 +1979,18 @@ class DeviceRefusedError(AssistantError):
                 raised rather than a bare ``str`` that merely compares equal.
 
         Raises:
-            ValueError: If ``reason`` names no member of the vocabulary.
+            ValueError: If ``reason`` names no member of the vocabulary, or the
+                message is longer than :data:`DEVICE_REFUSAL_MESSAGE_BYTES` as the
+                codec writes it.
         """
         super().__init__(message)
+        size = len(json.dumps(message, ensure_ascii=False).encode("utf-8")) - 2
+        if size > DEVICE_REFUSAL_MESSAGE_BYTES:
+            msg = (
+                f"a device refusal's message is {size} bytes encoded, over the "
+                f"{DEVICE_REFUSAL_MESSAGE_BYTES} that keep its reason on the wire"
+            )
+            raise ValueError(msg)
         self.reason: DeviceRefusal = DeviceRefusal(reason)
 
 

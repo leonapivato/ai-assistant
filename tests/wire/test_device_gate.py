@@ -19,6 +19,7 @@ from __future__ import annotations
 
 import asyncio
 import contextlib
+import json
 import re
 from dataclasses import dataclass, field
 from datetime import timedelta
@@ -28,7 +29,11 @@ from typing import TYPE_CHECKING, Final
 import pytest
 
 from ai_assistant.core.device_context import acting_for, current_requesting_device
-from ai_assistant.core.errors import DeviceRefusal, DeviceRefusedError
+from ai_assistant.core.errors import (
+    DEVICE_REFUSAL_MESSAGE_BYTES,
+    DeviceRefusal,
+    DeviceRefusedError,
+)
 from ai_assistant.core.streams import closing_stream
 from ai_assistant.core.types import (
     HUB_DEVICE_ID,
@@ -41,9 +46,9 @@ from ai_assistant.core.types import (
 from ai_assistant.testing import FakeAssistantEngine
 from ai_assistant.wire import envelope as env
 from ai_assistant.wire.client import HubEngineClient
-from ai_assistant.wire.codec import ENVELOPE_RESERVE_BYTES
+from ai_assistant.wire.codec import ENVELOPE_RESERVE_BYTES, canonical_payload
 from ai_assistant.wire.credential import mint_credential
-from ai_assistant.wire.errors import error_payload
+from ai_assistant.wire.errors import error_payload, raise_from_payload
 from ai_assistant.wire.framing import read_frame, write_frame
 from ai_assistant.wire.routes import ROWS, check_request
 from ai_assistant.wire.server import AdmissionRefusal, ConnectionLimits, serve_connection
@@ -357,6 +362,33 @@ def test_every_refusal_this_lane_writes_fits_unreduced_at_the_floor() -> None:
         payload = error_payload(refusal, max_bytes=floor_limit)
         assert payload["reduced"] is False, str(refusal)
         assert payload["details"] == {"reason": refusal.reason.value}
+
+
+@pytest.mark.parametrize("reason", list(DeviceRefusal))
+@pytest.mark.parametrize("message", ["x" * DEVICE_REFUSAL_MESSAGE_BYTES, "\u0007" * 64])
+def test_the_longest_refusal_crosses_unreduced_at_the_floor(
+    message: str, reason: DeviceRefusal
+) -> None:
+    """The constructor's bound, against the wire's own measurement.
+
+    A message at the bound — or one whose escapes take it to its 384 bytes, since the
+    bound counts what the codec writes — fits ADR-0085 §8d's floor with its reason,
+    and round-trips through the bytes to the reason the hub raised.
+    """
+    refusal = DeviceRefusedError(message, reason=reason)
+    payload = error_payload(refusal, max_bytes=env.MIN_FRAME_BYTES - ENVELOPE_RESERVE_BYTES)
+    assert payload["reduced"] is False
+    with pytest.raises(DeviceRefusedError) as rebuilt:
+        raise_from_payload(json.loads(canonical_payload(payload)))
+    assert rebuilt.value.reason is reason
+    assert rebuilt.value.details_elided is False
+
+
+@pytest.mark.parametrize("message", ["x" * (DEVICE_REFUSAL_MESSAGE_BYTES + 1), "\u0007" * 65])
+def test_a_refusal_too_long_to_cross_whole_is_refused_where_it_is_made(message: str) -> None:
+    """A reduced payload would lose the required reason, so it is never built."""
+    with pytest.raises(ValueError, match=str(DEVICE_REFUSAL_MESSAGE_BYTES)):
+        DeviceRefusedError(message, reason=DeviceRefusal.NOT_ACCEPTED)
 
 
 def test_only_the_wire_server_sets_the_requesting_device() -> None:
