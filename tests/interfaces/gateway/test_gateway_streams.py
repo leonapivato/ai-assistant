@@ -59,6 +59,7 @@ if TYPE_CHECKING:
     from collections.abc import AsyncIterator
 
     from ai_assistant.core.types import EncodableText, Identifier, TurnReference
+    from ai_assistant.wire.overlay import OverlayAgent
 
 pytestmark = pytest.mark.integration
 
@@ -373,13 +374,18 @@ async def _settled() -> None:
 
 @contextlib.asynccontextmanager
 async def _harness(
-    engine: FakeAssistantEngine | None = None, **overrides: Any
+    engine: FakeAssistantEngine | None = None,
+    *,
+    agent: OverlayAgent | None = None,
+    **overrides: Any,
 ) -> AsyncIterator[Harness]:
     """Bind one gateway with a session already minted, and tear it down after."""
     settings = Settings(gateway_port=free_port(), **overrides)
     clock, timers = Clock(), Timers()
     behind = engine or FakeAssistantEngine()
-    gateway = Gateway(settings=settings, engine=behind, now=clock, defer=timers, bundle=_BUNDLE)
+    gateway = Gateway(
+        settings=settings, engine=behind, now=clock, defer=timers, bundle=_BUNDLE, agent=agent
+    )
     server = await gateway.start()
     harness = Harness(
         gateway=gateway,

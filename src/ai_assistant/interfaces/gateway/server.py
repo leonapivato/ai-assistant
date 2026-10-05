@@ -1264,8 +1264,11 @@ class Gateway:
             bundle: The front end's assets, already read.
             agent: The overlay agent on **this** machine, which ADR-0174 §3 makes the
                 sole source of a browsing device's identity. Required when
-                ``gateway_remote_address`` is set and unused when it is not —
-                :func:`run_gateway` builds the real one, and a test supplies a fake.
+                ``gateway_remote_address`` is set. Where the hub is on another
+                machine it is also asked, once at :meth:`start`, which node this
+                machine is — the device a loopback browser writes from (ADR-0296
+                §1:7). :func:`run_gateway` builds the real one where either needs it,
+                and a test supplies a fake.
             mint_value: The entropy source for the bootstrap value and both
                 session halves.
 
@@ -1336,12 +1339,11 @@ class Gateway:
         #: transport (ADR-0098 §5).
         self._hub_carries_connections = settings.remote_hub_address is None
         #: This machine's device, for a browser on the loopback listener (ADR-0296
-        #: §1:7), or ``None`` where the hub is on another machine and nothing names
-        #: this one (:meth:`_browser_device`).
-        try:
-            self._own_device: str | None = this_device(settings, named=None)
-        except ConfigurationError:
-            self._own_device = None
+        #: §1:7), named once at :meth:`start` (:meth:`_name_own_device`) and ``None``
+        #: until then — or for good, where the hub is on another machine and this
+        #: machine's overlay agent would not say which node it is
+        #: (:meth:`_browser_device`).
+        self._own_device: str | None = None
         #: Read as a set, "compared for equality against the identity §3 obtained. A
         #: repeated element changes nothing and is not refused; order carries no
         #: meaning; and no element is matched by prefix, suffix, pattern or any form
@@ -1523,14 +1525,48 @@ class Gateway:
         driven apart — which is what a test needs to send a request and read the
         answer rather than wait for a signal.
 
+        **This machine's device is named first** (:meth:`_name_own_device`), so no
+        request on the listener is ever answered before it has been: a browser there
+        writes as that device, and a write answered in the gap would be refused as
+        unnamed for no reason a later request would share.
+
         Returns:
             The bound server, whose lifetime the caller owns.
         """
+        if self._own_device is None:
+            self._own_device = await self._name_own_device()
         server = await asyncio.start_server(
             partial(self._handle, remote=False), host=_LOOPBACK, port=self._settings.gateway_port
         )
         _log.info("gateway.listening", origin=self._origin, served_paths=sorted(self._bundle))
         return server
+
+    async def _name_own_device(self) -> str | None:
+        """Name this machine's device, once, by the rule the command line uses (ADR-0296 §1).
+
+        :func:`~ai_assistant.interfaces.devices.this_device` with nothing ``named``:
+        ``hub`` where the hub is on this machine, and otherwise this machine's overlay
+        identity as its own agent reports it. An agent that will not say leaves the
+        device unnamed rather than stopping the gateway: ADR-0168 §9 binds the loopback
+        listener whether or not the hub is reachable, and an agent that cannot answer
+        is no better reason to stay down — an unnamed device costs only its writes,
+        each refused as its own condition (:meth:`_write_message`).
+
+        Returns:
+            The device's id, or ``None`` where it cannot be named.
+        """
+        try:
+            return await this_device(self._settings, named=None, agent=self._agent)
+        except ConfigurationError as exc:
+            _log.warning(
+                "gateway.own_device_unnamed",
+                detail=(
+                    "a browser on the loopback listener has no device, so its writes "
+                    "into a conversation are refused"
+                ),
+                reason=str(exc),
+            )
+            return None
 
     async def start_remote(self) -> asyncio.Server | None:
         """Bind the remote browser listener, if the owner configured one (ADR-0174 §2).
@@ -2428,14 +2464,13 @@ class Gateway:
         * **On the loopback listener**, the gateway's own machine, which §1:7 makes
           that machine's hub device — named by the rule the command line names its
           machine by (:func:`~ai_assistant.interfaces.devices.this_device`): ``hub``
-          where the hub is on this machine too.
+          where the hub is on this machine too, and otherwise this machine's overlay
+          identity, read once from its own agent at :meth:`start`.
 
-        **A loopback browser of a gateway whose hub is remote has no name here**, and
-        ``None`` says so rather than inventing one: that machine's device id is its
-        overlay identity, which no adapter can read for itself yet and which this
-        gateway is not configured with. So a write from it is refused as its own
-        condition (:meth:`_write_message`) instead of being recorded under an id the
-        hub would not know the machine by.
+        **A loopback browser whose machine the agent would not name has no name
+        here**, and ``None`` says so rather than inventing one. So a write from it is
+        refused as its own condition (:meth:`_write_message`) instead of being
+        recorded under an id the hub would not know the machine by.
 
         Args:
             connection: The connection the request arrived on.
@@ -4085,9 +4120,10 @@ _ACCESSES: Final = frozenset(one.value for one in DeviceAccess)
 _DEVICE_UNNAMED: Final = (
     "This gateway cannot name this browser's device, so it cannot write a message from "
     "here: its hub is on another machine, and a browser on the gateway's own machine is "
-    "that machine's device, whose overlay identity this gateway does not know. Write "
-    "from a browser on the hub's own machine, or from another device through the "
-    "gateway's remote listener."
+    "that machine's device, whose overlay identity this machine's overlay agent did not "
+    "give the gateway when it started. Start the overlay agent and restart the gateway, "
+    "or write from a browser on the hub's own machine, or from another device through "
+    "the gateway's remote listener."
 )
 
 
@@ -7035,11 +7071,11 @@ async def run_gateway(
     ``127.0.0.1`` would hand them a value and no door to spend it at. On a gateway
     with no remote listener this is the single origin it has always printed.
 
-    **The agent is built only where a remote listener needs one**, from
-    ``client_overlay_agent_socket`` — the field ADR-0174 §8 widens rather than
-    duplicating: "a gateway may dial its hub over loopback and still serve browsers
-    over the overlay, so the condition widens to cover a set
-    ``gateway_remote_address``. No eleventh agent-socket field is owed, and the
+    **The agent is built only where a remote listener or this machine's device needs
+    one** (:func:`_agent_for`), from ``client_overlay_agent_socket`` — the field
+    ADR-0174 §8 widens rather than duplicating: "a gateway may dial its hub over
+    loopback and still serve browsers over the overlay, so the condition widens to
+    cover a set ``gateway_remote_address``. No eleventh agent-socket field is owed, and the
     custody conditions ``wire/overlay.py`` enforces on that socket are applied
     unchanged." Those conditions are enforced by :func:`local_agent` itself, which
     refuses a configured path an untrusted user could answer on.
@@ -7082,19 +7118,25 @@ async def run_gateway(
 def _agent_for(settings: Settings) -> OverlayAgent | None:
     """This machine's overlay agent, where a remote browser listener needs one.
 
+    **Also where the hub is on another machine**, because this machine's device is
+    then its overlay identity and the agent is what says it (ADR-0296 §1:7,
+    :meth:`Gateway._name_own_device`). Such a gateway already reaches its hub through
+    an agent built from this same setting, under these same custody conditions, so
+    building one here puts no new check on its path.
+
     Args:
         settings: The loaded configuration.
 
     Returns:
-        The agent, or ``None`` where no remote listener is configured and none is
-        read. Building one eagerly would put a configured socket's custody check on
-        the path of every gateway, including the loopback-only one ADR-0168 §2 rules
-        and which never asks the agent anything.
+        The agent, or ``None`` where no remote listener is configured, the hub is on
+        this machine, and none is read. Building one eagerly would put a configured
+        socket's custody check on the path of every gateway, including the
+        loopback-only one ADR-0168 §2 rules and which never asks the agent anything.
 
     Raises:
         ConfigurationError: If a configured socket path fails the custody conditions
             ``wire/overlay.py`` holds both ends of ADR-0124 §4's hop to.
     """
-    if settings.gateway_remote_address is None:
+    if settings.gateway_remote_address is None and settings.remote_hub_address is None:
         return None
     return local_agent(settings.client_overlay_agent_socket, terms=CLIENT_AGENT_SOCKET)

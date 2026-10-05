@@ -18,9 +18,10 @@ from __future__ import annotations
 from typing import TYPE_CHECKING, Any, Final
 
 import pytest
-from test_gateway_remote_listener import _PHONE, _remote, _start_session
+from test_gateway_remote_listener import _GATEWAY_NODE, _PHONE, _FakeAgent, _remote, _start_session
 from test_gateway_streams import Harness, _harness
 
+from ai_assistant.core.config import Settings
 from ai_assistant.core.types import (
     TRANSCRIPT_MESSAGE_MAX_CHARS,
     ActivationEnding,
@@ -31,7 +32,9 @@ from ai_assistant.core.types import (
     NewMessage,
     UserMessage,
 )
-from ai_assistant.interfaces.gateway.server import _ASSISTANT_PATHS
+from ai_assistant.interfaces.gateway.server import _ASSISTANT_PATHS, _agent_for
+from ai_assistant.testing import FakeAssistantEngine
+from ai_assistant.wire.overlay import TailscaleAgent
 
 if TYPE_CHECKING:
     from collections.abc import AsyncIterator
@@ -320,15 +323,25 @@ async def test_writing_into_a_conversation_that_is_gone_is_its_own_condition(
     assert body == {"fault": "no-such-conversation"}
 
 
-async def test_a_gateway_that_cannot_name_the_browsers_device_writes_nothing() -> None:
-    """A loopback browser of a gateway whose hub is on another machine has no name here.
+@pytest.mark.parametrize(
+    "agent",
+    [
+        pytest.param(None, id="no agent"),
+        pytest.param(_FakeAgent(own=None), id="an agent that will not say"),
+    ],
+)
+async def test_a_gateway_that_cannot_name_the_browsers_device_writes_nothing(
+    agent: _FakeAgent | None,
+) -> None:
+    """A loopback browser whose machine its own agent would not name has no name here.
 
     That machine's device id is its overlay identity (ADR-0296 §1:7, ADR-0298 §3), and
-    the gateway does not know its own; recording the message under an id the hub would
-    not know the machine by would make §4:2's repeat and §7:2's ends answer for the
-    wrong device. So the write is refused as its own condition, and the page is told.
+    the gateway could not read it; recording the message under an id the hub would not
+    know the machine by would make §4:2's repeat and §7:2's ends answer for the wrong
+    device. So the write is refused as its own condition, and the page is told — and
+    the gateway serves regardless (ADR-0168 §9).
     """
-    async with _harness(remote_hub_address="100.64.0.1") as harness:
+    async with _harness(remote_hub_address="100.64.0.1", agent=agent) as harness:
         _, devices = await harness.whole("POST", "/chat/devices", {})
         status, body = await harness.whole(
             "POST",
@@ -340,6 +353,61 @@ async def test_a_gateway_that_cannot_name_the_browsers_device_writes_nothing() -
     assert status == 422
     assert body["fault"] == "device-unnamed"
     assert _written(harness) == []
+
+
+async def test_a_loopback_browser_of_a_remote_hub_writes_as_this_machines_overlay_node() -> None:
+    """ADR-0296 §1:7 where the hub is elsewhere: the machine's device is its overlay id.
+
+    Read once, at start, from the gateway's own agent — the same stable identifier the
+    hub's enrolment recorded for this machine — so a browser on the loopback listener
+    writes as the machine the hub knows, with no setting naming it.
+    """
+    agent = _FakeAgent()
+    engine = FakeAssistantEngine()
+    await engine.set_my_devices(
+        [ChatDevice(device_id=_GATEWAY_NODE, access=DeviceAccess.READ_WRITE)]
+    )
+    started = await engine.start_conversation()
+    async with _harness(engine, remote_hub_address="100.64.0.1", agent=agent) as harness:
+        _, devices = await harness.whole("POST", "/chat/devices", {})
+        status, body = await harness.whole(
+            "POST",
+            "/chat/message/write",
+            {"conversation_id": started.id, "message_id": "m-1", "text": "Hello."},
+        )
+
+    assert devices["this_device"] == _GATEWAY_NODE
+    assert status == 200, body
+    (written,) = _written(harness)
+    assert written["message"].device_id == _GATEWAY_NODE
+    assert agent.own_asked == 1
+    assert agent.asked == []
+
+
+async def test_a_gateway_on_the_hubs_machine_never_asks_its_agent_which_node_it_is() -> None:
+    """Where the hub is on this machine the device is ``hub``, and nothing is read."""
+    agent = _FakeAgent()
+    async with _harness(agent=agent) as harness:
+        _, devices = await harness.whole("POST", "/chat/devices", {})
+
+    assert devices["this_device"] == _HUB
+    assert agent.own_asked == 0
+
+
+@pytest.mark.parametrize(
+    ("overrides", "built"),
+    [
+        pytest.param({}, False, id="hub here, no remote listener: no agent"),
+        pytest.param({"remote_hub_address": "100.64.0.1"}, True, id="hub elsewhere"),
+    ],
+)
+def test_the_agent_is_built_where_this_machines_device_needs_it(
+    overrides: dict[str, Any], *, built: bool
+) -> None:
+    """The real composition's half: a gateway of a remote hub has an agent to ask."""
+    agent = _agent_for(Settings(**overrides))
+
+    assert isinstance(agent, TailscaleAgent) is built
 
 
 async def test_a_remote_browser_writes_as_the_device_the_overlay_named() -> None:

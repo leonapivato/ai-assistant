@@ -28,7 +28,7 @@ from ai_assistant.core.types import (
 )
 from ai_assistant.interfaces import cli
 from ai_assistant.testing import FakeAssistantEngine
-from ai_assistant.wire import TransportError
+from ai_assistant.wire import OverlayIdentityUnavailableError, TransportError
 
 if TYPE_CHECKING:
     from collections.abc import Awaitable, Callable, Sequence
@@ -171,6 +171,88 @@ async def test_chat_asks_nothing_where_this_device_already_writes(output: String
     assert code == 0
     assert len(_calls(engine, "start_conversation")) == 1
     assert "not one of your devices" not in output.getvalue()
+
+
+# --- naming this device (ADR-0296 §1) -----------------------------------------
+
+#: This machine's stable node id, as its overlay agent reports it.
+_LAPTOP = "nL4pT0pCNTRL"
+
+
+class _OwnAgent:
+    """This machine's overlay agent, as the command line asks it which node it is.
+
+    Attributes:
+        asked: How many times it was asked.
+    """
+
+    def __init__(self, own: str | None = _LAPTOP) -> None:
+        self._own = own
+        self.asked = 0
+
+    async def identify(self, host: str, port: int) -> str:
+        """Never asked here: the client that dials is replaced by the engine below."""
+        raise AssertionError((host, port))
+
+    async def own_identity(self) -> str:
+        """This machine's node, or the failure the seam declares."""
+        self.asked += 1
+        if self._own is None:
+            msg = "the overlay agent is not running"
+            raise OverlayIdentityUnavailableError(msg)
+        return self._own
+
+
+def _remote_chat(monkeypatch: pytest.MonkeyPatch, tmp_path: Path, agent: _OwnAgent) -> list[str]:
+    """Run ``_chat`` against a hub on another machine; record the device it writes as."""
+    settings = Settings(data_dir=tmp_path, remote_hub_address="100.64.0.1")
+    _wire(monkeypatch, FakeAssistantEngine())
+    monkeypatch.setattr(cli, "load_settings", lambda: settings)
+    monkeypatch.setattr(cli, "local_agent", lambda _socket: agent)
+    named: list[str] = []
+
+    async def _drive(_engine: object, _conversation: object, *, device_id: str, **_: object) -> int:
+        named.append(device_id)
+        return 0
+
+    monkeypatch.setattr(cli, "_drive_chat", _drive)
+    return named
+
+
+async def test_chat_on_another_machine_writes_as_the_node_its_agent_names(
+    output: StringIO, monkeypatch: pytest.MonkeyPatch, tmp_path: Path
+) -> None:
+    """No ``--device`` needed: the agent here names the machine the hub enrolled."""
+    agent = _OwnAgent()
+    named = _remote_chat(monkeypatch, tmp_path, agent)
+
+    assert await cli._chat(None, device=None) == 0
+    assert named == [_LAPTOP]
+    assert agent.asked == 1
+
+
+async def test_chat_writes_as_the_device_named_without_asking_the_agent(
+    output: StringIO, monkeypatch: pytest.MonkeyPatch, tmp_path: Path
+) -> None:
+    """``--device`` still wins, and is the fallback where the agent cannot answer."""
+    agent = _OwnAgent(own=None)
+    named = _remote_chat(monkeypatch, tmp_path, agent)
+
+    assert await cli._chat(None, device="nOTHERCNTRL") == 0
+    assert named == ["nOTHERCNTRL"]
+    assert agent.asked == 0
+
+
+async def test_chat_whose_agent_will_not_say_names_the_fallback(
+    output: StringIO, monkeypatch: pytest.MonkeyPatch, tmp_path: Path
+) -> None:
+    named = _remote_chat(monkeypatch, tmp_path, _OwnAgent(own=None))
+
+    assert await cli._chat(None, device=None) == cli._EXIT_ERROR
+    assert named == []
+    rendered = _flat(output.getvalue())
+    assert "--device" in rendered
+    assert "not running" in rendered
 
 
 async def test_chat_offers_this_device_to_a_conversation_without_it(output: StringIO) -> None:
@@ -1012,12 +1094,18 @@ def test_chat_through_the_terminal(
 def test_chat_refuses_to_guess_the_device_for_a_hub_elsewhere(
     monkeypatch: pytest.MonkeyPatch, output: StringIO, tmp_path: Path
 ) -> None:
+    """Where this machine's agent will not name it, nothing is opened and nothing guessed.
+
+    The agent is replaced, never left to the machine: a real daemon on the machine
+    running the suite would otherwise answer, and the case would test that machine.
+    """
     opened = _wire(monkeypatch, FakeAssistantEngine())
     monkeypatch.setattr(
         cli,
         "load_settings",
         lambda: Settings(data_dir=tmp_path, remote_hub_address="100.64.0.1"),
     )
+    monkeypatch.setattr(cli, "local_agent", lambda _socket: _OwnAgent(own=None))
 
     result = CliRunner().invoke(cli.app, ["chat"])
 

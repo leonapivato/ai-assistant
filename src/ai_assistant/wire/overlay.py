@@ -1,4 +1,7 @@
-"""Whose device holds the address this client is about to dial (ADR-0124 §4).
+"""Whose device holds the address a client dials, and which device it is itself.
+
+The first question is ADR-0124 §4's; the second names this machine as ADR-0296 §1
+counts devices, where the hub is on another machine.
 
 The client's half of the mutual authentication, and the mirror of the hub's:
 
@@ -10,7 +13,7 @@ The client's half of the mutual authentication, and the mirror of the hub's:
 
 **The agent is queried, never linked** (ADR-0124 §3): "the overlay agent is not
 imported by, embedded in, linked into or launched by ``ai_assistant``… neither
-speaks to the agent's operator". So this speaks a few bytes of HTTP/1.1 to a Unix
+speaks to the agent's operator". So this speaks a few bytes of HTTP/1.0 to a Unix
 socket the agent already listens on and adds no dependency — refusing to grow a
 client library for a fixed ``GET`` is also what keeps the "not linked into" clause
 mechanically true.
@@ -23,8 +26,10 @@ about."
 half and lives in ``service``; ADR-0084 §6 rules that ``wire`` "depends on ``core``
 and nothing else", so a client in ``wire`` cannot reach it — the same wall that
 gave the hub's device tool its own console script. What is here is deliberately
-*narrower* than what is there: the hub asks two questions (which addresses are
-mine, and who is at this one), and a client asks one.
+*narrower* than what is there: the hub asks which addresses are its own and who is
+at one, and a client asks who is at the address it is about to dial and which node
+it is itself — never which addresses are its own, because it binds none it has to
+prove to the hub.
 
 **The custody guard, by contrast, is shared and lives here** (#911, #937).
 :func:`check_configured_socket` decides whether a socket an operator named can be
@@ -43,7 +48,7 @@ here for the same reason the custody guard does: this is the module both ends ca
 reach. What is per-caller is the exception the refusal arrives as, because the two
 ends raise two different classes of that name — see the function.
 
-The HTTP/1.1 transport and ``_stable_id`` below are still duplicated against the
+The HTTP/1.0 transport and ``_stable_id`` below are still duplicated against the
 hub's copy; folding those together is #911's remaining half and is deliberately
 not taken here, so that a security guard's move and a refactor of the bytes on the
 socket are two reviewable changes rather than one.
@@ -88,12 +93,39 @@ _LOCAL_API_HOST: Final = "local-tailscaled.sock"
 _QUERY_TIMEOUT_SECONDS: Final = 5.0
 
 #: How many space-separated parts a status line must have before its code can be
-#: read: ``HTTP/1.1`` and the code itself.
+#: read: the version and the code itself.
 _STATUS_LINE_PARTS: Final = 2
 
-#: What one response may occupy. A ``whois`` answer is one node's record, so this is
-#: generous; it exists so that a daemon answering without end cannot be a memory
-#: fault in a command.
+#: The version this client asks in, and it is load-bearing rather than incidental —
+#: the hub's half learned it first (#1309, :mod:`ai_assistant.service.overlay`). Go's
+#: ``net/http``, which ``tailscaled`` embeds, frames an HTTP/1.1 response it has not
+#: measured as ``Transfer-Encoding: chunked`` *whatever* ``Connection: close`` says.
+#: ``whois`` happens to be measured, which is why this client asked in HTTP/1.1 and
+#: was never caught; ``status`` is not, so the same request for this machine's own
+#: node arrives in chunk framing and fails as "not JSON". HTTP/1.0 has no chunked
+#: encoding at all, so the daemon measures the body or ends it at close, and the
+#: read-to-EOF below takes either whole with no chunk parser to grow.
+_HTTP_VERSION: Final = "HTTP/1.0"
+
+#: The one response framing this transport reads: none (#1309's other half). A
+#: ``Transfer-Encoding`` on an answer to an HTTP/1.0 request is a frame nobody asked
+#: for, and the bytes underneath it are not the body.
+_UNFRAMED: Final = b"identity"
+
+#: Which member carries a node's stable identifier, per endpoint — and the two
+#: endpoints do not agree (#1309). ``status`` answers with Go's
+#: ``ipnstate.PeerStatus``, whose stable identifier is ``ID``; ``whois`` answers with
+#: a ``tailcfg.Node``, whose is ``StableID``. The live daemon returns one string for
+#: both about the same node, which is what makes this machine's own answer equal to
+#: what the hub's ``whois`` recorded for it at enrolment. Named per endpoint rather
+#: than tried in turn: a fallback would read a member the type does not define.
+_STATUS_SELF_IDENTITY: Final = "ID"
+_WHOIS_NODE_IDENTITY: Final = "StableID"
+
+#: What one response may occupy. A ``whois`` answer is one node's record, and the
+#: ``status`` this client asks for is asked without its peers, so this is generous;
+#: it exists so that a daemon answering without end cannot be a memory fault in a
+#: command.
 _MAX_RESPONSE_BYTES: Final = 1024 * 1024
 
 #: What an overlay identity may occupy, encoded. Every overlay ADR-0124 §2 could
@@ -109,12 +141,14 @@ MAX_OVERLAY_IDENTITY_BYTES: Final[int] = 128
 
 
 class OverlayAgent(Protocol):
-    """The local daemon, as a *client* uses it: one question, asked of this machine.
+    """The local daemon, as a *client* uses it: two questions, asked of this machine.
 
-    Narrower than the hub's seam on purpose. A client never binds an address, so it
-    never needs to know which addresses are its own; what it needs is the identity
-    of the node at the address it is about to dial, so that it can refuse a
-    destination that is not the hub it was enrolled at.
+    Narrower than the hub's seam on purpose. A client never needs to know which
+    addresses are its own; what it needs is the identity of the node at the address
+    it is about to dial, so that it can refuse a destination that is not the hub it
+    was enrolled at (ADR-0124 §4) — and, where the hub is on another machine, which
+    node it is itself, because that is the device id the hub enrolled this machine
+    under and the one an adapter names it by (ADR-0296 §1).
     """
 
     async def identify(self, host: str, port: int) -> str:
@@ -126,6 +160,18 @@ class OverlayAgent(Protocol):
 
         Returns:
             That node's overlay identity.
+
+        Raises:
+            OverlayIdentityUnavailableError: If the agent will not say.
+        """
+
+    async def own_identity(self) -> str:
+        """Ask the agent which node this machine is.
+
+        Returns:
+            This machine's overlay identity: the same stable identifier
+            :meth:`identify` returns for it when asked about one of its addresses,
+            which is the value the hub's enrolment of this machine recorded.
 
         Raises:
             OverlayIdentityUnavailableError: If the agent will not say.
@@ -282,7 +328,33 @@ class TailscaleAgent:
                 f"(ADR-0124 §4); check that the hub's device is on the overlay and up"
             )
             raise OverlayIdentityUnavailableError(msg)
-        return _stable_id(node)
+        return _stable_id(node, _WHOIS_NODE_IDENTITY)
+
+    async def own_identity(self) -> str:
+        """Ask the daemon which node this machine is.
+
+        ``status`` with ``peers=false``: this machine's own record is the one member
+        read, so the rest of the overlay is not asked for. The identity is the
+        record's stable identifier, for :meth:`identify`'s reason — a name is
+        renameable and an address reassignable, and the hub enrolled this machine
+        against neither.
+
+        Returns:
+            This machine's overlay identity.
+
+        Raises:
+            OverlayIdentityUnavailableError: If the daemon cannot be reached, names
+                no node for this machine, or answers with something unusable.
+        """
+        status = await self._get("/localapi/v0/status?peers=false")
+        this = status.get("Self")
+        if not isinstance(this, dict):
+            msg = (
+                f"the overlay agent at {self.socket_path} names no node for this "
+                f"machine; check that this machine is on the overlay and up"
+            )
+            raise OverlayIdentityUnavailableError(msg)
+        return _stable_id(this, _STATUS_SELF_IDENTITY)
 
     async def _get(self, path: str) -> dict[str, Any]:
         """Perform one local ``GET`` and decode its JSON body.
@@ -304,8 +376,8 @@ class TailscaleAgent:
             msg = (
                 f"the overlay agent at {self.socket_path} did not answer ({exc}). This "
                 f"client asks its own machine who is at the address it is about to dial, "
-                f"and sends nothing until it has been told (ADR-0124 §4); start the "
-                f"overlay agent and try again"
+                f"and which machine it is itself, and sends nothing until it has been told "
+                f"(ADR-0124 §4); start the overlay agent and try again"
             )
             raise OverlayIdentityUnavailableError(msg) from exc
         try:
@@ -321,13 +393,14 @@ class TailscaleAgent:
         return decoded
 
     async def _request(self, path: str) -> bytes:
-        """Write one HTTP/1.1 request and read the whole response body.
+        """Write one HTTP/1.0 request and read the whole response body.
 
         Hand-written rather than delegated, for ADR-0124 §3's reason: the agent is
         "not imported by, embedded in, linked into or launched by ``ai_assistant``",
         and a fixed ``GET`` against a local socket is a smaller thing than the
-        dependency that would perform it. ``Connection: close`` is what makes the
-        body's end unambiguous without reading a chunked encoding.
+        dependency that would perform it. **The version is what keeps the body's
+        end unambiguous** (:data:`_HTTP_VERSION`): ``Connection: close`` alone does
+        not stop Go's ``net/http`` chunking an unmeasured answer, and HTTP/1.0 does.
 
         Args:
             path: The local API path, query string included.
@@ -339,7 +412,8 @@ class TailscaleAgent:
             OSError: If the socket cannot be opened or the daemon goes away.
             OverlayIdentityUnavailableError: If the peer answering on the socket is
                 neither root nor this process (ADR-0131 §7), if the status line is
-                not a success, or if the daemon closed early or ran on.
+                not a success, if the answer is framed in an encoding this transport
+                does not read, or if the daemon closed early or ran on.
         """
         reader, writer = await asyncio.open_unix_connection(self.socket_path)
         try:
@@ -347,7 +421,7 @@ class TailscaleAgent:
             # request path, and this is the client's.
             check_agent_peer(writer, self.socket_path, refusal=OverlayIdentityUnavailableError)
             request = (
-                f"GET {path} HTTP/1.1\r\n"
+                f"GET {path} {_HTTP_VERSION}\r\n"
                 f"Host: {_LOCAL_API_HOST}\r\n"
                 f"Accept: application/json\r\n"
                 f"Connection: close\r\n\r\n"
@@ -360,6 +434,7 @@ class TailscaleAgent:
                 rendered = head.split(b"\r\n", 1)[0].decode("ascii", errors="replace")
                 msg = f"the overlay agent refused a local query: {rendered}"
                 raise OverlayIdentityUnavailableError(msg)
+            _check_framing(head)
             return await _read_body(reader)
         except (asyncio.IncompleteReadError, asyncio.LimitOverrunError) as exc:
             msg = "the overlay agent closed the connection before answering, or ran on"
@@ -368,6 +443,36 @@ class TailscaleAgent:
             writer.close()
             with contextlib.suppress(OSError):
                 await writer.wait_closed()
+
+
+def _check_framing(head: bytes) -> None:
+    """Refuse an answer wrapped in a transfer encoding, by name (#1309).
+
+    The request was HTTP/1.0 precisely so there would be no framing to read
+    (:data:`_HTTP_VERSION`). Left undetected, the chunk-size lines reach
+    :func:`json.loads`, which reports an agent "answering with something that is not
+    JSON" — pointing at the daemon's content when the problem is its envelope.
+
+    Args:
+        head: The response's status line and headers, terminated by a blank line.
+
+    Raises:
+        OverlayIdentityUnavailableError: If the response declares any transfer
+            encoding other than ``identity``.
+    """
+    for line in head.split(b"\r\n")[1:]:
+        name, sep, value = line.partition(b":")
+        if not sep or name.strip().lower() != b"transfer-encoding":
+            continue
+        framing = value.strip().lower()
+        if framing == _UNFRAMED:
+            continue
+        rendered = framing.decode("ascii", errors="replace")
+        msg = (
+            f"the overlay agent framed its answer as {rendered!r}, which this client "
+            f"does not read; the query is HTTP/1.0 so that the body needs no framing"
+        )
+        raise OverlayIdentityUnavailableError(msg)
 
 
 async def _read_body(reader: asyncio.StreamReader) -> bytes:
@@ -396,11 +501,14 @@ async def _read_body(reader: asyncio.StreamReader) -> bytes:
     return bytes(body)
 
 
-def _stable_id(node: dict[str, Any]) -> str:
+def _stable_id(node: dict[str, Any], member: str) -> str:
     """Read one node's stable overlay identity, or refuse to guess.
 
     Args:
         node: The agent's record of a node.
+        member: Which member of that record carries the stable identifier —
+            :data:`_STATUS_SELF_IDENTITY` or :data:`_WHOIS_NODE_IDENTITY`, because
+            the two endpoints name it differently.
 
     Returns:
         Its stable identifier.
@@ -411,15 +519,16 @@ def _stable_id(node: dict[str, Any]) -> str:
             an enrolment recorded is a stable identifier, so comparing against a
             renameable or reassignable one would accept a node that had merely
             acquired the hub's name — which is the substitution ADR-0124 §4's second
-            clause exists to refuse.
+            clause exists to refuse — and naming this machine by one would name it
+            as something the hub did not enrol.
     """
-    identity = node.get("StableID")
+    identity = node.get(member)
     if not isinstance(identity, str) or not identity:
         msg = (
             "the overlay agent reported a node with no stable identity, so this client "
-            "cannot tell whether the address it was about to dial is the hub it was "
-            "enrolled at; it refuses rather than guessing from a name or an address, "
-            "either of which would follow a rename or a reassignment"
+            "cannot compare it with an enrolled one; it refuses rather than guessing "
+            "from a name or an address, either of which would follow a rename or a "
+            "reassignment"
         )
         raise OverlayIdentityUnavailableError(msg)
     try:
@@ -431,14 +540,14 @@ def _stable_id(node: dict[str, Any]) -> str:
         # way in — not knowing it is the same condition as not being told it.
         msg = (
             "the overlay agent reported a stable identity with no UTF-8 form, so it "
-            "cannot be compared against the enrolled one; the destination is refused"
+            "cannot be compared against an enrolled one; it is refused"
         )
         raise OverlayIdentityUnavailableError(msg) from exc
     if size > MAX_OVERLAY_IDENTITY_BYTES:
         msg = (
             f"the overlay agent reported a stable identity over "
             f"{MAX_OVERLAY_IDENTITY_BYTES} bytes, which no overlay this client accepts "
-            f"produces; the destination is refused rather than compared against it"
+            f"produces; it is refused rather than compared against an enrolled one"
         )
         raise OverlayIdentityUnavailableError(msg)
     return identity

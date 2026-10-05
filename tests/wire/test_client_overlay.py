@@ -205,6 +205,119 @@ async def test_no_daemon_at_the_path_is_a_refusal(tmp_path: Path) -> None:
     assert "sends nothing" in str(raised.value)
 
 
+# --- this machine's own node (ADR-0296 §1) -----------------------------------
+
+#: This machine's stable node id, as the daemon's ``status`` reports it.
+LAPTOP = "nL4pT0pCNTRL"
+
+
+def _status(self_record: object) -> Callable[[str], bytes]:
+    """A daemon whose ``status`` names ``self_record`` as this machine."""
+    return lambda _line: _ok({"BackendState": "Running", "Self": self_record})
+
+
+async def test_this_machines_node_is_read_from_the_status_self_record(tmp_path: Path) -> None:
+    """``status`` answers with a ``PeerStatus``, whose stable identifier is ``ID``.
+
+    Not ``StableID``, which is the ``whois`` record's member for the same value: the
+    live daemon returns one string under both names for one node, which is why this
+    machine's answer equals what the hub's ``whois`` recorded for it at enrolment.
+    """
+    record = {"ID": LAPTOP, "HostName": "laptop", "TailscaleIPs": ["100.64.1.9"]}
+    async with _agent(tmp_path / "d.sock", _status(record)) as agent:
+        assert await agent.own_identity() == LAPTOP
+        (asked,) = agent.api.requested  # type: ignore[attr-defined]
+
+    assert asked == "GET /localapi/v0/status?peers=false HTTP/1.0"
+
+
+async def test_a_self_record_carrying_only_a_whois_member_is_refused(tmp_path: Path) -> None:
+    """Named per endpoint, not tried in turn: a fallback reads a member the type lacks."""
+    async with _agent(tmp_path / "d.sock", _status({"StableID": LAPTOP})) as agent:
+        with pytest.raises(OverlayIdentityUnavailableError) as raised:
+            await agent.own_identity()
+
+    assert "name or an address" in str(raised.value)
+
+
+@pytest.mark.parametrize(
+    "answer",
+    [
+        pytest.param({"BackendState": "NeedsLogin"}, id="no Self at all"),
+        pytest.param({"Self": None}, id="a null Self"),
+        pytest.param({"Self": ["not", "a", "record"]}, id="a Self that is not a record"),
+    ],
+)
+async def test_a_status_naming_no_node_for_this_machine_is_refused(
+    tmp_path: Path, answer: dict[str, object]
+) -> None:
+    async with _agent(tmp_path / "d.sock", lambda _line: _ok(answer)) as agent:
+        with pytest.raises(OverlayIdentityUnavailableError) as raised:
+            await agent.own_identity()
+
+    assert "names no node for this machine" in str(raised.value)
+
+
+async def test_this_machines_node_is_bounded_like_any_other(tmp_path: Path) -> None:
+    huge = {"ID": "N" * (MAX_OVERLAY_IDENTITY_BYTES + 1)}
+    async with _agent(tmp_path / "d.sock", _status(huge)) as agent:
+        with pytest.raises(OverlayIdentityUnavailableError) as raised:
+            await agent.own_identity()
+
+    assert str(MAX_OVERLAY_IDENTITY_BYTES) in str(raised.value)
+
+
+async def test_no_daemon_is_a_refusal_for_this_machines_node_too(tmp_path: Path) -> None:
+    with pytest.raises(OverlayIdentityUnavailableError, match="start the overlay agent"):
+        await TailscaleAgent(tmp_path / "nothing.sock").own_identity()
+
+
+# --- the version asked in (#1309) ---------------------------------------------
+
+
+async def test_every_query_is_asked_in_http_1_0(tmp_path: Path) -> None:
+    """Go's ``net/http`` chunks an unmeasured HTTP/1.1 answer whatever the request says.
+
+    ``whois`` happens to be measured and ``status`` is not, so a client asking in 1.1
+    reads ``status`` as chunk framing; 1.0 has no chunked encoding at all.
+    """
+    async with _agent(tmp_path / "d.sock", lambda _line: _ok({"Node": {"StableID": HUB}})) as agent:
+        await agent.identify("100.64.1.7", 50084)
+        (asked,) = agent.api.requested  # type: ignore[attr-defined]
+
+    assert asked.endswith(" HTTP/1.0")
+
+
+@pytest.mark.parametrize("framing", ["chunked", "gzip, chunked"])
+async def test_an_answer_in_a_transfer_encoding_is_refused_by_name(
+    tmp_path: Path, framing: str
+) -> None:
+    """Not as "not JSON", which would point at the daemon's content and not its envelope."""
+    body = json.dumps({"Self": {"ID": LAPTOP}}).encode("utf-8")
+    chunked = (
+        (
+            f"HTTP/1.1 200 OK\r\nTransfer-Encoding: {framing}\r\nConnection: close\r\n\r\n"
+            f"{len(body):x}\r\n"
+        ).encode("ascii")
+        + body
+        + b"\r\n0\r\n\r\n"
+    )
+    async with _agent(tmp_path / "d.sock", lambda _line: chunked) as agent:
+        with pytest.raises(OverlayIdentityUnavailableError) as raised:
+            await agent.own_identity()
+
+    assert "framed its answer" in str(raised.value)
+    assert "not JSON" not in str(raised.value)
+
+
+async def test_an_identity_framing_is_read_as_no_framing(tmp_path: Path) -> None:
+    """``identity`` is the absence of a transfer encoding, spelled out."""
+    body = json.dumps({"Self": {"ID": LAPTOP}}).encode("utf-8")
+    plain = b"HTTP/1.0 200 OK\r\nTransfer-Encoding: Identity\r\nConnection: close\r\n\r\n" + body
+    async with _agent(tmp_path / "d.sock", lambda _line: plain) as agent:
+        assert await agent.own_identity() == LAPTOP
+
+
 def test_the_agent_is_pointed_at_a_path_without_probing(tmp_path: Path) -> None:
     """Constructing one asks nothing, so "is the overlay up" is asked when a command chose.
 
