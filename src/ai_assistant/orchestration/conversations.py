@@ -285,11 +285,13 @@ _WIDEST_NUMBER: Final = 2**63 - 1
 
 def _widest_records(
     conversation_id: str, message: NewMessage
-) -> tuple[TranscriptPage, ChatChanges]:
-    """The one-entry transcript page and change page ``message``'s record could cost.
+) -> tuple[TranscriptPage, ChatChanges, ChatStreamChunk]:
+    """The three records ``message``'s own record could cost to read back.
 
-    Measured at the widest position, sequence number and instant it could be recorded
-    with, and a reply reference as wide as the one it names.
+    The one-entry transcript page, the one-change page, and the change stream's chunk
+    carrying the change (ADR-0298 §7:3), measured at the widest position, sequence
+    number and instant it could be recorded with, and a reply reference as wide as the
+    one it names.
     """
     recorded = TranscriptMessage(
         conversation_id=conversation_id,
@@ -307,12 +309,11 @@ def _widest_records(
         device_id=message.device_id,
         message_id=message.message_id,
     )
+    added = MessageAddedChange(seq=_WIDEST_NUMBER, message=recorded)
     return (
         TranscriptPage(conversation_id=conversation_id, entries=(recorded,), as_of=_WIDEST_NUMBER),
-        ChatChanges(
-            changes=(MessageAddedChange(seq=_WIDEST_NUMBER, message=recorded),),
-            next_after=_WIDEST_NUMBER,
-        ),
+        ChatChanges(changes=(added,), next_after=_WIDEST_NUMBER),
+        ChatStreamChunk(change=DeviceChange(change=added)),
     )
 
 
@@ -320,17 +321,18 @@ def check_message_fits(conversation_id: str, message: UserMessage, *, max_bytes:
     """Refuse a message whose own record could not be read back within the limit.
 
     A message is accepted only where a page holding it alone — the transcript's and
-    the change stream's — fits the payload limit, measured at the widest position,
-    sequence number and instant it could be recorded with. Otherwise a message the
-    conversation recorded would be one no read could return, and a device's cursor
-    would stop at it for good: :func:`fit_transcript` and :func:`fit_changes` can
-    shorten a page to one entry and no further. Shared by the engine and the
+    the change stream's — and the change stream's chunk carrying it (ADR-0298 §7:3)
+    fit the payload limit, measured at the widest position, sequence number and
+    instant it could be recorded with. Otherwise a message the conversation recorded
+    would be one no read could return, and a device's cursor would stop at it for
+    good: :func:`fit_transcript` and :func:`fit_changes` can shorten a page to one
+    entry and no further, and a chunk carries one change. Shared by the engine and the
     canonical fake engine.
 
     Raises:
-        OversizedValueError: If either one-entry page would exceed ``max_bytes``.
+        OversizedValueError: If any of the three would exceed ``max_bytes``.
     """
-    page, changes = _widest_records(conversation_id, message.as_new_message())
+    page, changes, chunk = _widest_records(conversation_id, message.as_new_message())
     check_payload(
         page,
         max_bytes=max_bytes,
@@ -340,6 +342,11 @@ def check_message_fits(conversation_id: str, message: UserMessage, *, max_bytes:
         changes,
         max_bytes=max_bytes,
         subject="the change recording the message write_message() was given",
+    )
+    check_payload(
+        chunk,
+        max_bytes=max_bytes,
+        subject="the change stream's chunk carrying the message write_message() was given",
     )
 
 
@@ -351,19 +358,23 @@ def _prefix_fits(conversation_id: str, message: NewMessage, length: int, *, max_
     the length whatever the characters, and the search over it has to see every
     length to stay a search (a blank prefix is refused afterwards, not here).
     """
-    page, _ = _widest_records(conversation_id, message)
+    page, _, _ = _widest_records(conversation_id, message)
     (entry,) = page.entries
     assert isinstance(entry, TranscriptMessage)  # noqa: S101 — the probe holds one message
     cut = TranscriptMessage.model_construct(
         **{**dict(entry), "text": message.text[:length], "cut_off": True}
     )
+    added = MessageAddedChange.model_construct(seq=_WIDEST_NUMBER, message=cut)
     return all(
         len(canonical_payload(one)) <= max_bytes
         for one in (
             page.model_copy(update={"entries": (cut,)}),
-            ChatChanges.model_construct(
-                changes=(MessageAddedChange.model_construct(seq=_WIDEST_NUMBER, message=cut),),
-                next_after=_WIDEST_NUMBER,
+            ChatChanges.model_construct(changes=(added,), next_after=_WIDEST_NUMBER),
+            ChatStreamChunk.model_construct(
+                change=DeviceChange.model_construct(change=added, snapshot=None),
+                state=None,
+                roles=None,
+                heartbeat=False,
             ),
         )
     )
@@ -384,8 +395,8 @@ def fitted_message(conversation_id: str, message: NewMessage, *, max_bytes: int)
         OversizedValueError: If the longest prefix that fits is blank, which no message
             may be — only a limit too small for a message's own frame brings it about.
     """
-    page, changes = _widest_records(conversation_id, message)
-    if all(len(canonical_payload(one)) <= max_bytes for one in (page, changes)):
+    records = _widest_records(conversation_id, message)
+    if all(len(canonical_payload(one)) <= max_bytes for one in records):
         return message
     # `low` always fits (the empty prefix is the frame alone); `high` never does.
     low, high = 0, len(message.text)
@@ -396,8 +407,8 @@ def fitted_message(conversation_id: str, message: NewMessage, *, max_bytes: int)
         else:
             high = middle
     if not message.text[:low].strip():
-        check_payload(page, max_bytes=max_bytes, subject="the assistant's message")
-        check_payload(changes, max_bytes=max_bytes, subject="the assistant's message")
+        for one in records:
+            check_payload(one, max_bytes=max_bytes, subject="the assistant's message")
         raise AssertionError("an oversized message was unexpectedly admitted")
     return NewMessage(
         author=message.author,
@@ -420,9 +431,10 @@ def check_devices_fit(
 
     A set of devices is recorded as a change (ADR-0293 §5:10) — "my devices" also in
     every later conversation's start — and read back on the conversation's digest
-    (§3:3). A set whose one-change page or digest would exceed the payload limit
-    would stop every cursor at that change, since :func:`fit_changes` can shorten a
-    page to one change and no further; so it is refused before it is recorded,
+    (§3:3) and in the change stream's chunk (ADR-0298 §7:3). A set whose one-change
+    page, chunk or digest would exceed the payload limit would stop every cursor at
+    that change, since :func:`fit_changes` can shorten a page to one change and no
+    further and a chunk carries one change; so it is refused before it is recorded,
     measured at the widest sequence number and instants. Shared by the engine and the
     canonical fake engine.
 
@@ -449,6 +461,18 @@ def check_devices_fit(
             ChatChanges(changes=(change,), next_after=_WIDEST_NUMBER),
             max_bytes=max_bytes,
             subject="the change recording the devices given",
+        )
+        # The change stream's chunk carrying it, with the snapshot a device it adds is
+        # given shortened to none, which is as far as §7:8 shortens it.
+        snapshot = (
+            None
+            if change.conversation_id is None
+            else TranscriptPage(conversation_id=change.conversation_id, as_of=_WIDEST_NUMBER)
+        )
+        check_payload(
+            ChatStreamChunk(change=DeviceChange(change=change, snapshot=snapshot)),
+            max_bytes=max_bytes,
+            subject="the change stream's chunk carrying the devices given",
         )
     check_payload(
         ConversationDigest(

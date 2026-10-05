@@ -20,7 +20,7 @@ import asyncio
 import contextlib
 import socket
 from dataclasses import dataclass, field
-from datetime import timedelta
+from datetime import UTC, datetime, timedelta
 from typing import TYPE_CHECKING, Any, Final
 
 import pytest
@@ -40,7 +40,9 @@ from ai_assistant.core.types import (
     DeviceChange,
     DeviceRole,
     MessageAddedChange,
+    MessageAuthor,
     RequestingDevice,
+    TranscriptMessage,
     UserMessage,
 )
 from ai_assistant.testing import FakeAssistantEngine
@@ -62,6 +64,7 @@ _LIMITS: Final = ConnectionLimits(max_frame_bytes=_FRAME, read_timeout=_PATIENT,
 _PHONE: Final = ChatDevice(device_id="phone", access=DeviceAccess.READ_WRITE)
 _SETTLE: Final = 5.0
 _QUICK: Final = timedelta(milliseconds=100)
+_AT: Final = datetime(2026, 10, 5, 12, tzinfo=UTC)
 
 
 def _said(message_id: str) -> UserMessage:
@@ -438,6 +441,69 @@ def test_a_tcp_stream_sets_its_user_timeout_to_the_dead_peer_timeout() -> None:
     milliseconds = int(env.CHANGE_STREAM_DEAD_PEER.total_seconds() * 1000)
     assert tcp.set == [(socket.IPPROTO_TCP, socket.TCP_USER_TIMEOUT, milliseconds)]
     assert local.set == [], "the local socket reports a closed peer at once"
+
+
+class _Flooding(FakeAssistantEngine):
+    """An engine whose stream sends large chunks for as long as it is read."""
+
+    def follow_chat(self, *, after: int) -> AsyncIterator[ChatStreamChunk | ChatStreamEnd]:
+        """Large changes, one after another."""
+        del after
+        return self._flooding()
+
+    async def _flooding(self) -> AsyncIterator[ChatStreamChunk | ChatStreamEnd]:
+        seq = 0
+        while True:
+            seq += 1
+            message = TranscriptMessage(
+                conversation_id="c-1",
+                position=seq,
+                written_at=_AT,
+                author=MessageAuthor.ASSISTANT,
+                text="x" * 15_000,
+            )
+            change = MessageAddedChange(seq=seq, message=message)
+            yield ChatStreamChunk(change=DeviceChange(change=change))
+
+
+async def test_a_peer_that_stops_reading_is_abandoned_at_the_dead_peer_timeout(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """§7:14: a write that does not drain ends the connection, and its hang-up with it."""
+    monkeypatch.setattr(wire_server, "CHANGE_STREAM_DEAD_PEER", _QUICK)
+    path = tmp_path / "s.sock"
+    accepted: asyncio.Future[tuple[asyncio.StreamReader, asyncio.StreamWriter]] = (
+        asyncio.get_running_loop().create_future()
+    )
+
+    async def _accept(reader: asyncio.StreamReader, writer: asyncio.StreamWriter) -> None:
+        accepted.set_result((reader, writer))
+
+    server = await asyncio.start_unix_server(_accept, path=str(path))
+    reader, writer = await asyncio.open_unix_connection(str(path))
+    hub_reader, hub_writer = await accepted
+    served = asyncio.ensure_future(
+        serve_connection(_Flooding(), hub_reader, hub_writer, limits=_LIMITS)
+    )
+    try:
+        peer = _Peer(reader, writer)
+        await peer.handshake()
+        await peer.send(_follow("r-1"))
+        # The peer reads nothing more, so the hub's writes fill the socket and stall.
+        # Well inside the connection's own read deadline, so it is the stalled write
+        # that ends it, and its hang-up does not wait for the bytes to drain.
+        # Shielded, so the deadline expiring fails the case rather than cancelling the
+        # serving task into an ending of its own.
+        async with asyncio.timeout(_PATIENT.total_seconds() / 4):
+            await asyncio.shield(served)
+        assert hub_writer.transport.is_closing()
+    finally:
+        with contextlib.suppress(Exception):
+            writer.close()
+        served.cancel()
+        await asyncio.gather(served, return_exceptions=True)
+        server.close()
+        await server.wait_closed()
 
 
 def test_the_two_figures_are_the_ones_the_adr_fixed() -> None:

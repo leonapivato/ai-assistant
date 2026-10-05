@@ -968,6 +968,23 @@ class ChatReaderContract:
 
         assert ended.state == ConversationState(last_ended=ActivationEnding.DONE)
 
+    async def test_forgetting_a_conversation_pushes_the_state_it_leaves(
+        self, chat_reader_surface: ChatReaderSubject
+    ) -> None:
+        """ADR-0296 §4:9: the state is read from the episodes, so forgetting changes it."""
+        engine = chat_reader_surface.engine
+        conversation = await _started(engine, _PHONE)
+        await engine.write_message(conversation, message=said(_PHONE, "m-1", "hello"))
+        await _answered(engine, conversation, 1)
+
+        async with closing_stream(engine.follow_chat(after=0)) as chunks:
+            await next_change(chunks)  # the stream has taken its first reading
+            assert await engine.forget_conversation(conversation) is True
+            left = await next_state(chunks)
+
+        assert left.conversation_id == conversation
+        assert left.state == ConversationState(), "what the assistant forgot it no longer knows"
+
     async def test_a_stopped_activation_writes_nothing_and_shows_stopped(
         self, chat_reader_surface: ChatReaderSubject
     ) -> None:
