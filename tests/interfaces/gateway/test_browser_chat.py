@@ -24,6 +24,7 @@ from playwright.async_api import expect
 from ai_assistant.core.errors import ConversationStoreError, DeviceRefusal
 from ai_assistant.core.types import (
     ChatDevice,
+    ChatStreamChunk,
     ChatStreamEnd,
     ConversationState,
     DeviceAccess,
@@ -993,7 +994,7 @@ async def test_a_device_added_to_a_conversation_is_listed_it_with_its_snapshot(
 async def test_a_device_refused_for_holding_no_role_drops_every_conversation(
     gateway_browser: Browser, tmp_path: Path
 ) -> None:
-    """ADR-0298 §7:13: a device refused the change stream for holding no role drops every
+    """ADR-0298 §7:17: a device refused the change stream for holding no role drops every
     conversation it holds, as if it had seen the change that removed it from each — and
     says why, with the remedy, and reopens nothing of its own motion."""
     async with driving(gateway_browser, tmp_path, device=_LAPTOP) as drive:
@@ -1017,6 +1018,27 @@ async def test_a_device_refused_for_holding_no_role_drops_every_conversation(
         opened = len(_follows(drive))
         await drive.page.wait_for_timeout(2_000)
         assert len(_follows(drive)) == opened
+
+
+async def test_a_roles_chunk_with_no_roles_drops_nothing(
+    gateway_browser: Browser, tmp_path: Path
+) -> None:
+    """The roles the stream carries are the roster's (ADR-0298 §7:9), and membership of a
+    conversation is a role the roster does not carry: so an empty set is not the
+    ``NO_ROLE`` refusal §7:17 drops on. The page says what the set is and keeps
+    following, with every conversation it held."""
+    async with driving(gateway_browser, tmp_path, device=_LAPTOP) as drive:
+        conversation = await _open(drive, devices=(_LAPTOP,))
+        drive.engine.push(ChatStreamChunk(roles=()))
+
+        await expect(drive.page.locator("#chat-this-device")).to_contain_text(
+            "roster gives it no role", timeout=_FOLLOWED
+        )
+        await expect(drive.page.locator("#chat-heading")).to_have_text(
+            f"Conversation {conversation}"
+        )
+        await expect(drive.page.locator("#chat-follow")).to_contain_text("Following this chat")
+        await expect(drive.page.locator("#chat-said")).to_be_hidden()
 
 
 async def test_a_hub_shutting_down_stops_the_following_and_it_carries_on_after(

@@ -8564,7 +8564,7 @@ const CHAT_STREAM_MISFRAMED =
 const CHAT_HUB_ENDED =
   "Stopped following the chat: the hub is shutting down. Follow again once it is back, " +
   "and this page carries on from the last change it showed.";
-// What the page says when it drops what it held (ADR-0298 §7:13, ADR-0296 §4:8).
+// What the page says when it drops what it held (ADR-0298 §7:17, ADR-0296 §4:8).
 const CHAT_DROPPED_NO_ROLE =
   "The hub refused this device for holding no role, so this page has let go of every " +
   "conversation it showed. Once the device is given a role, follow again.";
@@ -9188,7 +9188,7 @@ function dropConversation(id) {
 
 // A refusal of the change stream or of the changes read for holding no role drops every
 // conversation this page holds, as if it had seen the change that removed it from each
-// (ADR-0298 §7:13). Only that reason: a device refused for a role that does not allow an
+// (ADR-0298 §7:17). Only that reason: a device refused for a role that does not allow an
 // act still reads what it reads.
 function dropOnRefusal(body) {
   if (body === null || body.fault !== "device-without-role") {
@@ -10121,9 +10121,17 @@ function renderMyDevices() {
   chat.myDevices.forEach((device) => renderDevice(list, device));
 }
 
+// **An empty set is not the hub's "no role" refusal, and drops nothing.** The roles the
+// stream carries are the roster's (ADR-0298 §7:9): a device's membership of "my devices"
+// and of conversations is a role the roster does not record (ADR-0296 §2), so a device
+// with no roster role may still read and write the conversations it is a device of. What
+// drops everything is the refusal for holding no role (§7:17, `dropOnRefusal`).
 function rolesSaid(roles) {
   if (roles.length === 0) {
-    return "The hub has given it no role yet, so it can do nothing until it is given one.";
+    return (
+      "The hub's device roster gives it no role, so it cannot ask or manage from here; " +
+      "the conversations it is a device of, it still reads and writes."
+    );
   }
   const named = roles.join(" and ");
   return `The hub gives it the ${named} role${roles.length === 1 ? "" : "s"}.`;
