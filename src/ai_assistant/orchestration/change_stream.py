@@ -34,6 +34,14 @@ stream opening sends the state of each conversation running then. The state is a
 read from the episodes on the conversation's place, so the engine moves the count when
 it forgets episodes there — a conversation's forgetting, or a forget naming one of its
 episodes — and that conversation's state is sent again.
+
+**A state no act changed is caught by a sweep.** An episode leaving its retention
+window changes the state at that instant with nothing to count, so every
+:data:`CHANGE_STREAM_SWEEP_SECONDS` the stream reads again the state of every
+conversation its device reads and sends each that differs from the last it knew. The
+listing it reads is paged and may pass over a conversation that moves while it is
+read; the next sweep reads it again, so the sweep converges rather than claiming
+completeness.
 """
 
 from __future__ import annotations
@@ -68,6 +76,12 @@ CHANGE_STREAM_POLL_SECONDS: Final = 0.25
 #: How long an engine shutting down waits for its open streams to be closed, having
 #: woken each to send its end (:meth:`ChangeStream.close`), in seconds.
 CHANGE_STREAM_CLOSE_SECONDS: Final = 1.0
+
+#: How often an open change stream reads again the current state of every
+#: conversation its device reads, in seconds, and sends each that differs from the
+#: last it knew: what carries a state no act of the engine's changed — an episode
+#: leaving its retention window — and a forget whose record could not be read first.
+CHANGE_STREAM_SWEEP_SECONDS: Final = 60.0
 
 #: How many changes one read of the stream asks the store for. A full page is read
 #: on at once rather than after the interval, so a device far behind catches up at
@@ -115,6 +129,7 @@ class ChangeStream:
         tracked: Callable[[Awaitable[object]], Awaitable[object]],
         max_payload_bytes: int,
         poll_seconds: float = CHANGE_STREAM_POLL_SECONDS,
+        sweep_seconds: float = CHANGE_STREAM_SWEEP_SECONDS,
     ) -> None:
         """Read the chat space and the engine's account of what it runs.
 
@@ -130,6 +145,8 @@ class ChangeStream:
             max_payload_bytes: The contract limit a chunk is fitted to (§7:8).
             poll_seconds: The interval; :data:`CHANGE_STREAM_POLL_SECONDS` but in a
                 test that steps it.
+            sweep_seconds: How often every conversation the device reads has its
+                state read again; :data:`CHANGE_STREAM_SWEEP_SECONDS` but in a test.
         """
         self._chat = chat
         self._running = running
@@ -138,6 +155,7 @@ class ChangeStream:
         self._tracked = tracked
         self._max_payload_bytes = max_payload_bytes
         self._poll_seconds = poll_seconds
+        self._sweep_seconds = sweep_seconds
         # Set once, by `close`, so every stream waiting out its interval wakes to end.
         self._woken = asyncio.Event()
         # How many streams are open, and set whenever none is (`close` waits on it).
@@ -178,7 +196,7 @@ class ChangeStream:
             if not self._open:
                 self._all_closed.set()
 
-    async def _following(
+    async def _following(  # noqa: C901 — one loop over the pages, the states, the sweep and the wake
         self,
         device: RequestingDevice,
         cursor: int,
@@ -186,7 +204,11 @@ class ChangeStream:
         due: set[str],
     ) -> AsyncIterator[ChatStreamChunk | ChatStreamEnd]:
         """The body of :meth:`follow`, counted open there until it is closed."""
+        loop = asyncio.get_running_loop()
         try:
+            # Each state as the stream opens, so the sweep sends what changes after.
+            known = await self._sweep(device, seen, {})
+            swept = loop.time()
             while not self._closing() and not self._woken.is_set():
                 page = await self._page(device, cursor)
                 reading: dict[str, bool] = {}
@@ -204,8 +226,16 @@ class ChangeStream:
                 for conversation_id in sorted(due):
                     state = await self._state(device, conversation_id, seen)
                     if state is not None:
+                        known[conversation_id] = state.state
                         yield ChatStreamChunk(state=state)
                 due = set()
+                if loop.time() >= swept + self._sweep_seconds:
+                    swept = loop.time()
+                    for conversation_id in sorted(await self._read_conversations(device)):
+                        state = await self._state(device, conversation_id, seen)
+                        if state is not None and known.get(conversation_id) != state.state:
+                            known[conversation_id] = state.state
+                            yield ChatStreamChunk(state=state)
                 if len(page.changes) < CHANGE_STREAM_PAGE:
                     with contextlib.suppress(TimeoutError):
                         async with asyncio.timeout(self._poll_seconds):
@@ -213,6 +243,44 @@ class ChangeStream:
         except _EngineClosingError:
             pass
         yield ChatStreamEnd(next_after=cursor)
+
+    async def _sweep(
+        self, device: RequestingDevice, seen: Running, known: dict[str, ConversationState]
+    ) -> dict[str, ConversationState]:
+        """Every conversation the device reads, with its current state now, into ``known``."""
+        for conversation_id in await self._read_conversations(device):
+            state = await self._state(device, conversation_id, seen)
+            if state is not None:
+                known[conversation_id] = state.state
+        return known
+
+    async def _read_conversations(self, device: RequestingDevice) -> set[str]:
+        """Every conversation the device reads now: every one held, for the hub's.
+
+        Paged by offset over an order activity and deletion change, so a conversation
+        that moves across a page boundary while it is read can be passed over; the
+        sweep reads it again at its next interval, and nothing is consumed by a
+        reading that missed one.
+        """
+        found: set[str] = set()
+        offset = 0
+        while True:
+            if device.is_hub:
+                listed = await self._read(
+                    self._chat.recent(limit=CHANGE_STREAM_PAGE, offset=offset)
+                )
+                page = [one.id for one in listed]
+            else:
+                held = await self._read(
+                    self._chat.device_conversations(
+                        device.device_id, limit=CHANGE_STREAM_PAGE, offset=offset
+                    )
+                )
+                page = [one.conversation.id for one in held]
+            found.update(page)
+            if len(page) < CHANGE_STREAM_PAGE:
+                return found
+            offset += CHANGE_STREAM_PAGE
 
     async def close(self, *, within: float = CHANGE_STREAM_CLOSE_SECONDS) -> None:
         """Wake every open stream to its end, and wait for each to be closed.
@@ -324,6 +392,7 @@ __all__ = [
     "CHANGE_STREAM_CLOSE_SECONDS",
     "CHANGE_STREAM_PAGE",
     "CHANGE_STREAM_POLL_SECONDS",
+    "CHANGE_STREAM_SWEEP_SECONDS",
     "Activity",
     "ChangeStream",
     "Running",

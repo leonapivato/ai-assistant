@@ -20,11 +20,17 @@ import pytest
 from test_engine import Harness, NoStepPlanner
 
 from ai_assistant.core.device_context import serving_device
-from ai_assistant.core.errors import DeviceRefusal, DeviceRefusedError, OversizedValueError
+from ai_assistant.core.errors import (
+    DeviceRefusal,
+    DeviceRefusedError,
+    MemoryStoreError,
+    OversizedValueError,
+)
 from ai_assistant.core.streams import closing_stream
 from ai_assistant.core.types import (
     CHAT_DEVICES_MAX,
     HUB_REQUESTING_DEVICE,
+    ActivationEnding,
     ChatChanges,
     ChatDevice,
     ChatStreamChunk,
@@ -36,10 +42,13 @@ from ai_assistant.core.types import (
     DeviceAccess,
     DeviceChange,
     DevicesChangedChange,
+    MemorySource,
     MessageAddedChange,
     MessageAuthor,
     NewMessage,
+    Provenance,
     RequestingDevice,
+    SemanticMemory,
     TranscriptMessage,
     UserMessage,
 )
@@ -51,7 +60,7 @@ from ai_assistant.orchestration.conversations import (
     fitted_message,
 )
 from ai_assistant.orchestration.payloads import canonical_payload
-from ai_assistant.testing import FakeConversationStore
+from ai_assistant.testing import FakeConversationStore, FakeMemoryStore
 from ai_assistant.wire.client import HubEngineClient
 from ai_assistant.wire.server import ConnectionLimits, serve_connection
 
@@ -59,7 +68,7 @@ if TYPE_CHECKING:
     from collections.abc import AsyncIterator, Awaitable, Sequence
     from pathlib import Path
 
-    from ai_assistant.core.types import CurrentState
+    from ai_assistant.core.types import CurrentState, MemoryRecord
 
 _PHONE: Final = ChatDevice(device_id="phone", access=DeviceAccess.READ_WRITE)
 _WATCH: Final = ChatDevice(device_id="watch", access=DeviceAccess.READ)
@@ -70,6 +79,7 @@ PEN: Final = RequestingDevice(device_id="pen")
 
 #: A payload limit roomy enough for every case but the one that fits a snapshot.
 _ROOMY: Final = 1_000_000
+_AT: Final = datetime(2026, 1, 1, 12, tzinfo=UTC)
 _SETTLE: Final = 5.0
 
 
@@ -102,6 +112,7 @@ def _stream(
     *,
     limit: int = _ROOMY,
     poll: float = 0.01,
+    sweep: float = 60.0,
 ) -> ChangeStream:
     held = engine or _Engine()
     return ChangeStream(
@@ -112,6 +123,7 @@ def _stream(
         tracked=_tracked,
         max_payload_bytes=limit,
         poll_seconds=poll,
+        sweep_seconds=sweep,
     )
 
 
@@ -245,15 +257,15 @@ async def test_a_device_removed_while_its_state_is_read_is_not_sent_it() -> None
     chat = FakeConversationStore()
     conversation = await _chat(chat, _PHONE, _WATCH)
     engine = _Engine()
-    engine.gate = asyncio.Event()
     async with _Following(_stream(chat, engine).follow(WATCH, after=0)) as following:
         await following.drain()
+        engine.gate = asyncio.Event()
         engine.activity = {conversation: Activity(turns=1, running=("a-1",))}
         async with asyncio.timeout(_SETTLE):
             await engine.reading.wait()
         await chat.set_conversation_devices(conversation, [_PHONE])
         engine.gate.set()
-        sent: list[ChatStreamChunk] = []
+        sent = []
         while (chunk := await following.next(0.2)) is not None:
             assert isinstance(chunk, ChatStreamChunk)
             sent.append(chunk)
@@ -411,6 +423,30 @@ async def test_closing_wakes_a_waiting_stream_to_its_end_and_waits_for_it() -> N
     assert isinstance(last, ChatStreamEnd)
 
 
+async def test_a_state_no_act_changed_is_sent_by_the_sweep() -> None:
+    """Round 5's case: an episode leaving its window changes a state with nothing run.
+
+    The sweep reads every read conversation's state again and sends each that differs
+    from the last the stream knew, and none to a device that does not read it.
+    """
+    chat = FakeConversationStore()
+    shown = await _chat(chat, _PHONE)
+    hidden = await _chat(chat, _PEN)
+    engine = _Engine()
+    engine.states[shown] = ConversationState(last_ended=ActivationEnding.DONE)
+    engine.states[hidden] = ConversationState(last_ended=ActivationEnding.DONE)
+    async with _Following(_stream(chat, engine, sweep=0.05).follow(PHONE, after=0)) as following:
+        await following.drain()
+        engine.states[shown] = ConversationState()  # its episode expired
+        engine.states[hidden] = ConversationState()
+        sent: list[CurrentState] = []
+        while (chunk := await following.next(0.3)) is not None:
+            if isinstance(chunk, ChatStreamChunk) and chunk.state is not None:
+                sent.append(chunk.state)
+
+    assert [(one.conversation_id, one.state) for one in sent] == [(shown, ConversationState())]
+
+
 # --- through the engine -----------------------------------------------------
 
 
@@ -503,6 +539,41 @@ async def test_the_hub_writes_each_streams_end_before_its_listener_closes(
         await server.wait_closed()
 
     assert isinstance(received[-1], ChatStreamEnd)
+
+
+class _Unreadable(FakeMemoryStore):
+    """A memory store whose one record cannot be read, though it can be destroyed."""
+
+    def __init__(self, unreadable: str) -> None:
+        super().__init__()
+        self.unreadable = unreadable
+
+    async def get(self, record_id: str) -> MemoryRecord | None:
+        if record_id == self.unreadable:
+            msg = "a stored record could not be decoded"
+            raise MemoryStoreError(msg)
+        return await super().get(record_id)
+
+
+async def test_a_record_that_cannot_be_read_is_still_forgotten() -> None:
+    """ADR-0073 §5: the read a forget makes for the stream never stands in its way."""
+    memory = _Unreadable("note-1")
+    await memory.add(
+        SemanticMemory(
+            id="note-1",
+            content="unreadable",
+            fact="unreadable",
+            provenance=Provenance(
+                source=MemorySource.USER_ASSERTED, confidence=1.0, last_updated=_AT
+            ),
+        )
+    )
+    engine = Harness(planner=NoStepPlanner(), chat_reader=False, memory=memory).engine
+    try:
+        assert await engine.forget("note-1") is True
+        assert await memory.delete("note-1") is False, "already destroyed"
+    finally:
+        await engine.aclose()
 
 
 async def test_a_snapshot_shows_a_message_deleted_since_as_its_marker() -> None:
