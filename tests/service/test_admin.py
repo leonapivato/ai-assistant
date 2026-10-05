@@ -27,6 +27,7 @@ from ai_assistant.service.enrolment import (
     LISTING_LIMIT,
     DeviceRegistry,
     EnrolmentStore,
+    Role,
 )
 from ai_assistant.service.exits import EXIT_DEPLOYMENT, EXIT_OK, EXIT_RESTART
 from ai_assistant.service.overlay import MAX_OVERLAY_IDENTITY_BYTES
@@ -183,7 +184,7 @@ async def test_a_revocation_through_the_socket_reaches_the_running_hubs_record(
         registry.when_expelled(lambda identity, reason: expelled.append((identity, reason)))
         await _act(listener, {"act": "enrol", "identity": _DEVICE})
         reply = await _act(listener, {"act": "revoke", "identity": _DEVICE})
-        assert reply == {"ok": True, "revoked": True}
+        assert reply == {"ok": True, "enrolment": True, "registrations": 0, "roles": []}
         assert expelled == [(_DEVICE, "revoked")]
 
 
@@ -193,7 +194,9 @@ async def test_revoking_a_device_that_holds_nothing_says_so(tmp_path: Path) -> N
     async with _admin(tmp_path) as (listener, _):
         assert await _act(listener, {"act": "revoke", "identity": _DEVICE}) == {
             "ok": True,
-            "revoked": False,
+            "enrolment": False,
+            "registrations": 0,
+            "roles": [],
         }
 
 
@@ -209,7 +212,7 @@ async def test_the_listing_keeps_revoked_enrolments_and_dates_them(tmp_path: Pat
         await _act(listener, {"act": "revoke", "identity": _DEVICE})
         listed = await _act(listener, {"act": "list"})
     assert listed["hub_identity"] == _HUB_ID
-    (device,) = listed["devices"]
+    (device,) = listed["enrolments"]
     assert device["overlay_identity"] == _DEVICE
     assert device["enrolled_at"] == _MOMENT.isoformat()
     assert device["revoked_at"] == _MOMENT.isoformat()
@@ -313,7 +316,7 @@ def test_the_command_says_a_revocation_is_prospective(
     asserting something the hub cannot know and did not do." So the rendering says
     what a revocation *is* — a statement about the door.
     """
-    code = _render({"ok": True, "revoked": True}, "revoke")
+    code = _render({"ok": True, "enrolment": True, "registrations": 1, "roles": []}, "revoke")
     printed = capsys.readouterr().out
     assert code == EXIT_OK
     assert "already received, it keeps" in printed
@@ -405,7 +408,7 @@ async def test_a_listing_stays_inside_one_frame_however_long_the_record_is(
     await listener.begin_serving()
     try:
         one_row = await _act(listener, {"act": "list"})
-        row_bytes = len(json.dumps(one_row["devices"][0]).encode())
+        row_bytes = len(json.dumps(one_row["enrolments"][0]).encode())
         record_length = _PAST_THE_CEILING * (ADMIN_FRAME_BYTES // row_bytes + 1)
         _grow_the_record(store.path, upto=record_length)
         listed = await _act(listener, {"act": "list"})
@@ -416,9 +419,9 @@ async def test_a_listing_stays_inside_one_frame_however_long_the_record_is(
 
     assert listed["ok"]
     assert len(json.dumps(listed).encode()) < ADMIN_FRAME_BYTES
-    assert len(listed["devices"]) == LISTING_LIMIT
-    assert listed["omitted"] == record_length - LISTING_LIMIT
-    rendered = len(json.dumps(listed["devices"]).encode())
+    assert len(listed["enrolments"]) == LISTING_LIMIT
+    assert listed["enrolments_omitted"] == record_length - LISTING_LIMIT
+    rendered = len(json.dumps(listed["enrolments"]).encode())
     assert record_length * (rendered // LISTING_LIMIT) > ADMIN_FRAME_BYTES
 
 
@@ -427,12 +430,14 @@ async def test_a_listing_says_what_it_did_not_show(tmp_path: Path) -> None:
 
     "A listing that quietly stopped at a limit" would read as a complete record, and
     an owner checking which devices they enrolled would draw a conclusion from a
-    partial answer. So ``omitted`` is on every reply — zero when nothing was — and
-    the command prints it.
+    partial answer. So each section's ``*_omitted`` is on every reply — zero when
+    nothing was — and the command prints it.
     """
     async with _admin(tmp_path) as (listener, _):
         await _act(listener, {"act": "enrol", "identity": _DEVICE})
-        assert (await _act(listener, {"act": "list"}))["omitted"] == 0
+        listed = await _act(listener, {"act": "list"})
+    for section in ("enrolments", "devices", "registrations"):
+        assert listed[f"{section}_omitted"] == 0
 
 
 def test_the_command_says_how_many_enrolments_it_did_not_show(
@@ -443,7 +448,7 @@ def test_the_command_says_how_many_enrolments_it_did_not_show(
         {
             "ok": True,
             "hub_identity": _HUB_ID,
-            "devices": [
+            "enrolments": [
                 {
                     "overlay_identity": _DEVICE,
                     "enrolled_at": _MOMENT.isoformat(),
@@ -451,12 +456,19 @@ def test_the_command_says_how_many_enrolments_it_did_not_show(
                     "live": True,
                 }
             ],
-            "omitted": 42,
+            "enrolments_omitted": 42,
+            "devices": [{"device": _DEVICE, "kind": "hub_device", "roles": [], "admitted": True}],
+            "devices_omitted": 7,
+            "registrations": [],
+            "registrations_omitted": 3,
         },
         "list",
     )
     assert code == EXIT_OK
-    assert "42 older enrolment(s) not shown" in capsys.readouterr().out
+    printed = capsys.readouterr().out
+    assert "42 older enrolment(s) not shown" in printed
+    assert "7 older device(s) not shown" in printed
+    assert "3 older registration(s) not shown" in printed
 
 
 async def test_a_hub_that_goes_away_mid_act_is_reported_rather_than_raised(
@@ -536,19 +548,17 @@ async def test_a_device_command_that_finds_no_hub_says_where_it_looked(
     assert "ai-assistant-hub" in printed
 
 
-async def test_a_device_command_on_a_hub_with_no_remote_listener_says_that_instead(
+async def test_a_device_command_on_a_hub_whose_control_socket_is_gone_says_restart_it(
     tmp_path: Path, capsys: pytest.CaptureFixture[str]
 ) -> None:
     """The other state an absent control socket can be, told apart rather than
     guessed at (#1441).
 
-    ADR-0124 §2 binds the control socket only where the remote listener is
-    configured on, and binds the loopback socket "whether or not the remote
-    listener is" — so a hub answering on ADR-0084 §1's socket with no ``admin.sock``
-    beside it is a running hub with no remote listener, and the fix is a setting
-    rather than a start. The message must not send the owner to start the hub that
-    is answering the probe, and the code must not say "come back": running this
-    again, unchanged, never succeeds.
+    Every hub binds the control socket before it opens ADR-0084 §1's door (ADR-0298
+    §4:13), so a hub answering there with no ``admin.sock`` beside it had the socket
+    removed from under it, or predates the roster. The message must not send the
+    owner to start the hub that is answering the probe, and the code must not say
+    "come back": running this again, unchanged, never succeeds.
     """
 
     async def _accept(reader: asyncio.StreamReader, writer: asyncio.StreamWriter) -> None:
@@ -565,7 +575,7 @@ async def test_a_device_command_on_a_hub_with_no_remote_listener_says_that_inste
 
     assert code == EXIT_DEPLOYMENT
     printed = capsys.readouterr().err
-    assert "ASSISTANT_HUB_REMOTE_ADDRESS" in printed
+    assert "restart the hub" in printed
     assert str(loopback) in printed
     assert "no hub is listening" not in printed
     assert "start it with 'ai-assistant-hub'" not in printed
@@ -581,12 +591,11 @@ async def test_a_control_socket_bound_but_not_yet_serving_is_restartable_not_fat
     *after* — and a Unix socket that is bound and not yet serving refuses rather
     than accepting. So there is a startup instant in which the loopback door
     answers and this one refuses, and a report deciding on the loopback probe alone
-    would tell an operator whose ``ASSISTANT_HUB_REMOTE_ADDRESS`` is perfectly good
-    to go and set it, fatally.
+    would tell an owner whose hub is merely starting to restart it, fatally.
 
     The errno separates them at no cost: a refusal means the socket file is there,
-    which this state has and a hub that never configured a remote listener does
-    not. The state is restartable, because the next attempt succeeds.
+    which this state has and a removed socket does not. The state is restartable,
+    because the next attempt succeeds.
     """
 
     async def _accept(reader: asyncio.StreamReader, writer: asyncio.StreamWriter) -> None:
@@ -611,7 +620,7 @@ async def test_a_control_socket_bound_but_not_yet_serving_is_restartable_not_fat
     assert "not answering yet" in printed
     assert "try again" in printed
     # Not the fatal message: the deployment is not misconfigured, it is starting.
-    assert "it bound no control socket" not in printed
+    assert "there is no control socket" not in printed
 
 
 async def test_a_loopback_peer_that_is_not_this_user_is_not_evidence_of_a_hub(
@@ -623,8 +632,8 @@ async def test_a_loopback_peer_that_is_not_this_user_is_not_evidence_of_a_hub(
     and a walk can be wrong — a bind mount, an ACL, a symlinked ancestor", so a
     client reads the peer's credentials rather than inferring from the path. Nothing
     is sent on this probe, so §1's "before sending anything" is not what compels the
-    check here; the point is that the fatal branch tells an owner their remote
-    configuration is missing, and another user's process bound at that path must not
+    check here; the point is that the fatal branch tells an owner their hub's
+    control socket is gone, and another user's process bound at that path must not
     be able to say that on the hub's behalf.
 
     Both limbs of ``check_peer_is_self`` raise ``ProtocolError`` — a foreign uid, and
@@ -657,8 +666,8 @@ async def test_a_loopback_peer_that_is_not_this_user_is_not_evidence_of_a_hub(
     printed = capsys.readouterr().err
     assert "no hub is listening" in printed
     # Emphatically not the fatal branch: an unauthenticated peer must not be able to
-    # tell an owner that their remote configuration is missing.
-    assert "ASSISTANT_HUB_REMOTE_ADDRESS" not in printed
+    # tell an owner that their hub's control socket is gone.
+    assert "there is no control socket" not in printed
 
 
 async def test_a_kernel_failure_reading_peer_credentials_fails_closed_not_loudly(
@@ -813,15 +822,22 @@ async def test_a_full_listing_of_the_longest_identities_still_fits_one_frame(
 
     A limit on *rows* bounds the answer only if a row is bounded too: two hundred
     unbounded identities would overflow the frame exactly as one would. Driven at
-    both maxima at once — the row limit and the identity bound — so the arithmetic
-    is checked rather than assumed.
+    both maxima at once — the row limit and the identity bound — in all three of the
+    listing's sections, every device holding every role and every registration
+    revoked so each row renders at its longest, so the arithmetic is checked rather
+    than assumed.
     """
     store = EnrolmentStore(tmp_path / ENROLMENTS_FILENAME)
     verifier = verifier_for("x" * 43)
+    gateway = "g".ljust(MAX_OVERLAY_IDENTITY_BYTES, "g")
     for index in range(LISTING_LIMIT + 20):
-        store.enrol(
-            f"{index:04d}".ljust(MAX_OVERLAY_IDENTITY_BYTES, "n"), verifier=verifier, now=_MOMENT
-        )
+        enrolled = f"{index:04d}".ljust(MAX_OVERLAY_IDENTITY_BYTES, "n")
+        browser = f"{index:04d}".ljust(MAX_OVERLAY_IDENTITY_BYTES, "b")
+        store.enrol(enrolled, verifier=verifier, now=_MOMENT)
+        store.register(browser, gateway=gateway, now=_MOMENT)
+        for role in Role:
+            store.assign_role(enrolled, role)
+        store.revoke_registration(browser, gateway=gateway, now=_MOMENT)
     registry = DeviceRegistry(store, hub_identity=_HUB_ID)
     listener = AdminListener(registry, data_dir=tmp_path, now=_clock)
     await listener.start()
@@ -832,6 +848,216 @@ async def test_a_full_listing_of_the_longest_identities_still_fits_one_frame(
         await listener.stop_accepting()
         await listener.aclose()
         store.close()
-    assert len(listed["devices"]) == LISTING_LIMIT
-    assert listed["omitted"] == 20
+    for section, total in (
+        ("enrolments", LISTING_LIMIT + 20),
+        ("devices", 2 * (LISTING_LIMIT + 20)),
+        ("registrations", LISTING_LIMIT + 20),
+    ):
+        assert len(listed[section]) == LISTING_LIMIT
+        assert listed[f"{section}_omitted"] == total - LISTING_LIMIT
     assert len(json.dumps(listed).encode()) < ADMIN_FRAME_BYTES
+
+
+# --- the roster's acts (ADR-0298 §4) ---------------------------------------------
+
+_PHONE: Final = "nPHONE22CNTRL"
+
+
+async def test_roles_are_given_and_taken_through_the_socket(tmp_path: Path) -> None:
+    """ADR-0298 §4:12: roles are assigned "only by ``ai-assistant-device`` on the hub's
+    own machine". Each reply says whether it changed anything and what the device
+    holds now."""
+    async with _admin(tmp_path) as (listener, registry):
+        registry.accept_naming("hub", _PHONE, now=_MOMENT)
+        given = await _act(listener, {"act": "assign", "identity": _PHONE, "role": "commands"})
+        again = await _act(listener, {"act": "assign", "identity": _PHONE, "role": "commands"})
+        taken = await _act(listener, {"act": "withdraw", "identity": _PHONE, "role": "commands"})
+    assert given == {"ok": True, "changed": True, "roles": ["commands"]}
+    assert again == {"ok": True, "changed": False, "roles": ["commands"]}
+    assert taken == {"ok": True, "changed": True, "roles": []}
+
+
+@pytest.mark.parametrize(
+    "request_body",
+    [
+        {"act": "assign", "identity": _PHONE},
+        {"act": "assign", "identity": _PHONE, "role": "host"},
+        {"act": "assign", "identity": _PHONE, "role": ["commands"]},
+        {"act": "restore", "identity": _PHONE},
+        {"act": "revoke", "identity": _PHONE, "gateway": "  "},
+    ],
+)
+async def test_a_malformed_roster_act_is_refused_and_changes_nothing(
+    request_body: dict[str, Any], tmp_path: Path
+) -> None:
+    """A role the roster does not hold, or a gateway that is not named, is refused in a
+    sentence rather than guessed at."""
+    async with _admin(tmp_path) as (listener, registry):
+        registry.accept_naming("hub", _PHONE, now=_MOMENT)
+        reply = await _act(listener, request_body)
+        assert reply["ok"] is False
+        assert registry.roles_of(_PHONE) == frozenset()
+        assert registry.registrations()[0][0].is_live
+
+
+async def test_a_role_for_a_machine_nothing_admits_is_refused_in_a_sentence(
+    tmp_path: Path,
+) -> None:
+    """The record's refusal reaches the owner as the reply's error, not a closed socket."""
+    async with _admin(tmp_path) as (listener, _):
+        reply = await _act(listener, {"act": "assign", "identity": _PHONE, "role": "commands"})
+    assert reply["ok"] is False
+    assert "not a device this hub admits" in reply["error"]
+
+
+async def test_one_registration_is_revoked_and_restored_through_the_socket(
+    tmp_path: Path,
+) -> None:
+    """ADR-0298 §4:8 and §4:9: "The owner revokes, at the hub with ``ai-assistant-device``,
+    either one registration or a whole device", and only the owner's act restores a
+    revoked registration."""
+    async with _admin(tmp_path) as (listener, registry):
+        registry.accept_naming("hub", _PHONE, now=_MOMENT)
+        revoked = await _act(listener, {"act": "revoke", "identity": _PHONE, "gateway": "hub"})
+        refused = registry.accept_naming("hub", _PHONE, now=_MOMENT)
+        restored = await _act(listener, {"act": "restore", "identity": _PHONE, "gateway": "hub"})
+        accepted = registry.accept_naming("hub", _PHONE, now=_MOMENT)
+    assert revoked == {"ok": True, "revoked": True}
+    assert not refused.accepted
+    assert restored == {"ok": True, "restored": True}
+    assert accepted.accepted
+
+
+async def test_the_listing_shows_the_roster_and_every_registration(tmp_path: Path) -> None:
+    """ADR-0298 §4:6: the owner "can see every machine each gateway has named" — the
+    revoked registration as well as the live one — and each device's kind and roles."""
+    async with _admin(tmp_path) as (listener, registry):
+        registry.accept_naming("hub", _PHONE, now=_MOMENT)
+        registry.assign(_PHONE, Role.COMMANDS)
+        registry.accept_naming("hub", _DEVICE, now=_MOMENT)
+        registry.revoke_registration(_DEVICE, gateway="hub", now=_MOMENT)
+        listed = await _act(listener, {"act": "list"})
+    assert {one["device"]: one for one in listed["devices"]} == {
+        _PHONE: {
+            "device": _PHONE,
+            "kind": "browser_device",
+            "roles": ["commands"],
+            "admitted": True,
+        },
+        _DEVICE: {"device": _DEVICE, "kind": "browser_device", "roles": [], "admitted": False},
+    }
+    assert [(one["device"], one["gateway"], one["live"]) for one in listed["registrations"]] == [
+        (_DEVICE, "hub", False),
+        (_PHONE, "hub", True),
+    ]
+
+
+async def test_a_hub_with_no_remote_listener_refuses_an_enrolment_and_performs_roster_acts(
+    tmp_path: Path,
+) -> None:
+    """ADR-0298 §4:13 binds this socket on every hub. A hub with no remote listener has
+    no hub identity to disclose beside a credential, so its enrolment is refused in a
+    sentence naming the setting — and the roster's acts work."""
+    store = EnrolmentStore(tmp_path / ENROLMENTS_FILENAME)
+    registry = DeviceRegistry(store, hub_identity=None)
+    listener = AdminListener(registry, data_dir=tmp_path, now=_clock)
+    await listener.start()
+    await listener.begin_serving()
+    try:
+        enrolled = await _act(listener, {"act": "enrol", "identity": _DEVICE})
+        registry.accept_naming("hub", _PHONE, now=_MOMENT)
+        given = await _act(listener, {"act": "assign", "identity": _PHONE, "role": "spokes"})
+        listed = await _act(listener, {"act": "list"})
+        assert registry.enrolments() == ([], 0)
+    finally:
+        await listener.stop_accepting()
+        await listener.aclose()
+        store.close()
+    assert enrolled["ok"] is False
+    assert "ASSISTANT_HUB_REMOTE_ADDRESS" in enrolled["error"]
+    assert given["ok"] is True
+    assert listed["hub_identity"] is None
+
+
+@pytest.mark.parametrize("act", ["revoke", "assign", "withdraw"])
+async def test_the_hubs_own_machine_is_refused_by_name(act: str, tmp_path: Path) -> None:
+    """``hub`` is never revoked and its roles are not a row (ADR-0298 §3:2, §3:4)."""
+    async with _admin(tmp_path) as (listener, _):
+        reply = await _act(listener, {"act": act, "identity": "hub", "role": "commands"})
+    assert reply["ok"] is False
+    assert "hub's own machine" in reply["error"]
+
+
+def test_the_command_renders_a_whole_devices_revocation(
+    capsys: pytest.CaptureFixture[str],
+) -> None:
+    """Each part the act revoked is said, so an owner can see it reached everything."""
+    code = _render(
+        {"ok": True, "enrolment": True, "registrations": 2, "roles": ["commands"]}, "revoke"
+    )
+    printed = capsys.readouterr().out
+    assert code == EXIT_OK
+    assert "enrolment is revoked" in printed
+    assert "2 registration(s)" in printed
+    assert "Roles cleared: commands." in printed
+
+
+def test_the_command_says_a_revocation_that_found_nothing_changed_nothing(
+    capsys: pytest.CaptureFixture[str],
+) -> None:
+    """Reported honestly rather than claimed."""
+    _render({"ok": True, "enrolment": False, "registrations": 0, "roles": []}, "revoke")
+    assert "nothing changed" in capsys.readouterr().out
+
+
+def test_the_command_says_a_restored_device_holds_no_role(
+    capsys: pytest.CaptureFixture[str],
+) -> None:
+    """ADR-0298 §4:11, said where the owner restores it."""
+    _render({"ok": True, "restored": True}, "restore")
+    assert "holds no role" in capsys.readouterr().out
+
+
+def test_the_command_prints_what_a_device_holds_after_a_role_act(
+    capsys: pytest.CaptureFixture[str],
+) -> None:
+    """The reply's roles are the device's, after the act."""
+    _render({"ok": True, "changed": True, "roles": ["commands", "spokes"]}, "assign")
+    assert "Roles: commands, spokes" in capsys.readouterr().out
+
+
+def test_the_command_line_builds_each_roster_act(monkeypatch: pytest.MonkeyPatch) -> None:
+    """Each act's arguments reach the request the hub reads, and nothing else does."""
+    sent: list[dict[str, Any]] = []
+
+    async def _record(socket: Path, request: dict[str, Any], *, loopback: Path) -> int:
+        del socket, loopback
+        sent.append(request)
+        return EXIT_OK
+
+    monkeypatch.setattr(device, "_perform", _record)
+    monkeypatch.setenv("ASSISTANT_DATA_DIR", "/tmp/ds1-roster-args")  # noqa: S108 - never opened
+    for argv in (
+        ["assign", _PHONE, "commands"],
+        ["withdraw", _PHONE, "spokes"],
+        ["revoke", _PHONE],
+        ["revoke", _PHONE, "--gateway", "hub"],
+        ["restore", _PHONE, "--gateway", "hub"],
+        ["list"],
+    ):
+        assert device.main(argv) == EXIT_OK
+    assert sent == [
+        {"act": "assign", "identity": _PHONE, "role": "commands"},
+        {"act": "withdraw", "identity": _PHONE, "role": "spokes"},
+        {"act": "revoke", "identity": _PHONE},
+        {"act": "revoke", "identity": _PHONE, "gateway": "hub"},
+        {"act": "restore", "identity": _PHONE, "gateway": "hub"},
+        {"act": "list"},
+    ]
+
+
+def test_the_command_line_refuses_a_role_the_roster_does_not_hold() -> None:
+    """argparse refuses it before any socket is opened."""
+    with pytest.raises(SystemExit) as raised:
+        device.main(["assign", _PHONE, "host"])
+    assert raised.value.code == 2

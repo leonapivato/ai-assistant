@@ -29,6 +29,7 @@ from __future__ import annotations
 import asyncio
 import contextlib
 import errno
+import json
 import os
 import signal
 import socket
@@ -43,11 +44,13 @@ from ai_assistant.core.errors import ConfigurationError, IncompatibleStateError,
 from ai_assistant.core.types import EvaluationTrace, TraceKind
 from ai_assistant.orchestration.engine import DrainPhase, PurgeReport
 from ai_assistant.service import hub
+from ai_assistant.service.admin import ADMIN_FRAME_BYTES, ADMIN_TIMEOUT
 from ai_assistant.service.configuration import SEAM_STARTUP
 from ai_assistant.service.exits import EXIT_DEPLOYMENT, EXIT_OK, EXIT_RESTART
 from ai_assistant.service.lock import LOCK_FILENAME, InstanceLock
 from ai_assistant.testing import FakeTraceSink
 from ai_assistant.wire.address import ADMIN_SOCKET_FILENAME
+from ai_assistant.wire.framing import read_frame, write_frame
 
 if TYPE_CHECKING:
     from collections.abc import Callable, Mapping, Sequence
@@ -268,6 +271,38 @@ def _stop_after_start(
             os.kill(os.getpid(), sig)
 
     return _send
+
+
+async def _act_once_serving(control: Path, request: dict[str, Any]) -> Any:
+    """Perform one act on a starting hub's control socket once it accepts.
+
+    Polled rather than signalled, because the socket is the thing under test: it is
+    tried until it answers, within a bound that fails the test rather than hanging it.
+    """
+    deadline = asyncio.get_running_loop().time() + 30
+    while True:
+        try:
+            reader, writer = await asyncio.open_unix_connection(str(control))
+            break
+        except FileNotFoundError, ConnectionRefusedError:
+            if asyncio.get_running_loop().time() > deadline:
+                raise
+            await asyncio.sleep(0.02)
+    try:
+        await write_frame(
+            writer, json.dumps(request).encode("utf-8"), max_frame_bytes=ADMIN_FRAME_BYTES
+        )
+        body = await read_frame(
+            reader,
+            max_frame_bytes=ADMIN_FRAME_BYTES,
+            timeout=ADMIN_TIMEOUT,
+            idle_timeout=ADMIN_TIMEOUT,
+        )
+    finally:
+        writer.close()
+        with contextlib.suppress(Exception):
+            await writer.wait_closed()
+    return json.loads(body)
 
 
 def _events(captured: Sequence[Mapping[str, Any]]) -> list[str]:
@@ -1459,17 +1494,14 @@ def test_an_end_of_options_marker_is_an_argument_and_is_refused_too(
 # --- ADR-0124 §2: the remote listener is off unless it is configured on ------
 
 
-async def test_a_hub_with_no_remote_configuration_binds_only_the_loopback_socket(
+async def test_a_hub_with_no_remote_configuration_opens_no_remote_door(
     settings: Settings, wired: dict[str, list[Any]], engine: FakeEngine
 ) -> None:
-    """ADR-0124 §2: "a hub with no remote-listener configuration binds only ADR-0084
-    §1's loopback socket, and the loopback socket is bound whether or not the remote
-    listener is".
+    """ADR-0124 §2: "the remote listener is off unless it is configured on".
 
-    Asserted through the readiness event, which is where an operator reads it, and
-    through the enrolment record's *absence*: a hub that built the apparatus anyway
-    would need an overlay agent it is not running, and would leave a database in the
-    data directory for a door it never opened.
+    Asserted through the readiness event, which is where an operator reads it. The
+    hub asks no overlay agent — none is running here, and a hub that built the remote
+    apparatus anyway would have failed to start on it.
     """
     engine.on_start = _stop_after_start()
 
@@ -1480,25 +1512,50 @@ async def test_a_hub_with_no_remote_configuration_binds_only_the_loopback_socket
     ready = _only(captured, "hub_ready")
     assert ready["remote"] is None
     assert "hub_remote_listening" not in _events(captured)
-    assert not (settings.data_dir / "devices.db").exists()
 
 
-async def test_a_hub_with_no_remote_configuration_removes_a_control_socket_it_will_not_serve(
+async def test_a_hub_with_no_remote_configuration_still_binds_its_control_socket(
     settings: Settings, wired: dict[str, list[Any]], engine: FakeEngine
 ) -> None:
-    """A door this hub does not open must not be left standing shut (#1441).
+    """ADR-0298 §4:13: ``admin.sock`` and the roster acts it carries "are bound
+    wherever the hub runs, not only where the remote listener is configured".
 
-    A remotely-configured hub that crashed leaves ``admin.sock`` behind; started
-    again with the configuration removed, nothing unlinks it, because the only
-    unlink lives in the ``AdminListener.start`` this hub never reaches. The file is
-    not inert: connecting to it is *refused* rather than finding nothing, and that
-    difference is the whole of how ``ai-assistant-device`` tells "the hub has not
-    opened this door yet" from "this hub has no such door". Left lying, it makes
-    the first answer true forever, on a hub where retrying can never succeed.
+    A gateway on the hub's own machine serves listed browsers whether or not the hub
+    has a remote listener, and those browser devices need roles, which are given
+    there. So the record is opened and the socket answers an act on a hub that never
+    asked an overlay agent anything — the listing says it has no hub identity, and
+    the socket is gone again once the hub has stopped.
+    """
+    control = settings.data_dir / ADMIN_SOCKET_FILENAME
+    with structlog.testing.capture_logs() as captured:
+        serving = asyncio.create_task(hub.serve(settings))
+        try:
+            reply = await _act_once_serving(control, {"act": "list"})
+        finally:
+            os.kill(os.getpid(), signal.SIGTERM)
+            code = await serving
 
-    ADR-0124 §2 is not engaged by removing it: the clause governs what a hub with no
-    remote-listener configuration *binds*, and this hub still binds only ADR-0084
-    §1's loopback socket.
+    assert code == EXIT_OK
+    assert reply["ok"] is True
+    assert reply["hub_identity"] is None
+    assert (settings.data_dir / "devices.db").exists()
+    assert not (settings.data_dir / ADMIN_SOCKET_FILENAME).exists()
+    assert _only(captured, "hub_ready")["admin_socket"] == str(
+        settings.data_dir / ADMIN_SOCKET_FILENAME
+    )
+
+
+async def test_a_stale_control_socket_from_a_crashed_run_is_replaced(
+    settings: Settings, wired: dict[str, list[Any]], engine: FakeEngine
+) -> None:
+    """A door a crashed hub left standing shut does not outlive the next start (#1441).
+
+    A killed hub leaves ``admin.sock`` behind, and the file is not inert: connecting
+    to it is *refused* rather than finding nothing, and that difference is how
+    ``ai-assistant-device`` tells "the hub has not opened this door yet" from "the
+    door is gone". The next hub unlinks it before it binds its own — safe because the
+    instance lock is held — and removes its own at the start of phase A, so nothing
+    is left at the path afterwards.
     """
     stale = settings.data_dir / ADMIN_SOCKET_FILENAME
     stale.parent.mkdir(parents=True, exist_ok=True)
@@ -1509,33 +1566,11 @@ async def test_a_hub_with_no_remote_configuration_removes_a_control_socket_it_wi
     assert stale.exists()
     engine.on_start = _stop_after_start()
 
-    assert await hub.serve(settings) == EXIT_OK
-
-    assert not stale.exists()
-
-
-async def test_a_hub_does_not_delete_something_at_that_path_that_is_not_a_socket(
-    settings: Settings, wired: dict[str, list[Any]], engine: FakeEngine
-) -> None:
-    """The cleanup above removes a socket, and only a socket.
-
-    It is opportunistic — nothing depends on it — so it has no standing to delete a
-    file it did not create, and that makes it deliberately stricter than
-    ``AdminListener.start``'s unconditional unlink, which *must* clear the path in
-    order to bind and reports at the bind if it could not. The occupant is left
-    exactly where it is and said out loud; ``ai-assistant-device`` diagnoses the same
-    state in its own words rather than calling it a hub that is still starting.
-    """
-    occupied = settings.data_dir / ADMIN_SOCKET_FILENAME
-    occupied.parent.mkdir(parents=True, exist_ok=True)
-    occupied.write_text("something an operator put here", encoding="utf-8")
-    engine.on_start = _stop_after_start()
-
     with structlog.testing.capture_logs() as captured:
         assert await hub.serve(settings) == EXIT_OK
 
-    assert occupied.read_text(encoding="utf-8") == "something an operator put here"
-    assert "hub_admin_socket_path_occupied" in _events(captured)
+    assert "hub_admin_bound" in _events(captured)
+    assert not stale.exists()
 
 
 async def test_a_configured_hub_that_cannot_ask_its_agent_stays_down(

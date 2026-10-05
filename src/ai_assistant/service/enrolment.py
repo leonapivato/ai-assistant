@@ -32,11 +32,34 @@ them one.
 **A revocation is recorded, never erased** (§6), so the record says what the owner
 actually decided and when; and re-enrolling is one act that rotates rather than two
 acts an implementation could interleave.
+
+**The device roster lives in the same file** (ADR-0298 §4): each device's id and
+kind, the two roles the roster holds — source of commands and queries, host of
+spokes — and each registration of a machine as a browser device under a gateway.
+One file, so that one transaction revokes a device's enrolment, every registration
+of it and its roles together, and so that ADR-0126's deletion takes the roster with
+the enrolment record, first. The user's end of conversations is not here: it is
+membership of "my devices" and of conversations, which the conversation store keeps
+(ADR-0293 §3).
+
+**The roster records and answers; it refuses no request.** Which request needs
+which role, and the refusal, are the wire server's and the engine's (ADR-0298 §5,
+§6), and nothing is enforced until the cutover (§9). What is here is the record
+those checks will read — synchronously, from a live view, for the reason the
+enrolments are read that way.
+
+**One invariant the roster keeps for itself: a device holds a role only while it is
+admitted**, by a live enrolment or a live registration. Every act that leaves a
+device with neither clears its roles in the same transaction, which is how §4's "a
+device re-admitted after revocation, by re-enrolment or by a restored registration,
+holds no role until the user gives it one" holds without the re-admitting act having
+to remember it.
 """
 
 from __future__ import annotations
 
 import sqlite3
+from collections import Counter
 from collections.abc import Callable
 from dataclasses import dataclass
 from datetime import UTC, datetime
@@ -45,6 +68,7 @@ from typing import TYPE_CHECKING, Final
 
 import structlog
 
+from ai_assistant.core.errors import AssistantError
 from ai_assistant.service.overlay import MAX_OVERLAY_IDENTITY_BYTES
 from ai_assistant.wire.credential import mint_credential, verifier_for, verifies
 
@@ -88,6 +112,106 @@ class Verdict:
     refusal: Refusal | None = None
 
 
+#: The id of the hub's own machine, in every configuration and whether or not the
+#: hub has an overlay identity (ADR-0298 §3:1). It is never enrolled, registered or
+#: revoked, and it holds every role by rule rather than by a row (§3:2, §3:4).
+HUB_DEVICE: Final = "hub"
+
+
+class DeviceKind(StrEnum):
+    """The two kinds of device ADR-0296 §1 admits.
+
+    A machine enrolled at the hub is a hub device, admitted by ADR-0124's two facts;
+    a machine a gateway names, and that is not already a device, is a browser
+    device, admitted by that gateway. A machine is one device however it is admitted
+    (ADR-0296 §1:4), so a browser device later enrolled becomes a hub device and
+    keeps its id, its roles and its registrations.
+    """
+
+    HUB = "hub_device"
+    BROWSER = "browser_device"
+
+
+class Role(StrEnum):
+    """The roles the roster holds (ADR-0298 §4:1), each assigned by the owner.
+
+    **Two, not three.** ADR-0296 §2's third role, the user's end of conversations, is
+    membership of "my devices" and of conversations, which the conversation store
+    keeps; the roster never holds it.
+
+    **Service-local until ``core`` carries the enum.** ADR-0298 §10:1 puts "the roles
+    the roster holds as one enum" in ``core/types.py``, where the requesting device
+    the wire server builds will carry them; that lane holds ``core`` while this one
+    builds the roster, and nothing here crosses a subsystem boundary yet. The values
+    are the record's stored text, so the change that binds the roster to the wire
+    maps them, or replaces this class with ``core``'s, without migrating a row.
+    """
+
+    #: Source of commands and queries: commands, queries, changing "my devices" and
+    #: a conversation's devices (ADR-0296 §2).
+    COMMANDS = "commands"
+    #: Host of spokes: the assistant's sensors and actuators, placed on channels.
+    #: Assignable now, and no device-hosted spoke exists yet (ADR-0296 §3:4).
+    SPOKES = "spokes"
+
+
+#: Every role, which the hub's own machine holds by rule (ADR-0298 §3:2).
+EVERY_ROLE: Final[frozenset[Role]] = frozenset(Role)
+
+#: How many live registrations one gateway may hold (ADR-0298 §4:7: "a figure the
+#: implementing change names"). A gateway names only what its owner listed there,
+#: and a household's phones, tablets, watches and laptops fit well inside it; what
+#: the bound is for is the other case — a gateway naming machine after machine,
+#: which §8 accepts it can do, and which the owner should see stop rather than
+#: fill the roster. A naming beyond it is refused, and nothing is registered.
+MAX_REGISTRATIONS_PER_GATEWAY: Final[int] = 32
+
+
+class NamingRefusal(StrEnum):
+    """Why the hub does not accept a gateway's name for a browser device (ADR-0298 §6:2).
+
+    All three are the first of §6's reasons — "the device named is not accepted under
+    that gateway" — told apart so the owner can see which.
+    """
+
+    #: The owner revoked this machine's registration under this gateway; it stays
+    #: revoked until the owner restores it (§4:9).
+    REVOKED = "revoked"
+    #: ``hub``, or the hub's own overlay identity, which no gateway may name (§3:3).
+    RESERVED = "reserved"
+    #: The gateway already holds :data:`MAX_REGISTRATIONS_PER_GATEWAY` live
+    #: registrations, and this naming would add one (§4:7).
+    BOUND = "bound"
+
+
+@dataclass(frozen=True, slots=True)
+class NamingVerdict:
+    """What the roster made of one gateway naming one machine (ADR-0298 §4:2).
+
+    Attributes:
+        refusal: Why the name is not accepted, or ``None`` where it is.
+        registered: Whether this naming registered the machine under the gateway —
+            the first naming does, and every later one finds the registration.
+    """
+
+    refusal: NamingRefusal | None = None
+    registered: bool = False
+
+    @property
+    def accepted(self) -> bool:
+        """Whether the hub accepts the name, so the request acts as that device."""
+        return self.refusal is None
+
+
+class RosterActError(AssistantError):
+    """An owner's act on the roster that the record will not perform.
+
+    The message is the whole diagnostic and is printed to the owner by
+    ``ai-assistant-device``, so it is written for one: what was refused, and what to
+    do instead.
+    """
+
+
 #: The record's file inside ``data_dir`` (ADR-0124 §6, ADR-0083's layout).
 ENROLMENTS_FILENAME: Final[str] = "devices.db"
 
@@ -113,6 +237,49 @@ CREATE TABLE IF NOT EXISTS enrolments (
 );
 CREATE UNIQUE INDEX IF NOT EXISTS one_live_enrolment_per_identity
     ON enrolments (overlay_identity) WHERE revoked_at IS NULL;
+
+CREATE TABLE IF NOT EXISTS devices (
+    device_id       TEXT    PRIMARY KEY,
+    kind            TEXT    NOT NULL CHECK (kind IN ('hub_device', 'browser_device')),
+    first_known_at  TEXT    NOT NULL
+);
+CREATE TABLE IF NOT EXISTS device_roles (
+    device_id  TEXT  NOT NULL REFERENCES devices (device_id),
+    role       TEXT  NOT NULL CHECK (role IN ('commands', 'spokes')),
+    PRIMARY KEY (device_id, role)
+);
+CREATE TABLE IF NOT EXISTS registrations (
+    id             INTEGER PRIMARY KEY AUTOINCREMENT,
+    device_id      TEXT    NOT NULL REFERENCES devices (device_id),
+    gateway        TEXT    NOT NULL,
+    registered_at  TEXT    NOT NULL,
+    revoked_at     TEXT
+);
+CREATE UNIQUE INDEX IF NOT EXISTS one_live_registration_per_gateway
+    ON registrations (device_id, gateway) WHERE revoked_at IS NULL;
+"""
+
+#: The roster's migration from a record written before it existed: every machine the
+#: record has ever enrolled is a hub device, with no role (ADR-0298 §9:4 — "a role is
+#: never inferred from what a device could reach before"). Idempotent, so it runs on
+#: every open rather than behind a version: a row it would add is a row it added.
+_BACKFILL: Final = """
+INSERT OR IGNORE INTO devices (device_id, kind, first_known_at)
+    SELECT overlay_identity, 'hub_device', MIN(enrolled_at)
+    FROM enrolments GROUP BY overlay_identity;
+"""
+
+#: A device's roles, cleared where nothing admits it any more — the invariant the
+#: module docstring states, as one statement every act that can end an admission
+#: runs inside its own transaction.
+_CLEAR_ROLES_IF_UNADMITTED: Final = """
+DELETE FROM device_roles WHERE device_id = :device
+    AND NOT EXISTS (
+        SELECT 1 FROM enrolments WHERE overlay_identity = :device AND revoked_at IS NULL
+    )
+    AND NOT EXISTS (
+        SELECT 1 FROM registrations WHERE device_id = :device AND revoked_at IS NULL
+    )
 """
 
 
@@ -172,6 +339,64 @@ class MintedEnrolment:
     rotated: bool
 
 
+@dataclass(frozen=True, slots=True)
+class Registration:
+    """One registration of a machine as a browser device under a gateway (ADR-0298 §4).
+
+    Attributes:
+        registration_id: The row's identity.
+        device_id: The machine, as its overlay identity names it.
+        gateway: The connecting device of the request that registered it — an
+            enrolled hub device's overlay identity, or :data:`HUB_DEVICE` for a
+            gateway on the local socket (§4:4).
+        registered_at: When the first naming, or the owner's restoring act, made it.
+        revoked_at: When the owner revoked it, or ``None`` while it is live.
+    """
+
+    registration_id: int
+    device_id: str
+    gateway: str
+    registered_at: datetime
+    revoked_at: datetime | None
+
+    @property
+    def is_live(self) -> bool:
+        """Whether this registration still admits its machine under its gateway."""
+        return self.revoked_at is None
+
+
+@dataclass(frozen=True, slots=True)
+class RosterDevice:
+    """One device the roster holds, as the owner's listing shows it.
+
+    Attributes:
+        device_id: The machine's id: its overlay identity.
+        kind: Which of ADR-0296 §1's two kinds it is.
+        roles: The roles the owner has given it.
+        first_known_at: When the roster first held it.
+    """
+
+    device_id: str
+    kind: DeviceKind
+    roles: frozenset[Role]
+    first_known_at: datetime
+
+
+@dataclass(frozen=True, slots=True)
+class DeviceRevocation:
+    """What revoking a whole device did (ADR-0298 §4:10).
+
+    Attributes:
+        enrolment: Whether a live enrolment was revoked.
+        registrations: How many live registrations were revoked.
+        roles: The roles the device held, and holds no longer.
+    """
+
+    enrolment: bool
+    registrations: int
+    roles: frozenset[Role]
+
+
 class EnrolmentStore:
     """The durable half: rows, and the one uniqueness rule over them.
 
@@ -197,6 +422,7 @@ class EnrolmentStore:
         self._conn.execute("PRAGMA journal_mode=WAL")
         self._conn.execute("PRAGMA foreign_keys=ON")
         self._conn.executescript(_SCHEMA)
+        self._conn.executescript(_BACKFILL)
         if not existed:
             path.chmod(_OWNER_ONLY_FILE)
 
@@ -330,6 +556,14 @@ class EnrolmentStore:
                 "VALUES (?, ?, ?, NULL)",
                 (identity, verifier, stamp),
             )
+            # The roster's half of the same act: an enrolled machine is a hub device
+            # (ADR-0296 §1:1), and one already known as a browser device becomes one
+            # keeping its id, roles and registrations (§1:4).
+            self._conn.execute(
+                "INSERT INTO devices (device_id, kind, first_known_at) VALUES (?, ?, ?) "
+                "ON CONFLICT (device_id) DO UPDATE SET kind = excluded.kind",
+                (identity, DeviceKind.HUB.value, stamp),
+            )
         enrolment_id = cursor.lastrowid
         assert enrolment_id is not None  # noqa: S101 - a fresh AUTOINCREMENT row always has one
         return (
@@ -361,7 +595,238 @@ class EnrolmentStore:
                 "WHERE overlay_identity = ? AND revoked_at IS NULL",
                 (_stamp(now), identity),
             ).rowcount
+            self._conn.execute(_CLEAR_ROLES_IF_UNADMITTED, {"device": identity})
         return bool(changed)
+
+    # --- the device roster (ADR-0298 §4) ---------------------------------------
+
+    def device_kinds(self) -> dict[str, DeviceKind]:
+        """Every device the roster holds, with its kind, complete and unbounded.
+
+        Returns:
+            Each device's id, mapped to its kind.
+        """
+        rows = self._conn.execute("SELECT device_id, kind FROM devices").fetchall()
+        return {row["device_id"]: DeviceKind(row["kind"]) for row in rows}
+
+    def device_roles(self) -> dict[str, frozenset[Role]]:
+        """Every role the roster holds, complete and unbounded.
+
+        Returns:
+            Each device holding at least one role, mapped to its roles.
+        """
+        held: dict[str, set[Role]] = {}
+        for row in self._conn.execute("SELECT device_id, role FROM device_roles"):
+            held.setdefault(row["device_id"], set()).add(Role(row["role"]))
+        return {device: frozenset(roles) for device, roles in held.items()}
+
+    def registration_pairs(self) -> tuple[set[tuple[str, str]], set[tuple[str, str]]]:
+        """Every registration's state, as the live view needs it.
+
+        Returns:
+            The ``(device, gateway)`` pairs holding a live registration, and the
+            pairs whose registration the owner revoked and has not restored.
+        """
+        live: set[tuple[str, str]] = set()
+        ever: set[tuple[str, str]] = set()
+        for row in self._conn.execute("SELECT device_id, gateway, revoked_at FROM registrations"):
+            pair = (row["device_id"], row["gateway"])
+            ever.add(pair)
+            if row["revoked_at"] is None:
+                live.add(pair)
+        return live, ever - live
+
+    def register(self, device: str, *, gateway: str, now: datetime) -> int:
+        """Register a machine under a gateway, as the first naming does (ADR-0298 §4:2).
+
+        A machine that is not yet a device becomes a browser device with no role; a
+        machine that is already one keeps its kind and its roles (§4:3). One
+        transaction, so a crash leaves either both rows or neither.
+
+        Args:
+            device: The machine the gateway named.
+            gateway: The connecting device of the request that named it.
+            now: The instant to record.
+
+        Returns:
+            The new registration's id.
+        """
+        _bounded_identity(device)
+        stamp = _stamp(now)
+        with self._conn:
+            self._conn.execute("BEGIN IMMEDIATE")
+            self._conn.execute(
+                "INSERT OR IGNORE INTO devices (device_id, kind, first_known_at) VALUES (?, ?, ?)",
+                (device, DeviceKind.BROWSER.value, stamp),
+            )
+            cursor = self._conn.execute(
+                "INSERT INTO registrations (device_id, gateway, registered_at, revoked_at) "
+                "VALUES (?, ?, ?, NULL)",
+                (device, gateway, stamp),
+            )
+        registration_id = cursor.lastrowid
+        assert registration_id is not None  # noqa: S101 - a fresh AUTOINCREMENT row always has one
+        return registration_id
+
+    def revoke_registration(self, device: str, *, gateway: str, now: datetime) -> bool:
+        """Revoke one machine's live registration under one gateway (ADR-0298 §4:8).
+
+        Args:
+            device: The machine.
+            gateway: The gateway it is registered under.
+            now: The instant to record.
+
+        Returns:
+            Whether a live registration was revoked.
+        """
+        with self._conn:
+            self._conn.execute("BEGIN IMMEDIATE")
+            changed = self._conn.execute(
+                "UPDATE registrations SET revoked_at = ? "
+                "WHERE device_id = ? AND gateway = ? AND revoked_at IS NULL",
+                (_stamp(now), device, gateway),
+            ).rowcount
+            self._conn.execute(_CLEAR_ROLES_IF_UNADMITTED, {"device": device})
+        return bool(changed)
+
+    def restore_registration(self, device: str, *, gateway: str, now: datetime) -> None:
+        """Record a new live registration where the owner revoked one (ADR-0298 §4:9).
+
+        A new row rather than an erased revocation, for the reason an enrolment's
+        revocation is never erased: the record says what the owner decided and when.
+        The caller has established that the pair holds a revoked registration and no
+        live one; the schema's partial unique index refuses a second live one anyway.
+
+        Args:
+            device: The machine.
+            gateway: The gateway it was registered under.
+            now: The instant to record.
+        """
+        with self._conn:
+            self._conn.execute("BEGIN IMMEDIATE")
+            self._conn.execute(
+                "INSERT INTO registrations (device_id, gateway, registered_at, revoked_at) "
+                "VALUES (?, ?, ?, NULL)",
+                (device, gateway, _stamp(now)),
+            )
+
+    def revoke_device(self, device: str, *, now: datetime) -> DeviceRevocation:
+        """Revoke a whole device, in one transaction (ADR-0298 §4:10).
+
+        Its enrolment, if it has one, every registration of it, and its roles — so
+        no instant has a device whose enrolment is revoked and whose browser
+        registration still admits it with the roles it held.
+
+        Args:
+            device: The machine.
+            now: The instant to record.
+
+        Returns:
+            What the act revoked.
+        """
+        stamp = _stamp(now)
+        with self._conn:
+            self._conn.execute("BEGIN IMMEDIATE")
+            enrolment = self._conn.execute(
+                "UPDATE enrolments SET revoked_at = ? "
+                "WHERE overlay_identity = ? AND revoked_at IS NULL",
+                (stamp, device),
+            ).rowcount
+            registrations = self._conn.execute(
+                "UPDATE registrations SET revoked_at = ? "
+                "WHERE device_id = ? AND revoked_at IS NULL",
+                (stamp, device),
+            ).rowcount
+            roles = frozenset(
+                Role(row["role"])
+                for row in self._conn.execute(
+                    "SELECT role FROM device_roles WHERE device_id = ?", (device,)
+                )
+            )
+            self._conn.execute("DELETE FROM device_roles WHERE device_id = ?", (device,))
+        return DeviceRevocation(enrolment=bool(enrolment), registrations=registrations, roles=roles)
+
+    def assign_role(self, device: str, role: Role) -> bool:
+        """Give a device one role.
+
+        Args:
+            device: A device the roster holds; the caller has established that it is
+                admitted, which the roster's invariant requires.
+            role: The role.
+
+        Returns:
+            Whether the device did not already hold it.
+        """
+        with self._conn:
+            self._conn.execute("BEGIN IMMEDIATE")
+            changed = self._conn.execute(
+                "INSERT OR IGNORE INTO device_roles (device_id, role) VALUES (?, ?)",
+                (device, role.value),
+            ).rowcount
+        return bool(changed)
+
+    def withdraw_role(self, device: str, role: Role) -> bool:
+        """Take one role from a device.
+
+        Args:
+            device: The device.
+            role: The role.
+
+        Returns:
+            Whether the device held it.
+        """
+        with self._conn:
+            self._conn.execute("BEGIN IMMEDIATE")
+            changed = self._conn.execute(
+                "DELETE FROM device_roles WHERE device_id = ? AND role = ?",
+                (device, role.value),
+            ).rowcount
+        return bool(changed)
+
+    def recent_devices(self, *, limit: int) -> tuple[Sequence[RosterDevice], int]:
+        """The devices the roster holds, newest first, bounded as the enrolments are.
+
+        Args:
+            limit: How many to return.
+
+        Returns:
+            The devices and how many the roster holds in all.
+        """
+        rows = self._conn.execute(
+            "SELECT device_id, kind, first_known_at FROM devices ORDER BY rowid DESC LIMIT ?",
+            (limit,),
+        ).fetchall()
+        roles = self.device_roles()
+        (total,) = self._conn.execute("SELECT count(*) FROM devices").fetchone()
+        return [
+            RosterDevice(
+                device_id=row["device_id"],
+                kind=DeviceKind(row["kind"]),
+                roles=roles.get(row["device_id"], frozenset()),
+                first_known_at=_instant(row["first_known_at"]),
+            )
+            for row in rows
+        ], int(total)
+
+    def recent_registrations(self, *, limit: int) -> tuple[Sequence[Registration], int]:
+        """The registrations the record holds, revoked ones included, newest first.
+
+        Bounded for :meth:`recent_enrolments`' reason: a revocation is kept, so the
+        record only grows.
+
+        Args:
+            limit: How many to return.
+
+        Returns:
+            The registrations and how many the record holds in all.
+        """
+        rows = self._conn.execute(
+            "SELECT id, device_id, gateway, registered_at, revoked_at FROM registrations "
+            "ORDER BY id DESC LIMIT ?",
+            (limit,),
+        ).fetchall()
+        (total,) = self._conn.execute("SELECT count(*) FROM registrations").fetchone()
+        return [_as_registration(row) for row in rows], int(total)
 
 
 class DeviceRegistry:
@@ -382,13 +847,25 @@ class DeviceRegistry:
     hold the uniqueness rule if one ever appeared.
     """
 
-    def __init__(self, store: EnrolmentStore, *, hub_identity: str) -> None:
+    def __init__(
+        self,
+        store: EnrolmentStore,
+        *,
+        hub_identity: str | None,
+        max_registrations_per_gateway: int = MAX_REGISTRATIONS_PER_GATEWAY,
+    ) -> None:
         """Read the record into the hub's live view.
 
         Args:
             store: The durable record.
             hub_identity: This hub's own overlay identity, disclosed beside every
-                credential it mints (§6).
+                credential it mints (§6) — or ``None`` on a hub with no remote
+                listener, which asks no overlay agent what it is and so enrols
+                nothing (:meth:`enrol`), while its roster acts still work
+                (ADR-0298 §4:13).
+            max_registrations_per_gateway: ADR-0298 §4:7's bound. A parameter so a
+                test can reach it without naming dozens of machines; the hub passes
+                nothing.
         """
         self._store = store
         self._hub_identity = hub_identity
@@ -400,10 +877,17 @@ class DeviceRegistry:
         # place an ``await`` could be introduced later without anyone noticing.
         self._known = store.known_identities()
         self._on_expelled: list[ExpelCallback] = []
+        # The roster's live view, for the same reason: a gateway's naming is decided
+        # on every request it relays (ADR-0298 §2:1), so it costs no query either.
+        self._max_per_gateway = max_registrations_per_gateway
+        self._kinds = store.device_kinds()
+        self._roles = store.device_roles()
+        self._registered, self._withdrawn = store.registration_pairs()
+        self._per_gateway = Counter(gateway for _, gateway in self._registered)
 
     @property
-    def hub_identity(self) -> str:
-        """This hub's own overlay identity (ADR-0124 §4, §6)."""
+    def hub_identity(self) -> str | None:
+        """This hub's own overlay identity (ADR-0124 §4, §6), where it has one."""
         return self._hub_identity
 
     def when_expelled(self, callback: ExpelCallback) -> None:
@@ -478,7 +962,23 @@ class DeviceRegistry:
         Returns:
             The credential to show the owner once, the hub identity beside it, and
             the record that was kept.
+
+        Raises:
+            RosterActError: On a hub with no overlay identity, which has nothing to
+                disclose beside the credential (§6) and no listener for the device to
+                arrive on; and for ``hub`` or the hub's own overlay identity, which
+                ADR-0298 §3:4 never enrols. Checked before anything is minted.
         """
+        hub_identity = self._hub_identity
+        if hub_identity is None:
+            msg = (
+                "this hub has no remote listener, so an enrolment would have no hub "
+                "identity to disclose beside its credential and no door for the device "
+                "to arrive at; set ASSISTANT_HUB_REMOTE_ADDRESS, restart the hub, and "
+                "enrol again"
+            )
+            raise RosterActError(msg)
+        self._refuse_the_hub(identity, act="enrolled")
         credential = mint_credential()
         verifier = verifier_for(credential)
         enrolment, rotated = self._store.enrol(identity, verifier=verifier, now=now)
@@ -487,6 +987,7 @@ class DeviceRegistry:
         # enrolments for one identity, or none.
         self._live[identity] = (enrolment.enrolment_id, verifier)
         self._known.add(identity)
+        self._kinds[identity] = DeviceKind.HUB
         if rotated:
             self._expel(identity, reason="rotated")
         _log.info(
@@ -498,7 +999,7 @@ class DeviceRegistry:
         return MintedEnrolment(
             enrolment=enrolment,
             credential=credential,
-            hub_identity=self._hub_identity,
+            hub_identity=hub_identity,
             rotated=rotated,
         )
 
@@ -519,6 +1020,7 @@ class DeviceRegistry:
         """
         revoked = self._store.revoke(identity, now=now)
         self._live.pop(identity, None)
+        self._settle_roles(identity)
         if revoked:
             self._expel(identity, reason="revoked")
             _log.info("device_revoked", overlay_identity=identity)
@@ -534,6 +1036,320 @@ class DeviceRegistry:
             The rows and the total, so a surface can say what it did not show.
         """
         return self._store.recent_enrolments(limit=limit)
+
+    # --- the device roster (ADR-0298 §3, §4) -----------------------------------
+
+    def accept_naming(self, gateway: str, name: str, *, now: datetime) -> NamingVerdict:
+        """Decide whether the hub accepts a gateway's name for a browser device.
+
+        ADR-0298 §4:2: "the first request on which a gateway names a machine
+        registers it under that gateway", so this is both the check and, the first
+        time, the registration — and the registration stands whatever the request
+        it rode on is then refused for (§6:1). The hub refuses the name only for a
+        registration the owner revoked under that gateway (§4:9), for ``hub`` and
+        the hub's own overlay identity (§3:3), and beyond the gateway's bound
+        (§4:7).
+
+        Synchronous, like :meth:`verify`, and answered from the live view: the first
+        naming writes one transaction, and every later one reads nothing.
+
+        Args:
+            gateway: The connecting device of the request: an enrolled hub device's
+                overlay identity on the remote listener, or :data:`HUB_DEVICE` on the
+                local socket (§4:4). The caller's to establish; the roster takes it as
+                given, as the wire server takes ``Admission.device``.
+            name: The machine the gateway named. The wire decoder has already held it
+                to ADR-0298 §1:3's form.
+            now: The instant a registration is recorded at.
+
+        Returns:
+            Whether the name is accepted, why not where it is not, and whether this
+            naming registered the machine.
+
+        Raises:
+            ValueError: If a name that would be registered has no UTF-8 form or is
+                over :data:`~ai_assistant.service.overlay.MAX_OVERLAY_IDENTITY_BYTES`
+                — a name the wire decoder refuses first, refused here too so the
+                record cannot hold one it could not report.
+        """
+        if name in self._reserved():
+            return NamingVerdict(refusal=NamingRefusal.RESERVED)
+        pair = (name, gateway)
+        if pair in self._registered:
+            return NamingVerdict()
+        if pair in self._withdrawn:
+            return NamingVerdict(refusal=NamingRefusal.REVOKED)
+        if self._per_gateway[gateway] >= self._max_per_gateway:
+            _log.warning(
+                "device_registration_refused",
+                device=name,
+                gateway=gateway,
+                reason=NamingRefusal.BOUND.value,
+                bound=self._max_per_gateway,
+            )
+            return NamingVerdict(refusal=NamingRefusal.BOUND)
+        registration_id = self._store.register(name, gateway=gateway, now=now)
+        self._registered.add(pair)
+        self._per_gateway[gateway] += 1
+        self._kinds.setdefault(name, DeviceKind.BROWSER)
+        _log.info(
+            "device_registered",
+            device=name,
+            gateway=gateway,
+            registration_id=registration_id,
+            kind=self._kinds[name].value,
+        )
+        return NamingVerdict(registered=True)
+
+    def roles_of(self, device: str) -> frozenset[Role]:
+        """The roles a device holds, as the checks read them at dispatch.
+
+        Args:
+            device: The device's id.
+
+        Returns:
+            :data:`EVERY_ROLE` for :data:`HUB_DEVICE` (ADR-0298 §3:2); otherwise the
+            roles the owner gave it, which is none for a device the roster does not
+            hold or that nothing admits.
+        """
+        if device == HUB_DEVICE:
+            return EVERY_ROLE
+        return self._roles.get(device, frozenset())
+
+    def is_known(self, device: str) -> bool:
+        """Whether the hub knows a device, as "my devices" and a conversation's devices need.
+
+        ADR-0298 §4:11: "``hub``, an enrolled hub device whose enrolment is live, or a
+        browser device with a live registration".
+
+        Args:
+            device: The device's id.
+
+        Returns:
+            Whether it is one of those.
+        """
+        return device == HUB_DEVICE or self._is_admitted(device)
+
+    def kind_of(self, device: str) -> DeviceKind | None:
+        """Which kind of device the roster holds a machine as.
+
+        Args:
+            device: The device's id.
+
+        Returns:
+            Its kind, or ``None`` for a machine the roster has never held — and for
+            :data:`HUB_DEVICE`, which is not a row.
+        """
+        return self._kinds.get(device)
+
+    def assign(self, device: str, role: Role) -> bool:
+        """Give a device one role, as the owner's act at the hub (ADR-0298 §4:12).
+
+        Args:
+            device: The device.
+            role: The role.
+
+        Returns:
+            Whether the device did not already hold it.
+
+        Raises:
+            RosterActError: For the hub's own machine, which holds every role by rule;
+                and for a machine nothing admits, because a role is held only while a
+                device is admitted and a machine never named or enrolled is no
+                device yet.
+        """
+        self._refuse_the_hub(device, act="given a role")
+        if not self._is_admitted(device):
+            msg = (
+                f"{device} is not a device this hub admits: enrol it, or let a gateway "
+                f"that lists it name it once, then give it the role. A device whose "
+                f"registrations and enrolment were all revoked holds no role until it is "
+                f"admitted again"
+            )
+            raise RosterActError(msg)
+        changed = self._store.assign_role(device, role)
+        self._roles[device] = self._roles.get(device, frozenset()) | {role}
+        if changed:
+            _log.info("device_role_assigned", device=device, role=role.value)
+        return changed
+
+    def withdraw(self, device: str, role: Role) -> bool:
+        """Take one role from a device.
+
+        Args:
+            device: The device.
+            role: The role.
+
+        Returns:
+            Whether the device held it.
+
+        Raises:
+            RosterActError: For the hub's own machine, whose roles are not a row.
+        """
+        self._refuse_the_hub(device, act="stripped of a role")
+        changed = self._store.withdraw_role(device, role)
+        remaining = self._roles.get(device, frozenset()) - {role}
+        if remaining:
+            self._roles[device] = remaining
+        else:
+            self._roles.pop(device, None)
+        if changed:
+            _log.info("device_role_withdrawn", device=device, role=role.value)
+        return changed
+
+    def revoke_device(self, device: str, *, now: datetime) -> DeviceRevocation:
+        """Revoke a whole device: its enrolment, every registration of it, its roles.
+
+        ADR-0298 §4:10. Its removal from "my devices" and from every conversation's
+        devices, and the end of its open change streams, are the same clause's other
+        half; they belong to the conversation store and the session, and arrive with
+        the enforcement that reads this record (§9). A revoked enrolment closes the
+        device's connections here, as ADR-0124 §8 requires, after the record and the
+        live view have both moved.
+
+        Args:
+            device: The device.
+            now: The instant to record.
+
+        Returns:
+            What was revoked.
+
+        Raises:
+            RosterActError: For the hub's own machine, which is never revoked (§3:4).
+        """
+        self._refuse_the_hub(device, act="revoked")
+        revocation = self._store.revoke_device(device, now=now)
+        self._live.pop(device, None)
+        self._roles.pop(device, None)
+        for pair in [pair for pair in self._registered if pair[0] == device]:
+            self._registered.discard(pair)
+            self._withdrawn.add(pair)
+            self._per_gateway[pair[1]] -= 1
+        if revocation.enrolment:
+            self._expel(device, reason="revoked")
+        _log.info(
+            "device_revoked_whole",
+            device=device,
+            enrolment=revocation.enrolment,
+            registrations=revocation.registrations,
+            roles=sorted(role.value for role in revocation.roles),
+        )
+        return revocation
+
+    def revoke_registration(self, device: str, *, gateway: str, now: datetime) -> bool:
+        """Revoke one machine's registration under one gateway (ADR-0298 §4:8).
+
+        It stays revoked: the gateway naming the machine again is refused and
+        registers nothing (§4:9), until :meth:`restore_registration`.
+
+        Args:
+            device: The machine.
+            gateway: The gateway.
+            now: The instant to record.
+
+        Returns:
+            Whether a live registration was revoked.
+
+        Raises:
+            RosterActError: For the hub's own machine, which is never registered.
+        """
+        self._refuse_the_hub(device, act="registered or revoked")
+        revoked = self._store.revoke_registration(device, gateway=gateway, now=now)
+        pair = (device, gateway)
+        if pair in self._registered:
+            self._registered.discard(pair)
+            self._withdrawn.add(pair)
+            self._per_gateway[gateway] -= 1
+        self._settle_roles(device)
+        if revoked:
+            _log.info("device_registration_revoked", device=device, gateway=gateway)
+        return revoked
+
+    def restore_registration(self, device: str, *, gateway: str, now: datetime) -> bool:
+        """Restore a registration the owner revoked — the only way one comes back (§4:9).
+
+        The device it re-admits holds no role, because the act that left it
+        unadmitted cleared them (§4:11's "holds no role until the user gives it
+        one").
+
+        Args:
+            device: The machine.
+            gateway: The gateway it was registered under.
+            now: The instant to record.
+
+        Returns:
+            Whether a registration was restored; ``False`` where it is already live.
+
+        Raises:
+            RosterActError: For the hub's own machine; and where no registration of
+                the machine under that gateway was ever revoked — restoring is not a
+                way to register a machine its gateway never named.
+        """
+        self._refuse_the_hub(device, act="registered or revoked")
+        pair = (device, gateway)
+        if pair in self._registered:
+            return False
+        if pair not in self._withdrawn:
+            msg = (
+                f"{device} has no revoked registration under {gateway} to restore; a "
+                f"machine is registered by its gateway naming it, not by an act here"
+            )
+            raise RosterActError(msg)
+        self._store.restore_registration(device, gateway=gateway, now=now)
+        self._withdrawn.discard(pair)
+        self._registered.add(pair)
+        self._per_gateway[gateway] += 1
+        _log.info("device_registration_restored", device=device, gateway=gateway)
+        return True
+
+    def roster(self, *, limit: int = LISTING_LIMIT) -> tuple[Sequence[RosterDevice], int]:
+        """The newest devices the roster holds, and how many it holds in all.
+
+        Args:
+            limit: How many to return, newest first.
+
+        Returns:
+            The devices and the total.
+        """
+        return self._store.recent_devices(limit=limit)
+
+    def registrations(self, *, limit: int = LISTING_LIMIT) -> tuple[Sequence[Registration], int]:
+        """The newest registrations the record holds, and how many it holds in all.
+
+        ADR-0298 §4:6: "``ai-assistant-device`` lists the registrations, so the owner
+        can see every machine each gateway has named."
+
+        Args:
+            limit: How many to return, newest first.
+
+        Returns:
+            The registrations and the total.
+        """
+        return self._store.recent_registrations(limit=limit)
+
+    def _reserved(self) -> frozenset[str]:
+        """The names no gateway may give and no act may enrol (ADR-0298 §3:3, §3:4)."""
+        if self._hub_identity is None:
+            return frozenset({HUB_DEVICE})
+        return frozenset({HUB_DEVICE, self._hub_identity})
+
+    def _refuse_the_hub(self, device: str, *, act: str) -> None:
+        """Refuse an owner's act on the hub's own machine, in the owner's words."""
+        if device in self._reserved():
+            msg = (
+                f"{device} is the hub's own machine, which is never {act}: it holds every "
+                f"role through the local socket, and reaches the hub through nothing else"
+            )
+            raise RosterActError(msg)
+
+    def _is_admitted(self, device: str) -> bool:
+        """Whether a live enrolment or a live registration admits a device."""
+        return device in self._live or any(pair[0] == device for pair in self._registered)
+
+    def _settle_roles(self, device: str) -> None:
+        """Mirror the record's invariant: a device nothing admits holds no role."""
+        if not self._is_admitted(device):
+            self._roles.pop(device, None)
 
     def _expel(self, identity: str, *, reason: str) -> None:
         """Close whatever connections a device holds, now that it holds none by right."""
@@ -574,6 +1390,18 @@ def _as_enrolment(row: sqlite3.Row) -> Enrolment:
         enrolment_id=row["id"],
         overlay_identity=row["overlay_identity"],
         enrolled_at=_instant(row["enrolled_at"]),
+        revoked_at=None if revoked is None else _instant(revoked),
+    )
+
+
+def _as_registration(row: sqlite3.Row) -> Registration:
+    """Rebuild one row as a :class:`Registration`."""
+    revoked = row["revoked_at"]
+    return Registration(
+        registration_id=row["id"],
+        device_id=row["device_id"],
+        gateway=row["gateway"],
+        registered_at=_instant(row["registered_at"]),
         revoked_at=None if revoked is None else _instant(revoked),
     )
 

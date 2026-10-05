@@ -25,8 +25,17 @@ all. The act therefore happens *inside* the hub process, which is also what keep
 adding a listener", and §10's list of what this decision does not authorise — the
 hub dialling out, a delivery seam, a second hub, the client half — is untouched by
 a Unix socket in ``data_dir`` that only the owner's uid can open. It carries no
-engine call and never will: the surface below is three acts on the enrolment
-record and nothing else.
+engine call and never will: the surface below is the owner's acts on the
+enrolment record and the device roster beside it, and nothing else.
+
+**Bound wherever the hub runs** (ADR-0298 §4:13), not only where the remote
+listener is configured: a gateway on the hub's own machine serves listed browsers
+whether or not the hub has a remote listener, and those browser devices need roles,
+which are given here (§4:12). A hub with no remote listener refuses an enrolment in
+a sentence — there is no hub identity to disclose and no door to arrive at — and
+performs every roster act. ADR-0124 §2:3's "binds only ADR-0084 §1's loopback
+socket" is read as the network posture it states: this socket is §6's hub-local
+entry point, on the hub's own machine and owner-only, and no door off it.
 
 **The credential crosses this socket exactly once and is never stored.** ADR-0124
 §6 mints it, discloses it "to the owner once at enrolment and never again", and
@@ -48,6 +57,7 @@ from typing import TYPE_CHECKING, Any, Final
 import structlog
 
 from ai_assistant.core.clock import checked_clock
+from ai_assistant.service.enrolment import Role, RosterActError
 from ai_assistant.service.overlay import MAX_OVERLAY_IDENTITY_BYTES
 from ai_assistant.wire.address import SOCKET_MODE, admin_socket_path, check_admin_socket_path
 from ai_assistant.wire.errors import TransportError
@@ -89,13 +99,18 @@ ADMIN_FRAME_BYTES: Final[int] = 1024 * 1024
 #: work between them is a handful of SQLite rows.
 ADMIN_TIMEOUT: Final[timedelta] = timedelta(seconds=10)
 
-#: The three acts. ``list`` is not one of ADR-0124's normative requirements and is
-#: here for ADR-0083's ruling 4: an owner who cannot see which devices are
-#: enrolled, and which were revoked and when, cannot check what §6's record says
-#: they decided. It discloses no verifier (§7).
+#: The acts. ``list`` is not one of ADR-0124's normative requirements and is here
+#: for ADR-0083's ruling 4: an owner who cannot see which devices are enrolled, and
+#: which were revoked and when, cannot check what §6's record says they decided. It
+#: discloses no verifier (§7). ADR-0298 §4:6 makes it list the registrations too.
 ENROL: Final = "enrol"
 REVOKE: Final = "revoke"
 LIST: Final = "list"
+#: The roster's acts (ADR-0298 §4:8, §4:9, §4:12): restoring a revoked
+#: registration, and giving or taking one role.
+RESTORE: Final = "restore"
+ASSIGN: Final = "assign"
+WITHDRAW: Final = "withdraw"
 
 
 class AdminListener:
@@ -241,7 +256,7 @@ class AdminListener:
             with contextlib.suppress(ConnectionError, OSError, asyncio.CancelledError):
                 await writer.wait_closed()
 
-    def _perform(self, body: bytes) -> dict[str, Any]:  # noqa: PLR0911 — one return per way a request is malformed, plus one per act
+    def _perform(self, body: bytes) -> dict[str, Any]:
         """Decode one request and carry out the act it names.
 
         Synchronous, and every act inside it is (:mod:`ai_assistant.service.enrolment`
@@ -264,30 +279,36 @@ class AdminListener:
         act = request.get("act")
         if act == LIST:
             return self._listing()
-        identity = request.get("identity")
-        if not isinstance(identity, str) or not identity.strip():
-            return _failed("a device act must name the device's overlay identity")
-        identity = identity.strip()
-        # **Before the act, not after it**, and the ordering is the guarantee rather
-        # than tidiness. An enrolment's reply repeats the identity beside the
-        # credential ADR-0124 §6 discloses "once at enrolment and never again", so an
-        # identity large enough to overflow that reply would commit a row and then
-        # fail to render the one answer the act exists to produce — leaving the
-        # device enrolled under a credential nobody read. The store refuses it too
-        # (:func:`~ai_assistant.service.enrolment._bounded_identity`); that refusal
-        # is the invariant and this one is the sentence an owner gets.
+        if act not in _NAMING_ACTS:
+            return _failed(f"no such device act: {act!r}")
         try:
-            size = len(identity.encode("utf-8"))
-        except UnicodeEncodeError:
-            # A lone surrogate survives ``json.loads`` and has no UTF-8 form; the
-            # store refuses it too, but a ``ValueError`` raised there would reach
-            # the catch-all below and close the socket without a word.
-            return _failed("an overlay identity must be text that can be encoded")
-        if size > MAX_OVERLAY_IDENTITY_BYTES:
-            return _failed(
-                f"an overlay identity is at most {MAX_OVERLAY_IDENTITY_BYTES} bytes; "
-                f"use the stable identifier your overlay agent reports for the device"
-            )
+            return self._act(act, request)
+        except (_MalformedError, RosterActError) as exc:
+            return _failed(str(exc))
+
+    def _act(self, act: str, request: dict[str, Any]) -> dict[str, Any]:
+        """Perform one act that names a device.
+
+        Args:
+            act: Which act, one of :data:`_NAMING_ACTS`.
+            request: The decoded request.
+
+        Returns:
+            The reply's members.
+
+        Raises:
+            _MalformedError: If a member the act needs is missing or malformed.
+            RosterActError: If the record will not perform the act.
+        """
+        # **Every name is checked before the act, not after it**, and the ordering is
+        # the guarantee rather than tidiness. An enrolment's reply repeats the
+        # identity beside the credential ADR-0124 §6 discloses "once at enrolment and
+        # never again", so an identity large enough to overflow that reply would
+        # commit a row and then fail to render the one answer the act exists to
+        # produce — leaving the device enrolled under a credential nobody read. The
+        # store refuses it too (:func:`~ai_assistant.service.enrolment._bounded_identity`);
+        # that refusal is the invariant and this one is the sentence an owner gets.
+        identity = _name(request.get("identity"), what="the device's overlay identity")
         if act == ENROL:
             minted = self._registry.enrol(identity, now=self._now())
             return {
@@ -298,44 +319,156 @@ class AdminListener:
                 "rotated": minted.rotated,
             }
         if act == REVOKE:
-            return {"ok": True, "revoked": self._registry.revoke(identity, now=self._now())}
-        return _failed(f"no such device act: {act!r}")
+            if request.get("gateway") is None:
+                revocation = self._registry.revoke_device(identity, now=self._now())
+                return {
+                    "ok": True,
+                    "enrolment": revocation.enrolment,
+                    "registrations": revocation.registrations,
+                    "roles": sorted(role.value for role in revocation.roles),
+                }
+            gateway = _name(request.get("gateway"), what="the gateway's device")
+            revoked = self._registry.revoke_registration(identity, gateway=gateway, now=self._now())
+            return {"ok": True, "revoked": revoked}
+        if act == RESTORE:
+            gateway = _name(request.get("gateway"), what="the gateway's device")
+            restored = self._registry.restore_registration(
+                identity, gateway=gateway, now=self._now()
+            )
+            return {"ok": True, "restored": restored}
+        role = _role(request.get("role"))
+        if act == ASSIGN:
+            changed = self._registry.assign(identity, role)
+        else:
+            changed = self._registry.withdraw(identity, role)
+        return {
+            "ok": True,
+            "changed": changed,
+            "roles": sorted(held.value for held in self._registry.roles_of(identity)),
+        }
 
     def _listing(self) -> dict[str, Any]:
-        """The newest enrolments the record holds, and this hub's own identity.
+        """The newest enrolments, devices and registrations, and this hub's identity.
 
         Revoked enrolments are listed rather than hidden, because ADR-0124 §6 keeps
         them — "a revocation is recorded rather than erasing the enrolment it
         revokes, so the record says what the owner actually decided and when" — and
         a surface that dropped them would make the record's own point unreadable.
+        Revoked registrations are listed for the same reason, and because ADR-0298
+        §4:6 lists them "so the owner can see every machine each gateway has named".
 
         **Bounded, and it says what it omitted.** The record only ever grows, so an
         unbounded listing would eventually build a reply larger than
         :data:`ADMIN_FRAME_BYTES` — and the surface an owner uses to *check* the
         record would be the first thing the record's own growth broke, failing as a
-        closed connection rather than as an answer. ``omitted`` is what keeps the
-        bound honest: a listing that quietly stopped at a limit would be ADR-0083's
-        ruling 4 failure in the one place an owner goes to find out what they
-        decided.
+        closed connection rather than as an answer. Each ``*_omitted`` is what keeps
+        its bound honest: a listing that quietly stopped at a limit would be
+        ADR-0083's ruling 4 failure in the one place an owner goes to find out what
+        they decided.
 
         Returns:
             The reply's members. No verifier appears in it (§7).
         """
-        devices, total = self._registry.enrolments()
+        enrolments, enrolled = self._registry.enrolments()
+        devices, held = self._registry.roster()
+        registrations, registered = self._registry.registrations()
         return {
             "ok": True,
             "hub_identity": self._registry.hub_identity,
-            "devices": [
+            "enrolments": [
                 {
                     "overlay_identity": one.overlay_identity,
                     "enrolled_at": one.enrolled_at.isoformat(),
                     "revoked_at": None if one.revoked_at is None else one.revoked_at.isoformat(),
                     "live": one.is_live,
                 }
+                for one in enrolments
+            ],
+            "enrolments_omitted": enrolled - len(enrolments),
+            "devices": [
+                {
+                    "device": one.device_id,
+                    "kind": one.kind.value,
+                    "roles": sorted(role.value for role in one.roles),
+                    "admitted": self._registry.is_known(one.device_id),
+                }
                 for one in devices
             ],
-            "omitted": total - len(devices),
+            "devices_omitted": held - len(devices),
+            "registrations": [
+                {
+                    "device": one.device_id,
+                    "gateway": one.gateway,
+                    "registered_at": one.registered_at.isoformat(),
+                    "revoked_at": None if one.revoked_at is None else one.revoked_at.isoformat(),
+                    "live": one.is_live,
+                }
+                for one in registrations
+            ],
+            "registrations_omitted": registered - len(registrations),
         }
+
+
+#: The acts that name a device, and so carry an ``identity`` member.
+_NAMING_ACTS: Final = frozenset({ENROL, REVOKE, RESTORE, ASSIGN, WITHDRAW})
+
+
+class _MalformedError(ValueError):
+    """A request member an act needs is missing or malformed; its message is the reply."""
+
+
+def _name(value: object, *, what: str) -> str:
+    """Read one device name from a request, bounded as the record bounds it.
+
+    Args:
+        value: The member as decoded.
+        what: What the member names, for the sentence a refusal carries.
+
+    Returns:
+        The name, stripped of surrounding space.
+
+    Raises:
+        _MalformedError: If it is not non-blank text the record could hold.
+    """
+    if not isinstance(value, str) or not value.strip():
+        msg = f"a device act must name {what}"
+        raise _MalformedError(msg)
+    name = value.strip()
+    try:
+        size = len(name.encode("utf-8"))
+    except UnicodeEncodeError:
+        # A lone surrogate survives ``json.loads`` and has no UTF-8 form; the store
+        # refuses it too, but a ``ValueError`` raised there would reach the
+        # catch-all and close the socket without a word.
+        msg = "an overlay identity must be text that can be encoded"
+        raise _MalformedError(msg) from None
+    if size > MAX_OVERLAY_IDENTITY_BYTES:
+        msg = (
+            f"an overlay identity is at most {MAX_OVERLAY_IDENTITY_BYTES} bytes; "
+            f"use the stable identifier your overlay agent reports for the device"
+        )
+        raise _MalformedError(msg)
+    return name
+
+
+def _role(value: object) -> Role:
+    """Read one role from a request.
+
+    Args:
+        value: The member as decoded.
+
+    Returns:
+        The role.
+
+    Raises:
+        _MalformedError: If it names no role the roster holds.
+    """
+    for role in Role:
+        if value == role.value:
+            return role
+    named = ", ".join(role.value for role in Role)
+    msg = f"a role is one of {named}, not {value!r}"
+    raise _MalformedError(msg)
 
 
 def _failed(reason: str) -> dict[str, Any]:
