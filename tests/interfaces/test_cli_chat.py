@@ -316,7 +316,7 @@ async def test_chat_reports_a_conversation_it_cannot_show(output: StringIO) -> N
 async def test_a_typed_line_is_written_as_this_devices_message_and_received(
     output: StringIO,
 ) -> None:
-    engine = FakeAssistantEngine()
+    engine = FakeAssistantEngine(chat_reader=False)
     conversation = await _started(engine, HUB)
 
     code = await _chat(engine, conversation, _lines("", "Book Pinecrest for Friday"))
@@ -337,7 +337,7 @@ async def test_a_typed_line_is_written_as_this_devices_message_and_received(
 
 async def test_each_message_carries_its_own_id(output: StringIO) -> None:
     """§4:1: the device chooses the id, unique per device — two messages, two ids."""
-    engine = FakeAssistantEngine()
+    engine = FakeAssistantEngine(chat_reader=False)
     conversation = await _started(engine, HUB)
 
     await _chat(engine, conversation, _lines("one", "two"))
@@ -453,7 +453,7 @@ class _LosesTheFirstSend(FakeAssistantEngine):
 
 async def test_a_lost_send_is_sent_again_with_the_same_id(output: StringIO) -> None:
     """§4:2: sending is safe to repeat, so the repeat is the same message, recorded once."""
-    engine = _LosesTheFirstSend()
+    engine = _LosesTheFirstSend(chat_reader=False)
     conversation = await _started(engine, HUB)
 
     code = await _chat(engine, conversation, _lines("hello"))

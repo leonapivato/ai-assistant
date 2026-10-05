@@ -63,7 +63,12 @@ from assistant_engine_contract import (
     seeded_spend_ledger,
     seeded_trail,
 )
-from chat_surface_contract import CHAT_LIMIT, CHAT_SURFACE_AT, ChatSurfaceSubject
+from chat_surface_contract import (
+    CHAT_LIMIT,
+    CHAT_SURFACE_AT,
+    ChatReaderSubject,
+    ChatSurfaceSubject,
+)
 from episode_inspection_contract import (
     INSPECTION_AT,
     INSPECTION_LIMIT,
@@ -463,6 +468,7 @@ def _wire(  # noqa: PLR0913 — one knob per state the shared suite needs a subj
     notification_outbox: FakeNotificationOutbox | None = None,
     stories: StoryStore | None = None,
     chat_reader: bool = True,
+    conversation_store: FakeConversationStore | None = None,
 ) -> Engine:
     """Build one engine over in-memory fakes, wired as the composition root would.
 
@@ -507,11 +513,15 @@ def _wire(  # noqa: PLR0913 — one knob per state the shared suite needs a subj
     holding one. Left ``None`` for every other case, which is the deployment the suite
     had before ADR-0206 and is why none of them is affected by it.
 
-    ``chat_reader`` is ADR-0293 §6's reader, switched off for the chat-space suite alone:
-    that suite holds the medium to the surface's contract on every implementation, and
-    the canonical fake and the wire client answer no message, so on this subject a
-    written message is recorded and waits, as it does there. The reader is held to its
-    own decision in ``test_chat_reader.py``.
+    ``chat_reader`` is ADR-0293 §6's reader, switched off for the chat-space suite's
+    medium obligations alone: they hold exact positions and change lists, so on that
+    subject a written message is recorded and waits, as it does on the other two
+    implementations built the same way. The reader obligations run with it on, as the
+    canonical fake and the wire client answer too; the reader is held to its own
+    decision in ``test_chat_reader.py``.
+
+    ``conversation_store`` is the chat space, a knob so the reader obligations can hold
+    the reader's marking on the store the engine's chat space is.
 
     ``max_outstanding_confirmations`` is the ceiling ADR-0198 §4 reuses as the bound on
     the retained settled records. A knob for :attr:`AssistantEngineContract.tiny_engine`'s
@@ -568,7 +578,8 @@ def _wire(  # noqa: PLR0913 — one knob per state the shared suite needs a subj
             transport_endpoint="test://endpoint/one",
         )
     records = FakeMemoryStore(now=lambda: AT) if memory is None else memory
-    conversation_store = FakeConversationStore(now=conversation_clock)
+    if conversation_store is None:
+        conversation_store = FakeConversationStore(now=conversation_clock)
     conversations = ConversationLifecycle(
         conversations=conversation_store,
         memory=records,
@@ -701,6 +712,24 @@ class TestEngineContract(AssistantEngineContract):
         await built.start()
         try:
             yield ChatSurfaceSubject(engine=built, memory=memory)
+        finally:
+            await built.aclose()
+
+    @pytest.fixture
+    async def chat_reader_surface(self) -> AsyncIterator[ChatReaderSubject]:
+        """The production engine with its chat reader on, over injected stores.
+
+        Both read the engine's own instant: the episodes its reader's activations write
+        are stamped with it and expire by it, so a store reading another instant would
+        hide them. The conversation store's clock advances, as :func:`_wire`'s does.
+        """
+        memory = FakeMemoryStore(now=lambda: AT)
+        ticks = count(1)
+        chat = FakeConversationStore(now=lambda: AT + timedelta(seconds=next(ticks)))
+        built = _wire(memory=memory, max_payload_bytes=CHAT_LIMIT, conversation_store=chat)
+        await built.start()
+        try:
+            yield ChatReaderSubject(engine=built, memory=memory, chat=chat)
         finally:
             await built.aclose()
 

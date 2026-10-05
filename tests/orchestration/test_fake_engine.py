@@ -59,7 +59,12 @@ from assistant_engine_contract import (
     spoken_routed_park_outcome,
     spoken_step_park_outcome,
 )
-from chat_surface_contract import CHAT_LIMIT, CHAT_SURFACE_AT, ChatSurfaceSubject
+from chat_surface_contract import (
+    CHAT_LIMIT,
+    CHAT_SURFACE_AT,
+    ChatReaderSubject,
+    ChatSurfaceSubject,
+)
 from episode_inspection_contract import (
     INSPECTION_AT,
     INSPECTION_LIMIT,
@@ -84,12 +89,15 @@ from ai_assistant.core.types import (
     BoundAccount,
     ChannelIdentity,
     ChannelInput,
+    ChatDevice,
     ContinuationToken,
     Conversation,
+    ConversationState,
     ConversationSummary,
     CostBasis,
     DataTier,
     DestinationProtocol,
+    DeviceAccess,
     DiscloserProvenance,
     Disposition,
     EgressBinding,
@@ -101,6 +109,7 @@ from ai_assistant.core.types import (
     Idempotency,
     MemoryKind,
     MemoryWrite,
+    MessageAuthor,
     PermissionDecision,
     PermissionOutcome,
     PermissionRuling,
@@ -116,12 +125,14 @@ from ai_assistant.core.types import (
     TextChannelPayload,
     ToolCost,
     ToolDefinition,
+    TranscriptMessage,
     TurnOutcome,
     TurnReference,
     UserMessage,
     UtcInstant,
     WholeTextReply,
 )
+from ai_assistant.orchestration.chat import COULDNT_FINISH
 from ai_assistant.testing import (
     AUTHORIZATION_GOAL,
     FakeAssistantEngine,
@@ -228,11 +239,19 @@ class TestFakeAssistantEngineContract(AssistantEngineContract):
 
     @pytest.fixture
     def chat_surface(self) -> ChatSurfaceSubject:
-        """The canonical fake over an injected memory store, at the chat bound."""
+        """The canonical fake over an injected memory store, at the chat bound, not answering."""
+        memory = FakeMemoryStore(now=lambda: CHAT_SURFACE_AT)
+        built = FakeAssistantEngine(max_payload_bytes=CHAT_LIMIT, chat_reader=False)
+        built.episode_memory = memory
+        return ChatSurfaceSubject(engine=built, memory=memory)
+
+    @pytest.fixture
+    def chat_reader_surface(self) -> ChatReaderSubject:
+        """The canonical fake answering, over an injected memory store, at the chat bound."""
         memory = FakeMemoryStore(now=lambda: CHAT_SURFACE_AT)
         built = FakeAssistantEngine(max_payload_bytes=CHAT_LIMIT)
         built.episode_memory = memory
-        return ChatSurfaceSubject(engine=built, memory=memory)
+        return ChatReaderSubject(engine=built, memory=memory, chat=built.chat)
 
     @pytest.fixture
     def story_surface(self) -> StorySurfaceSubject:
@@ -1939,3 +1958,69 @@ async def test_a_stop_reaches_a_resume_while_it_runs_and_it_returns_stopped() ->
     assert resumed.recipient_grant is not None
     # Finalized: no longer running, and a second stop finds nothing it can mark.
     assert await engine.stop_activation(known) is not ActivationStop.STOPPED
+
+
+# --- ADR-0293 §6, §10: the fake answers a written message, and can be told not to ------
+
+
+async def _chat_with_one_message(engine: FakeAssistantEngine) -> str:
+    """Start a conversation on one device and write ``"hello"`` into it."""
+    device = ChatDevice(device_id="phone", access=DeviceAccess.READ_WRITE)
+    await engine.set_my_devices([device])
+    conversation = (await engine.start_conversation()).id
+    await engine.write_message(
+        conversation, message=UserMessage(device_id="phone", message_id="m-1", text="hello")
+    )
+    return conversation
+
+
+async def _settled(engine: FakeAssistantEngine) -> None:
+    """Let every read the fake's reader started run to its end."""
+    async with asyncio.timeout(10):
+        while engine._chat_reads:
+            await asyncio.gather(*engine._chat_reads)
+
+
+async def test_the_fake_answers_with_a_composed_reply_naming_the_input() -> None:
+    """The canned reply, written once by the engine's own adapter (§10:1)."""
+    engine = FakeAssistantEngine()
+    conversation = await _chat_with_one_message(engine)
+    await _settled(engine)
+    page = await engine.transcript(conversation)
+    assert page is not None
+    reply = page.entries[-1]
+    assert isinstance(reply, TranscriptMessage)
+    assert reply.author is MessageAuthor.ASSISTANT
+    assert "hello" in reply.text
+
+
+async def test_a_scripted_outcome_with_no_reply_writes_couldnt_finish() -> None:
+    """§10:2: a pass that ends without a reply — a park, here — writes *couldn't finish*."""
+    engine = FakeAssistantEngine()
+    engine.turn_outcome = spoken_step_park_outcome()
+    conversation = await _chat_with_one_message(engine)
+    await _settled(engine)
+    page = await engine.transcript(conversation)
+    assert page is not None
+    reply = page.entries[-1]
+    assert isinstance(reply, TranscriptMessage)
+    assert (reply.author, reply.text) == (MessageAuthor.ASSISTANT, COULDNT_FINISH)
+
+
+@pytest.mark.parametrize("by", ["constructor", "attribute"])
+async def test_a_fake_told_not_to_answer_leaves_the_message_waiting(by: str) -> None:
+    """``chat_reader=False``: the message is recorded and waits, as before the reader."""
+    engine = FakeAssistantEngine(chat_reader=by != "constructor")
+    if by == "attribute":
+        engine.chat_reader = False
+    conversation = await _chat_with_one_message(engine)
+    for _ in range(10):
+        await asyncio.sleep(0)
+    assert not engine._chat_reads
+    page = await engine.transcript(conversation)
+    assert page is not None
+    assert [type(one) for one in page.entries] == [TranscriptMessage]
+    assert len(await engine.chat.untaken_messages(conversation)) == 1
+    digest = await engine.conversation(conversation)
+    assert digest is not None
+    assert digest.state == ConversationState()

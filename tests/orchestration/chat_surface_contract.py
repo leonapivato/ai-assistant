@@ -1,4 +1,4 @@
-"""Shared chat-space obligations from ADR-0293 §2-§5, §8 and §11.
+"""Shared chat-space obligations from ADR-0293 §2-§6, §8, §10 and §11.
 
 Run through the engine, the canonical fake engine and the wire client, each over an
 injected memory store the suite seeds episodes into, so the acts in the medium, their
@@ -9,6 +9,12 @@ surface adds: a conversation started empty on "my devices", a written message an
 *received* and safe to repeat, deleting that forgets nothing, forgetting that deletes
 nothing, the current state read from the episodes, the pages fitted to the payload
 limit, and every argument refused locally.
+
+**Two subjects per implementation.** :class:`ChatSurfaceContract` holds the medium on a
+subject whose reader is off, so a written message is recorded and waits and every
+position and change list is the case's own. :class:`ChatReaderContract` holds the
+reader (§6), the adapter (§10) and the current state they drive (§8) on a subject whose
+reader is on, over a conversation store the suite can hold at the reader's marking.
 """
 
 from __future__ import annotations
@@ -16,13 +22,14 @@ from __future__ import annotations
 import asyncio
 from dataclasses import dataclass
 from datetime import UTC, datetime, timedelta
-from typing import TYPE_CHECKING
+from typing import TYPE_CHECKING, Any
 
 import pytest
 
 from ai_assistant.core.errors import OversizedValueError, UnknownConversationError
 from ai_assistant.core.types import (
     ActivationEnding,
+    ActivationStop,
     ChannelContext,
     ChannelIdentity,
     ChannelInput,
@@ -58,11 +65,11 @@ from ai_assistant.core.types import (
 from ai_assistant.testing.activation import ended_pass
 
 if TYPE_CHECKING:
-    from collections.abc import Sequence
+    from collections.abc import Awaitable, Callable, Sequence
 
     from ai_assistant.core.protocols import AssistantEngine
     from ai_assistant.core.types import MemoryWrite
-    from ai_assistant.testing import FakeMemoryStore
+    from ai_assistant.testing import FakeConversationStore, FakeMemoryStore
 
 #: The payload limit every subject is built at: small enough that a page of a few
 #: long messages does not fit, so the fitting is exercised rather than assumed.
@@ -86,6 +93,21 @@ class ChatSurfaceSubject:
 
     engine: AssistantEngine
     memory: FakeMemoryStore
+
+
+@dataclass(frozen=True)
+class ChatReaderSubject:
+    """An engine whose chat reader is on, with the stores behind it.
+
+    ``chat`` is the conversation store the engine's chat space is, which the suite
+    holds at the reader's ``take_in`` — the activation's first step once it is
+    admitted (ADR-0293 §6:8), on every implementation — so an activation is running,
+    and reachable by a stop, while the case acts.
+    """
+
+    engine: AssistantEngine
+    memory: FakeMemoryStore
+    chat: FakeConversationStore
 
 
 _STATUS_REASON: dict[ProcessingStatus, tuple[ProcessingReason, ControllerRule]] = {
@@ -671,3 +693,189 @@ class ChatSurfaceContract:
         receipt = await engine.write_message(f" {conversation} ", message=said(_PHONE, "m", "hi"))
         assert receipt.conversation_id == conversation
         assert receipt.outcome is SendOutcome.RECORDED
+
+
+# --- the reader and the adapter (§6, §8, §10) --------------------------------------
+
+#: How long a case waits for the reader to settle before it fails rather than hangs.
+_SETTLE = 10.0
+
+
+async def _until(check: Callable[[], Awaitable[bool]], *, what: str) -> None:
+    """Wait for ``check`` to hold, polling the loop; fail rather than hang."""
+    deadline = asyncio.get_running_loop().time() + _SETTLE
+    while not await check():
+        if asyncio.get_running_loop().time() > deadline:
+            msg = f"the reader never settled: {what}"
+            raise AssertionError(msg)
+        await asyncio.sleep(0.005)
+
+
+async def _messages(engine: AssistantEngine, conversation_id: str) -> list[TranscriptMessage]:
+    """The conversation's standing messages, oldest first."""
+    page = await engine.transcript(conversation_id)
+    assert page is not None
+    return [one for one in page.entries if isinstance(one, TranscriptMessage)]
+
+
+async def _answered(
+    engine: AssistantEngine, conversation_id: str, count: int
+) -> list[TranscriptMessage]:
+    """Wait for ``count`` assistant messages and an idle conversation, then read."""
+
+    async def done() -> bool:
+        written = await _messages(engine, conversation_id)
+        digest = await engine.conversation(conversation_id)
+        replies = [one for one in written if one.author is MessageAuthor.ASSISTANT]
+        return len(replies) >= count and digest is not None and not digest.state.working
+
+    await _until(done, what=f"{count} assistant message(s)")
+    return await _messages(engine, conversation_id)
+
+
+async def _working(engine: AssistantEngine, conversation_id: str) -> str:
+    """Wait for the conversation to show "working…" with an id, and return the id."""
+    found: list[str] = []
+
+    async def shown() -> bool:
+        digest = await engine.conversation(conversation_id)
+        if digest is None or not digest.state.working or digest.state.activation_id is None:
+            return False
+        found.append(digest.state.activation_id)
+        return True
+
+    await _until(shown, what="the running activation's id")
+    return found[-1]
+
+
+def _held_take_in(chat: FakeConversationStore) -> tuple[asyncio.Event, asyncio.Event]:
+    """Hold the reader's first marking until released: its activation is then running."""
+    entered, release = asyncio.Event(), asyncio.Event()
+    original = chat.take_in
+
+    async def held(*args: Any, **kwargs: Any) -> tuple[int, ...]:
+        if not entered.is_set():
+            entered.set()
+            await release.wait()
+        return await original(*args, **kwargs)
+
+    chat.take_in = held  # type: ignore[method-assign]
+    return entered, release
+
+
+async def _input_of(memory: FakeMemoryStore, activation_id: str) -> str:
+    """The text the activation's episode says it was admitted with."""
+    episode = await memory.get(f"activation:{activation_id}")
+    assert isinstance(episode, EpisodicMemory)
+    assert episode.processing_record is not None
+    trigger = episode.processing_record.trigger
+    assert isinstance(trigger, RecordedChannelTrigger)
+    assert isinstance(trigger.payload, RecordedTextInput)
+    return trigger.payload.text
+
+
+class ChatReaderContract:
+    """The chat's reader and adapter, through every ``AssistantEngine`` (ADR-0293 §6, §10)."""
+
+    @pytest.fixture
+    def chat_reader_surface(self) -> ChatReaderSubject:
+        """Override: an implementation at ``CHAT_LIMIT`` with its chat reader on."""
+        raise NotImplementedError
+
+    async def test_a_written_message_is_answered_with_one_assistant_message(
+        self, chat_reader_surface: ChatReaderSubject
+    ) -> None:
+        """§6:1, §10:1, §8:3: taken in, answered once, and the state shows it ended done.
+
+        The assistant's own message is never taken in (§6:1), so it starts nothing:
+        nothing waits once the reply is written.
+        """
+        engine, chat = chat_reader_surface.engine, chat_reader_surface.chat
+        conversation = await _started(engine, _PHONE)
+        receipt = await engine.write_message(conversation, message=said(_PHONE, "m-1", "hello"))
+        assert receipt.outcome is SendOutcome.RECORDED
+        written = await _answered(engine, conversation, 1)
+        assert [(one.position, one.author) for one in written] == [
+            (1, MessageAuthor.USER),
+            (2, MessageAuthor.ASSISTANT),
+        ]
+        assert written[1].text.strip()
+        digest = await engine.conversation(conversation)
+        assert digest is not None
+        assert digest.state == ConversationState(last_ended=ActivationEnding.DONE)
+        taken = await chat.taken_in(conversation, positions=[1, 2])
+        assert set(taken) == {1}, "the user's message is taken in, the reply is not"
+        assert await chat.untaken_messages(conversation) == ()
+        assert await _input_of(chat_reader_surface.memory, taken[1]) == "hello"
+
+    async def test_messages_written_while_it_runs_wait_and_are_taken_in_together(
+        self, chat_reader_surface: ChatReaderSubject
+    ) -> None:
+        """§6:2, §6:3, §8:2: one activation at a time; what waited is one input after it.
+
+        The first activation is held at its marking, so it is running — "working…",
+        with its id — while two more messages are written. Each lands at once, and
+        when it ends the two are taken in together by one second activation: two
+        replies, not three.
+        """
+        engine, chat = chat_reader_surface.engine, chat_reader_surface.chat
+        conversation = await _started(engine, _PHONE)
+        entered, release = _held_take_in(chat)
+        await engine.write_message(conversation, message=said(_PHONE, "m-1", "first"))
+        try:
+            async with asyncio.timeout(_SETTLE):
+                await entered.wait()
+            running = await _working(engine, conversation)
+            second = await engine.write_message(conversation, message=said(_PHONE, "m-2", "second"))
+            third = await engine.write_message(conversation, message=said(_PHONE, "m-3", "third"))
+            assert (second.position, third.position) == (2, 3), "never refused, never held"
+            assert await _working(engine, conversation) == running
+        finally:
+            release.set()
+        written = await _answered(engine, conversation, 2)
+        assert [one.author for one in written] == [
+            MessageAuthor.USER,
+            MessageAuthor.USER,
+            MessageAuthor.USER,
+            MessageAuthor.ASSISTANT,
+            MessageAuthor.ASSISTANT,
+        ]
+        taken = await chat.taken_in(conversation, positions=[1, 2, 3])
+        assert taken[1] == running
+        assert taken[2] == taken[3] != running, "what waited is one input"
+        together = await _input_of(chat_reader_surface.memory, taken[2])
+        assert "second" in together
+        assert "third" in together
+        assert await chat.untaken_messages(conversation) == ()
+
+    async def test_a_stopped_activation_writes_nothing_and_shows_stopped(
+        self, chat_reader_surface: ChatReaderSubject
+    ) -> None:
+        """ADR-0295 §3:3-§3:4, ADR-0297 §4: no reply, no *couldn't finish*; state *stopped*.
+
+        What it marked stays taken in (§6:8), so nothing is taken in again after it.
+        """
+        engine, chat = chat_reader_surface.engine, chat_reader_surface.chat
+        conversation = await _started(engine, _PHONE)
+        entered, release = _held_take_in(chat)
+        await engine.write_message(conversation, message=said(_PHONE, "m-1", "hi"))
+        try:
+            async with asyncio.timeout(_SETTLE):
+                await entered.wait()
+            running = await _working(engine, conversation)
+            assert await engine.stop_activation(running) is ActivationStop.STOPPED
+        finally:
+            release.set()
+
+        async def idle() -> bool:
+            digest = await engine.conversation(conversation)
+            return digest is not None and not digest.state.working
+
+        await _until(idle, what="the stopped activation to end")
+        written = await _messages(engine, conversation)
+        assert [(one.author, one.text) for one in written] == [(MessageAuthor.USER, "hi")]
+        digest = await engine.conversation(conversation)
+        assert digest is not None
+        assert digest.state == ConversationState(last_ended=ActivationEnding.STOPPED)
+        assert await chat.taken_in(conversation, positions=[1]) == {1: running}
+        assert await chat.untaken_messages(conversation) == ()
