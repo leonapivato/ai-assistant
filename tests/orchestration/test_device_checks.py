@@ -18,7 +18,7 @@ from datetime import UTC, datetime, timedelta
 from typing import TYPE_CHECKING, Final
 
 import pytest
-from test_engine import Harness, NoStepPlanner
+from test_engine import Harness, NoStepPlanner, feedback
 
 from ai_assistant.core.device_context import current_requesting_device, serving_device
 from ai_assistant.core.errors import DeviceRefusal, DeviceRefusedError
@@ -414,5 +414,45 @@ async def test_the_activation_a_message_starts_does_not_run_as_its_device() -> N
     ):
         assert asyncio.get_running_loop().time() < deadline, "the reader never answered"
         await asyncio.sleep(0.001)
+    assert witness.seen
+    assert all(one == HUB_REQUESTING_DEVICE for one in witness.seen)
+
+
+async def test_feedback_is_a_legacy_turn_naming_no_conversation() -> None:
+    """§5: ``learn`` needs "my devices" for both, and a refused one writes nothing."""
+    harness = _harness()
+    engine = harness.engine
+    await engine.set_my_devices([_PHONE, _WATCH])
+    await _refused(STRANGER, lambda: engine.learn(feedback()), DeviceRefusal.NO_ROLE)
+    await _refused(WATCH, lambda: engine.learn(feedback()), DeviceRefusal.NOT_ALLOWED)
+    assert await harness.memory.export() == []
+    await _as(PHONE, lambda: engine.learn(feedback()))
+    assert await harness.memory.export() != []
+
+
+async def test_a_writing_end_outside_my_devices_holds_a_role() -> None:
+    """ADR-0296 §2: a write-only end holds the user's end, so it is never ``NO_ROLE``."""
+    engine = _harness().engine
+    conversation = await _conversation(engine, _PEN)
+    await engine.set_my_devices([])
+    assert await _as(PEN, engine.recent_conversations) == ()
+    await _refused(PEN, lambda: engine.transcript(conversation), DeviceRefusal.NOT_ALLOWED)
+    await _refused(PEN, engine.start_conversation, DeviceRefusal.NOT_ALLOWED)
+    written = await _as(
+        PEN, lambda: engine.write_message(conversation, message=_said(PEN, "m-1", "hi"))
+    )
+    assert written.position == 1
+
+
+async def test_a_turn_does_not_run_as_the_device_that_asked_for_it() -> None:
+    """§2:6: the activation a turn starts may outlive the request, so it runs unset."""
+    witness = _Witness()
+    engine = Harness(
+        planner=NoStepPlanner(),
+        composing=ComposingStage(model=witness, streaming=FakeStreamingCompleter()),
+        chat_reader=False,
+    ).engine
+    await engine.set_my_devices([_PHONE])
+    await _as(PHONE, lambda: engine.converse("hello", timeout=_TIMEOUT))
     assert witness.seen
     assert all(one == HUB_REQUESTING_DEVICE for one in witness.seen)
