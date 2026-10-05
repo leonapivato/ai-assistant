@@ -280,45 +280,35 @@ _ACTIVATION_ID: Final[TypeAdapter[str]] = TypeAdapter(Identifier)
 _DEVICE_ID: Final[TypeAdapter[str]] = TypeAdapter(Identifier)
 
 #: The access values that make a device one of a conversation's ends for reading
-#: (ADR-0293 §3:5), as the JSON array the device-scoped reads bind.
+#: (ADR-0293 §3:5), as the JSON array :meth:`SqliteConversationStore.device_conversations`
+#: binds.
 _READING_ACCESS: Final = json.dumps(sorted(one.value for one in DeviceAccess if one.reads))
 
-#: The read behind :meth:`SqliteConversationStore.device_changes` (ADR-0296 §4:5), one
-#: statement so the filter and the page bound apply together. Each change is tested
-#: against the set it was recorded under: the latest row before it that set the same
-#: conversation's devices, or "my devices" where ``conversation_id`` is ``NULL`` (``IS``
-#: matches the two ``NULL``s); a started conversation has none before it. A change that
-#: sets a set reaches every device in it before or after; a deletion reaches the ends
-#: that read the conversation when it was deleted, kept on its own row; every other
-#: change is in a conversation and reaches the ends that read it then. Written out as
-#: one literal, for the reason the module gives for its column lists (ruff ``S608``).
-#: Its parameters are the cursor, the device four times with the reading access twice
-#: between, and the page bound.
+#: The read behind :meth:`SqliteConversationStore.device_changes` (ADR-0296 §4:5): the
+#: changes after a cursor, each with the message an addition names and with the set of
+#: devices it was recorded under — the latest row before it that set the same
+#: conversation's devices, or "my devices" where ``conversation_id`` is ``NULL``
+#: (``IS`` matches the two ``NULL``s). A started conversation has none before it. The
+#: filter itself is :func:`_reaches`, in Python, so every set it consults is decoded
+#: and checked as :meth:`SqliteConversationStore.changes` checks the sets it returns: a
+#: corrupt set is a store fault, never a reason to withhold a change in silence. Written
+#: out as one literal, for the reason the module gives for its column lists (ruff
+#: ``S608``). Its parameters are the cursor and the batch bound.
 _DEVICE_CHANGES_SQL: Final = (
     "SELECT c.seq, c.kind, c.conversation_id, c.position, c.devices, "
     "m.conversation_id, m.position, m.author, m.written_at, m.text, m.replies_to, "
-    "m.options, m.cut_off, m.device_id, m.message_id, m.deleted "
+    "m.options, m.cut_off, m.device_id, m.message_id, m.deleted, "
+    "(SELECT p.devices FROM chat_changes p WHERE p.conversation_id IS c.conversation_id "
+    "AND p.kind IN ('conversation_started', 'devices_changed') AND p.seq < c.seq "
+    "ORDER BY p.seq DESC LIMIT 1) "
     "FROM chat_changes c LEFT JOIN messages m ON c.kind = 'message_added' "
     "AND m.conversation_id = c.conversation_id AND m.position = c.position "
-    "WHERE c.seq > ? AND CASE "
-    "WHEN c.kind IN ('conversation_started', 'devices_changed') THEN "
-    "EXISTS (SELECT 1 FROM json_each(c.devices) d "
-    "WHERE json_extract(d.value, '$.device_id') = ?) "
-    "OR EXISTS (SELECT 1 FROM json_each((SELECT p.devices FROM chat_changes p "
-    "WHERE p.conversation_id IS c.conversation_id "
-    "AND p.kind IN ('conversation_started', 'devices_changed') AND p.seq < c.seq "
-    "ORDER BY p.seq DESC LIMIT 1)) d WHERE json_extract(d.value, '$.device_id') = ?) "
-    "WHEN c.kind = 'conversation_deleted' THEN c.devices IS NULL "
-    "OR EXISTS (SELECT 1 FROM json_each(c.devices) d "
-    "WHERE json_extract(d.value, '$.device_id') = ? "
-    "AND json_extract(d.value, '$.access') IN (SELECT value FROM json_each(?))) "
-    "ELSE EXISTS (SELECT 1 FROM json_each((SELECT p.devices FROM chat_changes p "
-    "WHERE p.conversation_id IS c.conversation_id "
-    "AND p.kind IN ('conversation_started', 'devices_changed') AND p.seq < c.seq "
-    "ORDER BY p.seq DESC LIMIT 1)) d WHERE json_extract(d.value, '$.device_id') = ? "
-    "AND json_extract(d.value, '$.access') IN (SELECT value FROM json_each(?))) "
-    "END ORDER BY c.seq ASC LIMIT ?"
+    "WHERE c.seq > ? ORDER BY c.seq ASC LIMIT ?"
 )
+
+#: How many changes :meth:`SqliteConversationStore.device_changes` reads at a time
+#: while it fills a page, all inside the one deferred transaction.
+_DEVICE_CHANGES_BATCH: Final = 500
 
 #: The page size :meth:`SqliteConversationStore.device_conversations` defaults to:
 #: ``recent``'s, since it is ``recent`` for one device.
@@ -924,6 +914,49 @@ def _change_from(row: Sequence[Any]) -> ChatChange:
         raise ConversationStoreError(msg) from exc
     msg = f"a stored change carries an unknown kind: {describe_untrusted(kind)}"
     raise ConversationStoreError(msg)
+
+
+def _set_of(conversation_id: object, value: object) -> tuple[ChatDevice, ...]:
+    """A stored set of devices, ``NULL`` read as no set: none before the first."""
+    return () if value is None else _devices_from(conversation_id, value)
+
+
+def _named(device: str, devices: tuple[ChatDevice, ...]) -> ChatDevice | None:
+    """The entry ``devices`` holds for ``device``, or ``None``."""
+    return next((one for one in devices if one.device_id == device), None)
+
+
+def _reaches(device: str, row: Sequence[Any]) -> bool:
+    """Whether the change in ``row`` reaches ``device`` (ADR-0296 §4:5).
+
+    ``row`` is one of :data:`_DEVICE_CHANGES_SQL`'s: the change's own set is column 4
+    and the set it was recorded under the last. A change that sets a set reaches every
+    device in it before or after; a deletion, the ends that read the conversation when
+    it was deleted (every device, where a row written before those were kept holds
+    none); every other change, the ends that read its conversation as its devices
+    stood when it was recorded.
+
+    Raises:
+        ConversationStoreError: If a stored set of devices does not decode, or the
+            change's kind is none this store writes.
+    """
+    kind, conversation_id, own, before = row[1], row[2], row[4], row[-1]
+    if kind in {"conversation_started", "devices_changed"}:
+        return (
+            _named(device, _set_of(conversation_id, own)) is not None
+            or _named(device, _set_of(conversation_id, before)) is not None
+        )
+    if kind == "conversation_deleted":
+        if own is None:
+            return True
+        ends = _set_of(conversation_id, own)
+    elif kind in {"message_added", "message_deleted"}:
+        ends = _set_of(conversation_id, before)
+    else:
+        msg = f"a stored change carries an unknown kind: {describe_untrusted(kind)}"
+        raise ConversationStoreError(msg)
+    held = _named(device, ends)
+    return held is not None and held.access.reads
 
 
 class SqliteConversationStore:
@@ -2360,11 +2393,10 @@ class SqliteConversationStore:
     ) -> ChatChanges:
         """Read the changes after ``after`` that ``device_id`` may see (ADR-0296 §4:5).
 
-        One statement in one deferred transaction: each change is tested against
-        the devices of the latest row before it that set its conversation's devices
-        (or "my devices"), which is the set as it stood when the change was recorded,
-        so the filter and the page bound apply together and a page is full of
-        changes the device may see.
+        Read in batches inside one deferred transaction, so the page is one
+        consistent reading however many changes the device is passed over: each
+        change is judged by :func:`_reaches` against the set of devices it was
+        recorded under, and the page fills with changes the device may see.
 
         Raises:
             ValueError: If ``device_id`` is malformed, or ``after`` or ``limit`` is
@@ -2388,14 +2420,25 @@ class SqliteConversationStore:
             raise ConversationStoreError(msg) from exc
 
     def _device_changes_sync(self, device: str, after: int, limit: int) -> tuple[list[Any], int]:
+        seen: list[Any] = []
         with self._transaction("read a device's changes", immediate=False) as conn:
-            rows = self._fetch(
-                conn,
-                "read a device's changes",
-                _DEVICE_CHANGES_SQL,
-                (after, device, device, device, _READING_ACCESS, device, _READING_ACCESS, limit),
-            )
-            return rows, self._head(conn)
+            cursor = after
+            while len(seen) < limit:
+                batch = self._fetch(
+                    conn,
+                    "read a device's changes",
+                    _DEVICE_CHANGES_SQL,
+                    (cursor, _DEVICE_CHANGES_BATCH),
+                )
+                for row in batch:
+                    if _reaches(device, row):
+                        seen.append(row[:-1])
+                        if len(seen) == limit:
+                            break
+                if len(batch) < _DEVICE_CHANGES_BATCH:
+                    break
+                cursor = batch[-1][0]
+            return seen, self._head(conn)
 
     async def device_conversations(
         self,

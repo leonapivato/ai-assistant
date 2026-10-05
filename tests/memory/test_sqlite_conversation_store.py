@@ -41,6 +41,7 @@ from ai_assistant.core.types import (
     SpokenDelivery,
     SpokenDeliveryState,
 )
+from ai_assistant.memory import conversation_store
 from ai_assistant.memory._episode_format import EPISODE_RECORD_FORMAT
 from ai_assistant.memory.conversation_store import SqliteConversationStore, _run_to_completion
 from ai_assistant.testing.cancellation import (
@@ -90,6 +91,9 @@ _SYNC_METHODS = {
     "untaken_messages": "_untaken_sync",
     "conversations_awaiting": "_awaiting_sync",
     "taken_in": "_taken_in_sync",
+    "device_changes": "_device_changes_sync",
+    "device_conversations": "_device_conversations_sync",
+    "remove_device": "_remove_device_sync",
 }
 
 _NOW = datetime(2026, 6, 1, tzinfo=UTC)
@@ -1654,6 +1658,17 @@ async def test_a_file_written_before_the_chat_space_opens_with_empty_transcripts
         ("""UPDATE chat_changes SET devices = '"phone"' WHERE devices IS NOT NULL""", "changes"),
         ("UPDATE conversation_devices SET access = 'everything'", "devices"),
         ("UPDATE taken_in SET activation_id = ' '", "taken_in"),
+        ("UPDATE chat_changes SET kind = 'mystery'", "device_changes"),
+        (
+            "UPDATE chat_changes SET devices = '[{\"device_id\": 3}]' WHERE devices IS NOT NULL",
+            "device_changes",
+        ),
+        ("UPDATE chat_changes SET devices = '{}' WHERE devices IS NOT NULL", "device_changes"),
+        (
+            "UPDATE chat_changes SET devices = 'not json' WHERE devices IS NOT NULL",
+            "device_changes",
+        ),
+        ("UPDATE conversations SET started_at = 'then'", "device_conversations"),
     ],
 )
 async def test_a_corrupt_chat_row_is_a_store_fault_on_the_read(
@@ -1674,6 +1689,8 @@ async def test_a_corrupt_chat_row_is_a_store_fault_on_the_read(
             "changes": lambda: store.changes(after=0),
             "devices": lambda: store.conversation_devices(conversation),
             "taken_in": lambda: store.taken_in(conversation, positions=[1]),
+            "device_changes": lambda: store.device_changes("phone", after=0),
+            "device_conversations": lambda: store.device_conversations("phone"),
         }
         with pytest.raises(ConversationStoreError):
             await reads[read]()
@@ -1767,3 +1784,84 @@ async def test_a_change_that_cannot_be_recorded_leaves_the_transcript_as_it_was(
         assert recorded.conversation_id == conversation
     finally:
         store.close()
+
+
+@pytest.mark.integration
+async def test_a_deletion_recorded_before_its_ends_were_kept_reaches_every_device(
+    tmp_path: Path,
+) -> None:
+    """A ``conversation_deleted`` row with no ends is read as reaching every device.
+
+    Such a row was written by a build before the deletion kept who its ends were
+    (ADR-0296 §4:5). It carries an opaque id alone, and a device left holding a
+    deleted conversation is the worse error.
+    """
+    path = tmp_path / "conversations.db"
+    store = SqliteConversationStore(path=path, now=_fixed_now)
+    try:
+        await store.set_my_devices([_PHONE])
+        conversation = (await store.start()).id
+        await store.stamp_deleted(conversation)
+        store._conn.execute(
+            "UPDATE chat_changes SET devices = NULL WHERE kind = 'conversation_deleted'"
+        )
+
+        for device in ("phone", "stranger"):
+            seen = (await store.device_changes(device, after=0)).changes
+            assert [one.conversation_id for one in seen if one.kind == "conversation_deleted"] == [
+                conversation
+            ]
+    finally:
+        store.close()
+
+
+@pytest.mark.integration
+async def test_a_devices_page_is_filled_across_batches_in_one_reading(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """A device passed over for many changes still gets a full page, in sequence order."""
+    monkeypatch.setattr(conversation_store, "_DEVICE_CHANGES_BATCH", 2)
+    path = tmp_path / "conversations.db"
+    store = SqliteConversationStore(path=path, now=_fixed_now)
+    try:
+        await store.set_my_devices([_PHONE])
+        mine = (await store.start()).id
+        await store.set_my_devices([ChatDevice(device_id="laptop", access=DeviceAccess.READ)])
+        other = (await store.start()).id
+        for index in range(3):
+            await store.append_message(other, NewMessage(author=MessageAuthor.ASSISTANT, text="x"))
+            await store.append_message(mine, _said(str(index), f"m-{index}"))
+        head = (await store.changes(after=0)).next_after
+
+        whole = await store.device_changes("phone", after=0)
+        first = await store.device_changes("phone", after=0, limit=4)
+
+        assert [one.conversation_id for one in whole.changes] == [
+            None,
+            mine,
+            None,
+            mine,
+            mine,
+            mine,
+        ]
+        assert whole.next_after == head
+        assert first.changes == whole.changes[:4]
+        assert first.next_after == whole.changes[3].seq
+    finally:
+        store.close()
+
+
+def test_a_devices_conversations_are_indexed_by_device(tmp_path: Path) -> None:
+    """A device's own reads and its removal do not scan every conversation's devices."""
+    path = tmp_path / "conversations.db"
+    SqliteConversationStore(path=path, now=_fixed_now).close()
+    raw = sqlite3.connect(path)
+    try:
+        plan = raw.execute(
+            "EXPLAIN QUERY PLAN SELECT conversation_id FROM conversation_devices "
+            "WHERE device_id = ?",
+            ("phone",),
+        ).fetchall()
+    finally:
+        raw.close()
+    assert any("conversation_devices_device" in str(row[-1]) for row in plan)
