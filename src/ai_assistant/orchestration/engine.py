@@ -271,6 +271,7 @@ from ai_assistant.orchestration.controller import (
 from ai_assistant.orchestration.conversations import (
     check_devices_fit,
     check_message_fits,
+    episode_conversation,
     fit_changes,
     fit_transcript,
 )
@@ -3591,12 +3592,11 @@ class Engine:
         #: end of its finalization: what a conversation's current state reads its
         #: "working…" from (ADR-0293 §8:2), whether or not its episode survives.
         self._running: list[ActivationScope] = []
-        #: Per conversation, how many activations started from it have ended: with
-        #: :attr:`_running`, the engine's account the change stream pushes a
-        #: conversation's current state from (ADR-0296 §4:9).
+        #: Per conversation, how many activations started from it have ended and how
+        #: many times episodes on its place were forgotten: with :attr:`_running`, the
+        #: engine's account the change stream pushes a conversation's current state
+        #: from (ADR-0296 §4:9).
         self._activation_turns: dict[str, int] = {}
-        #: How many times this engine has destroyed episodes (:meth:`_forgetting`).
-        self._episodes_forgotten = 0
         self._activation_coordinator = ActivationCoordinator(
             writer=conversations.activation_writer,
             register=self._register_capture,
@@ -3853,7 +3853,6 @@ class Engine:
             closing=lambda: self._closing,
             tracked=self._stream_read,
             max_payload_bytes=max_payload_bytes,
-            forgotten=lambda: self._episodes_forgotten,
         )
 
     @property
@@ -4160,7 +4159,7 @@ class Engine:
         saturates rather than overflowing, because the arithmetic runs on
         configuration this system accepts (:func:`_horizon`).
         """
-        records = await self._forgetting(self._memory.purge_expired())
+        records = await self._memory.purge_expired()
         questions = await self._deferrals.purge()
         traces = (
             None
@@ -6493,7 +6492,9 @@ class Engine:
         """Destroy the record ``record_id`` names (ADR-0073 §5; ADR-0007 §1).
 
         "Kill any of them", relayed to
-        :meth:`~ai_assistant.core.protocols.MemoryStore.delete` and nothing more.
+        :meth:`~ai_assistant.core.protocols.MemoryStore.delete`, with the record read
+        first only to learn whether it is an episode whose conversation's current state
+        an open change stream must send again (ADR-0296 §4:9).
         The **contract does not change and the store grows no band-conditional
         refusal**: ADR-0004 §6 gives the user an unconditional right to delete their
         data, and a store that refused because of the band it had itself assigned
@@ -6550,21 +6551,16 @@ class Engine:
         (§8:2), and it reads no store.
         """
         self._conversations.activation_writer.forgetting(record_id)
-        return await self._forgetting(self._memory.delete(record_id))
-
-    async def _forgetting[T](self, work: Awaitable[T]) -> T:
-        """Destroy episodes, then count it for the change stream (ADR-0296 §4:9).
-
-        A conversation's current state is read from the episodes on its place, so a
-        destruction of episodes may change it with no activation running; the count
-        moving is what tells an open change stream to send again the state of every
-        conversation its device reads. Counted however the work ends, since a walk
-        that failed part-way may still have destroyed some.
-        """
+        # ADR-0296 §4:9: an episode is read into its conversation's current state, so
+        # the conversation it names is counted once it is destroyed, and an open change
+        # stream sends that state again. Only a live episode is read into the state, and
+        # only a live record is returned here, so nothing else needs counting.
+        conversation = episode_conversation(await self._memory.get(record_id))
         try:
-            return await work
+            return await self._memory.delete(record_id)
         finally:
-            self._episodes_forgotten += 1
+            if conversation is not None:
+                self._count_change(conversation)
 
     async def guard(self, record_id: Identifier) -> Placement | None:
         """Keep the record ``record_id`` names for the owner alone (ADR-0217 §7).
@@ -7422,7 +7418,22 @@ class Engine:
         began and ended between two of its readings (:meth:`_activity`).
         """
         if scope.state is not None and (ended := scope.state.conversation_id) is not None:
-            self._activation_turns[ended] = self._activation_turns.get(ended, 0) + 1
+            self._count_change(ended)
+
+    def _count_change(self, conversation_id: str) -> None:
+        """Move the count the change stream reads a conversation's state changes by."""
+        self._activation_turns[conversation_id] = self._activation_turns.get(conversation_id, 0) + 1
+
+    async def _forgetting_conversation(self, conversation_id: str) -> bool:
+        """Forget the episodes on a conversation's place, then count the change (§4:9).
+
+        Counted however the walk ends, since one that failed part-way may still have
+        destroyed the episode the state was read from.
+        """
+        try:
+            return await self._conversations.forget(conversation_id)
+        finally:
+            self._count_change(conversation_id)
 
     def _activity(self) -> dict[str, Activity]:
         """What this engine runs per conversation, with a count of its starts and ends.
@@ -7478,7 +7489,7 @@ class Engine:
             "forget_conversation", max_bytes=self._max_payload_bytes, conversation_id=named
         )
         return await self._tracked(
-            self._forgetting(self._conversations.forget(named)),
+            self._forgetting_conversation(named),
             "forget_conversation",
             checked=True,
         )

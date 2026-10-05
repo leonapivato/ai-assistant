@@ -196,6 +196,24 @@ def started_from(record: MemoryRecord, channel: ChannelIdentity) -> EpisodicMemo
     return None
 
 
+def episode_conversation(record: MemoryRecord | None) -> str | None:
+    """The conversation ``record`` is an episode of an activation started from, or ``None``.
+
+    Read as :func:`started_from` reads a channel: the trigger's ``channel`` once the
+    pass has named it, else its ``target``. A record that is no episode, or an episode
+    of another channel, names none. What a forget reads before it destroys a record,
+    so the conversation whose current state the episode was read into is known
+    (ADR-0296 §4:9).
+    """
+    if not isinstance(record, EpisodicMemory) or record.processing_record is None:
+        return None
+    trigger = record.processing_record.trigger
+    for channel in (trigger.channel, getattr(trigger, "target", None)):
+        if isinstance(channel, ChannelIdentity) and channel.channel_type == "conversation":
+            return channel.instance_id
+    return None
+
+
 async def _open_on(memory: MemoryStore, channel: ChannelIdentity) -> list[EpisodicMemory]:
     """Every open episode of an activation started from ``channel``, oldest first.
 

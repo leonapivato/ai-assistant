@@ -31,9 +31,9 @@ reads it. The account carries a count that moves at every start and end, so an
 activation that began and ended between two readings still sends the state it left;
 what a device is sent is the state as of the reading, not every state in between. A
 stream opening sends the state of each conversation running then. The state is also
-read from the episodes on the conversation's place, so when the engine destroys
-episodes — a forget, a conversation's forgetting, a retention sweep — the state of
-every conversation the device reads is sent again.
+read from the episodes on the conversation's place, so the engine moves the count when
+it forgets episodes there — a conversation's forgetting, or a forget naming one of its
+episodes — and that conversation's state is sent again.
 """
 
 from __future__ import annotations
@@ -69,10 +69,6 @@ CHANGE_STREAM_POLL_SECONDS: Final = 0.25
 #: woken each to send its end (:meth:`ChangeStream.close`), in seconds.
 CHANGE_STREAM_CLOSE_SECONDS: Final = 1.0
 
-#: How many times a listing of a device's conversations is read before its union is
-#: taken as complete (:meth:`ChangeStream._read_conversations`).
-_SCANS: Final = 3
-
 #: How many changes one read of the stream asks the store for. A full page is read
 #: on at once rather than after the interval, so a device far behind catches up at
 #: the store's pace.
@@ -84,8 +80,9 @@ class Activity(NamedTuple):
 
     Attributes:
         turns: A count that moves each time an activation started from the
-            conversation begins or ends, so a reading that differs from the last by
-            this alone is an activation that began and ended between the two.
+            conversation begins or ends, and each time episodes on its place are
+            forgotten, so a reading that differs from the last by this alone is a
+            change of state between the two.
         running: The activation ids running now, oldest first, ``None`` for one
             whose id is not known (ADR-0297 §5).
     """
@@ -117,7 +114,6 @@ class ChangeStream:
         closing: Callable[[], bool],
         tracked: Callable[[Awaitable[object]], Awaitable[object]],
         max_payload_bytes: int,
-        forgotten: Callable[[], int] = lambda: 0,
         poll_seconds: float = CHANGE_STREAM_POLL_SECONDS,
     ) -> None:
         """Read the chat space and the engine's account of what it runs.
@@ -132,10 +128,6 @@ class ChangeStream:
                 ``RuntimeError`` once ``closing`` holds ends the stream as shutdown
                 does.
             max_payload_bytes: The contract limit a chunk is fitted to (§7:8).
-            forgotten: A count that moves whenever the engine destroys episodes a
-                conversation's current state is read from — a forget, a
-                conversation's forgetting, a retention sweep — so every state the
-                device may have been shown is sent again as it now reads.
             poll_seconds: The interval; :data:`CHANGE_STREAM_POLL_SECONDS` but in a
                 test that steps it.
         """
@@ -145,7 +137,6 @@ class ChangeStream:
         self._closing = closing
         self._tracked = tracked
         self._max_payload_bytes = max_payload_bytes
-        self._forgotten = forgotten
         self._poll_seconds = poll_seconds
         # Set once, by `close`, so every stream waiting out its interval wakes to end.
         self._woken = asyncio.Event()
@@ -175,11 +166,10 @@ class ChangeStream:
         # first page.
         seen: Running = dict(self._running())
         due = {one for one, held in seen.items() if held.running}
-        forgotten = self._forgotten()
         self._open += 1
         self._all_closed.clear()
         try:
-            following = self._following(device, cursor, seen, due, forgotten)
+            following = self._following(device, cursor, seen, due)
             async with closing_stream(following) as chunks:
                 async for chunk in chunks:
                     yield chunk
@@ -194,7 +184,6 @@ class ChangeStream:
         cursor: int,
         seen: Running,
         due: set[str],
-        forgotten: int,
     ) -> AsyncIterator[ChatStreamChunk | ChatStreamEnd]:
         """The body of :meth:`follow`, counted open there until it is closed."""
         try:
@@ -212,9 +201,6 @@ class ChangeStream:
                 now = dict(self._running())
                 due |= {one for one in now.keys() | seen.keys() if now.get(one) != seen.get(one)}
                 seen = now
-                if (moved := self._forgotten()) != forgotten:
-                    forgotten = moved
-                    due |= await self._read_conversations(device)
                 for conversation_id in sorted(due):
                     state = await self._state(device, conversation_id, seen)
                     if state is not None:
@@ -296,49 +282,6 @@ class ChangeStream:
         if named not in reading:
             reading[named] = await self._reads(device, named)
         return reading[named] or _ends_reading(device.device_id, entry)
-
-    async def _read_conversations(self, device: RequestingDevice) -> set[str]:
-        """Every conversation the device reads now: every one held, for the hub's.
-
-        The listing is paged by offset over an order activity and deletion change, so
-        a conversation can move across a page boundary while it is read and be passed
-        over. It is read again, and the union kept, until a reading finds nothing
-        new — at most :data:`_SCANS` times — so a conversation that stood throughout
-        two readings is found by one of them.
-        """
-        found: set[str] = set()
-        for _ in range(_SCANS):
-            scanned = await self._scan(device)
-            if found and scanned <= found:
-                break
-            found |= scanned
-        return found
-
-    async def _scan(self, device: RequestingDevice) -> set[str]:
-        """One reading of the conversations the device reads, page by page."""
-        found: set[str] = set()
-        offset = 0
-        while True:
-            if device.is_hub:
-                page = [
-                    one.id
-                    for one in await self._read(
-                        self._chat.recent(limit=CHANGE_STREAM_PAGE, offset=offset)
-                    )
-                ]
-            else:
-                page = [
-                    one.conversation.id
-                    for one in await self._read(
-                        self._chat.device_conversations(
-                            device.device_id, limit=CHANGE_STREAM_PAGE, offset=offset
-                        )
-                    )
-                ]
-            found.update(page)
-            if len(page) < CHANGE_STREAM_PAGE:
-                return found
-            offset += CHANGE_STREAM_PAGE
 
     async def _state(
         self, device: RequestingDevice, conversation_id: str, now: Running

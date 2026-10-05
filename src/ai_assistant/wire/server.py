@@ -1356,6 +1356,11 @@ class _ChangeStreamWriter:
             self.writer.transport.abort()
             msg = "a change stream's write did not drain within the dead-peer timeout"
             raise ConnectionClosedError(msg) from exc
+        except asyncio.CancelledError:
+            # A shutdown cancelling a write that has not drained abandons it too, for
+            # the same reason: the hang-up after it would wait on the same bytes.
+            self.writer.transport.abort()
+            raise
         if kind is env.FrameKind.CHUNK:
             self.written = asyncio.get_running_loop().time()
 
