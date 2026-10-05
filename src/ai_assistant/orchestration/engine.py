@@ -2816,7 +2816,13 @@ def _kept_resolution(
     disposition the runner had already assembled for an executed step before its later
     bookkeeping raised, carried by value with the establishing pair it published, or —
     where the step never executed — the resolution that acted on nothing, whose step
-    the park still holds. No disposition the runner did not assemble is invented.
+    the park still holds. No disposition the runner did not assemble is invented, and
+    either way the park is not settled: the runner did not return (ADR-0198 §3).
+
+    **"Recorded" is the runner's own boundary**: ``on_ruled`` fires once the trail has
+    handed back the record it was given (``StepRunner._record``'s read-back). A write
+    the trail accepted and could not hand back is not an answer the runner may act on
+    or the engine may report as given, so a raise there propagates as before.
     """
     if not (recorded and _marked()):
         return None
@@ -15475,6 +15481,7 @@ class Engine:
             # step reached — none where the claim was withheld. The activation is
             # admitted at the resolution point, inside the drive, which is why the
             # record is read once the drive ends.
+            runner_returned = True
             try:
                 driven = await run_recorded(
                     self._resume_record,
@@ -15493,7 +15500,7 @@ class Engine:
                 kept = _kept_resolution(parked, observed, recorded=recorded)
                 if kept is None:
                     raise
-                driven = kept
+                driven, runner_returned = kept, False
             if isinstance(driven, _WithheldResumption):
                 return driven
             disposition = driven
@@ -15502,6 +15509,20 @@ class Engine:
             step = await self._step_outcome(
                 parked.turn, disposition, step_id=parked.step_id, handle=None
             )
+            if not runner_returned:
+                # ADR-0198 §3: the settled record is installed *"only where the answer
+                # was recorded, the runner returned and the park was evicted"*, and here
+                # the runner raised — a stopped resume keeps the disposition it had
+                # assembled (ADR-0297 §4) and leaves the park where a resolution that
+                # raised leaves it.
+                return (
+                    parked,
+                    step,
+                    disposition.establishing,
+                    allowed_by,
+                    disposition.outbound,
+                    disposition.satisfied,
+                )
             # Answered once, and now **retained** rather than forgotten (ADR-0198 §1).
             # ADR-0044 §2b makes a second resolution impossible anyway; what changes is
             # what the engine says about one. Evicting used to turn a replay into an

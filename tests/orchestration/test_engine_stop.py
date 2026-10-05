@@ -35,6 +35,7 @@ from test_engine import (
 from ai_assistant.core.errors import (
     ActivationStoppedError,
     ConversationStoreError,
+    PermissionDeniedError,
     PlanningError,
 )
 from ai_assistant.core.types import (
@@ -763,3 +764,8 @@ async def test_a_stopped_resume_whose_bookkeeping_faults_after_executing_keeps_t
         (ControllerStage.DRIVE, ControllerRule.PARK_ANSWERED, StageOutcome.FAILED),
         (ControllerStage.END, ControllerRule.STOPPED, StageOutcome.DONE),
     ]
+    # ADR-0198 §3: the runner raised, so the park was not settled — the token is not
+    # restated as a settled answer; presenting it again meets the step it no longer parks.
+    with pytest.raises(PermissionDeniedError):
+        await harness.engine.resume(parked.step.confirmation.token, approved=True, timeout=PATIENT)
+    assert tool_handler.calls == 1
