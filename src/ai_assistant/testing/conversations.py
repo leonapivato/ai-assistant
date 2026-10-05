@@ -55,6 +55,7 @@ from pydantic import TypeAdapter, ValidationError
 from ai_assistant.core.clock import ClockReadingError, checked_clock
 from ai_assistant.core.errors import ConversationStoreError, UnknownConversationError
 from ai_assistant.core.types import (
+    CHAT_SNAPSHOT_ENTRIES,
     ChatChanges,
     ChatDevice,
     Conversation,
@@ -62,6 +63,8 @@ from ai_assistant.core.types import (
     ConversationExport,
     ConversationStartedChange,
     DeletedMessage,
+    DeviceChange,
+    DeviceChanges,
     DeviceConversation,
     DevicesChangedChange,
     Identifier,
@@ -447,6 +450,11 @@ class FakeConversationStore:
         #: any point of its recorded history: what the store keeps beside the deletion,
         #: read by :meth:`device_changes` alone (ADR-0296 §4:5, §4:8).
         self._deleted_ends: dict[int, tuple[ChatDevice, ...]] = {}
+        #: Per sequence number of a change setting a conversation's devices, the
+        #: conversation's highest message position when it was recorded: the snapshot
+        #: a device it adds is given is the conversation at or below it (ADR-0298
+        #: §7:7). A start has none recorded, and its conversation holds no message.
+        self._positions_at: dict[int, int] = {}
         #: The reader's bookkeeping (§6:6): per conversation, position to activation.
         self._taken: dict[str, dict[int, str]] = {}
         self._start_lock = asyncio.Lock()
@@ -1113,10 +1121,10 @@ class FakeConversationStore:
             if wanted == self._devices[conversation_id]:
                 return False
             self._devices[conversation_id] = wanted
+            seq = self._next_seq()
+            self._positions_at[seq] = max(self._messages[conversation_id], default=0)
             self._changes.append(
-                DevicesChangedChange(
-                    seq=self._next_seq(), conversation_id=conversation_id, devices=wanted
-                )
+                DevicesChangedChange(seq=seq, conversation_id=conversation_id, devices=wanted)
             )
             return True
 
@@ -1205,13 +1213,14 @@ class FakeConversationStore:
 
     async def device_changes(
         self, device_id: str, *, after: int, limit: int = _DEFAULT_CHANGES_PAGE
-    ) -> ChatChanges:
+    ) -> DeviceChanges:
         """Read the changes after ``after`` that ``device_id`` may see (ADR-0296 §4:5).
 
         Walks the whole stream from its start, carrying each set of devices forward
         as the changes that set it pass, so each change is judged against the set as
         it stood when it was recorded — the walk the ``sqlite3`` store does per change
-        with a subquery.
+        with a subquery. A change that adds the device as an end for reading carries
+        the conversation's snapshot as of that change (ADR-0298 §7:6, §7:7).
 
         Raises:
             ValueError: If ``device_id`` is malformed, or ``after`` or ``limit`` is
@@ -1222,17 +1231,42 @@ class FakeConversationStore:
         _check_page_bound("limit", limit)
         async with self._resource.held():  # a locked read on the durable store (#492)
             if limit == 0:
-                return ChatChanges(next_after=after)
+                return DeviceChanges(next_after=after)
             devices: dict[str | None, tuple[ChatDevice, ...]] = {}
-            page: list[ChatChange] = []
+            page: list[DeviceChange] = []
             for one in self._changes:
                 if one.seq > after and self._reaches(device, one, devices):
-                    page.append(one)
+                    page.append(self._with_snapshot(device, one, devices))
                     if len(page) == limit:
-                        return ChatChanges(changes=tuple(page), next_after=page[-1].seq)
+                        return DeviceChanges(changes=tuple(page), next_after=page[-1].seq)
                 if isinstance(one, (ConversationStartedChange, DevicesChangedChange)):
                     devices[one.conversation_id] = one.devices
-            return ChatChanges(changes=tuple(page), next_after=self._seq)
+            return DeviceChanges(changes=tuple(page), next_after=self._seq)
+
+    def _with_snapshot(
+        self, device: str, change: ChatChange, devices: dict[str | None, tuple[ChatDevice, ...]]
+    ) -> DeviceChange:
+        """``change``, with the snapshot it carries where it adds ``device`` as a reader."""
+        if (
+            not isinstance(change, (ConversationStartedChange, DevicesChangedChange))
+            or change.conversation_id is None
+        ):
+            return DeviceChange(change=change)
+        now = _access_of(device, change.devices)
+        then = _access_of(device, devices.get(change.conversation_id, ()))
+        if now is None or not now.access.reads or (then is not None and then.access.reads):
+            return DeviceChange(change=change)
+        highest = self._positions_at.get(change.seq, 0)
+        held = self._messages.get(change.conversation_id, {})
+        chosen = [one for one in sorted(held) if one <= highest][-CHAT_SNAPSHOT_ENTRIES:]
+        return DeviceChange(
+            change=change,
+            snapshot=TranscriptPage(
+                conversation_id=change.conversation_id,
+                entries=tuple(held[one] for one in chosen),
+                as_of=change.seq,
+            ),
+        )
 
     async def device_conversations(
         self,

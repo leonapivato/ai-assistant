@@ -82,6 +82,7 @@ from ai_assistant.core.errors import (
     UnknownConversationError,
 )
 from ai_assistant.core.types import (
+    CHAT_SNAPSHOT_ENTRIES,
     ChatChanges,
     ChatDevice,
     Conversation,
@@ -90,6 +91,8 @@ from ai_assistant.core.types import (
     ConversationStartedChange,
     DeletedMessage,
     DeviceAccess,
+    DeviceChange,
+    DeviceChanges,
     DeviceConversation,
     DevicesChangedChange,
     Identifier,
@@ -227,7 +230,11 @@ _SEARCH_DRAW_COLUMNS: Final = (
 #: with the message it names. A ``devices_changed`` or ``conversation_started`` row
 #: holds the whole set it set, so a conversation's devices as of any change are the
 #: set of the latest such row before it (ADR-0296 §4:5), which the partial
-#: ``chat_changes_membership`` index finds without walking a conversation's messages; a
+#: ``chat_changes_membership`` index finds without walking a conversation's messages.
+#: Such a row naming a conversation also holds, in ``position``, the conversation's
+#: highest message position when it was recorded, so the snapshot a device it adds is
+#: given is the conversation as it stood then (ADR-0298 §7:7); ``NULL`` there is a row
+#: written before it was kept, or a removal, which adds no device. A
 #: ``conversation_deleted`` row holds every device that read the conversation at any
 #: point of its recorded history, which no read presents and only
 #: :meth:`SqliteConversationStore.device_changes` consults: the deletion clears every
@@ -996,6 +1003,47 @@ def _reaches(device: str, row: Sequence[Any]) -> bool:
     return held is not None and held.access.reads
 
 
+def _adds_reader(device: str, row: Sequence[Any]) -> bool:
+    """Whether the change in ``row`` makes ``device`` an end for reading (ADR-0298 §7:6).
+
+    A change setting a conversation's devices — its start among them — under which the
+    device reads where, in the set it was recorded under, it did not. A "my devices"
+    change belongs to no conversation and adds the device to none.
+
+    Raises:
+        ConversationStoreError: If a stored set of devices does not decode.
+    """
+    kind, conversation_id, own, before = row[1], row[2], row[4], row[-1]
+    if kind not in {"conversation_started", "devices_changed"} or conversation_id is None:
+        return False
+    now = _named(device, _devices_from(conversation_id, own))
+    then = _named(device, _set_before(conversation_id, before))
+    return now is not None and now.access.reads and (then is None or not then.access.reads)
+
+
+def _device_change_from(row: Sequence[Any], snapshot: Sequence[Any] | None) -> DeviceChange:
+    """Rebuild one change a device may see, with its snapshot's rows where it has one.
+
+    Raises:
+        ConversationStoreError: If a stored row does not decode.
+    """
+    change = _change_from(row)
+    if snapshot is None:
+        return DeviceChange(change=change)
+    try:
+        return DeviceChange(
+            change=change,
+            snapshot=TranscriptPage(
+                conversation_id=row[2],
+                entries=tuple(_message_from(one) for one in reversed(snapshot)),
+                as_of=change.seq,
+            ),
+        )
+    except ValidationError as exc:
+        msg = f"a stored snapshot is inconsistent: {exc}"
+        raise ConversationStoreError(msg) from exc
+
+
 class SqliteConversationStore:
     """A persistent ``ConversationStore`` backed by ``sqlite3``."""
 
@@ -1355,6 +1403,24 @@ class SqliteConversationStore:
         )
 
     @classmethod
+    def _highest_position(cls, conn: sqlite3.Connection, conversation_id: str) -> int:
+        """The conversation's highest message position, ``0`` where it holds none.
+
+        What a change setting a conversation's devices records beside the set, so the
+        snapshot a device it adds is given is the conversation as it stood at that
+        change (ADR-0298 §7:7): a position is assigned once, in the order the messages
+        are written, so the messages recorded at or before the change are exactly
+        those at or below it, deleted ones included as their markers.
+        """
+        rows = cls._fetch(
+            conn,
+            "read a conversation's highest position",
+            "SELECT COALESCE(MAX(position), 0) FROM messages WHERE conversation_id = ?",
+            (conversation_id,),
+        )
+        return int(rows[0][0])
+
+    @classmethod
     def _readers_of(cls, conn: sqlite3.Connection, conversation_id: str) -> tuple[ChatDevice, ...]:
         """Every device that read the conversation at any point of its recorded history.
 
@@ -1528,7 +1594,11 @@ class SqliteConversationStore:
                 "VALUES (?, ?, ?)",
                 [(conversation.id, one.device_id, one.access.value) for one in devices],
             )
-            self._record_change(conn, "conversation_started", conversation.id, devices=devices)
+            # Position 0: the conversation holds no message as of its start, which is
+            # the snapshot a device it starts on is given (ADR-0298 §7:7).
+            self._record_change(
+                conn, "conversation_started", conversation.id, position=0, devices=devices
+            )
             return conversation
 
     async def get(self, conversation_id: str) -> Conversation | None:
@@ -2309,7 +2379,13 @@ class SqliteConversationStore:
                 "VALUES (?, ?, ?)",
                 [(conversation_id, one.device_id, one.access.value) for one in wanted],
             )
-            self._record_change(conn, "devices_changed", conversation_id, devices=wanted)
+            self._record_change(
+                conn,
+                "devices_changed",
+                conversation_id,
+                position=self._highest_position(conn, conversation_id),
+                devices=wanted,
+            )
             return True
 
     async def take_in(
@@ -2458,13 +2534,15 @@ class SqliteConversationStore:
 
     async def device_changes(
         self, device_id: str, *, after: int, limit: int = _DEFAULT_CHANGES_PAGE
-    ) -> ChatChanges:
+    ) -> DeviceChanges:
         """Read the changes after ``after`` that ``device_id`` may see (ADR-0296 §4:5).
 
         Read in batches inside one deferred transaction, so the page is one
         consistent reading however many changes the device is passed over: each
         change is judged by :func:`_reaches` against the set of devices it was
-        recorded under, and the page fills with changes the device may see.
+        recorded under, and the page fills with changes the device may see. A change
+        that adds the device as an end for reading (:func:`_adds_reader`) has its
+        snapshot read in the same transaction (ADR-0298 §7:6, §7:7).
 
         Raises:
             ValueError: If ``device_id`` is malformed, or ``after`` or ``limit`` is
@@ -2475,20 +2553,22 @@ class SqliteConversationStore:
         _check_page_bound("after", after)
         _check_page_bound("limit", limit)
         if limit == 0:
-            return ChatChanges(next_after=after)
+            return DeviceChanges(next_after=after)
         async with self._lock:
             rows, head = await _run_to_completion(self._device_changes_sync, device, after, limit)
-        page = tuple(_change_from(row) for row in rows)
+        page = tuple(_device_change_from(row, snapshot) for row, snapshot in rows)
         try:
-            return ChatChanges(
+            return DeviceChanges(
                 changes=page, next_after=page[-1].seq if len(page) == limit else head
             )
         except ValidationError as exc:
             msg = f"the stored change stream is inconsistent: {exc}"
             raise ConversationStoreError(msg) from exc
 
-    def _device_changes_sync(self, device: str, after: int, limit: int) -> tuple[list[Any], int]:
-        seen: list[Any] = []
+    def _device_changes_sync(
+        self, device: str, after: int, limit: int
+    ) -> tuple[list[tuple[Any, list[Any] | None]], int]:
+        seen: list[tuple[Any, list[Any] | None]] = []
         with self._transaction("read a device's changes", immediate=False) as conn:
             cursor = after
             while len(seen) < limit:
@@ -2500,13 +2580,46 @@ class SqliteConversationStore:
                 )
                 for row in batch:
                     if _reaches(device, row):
-                        seen.append(row[:-1])
+                        snapshot = (
+                            self._snapshot_at(conn, row) if _adds_reader(device, row) else None
+                        )
+                        seen.append((row[:-1], snapshot))
                         if len(seen) == limit:
                             break
                 if len(batch) < _DEVICE_CHANGES_BATCH:
                     break
                 cursor = batch[-1][0]
             return seen, self._head(conn)
+
+    @classmethod
+    def _snapshot_at(cls, conn: sqlite3.Connection, row: Sequence[Any]) -> list[Any]:
+        """The message rows of a conversation as it stood at the change in ``row``.
+
+        The newest :data:`~ai_assistant.core.types.CHAT_SNAPSHOT_ENTRIES` at or below
+        the highest position the change recorded beside its set
+        (:meth:`_highest_position`), newest first. A change recorded before that
+        position was kept carries none, and is read at the highest position a standing
+        message added at or before it holds: a message deleted since and added after
+        the last of those is then left out, never one recorded after the change shown.
+        """
+        seq, conversation_id, recorded = row[0], row[2], row[3]
+        if recorded is None:
+            held = cls._fetch(
+                conn,
+                "read a conversation's position at a change",
+                "SELECT COALESCE(MAX(position), 0) FROM chat_changes "
+                "WHERE conversation_id = ? AND kind = 'message_added' AND seq <= ?",
+                (conversation_id, seq),
+            )
+            recorded = held[0][0]
+        return cls._fetch(
+            conn,
+            "read a conversation's snapshot at a change",
+            "SELECT conversation_id, position, author, written_at, text, replies_to, "
+            "options, cut_off, device_id, message_id, deleted FROM messages "
+            "WHERE conversation_id = ? AND position <= ? ORDER BY position DESC LIMIT ?",
+            (conversation_id, recorded, CHAT_SNAPSHOT_ENTRIES),
+        )
 
     async def device_conversations(
         self,

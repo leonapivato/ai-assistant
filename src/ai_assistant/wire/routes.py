@@ -148,7 +148,8 @@ ROWS: Final[Mapping[Route, frozenset[str]]] = {
     Route.STARTING: frozenset({"start_conversation"}),
     Route.WRITING: frozenset({"write_message", "delete_message", "delete_conversation"}),
     Route.READING_ONE: frozenset({"transcript", "conversation"}),
-    Route.READING_MANY: frozenset({"recent_conversations", "chat_changes"}),
+    # ADR-0298 §5 names "the change stream" in this row; `follow_chat` is its name.
+    Route.READING_MANY: frozenset({"recent_conversations", "chat_changes", "follow_chat"}),
     Route.LEGACY_TURN: frozenset({"converse", "converse_spoken", "answer", *TARGETED}),
     Route.SPOKE_TRAFFIC: TARGETED,
     Route.NOTIFICATION_POLL: frozenset({"next_notification"}),

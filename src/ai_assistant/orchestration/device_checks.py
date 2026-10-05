@@ -306,7 +306,8 @@ class DeviceChecks:
             page = await self._conversations.device_changes(
                 device_id, after=after, limit=_REPLAY_PAGE
             )
-            for one in page.changes:
+            for entry in page.changes:
+                one = entry.change
                 if (
                     isinstance(one, (ConversationStartedChange, DevicesChangedChange))
                     and one.conversation_id is not None
@@ -347,13 +348,15 @@ async def device_changes(
 ) -> ChatChanges:
     """The changes after a cursor that a device may see, restricted as its caller asked.
 
-    ``ConversationStore.device_changes``, restricted as ``ConversationStore.changes``
-    restricts a page: the named conversations' changes, together with the changes to
-    "my devices", which belong to no conversation. The restriction is applied before
-    the page is cut, not after: the device's pages are read on until ``limit``
-    changes are kept or its changes run out, so a page shorter than ``limit`` still
-    means the reader has caught up (``ChatChanges``), however many changes in other
-    conversations stood in between.
+    ``ConversationStore.device_changes`` without the snapshots its adding changes
+    carry — ``chat_changes`` answers with changes alone, and a device catching up by
+    polling reads a conversation it joins with ``transcript`` — restricted as
+    ``ConversationStore.changes`` restricts a page: the named conversations' changes,
+    together with the changes to "my devices", which belong to no conversation. The
+    restriction is applied before the page is cut, not after: the device's pages are
+    read on until ``limit`` changes are kept or its changes run out, so a page
+    shorter than ``limit`` still means the reader has caught up (``ChatChanges``),
+    however many changes in other conversations stood in between.
 
     Args:
         conversations: The chat space.
@@ -367,12 +370,15 @@ async def device_changes(
         The page, and the cursor to ask from next.
     """
     if conversation_ids is None:
-        return await conversations.device_changes(device_id, after=after, limit=limit)
+        whole = await conversations.device_changes(device_id, after=after, limit=limit)
+        return whole.without_snapshots()
     named = frozenset(conversation_ids)
     kept: list[ChatChange] = []
     cursor = after
     while True:
-        page = await conversations.device_changes(device_id, after=cursor, limit=limit)
+        page = (
+            await conversations.device_changes(device_id, after=cursor, limit=limit)
+        ).without_snapshots()
         for one in page.changes:
             if one.conversation_id is None or one.conversation_id in named:
                 kept.append(one)

@@ -57,9 +57,12 @@ from ai_assistant.core.types import (
     ActivationEnding,
     ChannelIdentity,
     ChatChanges,
+    ChatStreamChunk,
     ConversationDigest,
     ConversationStartedChange,
     ConversationState,
+    DeviceChange,
+    DeviceChanges,
     DevicesChangedChange,
     EpisodicMemory,
     MemoryKind,
@@ -531,6 +534,45 @@ def fit_changes(page: ChatChanges, *, max_bytes: int) -> ChatChanges:
     raise AssertionError("an oversized changes page was unexpectedly admitted")
 
 
+def fit_stream_chunk(chunk: ChatStreamChunk, *, max_bytes: int) -> ChatStreamChunk:
+    """A change stream chunk with its snapshot shortened until it fits (ADR-0298 §7:8).
+
+    The snapshot keeps the newest of its messages that fit with the change within the
+    payload limit, shortened from its oldest end and to none if need be, so the chunk
+    always fits and a cursor never stops on a snapshot too large to send; the device
+    loads older messages by reading the transcript. A chunk with no snapshot is
+    measured as it is.
+
+    Raises:
+        OversizedValueError: If the chunk does not fit even with an empty snapshot,
+            which a change the store recorded within the limit cannot reach.
+    """
+    subject = "a chunk of follow_chat()"
+    if len(canonical_payload(chunk)) <= max_bytes:
+        return chunk
+    entry = chunk.change
+    if entry is None or entry.snapshot is None:
+        check_payload(chunk, max_bytes=max_bytes, subject=subject)
+        return chunk
+    snapshot = entry.snapshot
+    emptied = snapshot.model_copy(update={"entries": ()})
+    base = len(
+        canonical_payload(
+            ChatStreamChunk(change=DeviceChange(change=entry.change, snapshot=emptied))
+        )
+    )
+    newest_first = [len(canonical_payload(one)) for one in reversed(snapshot.entries)]
+    count = _fitting_count(newest_first, base=base, max_bytes=max_bytes)
+    kept = snapshot.entries[len(snapshot.entries) - count :] if count else ()
+    fitted = ChatStreamChunk(
+        change=DeviceChange(
+            change=entry.change, snapshot=snapshot.model_copy(update={"entries": kept})
+        )
+    )
+    check_payload(fitted, max_bytes=max_bytes, subject=subject)
+    return fitted
+
+
 @dataclass(frozen=True, slots=True)
 class AssembledHistory:
     """A conversation's recent episodes, with their delivery facts (ADR-0283 §4, §10).
@@ -890,8 +932,12 @@ class ConversationLifecycle:
         """List the conversations ``device_id`` reads, as ``recent`` orders them."""
         return await self._conversations.device_conversations(device_id, limit=limit, offset=offset)
 
-    async def device_changes(self, device_id: str, *, after: int, limit: int) -> ChatChanges:
-        """Read the changes after a cursor that ``device_id`` may see (ADR-0296 §4:5)."""
+    async def device_changes(self, device_id: str, *, after: int, limit: int) -> DeviceChanges:
+        """Read the changes after a cursor that ``device_id`` may see (ADR-0296 §4:5).
+
+        Each change that adds the device as a reader carries the conversation's
+        snapshot as of that change (ADR-0298 §7:6).
+        """
         return await self._conversations.device_changes(device_id, after=after, limit=limit)
 
     async def write(self, conversation_id: str, message: UserMessage) -> MessageReceipt:

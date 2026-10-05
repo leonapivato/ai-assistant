@@ -15887,6 +15887,12 @@ MESSAGE_OPTION_MAX_CHARS: Final = 200
 #: How many devices one set of devices may name, "my devices" or a conversation's.
 CHAT_DEVICES_MAX: Final = 64
 
+#: How many entries the snapshot a device-scoped change carries holds at most
+#: (ADR-0298 §7:7): the newest of the messages recorded at or before the change. The
+#: snapshot size ADR-0293 leaves open (What stays open), the figure a transcript read's
+#: own snapshot defaults to; the engine shortens it further to fit (§7:8).
+CHAT_SNAPSHOT_ENTRIES: Final = 50
+
 #: One past the largest position or sequence number: the signed 64-bit ceiling a
 #: SQLite ``INTEGER`` holds (ADR-0073 §2's bound, inherited).
 _CHAT_INT_BOUND: Final = 2**63
@@ -16592,6 +16598,159 @@ class DeviceConversation(BaseModel):
             msg = "a conversation stamped deleted is listed to no device"
             raise ValueError(msg)
         return self
+
+
+class DeviceChange(BaseModel):
+    """One change a device may see, with its snapshot where it adds the device (ADR-0298 §7).
+
+    ``snapshot`` is present exactly on the change that makes the device one of the
+    conversation's ends for reading — the conversation's start, or a change to its
+    devices — and is the conversation **as it stood at that change** (§7:7): the
+    newest of the messages recorded at or before the change's sequence number, a
+    message deleted since shown as its marker, and nothing recorded after it. Its
+    ``as_of`` is therefore the change's own sequence number, and a device that applies
+    the change has the snapshot with it (§7:6). A "my devices" change belongs to no
+    conversation and never carries one.
+    """
+
+    model_config = ConfigDict(extra="forbid", frozen=True)
+
+    change: ChatChange
+    snapshot: TranscriptPage | None = None
+
+    @model_validator(mode="after")
+    def _a_snapshot_only_with_the_change_that_adds(self) -> Self:
+        snapshot = self.snapshot
+        if snapshot is None:
+            return self
+        change = self.change
+        if (
+            not isinstance(change, (ConversationStartedChange, DevicesChangedChange))
+            or change.conversation_id is None
+        ):
+            msg = "a snapshot travels only with a change setting a conversation's devices"
+            raise ValueError(msg)
+        if snapshot.conversation_id != change.conversation_id:
+            msg = "a change's snapshot is of the conversation the change sets"
+            raise ValueError(msg)
+        if snapshot.as_of != change.seq:
+            msg = "a change's snapshot is the conversation as of that change (ADR-0298 §7:7)"
+            raise ValueError(msg)
+        if len(snapshot.entries) > CHAT_SNAPSHOT_ENTRIES:
+            msg = f"a change's snapshot holds at most {CHAT_SNAPSHOT_ENTRIES} entries"
+            raise ValueError(msg)
+        return self
+
+    @property
+    def seq(self) -> int:
+        """The change's sequence number, which is the device's cursor once applied."""
+        return self.change.seq
+
+    @property
+    def conversation_id(self) -> str | None:
+        """The conversation the change belongs to, ``None`` for "my devices"."""
+        return self.change.conversation_id
+
+
+class DeviceChanges(BaseModel):
+    """The changes after a cursor one device may see, and the cursor to ask from next.
+
+    :class:`ChatChanges` for one device (ADR-0298 §10:4): the same order, page and
+    ``next_after``, each change carried as a :class:`DeviceChange` so the change that
+    adds the device to a conversation brings that conversation's snapshot with it.
+    """
+
+    model_config = ConfigDict(extra="forbid", frozen=True)
+
+    changes: tuple[DeviceChange, ...] = ()
+    next_after: int = Field(strict=True, ge=0, lt=_CHAT_INT_BOUND)
+
+    @model_validator(mode="after")
+    def _the_changes_are_in_sequence(self) -> Self:
+        seqs = [one.seq for one in self.changes]
+        if any(later <= earlier for earlier, later in pairwise(seqs)):
+            msg = "changes are in strictly ascending sequence"
+            raise ValueError(msg)
+        if seqs and self.next_after < seqs[-1]:
+            msg = "the next cursor is never before the last change returned"
+            raise ValueError(msg)
+        return self
+
+    def without_snapshots(self) -> ChatChanges:
+        """The same page as :class:`ChatChanges`, each change without its snapshot."""
+        return ChatChanges(
+            changes=tuple(one.change for one in self.changes), next_after=self.next_after
+        )
+
+
+class CurrentState(BaseModel):
+    """A conversation's current state, as the change stream pushes it (ADR-0296 §4:9).
+
+    The state is not history, so it carries no sequence number: it is pushed when it
+    changes and read with the conversation on catch-up.
+    """
+
+    model_config = ConfigDict(extra="forbid", frozen=True)
+
+    conversation_id: Identifier
+    state: ConversationState
+
+
+class ChatStreamChunk(BaseModel):
+    """One chunk of the change stream: exactly one of four things (ADR-0298 §7:3).
+
+    * ``change`` — a change to the chat space the device may see, with its sequence
+      number, and the conversation's snapshot where the change adds the device (§7:1,
+      §7:6);
+    * ``state`` — a conversation's current state, pushed when it changes (§7:2);
+    * ``roles`` — the device's own roles, sent when the stream opens and whenever they
+      change (§7:9), written by the hub's session layer;
+    * ``heartbeat`` — nothing but the stream being alive, written by the session layer
+      whenever 15 seconds pass without a chunk (§7:12).
+
+    Only a ``change`` moves a device's cursor; the other three carry no sequence number.
+    One concrete class, so the wire tells a chunk from the stream's end by type, as it
+    does for a reply stream (§7:3).
+    """
+
+    model_config = ConfigDict(extra="forbid", frozen=True)
+
+    change: DeviceChange | None = None
+    state: CurrentState | None = None
+    roles: tuple[DeviceRole, ...] | None = None
+    heartbeat: bool = Field(default=False, strict=True)
+
+    @model_validator(mode="after")
+    def _exactly_one(self) -> Self:
+        held = sum(
+            (
+                self.change is not None,
+                self.state is not None,
+                self.roles is not None,
+                self.heartbeat,
+            )
+        )
+        if held != 1:
+            msg = "a change stream chunk holds exactly one change, state, roles or heartbeat"
+            raise ValueError(msg)
+        if self.roles is not None and list(self.roles) != sorted(set(self.roles)):
+            msg = "a device's roles are distinct and in their one order, ascending"
+            raise ValueError(msg)
+        return self
+
+
+class ChatStreamEnd(BaseModel):
+    """How a change stream ends when the hub ends it: the cursor to reopen it from.
+
+    A change stream is ended by revocation, by the dead-peer timeout or by its device
+    (ADR-0298 §7:15), none of which writes this. The hub writes it only when its engine
+    is shutting down, so a device reopens the stream from ``next_after`` once the hub
+    is back rather than waiting out the dead-peer timeout.
+    """
+
+    model_config = ConfigDict(extra="forbid", frozen=True)
+
+    next_after: int = Field(strict=True, ge=0, lt=_CHAT_INT_BOUND)
 
 
 class ConversationExport(BaseModel):

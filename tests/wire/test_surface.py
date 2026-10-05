@@ -57,12 +57,12 @@ def test_the_streaming_set_is_read_off_the_protocol() -> None:
 
     A streaming method is one this module already knows about; a table here would be
     a second vocabulary to keep in step with the first, which is the objection the
-    module opens with. The set is empty since ADR-0293 §11 retired
-    ``converse_streaming`` and ``receive_streaming``, and a method that streams again
-    — ADR-0296 §4's change stream — joins it by its annotation alone.
+    module opens with. ADR-0293 §11 retired ``converse_streaming`` and
+    ``receive_streaming``, and ADR-0296 §4's change stream, ``follow_chat``, joined by
+    its annotation alone.
     """
     assert STREAMING_METHODS <= METHODS
-    assert frozenset() == STREAMING_METHODS
+    assert frozenset({"follow_chat"}) == STREAMING_METHODS
 
 
 def test_no_method_is_adapted_by_both_rules() -> None:

@@ -43,6 +43,7 @@ from uuid import UUID, uuid4
 
 from ai_assistant.core.channel_validation import snapshot
 from ai_assistant.core.clock import ClockReadingError, checked_clock
+from ai_assistant.core.device_context import current_requesting_device
 from ai_assistant.core.episode_encoding import check_detail, check_list
 from ai_assistant.core.errors import (
     ActivationStoppedError,
@@ -182,6 +183,7 @@ from ai_assistant.core.types import (
     user_message,
 )
 from ai_assistant.orchestration.authorization_surface import is_live, view_of
+from ai_assistant.orchestration.change_stream import Activity, ChangeStream
 from ai_assistant.orchestration.channels import (
     UNCAPTURED,
     ChannelProjection,
@@ -255,12 +257,14 @@ from ai_assistant.testing.recipient_grants import FakeRecipientGrantStore
 from ai_assistant.testing.stories import FakeStoryStore
 
 if TYPE_CHECKING:
-    from collections.abc import Callable, Coroutine, Sequence
+    from collections.abc import AsyncIterator, Callable, Coroutine, Sequence
 
     from ai_assistant.core.protocols import AuditTrail, SourceReadTrail, SpendLedger
     from ai_assistant.core.types import (
         ChatChanges,
         ChatDevice,
+        ChatStreamChunk,
+        ChatStreamEnd,
         ConnectedAccount,
         ConnectionAct,
         DurableIdentifier,
@@ -588,6 +592,8 @@ class FakeAssistantEngine:
         #: The channel activations this fake is running, from admission to the end of
         #: their finalization: what a conversation's "working…" reads (ADR-0293 §8:2).
         self._running_activations: list[FakeActivation] = []
+        #: Per conversation, how many activations started from it have ended (§8:2).
+        self._activation_turns: dict[str, int] = {}
         self._joining: list[str] = []
         self._joining_lock = asyncio.Lock()
         self.chat = FakeConversationStore(now=lambda: _AT, new_id=self._joining_id)
@@ -980,6 +986,21 @@ class FakeAssistantEngine:
             spawn=self._spawn_read,
             closing=lambda: False,
             mint=self._chat_activation_id,
+        )
+        #: ADR-0298 §7: **the engine's own change stream** over this fake's chat space,
+        #: as the reader is, so what a following device is sent — its as-of membership,
+        #: the filter at sending, the snapshots fitted and the current state pushed —
+        #: is the engine's by construction. The fake never shuts down, so its stream
+        #: ends only when its caller closes it.
+        self._change_stream = ChangeStream(
+            chat=self.chat,
+            running=self._activity,
+            state_of=lambda conversation_id, running: conversation_state(
+                self.episode_memory, conversation_id, running=running
+            ),
+            closing=lambda: False,
+            tracked=lambda work: work,
+            max_payload_bytes=max_payload_bytes,
         )
 
     # --- the two turn calls -----------------------------------------------
@@ -3522,6 +3543,37 @@ class FakeAssistantEngine:
         self._running_activations[:] = [
             one for one in self._running_activations if one is not activation
         ]
+        if (ended := activation.conversation_id) is not None:
+            self._activation_turns[ended] = self._activation_turns.get(ended, 0) + 1
+
+    def _activity(self) -> dict[str, Activity]:
+        """What this fake runs, per conversation, as the engine reads its own (§8:2).
+
+        Each running activation by its id, and the activation the chat's reader has an
+        input in for, beside a count that moves at each end and at each of the
+        reader's admissions and replies — the account the change stream pushes the
+        current state from (ADR-0296 §4:9).
+        """
+        running: dict[str, list[str | None]] = {}
+        for one in self._running_activations:
+            if one.conversation_id is not None:
+                running.setdefault(one.conversation_id, []).append(one.activation_id)
+        reader = self._reader.activity()
+        for conversation_id, (_, reading) in reader.items():
+            if reading is None:
+                continue
+            held = running.setdefault(conversation_id, [])
+            if reading not in held:
+                held.append(reading)
+        named = running.keys() | self._activation_turns.keys() | reader.keys()
+        return {
+            conversation_id: Activity(
+                turns=self._activation_turns.get(conversation_id, 0)
+                + reader.get(conversation_id, (0, None))[0],
+                running=tuple(running.get(conversation_id, ())),
+            )
+            for conversation_id in named
+        }
 
     def _running_on(self, conversation_id: str) -> list[str | None]:
         """The running activations started from ``conversation_id``, oldest first."""
@@ -3813,6 +3865,18 @@ class FakeAssistantEngine:
         )
         page = await self.chat.changes(after=cursor, conversation_ids=named, limit=limit)
         return self._checked(fit_changes(page, max_bytes=self._max_payload_bytes), "chat_changes")
+
+    def follow_chat(self, *, after: int) -> AsyncIterator[ChatStreamChunk | ChatStreamEnd]:
+        """Follow the chat space's change stream from a cursor (ADR-0298 §7).
+
+        The engine's own stream over this fake's chat space, as the requesting device
+        sees it. Like every other act here, no role is checked: this fake grants
+        every device everything.
+        """
+        cursor = check_chat_cursor(after, name="after")
+        check_arguments("follow_chat", max_bytes=self._max_payload_bytes, after=cursor)
+        self.calls.append(("follow_chat", {"after": cursor}))
+        return self._change_stream.follow(current_requesting_device(), after=cursor)
 
     # --- durable recovery --------------------------------------------------
 

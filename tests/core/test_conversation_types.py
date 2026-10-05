@@ -14,15 +14,25 @@ import pytest
 from pydantic import ValidationError
 
 from ai_assistant.core.types import (
+    CHAT_SNAPSHOT_ENTRIES,
     MESSAGE_OPTIONS_MAX,
     TRANSCRIPT_MESSAGE_MAX_CHARS,
+    ChatChange,
     ChatChanges,
     ChatDevice,
+    ChatStreamChunk,
+    ChatStreamEnd,
     Conversation,
     ConversationDeletedChange,
     ConversationExport,
+    ConversationStartedChange,
+    ConversationState,
+    CurrentState,
     DeletedMessage,
     DeviceAccess,
+    DeviceChange,
+    DeviceChanges,
+    DeviceRole,
     DevicesChangedChange,
     MessageAddedChange,
     MessageAuthor,
@@ -250,6 +260,83 @@ def test_changes_are_in_sequence_and_round_trip_by_kind() -> None:
         ChatChanges(changes=page.changes[::-1], next_after=9)
     with pytest.raises(ValidationError):
         ChatChanges(changes=page.changes, next_after=3)
+
+
+_READER = ChatDevice(device_id="phone", access=DeviceAccess.READ)
+
+
+def _snapshot(seq: int, conversation_id: str = "c-1", count: int = 1) -> TranscriptPage:
+    return TranscriptPage(
+        conversation_id=conversation_id,
+        entries=tuple(
+            _message(index + 1, conversation_id=conversation_id) for index in range(count)
+        ),
+        as_of=seq,
+    )
+
+
+def test_a_snapshot_travels_only_with_the_change_setting_its_conversation() -> None:
+    """ADR-0298 §7:6-§7:7: with a set change of that conversation, as of that change."""
+    added = DevicesChangedChange(seq=5, conversation_id="c-1", devices=(_READER,))
+    started = ConversationStartedChange(seq=2, conversation_id="c-1", devices=(_READER,))
+
+    assert DeviceChange(change=added, snapshot=_snapshot(5)).seq == 5
+    assert DeviceChange(change=started, snapshot=_snapshot(2, count=0)).conversation_id == "c-1"
+    refused: list[tuple[ChatChange, TranscriptPage]] = [
+        (MessageAddedChange(seq=5, message=_message(1)), _snapshot(5)),
+        (DevicesChangedChange(seq=5, devices=(_READER,)), _snapshot(5)),
+        (added, _snapshot(4)),
+        (added, _snapshot(5, conversation_id="c-2")),
+        (added, _snapshot(5, count=CHAT_SNAPSHOT_ENTRIES + 1)),
+    ]
+    for change, snapshot in refused:
+        with pytest.raises(ValidationError):
+            DeviceChange(change=change, snapshot=snapshot)
+
+
+def test_a_devices_changes_are_in_sequence_and_drop_their_snapshots_as_chat_changes() -> None:
+    """``DeviceChanges`` is ``ChatChanges`` for one device, snapshots beside."""
+    added = DevicesChangedChange(seq=5, conversation_id="c-1", devices=(_READER,))
+    later = MessageAddedChange(seq=7, message=_message(2))
+    page = DeviceChanges(
+        changes=(DeviceChange(change=added, snapshot=_snapshot(5)), DeviceChange(change=later)),
+        next_after=9,
+    )
+
+    assert DeviceChanges.model_validate_json(page.model_dump_json()) == page
+    assert page.without_snapshots() == ChatChanges(changes=(added, later), next_after=9)
+    with pytest.raises(ValidationError):
+        DeviceChanges(changes=page.changes[::-1], next_after=9)
+    with pytest.raises(ValidationError):
+        DeviceChanges(changes=page.changes, next_after=6)
+
+
+def test_a_change_stream_chunk_holds_exactly_one_thing() -> None:
+    """ADR-0298 §7:3: a change, a current state, roles or a heartbeat, one of them."""
+    change = DeviceChange(change=ConversationDeletedChange(seq=3, conversation_id="c-1"))
+    state = CurrentState(conversation_id="c-1", state=ConversationState(working=True))
+    chunks = [
+        ChatStreamChunk(change=change),
+        ChatStreamChunk(state=state),
+        ChatStreamChunk(roles=(DeviceRole.COMMANDS, DeviceRole.SPOKES)),
+        ChatStreamChunk(roles=()),
+        ChatStreamChunk(heartbeat=True),
+    ]
+    for chunk in chunks:
+        assert ChatStreamChunk.model_validate_json(chunk.model_dump_json()) == chunk
+    for fields in (
+        {},
+        {"heartbeat": False},
+        {"change": change, "heartbeat": True},
+        {"state": state, "roles": ()},
+        {"roles": (DeviceRole.SPOKES, DeviceRole.COMMANDS)},
+        {"roles": (DeviceRole.COMMANDS, DeviceRole.COMMANDS)},
+    ):
+        with pytest.raises(ValidationError):
+            ChatStreamChunk.model_validate(fields)
+    assert ChatStreamEnd(next_after=0).next_after == 0
+    with pytest.raises(ValidationError):
+        ChatStreamEnd(next_after=-1)
 
 
 def test_a_device_access_says_what_it_lets_a_device_do() -> None:

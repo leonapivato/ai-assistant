@@ -22,6 +22,7 @@ from __future__ import annotations
 
 import json
 from dataclasses import dataclass
+from datetime import timedelta
 from enum import StrEnum
 from math import isfinite
 from typing import Any, Final, NoReturn
@@ -2441,7 +2442,23 @@ from ai_assistant.wire.overlay import MAX_OVERLAY_IDENTITY_BYTES
 #:     ``IngestSummary``, ``LearnDecision``, ``QueuedQuestion`` and ``QueueOutcome``
 #:     with them; ``receive`` refuses the text conversational combination, which a hub
 #:     at 78 accepted, and its ``reply`` is declared ``SpokenReply | None``.
-PROTOCOL_VERSION: Final[int] = 79
+#: 80: ADR-0298 §7 adds the change stream, ``follow_chat``, to the promoted
+#:     ``AssistantEngine`` method set — its chunk ``ChatStreamChunk``, its end
+#:     ``ChatStreamEnd`` and the types they carry — with the heartbeat interval and
+#:     the dead-peer timeout below, which both ends read.
+PROTOCOL_VERSION: Final[int] = 80
+
+#: ADR-0298 §7:11: the hub writes a heartbeat on a change stream whenever this long
+#: passes without a chunk. **A protocol constant, not a setting**: hub and client
+#: speak one ``PROTOCOL_VERSION`` exactly (ADR-0084 §3), so a figure both read cannot
+#: disagree, and changing it is a protocol change.
+CHANGE_STREAM_HEARTBEAT: Final = timedelta(seconds=15)
+
+#: ADR-0298 §7:11: the dead-peer timeout. The client closes a change stream that
+#: carries no frame for this long and reopens it with its cursor (§7:13); the hub
+#: abandons one whose write does not drain within it, and sets a TCP connection's
+#: user timeout to it where the platform offers one (§7:14).
+CHANGE_STREAM_DEAD_PEER: Final = timedelta(seconds=45)
 
 #: ADR-0085 §8a: "The correlation id is a UUID string and is at most 36 bytes.
 #: Bounding it is what makes the reserve a constant rather than an aspiration; a

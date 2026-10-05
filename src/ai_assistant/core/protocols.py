@@ -140,6 +140,8 @@ if TYPE_CHECKING:
         ChannelResult,
         ChatChanges,
         ChatDevice,
+        ChatStreamChunk,
+        ChatStreamEnd,
         ClarificationWithdrawal,
         Confirmation,
         ConflictRelation,
@@ -159,6 +161,7 @@ if TYPE_CHECKING:
         DeferredProposal,
         DestinationTrust,
         DestinationTrustRecord,
+        DeviceChanges,
         DeviceConversation,
         DurableIdentifier,
         EffectKey,
@@ -11740,7 +11743,9 @@ class ConversationStore(Protocol):
 
     # --- the chat space: one device's view (ADR-0296 §3, §4) ----------------------
 
-    async def device_changes(self, device_id: str, *, after: int, limit: int = 100) -> ChatChanges:
+    async def device_changes(
+        self, device_id: str, *, after: int, limit: int = 100
+    ) -> DeviceChanges:
         """Read every change after a cursor that ``device_id`` may see (ADR-0296 §4:5).
 
         :meth:`changes` filtered to one device by the class docstring's rule: a
@@ -11753,6 +11758,17 @@ class ConversationStore(Protocol):
         conversation's deletion does where it removed that change from the stream
         (ADR-0296 §4:8), and the conversation's changes from before the change that
         adds it do not (§4:7).
+
+        **The change that adds the device brings the conversation's snapshot**
+        (ADR-0298 §7:6, §10:4): a change setting a conversation's devices — its start
+        among them — that makes the device one of its ends for reading where it was
+        not one before carries the conversation as it stood at that change (§7:7): the
+        newest :data:`~ai_assistant.core.types.CHAT_SNAPSHOT_ENTRIES` of the messages
+        recorded at or before the change's sequence number, ascending, a message
+        deleted since shown as its marker and nothing recorded after it, with the
+        change's sequence number as its ``as_of``. Read in the same reading as the
+        page, so the device that applies the change has the snapshot with it. Every
+        other change carries none.
 
         The page and its cursor are :meth:`changes`' own: in sequence order, at most
         ``limit`` changes, and ``next_after`` moves across every change passed over,
@@ -11772,7 +11788,8 @@ class ConversationStore(Protocol):
                 leaves ``next_after`` at ``after``.
 
         Returns:
-            The changes the device may see, and the cursor to ask from next.
+            The changes the device may see, each adding change with its snapshot, and
+            the cursor to ask from next.
 
         Raises:
             ValueError: Before any I/O, if ``device_id`` is not a non-blank ``str``,
@@ -15724,6 +15741,55 @@ class AssistantEngine(Protocol):
             ValueError: If ``after`` or ``limit`` is outside ``[0, 2**63)``, or
                 ``conversation_ids`` is a ``str``, holds a blank id or more than 1000.
             ConversationStoreError: If the changes could not be read.
+        """
+        ...
+
+    def follow_chat(self, *, after: int) -> AsyncIterator[ChatStreamChunk | ChatStreamEnd]:
+        """Follow the chat space's change stream from a cursor (ADR-0296 §4, ADR-0298 §7).
+
+        The change stream as one streaming method (ADR-0296 §4:1): every change after
+        ``after`` that the requesting device may see, in sequence order, and then each
+        change as it happens, with the answer kept open. Each chunk is a
+        :class:`~ai_assistant.core.types.ChatStreamChunk` holding exactly one of a
+        change, a conversation's current state, the device's roles or a heartbeat; only
+        a change carries a sequence number, and a device's cursor is the last one it
+        applied (§4:4, §4:6).
+
+        **What the device sees** is ``ConversationStore.device_changes``' as-of
+        membership — a change in a conversation where the device was an end for
+        reading when the change was recorded, and a change to a set the device is in
+        before or after — kept, for a conversation the device does not read when the
+        stream sends to it, to the change that removed it and the conversation's
+        deletion (ADR-0298 §7:5). The change that makes the device an end for reading
+        arrives in one chunk with the conversation's snapshot as of that change,
+        shortened from its oldest end to fit the payload limit (§7:6-§7:8). A
+        conversation's current state is pushed when it changes, for the conversations
+        the device reads (ADR-0296 §4:9). The hub's own machine sees every change and
+        every conversation, and no snapshot, since it is an end of every one.
+
+        **The stream holds no lease and is ended only by revocation, the dead-peer
+        timeout or its device** (ADR-0298 §7:15): the device closes the iterator to
+        stop. The one :class:`~ai_assistant.core.types.ChatStreamEnd` is written when
+        the engine is shutting down, carrying the cursor to reopen from. The roles and
+        the heartbeat are the hub's session layer's to write (§7:10), so an engine
+        followed in-process yields neither.
+
+        **The local refusals are raised from the call, not from the iteration**, as
+        :meth:`chat_changes` raises them. The role check of ADR-0298 §5's "Reading
+        many" row is the stream's first step, so a device holding no role is refused
+        with :class:`~ai_assistant.core.errors.DeviceRefusedError` from the first
+        iteration, before any chunk.
+
+        Args:
+            after: The last sequence number the device applied, ``0`` for none.
+
+        Returns:
+            An async iterator over the stream's chunks, ending only with the engine.
+            Close it to stop following (:func:`contextlib.aclosing`).
+
+        Raises:
+            RuntimeError: If the engine is shutting down.
+            ValueError: If ``after`` is outside ``[0, 2**63)``.
         """
         ...
 

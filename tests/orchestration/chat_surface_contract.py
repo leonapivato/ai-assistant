@@ -27,6 +27,7 @@ from typing import TYPE_CHECKING, Any
 import pytest
 
 from ai_assistant.core.errors import OversizedValueError, UnknownConversationError
+from ai_assistant.core.streams import closing_stream
 from ai_assistant.core.types import (
     ActivationEnding,
     ActivationStop,
@@ -34,6 +35,7 @@ from ai_assistant.core.types import (
     ChannelIdentity,
     ChannelInput,
     ChatDevice,
+    ChatStreamChunk,
     ControllerRule,
     ConversationDeletedChange,
     ConversationStartedChange,
@@ -67,10 +69,10 @@ from ai_assistant.core.types import (
 from ai_assistant.testing.activation import ended_pass
 
 if TYPE_CHECKING:
-    from collections.abc import Awaitable, Callable, Sequence
+    from collections.abc import AsyncIterator, Awaitable, Callable, Sequence
 
     from ai_assistant.core.protocols import AssistantEngine
-    from ai_assistant.core.types import MemoryWrite
+    from ai_assistant.core.types import ChatStreamEnd, CurrentState, DeviceChange, MemoryWrite
     from ai_assistant.testing import FakeConversationStore, FakeMemoryStore
 
 #: The payload limit every subject is built at: small enough that a page of a few
@@ -588,6 +590,42 @@ class ChatSurfaceContract:
 
     # --- the transcript (§5:13) ---------------------------------------------
 
+    # --- the change stream (ADR-0296 §4, ADR-0298 §7) -----------------------
+
+    async def test_following_sends_every_change_after_the_cursor_then_each_as_it_happens(
+        self, chat_surface: ChatSurfaceSubject
+    ) -> None:
+        """ADR-0296 §4:1: catch up from the cursor, then the stream stays open."""
+        engine = chat_surface.engine
+        conversation = await _started(engine, _PHONE)
+        await engine.write_message(conversation, message=said(_PHONE, "m-1", "hello"))
+
+        async with closing_stream(engine.follow_chat(after=0)) as chunks:
+            caught = [await next_change(chunks) for _ in range(3)]
+            await engine.write_message(conversation, message=said(_PHONE, "m-2", "again"))
+            live = await next_change(chunks)
+
+        assert [type(one.change) for one in caught] == [
+            DevicesChangedChange,
+            ConversationStartedChange,
+            MessageAddedChange,
+        ]
+        assert all(one.snapshot is None for one in caught), "the hub's machine joins nothing"
+        assert isinstance(live.change, MessageAddedChange)
+        assert live.change.message.position == 2
+        assert [one.seq for one in [*caught, live]] == sorted(one.seq for one in [*caught, live])
+        async with closing_stream(engine.follow_chat(after=caught[-1].seq)) as chunks:
+            resumed = await next_change(chunks)
+        assert resumed == live, "a cursor is the last change applied"
+
+    @pytest.mark.parametrize("bad", [-1, 2**63, 1.5, True, "0", None])
+    async def test_a_malformed_cursor_is_refused_by_the_stream_locally(
+        self, chat_surface: ChatSurfaceSubject, bad: object
+    ) -> None:
+        """Refused from the call, before a stream exists (ADR-0085 §9)."""
+        with pytest.raises(ValueError, match=r"\w"):
+            chat_surface.engine.follow_chat(after=bad)  # type: ignore[arg-type]
+
     async def test_a_transcript_reads_recent_then_older(
         self, chat_surface: ChatSurfaceSubject
     ) -> None:
@@ -707,6 +745,31 @@ class ChatSurfaceContract:
 
 #: How long a case waits for the reader to settle before it fails rather than hangs.
 _SETTLE = 10.0
+
+
+async def next_change(chunks: AsyncIterator[ChatStreamChunk | ChatStreamEnd]) -> DeviceChange:
+    """The next change a change stream sends, passing over its other chunks.
+
+    Roles and heartbeats are the hub's session layer's (ADR-0298 §7:10), so a client
+    sends them and an engine followed in-process does not; a state is pushed as it
+    changes. Fails rather than hangs.
+    """
+    async with asyncio.timeout(_SETTLE):
+        async for chunk in chunks:
+            if isinstance(chunk, ChatStreamChunk) and chunk.change is not None:
+                return chunk.change
+    msg = "the change stream ended before its next change"
+    raise AssertionError(msg)
+
+
+async def next_state(chunks: AsyncIterator[ChatStreamChunk | ChatStreamEnd]) -> CurrentState:
+    """The next current state a change stream pushes, passing over its other chunks."""
+    async with asyncio.timeout(_SETTLE):
+        async for chunk in chunks:
+            if isinstance(chunk, ChatStreamChunk) and chunk.state is not None:
+                return chunk.state
+    msg = "the change stream ended before its next state"
+    raise AssertionError(msg)
 
 
 async def _until(check: Callable[[], Awaitable[bool]], *, what: str) -> None:
@@ -855,6 +918,55 @@ class ChatReaderContract:
         assert "second" in together
         assert "third" in together
         assert await chat.untaken_messages(conversation) == ()
+
+    async def test_following_pushes_the_current_state_as_it_changes(
+        self, chat_reader_surface: ChatReaderSubject
+    ) -> None:
+        """ADR-0296 §4:9: "working…" while it runs, then how it ended, unsequenced.
+
+        The activation is held at its marking, so it is running when the stream next
+        reads; once released, the state it ends in is pushed.
+        """
+        engine, chat = chat_reader_surface.engine, chat_reader_surface.chat
+        conversation = await _started(engine, _PHONE)
+        entered, release = _held_take_in(chat)
+
+        async with closing_stream(engine.follow_chat(after=0)) as chunks:
+            await next_change(chunks)  # the stream has taken its first reading
+            await engine.write_message(conversation, message=said(_PHONE, "m-1", "hello"))
+            try:
+                async with asyncio.timeout(_SETTLE):
+                    await entered.wait()
+                running = await next_state(chunks)
+            finally:
+                release.set()
+            ended = await next_state(chunks)
+            while ended.state.working:
+                ended = await next_state(chunks)
+
+        assert running.conversation_id == conversation
+        assert running.state.working
+        assert running.state.activation_id is not None
+        assert ended.conversation_id == conversation
+        assert ended.state == ConversationState(last_ended=ActivationEnding.DONE)
+
+    async def test_an_activation_between_two_readings_still_pushes_how_it_ended(
+        self, chat_reader_surface: ChatReaderSubject
+    ) -> None:
+        """A state the stream never saw running is still pushed once it has ended."""
+        engine = chat_reader_surface.engine
+        conversation = await _started(engine, _PHONE)
+        await engine.write_message(conversation, message=said(_PHONE, "m-1", "hello"))
+        await _answered(engine, conversation, 1)
+
+        async with closing_stream(engine.follow_chat(after=0)) as chunks:
+            await next_change(chunks)  # the stream has taken its first reading
+            await engine.write_message(conversation, message=said(_PHONE, "m-2", "again"))
+            ended = await next_state(chunks)
+            while ended.state.working:
+                ended = await next_state(chunks)
+
+        assert ended.state == ConversationState(last_ended=ActivationEnding.DONE)
 
     async def test_a_stopped_activation_writes_nothing_and_shows_stopped(
         self, chat_reader_surface: ChatReaderSubject

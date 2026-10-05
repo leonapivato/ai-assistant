@@ -38,12 +38,14 @@ from pydantic import ValidationError
 from ai_assistant.core.errors import ConversationStoreError, UnknownConversationError
 from ai_assistant.core.types import (
     CHAT_DEVICES_MAX,
+    CHAT_SNAPSHOT_ENTRIES,
     TRANSCRIPT_MESSAGE_MAX_CHARS,
     ChatDevice,
     ConversationDeletedChange,
     ConversationStartedChange,
     DeletedMessage,
     DeviceAccess,
+    DeviceChange,
     DeviceConversation,
     DevicesChangedChange,
     MessageAddedChange,
@@ -136,7 +138,14 @@ async def _chat(store: ConversationStore) -> str:
 
 async def _seen_by(store: ConversationStore, device: str, *, after: int = 0) -> list[Any]:
     """Every change after ``after`` that ``device`` may see, walking small pages."""
-    seen: list[Any] = []
+    return [one.change for one in await _entries_seen_by(store, device, after=after)]
+
+
+async def _entries_seen_by(
+    store: ConversationStore, device: str, *, after: int = 0
+) -> list[DeviceChange]:
+    """Every change ``device`` may see after ``after``, each with its snapshot, if any."""
+    seen: list[DeviceChange] = []
     cursor = after
     while True:
         page = await store.device_changes(device, after=cursor, limit=2)
@@ -2919,6 +2928,106 @@ class ConversationStoreContract:
         for device in ("watch", "reader-000", f"reader-{CHAT_DEVICES_MAX + 2:03}"):
             seen = await _seen_by(store, device)
             assert [one.kind for one in seen][-1] == "conversation_deleted"
+
+    async def test_the_change_that_adds_a_reader_carries_the_conversation_as_of_it(
+        self, store: ConversationStore
+    ) -> None:
+        """ADR-0298 §7:6-§7:7: the snapshot as of the adding change, and with it alone."""
+        conversation = await _chat(store)
+        await store.append_message(conversation, _said("deleted since", message_id="m-1"))
+        await store.append_message(conversation, _said("kept", message_id="m-2"))
+        await store.set_conversation_devices(conversation, [_PHONE, _WATCH, _LAPTOP])
+        await store.append_message(conversation, _said("after", message_id="m-3"))
+        await store.delete_message(conversation, 1)
+
+        seen = await _entries_seen_by(store, "laptop")
+
+        added, later, deletion = seen
+        assert isinstance(added.change, DevicesChangedChange)
+        snapshot = added.snapshot
+        assert snapshot is not None
+        assert snapshot.conversation_id == conversation
+        assert snapshot.as_of == added.seq
+        # Deleted since, so shown as its marker; recorded after, so not shown at all.
+        assert snapshot.entries[0] == DeletedMessage(conversation_id=conversation, position=1)
+        assert [one.position for one in snapshot.entries] == [1, 2]
+        assert isinstance(snapshot.entries[1], TranscriptMessage)
+        assert snapshot.entries[1].text == "kept"
+        assert later.snapshot is None
+        assert isinstance(later.change, MessageAddedChange)
+        assert deletion.snapshot is None
+        # The devices that already read it are given no snapshot by the same change.
+        for device in ("phone", "watch"):
+            entries = await _entries_seen_by(store, device)
+            assert [one.snapshot for one in entries if one.seq == added.seq] == [None]
+
+    async def test_a_start_gives_each_reading_end_an_empty_snapshot(
+        self, store: ConversationStore
+    ) -> None:
+        """§7:6: a start makes its reading ends ends, and nothing was recorded before it."""
+        await store.set_my_devices([_PHONE, _WATCH, _KEYBOARD])
+        conversation = (await store.start()).id
+
+        for device in ("phone", "watch"):
+            mine, started = await _entries_seen_by(store, device)
+            assert mine.snapshot is None, "my devices belongs to no conversation"
+            assert isinstance(started.change, ConversationStartedChange)
+            assert started.snapshot is not None
+            assert started.snapshot.conversation_id == conversation
+            assert started.snapshot.entries == ()
+            assert started.snapshot.as_of == started.seq
+        writing = await _entries_seen_by(store, "keyboard")
+        assert [one.snapshot for one in writing] == [None, None], "a writer is shown nothing"
+
+    async def test_a_snapshot_is_given_where_reading_begins_and_nowhere_else(
+        self, store: ConversationStore
+    ) -> None:
+        """Widening to reading adds a reader; a reader keeping its reading is not added."""
+        await store.set_my_devices([_PHONE, _WATCH, _KEYBOARD])
+        conversation = (await store.start()).id
+        await store.append_message(conversation, _said("one", message_id="m-1"))
+        reading = ChatDevice(device_id="keyboard", access=DeviceAccess.READ_WRITE)
+        widened = ChatDevice(device_id="watch", access=DeviceAccess.READ_WRITE)
+        await store.set_conversation_devices(conversation, [_PHONE, reading, widened])
+
+        keyboard = await _entries_seen_by(store, "keyboard")
+        watch = await _entries_seen_by(store, "watch")
+
+        snapshot = keyboard[-1].snapshot
+        assert snapshot is not None
+        assert [one.position for one in snapshot.entries] == [1]
+        assert watch[-1].snapshot is None
+
+    async def test_a_device_rejoining_gets_the_snapshot_of_its_return(
+        self, store: ConversationStore
+    ) -> None:
+        """§7:7: each interval of reading opens with the conversation as it stood then."""
+        conversation = await _chat(store)
+        await store.append_message(conversation, _said("first", message_id="m-1"))
+        await store.set_conversation_devices(conversation, [_PHONE])
+        await store.append_message(conversation, _said("while away", message_id="m-2"))
+        await store.set_conversation_devices(conversation, [_PHONE, _WATCH])
+
+        seen = await _entries_seen_by(store, "watch")
+        snapshots = [one.snapshot for one in seen if one.snapshot is not None]
+
+        assert [[one.position for one in page.entries] for page in snapshots] == [[], [1, 2]]
+
+    async def test_a_snapshot_holds_the_newest_entries_it_may(
+        self, store: ConversationStore
+    ) -> None:
+        """At most ``CHAT_SNAPSHOT_ENTRIES``, the newest, ascending."""
+        conversation = await _chat(store)
+        total = CHAT_SNAPSHOT_ENTRIES + 3
+        for index in range(total):
+            await store.append_message(conversation, _said(str(index), message_id=f"m-{index}"))
+        await store.set_conversation_devices(conversation, [_PHONE, _WATCH, _LAPTOP])
+
+        (added,) = await _entries_seen_by(store, "laptop")
+
+        assert added.snapshot is not None
+        positions = [one.position for one in added.snapshot.entries]
+        assert positions == list(range(total - CHAT_SNAPSHOT_ENTRIES + 1, total + 1))
 
     async def test_a_deleted_messages_addition_reaches_no_device(
         self, store: ConversationStore
