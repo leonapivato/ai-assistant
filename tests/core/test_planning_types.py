@@ -875,6 +875,27 @@ def test_no_other_transition_may_name_an_attempt(to_status: StepStatus) -> None:
         )
 
 
+def test_a_claim_may_name_its_activation_or_none() -> None:
+    """ADR-0297 §2: ``activation_id`` is optional on a claim, not required.
+
+    The one activation with no id can be named by no stop, so a claim of it names no
+    activation and the stop conjunct is vacuous there — which is why the field is not
+    required on ``→ RUNNING`` as ``attempt_id`` is.
+    """
+    assert _transition(StepStatus.RUNNING).activation_id is None
+    assert _transition(StepStatus.RUNNING, activation_id="act-1").activation_id == "act-1"
+
+
+@pytest.mark.parametrize(
+    "to_status",
+    [status for status in StepStatus if status is not StepStatus.RUNNING],
+)
+def test_no_other_transition_may_name_an_activation(to_status: StepStatus) -> None:
+    """ADR-0297 §2: "its model validator forbids it on every other ``to_status``"."""
+    with pytest.raises(ValidationError, match="activation_id is only valid"):
+        _transition(to_status, activation_id="act-1", **_payload_for(to_status))
+
+
 def _payload_for(to_status: StepStatus) -> dict[str, object]:
     """What a transition to ``to_status`` needs besides the field under test.
 
@@ -1354,17 +1375,18 @@ def test_the_kind_vocabulary_is_the_six_the_decisions_admit() -> None:
 
 def test_export_is_versioned_and_defaults_to_empty() -> None:
     export = PlanExport(exported_at=_WHEN)
-    assert export.schema_version == 16
+    assert export.schema_version == 17
     assert export.goals == ()
 
 
-def test_export_pins_the_schema_version_to_exactly_sixteen() -> None:
+def test_export_pins_the_schema_version_to_exactly_seventeen() -> None:
     """The label is a fact about the document, not a producer's claim (ADR-0039 §10).
 
-    ``Literal[16]`` refuses an explicit ``15`` — a document of the shape this export
-    had before it gained ``effects`` and ``StepExecution`` gained the two satisfaction
-    marks does not validate against this contract at all (ADR-0259 §9), exactly as a
-    ``14`` stopped validating when ``AttemptOutcome`` gained ``CANCELLED`` (ADR-0261
+    ``Literal[17]`` refuses an explicit ``16`` — a document of the shape this export
+    had before it gained ``stopped_activations`` does not validate against this
+    contract at all (ADR-0297 §1), exactly as a ``15`` stopped validating when it
+    gained ``effects`` and ``StepExecution`` gained the two satisfaction marks
+    (ADR-0259 §9), a ``14`` when ``AttemptOutcome`` gained ``CANCELLED`` (ADR-0261
     §10) — §10's mechanism applied for the first time to a **value** rather than to a
     shape, the document carrying ``tuple[GoalAttempt, ...]`` so that a reader at ``14``
     refuses an ``outcome`` of ``"cancelled"`` outright — a ``13`` when ``Goal``
@@ -1384,15 +1406,34 @@ def test_export_pins_the_schema_version_to_exactly_sixteen() -> None:
     value, so the advertised version cannot be mislabelled. The positive default is
     what a producer gets for free; only the rejections pin it.
 
-    **The neighbour on each side is asserted and not only the far ones**: ``15`` is
-    the shape this contract had one decision ago and ``17`` is the shape nobody has
+    **The neighbour on each side is asserted and not only the far ones**: ``16`` is
+    the shape this contract had one decision ago and ``18`` is the shape nobody has
     decided, and a ``Literal`` that admitted either would be a document announcing a
     shape it does not have.
     """
-    assert PlanExport(exported_at=_WHEN, schema_version=16).schema_version == 16
-    for stale in (1, 2, 3, 4, 5, 6, 7, 8, 9, 10, 11, 12, 13, 14, 15, 17):
+    assert PlanExport(exported_at=_WHEN, schema_version=17).schema_version == 17
+    for stale in (1, 2, 3, 4, 5, 6, 7, 8, 9, 10, 11, 12, 13, 14, 15, 16, 18):
         with pytest.raises(ValidationError):
             PlanExport(exported_at=_WHEN, schema_version=stale)  # type: ignore[arg-type]
+
+
+def test_export_carries_stopped_activations_once_each() -> None:
+    """ADR-0297 §1: the stop records travel as a tuple of ids, and none twice.
+
+    A record names an activation and nothing the document otherwise carries, so it
+    closes over nothing; the one constraint is that the store holds at most one record
+    per activation, which a duplicate would contradict.
+    """
+    export = PlanExport(exported_at=_WHEN, stopped_activations=("act-1", "act-2"))
+    assert export.stopped_activations == ("act-1", "act-2")
+    assert PlanExport(exported_at=_WHEN).stopped_activations == ()
+    restored = PlanExport.model_validate_json(export.model_dump_json())
+    assert restored == export
+
+    with pytest.raises(ValidationError, match="duplicate stopped activation"):
+        PlanExport(exported_at=_WHEN, stopped_activations=("act-1", "act-1"))
+    with pytest.raises(ValidationError):
+        PlanExport(exported_at=_WHEN, stopped_activations=("  ",))
 
 
 def test_export_rejects_a_plan_whose_goal_is_missing() -> None:
@@ -1437,7 +1478,7 @@ def test_export_carries_a_whole_supersession_chain() -> None:
         exported_at=_WHEN, goals=(_goal(),), plans=(first, revision), evidence=_histories("g1")
     )
 
-    assert export.schema_version == 16
+    assert export.schema_version == 17
     assert [plan.supersedes for plan in export.plans] == [None, "p1"]
 
 
@@ -1530,7 +1571,7 @@ def test_export_round_trips_through_json() -> None:
     )
     restored = TypeAdapter(PlanExport).validate_json(export.model_dump_json())
     assert restored == export
-    assert restored.schema_version == 16
+    assert restored.schema_version == 17
     request = restored.plans[0].read_request
     assert request is not None
     assert {ask.kind for ask in request.asks} == {ReadKind.SIGHTED_QUERY, ReadKind.CITATION_HOP}

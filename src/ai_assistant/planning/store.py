@@ -84,6 +84,7 @@ from ai_assistant.planning.goals import (
     superseded,
 )
 from ai_assistant.planning.goals import with_status as _with_status
+from ai_assistant.planning.stops import refuse_a_stopped_claim, revalidated_activation_id
 
 if TYPE_CHECKING:
     from collections.abc import Sequence
@@ -161,6 +162,10 @@ class InMemoryPlanStore:
         # **this** intended action whose key is **not** this call's key" is a state a
         # triple-keyed lookup could not ask about, finding no row.
         self._effects: dict[tuple[str, str], EffectRecord] = {}
+        # ADR-0297 §1: one stop record per activation, carrying the id alone. A set,
+        # because a record has nothing but its identity and `record_stop` is
+        # idempotent; ordered on export, so two exports of one store are one document.
+        self._stopped: set[str] = set()
         self._clock = checked_clock(now, owner="InMemoryPlanStore")
         self._tracker = tracker or PlanExecution(now=now)
         self._sequence = 0
@@ -1330,7 +1335,11 @@ class InMemoryPlanStore:
         ``PlanningError`` that is **not** a ``StaleExecutionError``, because no
         re-read makes either claim land.
 
+        **And ADR-0297 §2's stop conjunct**, read in that same step: a claim naming an
+        activation this store holds a stop record for is refused, nothing committed.
+
         Raises:
+            ClaimStopped: If a ``→ RUNNING`` claim names a stopped activation.
             StaleExecutionError: If the stored version has moved on, or a
                 ``→ RUNNING`` claim names a plan that does not target its goal's
                 current revision.
@@ -1343,6 +1352,9 @@ class InMemoryPlanStore:
         if stored is None:
             msg = f"unknown execution {transition.execution_id}"
             raise PlanningError(msg)
+        # ADR-0297 §2's stop conjunct, read in the same step as the write: there is no
+        # `await` between this read of the records and the commit below.
+        refuse_a_stopped_claim(transition, is_stopped=self._stopped.__contains__)
         self._refuse_a_stale_target(stored, transition)
         self._refuse_an_unclaimable_attempt(stored, transition)
         self._refuse_a_superseded_plan(stored, transition)
@@ -1519,6 +1531,14 @@ class InMemoryPlanStore:
             if one.goal_id == goal_id and execution_id in one.execution_ids
         ]
 
+    async def record_stop(self, activation_id: str, /) -> None:
+        """Write a stop record naming ``activation_id``, idempotently (ADR-0297 §1).
+
+        Raises:
+            PlanningError: If ``activation_id`` is not an identifier.
+        """
+        self._stopped.add(revalidated_activation_id(activation_id))
+
     async def get_execution(self, execution_id: str) -> ExecutionState | None:
         """Return the execution with ``execution_id``, or ``None``."""
         stored = self._executions.get(execution_id)
@@ -1562,6 +1582,9 @@ class InMemoryPlanStore:
             effects=tuple(
                 self._effects[key].model_copy(deep=True) for key in sorted(self._effects)
             ),
+            # ADR-0297 §1: every stop record. A record names no goal, so `delete_goal`
+            # never reaches one and only `clear` takes one out.
+            stopped_activations=tuple(sorted(self._stopped)),
         )
 
     async def delete_goal(self, goal_id: str) -> GoalDeletion:
@@ -1648,6 +1671,7 @@ class InMemoryPlanStore:
             + len(self._plans)
             + len(self._executions)
             + len(self._effects)
+            + len(self._stopped)
         )
         self._goals.clear()
         self._attempts.clear()
@@ -1657,4 +1681,5 @@ class InMemoryPlanStore:
         self._plans.clear()
         self._executions.clear()
         self._effects.clear()
+        self._stopped.clear()
         return removed

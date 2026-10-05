@@ -1864,6 +1864,33 @@ class ClaimRefused(PlanningError):  # noqa: N818 — ADR-0261 §7 names the clas
     """
 
 
+class ClaimStopped(PlanningError):  # noqa: N818 — ADR-0297 §2 names the class, and the name says what happened rather than that something is broken
+    """A ``→ RUNNING`` claim was refused because its activation was stopped (ADR-0297 §2).
+
+    Raised by **one conjunct and by nothing else**: ``PlanStore.commit_transition``
+    refuses a claim whose ``activation_id`` names an activation the store holds a stop
+    record for, decided in the same indivisible step as the write. Nothing is
+    committed, and the step keeps its entry status and stored version.
+
+    **Not a** :class:`StaleExecutionError`, because no re-read makes the claim land: a
+    stop is never withdrawn. **Not a** :class:`ClaimRefused`, because ADR-0261 §7:3 has
+    that class raised by exactly two liveness conjuncts and makes catching it mean the
+    goal's state can be read and reported; a stop changes no goal state, so that read
+    would establish nothing.
+
+    It carries a message and **no structured state**, and it propagates out of the walk
+    as every exception but ``ClaimRefused`` does (ADR-0261 §7:2); no lane composes a
+    reply about it. Where a stop record and another claim condition would both refuse
+    one claim, which class the store raises is not fixed, and no caller depends on it.
+
+    **It is not among what ADR-0297 §6:3 has cross the wire.** A pass a stop reaches
+    ends as stopped whatever the stage that met this refusal did, and a turn call
+    awaiting it raises ``ActivationStoppedError`` in its place (ADR-0297 §4), so no
+    promoted method lets this class escape and minting it moves no
+    ``PROTOCOL_VERSION``.
+    """
+
+
 class ActiveExecutionError(PlanningError):
     """A destructive store operation was refused because work is in flight.
 

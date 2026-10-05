@@ -112,6 +112,7 @@ from ai_assistant.planning.goals import (
     superseded,
 )
 from ai_assistant.planning.goals import with_status as _with_status
+from ai_assistant.planning.stops import refuse_a_stopped_claim, revalidated_activation_id
 
 if TYPE_CHECKING:
     from collections.abc import Callable, Sequence
@@ -260,16 +261,26 @@ _SIDECARS = ("-journal", "-wal", "-shm")
 #: or 7 is asserted rather than assumed
 #: (``test_the_upgrade_repairs_every_live_attempt_of_an_abandoned_goal``, and the
 #: composition arm below).
-_SCHEMA_VERSION = 8
+#:
+#: **Version 9 is ADR-0297 §1's, and it creates a table**: ``stopped_activations``,
+#: one row per stop record, carrying the activation id alone. The migration creates it
+#: **empty**, because no earlier store held a stop, and rewrites no row. **The marker
+#: moves for ADR-0049 §1's downgrade reading**, as at 8: an older build opening a file
+#: this code has written would ignore the table — so it would commit a claim a stop
+#: record refuses, and its ``clear`` and ``export`` would leave the records behind and
+#: out of the document, which is ADR-0004 §6's deletion and export limbs failing in
+#: silence rather than §1's loud refusal at the open.
+_SCHEMA_VERSION = 9
 
-#: The versions a database this code can upgrade carries. Seven members since ADR-0259:
+#: The versions a database this code can upgrade carries. Eight members since ADR-0297:
 #: version 1 is ADR-0049 §1's original shape, version 2 is ADR-0249 §12's, version 3 is
 #: ADR-0250 §9's, version 4 is ADR-0252 §13's, version 5 is ADR-0265 §5's, version 6 is
-#: ADR-0267 §11's and version 7 is ADR-0261 §10's. Only the first needs its ``goals``
-#: blobs rewritten (:meth:`SqlitePlanStore._upgrade_goal_rows`); **all seven** gain
+#: ADR-0267 §11's, version 7 is ADR-0261 §10's and version 8 is ADR-0259 §9's. Only the
+#: first needs its ``goals`` blobs rewritten
+#: (:meth:`SqlitePlanStore._upgrade_goal_rows`); **all eight** gain
 #: whichever of the :data:`_GOAL_COLUMNS` they lack and whichever record tables they do
 #: not hold, which ``CREATE TABLE IF NOT EXISTS`` supplies **empty** because no earlier
-#: store holds a question, an evidence row or an effect row.
+#: store holds a question, an evidence row, an effect row or a stop record.
 #:
 #: **The migrations compose rather than each standing alone**, which is what the one
 #: unconditional pass over :data:`_RECORD_SCHEMA` and :data:`_GOAL_COLUMNS` buys: a file
@@ -292,7 +303,7 @@ _SCHEMA_VERSION = 8
 #: migration and a version 1 store holds none, so it upgrades, writes no attempt row
 #: and reaches the new marker — and no arm seeds an ``attempts`` table into a version 1
 #: fixture, which would test a schema the application never wrote.
-_UPGRADABLE_FROM: Final[frozenset[int]] = frozenset({1, 2, 3, 4, 5, 6, 7})
+_UPGRADABLE_FROM: Final[frozenset[int]] = frozenset({1, 2, 3, 4, 5, 6, 7, 8})
 
 # The ``meta`` table is created first and on its own, so the schema version can be
 # read and a newer store refused *before* any record table is created (ADR-0049
@@ -470,6 +481,14 @@ _RECORD_SCHEMA = (
     "goal_id TEXT NOT NULL REFERENCES goals(id), intended_action_id TEXT NOT NULL, "
     "execution_id TEXT NOT NULL, step_id TEXT NOT NULL, data TEXT NOT NULL, "
     "PRIMARY KEY (goal_id, intended_action_id))",
+    # ADR-0297 §1's stop records. **The activation id is the whole row**: "a stop record
+    # carries the activation id alone: no instant, no reason, no conversation and no
+    # content", so there is no blob beside it, and declaring the id the primary key is
+    # what makes `record_stop`'s idempotence the schema's — a second record of one
+    # activation is `ON CONFLICT DO NOTHING` rather than a row beside the first. No
+    # foreign key, because a record names an activation and no goal. On any earlier
+    # database this table is **created empty**, because no earlier store held a stop.
+    "CREATE TABLE IF NOT EXISTS stopped_activations(activation_id TEXT PRIMARY KEY)",
 )
 
 #: ``created_seq`` is unique by construction — every allocation takes it from the
@@ -562,6 +581,9 @@ _RECORD_COLUMNS: dict[str, dict[str, tuple[str, bool, str | None]]] = {
         "step_id": ("TEXT", True, None),
         "data": ("TEXT", True, None),
     },
+    "stopped_activations": {
+        "activation_id": ("TEXT", False, None),
+    },
 }
 
 #: The single column every record table's ``PRIMARY KEY`` is, checked against
@@ -580,6 +602,7 @@ _RECORD_PRIMARY_KEY: dict[str, tuple[str, ...]] = {
     "goal_questions": ("id",),
     "goal_evidence": ("id",),
     "goal_effects": ("goal_id", "intended_action_id"),
+    "stopped_activations": ("activation_id",),
 }
 
 #: The foreign keys ADR-0049 §1's referential-integrity backstop rests on, absent
@@ -3593,7 +3616,12 @@ class SqlitePlanStore:
         Both refuse on a ``PlanningError`` that is **not** a ``StaleExecutionError``,
         because no re-read makes either claim land.
 
+        **And ADR-0297 §2's stop conjunct**, on that same connection and in that same
+        transaction: a claim naming an activation this store holds a stop record for is
+        refused, nothing committed.
+
         Raises:
+            ClaimStopped: If a ``→ RUNNING`` claim names a stopped activation.
             StaleExecutionError: If the stored version has moved on, or a
                 ``→ RUNNING`` claim names a plan that does not target its goal's
                 current revision.
@@ -3615,6 +3643,11 @@ class SqlitePlanStore:
                 msg = f"unknown execution {transition.execution_id}"
                 raise PlanningError(msg)
             stored = _decode_execution(row[0])
+            # ADR-0297 §2's stop conjunct, on the transaction's own connection: the
+            # record and the claim are one indivisible step.
+            refuse_a_stopped_claim(
+                transition, is_stopped=lambda activation_id: _is_stopped(conn, activation_id)
+            )
             self._refuse_a_stale_target(conn, stored, transition)
             self._refuse_an_unclaimable_attempt(conn, stored, transition)
             self._refuse_a_superseded_plan(conn, stored, transition)
@@ -3836,6 +3869,29 @@ class SqlitePlanStore:
         held = [_decode_attempt(one[0]) for one in rows]
         return [one for one in held if execution_id in one.execution_ids]
 
+    async def record_stop(self, activation_id: str, /) -> None:
+        """Write a stop record naming ``activation_id``, idempotently (ADR-0297 §1).
+
+        One ``BEGIN IMMEDIATE`` transaction under the connection lock, so the record and
+        any claim are totally ordered: whichever commits first is the one the other
+        is decided against.
+
+        Raises:
+            PlanningError: If ``activation_id`` is not an identifier, or the backend
+                fails.
+        """
+        named = revalidated_activation_id(activation_id)
+        async with self._lock:
+            await _run_to_completion(self._record_stop_sync, named)
+
+    def _record_stop_sync(self, activation_id: str) -> None:
+        with self._transaction(f"record a stop of activation {activation_id!r}") as conn:
+            conn.execute(
+                "INSERT INTO stopped_activations(activation_id) VALUES (?) "
+                "ON CONFLICT(activation_id) DO NOTHING",
+                (activation_id,),
+            )
+
     async def get_execution(self, execution_id: str) -> ExecutionState | None:
         """Return the execution with ``execution_id``, or ``None``."""
         async with self._lock:
@@ -3882,7 +3938,7 @@ class SqlitePlanStore:
         exported_at = self._now()
         async with self._lock:
             snapshot = await _run_to_completion(self._export_sync)
-        goals, plans, executions, attempts, questions, evidence, effects = snapshot
+        goals, plans, executions, attempts, questions, evidence, effects, stopped = snapshot
         return PlanExport(
             exported_at=exported_at,
             goals=tuple(_decode_goal(data) for data in goals),
@@ -3903,6 +3959,8 @@ class SqlitePlanStore:
             # §5's closure over **one holder** and refuses a row whose execution, step
             # and goal do not line up, so nothing here needs a second check.
             effects=tuple(effects),
+            # ADR-0297 §1: every stop record, in a deterministic order.
+            stopped_activations=tuple(stopped),
         )
 
     def _export_sync(
@@ -3915,6 +3973,7 @@ class SqlitePlanStore:
         list[str],
         list[tuple[str, list[GoalEvidence], int]],
         list[EffectRecord],
+        list[str],
     ]:
         # All three reads inside one transaction, so the export is a single
         # database snapshot: a concurrent connection cannot commit a goal+plan
@@ -3983,7 +4042,17 @@ class SqlitePlanStore:
                     _EFFECT_COLUMNS + " ORDER BY goal_id ASC, intended_action_id ASC"
                 ).fetchall()
             ]
-        return goals, plans, executions, attempts, questions, evidence, effects
+            # ADR-0297 §1's records, in the same snapshot as the rest. Each is
+            # revalidated as the identifier it was written as, so a row an outside
+            # writer blanked or nulled is refused as `planning`'s own error rather than
+            # escaping as a raw validation failure of the document.
+            stopped = [
+                revalidated_activation_id(r[0])
+                for r in conn.execute(
+                    "SELECT activation_id FROM stopped_activations ORDER BY activation_id ASC"
+                ).fetchall()
+            ]
+        return goals, plans, executions, attempts, questions, evidence, effects, stopped
 
     async def delete_goal(self, goal_id: str) -> GoalDeletion:
         """Delete a goal, its plan history, its attempts and its questions.
@@ -4105,6 +4174,8 @@ class SqlitePlanStore:
             # Likewise whole-table, so no row survives in storage or in the export
             # (ADR-0259 §9).
             removed += conn.execute("DELETE FROM goal_effects").rowcount
+            # ADR-0297 §1: `clear` erases every stop record with the store's other rows.
+            removed += conn.execute("DELETE FROM stopped_activations").rowcount
             removed += conn.execute("DELETE FROM goals").rowcount
         return removed
 
@@ -4112,6 +4183,17 @@ class SqlitePlanStore:
         """Close the underlying database connection."""
         with contextlib.suppress(sqlite3.Error):
             self._conn.close()
+
+
+def _is_stopped(conn: sqlite3.Connection, activation_id: str) -> bool:
+    """Whether the store holds a stop record for ``activation_id`` (ADR-0297 §2).
+
+    Read on the caller's connection, which is the commit transaction's own.
+    """
+    row = conn.execute(
+        "SELECT 1 FROM stopped_activations WHERE activation_id = ?", (activation_id,)
+    ).fetchone()
+    return row is not None
 
 
 def _wrap(action: str, subject: str, exc: sqlite3.Error) -> PlanningError:

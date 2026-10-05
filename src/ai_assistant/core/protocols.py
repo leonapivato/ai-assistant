@@ -4686,6 +4686,15 @@ class PlanStore(Protocol):
     its own because a carrier whose omission rule is removal is the one carrier an
     identity may not have.
 
+    **One further member carries ADR-0297's stop record, and ``commit_transition`` gains
+    a refusal on it, which is a seventh BREAKING contract change under golden rule 5**
+    (ADR-0297 §1, §2, §6): :meth:`record_stop` writes a record naming one activation,
+    and a ``→ RUNNING`` claim naming that activation is then refused with
+    :class:`~ai_assistant.core.errors.ClaimStopped`. **The record lives here and in no
+    other store**, because the claim it must refuse is decided here and only the store
+    that decides a claim holds a total order over it (ADR-0014 §5) — so whichever of a
+    stop and a claim lands first wins, and there is no third case.
+
     Cancelling any method here is governed by this module's cancellation clause
     (ADR-0060).
     """
@@ -6023,11 +6032,28 @@ class PlanStore(Protocol):
         are two **strengthenings** of an existing member in ADR-0255 §11's own sense of
         that word, so ADR-0014 §5's enumeration is untouched by the pair.
 
+        **And a ``→ RUNNING`` claim carries ADR-0297 §2's stop conjunct, decided in that
+        same indivisible step**: a claim whose ``activation_id`` names an activation
+        this store holds a stop record for (:meth:`record_stop`) is refused with
+        :class:`~ai_assistant.core.errors.ClaimStopped`, with **no separate read on
+        which the decision is taken** — ADR-0255 §3's rule, one conjunct over. Nothing
+        is committed: the step stays at its entry status and stored version
+        (ADR-0255 §3:22). Where the stop record lands first the claim is refused;
+        where the claim lands first it stands and the effect proceeds. A claim naming
+        no activation, or another one, is unaffected. **The activation id is compared
+        and not stored**: the committed :class:`~ai_assistant.core.types.StepExecution`
+        gains no field for it. Where a stop record and another claim condition would
+        both refuse one claim, **which class is raised is not fixed**, and no caller
+        depends on it. The stop bites at this claim and at no other write:
+        :meth:`claim_effect` is not refused on a stop record.
+
         Raises:
             ClaimRefused: If a ``→ RUNNING`` claim names a plan that does not target
                 its goal's current revision (ADR-0249 §8), or names an attempt whose
                 state is terminal or paused (ADR-0255 §3's state limb) — the two
                 refusals a **user act** produces (ADR-0261 §7).
+            ClaimStopped: If a ``→ RUNNING`` claim names an activation this store
+                holds a stop record for (ADR-0297 §2).
             StaleExecutionError: If the stored version has moved on.
             IllegalTransitionError: If the move is not legal from the step's
                 current status.
@@ -6035,6 +6061,33 @@ class PlanStore(Protocol):
                 ``→ RUNNING`` claim fails ADR-0255 §3's successor conjunct or any of
                 the attempt conjunct's other three limbs, or a satisfaction fails any
                 limb of ADR-0259 §9's claim condition.
+        """
+        ...
+
+    async def record_stop(self, activation_id: str, /) -> None:
+        """Write a stop record naming ``activation_id`` (ADR-0297 §1).
+
+        **One indivisible step**, writing that record and nothing else; from then on
+        :meth:`commit_transition` refuses every ``→ RUNNING`` claim naming the
+        activation with :class:`~ai_assistant.core.errors.ClaimStopped`.
+
+        **Idempotent**: recording a stop for an activation the store already holds one
+        for writes nothing and raises nothing. **It refuses no activation id on the
+        ground that the store does not know it**, since the store knows nothing of
+        which activations ran; a value that is not an identifier at all is not an
+        activation id, and is refused as the bad input it is.
+
+        **The record carries the activation id alone** — no instant, no reason, no
+        conversation and no content; when the user stopped is recorded where the user
+        reads it, as the episode's end entry. **No record is removed while the store
+        holds its rows**: there is no expiry, sweep or release member, and the only
+        route out is :meth:`clear`, which erases every record. :meth:`delete_goal`
+        reaches none, since a record names no goal. :meth:`export` carries every
+        record as :attr:`~ai_assistant.core.types.PlanExport.stopped_activations`.
+
+        Raises:
+            PlanningError: If ``activation_id`` is not an identifier, or the backend
+                fails.
         """
         ...
 
@@ -6068,6 +6121,9 @@ class PlanStore(Protocol):
         document, its ``step_id`` names a step **of that execution**, and that
         execution's plan carries the row's ``goal_id``. The same closure is owed of a
         satisfied step's pair.
+
+        **And it carries the store's stop records** (ADR-0297 §1), as the tuple of
+        activation ids :meth:`record_stop` recorded, each once.
         """
         ...
 
@@ -6089,6 +6145,9 @@ class PlanStore(Protocol):
         above being unchanged; and :class:`~ai_assistant.core.types.GoalDeletion` gains
         no member for them either.
 
+        **It reaches no stop record** (ADR-0297 §1): a record names an activation and
+        no goal, so no goal's deletion is a route out for one.
+
         Refused while any of the goal's executions has a **live** (``RUNNING``)
         step: erasing one would destroy the record its executor is about to
         commit against. The caller cancels first, then retries. Deliberately
@@ -6107,6 +6166,9 @@ class PlanStore(Protocol):
 
         Bound by the same in-flight rule as :meth:`delete_goal`: a bulk erase is
         not a licence to orphan a side effect a goal-scoped one would refuse to.
+
+        **Every stop record goes with the rest** (ADR-0297 §1), and is counted among
+        the records removed.
 
         Raises:
             ActiveExecutionError: If any execution has a live step.
