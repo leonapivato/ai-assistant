@@ -582,6 +582,56 @@ async def test_a_resume_whose_retry_reclaim_is_stopped_returns_the_failed_step()
     assert await _step_status(plans) is StepStatus.FAILED
 
 
+class _FaultingReclaim(_Stopping):
+    """A plan store whose second ``→ RUNNING`` write — a retry's re-claim — faults."""
+
+    async def commit_transition(self, transition: StepTransition) -> ExecutionState:
+        if transition.to_status is StepStatus.RUNNING and self.claims == 1:
+            self.claims += 1
+            msg = "the store cannot be written"
+            raise PlanningError(msg)
+        return await super().commit_transition(transition)
+
+
+async def test_a_stopped_resume_whose_retry_reclaim_faults_raises_and_never_says_nothing_ran() -> (
+    None
+):
+    """§4 under reading B: past a landed claim, "acted on nothing" is not the engine's to say.
+
+    The first invocation ran and committed a retryable failure, and the stop landed
+    during it; the retry's re-claim then faults. The runner assembled no disposition, so
+    the resume cannot say what the step did — and it ran once, so the resolution that
+    acted on nothing would misstate an effect. The raise propagates, exactly as it does
+    for an unstopped resume (#2711 owns whether either should return).
+    """
+    plans = _FaultingReclaim()
+    definition = egress_confirmable()
+    tool_handler = _StoppedWhileFailing(plans)
+    harness = Harness(
+        tools=(definition,),
+        binder=bound_binder(definition),
+        recipient_grants=FakeRecipientGrantStore(now=lambda: _NOW),
+        plans=plans,
+        tool_handler=tool_handler,
+    )
+    plans.engine = harness.engine
+    parked = await harness.engine.converse("send it to the address in the invite", timeout=PATIENT)
+    assert parked.step is not None
+    assert parked.step.confirmation is not None
+
+    with pytest.raises(PlanningError, match="cannot be written"):
+        await harness.engine.resume(
+            parked.step.confirmation.token,
+            approved=True,
+            timeout=PATIENT,
+            remember_recipients_until=_UNTIL,
+        )
+
+    assert tool_handler.answers == [ActivationStop.STOPPED]
+    assert tool_handler.calls == 1
+    assert await _step_status(plans) is StepStatus.FAILED
+
+
 # --- ADR-0295 §3, ADR-0297 §4: the conversation a stopped activation started from -------
 
 

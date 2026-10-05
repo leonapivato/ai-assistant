@@ -2815,8 +2815,8 @@ def _kept_resolution(
     recorded (ADR-0235 §6:10: a resume raises only where none was). Otherwise the
     disposition the runner had already assembled for an executed step before its later
     bookkeeping raised, carried by value with the establishing pair it published, or —
-    where the step never executed — the resolution that acted on nothing, whose step
-    the park still holds. No disposition the runner did not assemble is invented, and
+    where no claim of the step landed — the resolution that acted on nothing, whose
+    step the park still holds. No disposition the runner did not assemble is invented, and
     either way the park is not settled: the runner did not return (ADR-0198 §3).
 
     **"Recorded" is the answer's append** (:attr:`DriveObservation.answered`): once the
@@ -2835,6 +2835,14 @@ def _kept_resolution(
     returned outcome would then be silent about a request the user made, which §6
     forbids, so the raise propagates as it does for an unstopped resume and the user
     is told the resume failed rather than that nothing was asked.
+
+    **And save where it could not say whether the step acted.** "Acted on nothing" is
+    kept only where the engine knows it: no step claim of this drive landed
+    (:attr:`DriveObservation.claimed`), so nothing was invoked and the step is at its
+    entry status. Once a claim landed and the drive raised before the runner assembled
+    a disposition — a retry's re-claim faulting after the first invocation committed,
+    say — the step may have run, and reporting nothing executed would misstate an
+    effect. The raise then propagates exactly as it does for an unstopped resume.
     """
     if not (observed.answered and _marked()):
         return None
@@ -2842,6 +2850,8 @@ def _kept_resolution(
         return None
     if observed.executed is not None:
         return replace(observed.executed, establishing=observed.establishing)
+    if observed.claimed:
+        return None
     return _WithheldResumption(parked=parked, withheld=None, outbound=observed)
 
 
