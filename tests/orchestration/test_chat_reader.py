@@ -20,7 +20,7 @@ from typing import TYPE_CHECKING, Any, Final
 from test_engine import AT, Harness, NoStepPlanner
 from understanding_support import STATED_PROPOSAL, understanding_stage
 
-from ai_assistant.core.errors import ModelError
+from ai_assistant.core.errors import ConversationStoreError, ModelError
 from ai_assistant.core.types import (
     TRANSCRIPT_MESSAGE_MAX_CHARS,
     ActivationEnding,
@@ -565,3 +565,82 @@ def test_the_writer_fits_a_message_with_leading_whitespace_and_wide_characters()
     assert fitted_message(conversation, longer, max_bytes=4096) is not longer
     short = NewMessage(author=MessageAuthor.ASSISTANT, text="fits")
     assert fitted_message(conversation, short, max_bytes=4096) is short
+
+
+class _DeletedBeforeMarking(FakeConversationStore):
+    """A store where one message is deleted just as the reader marks its input."""
+
+    def __init__(self, doomed: int) -> None:
+        super().__init__(now=lambda: AT)
+        self._doomed = doomed
+
+    async def take_in(
+        self, conversation_id: str, *, positions: Sequence[int], activation_id: str
+    ) -> tuple[int, ...]:
+        if self._doomed in positions:
+            await self.delete_message(conversation_id, self._doomed)
+        return await super().take_in(
+            conversation_id, positions=positions, activation_id=activation_id
+        )
+
+
+async def test_a_message_deleted_before_it_is_marked_never_reaches_the_activation() -> None:
+    """§6:6: the pass runs on what it took in alone; its episode keeps what it was
+    admitted with, since an open episode is only extended (ADR-0286 §12:2)."""
+    store = _DeletedBeforeMarking(doomed=1)
+    memory = FakeMemoryStore(now=lambda: AT)
+    before = _harness(store=store, memory=memory, chat_reader=False)
+    conversation = await _conversation(before)
+    await before.engine.write_message(conversation, message=_said("m-1", "DELETED ORDER"))
+    await before.engine.write_message(conversation, message=_said("m-2", "kept"))
+    await before.engine.aclose()
+    composer = FakeModelProvider("Hello there.")
+    after = _harness(composer=composer, store=store, memory=memory)
+    await after.engine.start()
+    await _answered(after, conversation, 1)
+    (episode,) = await _episodes(memory)
+    assert _input_of(episode) == "DELETED ORDER\n\nkept"
+    assert composer.calls
+    assert all(
+        "DELETED ORDER" not in one.content for call in composer.calls for one in call.messages
+    )
+
+
+class _FailsSecondMarking(FakeConversationStore):
+    """A store whose second ``take_in`` call fails once, after the first committed."""
+
+    def __init__(self) -> None:
+        super().__init__(now=lambda: AT)
+        self.calls = 0
+
+    async def take_in(
+        self, conversation_id: str, *, positions: Sequence[int], activation_id: str
+    ) -> tuple[int, ...]:
+        self.calls += 1
+        if self.calls == 2:
+            msg = "the store is busy"
+            raise ConversationStoreError(msg)
+        return await super().take_in(
+            conversation_id, positions=positions, activation_id=activation_id
+        )
+
+
+async def test_a_marking_that_fails_part_way_ends_as_couldnt_finish() -> None:
+    """§9:1, §10:2: what was marked is consumed, so its activation's failure is written;
+    what was not is taken in by the next activation."""
+    store = _FailsSecondMarking()
+    memory = FakeMemoryStore(now=lambda: AT)
+    before = _harness(store=store, memory=memory, chat_reader=False)
+    conversation = await _conversation(before)
+    for n in range(1, 1002):
+        await before.engine.write_message(conversation, message=_said(f"m-{n}", f"w{n}"))
+    await before.engine.aclose()
+    after = _harness(store=store, memory=memory)
+    await after.engine.start()
+    written = await _answered(after, conversation, 2)
+    replies = [one.text for one in written if one.author is MessageAuthor.ASSISTANT]
+    assert replies == [COULDNT_FINISH, "Hello there."]
+    taken = await store.taken_in(conversation, positions=[1, 1000, 1001])
+    assert taken[1] == taken[1000] != taken[1001]
+    inputs = sorted((_input_of(one) for one in await _episodes(memory)), key=len)
+    assert inputs[0] == "w1001"
