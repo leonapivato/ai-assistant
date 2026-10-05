@@ -400,15 +400,15 @@ def _render(reply: Any, act: str) -> int:
     if act == REVOKE:
         _render_revocation(reply)
         return EXIT_OK
+    held = ", ".join(reply.get("roles", [])) or "none"
     if act == RESTORE:
         if reply.get("restored"):
-            print("Restored. The gateway's next naming of it is accepted; it holds no role")
-            print("until you give it one.")
+            print("Restored. The gateway's next naming of it is accepted.")
         else:
             print("That registration is already live; nothing changed.")
+        print(f"Roles: {held}")
         return EXIT_OK
     if act in (ASSIGN, WITHDRAW):
-        held = ", ".join(reply.get("roles", [])) or "none"
         if not reply.get("changed"):
             print("Nothing changed.")
         print(f"Roles: {held}")
