@@ -31,6 +31,7 @@ argument, so a test changes one thing without restating the rest.
 
 from __future__ import annotations
 
+import asyncio
 import hashlib
 import re
 from base64 import b64encode
@@ -192,6 +193,7 @@ from ai_assistant.orchestration.channels import (
     text_result,
 )
 from ai_assistant.orchestration.conversations import (
+    check_message_fits,
     conversation_state,
     episodes_on_place,
     fit_changes,
@@ -579,6 +581,7 @@ class FakeAssistantEngine:
         #: :attr:`_joining`, so a conversation keeps the id :attr:`conversations_held`
         #: knows it by.
         self._joining: list[str] = []
+        self._joining_lock = asyncio.Lock()
         self.chat = FakeConversationStore(now=lambda: _AT, new_id=self._joining_id)
         self._in_chat: set[str] = set()
         self._conversation_ids = count(1)
@@ -3699,11 +3702,14 @@ class FakeAssistantEngine:
         A conversation this engine does not hold is left alone, so the store answers
         for it — refused, ``None`` or ``False`` — exactly as for a deleted one.
         """
-        if conversation_id in self._in_chat or conversation_id not in self.conversations_held:
-            return
-        self._joining.append(conversation_id)
-        await self.chat.start()
-        self._in_chat.add(conversation_id)
+        async with self._joining_lock:
+            # Checked inside the lock: two first reads of one held conversation would
+            # otherwise both start it, and the second would collide (#2696 round 1).
+            if conversation_id in self._in_chat or conversation_id not in self.conversations_held:
+                return
+            self._joining.append(conversation_id)
+            await self.chat.start()
+            self._in_chat.add(conversation_id)
 
     async def start_conversation(self) -> ConversationSummary:
         """Start an empty conversation, shown on "my devices" (ADR-0293 §2:1)."""
@@ -3762,6 +3768,7 @@ class FakeAssistantEngine:
         check_arguments(
             "write_message", max_bytes=self._max_payload_bytes, conversation_id=named, message=sent
         )
+        check_message_fits(named, sent, max_bytes=self._max_payload_bytes)
         self.calls.append(("write_message", {"conversation_id": named, "message": sent}))
         await self._joined(named)
         receipt = await self.chat.append_message(named, sent.as_new_message())

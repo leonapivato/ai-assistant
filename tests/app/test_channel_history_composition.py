@@ -16,6 +16,7 @@ itself reads.
 from __future__ import annotations
 
 import asyncio
+import contextlib
 import json
 from dataclasses import dataclass
 from datetime import UTC, datetime, timedelta
@@ -27,6 +28,7 @@ import pytest
 from ai_assistant.app import build_engine
 from ai_assistant.core.config import EmbedderKind, Settings
 from ai_assistant.core.episode_encoding import episode_content
+from ai_assistant.core.errors import UnknownConversationError
 from ai_assistant.core.types import (
     ActionPlan,
     AssociationVerdict,
@@ -507,6 +509,69 @@ async def test_a_conversation_forgotten_while_a_pass_runs_leaves_no_episode(
     assert await composed.memory.get(address) is None
     assert await composed.held(conversation_id) == []
     assert await composed.engine.conversation(conversation_id) is None
+
+
+async def test_forgetting_a_conversation_reaches_an_admission_still_to_land(
+    composed: Composed, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """``forget_conversation`` completes while a new pass's admission write is held.
+
+    Neither enumeration can see an episode that has not landed, so the capture is told
+    through its conversation (``ActivationWriter.retiring``) and forgets itself at its
+    next write: nothing on the place survives the route ADR-0293 §Decision:2 keeps.
+    """
+    first = await composed.say("hello")
+    conversation_id = _conversation(first)
+    memory = composed.memory
+    original = memory.write_atomic
+    held: list[str] = []
+
+    async def write_atomic(writes: Sequence[MemoryWrite]) -> Sequence[str]:
+        episode = [write.record.id for write in writes if write.record.id.startswith("activation:")]
+        if episode and episode[0] != first.capture.episode_id and not held:
+            held.append(episode[0])
+            assert await composed.engine.forget_conversation(conversation_id) is True
+        return await original(writes)
+
+    monkeypatch.setattr(memory, "write_atomic", write_atomic)
+
+    with contextlib.suppress(UnknownConversationError):
+        await composed.say("and again", conversation_id)
+
+    assert held, "the second pass's admission was held across the forget"
+    assert await memory.get(held[0]) is None
+    assert await composed.held(conversation_id) == []
+
+
+async def test_a_running_activation_whose_episode_was_forgotten_still_shows_working(
+    composed: Composed, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """ADR-0293 §8:2, ADR-0295 §1:2: "working…" is the engine's, not the episode's.
+
+    ``forget`` of the running activation's episode ends its capture and not its
+    processing (ADR-0286 §8), so the conversation still shows it running, by its id.
+    """
+    first = await composed.say("hello")
+    conversation_id = _conversation(first)
+    entered, release = await _paused_on(composed, monkeypatch)
+    task = asyncio.create_task(composed.say("slow", conversation_id))
+    await entered.wait()
+    try:
+        before = await composed.engine.conversation(conversation_id)
+        assert before is not None
+        assert before.state.working
+        running = before.state.activation_id
+        assert running is not None
+        assert await composed.engine.forget(f"activation:{running}") is True
+        during = await composed.engine.conversation(conversation_id)
+        assert during is not None
+        assert (during.state.working, during.state.activation_id) == (True, running)
+    finally:
+        release.set()
+    await task
+    after = await composed.engine.conversation(conversation_id)
+    assert after is not None
+    assert not after.state.working
 
 
 @pytest.mark.parametrize("composed", [timedelta(days=30)], indirect=True, ids=["finite"])

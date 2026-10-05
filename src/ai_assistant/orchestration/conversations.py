@@ -61,7 +61,11 @@ from ai_assistant.core.types import (
     ConversationState,
     EpisodicMemory,
     MemoryKind,
+    MessageAddedChange,
+    MessageAuthor,
     ProcessingStatus,
+    TranscriptMessage,
+    TranscriptPage,
 )
 from ai_assistant.orchestration.activation_writer import ActivationWriter
 from ai_assistant.orchestration.payloads import canonical_payload, check_payload
@@ -84,7 +88,6 @@ if TYPE_CHECKING:
         ParkedBinding,
         SpokenDelivery,
         SpokenDeliveryReport,
-        TranscriptPage,
         UserMessage,
     )
 
@@ -222,19 +225,27 @@ async def episodes_on_place(memory: MemoryStore, conversation_id: str) -> list[s
     return list(dict.fromkeys(found))
 
 
-async def conversation_state(memory: MemoryStore, conversation_id: str) -> ConversationState:
+async def conversation_state(
+    memory: MemoryStore, conversation_id: str, *, running: Sequence[str | None] = ()
+) -> ConversationState:
     """What a conversation's devices are shown about the assistant (ADR-0293 §8).
 
-    **Read from the episodes on the conversation's place**, which are the assistant's
-    own record of its activations (§1:6), so a restart that closed an activation as
-    interrupted is read back as interrupted (§9:2). Shared by the engine and the
-    canonical fake engine, so both read one state from one store the same way. Two
-    reads:
+    **Working is the assistant's own account of what it is running** (§1:6, §8:2):
+    ``running`` is the activation id of every activation this process is running
+    that was started from the conversation — ``None`` for one whose id the factory
+    failed to mint, which shows "working…" with no id (ADR-0297 §5) — and the
+    newest id known is the one a stop names (ADR-0295 §1:2). It is held in process,
+    so an activation whose episode was forgotten or whose capture failed still
+    shows. An **open** episode on the place, found by :func:`started_from` from its
+    admission on, also counts as running: it is how a reader holding only the store
+    sees another holder's activation, and it supplies the id where ``running`` names
+    none.
 
-    * an **open** episode on the place is an activation started from the conversation
-      that is running, and its ``activation_id`` is the one a stop names (§8:2,
-      ADR-0295 §1:2), found by :func:`started_from` from its admission on, the newest
-      taken;
+    **How the last one ended is read from the episodes on the place**, the
+    assistant's durable record of its activations, so a restart that closed an
+    activation as interrupted is read back as interrupted (§9:2). Shared by the
+    engine and the canonical fake engine, so both read one state the same way:
+
     * the place's newest **ended** episode is the last activation that ended, and its
       status says how (:func:`activation_ending`).
 
@@ -246,14 +257,64 @@ async def conversation_state(memory: MemoryStore, conversation_id: str) -> Conve
         MemoryStoreError: If the episodes cannot be read.
     """
     channel = conversation_channel(conversation_id)
-    running = await _open_on(memory, channel)
-    newest = running[-1].processing_record if running else None
+    held = tuple(running)
+    opened = await _open_on(memory, channel)
+    known = [one for one in held if one is not None] + [
+        episode.processing_record.activation_id
+        for episode in opened
+        if episode.processing_record is not None
+    ]
     ended = await memory.channel_episodes(channel, limit=1)
     last = ended.entries[-1].record if ended.entries else None
     return ConversationState(
-        working=bool(running),
-        activation_id=None if newest is None else newest.activation_id,
+        working=bool(held) or bool(opened),
+        activation_id=known[0] if known else None,
         last_ended=activation_ending(last) if isinstance(last, EpisodicMemory) else None,
+    )
+
+
+#: The widest instant and number a recorded message can carry, so the probe below
+#: measures the most its record can cost rather than what it costs today.
+_WIDEST_AT: Final = datetime(9999, 12, 31, 23, 59, 59, 999999, tzinfo=UTC)
+_WIDEST_NUMBER: Final = 2**63 - 1
+
+
+def check_message_fits(conversation_id: str, message: UserMessage, *, max_bytes: int) -> None:
+    """Refuse a message whose own record could not be read back within the limit.
+
+    A message is accepted only where a page holding it alone — the transcript's and
+    the change stream's — fits the payload limit, measured at the widest position,
+    sequence number and instant it could be recorded with. Otherwise a message the
+    conversation recorded would be one no read could return, and a device's cursor
+    would stop at it for good: :func:`fit_transcript` and :func:`fit_changes` can
+    shorten a page to one entry and no further. Shared by the engine and the
+    canonical fake engine.
+
+    Raises:
+        OversizedValueError: If either one-entry page would exceed ``max_bytes``.
+    """
+    recorded = TranscriptMessage(
+        conversation_id=conversation_id,
+        position=_WIDEST_NUMBER,
+        written_at=_WIDEST_AT,
+        author=MessageAuthor.USER,
+        text=message.text,
+        replies_to=message.replies_to,
+        device_id=message.device_id,
+        message_id=message.message_id,
+    )
+    check_payload(
+        TranscriptPage(conversation_id=conversation_id, entries=(recorded,), as_of=_WIDEST_NUMBER),
+        max_bytes=max_bytes,
+        subject="the transcript page holding the message write_message() was given",
+    )
+    check_payload(
+        ChatChanges(
+            changes=(MessageAddedChange(seq=_WIDEST_NUMBER, message=recorded),),
+            next_after=_WIDEST_NUMBER,
+        ),
+        max_bytes=max_bytes,
+        subject="the change recording the message write_message() was given",
     )
 
 
@@ -568,7 +629,9 @@ class ConversationLifecycle:
 
     # --- deletion (§8) -------------------------------------------------------
 
-    async def digest(self, conversation_id: str) -> ConversationDigest | None:
+    async def digest(
+        self, conversation_id: str, *, running: Sequence[str | None] = ()
+    ) -> ConversationDigest | None:
         """One conversation as it is read, or ``None`` (ADR-0283 §4:2, ADR-0293 §8).
 
         The record for the span and ``last_turn_at``, which is the conversation's own,
@@ -596,19 +659,22 @@ class ConversationLifecycle:
             started_at=conversation.started_at,
             last_turn_at=conversation.last_turn_at,
             recorded_turns=page.total,
-            state=await self.state(conversation_id),
+            state=await self.state(conversation_id, running=running),
             devices=devices or (),
         )
 
-    async def state(self, conversation_id: str) -> ConversationState:
+    async def state(
+        self, conversation_id: str, *, running: Sequence[str | None] = ()
+    ) -> ConversationState:
         """What the conversation's devices are shown about the assistant (ADR-0293 §8).
 
-        :func:`conversation_state` over this stage's memory store.
+        :func:`conversation_state` over this stage's memory store, with the caller's
+        running activations started from the conversation.
 
         Raises:
             MemoryStoreError: If the episodes cannot be read.
         """
-        return await conversation_state(self._memory, conversation_id)
+        return await conversation_state(self._memory, conversation_id, running=running)
 
     # --- the chat space's acts and reads (ADR-0293 §2-§5) --------------------
 
@@ -684,24 +750,32 @@ class ConversationLifecycle:
         """Today's ``forget_conversation``: delete the conversation, then forget its place.
 
         The superseded route ADR-0293 §Decision:2 keeps working until the first build
-        replaces it, composed from the two acts that replace it — :meth:`delete`, then
-        :meth:`forget` — so it destroys what it destroyed before: the conversation and
-        every episode on its place. Deleting first means a capture racing the call
-        meets a deleted conversation and keeps its episode on the place (§2:7), where
-        the forgetting that follows finds it; an open one is told first (§2:6).
+        replaces it, composed from the two acts that replace it — :meth:`forget`, then
+        :meth:`delete` — so it destroys what it destroyed before: the conversation and
+        every episode on its place.
+
+        **Forgetting goes first, so nothing is left where no one can reach it.** A run
+        that dies part-way leaves the conversation standing, listed and with whatever
+        its place still holds, and the user's repeat finishes it; the tombstone only
+        lands once the place is empty. Deleting first would hide the conversation
+        with episodes still on its place, and since deleting forgets nothing (§2:3) no
+        sweep would ever find them. **Every capture of the conversation is told before
+        the walk** (:meth:`ActivationWriter.retiring`), so one whose admission write
+        lands after the walk passed is forgotten at its next write rather than kept;
+        an open one the walk finds is told by its address (§2:6).
 
         Returns:
             ``True`` if this call stamped the conversation, as :meth:`delete` answers.
 
         Raises:
             ConversationStoreError: If the conversation store cannot be written.
-            MemoryStoreError: If an episode could not be destroyed. The conversation is
-                deleted by then, and a repeat finishes the forgetting.
+            MemoryStoreError: If an episode could not be destroyed. The conversation
+                still stands, and a repeat finishes it.
             AssistantError: If this conversation's parked reads could not be dropped.
         """
-        stamped = await self.delete(conversation_id)
+        self.activation_writer.retiring(conversation_id)
         await self.forget(conversation_id)
-        return stamped
+        return await self.delete(conversation_id)
 
     async def _forget_one(self, episode_id: str) -> bool:
         """Tell any capture in flight at the id, then destroy it (ADR-0286 §8:1)."""
@@ -945,6 +1019,7 @@ __all__ = [
     "ConversationLifecycle",
     "ParkingOrigin",
     "activation_ending",
+    "check_message_fits",
     "conversation_channel",
     "conversation_state",
     "episodes_on_place",

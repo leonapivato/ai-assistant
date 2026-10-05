@@ -696,6 +696,48 @@ async def test_deleting_something_that_is_already_gone_is_not_an_error() -> None
     assert await wiring.stage.delete("nobody") is False
 
 
+async def test_the_legacy_route_interrupted_part_way_leaves_the_conversation_standing() -> None:
+    """``delete_and_forget`` forgets first, so a run that dies leaves nothing hidden.
+
+    The route ADR-0293 §Decision:2 keeps: forgetting fails part-way, the conversation
+    is not yet stamped and stays listed with what its place still holds, and the
+    user's repeat finishes both halves (ADR-0074 §8's survivable crash, by a residue
+    the user can still reach rather than a tombstone a sweep must find).
+    """
+    clock = MovableClock()
+    interrupt = 2
+
+    class DiesMidForget(FakeMemoryStore):
+        def __init__(self) -> None:
+            super().__init__(now=clock)
+            self.deleted = 0
+            self.arm = False
+
+        async def delete(self, record_id: str) -> bool:
+            if self.arm and self.deleted >= interrupt:
+                msg = "the process died mid-forget"
+                raise MemoryStoreError(msg)
+            self.deleted += 1
+            return await super().delete(record_id)
+
+    memory = DiesMidForget()
+    wiring = Wiring(clock=clock, memory=memory)
+    conversation_id, episodes = await _seed_turns(wiring, 4)
+    memory.arm = True
+
+    with pytest.raises(MemoryStoreError):
+        await wiring.stage.delete_and_forget(conversation_id)
+
+    assert await wiring.conversations.get(conversation_id) is not None, "still reachable"
+    assert await wiring.conversations.stamped_conversation_ids() == []
+    assert await channel_ids(memory, conversation_id) == episodes[interrupt:]
+
+    memory.arm = False
+    assert await wiring.stage.delete_and_forget(conversation_id) is True
+    assert await channel_ids(memory, conversation_id) == []
+    assert await wiring.conversations.get(conversation_id) is None
+
+
 async def test_an_episode_landing_after_the_stamp_is_kept() -> None:
     """ADR-0293 §2:7: a capture racing the deletion keeps its episode.
 

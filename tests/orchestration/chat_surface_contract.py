@@ -19,7 +19,7 @@ from typing import TYPE_CHECKING
 
 import pytest
 
-from ai_assistant.core.errors import UnknownConversationError
+from ai_assistant.core.errors import OversizedValueError, UnknownConversationError
 from ai_assistant.core.types import (
     ActivationEnding,
     ChannelContext,
@@ -242,6 +242,24 @@ class ChatSurfaceContract:
         with pytest.raises(UnknownConversationError):
             await engine.write_message("no-such", message=said(_PHONE, "m", "hello"))
         assert await engine.recent_conversations() == ()
+
+    async def test_a_message_no_read_could_return_is_refused_and_not_recorded(
+        self, chat_surface: ChatSurfaceSubject
+    ) -> None:
+        """Clause 5, read forward: a message is accepted only where it can be read back.
+
+        Its arguments fit the limit, but its record — position, instant, author — would
+        not fit a one-entry page, so a recorded copy would stop every cursor at it.
+        """
+        engine = chat_surface.engine
+        conversation = await _started(engine, _PHONE)
+        with pytest.raises(OversizedValueError):
+            await engine.write_message(conversation, message=said(_PHONE, "m", "x" * 3950))
+        page = await engine.transcript(conversation)
+        assert page is not None
+        assert page.entries == ()
+        fits = await engine.write_message(conversation, message=said(_PHONE, "m", "x" * 3000))
+        assert fits.outcome is SendOutcome.RECORDED
 
     # --- deleting, and forgetting (§2, §5) -----------------------------------
 
