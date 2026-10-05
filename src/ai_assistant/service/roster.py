@@ -40,7 +40,6 @@ from __future__ import annotations
 from datetime import UTC, datetime
 from typing import TYPE_CHECKING, Final
 
-from ai_assistant.core.clock import checked_clock
 from ai_assistant.core.errors import DeviceRefusal, DeviceRefusedError
 from ai_assistant.core.types import HUB_DEVICE_ID, HUB_REQUESTING_DEVICE, RequestingDevice
 from ai_assistant.service.enrolment import NamingRefusal
@@ -48,13 +47,7 @@ from ai_assistant.service.enrolment import NamingRefusal
 if TYPE_CHECKING:
     from collections.abc import Mapping
 
-    from ai_assistant.core.clock import Clock
     from ai_assistant.service.enrolment import DeviceRegistry
-
-
-def _utcnow() -> datetime:
-    """The default clock: the wall clock, in UTC."""
-    return datetime.now(UTC)
 
 
 #: What a refused naming tells the device, by the roster's reason. Every one is
@@ -89,16 +82,17 @@ class HubRoster:
     by both listeners, because both read the one roster (§4:1).
     """
 
-    def __init__(self, registry: DeviceRegistry, *, now: Clock = _utcnow) -> None:
+    def __init__(self, registry: DeviceRegistry) -> None:
         """Read the roster through the registry's live view.
+
+        A first naming's registration is dated by the wall clock, in UTC, read here:
+        the instant is a record for the owner to read (§4:6) and decides nothing, so
+        there is no injected clock to guard.
 
         Args:
             registry: The enrolments and the roster, and where an act takes effect.
-            now: The clock a first naming's registration is dated from, guarded by
-                :func:`~ai_assistant.core.clock.checked_clock` (ADR-0026 §7).
         """
         self._registry = registry
-        self._now = checked_clock(now, owner="HubRoster")
 
     def requesting_device(self, *, connecting: str, acting_for: str | None) -> RequestingDevice:
         """Decide a request's requesting device (ADR-0298 §2:1).
@@ -124,7 +118,7 @@ class HubRoster:
             if connecting == HUB_DEVICE_ID:
                 return HUB_REQUESTING_DEVICE
             return self._device(connecting)
-        verdict = self._registry.accept_naming(connecting, acting_for, now=self._now())
+        verdict = self._registry.accept_naming(connecting, acting_for, now=datetime.now(UTC))
         if verdict.refusal is not None:
             raise DeviceRefusedError(
                 _NAMING_REFUSED[verdict.refusal], reason=DeviceRefusal.NOT_ACCEPTED

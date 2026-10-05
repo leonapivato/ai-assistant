@@ -55,8 +55,8 @@ def registry(store: EnrolmentStore) -> DeviceRegistry:
 
 @pytest.fixture
 def roster(registry: DeviceRegistry) -> HubRoster:
-    """The seam over that view, on a fixed clock."""
-    return HubRoster(registry, now=lambda: _MOMENT)
+    """The seam over that view."""
+    return HubRoster(registry)
 
 
 def _refused(roster: HubRoster, *, connecting: str, acting_for: str | None) -> DeviceRefusedError:
@@ -175,7 +175,7 @@ def test_a_revoked_registration_is_refused_and_registers_nothing(
 def test_a_naming_beyond_the_gateways_bound_is_refused(store: EnrolmentStore) -> None:
     """ADR-0298 §4:7: "refuses a naming beyond it (§6)"."""
     registry = DeviceRegistry(store, hub_identity=_HUB, max_registrations_per_gateway=1)
-    roster = HubRoster(registry, now=lambda: _MOMENT)
+    roster = HubRoster(registry)
     roster.requesting_device(connecting=HUB_DEVICE_ID, acting_for=_PHONE)
 
     refusal = _refused(roster, connecting=HUB_DEVICE_ID, acting_for="nTABLETXCNTRL")
@@ -208,7 +208,7 @@ def test_a_live_enrolment_of_the_hubs_own_identity_is_refused_every_request(
     """
     store.enrol(_HUB, verifier="unused", now=_MOMENT)
     registry = DeviceRegistry(store, hub_identity=_HUB)
-    roster = HubRoster(registry, now=lambda: _MOMENT)
+    roster = HubRoster(registry)
 
     own = _refused(roster, connecting=_HUB, acting_for=None)
     relayed = _refused(roster, connecting=_HUB, acting_for=_PHONE)
