@@ -288,7 +288,7 @@ def _ask(
     conversation: str | None = None,
 ) -> tuple[str, bytes]:
     """Frame one `/ask`, with whichever halves the case presents."""
-    asked: dict[str, str] = {"utterance": "what is on today"}
+    asked: dict[str, Any] = {"utterance": "what is on today", "reference": {"goal_id": "goal-1"}}
     if conversation is not None:
         asked["conversation_id"] = conversation
     body = json.dumps(asked).encode()

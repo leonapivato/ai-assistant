@@ -803,31 +803,36 @@ async def test_forgetting_a_question_reports_whether_there_was_one() -> None:
 # --- a turn's conversation, the browser's own --------------------------------
 
 
-@pytest.mark.parametrize("path", ["/ask", "/ask/stream"])
-async def test_a_conversation_of_the_wrong_type_is_refused_rather_than_read_as_absent(
-    path: str,
-) -> None:
+async def test_a_conversation_of_the_wrong_type_is_refused_rather_than_read_as_absent() -> None:
     """ADR-0177 §1: "the gateway derives none of them, **defaults none of them**".
 
     An absent ``conversation_id`` runs the turn in a fresh conversation, so reading a
     number as an absence answers a *different* well-formed question instead of
     refusing a malformed one — and the turn writes, so it would record an episode on a
-    conversation nobody asked for. Both turn entries are here because the reader is
-    shared and the refusal has to reach the streamed shape as well as the unary one.
+    conversation nobody asked for. The body carries a reference, so the refusal is the
+    conversation's and not the missing reference's (ADR-0293 §11).
     """
-    body: dict[str, Any] = {"conversation_id": 7, "utterance": "what is on today"}
+    body: dict[str, Any] = {
+        "conversation_id": 7,
+        "utterance": "what is on today",
+        "reference": {"goal_id": "goal-1"},
+    }
     async with _harness() as one:
-        status, answered = await one.whole("POST", path, body)
+        status, answered = await one.whole("POST", "/ask", body)
 
-        assert status == 400, path
-        assert answered["fault"] == "malformed-request", path
-        assert one.engine.calls == [], path
+        assert status == 400
+        assert answered["fault"] == "malformed-request"
+        assert one.engine.calls == []
 
 
 async def test_a_null_conversation_is_the_absence_it_says_it_is() -> None:
     """JSON has a way of saying "no conversation", and a client using it is not
     getting the type wrong — so ``null`` reads as the absence the omitted member is."""
-    body: dict[str, Any] = {"conversation_id": None, "utterance": "what is on today"}
+    body: dict[str, Any] = {
+        "conversation_id": None,
+        "utterance": "what is on today",
+        "reference": {"goal_id": "goal-1"},
+    }
     async with _harness() as one:
         status, _ = await one.whole("POST", "/ask", body)
 

@@ -466,7 +466,9 @@ async def _start_session(one: Remote) -> tuple[str, str]:
 
 def _ask(one: Remote, *, header_half: str | None, cookie_half: str | None) -> tuple[str, bytes]:
     """Frame one `/ask` at the remote listener's own authority."""
-    body = json.dumps({"utterance": "what is on today"}).encode()
+    body = json.dumps(
+        {"utterance": "what is on today", "reference": {"goal_id": "goal-1"}}
+    ).encode()
     lines = [
         "POST /ask HTTP/1.1",
         "Host: {host}",
@@ -1135,7 +1137,7 @@ async def test_one_session_ceiling_spans_both_listeners() -> None:
         cookie_half, header_half = await _start_session(one)
 
         reader, writer = await one.connect_loopback()
-        body = json.dumps({"utterance": "hello"}).encode()
+        body = json.dumps({"utterance": "hello", "reference": {"goal_id": "goal-1"}}).encode()
         head = (
             f"POST /ask HTTP/1.1\r\nHost: {one.loopback_authority}\r\n"
             f"Origin: http://{one.loopback_authority}\r\n"
@@ -1166,7 +1168,7 @@ async def test_one_hub_connection_ceiling_spans_both_listeners() -> None:
         await asyncio.wait_for(engine.occupied.wait(), timeout=5)
 
         reader, writer = await one.connect_loopback()
-        second = json.dumps({"utterance": "and now"}).encode()
+        second = json.dumps({"utterance": "and now", "reference": {"goal_id": "goal-1"}}).encode()
         writer.write(
             (
                 f"POST /ask HTTP/1.1\r\nHost: {one.loopback_authority}\r\n"

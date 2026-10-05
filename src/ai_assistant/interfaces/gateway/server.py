@@ -61,8 +61,9 @@ repository ships to anyone who installs it.
 
 **A browser reaches a closed enumeration of operations** (ADR-0177 §1,
 superseding ADR-0175 §6's first clause and its figure of five; ADR-0285 §6 took
-``observe`` out of it). Among those served here: milestone 14's ``converse``,
-``converse_streaming``,
+``observe`` out of it, and ADR-0293 §11 retires ``converse_streaming``, which this
+gateway no longer serves). Among those served here: milestone 14's ``converse`` —
+only for a turn carrying a reference, the one the chat cannot yet carry —
 ``recent_conversations``, ``conversation`` and ``forget_conversation``, together
 with the grant surface — ``grantable_sources``, ``grant``, ``revoke``,
 ``recent_grants``, ``standing_grants`` — the belief surface — ``beliefs``,
@@ -153,7 +154,6 @@ from ai_assistant.core.errors import (
     UnknownConversationError,
     UnusableIdentityError,
 )
-from ai_assistant.core.streams import closing_stream
 from ai_assistant.core.types import (
     CHAT_DEVICES_MAX,
     DEFAULT_PAGE_SIZE,
@@ -332,21 +332,11 @@ _MICROS_A_SECOND: Final = 1_000_000
 _SESSION_PATH: Final = "/session"
 _ASK_PATH: Final = "/ask"
 
-#: ADR-0175 §3's streamed turn. A **second** entry beside :data:`_ASK_PATH` rather
-#: than a replacement, and keeping the non-streaming one is a decision rather than
-#: inertia: ADR-0173 §5 makes a provider that cannot stream "a ``ModelError`` from
-#: the call — before any delta", degrading to ``reply`` ``None`` with
-#: ``reply_degraded`` ``True``, so a browser offered only the streaming entry would
-#: answer nothing at all on a build where the CLI on the same machine answered
-#: normally. The gateway never chooses between them and never falls back from one to
-#: the other — ADR-0168 §9 forbids it retrying silently and ADR-0173 §7 refuses the
-#: same fallback one layer in. A second attempt is the front end asking again.
-_ASK_STREAM_PATH: Final = "/ask/stream"
-
-#: ADR-0200 §10's spoken turn. A **third** entry beside the two above and never a
-#: replacement for either: "It is a third entry rather than a replacement, and the
-#: gateway never chooses between the three, never falls back from one to another, and
-#: never retries silently (ADR-0168 §9)."
+#: ADR-0200 §10's spoken turn, an entry beside :data:`_ASK_PATH` and never a
+#: replacement for it: "It is a third entry rather than a replacement, and the gateway
+#: never chooses between the three, never falls back from one to another, and never
+#: retries silently (ADR-0168 §9)." The third of those was the streamed turn ADR-0293
+#: §11 retired; the rule binds the two that remain.
 #:
 #: **One request, answered whole.** The recording is uploaded complete and the
 #: rendering comes back on that request's response — no WebSocket, no protocol
@@ -482,9 +472,9 @@ _CANCEL_READ_PATH: Final = "/confirmation/cancel-read"
 #: **Answering a clarification is not a fourth path**, and that is ADR-0250 §11's own
 #: construction rather than an economy here: "answering is a turn and not an operation
 #: of its own, and that is the whole reason ``converse`` gains a keyword rather than the
-#: surface gaining a fifth verb". So a browser answers by posting :data:`_ASK_PATH` or
-#: :data:`_ASK_STREAM_PATH` with a ``reference``, and takes a goal up from another
-#: conversation the same way (§13) — the one route to a cross-conversation resumption.
+#: surface gaining a fifth verb". So a browser answers by posting :data:`_ASK_PATH`
+#: with a ``reference``, and takes a goal up from another conversation the same way
+#: (§13) — the one route to a cross-conversation resumption.
 #:
 #: **The verb comes last for** :data:`_CANCEL_READ_PATH`'s **reason**: the path names
 #: the thing acted on and then the act, so a later act on the same record kind cannot be
@@ -565,7 +555,6 @@ _CONNECTION_ACTS_PATH: Final = "/connections/recent"
 #: keeps ADR-0175 §6's enumeration checkable.
 _ASSISTANT_PATHS: Final[Mapping[tuple[str, str], str]] = {
     ("POST", _ASK_PATH): "converse",
-    ("POST", _ASK_STREAM_PATH): "converse_streaming",
     ("POST", _ASK_SPOKEN_PATH): "converse_spoken",
     ("GET", _DELIVERIES_PATH): "delivery-stream",
     ("POST", _CONVERSATIONS_PATH): "recent_conversations",
@@ -636,10 +625,11 @@ _CONNECTION_PATHS: Final = frozenset(
 #: split is stated over paths rather than over what a body happens to hold.
 _CREDENTIAL_PATHS: Final = frozenset({_CONNECT_PATH, _REPROVISION_PATH})
 
-#: The two shapes that answer on a stream (ADR-0175 §1). They are held apart from
-#: the rest because only they outlive the request that established them, so only
-#: they need the handle of the session that admitted them (§7).
-_STREAMED_SHAPES: Final = frozenset({("POST", _ASK_STREAM_PATH), ("GET", _DELIVERIES_PATH)})
+#: The one shape that answers on a stream (ADR-0175 §1), since ADR-0293 §11 retired
+#: the streamed turn. It is held apart from the rest because only it outlives the
+#: request that established it, so only it needs the handle of the session that
+#: admitted it (§7).
+_STREAMED_SHAPES: Final = frozenset({("GET", _DELIVERIES_PATH)})
 
 #: The cookie the gateway sets, and the header the front end sends. Two values
 #: rather than one because "a cookie is not scoped to a port" (ADR-0168 §6).
@@ -1075,9 +1065,9 @@ class _OpenStream:
         """End this stream now, tolerating a connection that is already gone.
 
         **Closing the writer is not enough on its own, and the case that shows it is
-        an answer stream waiting on its first value.** ``converse_streaming`` may be
-        composing when the session expires; a closed socket does not interrupt an
-        ``async for``, so the iteration — and with it the hub connection ADR-0175 §7
+        a stream waiting on its next value.** A delivery poll may be waiting on the hub
+        when the session expires; a closed socket does not interrupt an ``async for``,
+        so the iteration — and with it the hub connection ADR-0175 §7
         counts against ``gateway_max_hub_connections`` — would outlive the session by
         however long the turn took. Cancelling the task that drives the stream is what
         makes §7's "the gateway ends every stream a session held at the moment that
@@ -2418,7 +2408,7 @@ class Gateway:
         # §3 to §7's conditions, so nothing is recorded and the connection survives.
         return _fault(404, "Not Found", "no-such-path", close=False)
 
-    async def _assistant(  # noqa: PLR0911 — one return per shape class, and the split is the point
+    async def _assistant(
         self, request: Request, header_half: str | None, connection: _Connection
     ) -> Response | _Streamed:
         """Resolve one admitted assistant request onto ADR-0177 §1's enumeration.
@@ -2466,8 +2456,6 @@ class Gateway:
                 return self._refuse(
                     RequestClass.ASSISTANT, RefusalCondition.NO_LIVE_SESSION, connection
                 )
-            if shape == ("POST", _ASK_STREAM_PATH):
-                return self._ask_streaming(request, handle)
             return self._delivery_stream(handle)
         except _Refused as refused:
             return refused.response
@@ -2629,28 +2617,38 @@ class Gateway:
             self._give_hub_slot()
 
     async def _ask(self, request: Request) -> Response:
-        """Relay one turn to the hub and render what came back (ADR-0168 §1, §9).
+        """Relay one turn carrying a reference to the hub, and render what came back.
 
         The budget is the gateway's own and no browser value reaches it: a turn budget
         is the **caller's** (ADR-0029 §4), which ADR-0177 §1 makes one of exactly two
         members of the one class of argument this adapter supplies of itself.
 
+        **A turn here carries a reference, or it is refused** (ADR-0293 §11). The
+        ordinary turn is a message in the chat now, written through the chat's own
+        paths; what is left of this route is the turn the chat cannot yet carry —
+        answering a clarification, or taking a goal up from another conversation
+        (ADR-0250 §11, §13). A body with no ``reference`` is refused as malformed,
+        before the engine is reached, rather than run as the conversation ADR-0293
+        retired.
+
         **``reference`` is the browser's own argument and is relayed whole** (ADR-0250
-        §11). It is how this surface answers a clarification and how it takes a goal up
-        from another conversation (§13), and it is a keyword on the turn rather than an
-        operation of its own — so nothing is composed here out of two calls. This
-        gateway resolves no part of it: "it is resolved by ``orchestration`` against
-        records this system holds", and what became of it comes back on the outcome as
-        a ``ReferenceOutcome``.
+        §11), and it is a keyword on the turn rather than an operation of its own — so
+        nothing is composed here out of two calls. This gateway resolves no part of it:
+        "it is resolved by ``orchestration`` against records this system holds", and
+        what became of it comes back on the outcome as a ``ReferenceOutcome``.
         """
         payload = _payload(request)
+        utterance = _required_string(payload, "utterance")
+        reference = _reference(payload)
+        if reference is None:
+            raise _malformed()
         outcome = await self._relayed(
             partial(
                 self._engine.converse,
-                _required_string(payload, "utterance"),
+                utterance,
                 timeout=_TURN_BUDGET,
                 conversation_id=_optional_string(payload, "conversation_id"),
-                reference=_reference(payload),
+                reference=reference,
             )
         )
         return _rendered({"outcome": _outcome_view(outcome)})
@@ -2705,102 +2703,6 @@ class Gateway:
             fault=_spoken_fault,
         )
         return _rendered({"turn": _spoken_view(turn)})
-
-    def _ask_streaming(self, request: Request, handle: SessionHandle) -> Response | _Streamed:
-        """Relay one turn as a stream, one value per instalment (ADR-0175 §3).
-
-        "A browser's streamed turn is one request, answered by a stream carrying the
-        values ADR-0173 §1's frames carry, in the order they arrived: one value per
-        ``ReplyChunk``, then one terminal value carrying the ``TurnOutcome``, or one
-        terminal value carrying the fault the exchange ended in."
-
-        The hub slot is taken **before** the head is written and given back when the
-        body finishes, so a stream held open for a minute is a connection accounted
-        for the whole time (§7). What cannot be decided before the head is written
-        travels as the stream's terminal value instead of as a status.
-
-        Args:
-            request: The admitted request.
-            handle: The session that admitted it (§7).
-
-        Returns:
-            The stream, or a refusal decidable before the engine is reached.
-        """
-        payload = _payload(request)
-        utterance = _required_string(payload, "utterance")
-        conversation = _optional_string(payload, "conversation_id")
-        reference = _reference(payload)
-        if not self._take_hub_slot():
-            return _ceiling()
-        ending = _Ending()
-        return _Streamed(
-            handle=handle,
-            head=StreamHead(content_type=streams.MEDIA_TYPE),
-            body=partial(
-                self._pump_answer,
-                ending=ending,
-                utterance=utterance,
-                conversation=conversation,
-                reference=reference,
-            ),
-            release=self._give_hub_slot,
-            ending=ending,
-        )
-
-    async def _pump_answer(
-        self,
-        writer: asyncio.StreamWriter,
-        *,
-        ending: _Ending,
-        utterance: str,
-        conversation: str | None,
-        reference: TurnReference | None,
-    ) -> None:
-        """Drive ``converse_streaming`` onto the stream (ADR-0175 §3).
-
-        **Every engine stream this gateway opens is closed, on every exit and early
-        ones included**, through :func:`ai_assistant.core.streams.closing_stream` —
-        the seam that exists because "Python does not close an abandoned async
-        iterator at the point of abandonment". This surface is the first consumer
-        that will routinely abandon one: a browser that navigated away and a write
-        that failed are each an early exit here, where the CLI drives every stream to
-        exhaustion. A lane consuming this with a bare ``async for`` and a ``break``
-        leaks a turn's resources on the most common path this surface has.
-
-        **The reference is relayed to the streaming twin unchanged** (ADR-0250 §11,
-        ADR-0173): ``converse_streaming`` takes "exactly ``converse``'s arguments in
-        exactly its" order, so answering a clarification streams like any other turn.
-        It is read in :meth:`_ask_streaming` **before** the hub slot is taken, so a
-        malformed one is refused without a slot ever being held.
-
-        **A stream that ends without a terminal value is a transport failure and is
-        left as one** (§2). The contract yields exactly one ``TurnOutcome`` unless it
-        raises, so there is no third ending to invent a value for: a body that stops
-        early is what the front end reports as a transport failure, which is
-        ADR-0168 §9's distinction reaching the browser.
-        """
-        try:
-            answering = self._engine.converse_streaming(
-                utterance,
-                timeout=_TURN_BUDGET,
-                conversation_id=conversation,
-                reference=reference,
-            )
-            async with closing_stream(answering) as pieces:
-                async for produced in pieces:
-                    if isinstance(produced, TurnOutcome):
-                        await _write_value(
-                            writer,
-                            streams.outcome(_outcome_view(produced)),
-                            frame=ending.framing,
-                            wrote=ending.wrote,
-                        )
-                        return
-                    await _write_value(
-                        writer, streams.chunk(produced), frame=ending.framing, wrote=ending.wrote
-                    )
-        except (TransportError, AssistantError, ValueError) as exc:
-            await _write_value(writer, _stream_fault(exc), frame=ending.framing, wrote=ending.wrote)
 
     def _delivery_stream(self, handle: SessionHandle) -> Response | _Streamed:
         """Open one delivery stream, and the poll with the first (ADR-0175 §4).
@@ -4828,39 +4730,6 @@ def _frame(value: Mapping[str, Any]) -> bytes:
     return render_chunk(streams.encode(value))
 
 
-async def _write_value(
-    writer: asyncio.StreamWriter,
-    value: Mapping[str, Any],
-    *,
-    frame: Callable[[Mapping[str, Any]], bytes],
-    wrote: Callable[[], None],
-) -> None:
-    """Write one value on a stream and wait for it to leave.
-
-    The drain is awaited rather than fired and forgotten, because it is what applies
-    the browser's own backpressure to the turn: a page that cannot keep up should
-    slow the writer down rather than have the gateway buffer an answer on its behalf.
-    An answer stream "has one reader and nothing to protect from it", so ADR-0175
-    §4's abandonment clause does not reach one and there is nothing here to race the
-    drain against.
-
-    Args:
-        writer: The connection's writer, already carrying the stream's head.
-        value: The value to write.
-        frame: How one value becomes bytes on *this* stream — the stream's own
-            :class:`_Ending`, so that a terminal value is recorded as one in the same
-            step it is framed and before the drain below can suspend.
-        wrote: Called once the drain has returned. An answer stream is not guarded on
-            it (ADR-0175 §4 reaches a delivery stream alone), so what this keeps true
-            is the record rather than a decision: an ``_Ending`` that said a write was
-            outstanding for the life of every answer stream would be a field meaning
-            one thing on one stream shape and nothing on the other.
-    """
-    writer.write(frame(value))
-    await writer.drain()
-    wrote()
-
-
 def _rendered(payload: Mapping[str, Any]) -> Response:
     """A successful answer the engine returned, rendered as JSON (ADR-0168 §1)."""
     return _json_response(200, "OK", payload)
@@ -4987,21 +4856,6 @@ def _spoken_fault(exc: Exception) -> Response:
     if isinstance(exc, ValidationError):
         return _fault(400, "Bad Request", "rejected", detail=type(exc).__name__, close=False)
     return _relay_fault(exc)
-
-
-def _stream_fault(exc: Exception) -> dict[str, Any]:
-    """The same three conditions, as a stream's terminal value (ADR-0175 §2, §3).
-
-    The names match :func:`_relay_fault`'s exactly, so the page describes a fault
-    that arrived on a stream with the words it already has for one that arrived as a
-    response — which is what keeps ADR-0168 §9's distinction alive on this carrier
-    rather than leaving it at the status code a stream cannot revise.
-    """
-    if isinstance(exc, TransportError):
-        return streams.fault("hub-unreachable", detail=str(exc))
-    if isinstance(exc, AssistantError):
-        return streams.fault("assistant-declined", detail=str(exc))
-    return streams.fault("rejected", detail=str(exc))
 
 
 def _fault(  # noqa: PLR0913 — one parameter per member a fault body may carry, and the enumeration is the point

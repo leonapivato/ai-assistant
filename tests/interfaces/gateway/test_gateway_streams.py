@@ -37,15 +37,13 @@ from ai_assistant.core.types import (
     NotificationCandidate,
     NotificationDelivery,
     Provenance,
-    ReplyChunk,
     SpokenAudioFormat,
     TimeOfDay,
-    TurnOutcome,
     TurnResult,
 )
 from ai_assistant.interfaces.gateway import streams
 from ai_assistant.interfaces.gateway.delivery import GATEWAY_PLAYS, DeliveryStream, write_stream
-from ai_assistant.interfaces.gateway.http import Request, Response
+from ai_assistant.interfaces.gateway.http import Response
 from ai_assistant.interfaces.gateway.server import (
     _ASSISTANT_PATHS,
     Gateway,
@@ -58,7 +56,7 @@ from ai_assistant.wire.errors import HubUnavailableError
 if TYPE_CHECKING:
     from collections.abc import AsyncIterator
 
-    from ai_assistant.core.types import EncodableText, Identifier, TurnReference
+    from ai_assistant.core.types import Identifier
     from ai_assistant.wire.overlay import OverlayAgent
 
 pytestmark = pytest.mark.integration
@@ -164,64 +162,6 @@ class _Delivering(FakeAssistantEngine):
         self.released.set()
         for _ in range(4):
             await asyncio.sleep(0)
-
-
-class _StreamUnreachable(FakeAssistantEngine):
-    """An engine whose hub is not there, on the streaming entry (ADR-0168 §9)."""
-
-    def converse_streaming(
-        self,
-        utterance: EncodableText,
-        *,
-        timeout: timedelta,
-        conversation_id: Identifier | None = None,
-        reference: TurnReference | None = None,
-    ) -> AsyncIterator[ReplyChunk | TurnOutcome]:
-        """Fail the way a closed door fails, from the iteration."""
-        self.calls.append(("converse_streaming", {"utterance": utterance}))
-
-        async def failing() -> AsyncIterator[ReplyChunk | TurnOutcome]:
-            # The ``yield`` is what makes this an async generator, and it is placed
-            # before the raise so it is reachable rather than dead — the guard is
-            # what stops it ever running, and the raise is what the caller sees.
-            if self.calls:
-                msg = "no hub is listening on that socket"
-                raise HubUnavailableError(msg)
-            yield ReplyChunk(text="unreachable")
-
-        return failing()
-
-
-class _Abandonable(FakeAssistantEngine):
-    """An engine whose stream records whether the consumer closed it (ADR-0175 §3)."""
-
-    def __init__(self) -> None:
-        """Start with nothing yielded and nothing closed."""
-        super().__init__()
-        self.closed = asyncio.Event()
-        self.first_chunk = asyncio.Event()
-
-    def converse_streaming(
-        self,
-        utterance: EncodableText,
-        *,
-        timeout: timedelta,
-        conversation_id: Identifier | None = None,
-        reference: TurnReference | None = None,
-    ) -> AsyncIterator[ReplyChunk | TurnOutcome]:
-        """Yield chunks forever, recording the close the caller owes."""
-        self.calls.append(("converse_streaming", {"utterance": utterance}))
-
-        async def endless() -> AsyncIterator[ReplyChunk | TurnOutcome]:
-            try:
-                while True:
-                    yield ReplyChunk(text="tick ")
-                    self.first_chunk.set()
-                    await asyncio.sleep(0)
-            finally:
-                self.closed.set()
-
-        return endless()
 
 
 @dataclass
@@ -422,192 +362,20 @@ async def harness() -> AsyncIterator[Harness]:
         yield one
 
 
-# --- ADR-0175 §1, §3: a turn's answer streams --------------------------------
+# --- ADR-0175 §1, §3: what a stream is served to --------------------------------
 
 
-async def test_a_streamed_turn_is_a_chunked_body_of_ndjson_values(harness: Harness) -> None:
-    """§1: every message the gateway sends a browser is "the body of the response to
-    one ordinary HTTP request that browser made" — and §2 leaves the framing to this
-    lane, which chose one JSON object per line."""
-    reader, headers, status = await harness.send(
-        "POST", "/ask/stream", {"utterance": "what is on today"}
-    )
-
-    values = await _read_all(reader)
-
-    assert status == 200
-    assert headers["transfer-encoding"] == ["chunked"]
-    assert "content-length" not in headers
-    assert headers["content-type"] == ["application/x-ndjson"]
-    assert [value["kind"] for value in values][-1] == "outcome"
-
-
-async def test_a_streamed_turn_yields_chunks_then_exactly_one_terminal_outcome(
-    harness: Harness,
-) -> None:
-    """§3: "one value per ``ReplyChunk``, then one terminal value carrying the
-    ``TurnOutcome``"."""
-    reader, _, _ = await harness.send("POST", "/ask/stream", {"utterance": "what is on today"})
-
-    values = await _read_all(reader)
-
-    kinds = [value["kind"] for value in values]
-    assert set(kinds[:-1]) <= {"chunk"}
-    assert kinds[-1] == "outcome"
-    assert kinds.count("outcome") == 1
-
-
-async def test_the_terminal_reply_is_the_answer_and_the_chunks_joined_to_it(
-    harness: Harness,
-) -> None:
-    """ADR-0173 §3 binds at this edge unchanged (§3): "The terminal ``TurnOutcome``'s
-    ``reply`` is the answer; where a rendered chunk sequence and it disagree, the
-    front end renders the terminal ``reply``".
-
-    The canonical fake derives its chunks from the outcome, so the join holding here
-    is the property a client can rely on — and the clause the page obeys is that it
-    renders the terminal value rather than what it accumulated.
-    """
-    reader, _, _ = await harness.send("POST", "/ask/stream", {"utterance": "what is on today"})
-
-    values = await _read_all(reader)
-
-    joined = "".join(value["text"] for value in values if value["kind"] == "chunk")
-    assert values[-1]["outcome"]["reply"] == joined
-
-
-async def test_the_terminal_value_carries_the_turn_whole(harness: Harness) -> None:
-    """§3: "The terminal value carries the ``TurnOutcome`` whole, so all four of
-    ADR-0173 §6's shapes are readable at the browser from the two members alone."
-
-    Asserted against the non-streaming entry's own view, because ADR-0175 §3 keeps
-    both turn entries on this surface and "the gateway never substitutes one for the
-    other" — two renderings of one turn that disagreed would be the substitution
-    performed by the view rather than by the router.
-    """
-    reader, _, _ = await harness.send("POST", "/ask/stream", {"utterance": "what is on today"})
-    streamed = (await _read_all(reader))[-1]["outcome"]
-
-    _, whole = await harness.whole("POST", "/ask", {"utterance": "what is on today"})
-
-    assert set(streamed) == set(whole["outcome"])
-    assert {"reply", "reply_degraded", "step", "steps", "conversation_id"} <= set(streamed)
-
-
-async def test_a_partly_composed_answer_arrives_with_the_flag_that_says_so(
-    harness: Harness,
-) -> None:
-    """§3's fourth shape — "owed and **partly** produced" — is the one a browser
-    surface loses by accident, because showing the chunks and stopping displays it
-    identically to a complete answer. Both members cross, so the page can tell.
-    """
-    harness.engine.turn_outcome = TurnOutcome(
-        turn=_turn("what is on today"),
-        conversation_id=harness.engine.hold_conversation("c-partial"),
-        reply="half an answer",
-        reply_degraded=True,
-    )
-
-    reader, _, _ = await harness.send(
-        "POST", "/ask/stream", {"utterance": "what is on today", "conversation_id": "c-partial"}
-    )
-    values = await _read_all(reader)
-
-    assert values[-1]["outcome"]["reply"] == "half an answer"
-    assert values[-1]["outcome"]["reply_degraded"] is True
-
-
-async def test_a_streamed_turn_the_hub_could_not_answer_ends_in_a_terminal_fault() -> None:
-    """§3: "or one terminal value carrying the fault the exchange ended in", and §2
-    keeps that distinguishable from a body that simply stopped."""
-    async with _harness(_StreamUnreachable()) as one:
-        reader, _, status = await one.send("POST", "/ask/stream", {"utterance": "what is on today"})
-
-        values = await _read_all(reader)
-
-        assert status == 200
-        assert values == [
-            {
-                "kind": "fault",
-                "fault": "hub-unreachable",
-                "detail": "no hub is listening on that socket",
-            }
-        ]
-
-
-async def test_a_stream_the_browser_abandoned_closes_the_engines_iterator() -> None:
-    """§3: "The gateway closes every engine stream it opened, on every exit and early
-    ones included, through the closing seam ``core.streams`` carries."
-
-    "A browser that goes away… is an early exit, and none of them leaves an iteration
-    open." This surface is the first consumer that will routinely abandon one, where
-    the CLI drives every stream to exhaustion — so a lane consuming this with a bare
-    ``async for`` and a ``break`` leaks a turn's resources on the most common path
-    this surface has.
-    """
-    engine = _Abandonable()
-    async with _harness(engine) as one:
-        reader, writer = await one.connect()
-        await one.send(
-            "POST", "/ask/stream", {"utterance": "what is on today"}, connection=(reader, writer)
-        )
-        await asyncio.wait_for(engine.first_chunk.wait(), timeout=5)
-
-        writer.close()
-        with contextlib.suppress(Exception):
-            await writer.wait_closed()
-
-        await asyncio.wait_for(engine.closed.wait(), timeout=5)
-
-
-async def test_a_turn_asked_for_whole_is_never_answered_from_a_stream(harness: Harness) -> None:
-    """§3: "A streamed turn is not re-asked as ``converse`` by the gateway, whatever
-    it produced, and a turn the browser asked for whole is answered by ``converse``
-    and never from a stream."
-
-    The fallback is forbidden twice over — ADR-0168 §9 has the gateway not retry
-    silently, and ADR-0173 §7 refuses the same fallback one layer in because past the
-    first chunk it "produces a complete answer that does not begin with the text the
-    user already read".
-    """
-    reader, headers, _ = await harness.send("POST", "/ask/stream", {"utterance": "one"})
-    await _read_all(reader)
-    _, whole_headers, _ = await harness.send("POST", "/ask", {"utterance": "two"})
-
-    assert headers["content-type"] == ["application/x-ndjson"]
-    assert whole_headers["content-type"] == ["application/json"]
-    called = [name for name, _ in harness.engine.calls]
-    assert called == ["converse_streaming", "converse"]
-
-
-@pytest.mark.parametrize(
-    ("method", "path"),
-    [("POST", "/ask/stream"), ("GET", "/deliveries")],
-)
 async def test_an_unadmitted_stream_request_is_refused_and_never_reaches_the_engine(
-    harness: Harness, method: str, path: str
+    harness: Harness,
 ) -> None:
-    """ADR-0168 §1's biconditional, on the two shapes ADR-0175 adds. §3 serves a
-    stream only to an admitted browser, and §7 restates it: "No stream is served on
-    [an unadmitted connection], because no stream is served without the session that
-    admits it"."""
-    status, body = await harness.whole(method, path, admitted=False)
+    """ADR-0168 §1's biconditional, on the stream shape ADR-0175 adds and ADR-0293 §11
+    leaves. §3 serves a stream only to an admitted browser, and §7 restates it: "No
+    stream is served on [an unadmitted connection], because no stream is served without
+    the session that admits it"."""
+    status, body = await harness.whole("GET", "/deliveries", admitted=False)
 
     assert status == 401
     assert body == {"fault": "no-live-session"}
-    assert harness.engine.calls == []
-
-
-async def test_a_streamed_turn_with_no_utterance_is_refused_before_the_head_is_written(
-    harness: Harness,
-) -> None:
-    """Everything decidable before the engine is reached keeps its own status — a
-    stream's head is written only once the gateway has committed to answering on
-    one, and a fault after that has nowhere to put a status code."""
-    status, body = await harness.whole("POST", "/ask/stream", {"conversation_id": "c-1"})
-
-    assert status == 400
-    assert body == {"fault": "malformed-request"}
     assert harness.engine.calls == []
 
 
@@ -716,23 +484,20 @@ async def test_no_browser_value_reaches_the_poll_however_a_request_carries_one()
 async def test_the_cadence_is_stated_on_the_delivery_stream_and_on_nothing_else() -> None:
     """The header is a claim about §4's obligation, and §4 obliges nothing elsewhere.
 
-    An answer stream carries no keep-alive: ADR-0175 §3 has it carry chunks and one
-    terminal outcome, and it ends when the turn does. A page that read a cadence off it
-    would bound a stream nobody promised to write on, and abandon a model that was
-    merely thinking. So the header rides the one response §4 is about, which is also
-    why it is a field on :class:`StreamHead` rather than a line
-    :func:`render_stream_head` adds to every head.
+    A turn answered whole carries no keep-alive, and a page that read a cadence off it
+    would bound a response nobody promised to write on. So the header rides the one
+    response §4 is about, which is also why it is a field on :class:`StreamHead` rather
+    than a line :func:`render_stream_head` adds to every head.
     """
     async with _harness(_Delivering([None])) as one:
-        answering, streamed, status = await one.send(
-            "POST", "/ask/stream", {"utterance": "what is on today"}
+        _, whole, status = await one.send(
+            "POST", "/ask", {"utterance": "what is on today", "reference": {"goal_id": "goal-1"}}
         )
-        await _read_all(answering)
         _, delivered, _ = await one.send("GET", "/deliveries")
 
         assert status == 200
-        assert streamed["content-type"] == ["application/x-ndjson"]
-        assert "x-assistant-keep-alive-microseconds" not in streamed
+        assert whole["content-type"] == ["application/json"]
+        assert "x-assistant-keep-alive-microseconds" not in whole
         assert "x-assistant-keep-alive-microseconds" in delivered
 
 
@@ -814,7 +579,9 @@ async def test_the_hub_ceiling_refuses_a_delivery_stream_naming_the_limit() -> N
         assert status == 200
         await engine.polling.wait()
 
-        refused_status, body = await one.whole("POST", "/ask", {"utterance": "what is on today"})
+        refused_status, body = await one.whole(
+            "POST", "/ask", {"utterance": "what is on today", "reference": {"goal_id": "goal-1"}}
+        )
 
         assert refused_status == 503
         assert body == {"fault": "hub-connection-ceiling", "limit": "gateway_max_hub_connections"}
@@ -886,7 +653,9 @@ async def test_an_open_stream_is_not_use_of_the_session_and_dies_with_it() -> No
         await asyncio.sleep(0)
 
         assert await _read_all(reader) == [{"kind": "fault", "fault": "no-live-session"}]
-        status, body = await one.whole("POST", "/ask", {"utterance": "what is on today"})
+        status, body = await one.whole(
+            "POST", "/ask", {"utterance": "what is on today", "reference": {"goal_id": "goal-1"}}
+        )
         assert (status, body) == (401, {"fault": "no-live-session"})
 
 
@@ -959,8 +728,7 @@ def test_a_stream_that_already_carries_a_terminal_value_is_not_given_a_second() 
     """§2 and §3, at the window a session's ending opens in a body's last drain.
 
     "Every stream ends in exactly one of two ways… the gateway wrote a **terminal**
-    value, or the body ended without one", and §3 gives an answer stream "one value per
-    ``ReplyChunk``, then one terminal value". A body writes its terminal value and then
+    value, or the body ended without one". A body writes its terminal value and then
     awaits the drain; a session expiring inside that drain finds the value written and
     the response not yet complete, and appending a second terminal there would put a
     value on the wire that neither clause describes and no reader is told how to treat.
@@ -971,7 +739,7 @@ def test_a_stream_that_already_carries_a_terminal_value_is_not_given_a_second() 
     """
     ending = _Ending()
     stream, recording = _held(ending=ending)
-    already = ending.framing(streams.outcome({"turn": "done"}))
+    already = ending.framing(streams.fault("hub-unreachable"))
 
     stream.end()
 
@@ -1372,8 +1140,9 @@ def test_the_surface_resolves_onto_what_it_serves_and_the_gateways_own_poll() ->
     so does a lane that adds one this ADR admits *and* forgets it exists.
     """
     assert set(_ASSISTANT_PATHS.values()) == {
+        # ADR-0293 §11 retires `converse_streaming`; `converse` stays for the turn
+        # carrying a reference until question messages are built (ADR-0250 §11).
         "converse",
-        "converse_streaming",
         "converse_spoken",
         "recent_conversations",
         "conversation",
@@ -1426,37 +1195,6 @@ def test_the_surface_resolves_onto_what_it_serves_and_the_gateways_own_poll() ->
 
 
 # --- what a peer that goes away at the wrong moment must not cost ------------
-
-
-class _Stalling(FakeAssistantEngine):
-    """An engine that never reaches its first chunk until a test lets it."""
-
-    def __init__(self) -> None:
-        """Start with nothing composed and nothing closed."""
-        super().__init__()
-        self.composing = asyncio.Event()
-        self.closed = asyncio.Event()
-
-    def converse_streaming(
-        self,
-        utterance: EncodableText,
-        *,
-        timeout: timedelta,
-        conversation_id: Identifier | None = None,
-        reference: TurnReference | None = None,
-    ) -> AsyncIterator[ReplyChunk | TurnOutcome]:
-        """Compose forever, recording the close the caller owes."""
-        self.calls.append(("converse_streaming", {"utterance": utterance}))
-
-        async def stalled() -> AsyncIterator[ReplyChunk | TurnOutcome]:
-            try:
-                self.composing.set()
-                await asyncio.Event().wait()
-                yield ReplyChunk(text="never")  # pragma: no cover — the wait never ends
-            finally:
-                self.closed.set()
-
-        return stalled()
 
 
 class _GoneWriter:
@@ -1527,51 +1265,26 @@ class _ExpiringWriter:
         self.closed = True
 
 
-def _decide(one: Harness, method: str, path: str, payload: dict[str, Any]) -> Any:
-    """Decide one streamed request, as the router would, and hand back the stream."""
-    request = Request(
-        method=method,
-        path=path,
-        headers=(("x-assistant-session", one.header_half),),
-        body=json.dumps(payload).encode(),
-    )
+def _decide(one: Harness) -> Any:
+    """Decide one delivery stream, as the router would, and hand back the stream.
+
+    The delivery stream is the one stream this gateway serves since ADR-0293 §11
+    retired the streamed turn.
+    """
     handle = one.gateway._sessions.handle(one.header_half)
     assert handle is not None
-    decided = (
-        one.gateway._ask_streaming(request, handle)
-        if path == "/ask/stream"
-        else one.gateway._delivery_stream(handle)
-    )
+    decided = one.gateway._delivery_stream(handle)
     assert not isinstance(decided, Response)
     return decided
 
 
-async def _fail_the_head(one: Harness, method: str, path: str, payload: dict[str, Any]) -> bool:
-    """Decide one streamed request, then lose the peer before its head lands."""
+async def _fail_the_head(one: Harness) -> bool:
+    """Decide one delivery stream, then lose the peer before its head lands."""
     return await one.gateway._write_stream(
         _GoneWriter(),  # type: ignore[arg-type] # a writer is what it writes
-        _decide(one, method, path, payload),
+        _decide(one),
         closing=False,
     )
-
-
-async def test_a_turn_stream_whose_head_never_landed_gives_its_hub_slot_back() -> None:
-    """§7 counts a stream's hub connection against ``gateway_max_hub_connections``,
-    and a browser that hangs up between its request and the head is the one path on
-    which the body that releases that slot never runs at all.
-
-    At a ceiling of one the leak is immediate and total: the next turn is refused for
-    a connection nobody holds. Asserted through the ceiling rather than through a
-    counter, because the ceiling is what the owner would actually meet.
-    """
-    async with _harness(gateway_max_hub_connections=1) as one:
-        assert (
-            await _fail_the_head(one, "POST", "/ask/stream", {"utterance": "what is on"}) is False
-        )
-
-        status, _ = await one.whole("POST", "/ask", {"utterance": "what is on today"})
-
-        assert status == 200
 
 
 async def test_a_delivery_stream_whose_head_never_landed_leaves_no_poll_running() -> None:
@@ -1585,42 +1298,13 @@ async def test_a_delivery_stream_whose_head_never_landed_leaves_no_poll_running(
     """
     engine = _Delivering([None])
     async with _harness(engine, gateway_max_hub_connections=1) as one:
-        assert await _fail_the_head(one, "GET", "/deliveries", {}) is False
+        assert await _fail_the_head(one) is False
 
-        status, _ = await one.whole("POST", "/ask", {"utterance": "what is on today"})
+        status, _ = await one.whole(
+            "POST", "/ask", {"utterance": "what is on today", "reference": {"goal_id": "goal-1"}}
+        )
 
         assert status == 200
-
-
-async def test_a_session_ending_closes_an_answer_stream_still_waiting_to_compose() -> None:
-    """§7: "A stream ends no later than the session that admitted it, and the gateway
-    ends every stream a session held at the moment that session ends."
-
-    Closing the socket does not reach an ``async for`` that is waiting on the engine,
-    so a turn still composing when its session expired would hold both the iterator
-    and the hub connection §7 counts — for however long the turn took. Ending the
-    stream cancels the task driving it, which unwinds through ``closing_stream``
-    (ADR-0173's own obligation, §3) and through the release the body owes.
-
-    **An answer stream is ended by the same act and so carries the same named ending**
-    (#2498): the gateway names the condition on every stream a session held, because
-    the condition is the session's and not the stream shape's. What the *page* makes of
-    it differs and is app.js's own reading — ``describeDeliveryEnd`` adds
-    ``IDLE_WHILE_WATCHING`` on a delivery stream alone, "an answer stream's own request
-    refreshed the idle timeout on its way in" — but that is a sentence chosen from the
-    value, not a second value.
-    """
-    engine = _Stalling()
-    async with _harness(engine, gateway_session_idle_timeout=timedelta(minutes=5)) as one:
-        reader, _, status = await one.send("POST", "/ask/stream", {"utterance": "what is on"})
-        assert status == 200
-        await asyncio.wait_for(engine.composing.wait(), timeout=5)
-
-        one.clock.advance(timedelta(minutes=6))
-        one.timers.fire_all()
-
-        await asyncio.wait_for(engine.closed.wait(), timeout=5)
-        assert await _read_all(reader) == [{"kind": "fault", "fault": "no-live-session"}]
 
 
 async def test_a_session_that_dies_while_the_head_is_written_still_ends_the_stream() -> None:
@@ -1633,14 +1317,13 @@ async def test_a_session_that_dies_while_the_head_is_written_still_ends_the_stre
     that follows with nothing that will ever end it.
 
     Driven in its own task because ending a stream cancels the task driving it. The
-    engine is never reached at all here — the death lands during the *head*, before
-    the body starts — which is what makes the claim about registration rather than
-    about the turn: the stream was found and ended on a handle it had already been
+    death lands during the *head*, before the body starts, which is what makes the claim
+    about registration: the stream was found and ended on a handle it had already been
     associated with.
     """
-    engine = _Stalling()
+    engine = _Delivering([None])
     async with _harness(engine, gateway_session_idle_timeout=timedelta(minutes=5)) as one:
-        decided = _decide(one, "POST", "/ask/stream", {"utterance": "what is on"})
+        decided = _decide(one)
         writer = _ExpiringWriter(one)
 
         driving = asyncio.ensure_future(
@@ -1655,4 +1338,3 @@ async def test_a_session_that_dies_while_the_head_is_written_still_ends_the_stre
 
         assert driving.cancelled()
         assert writer.closed
-        assert engine.calls == []

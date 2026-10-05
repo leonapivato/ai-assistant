@@ -23,7 +23,7 @@ fix, and this module is the whole of it:
   frame "that is a chunk by kind and final by flag is two answers to one question",
   and a browser reading a stream is the second reader of the same sequence.
 
-**Two of the five kinds are terminal and three are not**, which is the other clause
+**One of the three kinds is terminal and two are not**, which is the other clause
 §2 fixes: "a reader that reached a terminal value has the whole of what the gateway
 sent; a reader that did not has a transport failure and the front end reports it as
 one". :data:`TERMINAL_KINDS` is that partition stated once, so the page and the
@@ -47,7 +47,7 @@ from typing import TYPE_CHECKING, Any, Final
 if TYPE_CHECKING:  # pragma: no cover — imported for typing alone
     from collections.abc import Mapping
 
-    from ai_assistant.core.types import NotificationDelivery, ReplyChunk
+    from ai_assistant.core.types import NotificationDelivery
 
 #: The media type every stream is served with. ``application/x-ndjson`` is the
 #: registered-in-practice name for one JSON value per line, and it is *not*
@@ -87,15 +87,6 @@ class ValueKind(StrEnum):
     not know treats the value as one it cannot render rather than guessing.
     """
 
-    CHUNK = "chunk"
-    """One :class:`~ai_assistant.core.types.ReplyChunk` of a streamed answer
-    (ADR-0173 §2). Never terminal, and never the record of what the assistant
-    said — ADR-0173 §3 keeps the terminal outcome's ``reply`` authoritative."""
-
-    OUTCOME = "outcome"
-    """The terminal value of an answer stream, carrying the whole
-    :class:`~ai_assistant.core.types.TurnOutcome` view. Terminal."""
-
     NOTIFICATION = "notification"
     """One delivery the hub returned, written to every open delivery stream
     (ADR-0175 §4). Never terminal: a delivery stream carries many."""
@@ -109,7 +100,7 @@ class ValueKind(StrEnum):
 
     FAULT = "fault"
     """The terminal value of a stream that ended in a fault the gateway can name —
-    a turn the hub declined, a poll it could not complete. Terminal, and it keeps
+    a poll it could not complete, or a session that ended. Terminal, and it keeps
     ADR-0168 §9's distinction: a fault *value* is a request the hub received and
     answered, where a body that ends without a terminal value is a transport
     failure and the front end reports it as one."""
@@ -117,7 +108,7 @@ class ValueKind(StrEnum):
 
 #: Which kinds end a stream. Stated once so the front end and the gateway cannot
 #: hold two partitions (ADR-0175 §2).
-TERMINAL_KINDS: Final = frozenset({ValueKind.OUTCOME, ValueKind.FAULT})
+TERMINAL_KINDS: Final = frozenset({ValueKind.FAULT})
 
 
 def encode(value: Mapping[str, Any]) -> bytes:
@@ -130,36 +121,6 @@ def encode(value: Mapping[str, Any]) -> bytes:
         The bytes to write, terminator included.
     """
     return json.dumps(value).encode("utf-8") + _TERMINATOR
-
-
-def chunk(piece: ReplyChunk) -> dict[str, Any]:
-    """One instalment of a streamed answer (ADR-0173 §2, ADR-0175 §3).
-
-    Args:
-        piece: The chunk the engine yielded.
-
-    Returns:
-        The value to write.
-    """
-    return {"kind": ValueKind.CHUNK.value, "text": piece.text}
-
-
-def outcome(view: Mapping[str, Any]) -> dict[str, Any]:
-    """The terminal value of an answer stream (ADR-0175 §3).
-
-    It carries the ``TurnOutcome`` view **whole**, so all four of ADR-0173 §6's
-    shapes are readable at the browser from ``reply`` and ``reply_degraded`` alone.
-    The fourth — an answer owed and *partly* produced — is the one a browser
-    surface loses by accident, because the natural rendering of a stream is to show
-    the chunks and stop, which displays it identically to a complete answer.
-
-    Args:
-        view: The rendered turn, as ``server._outcome_view`` built it.
-
-    Returns:
-        The value to write.
-    """
-    return {"kind": ValueKind.OUTCOME.value, "outcome": dict(view)}
 
 
 def notification(delivery: NotificationDelivery) -> dict[str, Any]:
@@ -260,9 +221,8 @@ def keep_alive_header(budget: timedelta) -> tuple[str, str]:
     candidate — the bootstrap exchange "returns nothing but the two session values §6
     requires" — so the figure could never have ridden that body.
 
-    **It is on the delivery stream alone.** An answer stream carries no keep-alive
-    and §4 obliges nothing on it, so a header there would be a claim about an
-    obligation that does not exist.
+    **It is on the delivery stream**, the one stream this gateway serves since
+    ADR-0293 §11 retired the streamed answer.
 
     Args:
         budget: ``gateway_notification_budget`` (ADR-0175 §8) — "the interval within

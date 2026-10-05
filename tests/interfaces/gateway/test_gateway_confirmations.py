@@ -182,7 +182,9 @@ def _holding(*confirmations: Confirmation) -> FakeAssistantEngine:
 async def _view(one: Harness, confirmation: Confirmation) -> dict[str, Any]:
     """Drive a turn that parks and return the confirmation view the page receives."""
     one.engine.turn_outcome = _parked(confirmation)
-    status, body = await one.whole("POST", "/ask", {"utterance": "send it"})
+    status, body = await one.whole(
+        "POST", "/ask", {"utterance": "send it", "reference": {"goal_id": "goal-1"}}
+    )
     assert status == 200, body
     view: dict[str, Any] = body["outcome"]["step"]["confirmation"]
     return view
@@ -282,7 +284,9 @@ async def test_a_turn_that_parks_renders_the_confirmation_and_not_a_boolean() ->
         # row, so ``null`` states that answering establishes no standing authority —
         # not that the call transmits nothing, which ``egress`` beside it is about.
         assert view["authorization"] is None
-        _, body = await one.whole("POST", "/ask", {"utterance": "again"})
+        _, body = await one.whole(
+            "POST", "/ask", {"utterance": "again", "reference": {"goal_id": "goal-1"}}
+        )
         assert "awaiting_confirmation" not in body["outcome"]["step"], body
 
 
@@ -1074,7 +1078,9 @@ async def test_a_parked_read_crosses_with_the_exact_query_and_both_destination_f
     question = _read_park(engine)
     engine.turn_outcome = TurnOutcome(turn=None, conversation_id="c-1", read_confirmation=question)
     async with _harness(engine) as one:
-        status, body = await one.whole("POST", "/ask", {"utterance": "what did it say"})
+        status, body = await one.whole(
+            "POST", "/ask", {"utterance": "what did it say", "reference": {"goal_id": "goal-1"}}
+        )
 
         assert status == 200, body
         view = body["outcome"]["read_confirmation"]
