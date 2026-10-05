@@ -58,7 +58,9 @@ from ai_assistant.core.types import (
     ChannelIdentity,
     ChatChanges,
     ConversationDigest,
+    ConversationStartedChange,
     ConversationState,
+    DevicesChangedChange,
     EpisodicMemory,
     MemoryKind,
     MessageAddedChange,
@@ -313,6 +315,66 @@ def check_message_fits(conversation_id: str, message: UserMessage, *, max_bytes:
         ),
         max_bytes=max_bytes,
         subject="the change recording the message write_message() was given",
+    )
+
+
+#: A conversation id as wide as the store mints one (a UUID's text), for a probe that
+#: measures a change about a conversation not yet started.
+_PROBE_CONVERSATION: Final = "0" * 36
+
+
+def check_devices_fit(
+    devices: Sequence[ChatDevice], *, conversation_id: str | None, max_bytes: int
+) -> None:
+    """Refuse a set of devices whose own records could not be read back within the limit.
+
+    A set of devices is recorded as a change (ADR-0293 §5:10) — "my devices" also in
+    every later conversation's start — and read back on the conversation's digest
+    (§3:3). A set whose one-change page or digest would exceed the payload limit
+    would stop every cursor at that change, since :func:`fit_changes` can shorten a
+    page to one change and no further; so it is refused before it is recorded,
+    measured at the widest sequence number and instants. Shared by the engine and the
+    canonical fake engine.
+
+    Args:
+        devices: The set, already checked.
+        conversation_id: The conversation whose devices these are, or ``None`` for
+            "my devices".
+        max_bytes: The payload limit.
+
+    Raises:
+        OversizedValueError: If a record carrying the set would exceed ``max_bytes``.
+    """
+    held = tuple(devices)
+    named = _PROBE_CONVERSATION if conversation_id is None else conversation_id
+    changes: list[DevicesChangedChange | ConversationStartedChange] = [
+        DevicesChangedChange(seq=_WIDEST_NUMBER, conversation_id=conversation_id, devices=held)
+    ]
+    if conversation_id is None:
+        changes.append(
+            ConversationStartedChange(seq=_WIDEST_NUMBER, conversation_id=named, devices=held)
+        )
+    for change in changes:
+        check_payload(
+            ChatChanges(changes=(change,), next_after=_WIDEST_NUMBER),
+            max_bytes=max_bytes,
+            subject="the change recording the devices given",
+        )
+    check_payload(
+        ConversationDigest(
+            id=named,
+            started_at=_WIDEST_AT,
+            last_turn_at=_WIDEST_AT,
+            recorded_turns=_WIDEST_NUMBER,
+            state=ConversationState(
+                working=True,
+                activation_id=_PROBE_CONVERSATION,
+                last_ended=ActivationEnding.COULDNT_FINISH,
+            ),
+            devices=held,
+        ),
+        max_bytes=max_bytes,
+        subject="the conversation read carrying the devices given",
     )
 
 
@@ -981,6 +1043,7 @@ __all__ = [
     "ConversationLifecycle",
     "ParkingOrigin",
     "activation_ending",
+    "check_devices_fit",
     "check_message_fits",
     "conversation_channel",
     "conversation_state",

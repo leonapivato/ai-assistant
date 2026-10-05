@@ -19,6 +19,7 @@ from ai_assistant.core.episode_encoding import canonical_json, episode_content, 
 from ai_assistant.core.errors import MemoryStoreConflictError, MemoryStoreStaleError
 from ai_assistant.core.types import (
     Capture,
+    ChannelIdentity,
     ControllerRule,
     ControllerStage,
     EpisodeCaptureReport,
@@ -49,13 +50,32 @@ if TYPE_CHECKING:
 
     from ai_assistant.core.clock import Clock
     from ai_assistant.core.protocols import ConversationStore, MemoryStore
-    from ai_assistant.core.types import MemoryRecord
+    from ai_assistant.core.types import MemoryRecord, RecordedActivationTrigger
     from ai_assistant.orchestration.activation_state import ActivationState
 
 _log = structlog.get_logger(__name__)
 
 #: How many open episodes the restart's close reads per page (ADR-0286 §7, §12:1).
 _OPEN_PAGE = 100
+
+
+def _on_its_conversation(trigger: RecordedActivationTrigger) -> RecordedActivationTrigger:
+    """``trigger`` on the conversation it targets, where a dead pass had not yet named it.
+
+    A conversational pass names the conversation its episode is written for once the
+    conversation is resolved (ADR-0275 §4:5 as ADR-0283 reads it), so a process that
+    died before that left an open episode on no channel, its target alone naming the
+    conversation. The restart's close puts it on that place: ADR-0293 §9:2 has the
+    current state show *interrupted* after a restart, and the place's episodes are
+    where it is read, as forgetting the conversation walks them (§2:4). Setting an
+    unset ``channel`` extends the record (ADR-0286 §3:3).
+    """
+    if not isinstance(trigger, RecordedChannelTrigger) or trigger.channel is not None:
+        return trigger
+    target = trigger.target
+    if not isinstance(target, ChannelIdentity) or target.channel_type != "conversation":
+        return trigger
+    return trigger.model_copy(update={"channel": target})
 
 
 def capture_loss(stage: str, reason: str) -> None:
@@ -335,6 +355,7 @@ class ActivationWriter:
         frozen = EpisodeProcessingRecord.model_validate(
             {
                 **dict(processing),
+                "trigger": _on_its_conversation(processing.trigger),
                 "status": ProcessingStatus.INTERRUPTED,
                 "reason": ProcessingReason.HUB_STOPPED,
                 "ended_at": now,
@@ -363,7 +384,7 @@ class ActivationWriter:
                 )
             ]
         )
-        channel = processing.trigger.channel
+        channel = frozen.trigger.channel
         if channel is None or channel.channel_type != "conversation":
             return
         # A ``None`` is a deleted conversation, and the episode is kept (ADR-0293 §2:7).

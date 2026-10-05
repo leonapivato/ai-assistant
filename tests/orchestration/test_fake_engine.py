@@ -71,6 +71,7 @@ from ai_assistant.core.errors import (
     DuplicateDecisionError,
     OversizedValueError,
     UngrantableActError,
+    UnknownConversationError,
 )
 from ai_assistant.core.types import (
     DEFAULT_PAGE_SIZE,
@@ -81,6 +82,7 @@ from ai_assistant.core.types import (
     BeliefSummary,
     BoundAccount,
     ContinuationToken,
+    Conversation,
     ConversationSummary,
     CostBasis,
     DataTier,
@@ -111,6 +113,7 @@ from ai_assistant.core.types import (
     ToolDefinition,
     TurnOutcome,
     TurnReference,
+    UserMessage,
     UtcInstant,
 )
 from ai_assistant.testing import (
@@ -1676,3 +1679,36 @@ async def test_two_first_reads_of_a_held_conversation_join_the_chat_space_once()
     assert second is not None
     started = (await engine.chat_changes(after=0)).changes
     assert [type(one).__name__ for one in started] == ["ConversationStartedChange"]
+
+
+async def test_a_deletion_racing_a_first_read_leaves_no_chat_conversation() -> None:
+    """Deleting a held conversation while a first read is joining it to the chat space.
+
+    The deletion waits for the join and stamps what it joined, so no write is accepted
+    into a conversation every other read calls deleted (#2696 round 3).
+    """
+    engine = FakeAssistantEngine()
+    engine.hold_conversation("c")
+    entered, release = asyncio.Event(), asyncio.Event()
+    start = engine.chat.start
+
+    async def slow_start() -> Conversation:
+        entered.set()
+        await release.wait()
+        return await start()
+
+    engine.chat.start = slow_start  # type: ignore[method-assign]
+    reading = asyncio.create_task(engine.transcript("c"))
+    await entered.wait()
+    deleting = asyncio.create_task(engine.delete_conversation("c"))
+    await asyncio.sleep(0)
+    release.set()
+    await reading
+    assert await deleting is True
+
+    assert await engine.conversation("c") is None
+    assert await engine.transcript("c") is None
+    with pytest.raises(UnknownConversationError):
+        await engine.write_message(
+            "c", message=UserMessage(device_id="phone", message_id="m", text="hello")
+        )

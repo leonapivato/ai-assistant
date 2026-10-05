@@ -262,6 +262,7 @@ from ai_assistant.orchestration.controller import (
     run_recorded,
 )
 from ai_assistant.orchestration.conversations import (
+    check_devices_fit,
     check_message_fits,
     fit_changes,
     fit_transcript,
@@ -7424,6 +7425,7 @@ class Engine:
         self._reject_if_closing()
         held = checked_chat_devices(devices)
         check_arguments("set_my_devices", max_bytes=self._max_payload_bytes, devices=held)
+        check_devices_fit(held, conversation_id=None, max_bytes=self._max_payload_bytes)
         return await self._tracked(
             self._conversations.set_my_devices(held), "set_my_devices", checked=True
         )
@@ -7448,6 +7450,7 @@ class Engine:
             conversation_id=named,
             devices=held,
         )
+        check_devices_fit(held, conversation_id=named, max_bytes=self._max_payload_bytes)
         return await self._tracked(
             self._conversations.set_conversation_devices(named, held),
             "set_conversation_devices",
