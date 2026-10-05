@@ -6,8 +6,9 @@
 - Authorization: the owner accepted proposal #2687 on 2026-10-04, at `099c83da`, which records the rulings of the owner's walkthrough the same day, and the dispatcher assigned 0296. This ADR is that proposal converted under `docs/proposals/README.md` → "When it is decided".
 - **Partially supersedes** [ADR-0292](0292-a-channel-is-the-spokes-facing-one-thing-and-the-assistants-edge-is-its-own.md) — **one scope.** **§4:8's *one connection per device*, §4:9's *closes its connection*, and §4:10's gate, as it reaches a browser device**: one session per device carries all its routes and may use several physical connections; revoking a device ends its session; a hub device is admitted by ADR-0124 and a browser device by its gateway (§1, §3 below). Every other clause stands, §4:9's removal as an end of every place and its unreachable spokes included.
 - **Partially supersedes** [ADR-0293](0293-the-hubs-chat-is-a-hosted-medium-and-a-conversation-keeps-its-own-transcript.md) — **one scope, which takes effect when built.** **§11:1's delivery poll, as the change stream's transport**: a device follows the change stream as one streaming method on the existing wire, opened with its cursor (§4 below). The acts in the medium stay requests. Until the change stream is built, devices fetch it through the delivery poll exactly as §11:1 decides. Every other clause stands.
+- **Partially supersedes** [ADR-0173](0173-an-answer-streams-as-chunks-of-one-reply-and-the-result-frame-is-still-the-answer.md) — **one scope.** **§2:2's *that model is `ReplyChunk`* and §2:3's *no sequence number*, as they reach the change stream's chunk frames**: each carries a change, the current state or a heartbeat, and a change carries its sequence number (§4 below). A reply stream's chunk stays `ReplyChunk` with no sequence number, `FrameKind` gains nothing, §1:4's rule that the hub writes only in answer to an outstanding request binds the change stream, and every other clause stands.
 - **Partially supersedes** [ADR-0168](0168-the-gateway-serves-one-devices-browsers-over-loopback-and-a-web-session-dies-with-the-gateway.md) — **one scope.** **§3:3's *no per-browser identifier* and its bar on any member, argument or convention by which a browser identity reaches the hub, and §3:4, as they reach a browser device**: the gateway names the browser device each request comes from, the hub accepts the name only for a browser device registered under that gateway, and the hub conditions a device's roles on it (§1, §2 below). No session identity, session value or session token crosses the wire, the hub's admission of the gateway's own connection stays ADR-0124 §7's two facts, two browsers on one machine stay one device, and every other clause stands.
-- **Partially supersedes** [ADR-0174](0174-a-gateway-may-serve-a-browser-on-another-overlay-device-and-that-hop-is-the-fourth-egress-boundary.md) — **two scopes.** **§4:4's bars on keying any rule on the list beyond admission, on citing it toward a device-scoped permission, on recording anything durable or revoking anything, and on any browser identity crossing the wire**: listing a machine at a gateway registers it at the hub as a browser device under that gateway, with no roles; the hub keeps that registration and revokes it, and checks the device's roles on every request the gateway names it on (§1–§3 below). **§3:3's *and to no other record***: the hub's registration of a browser device may keep the overlay identity that names it (§1 below). A listed device is still no enrolment under ADR-0124 §6, no ADR-0097 grant and no principal, and every other clause stands, §4:3 and §4:5 included.
+- **Partially supersedes** [ADR-0174](0174-a-gateway-may-serve-a-browser-on-another-overlay-device-and-that-hop-is-the-fourth-egress-boundary.md) — **two scopes.** **§4:4's bars on keying any rule on the list beyond admission, on citing it toward a device-scoped permission, on recording anything durable or revoking anything, and on any browser identity crossing the wire**: listing a machine at a gateway registers it at the hub under that gateway, as a browser device with no roles where it is not already a device; the hub keeps that registration and revokes it, and checks the device's roles on every request the gateway names it on (§1–§3 below). **§3:3's *and to no other record***: the hub's registration of a browser device may keep the overlay identity that names it (§1 below). A listed device is still no enrolment under ADR-0124 §6, no ADR-0097 grant and no principal, and every other clause stands, §4:3 and §4:5 included.
 - **Partially supersedes** [ADR-0175](0175-a-browser-stream-is-a-response-body-on-the-request-the-browser-made-and-one-delivery-fans-out-to-every-open-stream.md) — **one scope.** **§5:4's and §6:4's bars on a per-browser identifier and a per-browser scope, and §6:4's *a browser reaches exactly what the gateway's own device reaches*, as they reach a browser device**: the gateway names the browser device to the hub, and a browser device acts with its own roles (§1, §2 below). No session value crosses the wire, two browsers on one machine stay one device, every browser is still the owner under ADR-0099 §1, and every other clause stands.
 - **Partially supersedes** [ADR-0177](0177-the-browsers-control-surface-is-thirty-operations-and-a-credential-is-entered-only-on-a-loopback-origin.md) — **three scopes.** **§1:1's enumeration, which gains the acts in the medium (ADR-0293 §11:2) and the change stream** (§5 below). **§1:5's closed class of what the gateway supplies of its own, which gains the name of the browser device a request comes from** (§1 below). **§1:6's *no per-browser scope* and *a browser reaches exactly what the gateway's own device reaches*, as they reach a browser device**: of the operations a browser reaches, a browser device reaches what its roles allow (§2 below). §1:6's single principal stands, and every other clause stands, §1:3 included.
 
@@ -47,6 +48,7 @@ a conversation (§4); and declining one physical socket per device (Alternatives
 | ADR-0175 §5:4, §6:4 | ADR-0168 §3's prohibition restated for streams; no per-browser scope; a browser reaches what the gateway's device reaches. | Partially superseded with ADR-0168 §3, as it reaches a browser device (§1, §2). |
 | ADR-0175 §1 | A browser stream is a response body on the request the browser made; the gateway serves no WebSocket (§1:3). | Kept. The browser's change stream is such a stream (§5). |
 | ADR-0177 §1:1, §1:5, §1:6 | The browser reaches a closed enumeration of operations; the gateway supplies only a caller-owned deadline of its own; no per-browser scope. | Partially superseded: the enumeration gains the acts in the medium and the change stream, the gateway supplies the browser device's name, and a browser device reaches what its roles allow (§1, §2, §5). |
+| ADR-0173 §1:1, §2:2–§2:3 | A streaming request is chunk frames then one terminal frame; a chunk's payload is `ReplyChunk`, text alone, with no sequence number. | Partially superseded for the change stream's chunks, which carry changes with their sequence numbers (§4). The reply stream is unchanged. |
 | ADR-0131 | A notification travels to a device as an answer it asked for, on a connection kept for that alone, under a lease the device acknowledges. | Kept for notifications until they become messages (ADR-0292 §7:3). The change stream uses no lease (§4). |
 | ADR-0292 §4:8–§4:10 | Three user-assigned roles; three routes; one connection per device; revoking closes it; admission by ADR-0124. | Partially superseded: "one connection" is one **session**, and a browser device is admitted by its gateway (§1, §3). |
 | ADR-0293 §11:1 | The first build's devices fetch the change stream through the delivery poll. | Partially superseded when built: the change stream is one streaming method (§4). |
@@ -98,8 +100,17 @@ existing wire.
 As the owner ruled it:
 
 > **Normative.** Listing a machine at a gateway (ADR-0174 §4:3) registers it at the
-> hub as a browser device under that gateway, with no roles, and that listing is the
-> whole of its registration: there is no second enrolment.
+> hub under that gateway, as a browser device with no roles where it is not already a
+> device, and that listing is the whole of its registration: there is no second
+> enrolment.
+
+> **Normative.** A machine is one device however many gateways list it and whether
+> or not it is also a hub device, and a listing leaves the roles of a machine that is
+> already a device as they are.
+
+A laptop enrolled as a hub device and listed at another machine's gateway is that one
+device, with the roles the user gave the laptop, which is §1's rule that a device is the
+machine applied to a listing.
 
 > **Normative.** The gateway names the browser device on every request it relays for
 > it, and the hub accepts the name only for a browser device registered under that
@@ -134,7 +145,7 @@ device and gives it none.
 
 | Role | Allows |
 | --- | --- |
-| **In "my devices"** | Being an end of new conversations (ADR-0293 §3:1); starting a conversation, which it is then an end of; writing and reading in conversations it is an end of |
+| **The user's end of conversations**: in "my devices" (ADR-0293 §3:1), or chosen for one conversation (ADR-0293 §3:3) | In "my devices": being an end of every new conversation, and starting a conversation, which it is then an end of. In a conversation it is an end of: reading, and, unless it is an end there for reading only, writing, which is sending a message and deleting a message or the conversation (ADR-0292 §4:5) |
 | **Source of commands and queries** | Commands and queries; changing "my devices" and a conversation's devices; assigning roles |
 | **Host of spokes** | Hosting the assistant's sensors and actuators, placed on channels (ADR-0292 §2:7). None exists yet. |
 
@@ -204,6 +215,15 @@ As the owner ruled it:
 > **Normative.** The change stream is a streaming request as ADR-0173 §1:1 defines one,
 > on a connection of its own, so ADR-0084 §3's one outstanding request per connection
 > stands, and it needs no new protocol and no new dependency.
+
+> **Normative.** Each chunk frame of the change stream carries a change, the current
+> state or a heartbeat, and a change carries its sequence number; a reply stream's
+> chunk stays ADR-0173 §2:2's `ReplyChunk`.
+
+Every frame of the change stream answers the request that carried the cursor, so
+ADR-0173 §1:4's rule that the hub writes only in answer to an outstanding request
+stands; what moves is the chunk's payload, which ADR-0173 §2:2–§2:3 fixed while the reply
+stream was the only stream.
 
 > **Normative.** The device's cursor is its acknowledgement: the change stream holds no
 > lease, and a device that drops reconnects with the last sequence number it applied.
@@ -278,8 +298,8 @@ An `assistant chat` command is that case; it does not exist today.
 
 ### 7. Relationship to earlier decisions
 
-> **Normative.** This ADR supersedes ADR-0292, ADR-0293, ADR-0168, ADR-0174, ADR-0175
-> and ADR-0177 in the scopes its header names, and no clause of any other ADR.
+> **Normative.** This ADR supersedes ADR-0292, ADR-0293, ADR-0173, ADR-0168, ADR-0174,
+> ADR-0175 and ADR-0177 in the scopes its header names, and no clause of any other ADR.
 
 > **Normative.** This numbered draft records its replacements on the status line and in
 > a dated header note of each ADR it supersedes in part, atomically with this ADR under
@@ -295,6 +315,7 @@ Decision's second clause.
 | --- | --- |
 | ADR-0292 §4:8–§4:10, one connection per device and its gate | §1 (two kinds of device), §3 (a session) |
 | ADR-0293 §11:1's delivery poll | §4 (the change stream) |
+| ADR-0173 §2:2–§2:3, for the change stream's chunks | §4 (what a chunk carries) |
 | ADR-0168 §3:3–§3:4, as they reach a browser device | §1 (the gateway names it), §2 (its own roles) |
 | ADR-0174 §3:3's *no other record*, §4:4's bars | §1 (listing registers), §3 (revoking at the hub) |
 | ADR-0175 §5:4, §6:4, as they reach a browser device | §1, §2 |

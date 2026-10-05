@@ -1,6 +1,6 @@
 # 173. An answer streams as chunks of one reply, and the result frame is still the answer
 
-- Status: Partially superseded by ADR-0293 (§4's `converse_streaming` as an entry on the engine surface, once the first build lands)
+- Status: Partially superseded by ADR-0293 (§4's `converse_streaming` as an entry on the engine surface, once the first build lands) and ADR-0296 (§2:2's `ReplyChunk` payload and §2:3's bar on a sequence number, each only as it reaches the change stream's chunk frames)
 - Date: 2026-08-21
 - Note (2026-09-18): ADR-0274 §4 adds `receive_streaming`, whose terminal
   value wraps a conversational outcome in `ChannelResult`. This uses §4's
@@ -59,6 +59,15 @@
   carry that answer and changes nothing about what crosses or where.
 - **Every reference below to ADR-NNNN is to its text as merged on 2026-08-21**,
   the durability form ADR-0100 established. Refs #1312.
+- Partially superseded: 2026-10-04 by ADR-0296 — one scope. §2:2's *that model is
+  `ReplyChunk`* and §2:3's *no sequence number*, as they reach the change stream's chunk
+  frames: each carries a change, the current state or a heartbeat, and a change carries
+  its sequence number (ADR-0296 §4). A reply stream's chunk stays `ReplyChunk` with no
+  sequence number, `FrameKind` gains nothing, §1:4's rule that the hub writes only in
+  answer to an outstanding request binds the change stream, and every other clause
+  stands. This replacement takes effect on ratification of ADR-0296. This reciprocal
+  header record accompanies the numbered draft under ADR-0070 and ADR-0082; prior
+  supersessions and the ratified body below are preserved.
 
 ## Context
 

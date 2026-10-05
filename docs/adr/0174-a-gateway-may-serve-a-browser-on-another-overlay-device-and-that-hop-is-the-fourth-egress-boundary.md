@@ -154,15 +154,16 @@
 - Partially superseded: 2026-10-04 by ADR-0296 — two scopes. §4:4's bars on keying any
   rule on the list beyond admission, on citing it toward a device-scoped permission, on
   recording anything durable or revoking anything, and on any browser identity crossing
-  the wire: listing a machine at a gateway registers it at the hub as a browser device
-  under that gateway, with no roles; the hub keeps that registration and revokes it, and
-  checks the device's roles on every request the gateway names it on (ADR-0296 §1–§3).
-  §3:3's *and to no other record*: the hub's registration of a browser device may keep
-  the overlay identity that names it (ADR-0296 §1). A listed device is still no
-  enrolment under ADR-0124 §6, no ADR-0097 grant and no principal, and every other
-  clause stands, §4:3 and §4:5 included. These replacements take effect on ratification
-  of ADR-0296. This reciprocal header record accompanies the numbered draft under
-  ADR-0070 and ADR-0082; prior supersessions and the ratified body below are preserved.
+  the wire: listing a machine at a gateway registers it at the hub under that gateway,
+  as a browser device with no roles where it is not already a device; the hub keeps that
+  registration and revokes it, and checks the device's roles on every request the
+  gateway names it on (ADR-0296 §1–§3). §3:3's *and to no other record*: the hub's
+  registration of a browser device may keep the overlay identity that names it (ADR-0296
+  §1). A listed device is still no enrolment under ADR-0124 §6, no ADR-0097 grant and no
+  principal, and every other clause stands, §4:3 and §4:5 included. These replacements
+  take effect on ratification of ADR-0296. This reciprocal header record accompanies the
+  numbered draft under ADR-0070 and ADR-0082; prior supersessions and the ratified body
+  below are preserved.
 
 ## Context
 
