@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import asyncio
+import contextlib
 from dataclasses import dataclass, field
 from typing import TYPE_CHECKING
 from uuid import UUID
@@ -12,6 +13,7 @@ from ai_assistant.core.episode_encoding import canonical_json, episode_content
 from ai_assistant.core.errors import (
     AssistantError,
     ChannelProcessingTimeoutError,
+    MemoryStoreConflictError,
     OversizedValueError,
     TranscriptionFailedError,
 )
@@ -393,7 +395,7 @@ class FakeActivation:
         """
         return self.forgotten
 
-    async def finish(  # noqa: C901, PLR0911, PLR0913 — bounded capture stages, truthful early-loss returns, and the forgetting checks either side of the write
+    async def finish(  # noqa: C901, PLR0911, PLR0912, PLR0913 — bounded capture stages, truthful early-loss returns, and the forgetting checks either side of the write
         self,
         *,
         memory: MemoryStore,
@@ -443,9 +445,21 @@ class FakeActivation:
                 return degraded()
             if self.was_forgotten():
                 return forgotten()
-            await memory.write_atomic(
-                [MemoryWrite(record=record, mode=MemoryWriteMode.INSERT_IF_ABSENT)]
-            )
+            try:
+                await memory.write_atomic(
+                    [MemoryWrite(record=record, mode=MemoryWriteMode.INSERT_IF_ABSENT)]
+                )
+            except MemoryStoreConflictError:
+                # The address holds another record, which a forget never reaches.
+                raise
+            except BaseException:
+                # Indeterminate, a cancellation included: where the conversation was
+                # forgotten meanwhile, the write may have committed, so the episode is
+                # deleted before the failure goes on (ADR-0293 §2:6, ADR-0286 §8:2).
+                if self.was_forgotten():
+                    with contextlib.suppress(Exception):
+                        await memory.delete(address)
+                raise
             if self.was_forgotten():
                 # Forgotten while the write was on its way: as ADR-0286 §8:2's next
                 # write after the mark, the episode is deleted rather than kept.

@@ -81,6 +81,8 @@ from ai_assistant.core.types import (
     BeliefBand,
     BeliefSummary,
     BoundAccount,
+    ChannelIdentity,
+    ChannelInput,
     ContinuationToken,
     Conversation,
     ConversationSummary,
@@ -97,6 +99,7 @@ from ai_assistant.core.types import (
     GrantScope,
     Idempotency,
     MemoryKind,
+    MemoryWrite,
     PermissionDecision,
     PermissionOutcome,
     PermissionRuling,
@@ -109,12 +112,14 @@ from ai_assistant.core.types import (
     RiskLevel,
     RoutableOperation,
     SpanCoverage,
+    TextChannelPayload,
     ToolCost,
     ToolDefinition,
     TurnOutcome,
     TurnReference,
     UserMessage,
     UtcInstant,
+    WholeTextReply,
 )
 from ai_assistant.testing import (
     AUTHORIZATION_GOAL,
@@ -1712,3 +1717,46 @@ async def test_a_deletion_racing_a_first_read_leaves_no_chat_conversation() -> N
         await engine.write_message(
             "c", message=UserMessage(device_id="phone", message_id="m", text="hello")
         )
+
+
+async def test_a_forgotten_capture_whose_write_commits_then_cancels_leaves_no_episode() -> None:
+    """ADR-0293 §2:6: a write committed and then cancelled is still cleaned up.
+
+    The turn's capture write is held, its conversation forgotten, and the write then
+    commits and propagates a cancellation — which the store's cancellation contract
+    permits. The forgotten capture deletes what landed before the cancellation goes on
+    (#2696 round 5).
+    """
+    engine = FakeAssistantEngine()
+    conversation = (await engine.start_conversation()).id
+    memory = engine.episode_memory
+    entered, release = asyncio.Event(), asyncio.Event()
+    original = memory.write_atomic
+    landed: list[str] = []
+
+    async def commit_then_cancel(writes: Sequence[MemoryWrite]) -> Sequence[str]:
+        entered.set()
+        await release.wait()
+        await original(writes)
+        landed.extend(write.record.id for write in writes)
+        raise asyncio.CancelledError
+
+    memory.write_atomic = commit_then_cancel  # type: ignore[method-assign]
+    turn = asyncio.create_task(
+        engine.receive(
+            ChannelInput(
+                target=ChannelIdentity(channel_type="conversation", instance_id=conversation),
+                payload=TextChannelPayload(text="hello"),
+            ),
+            reply=WholeTextReply(),
+            timeout=timedelta(seconds=5),
+        )
+    )
+    await entered.wait()
+    await engine.forget_conversation(conversation)
+    release.set()
+    with pytest.raises(asyncio.CancelledError):
+        await turn
+
+    assert landed, "the write committed before it was cancelled"
+    assert await memory.get(landed[0]) is None
