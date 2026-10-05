@@ -774,14 +774,17 @@ async def test_a_stop_cannot_land_between_the_claims_lookup_and_its_write(
 
     Raced across **separate connections**, which share no in-process lock, so what
     orders them is the claim's own ``BEGIN IMMEDIATE``. The claiming worker is parked
-    **after** it has read the stop records and **before** it writes the step; a stop
-    on the other connection is then started and must not commit while the claim is
-    parked. An implementation that read the records outside the claim's transaction
-    would let the stop commit inside that window and the claim then land after it —
-    the "third case" §2 says the store's total order admits none of.
+    **after** it has read the stop records and **before** it writes the step, and a
+    second connection then tries to take the write lock a stop's write begins with,
+    **while it is parked** and with no busy wait, so the attempt is made at that
+    instant rather than whenever a scheduler gets to it. It must be refused. An
+    implementation that
+    read the records outside the claim's transaction would hold no lock there, so the
+    stop would commit inside the window and the claim then land after it — the "third
+    case" §2 says the store's total order admits none of.
 
-    So the stop waits for the claim, the claim lands (it was first), and the stop then
-    lands too and refuses the activation's next claim.
+    Released, the claim lands (it was first), and the stop then lands through the store
+    and refuses the activation's next claim.
     """
     path = tmp_path / "plans.db"
     claimer = SqlitePlanStore(path=path, now=_fixed_now)
@@ -810,18 +813,22 @@ async def test_a_stop_cannot_land_between_the_claims_lookup_and_its_write(
             claimer.commit_transition(_claim(state, activation_id="act-1"))
         )
         in_flight.append(claiming)
-        await asyncio.to_thread(looked_up.wait, 10)
-        stopping = asyncio.ensure_future(stopper.record_stop("act-1"))
-        in_flight.append(stopping)
-        await asyncio.sleep(0.2)
-        stopped_inside_the_claim = stopping.done()
+        assert await asyncio.to_thread(looked_up.wait, 10), "the claim reached its lookup"
+
+        competing = sqlite3.connect(path, timeout=0, isolation_level=None)
+        try:
+            # Taking the write lock is the first thing a stop's write does, and the
+            # claim's transaction already holds it.
+            with pytest.raises(sqlite3.OperationalError, match="locked"):
+                competing.execute("BEGIN IMMEDIATE")
+        finally:
+            competing.close()
         release.set()
 
         claimed = await claiming
-        await stopping
         monkeypatch.setattr(sqlite_store, "_is_stopped", original)
+        await stopper.record_stop("act-1")
 
-        assert not stopped_inside_the_claim, "the stop committed inside the claim's step"
         landed = claimed.step("s1")
         assert landed is not None
         assert landed.status is StepStatus.RUNNING, "the claim was first, so it stands"
