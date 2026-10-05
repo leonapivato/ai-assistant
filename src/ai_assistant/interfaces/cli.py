@@ -255,6 +255,8 @@ from ai_assistant.core.episode_encoding import check_list as check_episode_list
 from ai_assistant.core.errors import (
     AssistantError,
     ConfigurationError,
+    DeviceRefusal,
+    DeviceRefusedError,
     DisplacedProvisioningError,
     DuplicateDestinationTrustError,
     DuplicateRecipientGrantError,
@@ -274,6 +276,7 @@ from ai_assistant.core.errors import (
     UnusableIdentityError,
 )
 from ai_assistant.core.logging import configure_logging
+from ai_assistant.core.streams import closing_stream
 from ai_assistant.core.types import (
     CHAT_DEVICES_MAX,
     DEFAULT_NOTIFICATION_REACH,
@@ -293,6 +296,7 @@ from ai_assistant.core.types import (
     BoundKind,
     ChannelIdentity,
     ChatDevice,
+    ChatStreamEnd,
     Clarification,
     ClarificationWithdrawal,
     ClassReach,
@@ -386,6 +390,7 @@ from ai_assistant.wire import (
     store_enrolment,
 )
 from ai_assistant.wire.address import check_socket_path
+from ai_assistant.wire.envelope import CHANGE_STREAM_HEARTBEAT
 
 if TYPE_CHECKING:
     from collections.abc import Awaitable, Callable, Mapping, Sequence
@@ -406,6 +411,7 @@ if TYPE_CHECKING:
         ConversationState,
         ConversationSummary,
         DestinationProtocol,
+        DeviceChange,
         EgressSpan,
         GrantableSource,
         HeldNotification,
@@ -1958,13 +1964,19 @@ async def _show_story(story_id: str) -> int:
 # its transcript, delete a message or the conversation, and keep "my devices" and a
 # conversation's devices. Each act is one engine call relayed. What this adds, and
 # nothing more, is which device this command line is, the message id it chooses for
-# each message (ADR-0293 §4:1), and the polling a followed conversation is read by
-# until the change stream replaces it (§11:1, ADR-0296 §4). Forgetting is
+# each message (ADR-0293 §4:1), and the cursor a followed conversation's change
+# stream is opened from and reopened from (ADR-0296 §4:4, §6:1-§6:2). Forgetting is
 # ``forget-conversation``, offered beside deleting and never folded into it (§2:7).
 
-#: How often a followed conversation is read again for its changes and its current
-#: state, in seconds. Polling is the first build's transport (ADR-0293 §11:1).
-_CHAT_POLL_SECONDS: Final = 1.0
+#: How long a chat waits before opening its change stream again once it is lost, in
+#: seconds, the first time. Each further attempt waits twice as long as the one
+#: before, up to :data:`_CHAT_RETRY_MAX_SECONDS`, and an opened stream starts over.
+_CHAT_RETRY_SECONDS: Final = 1.0
+
+#: The longest a chat waits between attempts to open its change stream again, in
+#: seconds: the hub's heartbeat interval, so a hub that comes back is followed again
+#: within about the time a live one would have taken to say it was alive.
+_CHAT_RETRY_MAX_SECONDS: Final = CHANGE_STREAM_HEARTBEAT.total_seconds()
 
 #: How many of a conversation's recent messages a snapshot shows (ADR-0293 §5:13).
 _CHAT_SNAPSHOT_LIMIT: Final = 50
@@ -2496,6 +2508,22 @@ class _ChatView:
         _print("[yellow]This device is no longer shown this conversation.[/]")
         return False
 
+    def fill(self, snapshot: Sequence[TranscriptMessage | DeletedMessage]) -> None:
+        """Show what a change's snapshot holds that this chat has not shown (ADR-0298 §7:6).
+
+        The stream sends a snapshot only with the change that makes this device one of
+        the conversation's ends for reading, so a chat shown the conversation all along
+        is not sent one. Where one is sent, each entry not shown yet is shown, and a
+        marker replacing a message shown says so, so nothing is shown twice.
+        """
+        for entry in snapshot:
+            shown = self.entries.get(entry.position)
+            self.entries[entry.position] = entry
+            if shown is None:
+                _render_chat_entry(entry, known=self.entries)
+            elif isinstance(entry, DeletedMessage) and isinstance(shown, TranscriptMessage):
+                _print(f"[dim]Message #{entry.position} was deleted.[/]")
+
     def _added(self, message: TranscriptMessage) -> None:
         """Show a message added, unless it is one this device is sending (§4:4)."""
         self.entries[message.position] = message
@@ -2512,14 +2540,15 @@ async def _drive_chat(  # noqa: PLR0913 — the engine, the conversation, the de
     read_line: Callable[[], Awaitable[str | None]],
     confirm: Callable[[], bool],
     start_reading: Callable[[], None] = lambda: None,
-    poll_seconds: float = _CHAT_POLL_SECONDS,
+    retry_seconds: float = _CHAT_RETRY_SECONDS,
 ) -> int:
     """Open or start a conversation, show it, and relay each line until you leave.
 
-    The conversation is followed on a task of its own, polling its changes after the
-    cursor and its current state (ADR-0293 §11:1, §8), while lines are read; either
-    ending ends the chat. ``start_reading`` is called once the device prompts before
-    the conversation are answered, so the terminal is read by one reader at a time.
+    The conversation is followed on a task of its own, on the change stream from the
+    snapshot's cursor (ADR-0296 §6:1, :func:`_follow_chat`), while lines are read;
+    either ending ends the chat. ``start_reading`` is called once the device prompts
+    before the conversation are answered, so the terminal is read by one reader at a
+    time.
     """
     try:
         opened = await _open_chat(engine, conversation_id, device_id=device_id, confirm=confirm)
@@ -2529,7 +2558,7 @@ async def _drive_chat(  # noqa: PLR0913 — the engine, the conversation, the de
         if view is None:
             return _EXIT_ERROR
         start_reading()
-        follower = asyncio.create_task(_follow_chat(engine, view, poll_seconds=poll_seconds))
+        follower = asyncio.create_task(_follow_chat(engine, view, retry_seconds=retry_seconds))
         try:
             return await _relay_lines(engine, view, read_line=read_line, follower=follower)
         finally:
@@ -2629,7 +2658,7 @@ async def _show_snapshot(engine: AssistantEngine, view: _ChatView) -> bool:
     """Show the conversation from a snapshot, where this device is still shown it.
 
     The devices are read **after** the snapshot, so a change to them that the
-    snapshot's cursor already covers — and polling will therefore never deliver — is
+    snapshot's cursor already covers — and the stream will therefore never deliver — is
     still seen before anything is shown (ADR-0293 §3:5). ``False`` where the
     conversation is gone or this device may no longer read it.
     """
@@ -2782,40 +2811,130 @@ async def _send(engine: AssistantEngine, view: _ChatView, message: UserMessage) 
             assert_never(receipt.outcome)
 
 
-async def _follow_chat(engine: AssistantEngine, view: _ChatView, *, poll_seconds: float) -> int:
-    """Read the conversation again every ``poll_seconds`` until it is deleted."""
-    while True:
-        await asyncio.sleep(poll_seconds)
-        if not await _poll_chat(engine, view):
-            return _EXIT_OK
+async def _follow_chat(engine: AssistantEngine, view: _ChatView, *, retry_seconds: float) -> int:
+    """Follow the conversation on the change stream until the chat ends (ADR-0296 §6:1).
 
+    Each stream is opened from the cursor and its chunks applied (:func:`_follow_stream`).
+    **Where it is lost** — the hub not reachable, or the stream ended because the hub
+    is shutting down — it is opened again from the last change applied, which is
+    the device's acknowledgement (§4:4): after ``retry_seconds``, then twice as long
+    each time up to :data:`_CHAT_RETRY_MAX_SECONDS`, saying once that it was lost and
+    once that it is followed again. Lines are still read meanwhile, so ``/quit``
+    leaves at any time.
 
-async def _poll_chat(engine: AssistantEngine, view: _ChatView) -> bool:
-    """Show every change after the cursor, then the current state; ``False`` once gone.
+    **A refusal for holding no role ends the chat** (ADR-0298 §7:17): the device drops
+    every conversation it holds, and this one is the only one a command line holds.
+    Every other failure is the chat's boundary's to render (:func:`_drive_chat`).
 
-    A full page is followed by another read at once. A cursor the chat space has
-    fewer changes than means it started afresh, so the conversation is shown again
-    from a snapshot (ADR-0293 §5:13).
+    Returns:
+        The chat's exit code, where the conversation ends for this device.
     """
+    delay = retry_seconds
+    lost = False
+
+    def _opened() -> None:
+        nonlocal delay, lost
+        if lost:
+            _print("[dim]Following the conversation again.[/]")
+        delay, lost = retry_seconds, False
+
     while True:
-        page = await engine.chat_changes(
-            after=view.cursor, conversation_ids=(view.conversation_id,), limit=DEFAULT_PAGE_SIZE
-        )
-        if page.next_after < view.cursor:
-            _print("[dim]The chat started afresh; here is the conversation as it stands.[/]")
-            view.entries.clear()
-            return await _show_snapshot(engine, view)
-        added = [one.message for one in page.changes if isinstance(one, MessageAddedChange)]
-        await _resolve_replies(engine, view.conversation_id, added, into=view.entries)
-        for change in page.changes:
-            if not view.apply(change):
-                return False
-        view.cursor = page.next_after
-        if len(page.changes) < DEFAULT_PAGE_SIZE:
-            break
+        try:
+            ended = await _follow_stream(engine, view, opened=_opened)
+        except TransportError:
+            ended = None
+        except DeviceRefusedError as exc:
+            if exc.reason is not DeviceRefusal.NO_ROLE:
+                raise
+            _print(
+                "[yellow]This device holds no role on the hub now, so it is shown no "
+                "conversation.[/]"
+            )
+            return _EXIT_ERROR
+        if ended is not None:
+            return ended
+        if not lost:
+            _print("[dim]Lost the hub; following again once it is back…[/]")
+            lost = True
+        await asyncio.sleep(delay)
+        delay = min(delay * 2, _CHAT_RETRY_MAX_SECONDS)
+
+
+async def _follow_stream(
+    engine: AssistantEngine, view: _ChatView, *, opened: Callable[[], None]
+) -> int | None:
+    """Apply one change stream's chunks from the cursor (ADR-0298 §7).
+
+    A change moves the cursor once it is applied, and only one of this
+    conversation's is shown; the hub's own machine is sent every conversation's.
+    The current state is shown as it is pushed (ADR-0296 §4:9), and the device's
+    roles and the heartbeat move nothing here.
+
+    **Once the stream has sent its first chunk, the conversation is read again**
+    (:func:`_catch_up`), and ``opened`` is called: the current state is read with a
+    conversation on catch-up rather than pushed (§4:9), so what it was when the
+    stream opened is read here, and whatever it becomes after is pushed. Read after
+    the first chunk rather than before the stream is asked for, so the reading is
+    no older than the stream's own (over the wire, the first chunk is the device's
+    roles, written as the stream opens).
+
+    Returns:
+        The chat's exit code where the conversation ends for this device, or
+        ``None`` where the hub ended the stream because it is shutting down, the
+        cursor then the one to open the next from.
+    """
+    caught_up = False
+    async with closing_stream(engine.follow_chat(after=view.cursor)) as chunks:
+        async for chunk in chunks:
+            if isinstance(chunk, ChatStreamEnd):
+                view.cursor = max(view.cursor, chunk.next_after)
+                return None
+            if chunk.change is not None and not await _apply_change(engine, view, chunk.change):
+                return _EXIT_OK
+            if chunk.state is not None and chunk.state.conversation_id == view.conversation_id:
+                view.show_state(chunk.state.state)
+            if not caught_up:
+                caught_up = True
+                if not await _catch_up(engine, view):
+                    return _EXIT_OK
+                opened()
+    return None
+
+
+async def _apply_change(engine: AssistantEngine, view: _ChatView, change: DeviceChange) -> bool:
+    """Apply one change and move the cursor past it; ``False`` where the chat ends.
+
+    A message's replies are resolved before it is shown (:func:`_resolve_replies`),
+    and a snapshot travelling with the change is shown before the change itself, as
+    the conversation stood at it (ADR-0298 §7:6-§7:7).
+    """
+    if change.conversation_id == view.conversation_id:
+        if change.snapshot is not None:
+            await _resolve_replies(engine, view.conversation_id, change.snapshot, into=view.entries)
+            view.fill(change.snapshot)
+        if isinstance(change.change, MessageAddedChange):
+            await _resolve_replies(
+                engine, view.conversation_id, (change.change.message,), into=view.entries
+            )
+    if not view.apply(change.change):
+        return False
+    view.cursor = change.seq
+    return True
+
+
+async def _catch_up(engine: AssistantEngine, view: _ChatView) -> bool:
+    """Read the conversation as a stream opens: whether it is shown, and its state.
+
+    ``False`` where the conversation is gone — deleted, forgotten, or never held by
+    a hub that came back with a fresh chat space, which look the same from here on
+    purpose (:func:`_render_no_such_conversation`) — or no longer shown to this
+    device (ADR-0293 §3:5).
+    """
     digest = await engine.conversation(view.conversation_id)
     if digest is None:
-        _print("[yellow]This conversation was deleted.[/]")
+        _render_no_such_conversation(view.conversation_id)
+        return False
+    if not view.still_shown(digest.devices):
         return False
     view.show_state(digest.state)
     return True
