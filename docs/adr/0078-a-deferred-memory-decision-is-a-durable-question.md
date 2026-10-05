@@ -1,6 +1,6 @@
 # 78. A deferred memory decision is a durable question the user answers
 
-- Status: Partially superseded by ADR-0084 (§8's placement of the question surface and its DTOs outside contract surface, and its licence to widen the learn DTO without a contract change)
+- Status: Partially superseded by ADR-0084 (§8's placement of the question surface and its DTOs outside contract surface, and its licence to widen the learn DTO without a contract change) and ADR-0293 (§8's answering call, as the route by which the user answers a question, once question messages and their answers are built)
 - Date: 2026-07-28
 - Partially superseded: 2026-07-31 by ADR-0084 — **§8's three statements that the
   façade is not contract surface are false; every decision §8 made about *what the
@@ -54,6 +54,16 @@
   the form ADR-0075 established. Appended note per ADR-0070 §1: no text below it
   is rewritten, and the superseded sentences are left standing exactly as written.
   §10's ratification checklist and the 2026-07-30 note below are untouched.
+- Partially superseded: 2026-10-04 by ADR-0293 — one scope, which takes effect when
+  built. §8's answering call, `answer(question_id, *, accept)`, as the route by which
+  the user answers a question: the user answers by a message naming the question and,
+  for a button, the option (ADR-0293 §4, §6). Until question messages and their answers
+  are built, `answer` keeps working exactly as this ADR decides it (ADR-0293
+  §Decision:2, ADR-0292 §13:1); this record states the replacement now because ADR-0293
+  is the decision that makes it. What an answer authorizes, and that it is used once,
+  are not decided by ADR-0293, and every other clause stands. This reciprocal header
+  record accompanies the numbered draft under ADR-0070 and ADR-0082; prior supersessions
+  and the ratified body below are preserved.
 - Note (2026-07-30): **§10's `Status` renderings for ADR-0045 and ADR-0050 are
   re-rendered; what §10 required is unchanged.** §10 instructed each of those
   files to be "qualified" on its `Status` line plus a dated note. Both already
