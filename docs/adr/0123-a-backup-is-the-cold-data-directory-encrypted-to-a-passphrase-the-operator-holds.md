@@ -1,6 +1,6 @@
 # 123. A backup is the cold data directory, encrypted to a passphrase the operator holds off the machine
 
-- Status: Accepted
+- Status: Partially superseded by ADR-0299 (§3:2's exclusions, in the addition alone: `admin.sock`)
 - Date: 2026-08-09
 - **Decides no `core` surface.** No Protocol in `core/protocols.py` changes and no
   type, enum member or constant is added to `core/types.py` (§10). Golden rule 5
@@ -9,6 +9,14 @@
 - **This ADR amends nothing and supersedes nothing.** §12 applies ADR-0082 §1's
   test to each of the nine places where a record looks owed, and records why none
   is.
+- Partially superseded: 2026-10-05 by ADR-0299 — one scope. §3:2's exclusions, in the
+  addition alone: the backup also excludes `admin.sock`, the hub's control socket, for
+  the reason §3 gives for `hub.sock` — a socket a killed hub leaves would otherwise make
+  §1:2 refuse every backup taken before the next clean start (ADR-0299 §1). Its path comes
+  from `wire/address.py` under §3:3, and §3:3–§3:6 and every other clause stand. This
+  replacement takes effect on ratification of ADR-0299. This reciprocal header record
+  accompanies the numbered draft under ADR-0070 and ADR-0082; the ratified body below is
+  preserved.
 
 ## Context
 
