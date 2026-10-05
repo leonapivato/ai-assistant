@@ -71,8 +71,8 @@ its own to be refused on, keyed to the activation the stop names.**
 ## Decision
 
 We will make a stop two writes in a fixed order: a **mark** on the running activation's
-in-process state, which the controller and every repeating stage read and which ends the
-pass at its next step, and then a **stop record** in the plan store, against which the
+in-process state, which the controller and a resume read and which ends the pass before
+its next stage, and then a **stop record** in the plan store, against which the
 store refuses every later claim made under that activation. No task is cancelled, so an
 effect already sent finishes and records its own outcome.
 
@@ -265,17 +265,26 @@ forbids.
 > `interrupted`.
 
 > **Normative.** A resume, which the controller does not run (ADR-0284 §5:5), reads the
-> mark before it begins `compose`, composes nothing once it is set, and ends with the
-> stop's end entry.
+> mark before it begins `compose` and nowhere else, composes nothing once it is set, and
+> ends with the stop's end entry.
 
-> **Normative.** A stage that repeats a unit of work — each step of a walk, each round of
-> the turn loop — reads the mark before it begins each unit, begins none once it is set,
-> and ends having done what it already did.
+The resume therefore records the user's answer whenever the stop lands, and its claim is
+the store's to decide (§2).
 
-That is how "nothing new starts" is honoured inside a stage, and why a park recorded after
-the stop is the rare one whose step was entered before the mark. A walk that ends on the
-mark leaves no disposal, so it is not a member of ADR-0255 §2's stop list and adds no
-`Disposition` member, as ADR-0261 §7:1 rules for a refused claim.
+> **Normative.** The unit at which nothing new starts is the stage, and the claim: once
+> the mark is set no stage begins, and once the stop record is written no claim lands; a
+> stage already running when the mark is set is work already started, and the rounds,
+> rulings and steps inside it are that stage running to its end.
+
+That is this ADR's reading of ADR-0295 §2:1 under the owner's ruling that *"which work is
+interrupted at once, and how each phase stops, is the phases' design"*. A further round of
+the turn loop after the mark still services the reads it asks for, within the turn's
+planning budget and allowances (ADR-0251 §4), and a walk's next step still meets its
+ruling — and is refused at its claim. So no effect starts after the stop has landed,
+which ADR-0295 §2:2 makes the store's, and no stage starts after the mark. The one residual
+is a step whose ruling is `CONFIRM` and whose park commits after the mark: its confirmation
+stands as any pending confirmation stands, answerable where pending confirmations are
+listed, and the question it asks is an ended activation's open question (ADR-0295 §1:7).
 
 > **Normative.** A stop cancels no task and adds no deadline: a stage running when the
 > mark is set runs to its own end under exactly the deadlines and timeout enforcement it
@@ -471,8 +480,8 @@ one row per stop the user ever gave, until it is cleared.
 1. **The plan store's lane**: `record_stop`, the conjunct, `ClaimStopped`, the export field,
    with the `PlanStore` conformance suite and canonical fake.
 2. **The orchestration lane**: the in-process holding of running activations, the mark,
-   the threaded `activation_id`, the controller's reading of the mark, the repeating
-   stages', the resume's, the classification, the adapter's silence, `stop_activation` and
+   the threaded `activation_id`, the controller's and the resume's reading of the mark,
+   the classification, the adapter's silence, `stop_activation` and
    its wire route, with the engine conformance suite and canonical fake.
 3. **The interfaces lane**: `assistant stop`, and the gateway's stop control beside
    "working…", built on the current state's id.
@@ -492,6 +501,11 @@ session's (ADR-0295, out of scope).
 
 ## Alternatives considered
 
+- **Read the mark inside the turn loop and the walk**, before each round and each step.
+  Declined: the loop's further round is admitted *"if and only if **all**"* of ADR-0251
+  §4:1's conditions hold and its stop vocabulary is closed (ADR-0228 §9, as ADR-0251 left
+  it), so the check would reopen both for a gain bounded by the turn's planning budget, and
+  a walk's next step is already refused at its claim.
 - **Fence the attempt instead of the activation**, by a new `AttemptState` or by pausing
   it. Declined: ending an attempt while its goal stays open is the act ADR-0261 §1:4
   forbids, pausing borrows a state that means *waiting on the user's answer*, and an
