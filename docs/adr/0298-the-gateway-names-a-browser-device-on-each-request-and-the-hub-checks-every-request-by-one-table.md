@@ -245,7 +245,7 @@ remote listener, and those browser devices need roles.
 
 | Class | The requesting device must | Methods |
 | --- | --- | --- |
-| **Command or query** | hold the role of source of commands and queries | `abandon_goal`, `activation_stories`, `belief`, `beliefs`, `cancel_read`, `connect_account`, `connected_accounts`, `create_story`, `disconnect_account`, `dismiss_notification`, `episode_chunk`, `episodes`, `establish_destination_trust`, `establish_recipient_grant`, `export_decisions`, `export_invocations`, `export_reads`, `forget`, `forget_notification`, `forget_question`, `goals`, `grant`, `grantable_decisions`, `grantable_sources`, `guard`, `interrupted_questions`, `link_story`, `merge_stories`, `my_devices`, `notification_preferences`, `notifications`, `pending_confirmations`, `questions`, `recent_connection_acts`, `recent_decisions`, `recent_grants`, `recent_invocations`, `recent_reads`, `recent_recipient_grants`, `reprovision_account`, `resume`, `revoke`, `revoke_authorization`, `revoke_destination_trust`, `revoke_recipient_grant`, `set_notification_preferences`, `spend_totals`, `split_story`, `standing_authorizations`, `standing_destination_trust`, `standing_grants`, `standing_recipient_grants`, `stories`, `story`, `story_log`, `unguard`, `unlink_story`, `withdraw_clarification` |
+| **Command or query** | hold the role of source of commands and queries | `abandon_goal`, `activation_stories`, `belief`, `beliefs`, `cancel_read`, `connect_account`, `connected_accounts`, `create_story`, `disconnect_account`, `dismiss_notification`, `episode_chunk`, `episodes`, `establish_destination_trust`, `establish_recipient_grant`, `export_decisions`, `export_invocations`, `export_reads`, `forget`, `forget_notification`, `forget_question`, `goals`, `grant`, `grantable_decisions`, `grantable_sources`, `guard`, `interrupted_questions`, `link_story`, `merge_stories`, `my_devices`, `notification_preferences`, `notifications`, `pending_confirmations`, `questions`, `recent_connection_acts`, `recent_decisions`, `recent_grants`, `recent_invocations`, `recent_reads`, `recent_recipient_grants`, `reprovision_account`, `resume`, `revoke`, `revoke_authorization`, `revoke_destination_trust`, `revoke_recipient_grant`, `set_notification_preferences`, `spend_totals`, `split_story`, `standing_authorizations`, `standing_destination_trust`, `standing_grants`, `standing_recipient_grants`, `stop_activation`, `stories`, `story`, `story_log`, `unguard`, `unlink_story`, `withdraw_clarification` |
 | **Setting devices** | hold the command role, and name only devices the hub knows (§4) | `set_my_devices`, `set_conversation_devices` |
 | **Forgetting a conversation** | hold the command role and, while the method still deletes the conversation (until ADR-0293 §11:4 is built), be its end for writing | `forget_conversation` |
 | **Starting** | be in "my devices" | `start_conversation` |
@@ -263,7 +263,8 @@ A legacy turn is ADR-0293 §11:2's "for the conversation" and §11:5–§11:6's 
 routes: input to the assistant, which a command never is (ADR-0292 §4:4), so it needs
 the user's end rather than the command role, and both ends because it answers with the
 assistant's reply. `resume` answers a parked confirmation with the user's authority
-and stays a command until question messages are built (ADR-0293 §6).
+and stays a command until question messages are built (ADR-0293 §6). `stop_activation` is a command because ADR-0295 §1:4 accepts a stop only from a device
+that may send commands.
 
 > **Normative.** A request's kind (ADR-0296 §3:5) is its envelope `method`, and for
 > `receive` and `receive_streaming` also the input's target — its `kind`, and a
