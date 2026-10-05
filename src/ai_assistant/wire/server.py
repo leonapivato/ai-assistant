@@ -370,7 +370,7 @@ def _requesting_device(session: _Session, acting_for: str | None) -> RequestingD
 
 
 def _admitted(
-    session: _Session, frame: env.Envelope, arguments: dict[str, Any]
+    session: _Session, method: str, frame: env.Envelope, arguments: dict[str, Any]
 ) -> RequestingDevice:
     """Decide a request's device and check its roster-only rows, before dispatch.
 
@@ -384,10 +384,6 @@ def _admitted(
     Raises:
         DeviceRefusedError: If the request is refused under ADR-0298.
     """
-    method = frame.method
-    if method is None:  # pragma: no cover — `_read_request` admits only requests
-        msg = "a dispatch reached a frame that names no method"
-        raise UndecodableFrameError(msg)
     device = _requesting_device(session, frame.acting_for)
     roster = session.roster
     check_request(
@@ -1165,7 +1161,7 @@ async def _dispatch(
     arguments = _decode_arguments(method, frame.payload)
     positional, keyword = call_shape(method, arguments)
     try:
-        device = _admitted(session, frame, arguments)
+        device = _admitted(session, method, frame, arguments)
         with serving_device(device):
             result = await getattr(engine, method)(*positional, **keyword)
     except AssistantError as exc:
@@ -1245,7 +1241,7 @@ async def _dispatch_stream(  # noqa: PLR0913 — the engine, the request, the wr
         )
 
     try:
-        device = _admitted(session, frame, arguments)
+        device = _admitted(session, method, frame, arguments)
     except DeviceRefusedError as exc:
         # Refused before the engine is called, so no iterator exists to close and
         # the operation has changed nothing (ADR-0298 §6:1); the refusal is the
