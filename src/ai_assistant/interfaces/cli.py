@@ -235,6 +235,8 @@ import math
 import re
 import shlex
 import sys
+import threading
+import uuid
 from datetime import UTC, datetime, time, timedelta
 from decimal import Decimal
 from enum import Enum
@@ -274,9 +276,12 @@ from ai_assistant.core.errors import (
 from ai_assistant.core.logging import configure_logging
 from ai_assistant.core.streams import closing_stream
 from ai_assistant.core.types import (
+    CHAT_DEVICES_MAX,
     DEFAULT_NOTIFICATION_REACH,
     DEFAULT_PAGE_SIZE,
     SECRET_VALUE_MAX_BYTES,
+    TRANSCRIPT_MESSAGE_MAX_CHARS,
+    ActivationEnding,
     AnswerKind,
     AttemptOutcome,
     AttemptReport,
@@ -287,14 +292,20 @@ from ai_assistant.core.types import (
     BeliefBand,
     BoundKind,
     ChannelIdentity,
+    ChatDevice,
     Clarification,
     ClarificationWithdrawal,
     ClassReach,
     ContinuationToken,
+    ConversationDeletedChange,
+    ConversationStartedChange,
     CostBasis,
     CoverageUnrecordedBinding,
     CoverageView,
+    DeletedMessage,
     DestinationTrustRecord,
+    DeviceAccess,
+    DevicesChangedChange,
     DiscloserProvenance,
     Disposition,
     DriveWithheld,
@@ -310,6 +321,9 @@ from ai_assistant.core.types import (
     GrantScope,
     LearnDecision,
     MemoryKind,
+    MessageAddedChange,
+    MessageAuthor,
+    MessageDeletedChange,
     NotificationCondition,
     NotificationDispositionKind,
     NotificationPreferences,
@@ -340,6 +354,7 @@ from ai_assistant.core.types import (
     RouteOutcome,
     SearchNotServiced,
     SecretScope,
+    SendOutcome,
     SourceGrant,
     SourceReadRecord,
     SpanCoverage,
@@ -349,7 +364,9 @@ from ai_assistant.core.types import (
     StoryMember,
     StoryMemberKind,
     ToolOutcome,
+    TranscriptMessage,
     TurnReference,
+    UserMessage,
     ValueBound,
     check_story_page,
     encodable_text,
@@ -383,12 +400,14 @@ if TYPE_CHECKING:
         AnswerOutcome,
         BeliefSummary,
         CanonicalDestination,
+        ChatChange,
         Confirmation,
         ConfirmationDestination,
         ConfirmationEgress,
         ConnectedAccount,
         ConnectionAct,
         ConversationDigest,
+        ConversationState,
         ConversationSummary,
         DestinationProtocol,
         EgressSpan,
@@ -406,6 +425,7 @@ if TYPE_CHECKING:
         StoryOutcome,
         ToolCost,
         ToolInvocation,
+        TranscriptPage,
         TurnOutcome,
         Warrant,
     )
@@ -2171,6 +2191,1098 @@ async def _show_story(story_id: str) -> int:
     return _EXIT_OK
 
 
+# --- the chat space (ADR-0293 §2-§5, §8, §11; ADR-0296 §6) -------------------
+#
+# The conversation as a hosted medium: start one, write in it and follow it, read
+# its transcript, delete a message or the conversation, and keep "my devices" and a
+# conversation's devices. Each act is one engine call relayed. What this adds, and
+# nothing more, is which device this command line is, the message id it chooses for
+# each message (ADR-0293 §4:1), and the polling a followed conversation is read by
+# until the change stream replaces it (§11:1, ADR-0296 §4). Forgetting is
+# ``forget-conversation``, offered beside deleting and never folded into it (§2:7).
+
+#: The device the hub's own machine is (ADR-0296 §1:7): a command line on the local
+#: socket is the user at that machine. The id itself is ADR-0298 §3's, which is still
+#: a proposal (#2698) and is followed here ahead of it — a stable name that does not
+#: change when the remote listener is turned on or off.
+_HUB_DEVICE: Final = "hub"
+
+#: How often a followed conversation is read again for its changes and its current
+#: state, in seconds. Polling is the first build's transport (ADR-0293 §11:1).
+_CHAT_POLL_SECONDS: Final = 1.0
+
+#: How many of a conversation's recent messages a snapshot shows (ADR-0293 §5:13).
+_CHAT_SNAPSHOT_LIMIT: Final = 50
+
+#: What each access is called on screen (ADR-0293 §3:5).
+_ACCESS_PHRASES: Final = {
+    DeviceAccess.READ_WRITE: "reads and writes",
+    DeviceAccess.READ: "reads only",
+    DeviceAccess.WRITE: "writes only",
+}
+
+#: How the last activation started from a conversation ended, as one sentence
+#: (ADR-0293 §8:3, ADR-0295 §3:4). After a restart a device offers to send again
+#: rather than wait for a reply that never comes (§8).
+_ENDING_PHRASES: Final = {
+    ActivationEnding.DONE: "The assistant is done.",
+    ActivationEnding.COULDNT_FINISH: "The assistant couldn't finish.",
+    ActivationEnding.INTERRUPTED: "The assistant was interrupted; send your message again?",
+    ActivationEnding.STOPPED: "The assistant was stopped.",
+}
+
+#: What the chat prompt understands besides a message.
+_CHAT_HELP: Final = (
+    "[dim]Type a message and press Enter to send it. '/reply N <text>' replies to "
+    "message #N — that is also how you correct the assistant. '/quit' (or end of "
+    "input) leaves; '//' sends a message that starts with '/'.[/]"
+)
+
+_CHAT_DEVICE_OPTION = typer.Option(
+    None,
+    "--device",
+    callback=_present_optional_id,
+    metavar="DEVICE_ID",
+    help=(
+        "The device this command line writes as, for a hub on another machine: this "
+        "machine's overlay identity. On the hub's own machine the device is 'hub'."
+    ),
+)
+_DEVICE_ADD_OPTION = typer.Option(
+    None,
+    "--add",
+    callback=_present_ids,
+    metavar="DEVICE_ID",
+    help="Add this device. Repeat for more. Adding one says its screen is private.",
+)
+_DEVICE_REMOVE_OPTION = typer.Option(
+    None, "--remove", callback=_present_ids, metavar="DEVICE_ID", help="Remove this device."
+)
+_DEVICE_ACCESS_OPTION = typer.Option(
+    DeviceAccess.READ_WRITE,
+    "--access",
+    help="What the devices --add names may do: read, write, or both (read_write).",
+)
+
+
+def _position_argument(value: int) -> int:
+    """Refuse a message number the engine would refuse, while Typer is still parsing.
+
+    The engine's refusal is a ``ValueError`` (ADR-0085 §9), which would escape a
+    command's error boundary as a traceback; refused here it is a usage error, exit 2,
+    before any client is built — :func:`_page_argument`'s reason.
+
+    Raises:
+        BadParameter: If the value is not in ``[1, 2**63)``.
+    """
+    if not 1 <= value < _PAGE_BOUND:
+        msg = f"must be between 1 and {_PAGE_BOUND - 1}"
+        raise typer.BadParameter(msg)
+    return value
+
+
+def _optional_position_argument(value: int | None) -> int | None:
+    """:func:`_position_argument` for ``--before``, which may be absent."""
+    return None if value is None else _position_argument(value)
+
+
+@app.command()
+def chat(
+    conversation: str | None = typer.Option(
+        None,
+        "--conversation",
+        "-c",
+        callback=_present_optional_id,
+        help="Open this conversation (see 'assistant conversations'). Omit it to start one.",
+    ),
+    device: str | None = _CHAT_DEVICE_OPTION,
+) -> None:
+    """Talk in a conversation: its recent messages, then each one as it arrives.
+
+    Each line you type is written into the conversation as a message, and is
+    *received* once the conversation has recorded it. The assistant's messages, and
+    any written from your other devices, are shown as they arrive, and so is what the
+    assistant is doing: working, or how it last ended. Writing while it works is
+    fine — your message waits and is taken in when it is done.
+
+    This device has to be one of the conversation's devices to write in it. Where it
+    is not, you are asked whether to add it, which is saying its screen is private.
+    """
+    try:
+        code = asyncio.run(_chat(conversation, device=device))
+    except KeyboardInterrupt:
+        _print("\n[dim]Left the conversation. It is still there.[/]")
+        code = _EXIT_OK
+    raise typer.Exit(code)
+
+
+@app.command("start-conversation")
+def start_conversation() -> None:
+    """Start an empty conversation, shown on your devices.
+
+    Prints its id, which 'assistant chat --conversation' opens. A conversation is
+    started only this way or by 'assistant chat': writing a message never starts one.
+    """
+    raise typer.Exit(asyncio.run(_with_engine(_drive_start_conversation)))
+
+
+@app.command()
+def conversation(
+    conversation_id: str = typer.Argument(
+        ..., callback=_present_id, help="The conversation's id (see 'assistant conversations')."
+    ),
+    before: int | None = typer.Option(
+        None,
+        "--before",
+        callback=_optional_position_argument,
+        metavar="N",
+        help="Show the messages before message #N, to read further back.",
+    ),
+    limit: int = typer.Option(
+        _CHAT_SNAPSHOT_LIMIT,
+        "--limit",
+        callback=_page_argument,
+        help="How many messages to show at most.",
+    ),
+) -> None:
+    """Show one conversation: its devices, what the assistant is doing, its messages.
+
+    The most recent messages are shown; ``--before`` reads further back. A deleted
+    message is shown as deleted, so a reply to it still makes sense.
+    """
+    raise typer.Exit(
+        asyncio.run(
+            _with_engine(
+                lambda engine: _drive_show_conversation(
+                    engine, conversation_id, before=before, limit=limit
+                )
+            )
+        )
+    )
+
+
+@app.command("delete-message")
+def delete_message(
+    conversation_id: str = typer.Argument(..., callback=_present_id, help="The conversation."),
+    position: int = typer.Argument(
+        ..., callback=_position_argument, help="The message's number, as #N shows it."
+    ),
+    *,
+    yes: bool = typer.Option(
+        False, "--yes", "-y", help="Skip the prompt. The message is still shown first."
+    ),
+) -> None:
+    """Delete one message, of yours or the assistant's, after showing it.
+
+    It is removed from the conversation on every device, and a reply to it stays,
+    naming a deleted message. The assistant's memory is not changed by deleting.
+    """
+    confirm: Callable[[], bool] = (lambda: True) if yes else _confirm_delete_message
+    raise typer.Exit(
+        asyncio.run(
+            _with_engine(
+                lambda engine: _drive_delete_message(
+                    engine, conversation_id, position, confirm=confirm
+                )
+            )
+        )
+    )
+
+
+@app.command("delete-conversation")
+def delete_conversation(
+    conversation_id: str = typer.Argument(
+        ..., callback=_present_id, help="The id of the conversation to delete."
+    ),
+    *,
+    yes: bool = typer.Option(
+        False, "--yes", "-y", help="Skip the prompt. The conversation is still shown first."
+    ),
+) -> None:
+    """Delete a conversation and its messages, after showing you which.
+
+    Deleting forgets nothing: what the assistant remembers of the conversation stays
+    until you forget it with 'assistant forget-conversation', before or after deleting.
+    """
+    confirm: Callable[[], bool] = (lambda: True) if yes else _confirm_delete_conversation
+    raise typer.Exit(
+        asyncio.run(
+            _with_engine(
+                lambda engine: _drive_delete_conversation(engine, conversation_id, confirm=confirm)
+            )
+        )
+    )
+
+
+@app.command("my-devices")
+def my_devices(
+    add: list[str] | None = _DEVICE_ADD_OPTION,
+    remove: list[str] | None = _DEVICE_REMOVE_OPTION,
+    access: DeviceAccess = _DEVICE_ACCESS_OPTION,
+    *,
+    yes: bool = typer.Option(
+        False, "--yes", "-y", help="Skip the prompt. What adding says is still shown."
+    ),
+) -> None:
+    """Show your devices, or change them: every new conversation is shown on them.
+
+    Adding a device says its screen is private. A conversation already started keeps
+    its own devices; 'assistant conversation-devices' changes one.
+    """
+    change = _device_change(add, remove, access)
+    confirm: Callable[[], bool] = (lambda: True) if yes else _confirm_device_statement
+    raise typer.Exit(
+        asyncio.run(
+            _with_engine(lambda engine: _drive_devices(engine, None, change, confirm=confirm))
+        )
+    )
+
+
+@app.command("conversation-devices")
+def conversation_devices(
+    conversation_id: str = typer.Argument(..., callback=_present_id, help="The conversation."),
+    add: list[str] | None = _DEVICE_ADD_OPTION,
+    remove: list[str] | None = _DEVICE_REMOVE_OPTION,
+    access: DeviceAccess = _DEVICE_ACCESS_OPTION,
+    *,
+    yes: bool = typer.Option(
+        False, "--yes", "-y", help="Skip the prompt. What adding says is still shown."
+    ),
+) -> None:
+    """Show one conversation's devices, or change them, leaving your devices alone.
+
+    Adding a device to a conversation says its screen is private, for that
+    conversation; removing one keeps the conversation off it, as on a shared tablet.
+    """
+    change = _device_change(add, remove, access)
+    confirm: Callable[[], bool] = (lambda: True) if yes else _confirm_device_statement
+    raise typer.Exit(
+        asyncio.run(
+            _with_engine(
+                lambda engine: _drive_devices(engine, conversation_id, change, confirm=confirm)
+            )
+        )
+    )
+
+
+class _DeviceChange(NamedTuple):
+    """The devices a command was asked to add and remove, checked before any I/O."""
+
+    add: tuple[ChatDevice, ...]
+    remove: tuple[str, ...]
+
+    @property
+    def empty(self) -> bool:
+        """Whether nothing was asked, so the command only shows the set."""
+        return not self.add and not self.remove
+
+
+def _device_change(
+    add: list[str] | None, remove: list[str] | None, access: DeviceAccess
+) -> _DeviceChange:
+    """Build the change ``--add``/``--remove`` ask for, or refuse it as a usage error.
+
+    A device named on both sides, or twice on one, is refused rather than resolved
+    by an order nobody chose; an id ``ChatDevice`` refuses is refused here, before any
+    client is built, rather than as a ``ValueError`` out of the call.
+
+    Raises:
+        BadParameter: If a device is named twice, or an id is not one a device has.
+    """
+    added = list(add or [])
+    removed = list(remove or [])
+    named = added + removed
+    if len(set(named)) != len(named):
+        msg = "name each device once, to add it or to remove it"
+        raise typer.BadParameter(msg)
+    try:
+        devices = tuple(ChatDevice(device_id=one, access=access) for one in added)
+    except ValueError as exc:
+        msg = "a device id must be a non-blank id"
+        raise typer.BadParameter(msg) from exc
+    return _DeviceChange(add=devices, remove=tuple(removed))
+
+
+async def _with_engine(drive: Callable[[AssistantEngine], Awaitable[int]]) -> int:
+    """Obtain a client of the hub and run one command against it (ADR-0042 §7).
+
+    The one error boundary :func:`_list_conversations` and its siblings each spell
+    out, shared by the chat space's commands: a failure to reach the hub is
+    rendered and mapped to a non-zero exit code rather than escaping as a traceback.
+    """
+    try:
+        engine = await _open_engine()
+    except (AssistantError, TransportError) as exc:
+        _render_error(exc)
+        return _EXIT_ERROR
+    try:
+        return await drive(engine)
+    except (AssistantError, TransportError) as exc:
+        _render_error(exc)
+        return _EXIT_ERROR
+
+
+def _this_device(settings: Settings, *, named: str | None) -> str:
+    """The device this command line is, as ADR-0296 §1 counts devices: the machine.
+
+    On the hub's own machine it is :data:`_HUB_DEVICE`, whatever ``--device`` says
+    otherwise, since a command line there cannot be another machine. On another
+    machine it is that machine's overlay identity, which this command line has no
+    way to read for itself yet, so it is named with ``--device``.
+
+    Raises:
+        ConfigurationError: If the destination cannot be read from configuration, if
+            ``--device`` names another machine on the hub's own, or if it is missing
+            for a hub on another machine.
+    """
+    where = destination(
+        data_dir=settings.data_dir,
+        remote_address=settings.remote_hub_address,
+        remote_port=settings.remote_hub_port,
+    )
+    match where:
+        case LoopbackDestination():
+            if named is not None and named != _HUB_DEVICE:
+                msg = (
+                    f"on the hub's own machine this device is '{_HUB_DEVICE}', so --device "
+                    "cannot name another"
+                )
+                raise ConfigurationError(msg)
+            return _HUB_DEVICE
+        case RemoteDestination():
+            if named is None:
+                msg = (
+                    "the hub is on another machine, so name this device with --device: "
+                    "this machine's overlay identity, as the hub's enrolment of it shows"
+                )
+                raise ConfigurationError(msg)
+            return named
+        case _:  # pragma: no cover — the union is closed
+            assert_never(where)
+
+
+async def _chat(conversation_id: str | None, *, device: str | None) -> int:
+    """Load settings, name this device, obtain the hub, and hold the conversation open.
+
+    One error boundary over every stage (ADR-0042 §7). Lines are read from the
+    terminal on a thread of their own (:class:`_TerminalLines`), so the conversation
+    keeps being followed while you type.
+    """
+    try:
+        settings = load_settings()
+        this_device = _this_device(settings, named=device)
+        engine = await _open_engine()
+    except (AssistantError, TransportError) as exc:
+        _render_error(exc)
+        return _EXIT_ERROR
+    lines = _TerminalLines(asyncio.get_running_loop())
+    return await _drive_chat(
+        engine,
+        conversation_id,
+        device_id=this_device,
+        read_line=lines.next_line,
+        confirm=_confirm_device_statement,
+        start_reading=lines.start,
+    )
+
+
+class _TerminalLines:
+    """Lines typed at the terminal, read on a daemon thread and handed to the loop.
+
+    A daemon thread, and not ``asyncio.to_thread``: a read blocked on the terminal
+    cannot be cancelled, and the default executor is waited for when the loop shuts
+    down, so leaving with Ctrl-C would hang until the next Enter. A daemon thread is
+    abandoned at exit instead.
+    """
+
+    def __init__(self, loop: asyncio.AbstractEventLoop) -> None:
+        """Bind the lines to the loop they are handed to; nothing is read yet."""
+        self._loop = loop
+        self._queue: asyncio.Queue[str | None] = asyncio.Queue()
+
+    def start(self) -> None:
+        """Begin reading, once every prompt before the conversation has been answered."""
+        threading.Thread(target=self._read, name="assistant-chat-input", daemon=True).start()
+
+    async def next_line(self) -> str | None:
+        """The next line typed, without its line ending, or ``None`` at end of input."""
+        return await self._queue.get()
+
+    def _read(self) -> None:
+        while True:
+            try:
+                line = sys.stdin.readline()
+            except OSError, ValueError:
+                line = ""
+            handed = line.rstrip("\r\n") if line else None
+            try:
+                self._loop.call_soon_threadsafe(self._queue.put_nowait, handed)
+            except RuntimeError:  # the loop has closed: nobody is reading any more
+                return
+            if handed is None:
+                return
+
+
+@final
+class _ChatView:
+    """What a followed conversation has shown, and where it follows from.
+
+    Holds the cursor (the one state ADR-0296 §6:2 lets the command line keep), the
+    entries it has shown so a reply's reference can say its message was deleted
+    (ADR-0293 §5:8), the ids of messages this device is sending so their arrival is
+    not shown twice, and the current state last shown (§8).
+    """
+
+    def __init__(self, conversation_id: str, *, device_id: str, cursor: int) -> None:
+        """Start following ``conversation_id`` from ``cursor``."""
+        self.conversation_id = conversation_id
+        self.device_id = device_id
+        self.cursor = cursor
+        self.entries: dict[int, TranscriptMessage | DeletedMessage] = {}
+        self.sending: set[str] = set()
+        self.state: ConversationState | None = None
+
+    def show_page(self, page: TranscriptPage) -> None:
+        """Show a snapshot of the conversation's messages, and follow from its ``as_of``."""
+        self.cursor = page.as_of
+        if not page.entries:
+            _print("[dim]No messages yet.[/]")
+        elif page.entries[0].position > 1:
+            _print(
+                f"[dim]Earlier messages: assistant conversation "
+                f"{_safe(self.conversation_id)} --before {page.entries[0].position}[/]"
+            )
+        for entry in page.entries:
+            self.entries[entry.position] = entry
+            _render_chat_entry(entry, known=self.entries)
+
+    def show_state(self, state: ConversationState) -> None:
+        """Show what the assistant is doing, where it changed since last shown (§8)."""
+        previous = self.state
+        self.state = state
+        if previous is not None and previous == state:
+            return
+        if state.working:
+            if previous is None or not previous.working:
+                _print("[dim]The assistant is working… you can keep writing.[/]")
+            return
+        if state.last_ended is None:
+            return
+        if previous is None or previous.working or previous.last_ended != state.last_ended:
+            _print(f"[dim]{_ENDING_PHRASES[state.last_ended]}[/]")
+
+    def apply(self, change: ChatChange) -> bool:
+        """Show one change; ``False`` where it ends the conversation (§2:3).
+
+        A change to another conversation, a conversation starting, and a change to
+        "my devices" are not this conversation's and are passed over.
+        """
+        if change.conversation_id != self.conversation_id:
+            return True
+        match change:
+            case MessageAddedChange(message=message):
+                self._added(message)
+            case MessageDeletedChange(marker=marker):
+                self.entries[marker.position] = marker
+                _print(f"[dim]Message #{marker.position} was deleted.[/]")
+            case ConversationDeletedChange():
+                _print("[yellow]This conversation was deleted.[/]")
+                return False
+            case DevicesChangedChange(devices=devices):
+                _print("[dim]This conversation's devices changed:[/]")
+                _render_device_set(devices)
+            case ConversationStartedChange():
+                pass
+            case _:  # pragma: no cover — the union is closed
+                assert_never(change)
+        return True
+
+    def _added(self, message: TranscriptMessage) -> None:
+        """Show a message added, unless it is one this device is sending (§4:4)."""
+        self.entries[message.position] = message
+        if message.device_id == self.device_id and message.message_id in self.sending:
+            return
+        _render_chat_entry(message, known=self.entries)
+
+
+async def _drive_chat(  # noqa: PLR0913 — the engine, the conversation, the device, and the three seams a test replaces: the lines, the prompt, and when reading starts
+    engine: AssistantEngine,
+    conversation_id: str | None,
+    *,
+    device_id: str,
+    read_line: Callable[[], Awaitable[str | None]],
+    confirm: Callable[[], bool],
+    start_reading: Callable[[], None] = lambda: None,
+    poll_seconds: float = _CHAT_POLL_SECONDS,
+) -> int:
+    """Open or start a conversation, show it, and relay each line until you leave.
+
+    The conversation is followed on a task of its own, polling its changes after the
+    cursor and its current state (ADR-0293 §11:1, §8), while lines are read; either
+    ending ends the chat. ``start_reading`` is called once the device prompts before
+    the conversation are answered, so the terminal is read by one reader at a time.
+    """
+    try:
+        opened = await _open_chat(engine, conversation_id, device_id=device_id, confirm=confirm)
+        if isinstance(opened, int):
+            return opened
+        view = await _show_chat(engine, opened, device_id=device_id)
+        if view is None:
+            return _EXIT_ERROR
+        start_reading()
+        follower = asyncio.create_task(_follow_chat(engine, view, poll_seconds=poll_seconds))
+        try:
+            return await _relay_lines(engine, view, read_line=read_line, follower=follower)
+        finally:
+            follower.cancel()
+            with contextlib.suppress(asyncio.CancelledError):
+                await follower
+    except (AssistantError, TransportError) as exc:
+        _render_error(exc)
+        return _EXIT_ERROR
+
+
+async def _open_chat(
+    engine: AssistantEngine,
+    conversation_id: str | None,
+    *,
+    device_id: str,
+    confirm: Callable[[], bool],
+) -> str | int:
+    """The conversation to follow, with this device among its writing ends, or an exit code.
+
+    A conversation is started only by asking for one (ADR-0293 §2:1, §2:2), on "my
+    devices" as they stand — so where this device is not one of them it is offered
+    there first, and where an existing conversation does not have it, it is offered
+    for that conversation (§3:2, §3:3). Declining leaves everything as it was.
+    """
+    if conversation_id is None:
+        mine = await engine.my_devices()
+        if not _writes_from(mine, device_id) and not await _offer_device(
+            engine, None, mine, device_id, confirm=confirm
+        ):
+            return _EXIT_OK
+        started = await engine.start_conversation()
+        _print(f"[green]Started a conversation:[/] [bold cyan]{_safe(started.id)}[/]")
+        return started.id
+    digest = await engine.conversation(conversation_id)
+    if digest is None:
+        _render_no_such_conversation(conversation_id)
+        return _EXIT_ERROR
+    if not _writes_from(digest.devices, device_id) and not await _offer_device(
+        engine, conversation_id, digest.devices, device_id, confirm=confirm
+    ):
+        return _EXIT_OK
+    return conversation_id
+
+
+async def _offer_device(
+    engine: AssistantEngine,
+    conversation_id: str | None,
+    devices: Sequence[ChatDevice],
+    device_id: str,
+    *,
+    confirm: Callable[[], bool],
+) -> bool:
+    """Say what adding this device means, ask, and add it for reading and writing.
+
+    Returns:
+        Whether the device was added.
+    """
+    where = "your devices" if conversation_id is None else "this conversation's devices"
+    _print(f"\nThis device ([bold]{_safe(device_id)}[/]) is not one of {where} for writing.")
+    _render_device_statement(conversation_id)
+    added = _with_devices(
+        devices, (ChatDevice(device_id=device_id, access=DeviceAccess.READ_WRITE),)
+    )
+    if added is None:
+        _render_devices_full()
+        return False
+    if not confirm():
+        _print("[dim]Left alone. No device was added.[/]")
+        return False
+    if conversation_id is None:
+        await engine.set_my_devices(added)
+    else:
+        await engine.set_conversation_devices(conversation_id, devices=added)
+    return True
+
+
+async def _show_chat(
+    engine: AssistantEngine, conversation_id: str, *, device_id: str
+) -> _ChatView | None:
+    """Show the conversation's snapshot and current state; ``None`` where it is gone."""
+    page = await engine.transcript(conversation_id, limit=_CHAT_SNAPSHOT_LIMIT)
+    digest = await engine.conversation(conversation_id)
+    if page is None or digest is None:
+        _render_no_such_conversation(conversation_id)
+        return None
+    view = _ChatView(conversation_id, device_id=device_id, cursor=page.as_of)
+    view.show_page(page)
+    view.show_state(digest.state)
+    _print(_CHAT_HELP)
+    return view
+
+
+async def _relay_lines(
+    engine: AssistantEngine,
+    view: _ChatView,
+    *,
+    read_line: Callable[[], Awaitable[str | None]],
+    follower: asyncio.Task[int],
+) -> int:
+    """Send each line as it is typed, until input ends, ``/quit``, or the follow ends.
+
+    Whichever comes first ends the chat: the next line, or the follower finishing —
+    because the conversation was deleted, or the hub could not be read.
+    """
+    while True:
+        reading = asyncio.ensure_future(read_line())
+        await asyncio.wait({reading, follower}, return_when=asyncio.FIRST_COMPLETED)
+        if not reading.done():
+            reading.cancel()
+            return follower.result()
+        line = reading.result()
+        if line is None:
+            return _EXIT_OK
+        if not await _chat_line(engine, view, line):
+            return _EXIT_OK
+
+
+async def _chat_line(engine: AssistantEngine, view: _ChatView, line: str) -> bool:
+    """Act on one typed line; ``False`` where it was ``/quit``.
+
+    A blank line sends nothing. A message the type refuses — over the size bound, or
+    text with no encoding — is reported and not sent (ADR-0293 §4:7).
+    """
+    parsed = _parse_chat_line(line)
+    match parsed:
+        case None:
+            return True
+        case "quit":
+            return False
+        case "help":
+            _print(_CHAT_HELP)
+            return True
+        case str():
+            _print(f"[yellow]Not sent:[/] {parsed}")
+            return True
+        case (text, replies_to):
+            try:
+                message = UserMessage(
+                    device_id=view.device_id,
+                    message_id=uuid.uuid4().hex,
+                    text=text,
+                    replies_to=replies_to,
+                )
+            except ValueError:
+                _print(
+                    "[yellow]Not sent:[/] a message is at most "
+                    f"{TRANSCRIPT_MESSAGE_MAX_CHARS} characters of text."
+                )
+                return True
+            await _send(engine, view, message)
+            return True
+        case _:  # pragma: no cover — the parse returns one of the shapes above
+            assert_never(parsed)
+
+
+def _parse_chat_line(line: str) -> None | str | tuple[str, int | None]:
+    """Read one typed line: nothing, a command, a refusal to say, or a message to send.
+
+    Returns:
+        ``None`` for a blank line; ``"quit"`` or ``"help"`` for those commands; a
+        ``(text, replies_to)`` pair for a message; any other string is why the line
+        was not sent.
+    """
+    if not line.strip():
+        return None
+    if line.startswith("//"):
+        return (line[1:], None)
+    if not line.startswith("/"):
+        return (line, None)
+    command, _, rest = line[1:].partition(" ")
+    if command in {"quit", "exit", "help"}:
+        return "help" if command == "help" else "quit"
+    if command == "reply":
+        return _parse_reply(rest)
+    return f"'/{_safe(command)}' is not a command here — '/help' lists them."
+
+
+def _parse_reply(rest: str) -> str | tuple[str, int]:
+    """Read ``/reply``'s message number and text, or say why they cannot be read."""
+    number, _, text = rest.strip().partition(" ")
+    readable = number.isascii() and number.isdigit() and len(number) <= len(str(_PAGE_BOUND))
+    position = int(number) if readable else 0
+    if not 1 <= position < _PAGE_BOUND or not text.strip():
+        return "'/reply' takes a message number and your text: /reply 3 I meant Pinecrest."
+    return (text, position)
+
+
+async def _send(engine: AssistantEngine, view: _ChatView, message: UserMessage) -> None:
+    """Write one message, again with the same id where the first send was lost.
+
+    Sending is safe to repeat (ADR-0293 §4:2): a transport failure leaves it unknown
+    whether the conversation recorded the message, and resending the same id is
+    recorded once either way. A second failure is raised to the chat's boundary.
+    """
+    view.sending.add(message.message_id)
+    try:
+        receipt = await engine.write_message(view.conversation_id, message=message)
+    except TransportError:
+        receipt = await engine.write_message(view.conversation_id, message=message)
+    match receipt.outcome:
+        case SendOutcome.RECORDED | SendOutcome.REPEATED:
+            _print(f"[dim]  ✓ received, #{receipt.position}[/]")
+        case SendOutcome.NOT_AN_END:
+            _print(
+                "[yellow]Not sent:[/] this device is not one of this conversation's devices "
+                "for writing — 'assistant conversation-devices' adds it."
+            )
+        case SendOutcome.NO_SUCH_REPLY:
+            _print(
+                f"[yellow]Not sent:[/] this conversation never held a message "
+                f"#{message.replies_to} to reply to."
+            )
+        case _:  # pragma: no cover — exhaustive over the enum
+            assert_never(receipt.outcome)
+
+
+async def _follow_chat(engine: AssistantEngine, view: _ChatView, *, poll_seconds: float) -> int:
+    """Read the conversation again every ``poll_seconds`` until it is deleted."""
+    while True:
+        await asyncio.sleep(poll_seconds)
+        if not await _poll_chat(engine, view):
+            return _EXIT_OK
+
+
+async def _poll_chat(engine: AssistantEngine, view: _ChatView) -> bool:
+    """Show every change after the cursor, then the current state; ``False`` once gone.
+
+    A full page is followed by another read at once. A cursor the chat space has
+    fewer changes than means it started afresh, so the conversation is shown again
+    from a snapshot (ADR-0293 §5:13).
+    """
+    while True:
+        page = await engine.chat_changes(
+            after=view.cursor, conversation_ids=(view.conversation_id,), limit=DEFAULT_PAGE_SIZE
+        )
+        if page.next_after < view.cursor:
+            snapshot = await engine.transcript(view.conversation_id, limit=_CHAT_SNAPSHOT_LIMIT)
+            if snapshot is None:
+                _print("[yellow]This conversation was deleted.[/]")
+                return False
+            _print("[dim]The chat started afresh; here is the conversation as it stands.[/]")
+            view.entries.clear()
+            view.show_page(snapshot)
+            break
+        for change in page.changes:
+            if not view.apply(change):
+                return False
+        view.cursor = page.next_after
+        if len(page.changes) < DEFAULT_PAGE_SIZE:
+            break
+    digest = await engine.conversation(view.conversation_id)
+    if digest is None:
+        _print("[yellow]This conversation was deleted.[/]")
+        return False
+    view.show_state(digest.state)
+    return True
+
+
+async def _drive_start_conversation(engine: AssistantEngine) -> int:
+    """Start an empty conversation and say where it is shown (ADR-0293 §2:1, §3:1)."""
+    started = await engine.start_conversation()
+    digest = await engine.conversation(started.id)
+    _print(f"[green]Started a conversation:[/] [bold cyan]{_safe(started.id)}[/]")
+    devices = () if digest is None else digest.devices
+    if devices:
+        _print("  [dim]Shown on:[/]")
+        _render_device_set(devices)
+    else:
+        _print(
+            "  [yellow]It is shown on no device:[/] your devices are empty. "
+            "'assistant my-devices --add' adds one."
+        )
+    _print_chat_hint(started.id)
+    return _EXIT_OK
+
+
+async def _drive_show_conversation(
+    engine: AssistantEngine, conversation_id: str, *, before: int | None, limit: int
+) -> int:
+    """Show one conversation's devices, current state and a page of its messages."""
+    digest = await engine.conversation(conversation_id)
+    page = (
+        None
+        if digest is None
+        else await engine.transcript(conversation_id, before=before, limit=limit)
+    )
+    if digest is None or page is None:
+        _render_no_such_conversation(conversation_id)
+        return _EXIT_ERROR
+    _print(f"[bold cyan]{_safe(digest.id)}[/]")
+    _print(f"  [dim]Started:[/] {_when(digest.started_at)}")
+    if digest.devices:
+        _print("  [dim]Shown on:[/]")
+        _render_device_set(digest.devices)
+    else:
+        _print("  [dim]Shown on no device.[/]")
+    view = _ChatView(digest.id, device_id="", cursor=page.as_of)
+    view.show_state(digest.state)
+    _print("")
+    view.show_page(page)
+    return _EXIT_OK
+
+
+async def _drive_delete_message(
+    engine: AssistantEngine, conversation_id: str, position: int, *, confirm: Callable[[], bool]
+) -> int:
+    """Show the message, take the answer, then delete it alone (ADR-0293 §5:8, §5:9).
+
+    The message is read first so the person deletes what they were shown
+    (ADR-0073 §5); a number naming no standing message is reported and nothing is
+    asked.
+    """
+    below = position + 1 if position + 1 < _PAGE_BOUND else None
+    page = await engine.transcript(conversation_id, before=below, limit=1)
+    if page is None:
+        _render_no_such_conversation(conversation_id)
+        return _EXIT_ERROR
+    entry = page.entries[-1] if page.entries else None
+    if not isinstance(entry, TranscriptMessage) or entry.position != position:
+        _print(
+            f"[yellow]Nothing to delete:[/] that conversation holds no message #{position} — "
+            "it was never written there, or it is deleted already."
+        )
+        return _EXIT_ERROR
+    _print("\n[bold yellow]About to delete this message[/]")
+    _render_chat_entry(entry, known={})
+    _print(
+        "\n  [yellow]It is removed from the conversation on every device, and a reply to "
+        "it stays, naming a deleted message. The assistant's memory is not changed: what "
+        "it took in from this message stays until you forget the conversation.[/]"
+    )
+    if not confirm():
+        _print("[dim]Left alone. Nothing was deleted.[/]")
+        return _EXIT_OK
+    if not await engine.delete_message(conversation_id, position=position):
+        _print(f"[yellow]Nothing deleted:[/] message #{position} was already gone.")
+        return _EXIT_ERROR
+    _print(f"[green]Deleted[/] message #{position}.")
+    return _EXIT_OK
+
+
+async def _drive_delete_conversation(
+    engine: AssistantEngine, conversation_id: str, *, confirm: Callable[[], bool]
+) -> int:
+    """Show the conversation, take the answer, then delete it, forgetting nothing (§2:3).
+
+    Deleting and forgetting are offered side by side and never as one act (§2:7):
+    the prompt and the outcome both name ``forget-conversation`` as the other one.
+    """
+    digest = await engine.conversation(conversation_id)
+    if digest is None:
+        _render_no_such_conversation(conversation_id)
+        return _EXIT_ERROR
+    _print("\n[bold yellow]About to delete this conversation[/]")
+    _print(f"  [bold cyan]{_safe(digest.id)}[/]")
+    _print(f"  [dim]Started:[/] {_when(digest.started_at)}")
+    _print(
+        "\n  [yellow]Deleting removes the conversation and all its messages, on every "
+        "device. It forgets nothing: what the assistant remembers of it stays until you "
+        "forget it, which you can do before or after deleting.[/]"
+    )
+    _print_forget_hint(digest.id)
+    if not confirm():
+        _print("[dim]Left alone. Nothing was deleted.[/]")
+        return _EXIT_OK
+    if not await engine.delete_conversation(digest.id):
+        _print("[yellow]Nothing to delete:[/] that conversation was already deleted.")
+        return _EXIT_ERROR
+    _print("[green]Deleted.[/] The assistant's memory of it is unchanged.")
+    _print_forget_hint(digest.id)
+    return _EXIT_OK
+
+
+async def _drive_devices(
+    engine: AssistantEngine,
+    conversation_id: str | None,
+    change: _DeviceChange,
+    *,
+    confirm: Callable[[], bool],
+) -> int:
+    """Show "my devices" or a conversation's devices, or change them (ADR-0293 §3).
+
+    The set is read, changed as asked and written back whole, which is how the
+    surface takes it — so two people changing one set at once keep the later write.
+    Adding is the user's statement that the device's screen is private (§3:2, §3:3),
+    shown before it is asked.
+    """
+    current = await _read_devices(engine, conversation_id)
+    if current is None:
+        _render_no_such_conversation(conversation_id or "")
+        return _EXIT_ERROR
+    if change.empty:
+        _render_devices_heading(conversation_id, current)
+        return _EXIT_OK
+    for missing in sorted(set(change.remove) - {one.device_id for one in current}):
+        _print(f"[dim]{_safe(missing)} was not one of them.[/]")
+    kept = tuple(one for one in current if one.device_id not in change.remove)
+    wanted = _with_devices(kept, change.add)
+    if wanted is None:
+        _render_devices_full()
+        return _EXIT_ERROR
+    if change.add:
+        _render_device_statement(conversation_id)
+        if not confirm():
+            _print("[dim]Left alone. Nothing was changed.[/]")
+            return _EXIT_OK
+    if conversation_id is None:
+        await engine.set_my_devices(wanted)
+    else:
+        await engine.set_conversation_devices(conversation_id, devices=wanted)
+    now = await _read_devices(engine, conversation_id)
+    _render_devices_heading(conversation_id, now or ())
+    if conversation_id is None:
+        _print(
+            "[dim]A conversation already started keeps its own devices — "
+            "'assistant conversation-devices' changes one.[/]"
+        )
+    return _EXIT_OK
+
+
+async def _read_devices(
+    engine: AssistantEngine, conversation_id: str | None
+) -> tuple[ChatDevice, ...] | None:
+    """Read "my devices", or a conversation's devices; ``None`` where it is gone."""
+    if conversation_id is None:
+        return await engine.my_devices()
+    digest = await engine.conversation(conversation_id)
+    return None if digest is None else digest.devices
+
+
+def _with_devices(
+    devices: Sequence[ChatDevice], added: Sequence[ChatDevice]
+) -> tuple[ChatDevice, ...] | None:
+    """``devices`` with ``added`` in, replacing a device's access; ``None`` past the bound."""
+    named = {one.device_id for one in added}
+    merged = (*(one for one in devices if one.device_id not in named), *added)
+    if len(merged) > CHAT_DEVICES_MAX:
+        return None
+    return tuple(sorted(merged, key=lambda one: one.device_id))
+
+
+def _writes_from(devices: Sequence[ChatDevice], device_id: str) -> bool:
+    """Whether ``device_id`` is among ``devices`` as an end for writing (ADR-0293 §3:5)."""
+    return any(one.device_id == device_id and one.access.writes for one in devices)
+
+
+def _render_chat_entry(
+    entry: TranscriptMessage | DeletedMessage,
+    *,
+    known: Mapping[int, TranscriptMessage | DeletedMessage],
+) -> None:
+    """Render one transcript entry: who wrote it, when, what it replies to, its text.
+
+    A deleted message is its marker, with no text (ADR-0293 §5:12), and a reply to
+    one says so (§5:8). A message cut off before it finished is said never to be a
+    complete answer (§5:2). The text is a block of its own behind
+    :func:`_render_content`'s gutter, so a line inside it cannot pass for a header.
+    """
+    if isinstance(entry, DeletedMessage):
+        _print(f"[dim]#{entry.position} · deleted[/]")
+        return
+    if entry.author is MessageAuthor.USER:
+        who = f"[bold]You[/] [dim](from {_safe(entry.device_id or '')})[/]"
+    else:
+        who = "[bold cyan]Assistant[/]"
+    head = f"[dim]#{entry.position}[/] {who} [dim]· {_when(entry.written_at)}"
+    if entry.replies_to is not None:
+        gone = isinstance(known.get(entry.replies_to), DeletedMessage)
+        head += f" · replying to #{entry.replies_to}{', a deleted message' if gone else ''}"
+    _print(f"{head}[/]")
+    _render_content(entry.text)
+    if entry.options:
+        _print("  [dim]Options:[/] " + " | ".join(_safe(option) for option in entry.options))
+    if entry.cut_off:
+        _print("  [yellow]Cut off before it finished — not a complete answer.[/]")
+
+
+def _render_device_set(devices: Sequence[ChatDevice]) -> None:
+    """One line per device: its id and what it may do (ADR-0293 §3:5)."""
+    for one in devices:
+        _print(f"    {_safe(one.device_id)} [dim]— {_ACCESS_PHRASES[one.access]}[/]")
+
+
+def _render_devices_heading(conversation_id: str | None, devices: Sequence[ChatDevice]) -> None:
+    """Name the set, then its devices, or say it is empty."""
+    if conversation_id is None:
+        title = "Your devices — every new conversation is shown on them"
+    else:
+        title = f"The devices of conversation {_safe(conversation_id)}"
+    if not devices:
+        _print(f"[bold]{title}:[/] none.")
+        return
+    _print(f"[bold]{title}:[/]")
+    _render_device_set(devices)
+
+
+def _render_device_statement(conversation_id: str | None) -> None:
+    """What adding a device says, before it is asked (ADR-0293 §3:2, §3:3)."""
+    if conversation_id is None:
+        _print(
+            "  [yellow]Adding a device to your devices says its screen is private: every "
+            "conversation started from now on is shown on it.[/]"
+        )
+    else:
+        _print(
+            "  [yellow]Adding a device to this conversation says its screen is private, "
+            "for this conversation: it is shown there.[/]"
+        )
+
+
+def _render_devices_full() -> None:
+    """Say a set of devices is at its bound, so nothing was added."""
+    _print(
+        f"[yellow]Nothing added:[/] a set of devices holds at most {CHAT_DEVICES_MAX}; "
+        "remove one first."
+    )
+
+
+def _print_chat_hint(conversation_id: str) -> None:
+    """Offer the command that opens a conversation, where its id can be shown."""
+    if _is_pasteable(conversation_id):
+        _print_hint(f"[dim]Open it with: assistant chat -c {_argument(conversation_id)}[/]")
+    else:
+        _print(_uncopyable("Its id"))
+
+
+def _print_forget_hint(conversation_id: str) -> None:
+    """Name forgetting beside deleting, as the other act (ADR-0293 §2:7)."""
+    if _is_pasteable(conversation_id):
+        _print_hint(
+            f"[dim]  To forget it: assistant forget-conversation {_argument(conversation_id)}[/]"
+        )
+    else:
+        _print(_uncopyable("Its id", "'assistant forget-conversation' still takes it."))
+
+
+def _confirm_device_statement() -> bool:
+    """Read the yes/no for adding a device; what it says was already shown. Defaults no."""
+    return typer.confirm("Add it?", default=False)
+
+
+def _confirm_delete_message() -> bool:
+    """Read the yes/no for deleting a message already shown. Defaults no."""
+    return typer.confirm("Delete it?", default=False)
+
+
+def _confirm_delete_conversation() -> bool:
+    """Read the yes/no for deleting a conversation already shown. Defaults no."""
+    return typer.confirm("Delete it?", default=False)
+
+
 @app.command()
 def beliefs(
     band: list[BeliefBand] | None = _BELIEFS_BAND_OPTION,
@@ -3916,7 +5028,7 @@ async def _forget_conversation(conversation_id: str, *, assume_yes: bool) -> int
     supplies the answer and never the rendering, because a non-interactive approval
     must not destroy what the user never saw (ADR-0073 §5, ADR-0052 §4).
     """
-    confirm: Callable[[ConversationDigest], bool] = (
+    confirm: Callable[[ConversationDigest | None], bool] = (
         (lambda _digest: True) if assume_yes else _confirm_forget_conversation
     )
     try:
@@ -5833,26 +6945,33 @@ async def _drive_conversations(engine: AssistantEngine, *, limit: int, offset: i
 
 
 async def _drive_forget_conversation(
-    engine: AssistantEngine, conversation_id: str, *, confirm: Callable[[ConversationDigest], bool]
+    engine: AssistantEngine,
+    conversation_id: str,
+    *,
+    confirm: Callable[[ConversationDigest | None], bool],
 ) -> int:
     """Show the conversation's count and span, take the answer, then forget its episodes.
 
     Memory-only since ADR-0293 §11:4: the conversation and its transcript stay.
 
     Show-then-confirm at the unit the user thinks in (ADR-0074 §8, ADR-0073 §5).
-    A refusal is a valid outcome and exits 0. An id naming no conversation this
-    surface can show — unknown, or already deleted — is reported and exits non-zero.
+    A refusal is a valid outcome and exits 0. **An id naming no conversation this
+    surface can show is still offered**, because forgetting reaches the episodes on
+    the conversation's place whether or not the conversation still stands (ADR-0293
+    §2:5) — deleting one first and forgetting it after is the order
+    ``delete-conversation`` offers. Unknown and deleted are said the same way, and
+    where nothing was held the outcome says so and exits non-zero.
     """
     try:
         digest = await engine.conversation(conversation_id)
         if digest is None:
-            _render_no_such_conversation(conversation_id)
-            return _EXIT_ERROR
-        _render_forget_conversation_prompt(digest)
+            _render_forget_unseen_conversation_prompt(conversation_id)
+        else:
+            _render_forget_conversation_prompt(digest)
         if not confirm(digest):
             _print("[dim]Left alone. Nothing was forgotten.[/]")
             return _EXIT_OK
-        destroyed = await engine.forget_conversation(digest.id)
+        destroyed = await engine.forget_conversation(conversation_id)
     except (AssistantError, TransportError) as exc:
         _render_error(exc)
         return _EXIT_ERROR
@@ -9651,6 +10770,23 @@ def _render_forget_conversation_prompt(digest: ConversationDigest) -> None:
     )
 
 
+def _render_forget_unseen_conversation_prompt(conversation_id: str) -> None:
+    """Show what forgetting a conversation no longer shown will do (ADR-0293 §2:5).
+
+    There is no count or span to show: the conversation is deleted, or never was.
+    What is said is what forgetting would reach, so consent is still taken for
+    something stated.
+    """
+    _print(
+        f"\n[yellow]No conversation has the id[/] {_safe(conversation_id)} [yellow]any "
+        "more — it may have been deleted, or never existed.[/]"
+    )
+    _print(
+        "  [yellow]Forgetting it still removes any episodes the assistant holds from it, "
+        "so it no longer recalls them anywhere else.[/]"
+    )
+
+
 def _render_no_such_conversation(conversation_id: str) -> None:
     """Report an id that names no conversation this surface can show (ADR-0074 §1, §8).
 
@@ -9665,7 +10801,7 @@ def _render_no_such_conversation(conversation_id: str) -> None:
     )
 
 
-def _confirm_forget_conversation(_digest: ConversationDigest) -> bool:
+def _confirm_forget_conversation(_digest: ConversationDigest | None) -> bool:
     """Read the human's yes/no *without* rendering — the caller already displayed it.
 
     The conversation-scoped sibling of :func:`_confirm_forget` (I/O; ADR-0042 §6).
