@@ -449,6 +449,48 @@ class ChatSurfaceContract:
         assert not after.state.working
         assert after.state.activation_id is None
 
+    async def test_forgetting_reaches_an_activation_running_on_the_conversation(
+        self, chat_surface: ChatSurfaceSubject
+    ) -> None:
+        """§2:6: an activation running when its conversation is forgotten writes nothing back.
+
+        The turn is held at its first episode write — the engine's admission, the
+        fake's capture — so no read of the store can see its episode yet; forgetting
+        the conversation then must still leave no episode of it once it finishes.
+        """
+        engine, memory = chat_surface.engine, chat_surface.memory
+        conversation = await _started(engine, _PHONE)
+        entered, release = asyncio.Event(), asyncio.Event()
+        original = memory.write_atomic
+
+        async def held(writes: Sequence[MemoryWrite]) -> Sequence[str]:
+            if not entered.is_set():
+                entered.set()
+                await release.wait()
+            return await original(writes)
+
+        memory.write_atomic = held  # type: ignore[method-assign]
+        turn = asyncio.create_task(
+            engine.receive(
+                ChannelInput(
+                    target=ChannelIdentity(channel_type="conversation", instance_id=conversation),
+                    payload=TextChannelPayload(text="hello"),
+                ),
+                reply=WholeTextReply(),
+                timeout=timedelta(seconds=30),
+            )
+        )
+        try:
+            async with asyncio.timeout(10):
+                await entered.wait()
+            await engine.forget_conversation(conversation)
+        finally:
+            release.set()
+        result = await turn
+        assert result.capture.episode_id is None
+        assert await memory.get(f"activation:{result.capture.activation_id}") is None
+        assert await engine.conversation(conversation) is not None
+
     # --- the change stream (§5:10, §5:11) -----------------------------------
 
     async def test_every_change_after_a_cursor_in_sequence(

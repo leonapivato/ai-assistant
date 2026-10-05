@@ -115,6 +115,9 @@ class EpisodeProgress:
     #: A record-scoped ``forget`` named this address while the capture was in flight
     #: (§8).
     forgotten: bool = False
+    #: The conversation the activation was started from, as far as it is known: what
+    #: forgetting a conversation marks its in-flight captures by (ADR-0293 §2:6).
+    conversation_id: str | None = None
 
 
 @dataclass

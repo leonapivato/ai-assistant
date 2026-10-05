@@ -3681,6 +3681,11 @@ class FakeAssistantEngine:
             "forget_conversation", max_bytes=self._max_payload_bytes, conversation_id=named
         )
         self.calls.append(("forget_conversation", {"conversation_id": named}))
+        # Every activation running from it now is told first, as the engine tells its
+        # captures in flight (§2:6): what it would still write is not written back.
+        for running in self._running_activations:
+            if running.conversation_id == named:
+                running.forgotten = True
         # The place is walked as the engine walks it (§2:4-§2:6), whether or not the
         # conversation stands, and so is the membership this fake keeps beside it.
         members = {
