@@ -23,7 +23,7 @@ fix, and this module is the whole of it:
   frame "that is a chunk by kind and final by flag is two answers to one question",
   and a browser reading a stream is the second reader of the same sequence.
 
-**One of the three kinds is terminal and two are not**, which is the other clause
+**Two of the kinds are terminal and the rest are not**, which is the other clause
 §2 fixes: "a reader that reached a terminal value has the whole of what the gateway
 sent; a reader that did not has a transport failure and the front end reports it as
 one". :data:`TERMINAL_KINDS` is that partition stated once, so the page and the
@@ -98,6 +98,26 @@ class ValueKind(StrEnum):
     may be silent for as long as the assistant has nothing to say. Never
     terminal."""
 
+    CHANGE = "change"
+    """One change to the chat space the browser's device may see, with its sequence
+    number and, on the change that makes the device a reader of a conversation, that
+    conversation's snapshot (ADR-0298 §7:1, §7:6). Written only on a change stream.
+    Never terminal: the page's cursor moves past it."""
+
+    STATE = "state"
+    """One conversation's current state, pushed when it changes (ADR-0296 §4:9).
+    Written only on a change stream, and carries no sequence number. Never
+    terminal."""
+
+    ROLES = "roles"
+    """The device's own roles, sent when the hub's stream opens and whenever they
+    change (ADR-0298 §7:9). Written only on a change stream. Never terminal."""
+
+    END = "end"
+    """The terminal value of a change stream the hub ended because it is shutting
+    down, carrying the cursor to follow again from (``ChatStreamEnd``). Terminal: the
+    hub wrote it as the last thing it will write on that stream."""
+
     FAULT = "fault"
     """The terminal value of a stream that ended in a fault the gateway can name —
     a poll it could not complete, or a session that ended. Terminal, and it keeps
@@ -108,7 +128,7 @@ class ValueKind(StrEnum):
 
 #: Which kinds end a stream. Stated once so the front end and the gateway cannot
 #: hold two partitions (ADR-0175 §2).
-TERMINAL_KINDS: Final = frozenset({ValueKind.FAULT})
+TERMINAL_KINDS: Final = frozenset({ValueKind.FAULT, ValueKind.END})
 
 
 def encode(value: Mapping[str, Any]) -> bytes:
@@ -253,3 +273,15 @@ def fault(name: str, *, detail: str | None = None) -> dict[str, Any]:
     if detail is not None:
         value["detail"] = detail
     return value
+
+
+def end(next_after: int) -> dict[str, Any]:
+    """The change stream's ending when the hub shuts down, and where to follow from.
+
+    Args:
+        next_after: The cursor the hub's ``ChatStreamEnd`` carried.
+
+    Returns:
+        The value to write.
+    """
+    return {"kind": ValueKind.END.value, "next_after": next_after}

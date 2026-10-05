@@ -115,14 +115,20 @@ def test_the_keep_alive_carries_nothing_but_its_own_kind() -> None:
     assert streams.alive() == {"kind": "alive"}
 
 
-def test_exactly_one_kind_ends_a_stream() -> None:
+def test_a_fault_and_the_hubs_ending_are_the_kinds_that_end_a_stream() -> None:
     """§2 partitions the endings a reader must tell apart, and the partition is
     stated once so the page and the gateway cannot hold two of them.
 
-    One kind since ADR-0293 §11 retired the streamed turn and with it the ``outcome``
-    value: the delivery stream ends only in a fault it can name.
+    A fault the gateway can name ends either stream. The change stream has a second
+    ending of its own: the hub's ``ChatStreamEnd``, written only as it shuts down and
+    carrying the cursor to follow again from (ADR-0298 §7).
     """
-    assert set(streams.TERMINAL_KINDS) == {streams.ValueKind.FAULT}
+    assert set(streams.TERMINAL_KINDS) == {streams.ValueKind.FAULT, streams.ValueKind.END}
+
+
+def test_the_hubs_ending_carries_the_cursor_to_follow_again_from() -> None:
+    """``ChatStreamEnd.next_after``, relayed whole under its own kind."""
+    assert streams.end(41) == {"kind": "end", "next_after": 41}
 
 
 def test_the_media_type_is_not_the_one_an_event_source_reads() -> None:

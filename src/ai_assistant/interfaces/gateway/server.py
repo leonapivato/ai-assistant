@@ -156,6 +156,7 @@ from ai_assistant.core.errors import (
     UnknownConversationError,
     UnusableIdentityError,
 )
+from ai_assistant.core.streams import closing_stream
 from ai_assistant.core.types import (
     CHAT_DEVICES_MAX,
     DEFAULT_PAGE_SIZE,
@@ -169,6 +170,8 @@ from ai_assistant.core.types import (
     BeliefSummary,
     ChatChanges,
     ChatDevice,
+    ChatStreamChunk,
+    ChatStreamEnd,
     Clarification,
     ClassReach,
     Confirmation,
@@ -234,6 +237,7 @@ from ai_assistant.core.types import (
 )
 from ai_assistant.interfaces.devices import this_device
 from ai_assistant.interfaces.gateway import streams
+from ai_assistant.interfaces.gateway.change_stream import paced
 from ai_assistant.interfaces.gateway.delivery import DeliveryFanOut, DeliveryStream, write_stream
 from ai_assistant.interfaces.gateway.http import (
     IncompleteRequestError,
@@ -383,6 +387,17 @@ _CHAT_DELETE_MESSAGE_PATH: Final = "/chat/message/delete"
 _CHAT_DELETE_CONVERSATION_PATH: Final = "/chat/conversation/delete"
 _CHAT_TRANSCRIPT_PATH: Final = "/chat/transcript"
 _CHAT_CHANGES_PATH: Final = "/chat/changes"
+
+#: ADR-0296 §4's change stream, relayed to a browser (ADR-0298 §7). The page follows
+#: the chat on it in place of reading :data:`_CHAT_CHANGES_PATH` on a clock; that
+#: read stays on the surface, and the page still makes it once to learn the cursor
+#: it opens this stream from. ``POST`` because it carries one argument, the cursor,
+#: and every argument here travels in a body (:data:`_SESSION_PATH`'s note).
+#:
+#: **ADR-0177 §1:1's enumeration gains ``follow_chat`` by ADR-0296's record on it**
+#: ("§1:1's enumeration, which gains the acts in the medium … and the change
+#: stream"), which no header line of ADR-0177 yet records for this route by name.
+_CHAT_FOLLOW_PATH: Final = "/chat/follow"
 
 #: ADR-0297 §5's stop command, reached by the chat's stop control beside "working…"
 #: (ADR-0295 §1:2), which §6:4 lands last with ``assistant stop``.
@@ -572,6 +587,7 @@ _ASSISTANT_PATHS: Final[Mapping[tuple[str, str], str]] = {
     ("POST", _CHAT_DELETE_CONVERSATION_PATH): "delete_conversation",
     ("POST", _CHAT_TRANSCRIPT_PATH): "transcript",
     ("POST", _CHAT_CHANGES_PATH): "chat_changes",
+    ("POST", _CHAT_FOLLOW_PATH): "follow_chat",
     ("POST", _STOP_ACTIVATION_PATH): "stop_activation",
     ("POST", _SOURCES_PATH): "grantable_sources",
     ("POST", _GRANT_PATH): "grant",
@@ -628,11 +644,11 @@ _CONNECTION_PATHS: Final = frozenset(
 #: split is stated over paths rather than over what a body happens to hold.
 _CREDENTIAL_PATHS: Final = frozenset({_CONNECT_PATH, _REPROVISION_PATH})
 
-#: The one shape that answers on a stream (ADR-0175 §1), since ADR-0293 §11 retired
-#: the streamed turn. It is held apart from the rest because only it outlives the
-#: request that established it, so only it needs the handle of the session that
-#: admitted it (§7).
-_STREAMED_SHAPES: Final = frozenset({("GET", _DELIVERIES_PATH)})
+#: The shapes that answer on a stream (ADR-0175 §1): the delivery stream, and since
+#: ADR-0298 §7 the change stream. They are held apart from the rest because only they
+#: outlive the request that established them, so only they need the handle of the
+#: session that admitted them (§7).
+_STREAMED_SHAPES: Final = frozenset({("GET", _DELIVERIES_PATH), ("POST", _CHAT_FOLLOW_PATH)})
 
 #: The cookie the gateway sets, and the header the front end sends. Two values
 #: rather than one because "a cookie is not scoped to a port" (ADR-0168 §6).
@@ -2452,17 +2468,7 @@ class Gateway:
             return barred
         try:
             if shape in _STREAMED_SHAPES:
-                # **The delivery stream names nothing** (ADR-0298 §5): it is served from
-                # the gateway's own poll, ``next_notification`` "is the connecting
-                # device's own", and a poll carrying ``acting_for`` is refused. So it is
-                # opened outside :meth:`_relaying_for`, and the poll's task, which
-                # copies the context it is started in, never holds a browser's name.
-                handle = None if header_half is None else self._sessions.handle(header_half)
-                if handle is None:  # pragma: no cover — admitted means a session verified it
-                    return self._refuse(
-                        RequestClass.ASSISTANT, RefusalCondition.NO_LIVE_SESSION, connection
-                    )
-                return self._delivery_stream(handle)
+                return self._streamed(request, header_half, connection)
             with self._relaying_for(connection):
                 if request.path in self._named:
                     return await self._named[request.path](
@@ -2471,6 +2477,28 @@ class Gateway:
                 return await self._unary[request.path](request)
         except _Refused as refused:
             return refused.response
+
+    def _streamed(
+        self, request: Request, header_half: str | None, connection: _Connection
+    ) -> Response | _Streamed:
+        """Open one of :data:`_STREAMED_SHAPES`, held against its session (ADR-0175 §7).
+
+        Raises:
+            _Refused: If the change stream's cursor is malformed.
+        """
+        handle = None if header_half is None else self._sessions.handle(header_half)
+        if handle is None:  # pragma: no cover — admitted means a session verified it
+            return self._refuse(
+                RequestClass.ASSISTANT, RefusalCondition.NO_LIVE_SESSION, connection
+            )
+        if request.path == _CHAT_FOLLOW_PATH:
+            return self._change_stream(request, handle, connection)
+        # **The delivery stream names nothing** (ADR-0298 §5): it is served from the
+        # gateway's own poll, ``next_notification`` "is the connecting device's own",
+        # and a poll carrying ``acting_for`` is refused. So it is opened outside
+        # :meth:`_relaying_for`, and the poll's task, which copies the context it is
+        # started in, never holds a browser's name.
+        return self._delivery_stream(handle)
 
     def _acting_for(self, connection: _Connection) -> str | None:
         """The browser device a relayed call names to the hub, or ``None`` (ADR-0298 §1).
@@ -2837,6 +2865,129 @@ class Gateway:
             ending=ending,
             delivery=opened,
         )
+
+    def _change_stream(
+        self, request: Request, handle: SessionHandle, connection: _Connection
+    ) -> Response | _Streamed:
+        """Open one browser's change stream, relayed from the hub's (ADR-0298 §7).
+
+        **One hub stream per browser stream, relayed change for change.** Nothing is
+        shared between two browsers or two tabs: each has its own cursor, and the hub
+        filters each stream for the device it is followed for (§7:4, §7:5), so there is
+        nothing a fan-out could hold in common. The stream holds one of
+        ``gateway_max_hub_connections`` for its life, as a delivery poll does
+        (ADR-0175 §7), and is refused with the ceiling where none is free.
+
+        **The whole iteration runs inside the browser's name** (:meth:`_relaying_for`,
+        ADR-0298 §1:5): the wire client writes ``acting_for`` into the request frame,
+        and again into each one it reopens the stream with when the hub goes quiet
+        (§7:13). Nothing is named for a loopback browser, which is the connecting
+        device.
+
+        **The head is written before the hub has answered**, so a refusal the hub
+        makes on the first step — a device holding no role (ADR-0298 §5's "Reading
+        many") — arrives as the stream's terminal ``fault``, carrying the same name
+        and sentence a refused request would (:meth:`_device_refused`). Waiting for
+        the first chunk instead would hold the head for as long as the chat space is
+        quiet, since an engine followed in-process writes nothing until something
+        changes.
+
+        **The head states the cadence the gateway writes at**, the delivery stream's
+        own figure (:meth:`_delivery_stream`): the gateway writes ``alive`` whenever
+        that long passes with nothing else written, so the page can tell a quiet chat
+        from a stream that has died.
+
+        Args:
+            request: The admitted request, carrying ``after``.
+            handle: The session that admitted it (ADR-0175 §7).
+            connection: The connection it arrived on, which names the browser.
+
+        Returns:
+            The stream, or a refusal: a malformed cursor, or the ceiling.
+
+        Raises:
+            _Refused: If the cursor is absent or out of range.
+        """
+        after = _required_cursor(_payload(request), "after")
+        if not self._take_hub_slot():
+            return _ceiling()
+        ending = _Ending()
+        budget = self._settings.gateway_notification_budget
+        return _Streamed(
+            handle=handle,
+            head=StreamHead(
+                content_type=streams.MEDIA_TYPE,
+                headers=(streams.keep_alive_header(budget),),
+            ),
+            body=partial(
+                self._follow_chat,
+                after=after,
+                relaying=self._acting_for(connection),
+                every=budget,
+                ending=ending,
+            ),
+            release=self._give_hub_slot,
+            ending=ending,
+        )
+
+    async def _follow_chat(
+        self,
+        writer: asyncio.StreamWriter,
+        *,
+        after: int,
+        relaying: str | None,
+        every: timedelta,
+        ending: _Ending,
+    ) -> None:
+        """Relay the hub's change stream onto one browser's, until either ends.
+
+        Each chunk becomes one value (:func:`_stream_value`); the hub's heartbeat is
+        relayed as ``alive``, and the gateway writes one of its own whenever ``every``
+        passes with nothing written. The hub's ``ChatStreamEnd`` is relayed as the
+        terminal ``end``; a failure the hub reports, or a hub that cannot be reached,
+        as the terminal ``fault`` a refused request would name.
+
+        **A browser that stops reading is let go.** A write that has not drained when
+        the next keep-alive falls due ends the stream, as ADR-0175 §4 ends a delivery
+        stream: the gateway holds nothing behind a browser that is not taking it, and
+        stops asking the hub on its behalf. The page follows again from its cursor.
+
+        Args:
+            writer: The connection's writer, already carrying the stream's head.
+            after: The browser's cursor.
+            relaying: The browser device the stream is followed for, or ``None``.
+            every: The keep-alive cadence the head stated.
+            ending: The stream's record of what it has written (:class:`_Ending`).
+
+        Raises:
+            ConnectionAbortedError: If a write did not drain within ``every``.
+        """
+        seconds = every.total_seconds()
+
+        async def write(value: Mapping[str, Any]) -> None:
+            writer.write(ending.framing(value))
+            try:
+                async with asyncio.timeout(seconds):
+                    await writer.drain()
+            except TimeoutError:
+                writer.close()
+                msg = "the browser stopped reading its change stream"
+                raise ConnectionAbortedError(msg) from None
+            ending.wrote()
+
+        with contextlib.nullcontext() if relaying is None else acting_for(relaying):
+            try:
+                chunks = self._engine.follow_chat(after=after)
+                async with closing_stream(paced(chunks, every=seconds)) as values:
+                    async for chunk in values:
+                        if isinstance(chunk, ChatStreamEnd):
+                            await write(streams.end(chunk.next_after))
+                            return
+                        await write(streams.alive() if chunk is None else _stream_value(chunk))
+            except DeviceRefusedError as exc:
+                await write(_stream_fault(self._device_refused(exc)))
+            except (TransportError, AssistantError, ValueError) as exc:
+                await write(_stream_fault(_relay_fault(exc)))
 
     async def _recent_conversations(self, request: Request) -> Response:
         """List conversations, most recently active first (ADR-0074 §2, ADR-0177 §1)."""
@@ -6059,6 +6210,55 @@ def _change_view(change: ChatChange) -> dict[str, Any]:
 def _changes_view(page: ChatChanges) -> dict[str, Any]:
     """The changes after a cursor, and the cursor to ask from next (§5:10, §5:11)."""
     return {"changes": [_change_view(one) for one in page.changes], "next_after": page.next_after}
+
+
+def _stream_value(chunk: ChatStreamChunk) -> dict[str, Any]:
+    """One chunk of the hub's change stream, as the browser's stream carries it.
+
+    Exactly one of four, as the chunk holds exactly one (ADR-0298 §7:3), each under its
+    own ``kind`` (ADR-0175 §2):
+
+    * ``change`` — the change as :func:`_change_view` renders it in a page of
+      ``chat_changes``, and ``snapshot``: the conversation's entries as
+      :func:`_entry_view` renders a transcript's, on the change that makes the device
+      a reader (§7:6), and ``null`` on every other. One shape, so the page reads one
+      member rather than testing for one;
+    * ``state`` — a conversation's current state, as :func:`_state_view` renders the
+      digest's (ADR-0296 §4:9);
+    * ``roles`` — the device's own roles (§7:9);
+    * the hub's heartbeat — relayed as ``alive``, which is what it is to the page.
+    """
+    if chunk.change is not None:
+        snapshot = chunk.change.snapshot
+        return {
+            "kind": streams.ValueKind.CHANGE.value,
+            "change": _change_view(chunk.change.change),
+            "snapshot": None if snapshot is None else [_entry_view(one) for one in snapshot],
+        }
+    if chunk.state is not None:
+        return {
+            "kind": streams.ValueKind.STATE.value,
+            "conversation_id": chunk.state.conversation_id,
+            "state": _state_view(chunk.state.state),
+        }
+    if chunk.roles is not None:
+        return {
+            "kind": streams.ValueKind.ROLES.value,
+            "roles": [one.value for one in chunk.roles],
+        }
+    return streams.alive()
+
+
+def _stream_fault(refused: Response) -> dict[str, Any]:
+    """A refusal a request would have been answered with, as a stream's terminal value.
+
+    The same ``fault`` name and the same sentence, read back off the body the request
+    path builds, so a refusal reaches the page in the same words whichever of the two
+    shapes met it — and no second table of names can drift from the first.
+    """
+    body = json.loads(refused.body)
+    detail = body.get("detail")
+    return streams.fault(body["fault"], detail=detail if isinstance(detail, str) else None)
 
 
 def _source_view(source: GrantableSource) -> dict[str, Any]:
