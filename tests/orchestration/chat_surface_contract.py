@@ -853,6 +853,7 @@ class ChatReaderContract:
     ) -> None:
         """ADR-0295 §3:3-§3:4, ADR-0297 §4: no reply, no *couldn't finish*; state *stopped*.
 
+        The stop lands while the input is being taken in, so nothing after it starts.
         What it marked stays taken in (§6:8), so nothing is taken in again after it.
         """
         engine, chat = chat_reader_surface.engine, chat_reader_surface.chat
@@ -879,3 +880,10 @@ class ChatReaderContract:
         assert digest.state == ConversationState(last_ended=ActivationEnding.STOPPED)
         assert await chat.taken_in(conversation, positions=[1]) == {1: running}
         assert await chat.untaken_messages(conversation) == ()
+        # Nothing started after the stop (ADR-0297 §4): no understanding, no outcome.
+        episode = await chat_reader_surface.memory.get(f"activation:{running}")
+        assert isinstance(episode, EpisodicMemory)
+        assert episode.processing_record is not None
+        assert episode.processing_record.reason is ProcessingReason.STOPPED
+        assert episode.processing_record.understanding == ()
+        assert episode.outcome is None
