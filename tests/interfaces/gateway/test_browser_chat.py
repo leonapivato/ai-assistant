@@ -650,3 +650,69 @@ async def test_a_devices_read_that_fails_on_opening_is_read_again_on_the_owners_
         await drive.page.click("#chat-follow-again")
         await expect(drive.page.locator("#chat-add-device")).to_be_visible()
         await expect(drive.page.locator("#chat-follow")).to_contain_text("Following this chat")
+
+
+async def test_a_read_the_gateway_answered_late_applies_every_change_it_carries(
+    gateway_browser: Browser, tmp_path: Path
+) -> None:
+    """§5:10: the change stream is the authority, so no change it carries is skipped.
+
+    The read leaves the page before an edit and reaches the gateway after the edit and
+    another device's change, so it carries both; the page applies both, in order.
+    """
+    async with driving(gateway_browser, tmp_path) as drive:
+        await drive.engine.set_my_devices(
+            [
+                ChatDevice(device_id="hub", access=DeviceAccess.READ_WRITE),
+                ChatDevice(device_id="nTABLET", access=DeviceAccess.READ),
+                ChatDevice(device_id="nPHONE", access=DeviceAccess.READ),
+            ]
+        )
+        await drive.page.click("#chat-button")
+        devices = drive.page.locator("#chat-my-devices li")
+        await expect(devices).to_have_count(3)
+        await expect(drive.page.locator("#chat-follow")).to_contain_text("Following this chat")
+
+        loop = asyncio.get_running_loop()
+        held: asyncio.Future[Route] = loop.create_future()
+
+        async def hold(route: Route) -> None:
+            if not held.done():
+                held.set_result(route)
+                return
+            await route.continue_()
+
+        await drive.page.route("**/chat/changes", hold)
+        try:
+            route = await asyncio.wait_for(held, timeout=_IDLE_FOLLOWED / 1000)
+            await devices.filter(has_text="nTABLET").locator("button", has_text="Remove").click()
+            await expect(devices).to_have_count(2)
+            await drive.engine.set_my_devices(
+                [ChatDevice(device_id="hub", access=DeviceAccess.READ_WRITE)]
+            )
+            await route.continue_()
+            await expect(devices).to_have_count(1, timeout=_FOLLOWED)
+        finally:
+            await drive.page.unroute("**/chat/changes", hold)
+
+
+async def test_an_event_does_not_resume_a_chat_whose_opening_read_failed(
+    gateway_browser: Browser, tmp_path: Path
+) -> None:
+    """The owner's control stays until pressed; coming back does not stand in for it."""
+    async with driving(gateway_browser, tmp_path) as drive:
+
+        async def failing() -> Any:
+            raise ConversationStoreError("the set is unreadable")
+
+        drive.engine.my_devices = failing  # type: ignore[method-assign]
+        await drive.page.click("#chat-button")
+        await expect(drive.page.locator("#chat-follow")).to_contain_text("Stopped following")
+        await drive.page.evaluate(
+            """() => {
+              document.dispatchEvent(new Event("visibilitychange"));
+              window.dispatchEvent(new Event("online"));
+            }"""
+        )
+        await expect(drive.page.locator("#chat-follow-again")).to_be_visible()
+        assert await drive.page.evaluate("() => !chat.following")
