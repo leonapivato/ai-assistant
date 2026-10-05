@@ -18,7 +18,7 @@ import sys
 from datetime import UTC, datetime, timedelta
 from inspect import getsource, isfunction, unwrap
 from io import StringIO
-from itertools import count, product
+from itertools import count
 from pathlib import Path
 from typing import TYPE_CHECKING, Any, Final
 
@@ -75,9 +75,6 @@ from ai_assistant.core.types import (
     Ground,
     HeldNotification,
     Idempotency,
-    IngestSummary,
-    LearnDecision,
-    LearnOutcome,
     MemoryKind,
     MemorySource,
     Message,
@@ -93,11 +90,8 @@ from ai_assistant.core.types import (
     Provenance,
     Question,
     QuestionState,
-    QueuedQuestion,
-    QueueOutcome,
     QuietWindow,
     ReadAskOutcome,
-    ReplyChunk,
     Retirement,
     Reversibility,
     RiskLevel,
@@ -163,7 +157,7 @@ from ai_assistant.wire import GRANTABLE_SCOPES, TransportError
 from ai_assistant.wire.address import sun_path_limit
 
 if TYPE_CHECKING:
-    from collections.abc import AsyncIterator, Awaitable, Callable, Mapping, Sequence
+    from collections.abc import Awaitable, Callable, Mapping, Sequence
 
     from ai_assistant.core.protocols import ActionPolicy, AuditTrail
     from ai_assistant.core.types import FrozenJson, MemoryRecord, ShownFile, SourceGrant
@@ -2357,55 +2351,11 @@ async def test_a_terminal_that_fails_at_the_hidden_prompt_takes_the_same_arm(
     assert engine.calls == []
 
 
-# --- learn: the correction leg (ADR-0042 §3, §6) ------------------------
-
-
-class _RecordingEngine:
-    """A stand-in engine that records the feedback it is handed (ADR-0042 §6).
-
-    The adapter cannot tell it from the façade for the one call ``learn`` makes; it
-    lets a test assert the exact :class:`~ai_assistant.core.types.FeedbackEvent` the
-    command built without folding anything into a real memory store.
-    """
-
-    def __init__(self, outcome: LearnOutcome) -> None:
-        self._outcome = outcome
-        self.events: list[FeedbackEvent] = []
-
-    async def learn(self, event: FeedbackEvent) -> LearnOutcome:
-        self.events.append(event)
-        return self._outcome
-
-    async def start(self) -> None:
-        """The start-up sweeps, which this stand-in has no stores to sweep."""
-
-    async def aclose(self) -> None:
-        """Nothing to release: this stand-in owns no resource."""
-
-
-class _FailingLearnEngine:
-    """An engine whose ``learn`` fails, as a broken write path would."""
-
-    async def learn(self, event: FeedbackEvent) -> LearnOutcome:
-        msg = "the memory store would not write"
-        raise MemoryStoreError(msg)
-
-    async def start(self) -> None:
-        """The start-up sweeps, which this stand-in has no stores to sweep."""
-
-    async def aclose(self) -> None:
-        """Nothing to release."""
-
-
-def _stored_outcome() -> LearnOutcome:
-    """One stored proposal, the ordinary success shape."""
-    return LearnOutcome(
-        results=(IngestSummary(decision=LearnDecision.STORED, record_id="rec-1", reason="new"),)
-    )
+# --- the startup seam every command is wired through (ADR-0042 §6) --------
 
 
 def _wire(monkeypatch: pytest.MonkeyPatch, engine: object) -> None:
-    """Point the ``learn`` command's startup at ``engine``.
+    """Point a command's startup at ``engine``.
 
     The seam is :func:`~ai_assistant.interfaces.cli._open_engine` rather than
     ``build_engine``, because after ADR-0084 §6 the CLI has no composition root to
@@ -2436,9 +2386,9 @@ def _wire_recording_opens(monkeypatch: pytest.MonkeyPatch, engine: object) -> li
     The observation itself is :func:`cli_open_recorder.wire_recording_opens`, which
     three sibling modules make the same claim through (#1973); this binds it to
     *this* module's wiring. The cases making the claim here are spread the length of
-    the module — ``--timeout``, ``learn`` content, ``--kind``, an ``--about-person``,
-    ``--limit``, ``--offset`` and ``--band``, a grant's ``source``, a repeated
-    ``--scope``, a quiet window, and the id arguments themselves.
+    the module — ``--timeout``, ``--limit``, ``--offset`` and ``--band``, a grant's
+    ``source``, a repeated ``--scope``, a quiet window, and the id arguments
+    themselves.
 
     Args:
         monkeypatch: The patcher whose lifetime the substitution follows.
@@ -2462,589 +2412,12 @@ def test_the_open_recorder_sees_the_client_an_accepted_invocation_builds(
     about. So one *accepted* invocation is pinned here: it opens a client, and the
     list has to show it.
     """
-    opened = _wire_recording_opens(monkeypatch, _RecordingEngine(_stored_outcome()))
+    opened = _wire_recording_opens(monkeypatch, FakeAssistantEngine())
 
-    result = CliRunner().invoke(cli.app, ["learn", "--kind", "correction", "hello"])
+    result = CliRunner().invoke(cli.app, ["conversations"])
 
     assert result.exit_code == 0
     assert opened == [None]
-
-
-def test_learn_leaves_a_corrections_memory_kind_for_the_engine_to_resolve(
-    output: StringIO, monkeypatch: pytest.MonkeyPatch
-) -> None:
-    """ADR-0122 §2: this adapter no longer predicts a correction's record type.
-
-    It used to answer from a fixed table, and the answer was indistinguishable
-    downstream from one the user had chosen deliberately — which is #864: every
-    correction filed as a semantic fact, and the kind-scoped conflict probe then
-    looking only in the drawer the table named. A correction points at a belief that
-    already exists, whose record type is a property of *that* belief; naming it here
-    is a prediction made at the one layer with no access to the target. Leaving it
-    absent is the adapter reporting what it knows, and it is what keeps golden rule 3
-    intact — the resolution is business logic and none of it happens in
-    ``interfaces/``.
-    """
-    engine = _RecordingEngine(_stored_outcome())
-    _wire(monkeypatch, engine)
-
-    result = CliRunner().invoke(
-        cli.app, ["learn", "--kind", "correction", "the office is in Boston"]
-    )
-    assert result.exit_code == 0
-    assert len(engine.events) == 1
-    event = engine.events[0]
-    assert event.kind is FeedbackKind.CORRECTION
-    assert event.memory_kind is None  # not predicted here (ADR-0122 §2)
-    assert event.content == "the office is in Boston"
-    assert event.subject is None
-    assert event.created_at == AT  # stamped from the injected clock, not hand-rolled
-    assert "Learned" in output.getvalue()
-
-
-def test_the_default_table_no_longer_answers_for_a_correction() -> None:
-    """§2 removes the ``CORRECTION`` entry; the table is deliberately not exhaustive.
-
-    Asserted on the table itself as well as through the command, because the comment
-    that used to call it "exhaustive over ``FeedbackKind``" is exactly the invitation
-    to restore the entry — and restoring it would reinstate #864 while every outcome
-    test above still passed on a store that happened to hold a semantic neighbour.
-    """
-    assert cli._DEFAULT_MEMORY_KIND == {FeedbackKind.PREFERENCE: MemoryKind.PREFERENCE}
-
-
-def test_learn_builds_a_preference_event_with_a_subject(
-    monkeypatch: pytest.MonkeyPatch,
-) -> None:
-    """--kind preference with --about becomes a PREFERENCE event scoped by subject."""
-    engine = _RecordingEngine(_stored_outcome())
-    _wire(monkeypatch, engine)
-
-    result = CliRunner().invoke(
-        cli.app, ["learn", "--kind", "preference", "I prefer metric units", "--about", "units"]
-    )
-    assert result.exit_code == 0
-    event = engine.events[0]
-    assert event.kind is FeedbackKind.PREFERENCE
-    assert event.memory_kind is MemoryKind.PREFERENCE  # defaulted from --kind
-    assert event.subject == "units"
-
-
-def test_learn_states_a_subject_with_about_person(monkeypatch: pytest.MonkeyPatch) -> None:
-    """--about-person is the only route a non-owner subject has (ADR-0100 §4, §7).
-
-    Without it, ``assistant learn "Marta prefers window seats"`` constructs
-    ``about_person=None``, which §3 reads as *the owner's* — so the field's
-    arrival would make a false record of exactly the case it was added for. That
-    is why §7 makes the route a precondition of the field rather than a follow-up.
-    """
-    engine = _RecordingEngine(_stored_outcome())
-    _wire(monkeypatch, engine)
-
-    result = CliRunner().invoke(
-        cli.app,
-        ["learn", "--kind", "preference", "Marta prefers window seats", "--about-person", "Marta"],
-    )
-    assert result.exit_code == 0
-    event = engine.events[0]
-    assert event.about_person == "Marta"
-    assert event.subject is None  # the scope axis, untouched by the person flag
-
-
-def test_learn_keeps_the_two_about_flags_apart(monkeypatch: pytest.MonkeyPatch) -> None:
-    """--about is a scope and --about-person is whom it is about (ADR-0100 §7).
-
-    Given together they land in their own fields. The person flag is spelled long
-    precisely because ``--about`` and ``-a`` were already the scope axis's on this
-    command, and a second short flag beside ``-a`` is the confusion the ADR spent
-    a section avoiding.
-    """
-    engine = _RecordingEngine(_stored_outcome())
-    _wire(monkeypatch, engine)
-
-    result = CliRunner().invoke(
-        cli.app,
-        [
-            "learn",
-            "--kind",
-            "preference",
-            "prefers window seats",
-            "--about",
-            "travel",
-            "--about-person",
-            "Marta",
-        ],
-    )
-    assert result.exit_code == 0
-    event = engine.events[0]
-    assert event.subject == "travel"
-    assert event.about_person == "Marta"
-
-
-def test_learn_defaults_to_stating_no_subject(monkeypatch: pytest.MonkeyPatch) -> None:
-    """Silence is "no subject stated", which is read as the owner's (ADR-0100 §3)."""
-    engine = _RecordingEngine(_stored_outcome())
-    _wire(monkeypatch, engine)
-
-    result = CliRunner().invoke(cli.app, ["learn", "--kind", "correction", "the office moved"])
-
-    assert result.exit_code == 0
-    assert engine.events[0].about_person is None
-
-
-def test_learn_passes_a_subject_through_byte_for_byte(monkeypatch: pytest.MonkeyPatch) -> None:
-    """The adapter does not tidy a label (ADR-0100 §6).
-
-    Stripping here would store ``"  marta  "`` as ``"marta"``, and §6 keeps a
-    label exactly as given precisely so that every later matching rule stays
-    available — none can be recovered from labels normalised on the way in.
-    """
-    engine = _RecordingEngine(_stored_outcome())
-    _wire(monkeypatch, engine)
-
-    result = CliRunner().invoke(
-        cli.app, ["learn", "--kind", "correction", "x", "--about-person", "  marta  "]
-    )
-
-    assert result.exit_code == 0
-    assert engine.events[0].about_person == "  marta  "
-
-
-@pytest.mark.parametrize("blank", ["", "   ", "\t\n"])
-def test_learn_rejects_a_blank_about_person(blank: str, monkeypatch: pytest.MonkeyPatch) -> None:
-    """A blank subject is a usage error, not an uncaught ValidationError (§7).
-
-    ``FeedbackEvent.about_person`` is ``NonBlankEncodableText``, whose refusal is
-    a ``ValidationError`` — not an ``AssistantError`` — raised while the event is
-    built, which is *before* :func:`_learn_feedback`'s error boundary opens. The
-    parse-time callback turns it into a clean exit 2, the shape ``_present_source``
-    already uses one command over.
-
-    **And no client is opened** (#1973). "Parse-time" is the whole of the claim
-    above — the callback runs while Typer is still binding parameters, before
-    ``learn`` has reached its own body — and neither the exit code nor the absent
-    exception says so on its own. A client is wired here for the first time so that
-    the refusal has one to fail to open.
-    """
-    opened = _wire_recording_opens(monkeypatch, _RecordingEngine(_stored_outcome()))
-
-    result = CliRunner().invoke(
-        cli.app, ["learn", "--kind", "correction", "x", "--about-person", blank]
-    )
-
-    assert result.exit_code == 2  # Typer's usage-error code
-    assert result.exception is None or isinstance(result.exception, SystemExit)
-    assert opened == []
-
-
-def test_learn_rejects_an_unencodable_about_person(monkeypatch: pytest.MonkeyPatch) -> None:
-    r"""A lone surrogate reaches argv and no UTF-8 encoder will take it.
-
-    Linux passes argv as bytes and Python decodes it with ``surrogateescape``, so
-    ``assistant learn x --about-person $'\xe9'`` arrives as half a character.
-    ``EncodableText`` refuses it, and without the parse-time check that refusal
-    would land as the same uncaught ``ValidationError`` a blank one would.
-
-    Refused at the same boundary as a blank one, and observed the same way: the
-    value never reaches a client, because no client is opened (#1973).
-    """
-    opened = _wire_recording_opens(monkeypatch, _RecordingEngine(_stored_outcome()))
-
-    result = CliRunner().invoke(
-        cli.app, ["learn", "--kind", "correction", "x", "--about-person", "\udce9"]
-    )
-
-    assert result.exit_code == 2
-    assert result.exception is None or isinstance(result.exception, SystemExit)
-    assert opened == []
-
-
-def test_learn_guarded_flag_reaches_the_engine_on_the_event(
-    monkeypatch: pytest.MonkeyPatch,
-) -> None:
-    """--guarded arrives at the engine as ``FeedbackEvent.guarded`` (ADR-0217 §10).
-
-    The CLI-seam arm §10 owes this lane by name. Every other arm ADR-0217 takes of
-    the write-time act starts from a **preconstructed** event, so an adapter that
-    accepted the flag and then omitted the member when building the event would
-    pass all of them while writing the default placement over an explicit owner
-    act — a control silently doing nothing, which is the one failure the route
-    exists to prevent. Only an assertion taken from the far side of the adapter
-    catches it, which is why this one reads the event the engine was handed.
-    """
-    engine = _RecordingEngine(_stored_outcome())
-    _wire(monkeypatch, engine)
-
-    result = CliRunner().invoke(
-        cli.app, ["learn", "--kind", "correction", "the office moved", "--guarded"]
-    )
-
-    assert result.exit_code == 0
-    assert engine.events[0].guarded is True
-
-
-def test_learn_without_the_guarded_flag_states_no_act(monkeypatch: pytest.MonkeyPatch) -> None:
-    """Silence is ``False``, which ADR-0217 §7 says is not an act of any kind.
-
-    The other half of §10's CLI-seam arm: "the same command without it as one
-    carrying the default". The value is the field's default and the adapter sets it
-    explicitly, which are the same value — what the arm pins is that leaving the
-    flag off does not somehow arrive as an act, so the record keeps ADR-0217 §6's
-    default placement and nothing here records that the owner considered guarding
-    this belief and declined.
-    """
-    engine = _RecordingEngine(_stored_outcome())
-    _wire(monkeypatch, engine)
-
-    result = CliRunner().invoke(cli.app, ["learn", "--kind", "correction", "the office moved"])
-
-    assert result.exit_code == 0
-    assert engine.events[0].guarded is False
-
-
-def test_learn_offers_no_flag_that_widens(monkeypatch: pytest.MonkeyPatch) -> None:
-    """There is no ``--no-guarded``, because at write there is no widening act.
-
-    ADR-0217 §7: the member "is a narrowing only, and ``False`` is not an act of
-    any kind". A ``--no-guarded`` spelled as the flag's negative half would offer
-    the owner an act this decision does not give them at write — and would make the
-    absent flag look like the *other* half of a choice rather than the absence of
-    one. Widening a record the owner has already guarded is §7's ``unguard``, an
-    act on a stored record in a lane of its own; it is not reachable from here, so
-    the option is a usage error and no event is built.
-    """
-    engine = _RecordingEngine(_stored_outcome())
-    _wire(monkeypatch, engine)
-
-    result = CliRunner().invoke(
-        cli.app, ["learn", "--kind", "correction", "the office moved", "--no-guarded"]
-    )
-
-    assert result.exit_code == 2  # Typer's usage-error code
-    assert engine.events == []
-
-
-def test_learn_guarded_leaves_every_other_axis_alone(monkeypatch: pytest.MonkeyPatch) -> None:
-    """The placement flag composes with the two kinds and the two subjects.
-
-    ``--guarded`` is a fifth axis of one event, not a mode that reinterprets the
-    others: given alongside them, each field still carries what its own flag said.
-    """
-    engine = _RecordingEngine(_stored_outcome())
-    _wire(monkeypatch, engine)
-
-    result = CliRunner().invoke(
-        cli.app,
-        [
-            "learn",
-            "--kind",
-            "preference",
-            "prefers window seats",
-            "--about",
-            "travel",
-            "--about-person",
-            "Marta",
-            "--memory-kind",
-            "semantic",
-            "--guarded",
-        ],
-    )
-
-    assert result.exit_code == 0
-    event = engine.events[0]
-    assert event.guarded is True
-    assert event.kind is FeedbackKind.PREFERENCE
-    assert event.memory_kind is MemoryKind.SEMANTIC
-    assert event.subject == "travel"
-    assert event.about_person == "Marta"
-
-
-def test_learn_memory_kind_flag_overrides_the_default(
-    monkeypatch: pytest.MonkeyPatch,
-) -> None:
-    """An explicit --memory-kind overrides the default derived from --kind."""
-    engine = _RecordingEngine(_stored_outcome())
-    _wire(monkeypatch, engine)
-
-    result = CliRunner().invoke(
-        cli.app,
-        ["learn", "--kind", "preference", "call me Al", "--memory-kind", "semantic"],
-    )
-    assert result.exit_code == 0
-    event = engine.events[0]
-    assert event.kind is FeedbackKind.PREFERENCE
-    assert event.memory_kind is MemoryKind.SEMANTIC  # overridden, not the preference default
-
-
-def test_learn_memory_kind_flag_pins_a_correction_that_would_otherwise_resolve(
-    monkeypatch: pytest.MonkeyPatch,
-) -> None:
-    """§6: the flag keeps its role and acquires a sharper one.
-
-    It was a way to pre-empt a fixed table; it becomes the way to say "I know which
-    drawer, do not look" — a stronger guarantee, since it now suppresses a store read
-    as well as a default, and the escape hatch §4's best-ranked rule leaves the user.
-    The adapter's whole part in that is putting the value on the event; the
-    suppression itself is the engine's (``tests/orchestration/test_loop.py``).
-    """
-    engine = _RecordingEngine(_stored_outcome())
-    _wire(monkeypatch, engine)
-
-    result = CliRunner().invoke(
-        cli.app,
-        ["learn", "--kind", "correction", "the office is in Boston", "--memory-kind", "semantic"],
-    )
-    assert result.exit_code == 0
-    event = engine.events[0]
-    assert event.kind is FeedbackKind.CORRECTION
-    assert event.memory_kind is MemoryKind.SEMANTIC
-
-
-def test_learn_rejects_an_unknown_kind(monkeypatch: pytest.MonkeyPatch) -> None:
-    """An unrecognised --kind is a usage error, before any engine is built.
-
-    The recorded opens are what hold the second half of that sentence (#1970): exit
-    2 is equally what a command that connected first and refused afterwards returns.
-    """
-    opened = _wire_recording_opens(monkeypatch, _RecordingEngine(_stored_outcome()))
-
-    result = CliRunner().invoke(cli.app, ["learn", "--kind", "bogus", "hello"])
-
-    assert result.exit_code == 2  # Typer's usage-error code
-    assert opened == []
-
-
-def test_learn_requires_a_kind() -> None:
-    """--kind is required; omitting it is a usage error."""
-    result = CliRunner().invoke(cli.app, ["learn", "hello"])
-    assert result.exit_code == 2
-
-
-@pytest.mark.parametrize("blank", ["", "   ", "\t\n"])
-def test_learn_rejects_blank_content(blank: str, monkeypatch: pytest.MonkeyPatch) -> None:
-    """Whitespace-only content is a usage error, not an uncaught ValidationError (§7).
-
-    ``FeedbackEvent.content`` rejects blank text, and that ``ValidationError`` is not
-    an ``AssistantError``; the parse-time callback turns it into a clean usage error
-    (exit 2) before any event is constructed, rather than a dumped traceback.
-
-    **No client is opened either** (#1970). ``_learn_feedback`` builds the event
-    before it opens one, so today the two claims coincide — which is exactly why the
-    second needs an assertion of its own: swap those two statements and every
-    assertion this case already held still passes, while a mistyped ``learn`` starts
-    costing a hub connection to be told what was typed.
-    """
-    opened = _wire_recording_opens(monkeypatch, _RecordingEngine(_stored_outcome()))
-
-    result = CliRunner().invoke(cli.app, ["learn", "--kind", "correction", blank])
-
-    assert result.exit_code == 2  # Typer's usage-error code
-    assert result.exception is None or isinstance(result.exception, SystemExit)
-    assert opened == []
-
-
-def test_learn_surfaces_a_write_failure_with_a_nonzero_exit(
-    output: StringIO, monkeypatch: pytest.MonkeyPatch
-) -> None:
-    """A MemoryStoreError from the write path is rendered, not dumped, exit 1 (§7)."""
-    _wire(monkeypatch, _FailingLearnEngine())
-    result = CliRunner().invoke(cli.app, ["learn", "--kind", "correction", "x"])
-    assert result.exit_code == 1
-    rendered = output.getvalue()
-    assert "Error" in rendered
-    assert "would not write" in rendered
-
-
-def test_render_learn_lists_each_ruling_with_its_reason(output: StringIO) -> None:
-    """Each proposal renders a one-line confirmation naming the ruling and its reason."""
-    outcome = LearnOutcome(
-        results=(
-            IngestSummary(
-                decision=LearnDecision.REINFORCED,
-                record_id="r1",
-                reason="matches an existing memory",
-            ),
-            IngestSummary(
-                decision=LearnDecision.SUPERSEDED, record_id="r2", reason="overturns a prior belief"
-            ),
-        )
-    )
-    cli._render_learn(outcome)
-    rendered = output.getvalue()
-    assert "Reinforced" in rendered
-    assert "matches an existing memory" in rendered
-    assert "Replaced" in rendered
-    assert "overturns a prior belief" in rendered
-    assert "2 update(s)" in rendered
-
-
-def test_render_learn_reports_when_nothing_was_proposed(output: StringIO) -> None:
-    """Feedback that folds into no update is reported, not shown as a silent success."""
-    cli._render_learn(LearnOutcome(results=()))
-    assert "nothing" in output.getvalue().lower()
-
-
-def test_render_learn_points_a_queued_deferral_at_the_question_it_parked(
-    output: StringIO,
-) -> None:
-    """**Inverted by ADR-0078** (§8 reach 1, §10 item 9), and this is the inversion.
-
-    It used to assert the line "cannot be done from here yet", which was honest: no
-    memory-confirmation flow existed, so implying a follow-up would have promised
-    something that did not. ADR-0078 builds the flow, which makes that line false for
-    the arms it closes — and "leaving an honest message that has become a lie is the
-    specific failure ADR-0019 is about".
-
-    So the line now names the question and the verb that answers it. This is the reach
-    that closes issue #423's own scenario: the user submits feedback, is told it is
-    deferred, and is pointed at the answer.
-    """
-    outcome = LearnOutcome(
-        results=(
-            IngestSummary(
-                decision=LearnDecision.DEFERRED,
-                record_id=None,
-                reason="conflicts with a prior assertion",
-                queued=QueuedQuestion(
-                    outcome=QueueOutcome.QUEUED,
-                    question_id="q-7",
-                    question_state=QuestionState.OPEN,
-                ),
-            ),
-        )
-    )
-    cli._render_learn(outcome)
-    rendered = _flat(output.getvalue())
-    assert "Not stored yet" in rendered
-    assert "q-7" in rendered, "the user is pointed at the question, not left guessing"
-    assert "assistant questions" in rendered
-    assert "cannot be done from here" not in rendered, "that claim is now false"
-    assert "0 stored" in rendered  # the header count still excludes it
-    assert "conflicts with a prior" in rendered  # the reason is surfaced
-
-
-def test_render_learn_keeps_the_non_answerable_line_for_a_secret_tier_deferral(
-    output: StringIO,
-) -> None:
-    """And **only** for the arms ADR-0078 closes (§1, §10 item 9).
-
-    A secret-tier deferral is still not answerable: ADR-0004 §3 forbids Tier 0 content
-    a durable file, so nothing was queued and there is nothing to answer. It keeps the
-    existing line and the existing reason, because "one message covering both outcomes
-    would be the same dishonesty arriving from the other side — a user told to go
-    answer a question that was never queued".
-    """
-    outcome = LearnOutcome(
-        results=(
-            IngestSummary(
-                decision=LearnDecision.DEFERRED,
-                record_id=None,
-                reason="secret-tier data requires explicit user confirmation",
-                queued=QueuedQuestion(outcome=QueueOutcome.NOT_QUEUABLE),
-            ),
-        )
-    )
-    cli._render_learn(outcome)
-    rendered = _flat(output.getvalue())
-    assert "cannot be done from here" in rendered
-    assert "assistant questions" not in rendered, "there is no question to answer"
-
-
-@pytest.mark.parametrize(
-    ("state", "expected"),
-    [
-        (QuestionState.OPEN, "already waiting for your answer"),
-        (QuestionState.DECLINED, "already declined"),
-        (QuestionState.INTERRUPTED, "was already begun"),
-    ],
-    ids=["waiting", "declined", "interrupted"],
-)
-def test_render_learn_says_which_question_stands_in_the_way_and_in_what_state(
-    output: StringIO, state: QuestionState, expected: str
-) -> None:
-    """§7's suppression guidance, per state — and the state is what decides the line.
-
-    "The admission's ``deferral`` says **which and in what state**: for a ``REJECTED``
-    row, 'you declined this on <date>; forget that question to be asked again'; for an
-    ``APPLYING`` one, §9's first recovery step." Rendering an interrupted answer as an
-    answerable follow-up would advertise a question the user cannot act on.
-    """
-    outcome = LearnOutcome(
-        results=(
-            IngestSummary(
-                decision=LearnDecision.DEFERRED,
-                record_id=None,
-                reason="conflicts with a prior assertion",
-                queued=QueuedQuestion(
-                    outcome=QueueOutcome.ALREADY_ASKED,
-                    question_id="q-3",
-                    question_state=state,
-                ),
-            ),
-        )
-    )
-    cli._render_learn(outcome)
-    rendered = _flat(output.getvalue())
-    assert expected in rendered
-    assert "q-3" in rendered
-
-
-def test_render_learn_reports_a_full_queue_rather_than_saying_nothing(
-    output: StringIO,
-) -> None:
-    """§7's refused branch — the one an implementation leaves silent (§10 item 3).
-
-    Nothing raises, so a surface that said nothing here would swallow the correction
-    the user just typed. The line names the **queue** rather than a question, because
-    there is no question to read: reaching for one is the dereference the admission's
-    three-shape validator exists to prevent.
-    """
-    outcome = LearnOutcome(
-        results=(
-            IngestSummary(
-                decision=LearnDecision.DEFERRED,
-                record_id=None,
-                reason="conflicts with a prior assertion",
-                queued=QueuedQuestion(outcome=QueueOutcome.QUEUE_FULL),
-            ),
-        )
-    )
-    cli._render_learn(outcome)
-    rendered = _flat(output.getvalue())
-    assert "queue is full" in rendered
-    assert "assistant questions" in rendered, "and says what to do about it"
-
-
-def test_render_learn_neutralises_a_reason_for_the_terminal(output: StringIO) -> None:
-    """A reason carrying control bytes or markup is neutralised on render (§4)."""
-    outcome = LearnOutcome(
-        results=(
-            IngestSummary(
-                decision=LearnDecision.STORED,
-                record_id="r1",
-                reason="wipe\x1b[2J and [red]shout[/red]",
-            ),
-        )
-    )
-    cli._render_learn(outcome)
-    rendered = output.getvalue()
-    assert "\x1b" not in rendered  # the control sequence was neutralised
-    assert "[red]" in rendered  # markup shown literally, not interpreted
-
-
-async def test_drive_learn_folds_real_feedback_into_memory(output: StringIO) -> None:
-    """Against a real engine over fakes, the correction is folded and reported (§3)."""
-    engine = _engine()
-    event = FeedbackEvent(
-        kind=FeedbackKind.CORRECTION,
-        memory_kind=MemoryKind.SEMANTIC,
-        content="the office is in Boston",
-        created_at=AT,
-    )
-    code = await cli._drive_learn(engine, event)
-    assert code == 0
-    assert "Learned" in output.getvalue()
-    await engine.aclose()
 
 
 # --- beliefs / forget: the inspection surface (ADR-0073 §4, §5, §7) -----
@@ -4146,7 +3519,7 @@ def test_forget_prompt_shows_the_belief_and_scopes_the_consent(output: StringIO)
     assert "the office is in Boston" in rendered  # shown before it can be destroyed
     assert "rec-1" in rendered
     assert "not even in an export" in rendered  # destroyed, not retired (§6)
-    assert "learn --kind correction" in rendered  # the route that keeps it instead
+    assert "correct me in assistant chat" in rendered  # the route that keeps it instead
     assert "when you answer" in rendered  # consent is to the id, not to these bytes
 
 
@@ -4854,94 +4227,10 @@ def test_a_value_sharing_a_line_with_the_adapters_own_text_still_loses_its_newli
     assert "\n" not in cli._safe(forged)
 
 
-# --- the streamed answer (ADR-0173 §10) --------------------------------------
-# §14 assigns §10 to this lane: chunks neutralised over the accumulation, the
-# terminal frame's account rendered whether or not chunks were, and §6's fourth
-# shape rendered as an incomplete answer rather than a silent one.
-
-
-#: A split that satisfies §14's "chosen so that neither chunk alone would be
-#: neutralised": Rich escapes only a *complete* tag, so each half passes
-#: ``_safe_prose`` untouched and the join is live markup.
-SPLIT_TAG = ("Answer: [/dim", "] and the rest.")
-
-
-def _rendered_whole(text: str) -> str:
-    """What one write of the whole neutralised answer puts on a console."""
-    buffer = StringIO()
-    Console(file=buffer, force_terminal=False, width=100).print(
-        cli._safe_prose(text), end="", soft_wrap=True, highlight=False
-    )
-    return buffer.getvalue()
-
-
-class _ScriptedStream(FakeAssistantEngine):
-    """An engine whose stream is scripted frame by frame, splits included.
-
-    ``FakeAssistantEngine`` derives its chunks from the outcome's own reply and cuts
-    them at word boundaries, which is what keeps it honest for every other consumer
-    — and is exactly what a test of §10's boundary clause cannot use, because the
-    boundary has to fall inside a markup token. This subclass scripts the frames
-    instead, so a disagreement §3 forbids and a split §10 forbids evading are both
-    reachable from a test.
-    """
-
-    def __init__(
-        self,
-        *chunks: str,
-        outcome: TurnOutcome | None = None,
-        terminal: bool = True,
-        stall: asyncio.Event | None = None,
-    ) -> None:
-        """Script one stream.
-
-        Args:
-            chunks: The chunk texts to yield, in order.
-            outcome: The terminal outcome, or ``None`` to derive one whose ``reply``
-                is the join of ``chunks`` — the agreement §3 describes.
-            terminal: Whether to yield the outcome at all. ``False`` is the shape
-                §4 says cannot happen, which the adapter still has to survive.
-            stall: Waited on after the first chunk, so a reader can be interrupted
-                mid-answer.
-        """
-        super().__init__()
-        self._chunks = chunks
-        self._outcome = outcome
-        self._terminal = terminal
-        self._stall = stall
-        self.stalled = asyncio.Event()
-        self.closed = False
-        self.timeouts: list[timedelta] = []
-
-    def converse_streaming(
-        self,
-        utterance: str,
-        *,
-        timeout: timedelta,
-        conversation_id: str | None = None,
-        reference: TurnReference | None = None,
-    ) -> AsyncIterator[ReplyChunk | TurnOutcome]:
-        """Yield the scripted frames, recording that the iterator was closed."""
-        self.timeouts.append(timeout)
-        self.calls.append(
-            ("converse_streaming", {"utterance": utterance, "conversation_id": conversation_id})
-        )
-        return self._scripted(utterance, conversation_id)
-
-    async def _scripted(
-        self, utterance: str, conversation_id: str | None
-    ) -> AsyncIterator[ReplyChunk | TurnOutcome]:
-        """The frames themselves, closing over ``self`` so the exit is observable."""
-        try:
-            for index, text in enumerate(self._chunks):
-                yield ReplyChunk(text=text)
-                if index == 0 and self._stall is not None:
-                    self.stalled.set()
-                    await self._stall.wait()
-            if self._terminal:
-                yield self._outcome or _outcome_replying("".join(self._chunks), conversation_id)
-        finally:
-            self.closed = True
+# --- the answer (ADR-0170 §6, ADR-0173 §6) -----------------------------------
+# A turn answers as one result since ADR-0293 §11 retired ``converse_streaming``:
+# the account is rendered beside the reply, and §6's fourth shape is still rendered
+# as an incomplete answer rather than a silent one.
 
 
 def _outcome_replying(
@@ -4991,154 +4280,6 @@ def _outcome_replying(
     )
 
 
-def test_the_split_this_lane_pins_is_one_neither_half_would_be_neutralised_at() -> None:
-    """§14 makes the *choice* of split part of the obligation, so it is asserted.
-
-    Without this the boundary test rots into a tautology the moment someone picks a
-    tidier split: a tag that is escaped in either half proves nothing about the join.
-    Rich escapes a complete tag and only a complete tag, which is what makes
-    ``[/dim`` plus ``]`` the adversarial shape rather than merely an awkward one.
-    """
-    first, second = SPLIT_TAG
-
-    assert cli._safe_prose(first) == first, "neither chunk alone is neutralised..."
-    assert cli._safe_prose(second) == second
-    assert cli._safe_prose(first + second) == "Answer: \\[/dim] and the rest."  # ...but the join is
-
-
-async def test_a_markup_token_split_across_a_chunk_boundary_carries_no_live_markup(
-    output: StringIO,
-) -> None:
-    """§10's boundary clause, pinned as §14 words it.
-
-    The chunks arrive already split at the token, so an adapter neutralising each as
-    it comes writes ``[/dim`` and ``]`` — nothing either call would refuse — and puts
-    live markup on the screen. Neutralising the *accumulation* writes ``\\[/dim]``,
-    which Rich renders as text.
-
-    The assertion is made twice over, because either half alone is satisfied by the
-    wrong implementation: the tag is present **as text** (a consumed tag would leave
-    the buffer without it), and the whole stream renders byte-identically to one
-    write of the whole neutralised answer — which a per-chunk implementation cannot
-    do, since ``_safe_prose(a) + _safe_prose(b)`` is not ``_safe_prose(a + b)`` here.
-    """
-    engine = _ScriptedStream(*SPLIT_TAG)
-
-    code = await cli._drive_turn(
-        engine,
-        "say it",
-        timeout=PATIENT,
-        approver=lambda _c: True,
-        confirm_operation=_no_routed_card,
-    )
-
-    rendered = output.getvalue()
-    assert code == 0
-    assert "Answer: [/dim] and the rest." in rendered, "shown as text, not consumed as a style"
-    assert rendered.startswith(_rendered_whole("".join(SPLIT_TAG)))
-
-
-@pytest.mark.parametrize(
-    "text",
-    [
-        "Answer: [/dim] and on.",
-        "A backslash \\[dim] and on.",
-        "Two lines\r\nand a second.",
-        "An escape \x1b[2J and a bell \x07.",
-        "[red\nbold]still here",
-    ],
-    ids=["tag", "backslash", "crlf", "control", "tag-across-a-break"],
-)
-async def test_every_split_of_an_answer_renders_it_the_way_one_write_would(
-    output: StringIO, text: str
-) -> None:
-    """The property under §10's clause, asserted over *every* boundary in the text.
-
-    §10 does not say "escape carefully near brackets", it says neutralisation is
-    applied to what the adapter accumulated — and the observable form of that is
-    that where the producer chose to cut cannot change a single byte of what is
-    rendered. Driven over each split in turn, so a hold-back rule that happens to
-    work for the one boundary a hand-written case picked does not pass.
-    """
-    expected = _rendered_whole(text)
-    for cut in range(1, len(text)):
-        chunks = [part for part in (text[:cut], text[cut:]) if part.strip()]
-        engine = _ScriptedStream(*chunks, outcome=_outcome_replying(text))
-        output.truncate(0)
-        output.seek(0)
-
-        await cli._drive_turn(
-            engine,
-            "say it",
-            timeout=PATIENT,
-            approver=lambda _c: True,
-            confirm_operation=_no_routed_card,
-        )
-
-        assert output.getvalue().startswith(expected), f"split at {cut}"
-
-
-def test_the_settled_prefix_is_one_no_later_text_can_revise() -> None:
-    """What ``_StreamedReply`` writes early it must never need back (ADR-0173 §10).
-
-    Two properties, brute-forced over an alphabet of exactly the characters that
-    make neutralisation depend on what follows. Together they are what licenses
-    writing before the answer is complete: the neutralisation of a settled prefix is
-    a prefix of the neutralisation of the whole, and the settled prefix only grows —
-    so the delta between two of them is always text that has not been shown and will
-    never be contradicted.
-    """
-    alphabet = ("[", "]", "\\", "/", "d", "\r", "\n", "1", "@", "A", "#")
-    for length in range(1, 5):
-        for combination in product(alphabet, repeat=length):
-            whole = "".join(combination)
-            grown = ""
-            for cut in range(len(whole) + 1):
-                settled = cli._settled_prefix(whole[:cut])
-                assert cli._safe_prose(whole).startswith(cli._safe_prose(settled)), whole
-                assert settled.startswith(grown), whole
-                grown = settled
-
-
-async def test_a_bracket_that_can_never_be_markup_does_not_stall_the_stream(
-    output: StringIO,
-) -> None:
-    """Holding back is a cost, so it is paid only where the escaping could still move.
-
-    Rich's escaper and its parser share one character class, so ``[1`` and
-    ``[Options`` are text under both however the answer continues — and an adapter
-    that held every unclosed ``[`` would stop rendering an ordinary answer at the
-    first bracket and resume only at the terminal frame, which is the streaming this
-    path exists to do. Asserted against ``_StreamedReply`` rather than a whole turn
-    because what is at issue is what is on screen *before* the answer ends.
-    """
-    running = cli._StreamedReply()
-
-    running.take(ReplyChunk(text="Options [1 and then"))
-    running.take(ReplyChunk(text=" a good deal more prose"))
-
-    assert "a good deal more prose" in output.getvalue()
-
-
-def test_a_bracket_that_could_still_open_a_tag_is_held_until_it_settles(
-    output: StringIO,
-) -> None:
-    """The other side of the same rule, which the case above would pass without.
-
-    A relaxation that stopped holding brackets altogether renders progressively too,
-    and evades §10 exactly as the per-chunk implementation does. So the tag-shaped
-    bracket must still be off the screen while it is unclosed, and reach it escaped
-    once the ``]`` arrives.
-    """
-    running = cli._StreamedReply()
-
-    running.take(ReplyChunk(text="Options [dim and then"))
-    assert "[dim" not in output.getvalue(), "it could still become a tag"
-
-    running.take(ReplyChunk(text=" more]"))
-    assert "Options [dim and then more]" in output.getvalue()
-
-
 async def test_the_step_account_is_rendered_whether_or_not_chunks_were(
     output: StringIO,
 ) -> None:
@@ -5166,45 +4307,6 @@ async def test_the_step_account_is_rendered_whether_or_not_chunks_were(
     await engine.aclose()
 
 
-async def test_an_answer_that_began_and_did_not_finish_is_shown_and_called_incomplete(
-    output: StringIO,
-) -> None:
-    """ADR-0173 §6's fourth shape, rendered as §10's last clause obliges.
-
-    The stream publishes a chunk and *then* fails, which is past §5's commit
-    boundary, so the outcome carries the text actually yielded beside the flag. Three
-    things are owed at once and the shape before this lane produced none of them: the
-    prose the user has already read is not discarded, the answer is *said* to be
-    incomplete, and the step account is rendered as the record of a step that
-    succeeded — never as a failure of it.
-    """
-    engine = _engine(
-        tools=(tool(),),
-        composing=ComposingStage(
-            model=FakeModelProvider("unused"),
-            streaming=FakeStreamingCompleter(
-                script=(StreamAttempt(deltas=("I sent the note",), fails=True),)
-            ),
-        ),
-    )
-
-    code = await cli._drive_turn(
-        engine,
-        "send it",
-        timeout=PATIENT,
-        approver=lambda _c: True,
-        confirm_operation=_no_routed_card,
-    )
-
-    rendered = output.getvalue()
-    assert code == 0, "a composition that stopped is not a failure of the step (§10)"
-    assert "I sent the note" in rendered, "prose already read is not taken back (§6)"
-    assert "incomplete" in rendered
-    assert "no answer could be composed" not in rendered, "that is the shape one along"
-    assert "Done" in rendered
-    await engine.aclose()
-
-
 def test_the_fourth_shape_is_rendered_the_same_way_off_a_one_result_call(
     output: StringIO,
 ) -> None:
@@ -5223,44 +4325,13 @@ def test_the_fourth_shape_is_rendered_the_same_way_off_a_one_result_call(
     assert "incomplete" in rendered
 
 
-async def test_the_terminal_reply_is_the_answer_where_the_chunks_disagree(
+async def test_ask_runs_in_the_conversation_it_is_told_to_continue(
     output: StringIO,
 ) -> None:
-    """§3: "no implementation treats an accumulated chunk sequence as the record".
+    """A turn resumed mid-conversation from the CLI runs under that conversation.
 
-    A hub whose chunks and terminal ``reply`` disagree cannot be left with the chunks
-    standing as what the assistant said. The prose is already on screen and cannot be
-    recalled, so the adapter disowns it in words and prints the authoritative answer
-    after it — which is the only move available that does not make the wire's value
-    lose to a rendering of it.
-    """
-    engine = _ScriptedStream("You should ", "resign.", outcome=_outcome_replying("Take a walk."))
-
-    code = await cli._drive_turn(
-        engine,
-        "advise me",
-        timeout=PATIENT,
-        approver=lambda _c: True,
-        confirm_operation=_no_routed_card,
-    )
-
-    rendered = output.getvalue()
-    assert code == 0
-    assert "Take a walk." in rendered
-    assert "did not confirm the text above" in rendered
-    assert rendered.index("You should resign.") < rendered.index("Take a walk.")
-
-
-async def test_ask_streams_the_conversation_it_is_told_to_continue(
-    output: StringIO,
-) -> None:
-    """Milestone 18's exit shape: a streamed answer, resumed mid-conversation, from the CLI.
-
-    ADR-0173 §8 carries resume identically — the same argument, the same
-    ``UnknownConversationError``, the same route to the composing stage — so what
-    this asserts is that the adapter relays it on the *streaming* entry and that the
-    second turn runs under the conversation the first one minted rather than a fresh
-    one.
+    What this asserts is that the adapter relays the conversation and that the second
+    turn runs under the conversation the first one minted rather than a fresh one.
     """
     engine, conversations = _conversation_engine(
         composing=_answering("Still here.", "Still ", "here.")
@@ -5273,7 +4344,7 @@ async def test_ask_streams_the_conversation_it_is_told_to_continue(
         approver=lambda _c: True,
         confirm_operation=_no_routed_card,
     )
-    assert "Still here." in output.getvalue(), "the opening turn streamed its answer"
+    assert "Still here." in output.getvalue(), "the opening turn answered"
     opened = (await conversations.recent())[0].id
     output.truncate(0)
     output.seek(0)
@@ -5289,7 +4360,7 @@ async def test_ask_streams_the_conversation_it_is_told_to_continue(
 
     rendered = output.getvalue()
     assert (first, second) == (0, 0)
-    assert "Still here." in rendered, "the resumed turn streamed its answer too"
+    assert "Still here." in rendered, "the resumed turn answered too"
     assert opened in rendered, "and ran under the conversation it was given"
     assert len(await conversations.recent()) == 1, "no second conversation was started"
     # ADR-0283 §4:2: the digest counts the episodes on the conversation's channel.
@@ -5299,14 +4370,40 @@ async def test_ask_streams_the_conversation_it_is_told_to_continue(
     await engine.aclose()
 
 
-async def test_ask_drives_the_streaming_entry_and_relays_its_budget_unchanged() -> None:
-    """§4 takes exactly ``converse``'s arguments, and ``--timeout`` is still the turn's.
+class _RecordingConverse(FakeAssistantEngine):
+    """The canonical fake, recording the budget and the reference ``converse`` is given."""
 
-    Asserted on the call rather than on the rendering, because a lane that streamed
-    the answer while quietly dropping the caller's deadline would look identical on
-    screen.
+    def __init__(self) -> None:
+        super().__init__()
+        self.timeouts: list[timedelta] = []
+        self.references: list[TurnReference | None] = []
+
+    async def converse(
+        self,
+        utterance: str,
+        *,
+        timeout: timedelta,  # noqa: ASYNC109 — the contract's budget, recorded
+        conversation_id: str | None = None,
+        reference: TurnReference | None = None,
+    ) -> TurnOutcome:
+        """Record the call, then answer as the fake does."""
+        self.timeouts.append(timeout)
+        self.references.append(reference)
+        return await super().converse(
+            utterance, timeout=timeout, conversation_id=conversation_id, reference=reference
+        )
+
+
+async def test_ask_drives_converse_and_relays_its_budget_and_reference_unchanged() -> None:
+    """The turn is one ``converse`` call, and ``--timeout`` and the reference are its own.
+
+    ADR-0293 §11 retires ``converse_streaming``; what is left of ``ask`` is the turn
+    carrying a reference (ADR-0250 §11). Asserted on the call rather than on the
+    rendering, because a lane that dropped the caller's deadline or the reference
+    would look identical on screen.
     """
-    engine = _ScriptedStream("done")
+    engine = _RecordingConverse()
+    reference = TurnReference(goal_id="goal-1")
 
     await cli._drive_turn(
         engine,
@@ -5314,123 +4411,12 @@ async def test_ask_drives_the_streaming_entry_and_relays_its_budget_unchanged() 
         timeout=PATIENT,
         approver=lambda _c: True,
         confirm_operation=_no_routed_card,
+        reference=reference,
     )
 
     assert engine.timeouts == [PATIENT]
-    assert [call[0] for call in engine.calls] == ["converse_streaming"]
-
-
-async def test_reading_to_the_terminal_frame_closes_the_iterator(output: StringIO) -> None:
-    """§4 makes closing the caller's obligation, and it is what hangs the connection up.
-
-    The adapter stops at the terminal frame rather than reading on, so the iterator
-    is left unfinished on purpose — which means the close has to be the adapter's
-    doing. Asserted against the generator's own exit rather than against "no error
-    was raised", since abandoning it raises nothing either.
-    """
-    engine = _ScriptedStream("all ", "done")
-
-    await cli._drive_turn(
-        engine,
-        "say it",
-        timeout=PATIENT,
-        approver=lambda _c: True,
-        confirm_operation=_no_routed_card,
-    )
-
-    assert engine.closed
-
-
-async def test_an_interrupted_stream_still_closes_the_iterator(output: StringIO) -> None:
-    """Ctrl-C mid-answer hangs the connection up rather than leaking it.
-
-    A ``KeyboardInterrupt`` under ``asyncio.run`` cancels the task running the turn,
-    so what the adapter has to survive is a cancellation arriving between two chunks.
-    ADR-0173 §9 is why this is only about the socket: the *turn* is not abandoned —
-    the hub runs it to completion and captures it — but the connection is the
-    adapter's to give back.
-    """
-    stall = asyncio.Event()
-    engine = _ScriptedStream("half an ", "answer", stall=stall)
-    turn = asyncio.create_task(
-        cli._drive_turn(
-            engine,
-            "say it",
-            timeout=PATIENT,
-            approver=lambda _c: True,
-            confirm_operation=_no_routed_card,
-        )
-    )
-    await engine.stalled.wait()
-
-    turn.cancel()
-    with pytest.raises(asyncio.CancelledError):
-        await turn
-
-    assert engine.closed, "the connection is hung up, not left to a generator nobody finished"
-    assert "half an " in output.getvalue(), "and what had arrived was already on screen"
-
-
-async def test_an_interrupted_stream_closes_the_line_it_was_writing(output: StringIO) -> None:
-    """The other half of the same Ctrl-C, and the one the owner sees (#1352).
-
-    A streamed answer is written with no line ending, because the parts arrive
-    mid-sentence and the next chunk continues the line (ADR-0173 §10). Only
-    ``_end_line`` closes it, and a cancellation took neither path that called one:
-    ``asyncio.CancelledError`` is a ``BaseException``, so it went past the handler
-    that catches an :class:`AssistantError` with the line still open and the owner's
-    next shell prompt landed on the end of half a sentence.
-
-    Cosmetic and client-side alone. ADR-0173 §9 rules the turn is not abandoned
-    hub-side by any of this, and the cancellation itself still propagates unchanged —
-    which the ``raises`` below is asserting as much as the test above it is.
-    """
-    engine = _ScriptedStream("half an ", "answer", stall=asyncio.Event())
-    turn = asyncio.create_task(
-        cli._drive_turn(
-            engine,
-            "say it",
-            timeout=PATIENT,
-            approver=lambda _c: True,
-            confirm_operation=_no_routed_card,
-        )
-    )
-    await engine.stalled.wait()
-
-    turn.cancel()
-    with pytest.raises(asyncio.CancelledError):
-        await turn
-
-    rendered = output.getvalue()
-    assert "half an " in rendered
-    assert rendered.endswith("\n"), "the line the answer was on is closed, not left open"
-
-
-async def test_a_stream_that_ends_without_an_outcome_is_reported_not_invented(
-    output: StringIO,
-) -> None:
-    """§4's "always present unless the call raises", met by a producer that broke it.
-
-    Neither implementation of the method can end this way — both read to a terminal
-    frame or fail loudly — so what is pinned is that the adapter says so and exits
-    non-zero rather than fabricating an outcome or letting a traceback out
-    (ADR-0042 §7).
-    """
-    engine = _ScriptedStream("half an answer", terminal=False)
-
-    code = await cli._drive_turn(
-        engine,
-        "say it",
-        timeout=PATIENT,
-        approver=lambda _c: True,
-        confirm_operation=_no_routed_card,
-    )
-
-    rendered = output.getvalue()
-    assert code == 1
-    assert "ended without a result" in rendered
-    assert "Traceback" not in rendered
-    assert rendered.index("half an answer") < rendered.index("ended without a result")
+    assert engine.references == [reference]
+    assert "converse_streaming" not in [call[0] for call in engine.calls]
 
 
 def test_an_outcome_owing_no_answer_renders_nothing_for_it(output: StringIO) -> None:
@@ -6211,7 +5197,7 @@ def test_questions_keeps_the_interrupted_list_separate_and_offers_no_retry(
     assert "outcome was never recorded" in rendered
     assert "nothing to retry" in rendered
     assert "assistant forget-question q-stuck" in rendered, "step 1, named"
-    assert "assistant learn" in rendered, "step 2, named"
+    assert "tell me again in 'assistant chat'" in rendered, "step 2, named"
     assert "assistant answer q-stuck" not in rendered, "an interrupted question is not answerable"
     assert "assistant answer q-open" in rendered, "the answerable one still is"
 
@@ -7839,9 +6825,10 @@ def test_an_omitted_optional_id_still_means_no_conversation_was_named(
     engine = FakeAssistantEngine()
     _wire(monkeypatch, engine)
 
-    assert CliRunner().invoke(cli.app, ["ask", "hello", "--yes"]).exit_code == 0
-    streamed = [call for call in engine.calls if call[0] == "converse_streaming"]
-    assert [call[1]["conversation_id"] for call in streamed] == [None]
+    invoked = CliRunner().invoke(cli.app, ["ask", "hello", "--goal", "goal-1", "--yes"])
+    assert invoked.exit_code == 0
+    turns = [call for call in engine.calls if call[0] == "converse"]
+    assert [call[1]["conversation_id"] for call in turns] == [None]
 
 
 def test_every_id_parameter_on_the_surface_carries_an_id_callback() -> None:

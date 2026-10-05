@@ -533,7 +533,7 @@ def test_the_statement_reaches_a_user_driving_assistant_ask(
     engine.attempt_report = AttemptReport(outcome=AttemptOutcome.FAILED, continues=True)
     _wire(monkeypatch, engine)
 
-    result = CliRunner().invoke(cli.app, ["ask", "book the flight", "--yes"])
+    result = CliRunner().invoke(cli.app, ["ask", "book the flight", "--goal", "goal-1", "--yes"])
     rendered = _flat(result.output)
 
     assert result.exit_code == 0
@@ -552,7 +552,7 @@ def test_a_default_fake_turn_says_nothing_about_an_attempt_driving_assistant_ask
     engine = FakeAssistantEngine()
     _wire(monkeypatch, engine)
 
-    result = CliRunner().invoke(cli.app, ["ask", "book the flight", "--yes"])
+    result = CliRunner().invoke(cli.app, ["ask", "book the flight", "--goal", "goal-1", "--yes"])
     rendered = _flat(result.output)
 
     assert result.exit_code == 0
