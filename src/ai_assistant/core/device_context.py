@@ -32,7 +32,7 @@ module under ``src/`` calls :func:`serving_device`.
 from __future__ import annotations
 
 from contextlib import contextmanager
-from contextvars import ContextVar
+from contextvars import Context, ContextVar, copy_context
 from typing import TYPE_CHECKING, Final
 
 from ai_assistant.core.types import HUB_REQUESTING_DEVICE, RequestingDevice
@@ -86,6 +86,24 @@ def serving_device(device: RequestingDevice) -> Iterator[RequestingDevice]:
         _REQUESTING.reset(token)
 
 
+def without_requesting_device() -> Context:
+    """A copy of the current context with the requesting device unset (ADR-0298 §2:6).
+
+    For work a request starts that outlives the request: a task started in the
+    returned context keeps every other context value — the correlation scope among
+    them — but does not run as the requesting device, so the assistant's own work is
+    never checked as the device whose request started it. It reads as the hub's own
+    machine (§2:5). Unsetting is not setting: :func:`serving_device` stays the wire
+    server's alone (§2:4).
+
+    Returns:
+        The copy, for ``asyncio.create_task(..., context=...)``.
+    """
+    context = copy_context()
+    context.run(_REQUESTING.set, None)
+    return context
+
+
 def current_acting_for() -> str | None:
     """The browser device a call made here is relayed for (ADR-0298 §1:5).
 
@@ -123,4 +141,5 @@ __all__ = [
     "current_acting_for",
     "current_requesting_device",
     "serving_device",
+    "without_requesting_device",
 ]

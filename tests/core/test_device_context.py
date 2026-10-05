@@ -19,6 +19,7 @@ from ai_assistant.core.device_context import (
     current_acting_for,
     current_requesting_device,
     serving_device,
+    without_requesting_device,
 )
 from ai_assistant.core.errors import DeviceRefusal, DeviceRefusedError
 from ai_assistant.core.types import (
@@ -71,6 +72,21 @@ async def test_two_concurrent_requests_never_see_each_others_device() -> None:
 
     seen = await asyncio.gather(served(_PHONE), served(_WATCH))
     assert list(seen) == [_PHONE, _WATCH]
+
+
+async def test_work_that_outlives_a_request_runs_with_the_device_unset() -> None:
+    """§2:6: a task started in the copy reads the hub's own machine; others stay."""
+    seen: list[tuple[RequestingDevice, str | None]] = []
+
+    async def outliving() -> None:
+        seen.append((current_requesting_device(), current_acting_for()))
+
+    with acting_for("browser.one"), serving_device(_WATCH):
+        await asyncio.get_running_loop().create_task(
+            outliving(), context=without_requesting_device()
+        )
+        assert current_requesting_device() == _WATCH, "the request's own value stands"
+    assert seen == [(HUB_REQUESTING_DEVICE, "browser.one")]
 
 
 def test_the_outbound_name_is_absent_unless_a_gateway_sets_it() -> None:

@@ -27,9 +27,11 @@ device holds none of ADR-0296 §2's three roles — no roster role, not in "my d
 and an end for reading of no conversation — and ``NOT_ALLOWED`` otherwise. §7:13 has a
 device refused ``chat_changes`` with ``NO_ROLE`` drop every conversation it holds, so a
 device that reads any conversation is never told it holds no role. A device that is
-only a writing end of conversations outside "my devices" is read as holding none: the
-conversation store lists a device's conversations by reading (``device_conversations``)
-and offers no listing by writing, and such a device is shown nothing to drop.
+only a writing end of conversations outside "my devices" holds the user's end too
+(ADR-0296 §2), and the conversation store lists a device's conversations by reading
+alone (``device_conversations``), so that last case is found by walking the
+conversations' devices — only for a device that holds no other role, which is the
+path a refusal takes.
 
 **Not here.** The command role, the role of host of spokes and the known-device check
 are the wire server's (:mod:`ai_assistant.wire.routes`). ``forget_conversation``'s
@@ -55,6 +57,9 @@ if TYPE_CHECKING:
 #: The ``channel_type`` of a channel whose input is a conversation's, which makes a
 #: ``receive`` a legacy turn rather than spoke traffic (ADR-0298 §5's table).
 CONVERSATION_CHANNEL: Final = "conversation"
+
+#: How many conversations one page of :meth:`DeviceChecks._an_end_anywhere`'s walk reads.
+_WALK_PAGE: Final = 50
 
 
 def _access(devices: Sequence[ChatDevice] | None, device_id: str) -> DeviceAccess | None:
@@ -226,14 +231,32 @@ class DeviceChecks:
         """Whether the device holds any of ADR-0296 §2's three roles.
 
         A roster role, or the user's end of conversations: in "my devices", or an end
-        for reading of a conversation the store holds (the module docstring says why
-        a writing end alone is not read).
+        of a conversation the store holds, for reading or for writing. The cheap
+        reads come first; the walk for a writing end is the last resort.
         """
         if device.is_hub or device.roles:
             return True
         if _access(await self._conversations.my_devices(), device.device_id) is not None:
             return True
-        return bool(await self._conversations.device_conversations(device.device_id, limit=1))
+        if await self._conversations.device_conversations(device.device_id, limit=1):
+            return True
+        return await self._an_end_anywhere(device.device_id)
+
+    async def _an_end_anywhere(self, device_id: str) -> bool:
+        """Whether ``device_id`` is an end of any conversation the store holds.
+
+        A walk over every conversation's devices, page by page, stopping at the first
+        that names the device: the store offers no listing of the conversations a
+        device writes in.
+        """
+        offset = 0
+        while page := await self._conversations.recent(limit=_WALK_PAGE, offset=offset):
+            for one in page:
+                devices = await self._conversations.conversation_devices(one.id)
+                if _access(devices, device_id) is not None:
+                    return True
+            offset += len(page)
+        return False
 
     async def _refuse(self, device: RequestingDevice, message: str) -> NoReturn:
         """Refuse a membership row, with the reason §6:2 gives this device."""

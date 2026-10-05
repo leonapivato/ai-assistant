@@ -78,7 +78,10 @@ import structlog
 
 from ai_assistant.core.channel_validation import snapshot
 from ai_assistant.core.clock import ClockReadingError, checked_clock
-from ai_assistant.core.device_context import current_requesting_device
+from ai_assistant.core.device_context import (
+    current_requesting_device,
+    without_requesting_device,
+)
 from ai_assistant.core.episode_encoding import check_detail, check_list
 from ai_assistant.core.errors import (
     ActivationStoppedError,
@@ -6527,7 +6530,8 @@ class Engine:
         """
         self._reject_if_closing()
         check_arguments("learn", max_bytes=self._max_payload_bytes, event=event)
-        return await self._tracked(self._learn(event), "learn", checked=True)
+        device = current_requesting_device()
+        return await self._tracked(self._learn(event, device), "learn", checked=True)
 
     async def episodes(
         self,
@@ -10075,7 +10079,14 @@ class Engine:
 
         # Eager start enters run's finally and reaches only the closed barrier.
         # No processing can run until its lifetime is in the shutdown registry.
-        task = asyncio.create_task(self._operation_traces.observing(seam, run()), eager_start=True)
+        # ADR-0298 §2:6: an activation may outlive the request that started it — a
+        # stream abandoned mid-turn runs on (ADR-0173 §9) — so it runs with the
+        # requesting device unset; the request's membership was checked before it.
+        task = asyncio.create_task(
+            self._operation_traces.observing(seam, run()),
+            eager_start=True,
+            context=without_requesting_device(),
+        )
         self._inflight.add(task)
         task.add_done_callback(self._inflight.discard)
         admitted.set()
@@ -16190,8 +16201,14 @@ class Engine:
             state.observe_result(result)
         return result
 
-    async def _learn(self, event: FeedbackEvent) -> LearnOutcome:
-        """Delegate to the loop and translate its write outcomes (ADR-0042 §1)."""
+    async def _learn(self, event: FeedbackEvent, device: RequestingDevice) -> LearnOutcome:
+        """Delegate to the loop and translate its write outcomes (ADR-0042 §1).
+
+        First ADR-0298 §5 "A legacy turn": feedback names no conversation, so a
+        device other than the hub's own machine must be in "my devices" for writing
+        and for reading.
+        """
+        await self._device_checks.turn(device, None, "learn")
         outcomes = await self._loop.learn(event)
         return learn_outcome(outcomes)
 
