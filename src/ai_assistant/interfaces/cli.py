@@ -2879,12 +2879,13 @@ async def _follow_stream(
     moves nothing here.
 
     **Once the stream has sent its first chunk, and after each roles chunk, the
-    conversation is read again** (:func:`_catch_up`). The current state is read with
-    a conversation on catch-up rather than pushed (§4:9): a stream pushes only what
-    changes after it opened, so what it was when the stream opened is read here.
-    Read after the first chunk rather than before the stream is asked for, so the
-    reading is no older than the stream's own — over the wire, the first chunk is
-    the device's roles, written as the stream opens (ADR-0298 §7:9). **A roles
+    conversation is read again** (:func:`_catch_up`), whether it is still shown here
+    and its current state with it (§4:9). The state is not this read's to get right:
+    the engine's stream sends the state of every conversation the device reads as it
+    opens, before any change, and pushes each change after that, so whichever of the
+    read and the stream's state is older, the stream's next state corrects it
+    (#2740). Over the wire, the first chunk is the device's roles, written as the
+    stream opens (ADR-0298 §7:9). **A roles
     chunk is also how a reopening shows itself**: the wire client reopens a stream
     that goes quiet past the dead-peer timeout inside the one iterator (§7:13), and
     the reopened stream starts with the roles again, so reading on every roles
