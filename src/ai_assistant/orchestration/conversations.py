@@ -464,11 +464,7 @@ def check_devices_fit(
         )
         # The change stream's chunk carrying it, with the snapshot a device it adds is
         # given shortened to none, which is as far as §7:8 shortens it.
-        snapshot = (
-            None
-            if change.conversation_id is None
-            else TranscriptPage(conversation_id=change.conversation_id, as_of=_WIDEST_NUMBER)
-        )
+        snapshot = None if change.conversation_id is None else ()
         check_payload(
             ChatStreamChunk(change=DeviceChange(change=change, snapshot=snapshot)),
             max_bytes=max_bytes,
@@ -579,20 +575,13 @@ def fit_stream_chunk(chunk: ChatStreamChunk, *, max_bytes: int) -> ChatStreamChu
         check_payload(chunk, max_bytes=max_bytes, subject=subject)
         return chunk
     snapshot = entry.snapshot
-    emptied = snapshot.model_copy(update={"entries": ()})
     base = len(
-        canonical_payload(
-            ChatStreamChunk(change=DeviceChange(change=entry.change, snapshot=emptied))
-        )
+        canonical_payload(ChatStreamChunk(change=DeviceChange(change=entry.change, snapshot=())))
     )
-    newest_first = [len(canonical_payload(one)) for one in reversed(snapshot.entries)]
+    newest_first = [len(canonical_payload(one)) for one in reversed(snapshot)]
     count = _fitting_count(newest_first, base=base, max_bytes=max_bytes)
-    kept = snapshot.entries[len(snapshot.entries) - count :] if count else ()
-    fitted = ChatStreamChunk(
-        change=DeviceChange(
-            change=entry.change, snapshot=snapshot.model_copy(update={"entries": kept})
-        )
-    )
+    kept = snapshot[len(snapshot) - count :] if count else ()
+    fitted = ChatStreamChunk(change=DeviceChange(change=entry.change, snapshot=kept))
     check_payload(fitted, max_bytes=max_bytes, subject=subject)
     return fitted
 

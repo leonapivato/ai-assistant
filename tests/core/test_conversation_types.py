@@ -265,33 +265,43 @@ def test_changes_are_in_sequence_and_round_trip_by_kind() -> None:
 _READER = ChatDevice(device_id="phone", access=DeviceAccess.READ)
 
 
-def _snapshot(seq: int, conversation_id: str = "c-1", count: int = 1) -> TranscriptPage:
-    return TranscriptPage(
-        conversation_id=conversation_id,
-        entries=tuple(
-            _message(index + 1, conversation_id=conversation_id) for index in range(count)
-        ),
-        as_of=seq,
-    )
+def _snapshot(
+    conversation_id: str = "c-1", count: int = 1
+) -> tuple[TranscriptMessage | DeletedMessage, ...]:
+    return tuple(_message(index + 1, conversation_id=conversation_id) for index in range(count))
 
 
 def test_a_snapshot_travels_only_with_the_change_setting_its_conversation() -> None:
-    """ADR-0298 §7:6-§7:7: with a set change of that conversation, as of that change."""
+    """ADR-0298 §7:6-§7:7: with a set change of that conversation, its own entries."""
     added = DevicesChangedChange(seq=5, conversation_id="c-1", devices=(_READER,))
     started = ConversationStartedChange(seq=2, conversation_id="c-1", devices=(_READER,))
+    marker = DeletedMessage(conversation_id="c-1", position=2)
 
-    assert DeviceChange(change=added, snapshot=_snapshot(5)).seq == 5
-    assert DeviceChange(change=started, snapshot=_snapshot(2, count=0)).conversation_id == "c-1"
-    refused: list[tuple[ChatChange, TranscriptPage]] = [
-        (MessageAddedChange(seq=5, message=_message(1)), _snapshot(5)),
-        (DevicesChangedChange(seq=5, devices=(_READER,)), _snapshot(5)),
-        (added, _snapshot(4)),
-        (added, _snapshot(5, conversation_id="c-2")),
-        (added, _snapshot(5, count=CHAT_SNAPSHOT_ENTRIES + 1)),
+    assert DeviceChange(change=added, snapshot=(_message(1), marker)).seq == 5
+    assert DeviceChange(change=started, snapshot=()).conversation_id == "c-1"
+    refused: list[tuple[ChatChange, tuple[TranscriptMessage | DeletedMessage, ...]]] = [
+        (MessageAddedChange(seq=5, message=_message(1)), _snapshot()),
+        (DevicesChangedChange(seq=5, devices=(_READER,)), _snapshot()),
+        (added, _snapshot(conversation_id="c-2")),
+        (added, (marker, _message(1))),
+        (added, _snapshot(count=CHAT_SNAPSHOT_ENTRIES + 1)),
     ]
     for change, snapshot in refused:
         with pytest.raises(ValidationError):
             DeviceChange(change=change, snapshot=snapshot)
+
+
+def test_an_absent_member_is_left_out_of_the_encoding() -> None:
+    """A chunk writes the one member it holds, so it is no wider than a change page."""
+    added = MessageAddedChange(seq=5, message=_message(1))
+    chunk = ChatStreamChunk(change=DeviceChange(change=added))
+
+    assert set(chunk.model_dump()) == {"change"}
+    assert set(chunk.model_dump()["change"]) == {"change"}
+    assert ChatStreamChunk(heartbeat=True).model_dump() == {"heartbeat": True}
+    assert len(chunk.model_dump_json()) < len(
+        ChatChanges(changes=(added,), next_after=5).model_dump_json()
+    )
 
 
 def test_a_devices_changes_are_in_sequence_and_drop_their_snapshots_as_chat_changes() -> None:
@@ -299,7 +309,7 @@ def test_a_devices_changes_are_in_sequence_and_drop_their_snapshots_as_chat_chan
     added = DevicesChangedChange(seq=5, conversation_id="c-1", devices=(_READER,))
     later = MessageAddedChange(seq=7, message=_message(2))
     page = DeviceChanges(
-        changes=(DeviceChange(change=added, snapshot=_snapshot(5)), DeviceChange(change=later)),
+        changes=(DeviceChange(change=added, snapshot=_snapshot()), DeviceChange(change=later)),
         next_after=9,
     )
 

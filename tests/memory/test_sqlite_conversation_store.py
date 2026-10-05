@@ -1829,33 +1829,40 @@ async def test_a_deletion_recorded_before_its_readers_were_kept_reaches_no_devic
 async def test_a_set_change_recorded_before_its_position_was_kept_snapshots_conservatively(
     tmp_path: Path,
 ) -> None:
-    """A set change with no position kept is read at its last standing addition (§7:7).
+    """A set change with no position kept is read at what the stream still dates (§7:7).
 
     A row written before the change kept the conversation's highest position has none,
-    so the snapshot it gives is read at the highest position of a standing message
-    added at or before it. A message deleted since whose addition came after that is
-    left out: the snapshot may then lack a marker, and never shows anything recorded
-    after the change.
+    so its snapshot is read at the highest position of a standing message added at or
+    before it, or of a message deleted at or before it. A message added before it and
+    deleted after it, above both, has lost what dated it: its marker is left out, and
+    nothing recorded after the change is ever shown.
     """
     path = tmp_path / "conversations.db"
     store = SqliteConversationStore(path=path, now=_fixed_now)
     try:
         await store.set_my_devices([_PHONE])
-        conversation = (await store.start()).id
-        await store.append_message(conversation, _said("one", "m-1"))
-        await store.append_message(conversation, _said("two", "m-2"))
-        await store.append_message(conversation, _said("three", "m-3"))
-        await store.set_conversation_devices(conversation, [_PHONE, _LAPTOP])
-        await store.append_message(conversation, _said("after", "m-4"))
-        await store.delete_message(conversation, 3)
+        dated = (await store.start()).id
+        undated = (await store.start()).id
+        for conversation in (dated, undated):
+            for index in range(1, 4):
+                await store.append_message(conversation, _said(str(index), f"m-{index}"))
+        # Deleted before the change, so dated by its deletion; deleted after it, not.
+        await store.delete_message(dated, 3)
+        for conversation in (dated, undated):
+            await store.set_conversation_devices(conversation, [_PHONE, _LAPTOP])
+            await store.append_message(conversation, _said("after", "m-4"))
+        await store.delete_message(dated, 2)
+        await store.delete_message(undated, 3)
         store._conn.execute(
             "UPDATE chat_changes SET position = NULL WHERE kind = 'devices_changed'"
         )
 
-        (added, _, _) = (await store.device_changes("laptop", after=0)).changes
+        seen = (await store.device_changes("laptop", after=0)).changes
+        snapshots = {one.conversation_id: one.snapshot for one in seen if one.snapshot}
 
-        assert added.snapshot is not None
-        assert [one.position for one in added.snapshot.entries] == [1, 2]
+        assert [one.position for one in snapshots[dated]] == [1, 2, 3], "exact"
+        assert isinstance(snapshots[dated][1], DeletedMessage)
+        assert [one.position for one in snapshots[undated]] == [1, 2], "the marker of 3 lost"
     finally:
         store.close()
 

@@ -39,9 +39,11 @@ every conversation the device reads is sent again.
 from __future__ import annotations
 
 import asyncio
+import contextlib
 from collections.abc import Mapping
 from typing import TYPE_CHECKING, Final, NamedTuple
 
+from ai_assistant.core.streams import closing_stream
 from ai_assistant.core.types import (
     ChatStreamChunk,
     ChatStreamEnd,
@@ -62,6 +64,14 @@ if TYPE_CHECKING:
 #: How often an open change stream reads the chat space for what happened after its
 #: cursor, in seconds: the latency a change reaches a following device with.
 CHANGE_STREAM_POLL_SECONDS: Final = 0.25
+
+#: How long an engine shutting down waits for its open streams to be closed, having
+#: woken each to send its end (:meth:`ChangeStream.close`), in seconds.
+CHANGE_STREAM_CLOSE_SECONDS: Final = 1.0
+
+#: How many times a listing of a device's conversations is read before its union is
+#: taken as complete (:meth:`ChangeStream._read_conversations`).
+_SCANS: Final = 3
 
 #: How many changes one read of the stream asks the store for. A full page is read
 #: on at once rather than after the interval, so a device far behind catches up at
@@ -137,6 +147,12 @@ class ChangeStream:
         self._max_payload_bytes = max_payload_bytes
         self._forgotten = forgotten
         self._poll_seconds = poll_seconds
+        # Set once, by `close`, so every stream waiting out its interval wakes to end.
+        self._woken = asyncio.Event()
+        # How many streams are open, and set whenever none is (`close` waits on it).
+        self._open = 0
+        self._all_closed = asyncio.Event()
+        self._all_closed.set()
 
     async def follow(
         self, device: RequestingDevice, *, after: int
@@ -160,8 +176,29 @@ class ChangeStream:
         seen: Running = dict(self._running())
         due = {one for one, held in seen.items() if held.running}
         forgotten = self._forgotten()
+        self._open += 1
+        self._all_closed.clear()
         try:
-            while not self._closing():
+            following = self._following(device, cursor, seen, due, forgotten)
+            async with closing_stream(following) as chunks:
+                async for chunk in chunks:
+                    yield chunk
+        finally:
+            self._open -= 1
+            if not self._open:
+                self._all_closed.set()
+
+    async def _following(
+        self,
+        device: RequestingDevice,
+        cursor: int,
+        seen: Running,
+        due: set[str],
+        forgotten: int,
+    ) -> AsyncIterator[ChatStreamChunk | ChatStreamEnd]:
+        """The body of :meth:`follow`, counted open there until it is closed."""
+        try:
+            while not self._closing() and not self._woken.is_set():
                 page = await self._page(device, cursor)
                 reading: dict[str, bool] = {}
                 for entry in page.changes:
@@ -184,10 +221,28 @@ class ChangeStream:
                         yield ChatStreamChunk(state=state)
                 due = set()
                 if len(page.changes) < CHANGE_STREAM_PAGE:
-                    await asyncio.sleep(self._poll_seconds)
+                    with contextlib.suppress(TimeoutError):
+                        async with asyncio.timeout(self._poll_seconds):
+                            await self._woken.wait()
         except _EngineClosingError:
             pass
         yield ChatStreamEnd(next_after=cursor)
+
+    async def close(self, *, within: float = CHANGE_STREAM_CLOSE_SECONDS) -> None:
+        """Wake every open stream to its end, and wait for each to be closed.
+
+        Called by an engine shutting down, with its ``closing`` already true: a stream
+        waiting out its interval is woken rather than left to sleep through the
+        shutdown, sends its :class:`~ai_assistant.core.types.ChatStreamEnd`, and is
+        counted closed once its reader — the wire server, having written the end —
+        closes it. Waits at most ``within`` seconds, so a reader that never closes its
+        stream holds the shutdown no longer than that.
+        """
+        self._woken.set()
+        if self._open:
+            with contextlib.suppress(TimeoutError):
+                async with asyncio.timeout(within):
+                    await self._all_closed.wait()
 
     async def _page(self, device: RequestingDevice, cursor: int) -> DeviceChanges:
         """The next page of the device's changes: every change, for the hub's machine."""
@@ -243,7 +298,24 @@ class ChangeStream:
         return reading[named] or _ends_reading(device.device_id, entry)
 
     async def _read_conversations(self, device: RequestingDevice) -> set[str]:
-        """Every conversation the device reads now: every one held, for the hub's."""
+        """Every conversation the device reads now: every one held, for the hub's.
+
+        The listing is paged by offset over an order activity and deletion change, so
+        a conversation can move across a page boundary while it is read and be passed
+        over. It is read again, and the union kept, until a reading finds nothing
+        new — at most :data:`_SCANS` times — so a conversation that stood throughout
+        two readings is found by one of them.
+        """
+        found: set[str] = set()
+        for _ in range(_SCANS):
+            scanned = await self._scan(device)
+            if found and scanned <= found:
+                break
+            found |= scanned
+        return found
+
+    async def _scan(self, device: RequestingDevice) -> set[str]:
+        """One reading of the conversations the device reads, page by page."""
         found: set[str] = set()
         offset = 0
         while True:
@@ -306,6 +378,7 @@ def _ends_reading(device_id: str, entry: DeviceChange) -> bool:
 
 
 __all__ = [
+    "CHANGE_STREAM_CLOSE_SECONDS",
     "CHANGE_STREAM_PAGE",
     "CHANGE_STREAM_POLL_SECONDS",
     "Activity",

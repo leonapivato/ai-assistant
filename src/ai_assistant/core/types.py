@@ -16621,18 +16621,25 @@ class DeviceChange(BaseModel):
 
     ``snapshot`` is present exactly on the change that makes the device one of the
     conversation's ends for reading — the conversation's start, or a change to its
-    devices — and is the conversation **as it stood at that change** (§7:7): the
-    newest of the messages recorded at or before the change's sequence number, a
-    message deleted since shown as its marker, and nothing recorded after it. Its
-    ``as_of`` is therefore the change's own sequence number, and a device that applies
-    the change has the snapshot with it (§7:6). A "my devices" change belongs to no
+    devices — and holds the conversation's entries **as it stood at that change**
+    (§7:7): the newest of the messages recorded at or before the change's sequence
+    number, ascending, a message deleted since shown as its marker, and nothing
+    recorded after it. The conversation and the instant it is read at are the
+    change's own, so the snapshot is its entries alone, and a device that applies the
+    change has the snapshot with it (§7:6). A "my devices" change belongs to no
     conversation and never carries one.
+
+    The entries alone, rather than a ``TranscriptPage``, so that a chunk carrying a
+    change with its snapshot cut to none (§7:8) is no wider than the one-change page of
+    ``chat_changes``: every change the chat space records within the limit travels.
     """
 
     model_config = ConfigDict(extra="forbid", frozen=True)
 
     change: ChatChange
-    snapshot: TranscriptPage | None = None
+    snapshot: tuple[TranscriptMessage | DeletedMessage, ...] | None = Field(
+        default=None, max_length=CHAT_SNAPSHOT_ENTRIES
+    )
 
     @model_validator(mode="after")
     def _a_snapshot_only_with_the_change_that_adds(self) -> Self:
@@ -16646,14 +16653,12 @@ class DeviceChange(BaseModel):
         ):
             msg = "a snapshot travels only with a change setting a conversation's devices"
             raise ValueError(msg)
-        if snapshot.conversation_id != change.conversation_id:
+        if any(one.conversation_id != change.conversation_id for one in snapshot):
             msg = "a change's snapshot is of the conversation the change sets"
             raise ValueError(msg)
-        if snapshot.as_of != change.seq:
-            msg = "a change's snapshot is the conversation as of that change (ADR-0298 §7:7)"
-            raise ValueError(msg)
-        if len(snapshot.entries) > CHAT_SNAPSHOT_ENTRIES:
-            msg = f"a change's snapshot holds at most {CHAT_SNAPSHOT_ENTRIES} entries"
+        positions = [one.position for one in snapshot]
+        if any(later <= earlier for earlier, later in pairwise(positions)):
+            msg = "a snapshot's entries are in strictly ascending position"
             raise ValueError(msg)
         return self
 

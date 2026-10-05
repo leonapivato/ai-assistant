@@ -1032,12 +1032,7 @@ def _device_change_from(row: Sequence[Any], snapshot: Sequence[Any] | None) -> D
         return DeviceChange(change=change)
     try:
         return DeviceChange(
-            change=change,
-            snapshot=TranscriptPage(
-                conversation_id=row[2],
-                entries=tuple(_message_from(one) for one in reversed(snapshot)),
-                as_of=change.seq,
-            ),
+            change=change, snapshot=tuple(_message_from(one) for one in reversed(snapshot))
         )
     except ValidationError as exc:
         msg = f"a stored snapshot is inconsistent: {exc}"
@@ -2597,10 +2592,17 @@ class SqliteConversationStore:
 
         The newest :data:`~ai_assistant.core.types.CHAT_SNAPSHOT_ENTRIES` at or below
         the highest position the change recorded beside its set
-        (:meth:`_highest_position`), newest first. A change recorded before that
-        position was kept carries none, and is read at the highest position a standing
-        message added at or before it holds: a message deleted since and added after
-        the last of those is then left out, never one recorded after the change shown.
+        (:meth:`_highest_position`), newest first.
+
+        **A change recorded before that position was kept carries none**, and a
+        message deleted since has lost the addition that dated it, so its position
+        then is read from what the stream still holds: the highest position of a
+        standing message added at or before the change, or of a message deleted at or
+        before it — each recorded no later than the change, since a position is
+        assigned in the order messages are written. What that cannot place is a
+        message added before the change, deleted after it, and positioned above every
+        such record; its marker is left out, and nothing recorded after the change is
+        ever shown.
         """
         seq, conversation_id, recorded = row[0], row[2], row[3]
         if recorded is None:
@@ -2608,7 +2610,8 @@ class SqliteConversationStore:
                 conn,
                 "read a conversation's position at a change",
                 "SELECT COALESCE(MAX(position), 0) FROM chat_changes "
-                "WHERE conversation_id = ? AND kind = 'message_added' AND seq <= ?",
+                "WHERE conversation_id = ? AND kind IN ('message_added', 'message_deleted') "
+                "AND seq <= ?",
                 (conversation_id, seq),
             )
             recorded = held[0][0]
