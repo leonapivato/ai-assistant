@@ -660,10 +660,22 @@ def non_blank_text(value: str, *, name: str) -> str:
         raise ValueError(msg) from exc
 
 
+#: The uses a **new** grant may name, in declaration order (ADR-0294 §4).
+#:
+#: ``GrantScope`` keeps ``INGEST`` — a recorded grant naming it stays readable,
+#: exportable and revocable, and a revocation still transcribes it — but "a new
+#: grant names a non-empty subset of ``FACET`` and ``NOTIFY``", because nothing
+#: reads a source under ``INGEST`` any more. Written as an exclusion from the enum
+#: rather than as a list of the two, so the refusal is of the one retired member.
+GRANTABLE_SCOPES: Final[tuple[GrantScope, ...]] = tuple(
+    use for use in GrantScope if use is not GrantScope.INGEST
+)
+
+
 def grant_scope(value: Sequence[GrantScope], *, name: str) -> tuple[GrantScope, ...]:
     """Materialise and refuse a malformed ``scope`` argument (ADR-0102 §2a).
 
-    Three things, in this order, all before any I/O:
+    Four things, in this order, all before any I/O:
 
     * **Materialised first**, which is this module's input-observation obligation
       (ADR-0065, and the surface's own restatement of it): a caller that mutates the
@@ -672,7 +684,9 @@ def grant_scope(value: Sequence[GrantScope], *, name: str) -> tuple[GrantScope, 
       client decoding an unknown string for a scope member meets the same value, so
       this is a contract clause rather than one implementation's input hygiene.
     * **Empty and duplicated are refused**, which is ADR-0097 §2 and §10 one step
-      earlier than the record's own validator. Refusing here is what makes ADR-0085
+      earlier than the record's own validator. **So is a use outside**
+      :data:`GRANTABLE_SCOPES` (ADR-0294 §4), last, so a scope that is malformed for
+      an older reason is refused for that reason first. Refusing here is what makes ADR-0085
       §9's "refused locally, before any I/O" true of the argument: without it a
       ``grant`` with an empty scope would mint an id and read a clock before the
       model refused it, and the refusal would arrive from inside a constructor
@@ -692,7 +706,8 @@ def grant_scope(value: Sequence[GrantScope], *, name: str) -> tuple[GrantScope, 
 
     Raises:
         TypeError: If a member is not a ``GrantScope``.
-        ValueError: If the scope is empty or names a use twice.
+        ValueError: If the scope is empty, names a use twice, or names a use a new
+            grant may no longer name.
     """
     # Widened to ``object`` so the member check below is a *runtime* guard rather
     # than a statement mypy proves unreachable. The annotation says what a
@@ -714,6 +729,13 @@ def grant_scope(value: Sequence[GrantScope], *, name: str) -> tuple[GrantScope, 
         raise ValueError(msg)
     if len(set(snapshot)) != len(snapshot):
         msg = f"{name} names each use at most once, got {tuple(snapshot)!r} (ADR-0097 §10)"
+        raise ValueError(msg)
+    retired = [use for use in snapshot if use not in GRANTABLE_SCOPES]
+    if retired:
+        msg = (
+            f"{name} names {retired[0].value!r}, which a new grant may no longer name: "
+            f"nothing reads a source for that use (ADR-0294 §4)"
+        )
         raise ValueError(msg)
     return tuple(snapshot)
 

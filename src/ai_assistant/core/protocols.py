@@ -15135,21 +15135,30 @@ class AssistantEngine(Protocol):
         live-grant check, the revocation invariants and the append, so a lost race
         is a typed refusal and never a second live grant.
 
+        **A new grant names a non-empty subset of** ``FACET`` **and** ``NOTIFY``
+        (ADR-0294 §4). A ``scope`` naming
+        :attr:`~ai_assistant.core.types.GrantScope.INGEST` is refused with
+        ``ValueError``, locally and before any I/O, exactly as an empty one is, and
+        nothing is recorded: nothing reads a source under that use any more, so a
+        grant naming it would promise remembering nothing performs. ``GrantScope``
+        keeps the member, so a recorded grant naming it stays readable, exportable
+        and revocable — the refusal is of the *new* grant and of nothing else.
+
         Args:
             source: The reader's declared identity, compared exactly.
-            scope: The uses this grant authorises. Non-empty and without duplicates;
-                order is normalised to declaration order by the record's own
-                validator (ADR-0097 §2, §10).
+            scope: The uses this grant authorises. Non-empty, without duplicates and
+                without ``INGEST``; order is normalised to declaration order by the
+                record's own validator (ADR-0097 §2, §10; ADR-0294 §4).
 
         Returns:
             The recorded grant, as it was appended.
 
         Raises:
             ValueError: If ``source`` is blank or has no UTF-8 encoding, or if
-                ``scope`` is empty or names a use twice. A caller programming error
-                rather than a condition of the system, refused **locally and before
-                any I/O**, so both implementations refuse the same values without a
-                round trip (ADR-0085 §9).
+                ``scope`` is empty, names a use twice, or names ``INGEST``. A caller
+                programming error rather than a condition of the system, refused
+                **locally and before any I/O**, so both implementations refuse the
+                same values without a round trip (ADR-0085 §9, ADR-0294 §4).
             UngrantableSourceError: If the validated ``source`` is not admissible.
                 The refusal carries no filesystem path; it names the reader where a
                 *held* reader's declared name or configured location is the

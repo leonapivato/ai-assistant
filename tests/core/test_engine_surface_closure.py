@@ -1419,6 +1419,12 @@ def test_the_promoted_surface_and_the_protocol_version_are_both_pinned() -> None
     bump. ``TranscriptEntry``, ``TranscriptHit`` and ``TranscriptArchiveSize`` leave
     the surface with them.
 
+    **75 is ADR-0294 §4, on a method's arguments rather than on the method set.**
+    ``AssistantEngine.grant`` refuses a scope naming ``INGEST``, which a hub at 74
+    accepted, so a frame a client at 74 may send is refused by a hub at 75 — ADR-0294
+    §5's own ground for the bump, which ADR-0124 §9:2 reaches through "a method's
+    arguments". **The method set does not move and stays at 68.**
+
     **ADR-0124 §9 decides no mechanical check and creates none**, saying one is
     owed and leaving its shape open. This is not that check — it is a *pin*, and
     a deliberately crude one: it fails when either number moves, which is the
@@ -1427,7 +1433,7 @@ def test_the_promoted_surface_and_the_protocol_version_are_both_pinned() -> None
     """
     from ai_assistant.wire.envelope import PROTOCOL_VERSION  # noqa: PLC0415 — asserted about
 
-    assert (len(_method_names()), PROTOCOL_VERSION) == (68, 74), (
+    assert (len(_method_names()), PROTOCOL_VERSION) == (68, 75), (
         "the promoted method set and the protocol version are pinned together "
         "(ADR-0124 §9); move either and this pin makes you name the limb you are "
         "under — the method set, or a wire-carried core type"

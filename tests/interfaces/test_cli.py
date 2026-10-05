@@ -159,7 +159,7 @@ from ai_assistant.testing import (
     FakeTraceSink,
     StreamAttempt,
 )
-from ai_assistant.wire import TransportError
+from ai_assistant.wire import GRANTABLE_SCOPES, TransportError
 from ai_assistant.wire.address import sun_path_limit
 
 if TYPE_CHECKING:
@@ -6847,11 +6847,11 @@ def test_grant_records_the_grant_once_the_user_agrees(
     _wire(monkeypatch, engine)
 
     result = CliRunner().invoke(
-        cli.app, ["grant", "calendar", "--scope", "facet", "--scope", "ingest"], input="y\n"
+        cli.app, ["grant", "calendar", "--scope", "facet", "--scope", "notify"], input="y\n"
     )
     assert result.exit_code == 0
     assert [record.scope for record in engine.grants_recorded] == [
-        (GrantScope.FACET, GrantScope.INGEST)
+        (GrantScope.FACET, GrantScope.NOTIFY)
     ]
     assert "Granted" in output.getvalue()
 
@@ -6931,19 +6931,22 @@ def test_a_revoke_hint_is_withheld_where_the_source_name_cannot_be_shown(
     assert "assistant revoke '" not in prompt
 
 
-def test_every_scope_the_enum_offers_is_accepted_and_rendered_in_words(
+def test_every_scope_a_new_grant_may_name_is_accepted_and_rendered_in_words(
     output: StringIO, monkeypatch: pytest.MonkeyPatch
 ) -> None:
-    """ADR-0133 §6: the surface may not offer fewer uses than the vocabulary has.
+    """ADR-0133 §6, as ADR-0294 §4 narrows it: the surface offers what the hub grants.
 
     "No lane may suppress the member from that surface while it is in the enum: an
     option that silently refuses a member of its own type, or a help string
     enumerating two of three uses, is a surface disagreeing with the vocabulary."
+    ADR-0294 §4 takes ``INGEST`` out of what a new grant may name, so the vocabulary
+    a new grant is offered is :data:`~ai_assistant.wire.GRANTABLE_SCOPES` — and the
+    refusal of ``INGEST`` is loud, never silent (the case below).
 
-    Written over ``GrantScope`` rather than per member, so it is the *offer* that
-    is asserted rather than today's three names — a member added without a phrase
-    fails here as well as at the type check, and a member accepted by the option
-    but rendered as nothing cannot pass at all.
+    Written over that set rather than per member, so it is the *offer* that is
+    asserted rather than today's names — a member added without a phrase fails here
+    as well as at the type check, and a member accepted by the option but rendered
+    as nothing cannot pass at all.
 
     **Both halves matter and neither implies the other.** The value must reach the
     hub as the user's chosen scope, and the confirmation must say what that scope
@@ -6952,7 +6955,7 @@ def test_every_scope_the_enum_offers_is_accepted_and_rendered_in_words(
     them to agree to a blank. That is why the rendered text is asserted to be
     non-trivial rather than merely present.
     """
-    for use in GrantScope:
+    for use in GRANTABLE_SCOPES:
         engine = _granting_engine()
         _wire(monkeypatch, engine)
 
@@ -6965,16 +6968,17 @@ def test_every_scope_the_enum_offers_is_accepted_and_rendered_in_words(
         assert len(cli._scope_phrase([use])) > len(use.value), use
 
 
-def test_the_scope_options_help_names_every_use_the_enum_carries(
+def test_the_scope_options_help_names_every_use_a_new_grant_may_name(
     output: StringIO, monkeypatch: pytest.MonkeyPatch
 ) -> None:
     """ADR-0133 §6 again, on the surface a user reads *before* choosing.
 
     The confirmation above is shown once a scope has been named; this is what
-    tells them the scope exists at all. A help string enumerating two of three
-    uses leaves the third undiscoverable while the option happily accepts it,
-    which is the "surface disagreeing with the vocabulary" §6 forbids — and it is
-    the failure the type checker cannot see, because the help is a string.
+    tells them the scope exists at all. A help string enumerating fewer uses than
+    the hub grants leaves one undiscoverable, which is the "surface disagreeing with
+    the vocabulary" §6 forbids — and it is the failure the type checker cannot see,
+    because the help is a string. **And it offers no use the hub refuses**
+    (ADR-0294 §4): ``ingest`` appears nowhere, choices included.
     """
     _wire(monkeypatch, _granting_engine())
 
@@ -6982,8 +6986,33 @@ def test_the_scope_options_help_names_every_use_the_enum_carries(
 
     assert result.exit_code == 0
     rendered = " ".join(result.output.split())
-    for use in GrantScope:
+    for use in GRANTABLE_SCOPES:
         assert f"'{use.value}'" in rendered, use
+    assert GrantScope.INGEST.value not in rendered
+
+
+@pytest.mark.parametrize("command", ["grant", "amend"])
+def test_a_typed_ingest_scope_is_refused_at_the_door_and_nothing_is_sent(
+    output: StringIO, monkeypatch: pytest.MonkeyPatch, command: str
+) -> None:
+    """ADR-0294 §4: a new grant may not name ``INGEST``, and the CLI says so legibly.
+
+    The option's type still parses the word — ``GrantScope`` keeps the member so a
+    recorded grant still renders — so the refusal is the parameter callback's, and it
+    lands before the command body runs: nothing reaches the hub, not even the
+    enumeration a grant begins with. Without it the hub's ``ValueError`` would
+    surface as a traceback.
+    """
+    engine = _amendable_engine() if command == "amend" else _granting_engine()
+    _wire(monkeypatch, engine)
+
+    result = CliRunner().invoke(
+        cli.app, [command, "calendar", "--scope", "facet", "--scope", "ingest", "--yes"]
+    )
+
+    assert result.exit_code == 2
+    assert "can no longer be granted" in " ".join(result.output.split())
+    assert engine.calls == []
 
 
 def test_yes_supplies_the_answer_and_never_the_rendering(
@@ -7619,16 +7648,17 @@ def test_amend_is_refused_for_a_source_the_enumeration_does_not_carry(
     assert "assistant revoke journal" in rendered
 
 
-def test_the_amend_scope_option_names_every_use_the_type_admits(
+def test_the_amend_scope_option_names_every_use_a_new_grant_may_name(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
     """ADR-0139 §3's second clause, over ADR-0133 §6's CLI obligation.
 
     Wherever a surface offers, enumerates or explains the uses a user may choose
-    among, it carries **every** member of ``GrantScope``, named in words. An
-    amendment is a choice context, and a help string enumerating two of three uses
-    is a surface disagreeing with the vocabulary — deciding on the user's behalf
-    what they may permit, which is what ADR-0097 §8 forbids.
+    among, it carries every use the hub grants, named in words. An amendment is a
+    choice context, and a help string enumerating fewer is a surface disagreeing
+    with the vocabulary — deciding on the user's behalf what they may permit, which
+    is what ADR-0097 §8 forbids. ADR-0294 §4 takes ``INGEST`` out of that offer,
+    since the amendment's new scope is a new grant.
     """
     _wire(monkeypatch, _amendable_engine())
 
@@ -7636,8 +7666,9 @@ def test_the_amend_scope_option_names_every_use_the_type_admits(
     assert result.exit_code == 0
     help_text = re.sub(r"\s+", " ", result.output)
     assert "facet" in help_text
-    assert "ingest" in help_text
     assert "notify" in help_text
+    # ADR-0294 §4: an amendment's new scope is a new grant, offered without INGEST.
+    assert "ingest" not in help_text
 
 
 # --- id arguments refuse at the parse boundary (ADR-0042 §7, ADR-0085 §3c) ---

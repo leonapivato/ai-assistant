@@ -8733,19 +8733,27 @@ function statedForget(id, held, destroyed) {
 // neither. Each has its own panel, its own heading and its own read, and no panel
 // annotates one answer with another.
 
-// Every use a grant may authorise, named in words (ADR-0139 §3's second clause).
-// **All three, wherever a choice is offered**, and never a proper subset: "no
-// client may offer, enumerate or explain a proper subset of the members its own
-// type admits", because a user cannot choose what they are not shown.
+// Every use a grant may name, in words — the vocabulary a recorded grant is
+// rendered in (ADR-0139 §3's third clause). It keeps "ingest": a grant recorded
+// with it still names it, and a rendering names every use its grant names
+// (ADR-0294 §4).
 //
 // The phrases say what the reading is *used for* and never what follows from it
-// (ADR-0133 §1): granting the third decides nothing about whether you are ever
+// (ADR-0133 §1): granting "notify" decides nothing about whether you are ever
 // contacted, so its phrase is about reading, on the same footing as the others.
-const USES = [
+const USE_PHRASES = [
   { value: "facet", label: "Look at it while answering you" },
   { value: "ingest", label: "Durably remember what it says" },
   { value: "notify", label: "Read it to raise things with you unprompted" },
 ];
+
+// The uses a **new** grant may name, which is what a choice offers (ADR-0294 §4):
+// every phrase above but the one a new grant may no longer name. Nothing reads a
+// source under "ingest" any more, and the hub refuses a new grant naming it, so a
+// box for it would offer a use the hub refuses — the surface disagreeing with the
+// vocabulary that ADR-0139 §3's second clause forbids, from the other side.
+const RETIRED_USES = ["ingest"];
+const USES = USE_PHRASES.filter((use) => !RETIRED_USES.includes(use.value));
 
 // ADR-0139 §4's exactly three outcomes for one act of an amendment.
 const LANDED = "landed";
@@ -8781,7 +8789,7 @@ function usePhrase(scope) {
   }
   return scope
     .map((use) => {
-      const known = USES.find((one) => one.value === use);
+      const known = USE_PHRASES.find((one) => one.value === use);
       return known ? known.label.toLowerCase() : use;
     })
     .join(", and ");
@@ -8964,10 +8972,10 @@ function renderSource(list, source) {
   list.appendChild(item);
 }
 
-// The choice of uses, offered as all three and taken **before** anything is sent
-// (ADR-0139 §4's sixth clause, ADR-0177 §7's sixth). No surface revokes in order to
-// ask: a user who hesitates over this form, or closes the tab while thinking, has
-// withdrawn nothing.
+// The choice of uses, offered as every use a new grant may name (ADR-0294 §4) and
+// taken **before** anything is sent (ADR-0139 §4's sixth clause, ADR-0177 §7's
+// sixth). No surface revokes in order to ask: a user who hesitates over this form,
+// or closes the tab while thinking, has withdrawn nothing.
 function offerScope(item, source, label, live) {
   const open = document.createElement("button");
   open.type = "button";

@@ -3691,6 +3691,10 @@ class FakeAssistantEngine:
         exactly as the concrete engine does. Getting that wrong here would let a
         client's tests pass over the one path the wire annotation could have
         normalised, which is the direction nobody looks.
+
+        **``INGEST`` is refused before anything is recorded** (ADR-0294 §4), through
+        the same ``grant_scope`` the concrete engine uses, so a client's tests meet
+        the refusal a hub would give rather than a fake that grants it.
         """
         named = non_blank_text(source, name="source")
         uses = grant_scope(scope, name="scope")

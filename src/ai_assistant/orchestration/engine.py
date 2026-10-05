@@ -8108,13 +8108,14 @@ class Engine:
         refused blank or unwritable and **normalised by nothing** — the whole point
         of :data:`~ai_assistant.core.types.NonBlankEncodableText` on this argument
         (ADR-0102 §2) — and ``scope`` is materialised before the first ``await`` and
-        refused empty or duplicated. Both are local refusals before any I/O
-        (ADR-0085 §9), so a wire client refuses exactly what this refuses.
+        refused empty, duplicated, or naming ``INGEST`` (ADR-0294 §4). All are local
+        refusals before any I/O (ADR-0085 §9), so a wire client refuses exactly what
+        this refuses.
 
         Raises:
             RuntimeError: If the engine is shutting down.
-            ValueError: If ``source`` is blank or unwritable, or ``scope`` is empty
-                or names a use twice.
+            ValueError: If ``source`` is blank or unwritable, or ``scope`` is empty,
+                names a use twice, or names ``INGEST``.
             TypeError: If a ``scope`` member is not a ``GrantScope``.
             UngrantableSourceError: If the validated source is not admissible.
             GrantError: If the store cannot be read or written.
