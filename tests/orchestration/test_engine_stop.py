@@ -773,19 +773,13 @@ async def test_a_stopped_resume_whose_bookkeeping_faults_after_executing_keeps_t
     assert tool_handler.calls == 1
 
 
-async def test_a_stopped_resume_whose_answer_was_written_and_not_read_back_returns() -> None:
-    """The answer's append returned, so the user's answer is spent (ADR-0044 §2b); the
-    trail's read-back then failed, so nothing is acted on under it (ADR-0037 §3). A
-    stopped resume returns — no step, nothing executed, no reply — rather than raising.
+def _unread_answers(harness: Harness, answers: list[ActivationStop]) -> list[str]:
+    """Make the trail accept the resolving answer and fail its read-back, stopping first.
+
+    Returns the ids of the resolving answers the trail accepted.
     """
-    plans = _Stopping()
-    harness, tool_handler = _resuming(plans)
-    parked = await harness.engine.converse("send it to the address in the invite", timeout=PATIENT)
-    assert parked.step is not None
-    assert parked.step.confirmation is not None
     record, get = harness.trail.record, harness.trail.get
     resolving: list[str] = []
-    answers: list[ActivationStop] = []
 
     async def recording(decision: PermissionDecision) -> Any:
         if decision.resolves is not None:
@@ -804,12 +798,25 @@ async def test_a_stopped_resume_whose_answer_was_written_and_not_read_back_retur
 
     harness.trail.record = recording  # type: ignore[method-assign]
     harness.trail.get = reading  # type: ignore[method-assign]
+    return resolving
+
+
+async def test_a_stopped_resume_whose_answer_was_written_and_not_read_back_returns() -> None:
+    """The answer's append returned, so the user's answer is spent (ADR-0044 §2b); the
+    trail's read-back then failed, so nothing is acted on under it (ADR-0037 §3). A
+    stopped resume that collected no standing request returns — no step, nothing
+    executed, no reply, and no carrier, which is true: none was asked for.
+    """
+    plans = _Stopping()
+    harness, tool_handler = _resuming(plans)
+    parked = await harness.engine.converse("send it to the address in the invite", timeout=PATIENT)
+    assert parked.step is not None
+    assert parked.step.confirmation is not None
+    answers: list[ActivationStop] = []
+    resolving = _unread_answers(harness, answers)
 
     resumed = await harness.engine.resume(
-        parked.step.confirmation.token,
-        approved=True,
-        timeout=PATIENT,
-        remember_recipients_until=_UNTIL,
+        parked.step.confirmation.token, approved=True, timeout=PATIENT
     )
 
     assert answers == [ActivationStop.STOPPED]
@@ -818,7 +825,35 @@ async def test_a_stopped_resume_whose_answer_was_written_and_not_read_back_retur
     assert resumed.stopped is True
     assert resumed.reply is None
     assert resumed.step is None
+    assert resumed.recipient_grant is None
     assert await _step_status(plans) is StepStatus.AWAITING_APPROVAL
+
+
+async def test_a_stopped_resume_that_cannot_say_what_became_of_its_request_raises() -> None:
+    """Where a standing request was collected and its answer was not read back, no
+    carrier ADR-0235 §4 admits is true — the grant may only be transcribed from the
+    trail's read-back, and no member names this end — so the resume raises as an
+    unstopped one does rather than returning silent about the request (§6).
+    """
+    plans = _Stopping()
+    harness, tool_handler = _resuming(plans)
+    parked = await harness.engine.converse("send it to the address in the invite", timeout=PATIENT)
+    assert parked.step is not None
+    assert parked.step.confirmation is not None
+    answers: list[ActivationStop] = []
+    _unread_answers(harness, answers)
+
+    with pytest.raises(AuditError, match="cannot be read"):
+        await harness.engine.resume(
+            parked.step.confirmation.token,
+            approved=True,
+            timeout=PATIENT,
+            remember_recipients_until=_UNTIL,
+        )
+
+    assert answers == [ActivationStop.STOPPED]
+    assert tool_handler.calls == 0
+    assert await harness.recipient_grants.export() == []
 
 
 async def test_a_resume_no_stop_reached_still_raises_a_failed_read_back() -> None:
