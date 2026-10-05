@@ -659,3 +659,53 @@ async def test_a_reply_being_written_to_a_message_deleted_meanwhile_names_it_as_
         await expect(replying).to_have_text(
             "In reply to a message that was deleted.", timeout=_IDLE_FOLLOWED
         )
+
+
+async def test_a_reply_to_a_deleted_message_older_than_the_snapshot_says_so(
+    gateway_browser: Browser, tmp_path: Path
+) -> None:
+    """§5:8 for a target outside the loaded page: it is read, and named as deleted."""
+    async with driving(gateway_browser, tmp_path) as drive:
+        await drive.engine.set_my_devices(
+            [ChatDevice(device_id="hub", access=DeviceAccess.READ_WRITE)]
+        )
+        started = await drive.engine.start_conversation()
+        for index in range(1, 51):
+            await drive.engine.chat.append_message(
+                started.id, NewMessage(author=MessageAuthor.ASSISTANT, text=f"Note {index}.")
+            )
+        await drive.engine.chat.append_message(
+            started.id,
+            NewMessage(author=MessageAuthor.ASSISTANT, text="About the first.", replies_to=1),
+        )
+        await drive.engine.delete_message(started.id, position=1)
+
+        await drive.page.click("#chat-button")
+        await drive.page.locator("#chat-conversations button", has_text="Open").click()
+        reply = drive.page.locator("#chat-transcript li", has_text="About the first.")
+        await expect(reply).to_contain_text("In reply to a message that was deleted.")
+
+
+async def test_a_listing_that_could_not_be_read_again_stops_the_following(
+    gateway_browser: Browser, tmp_path: Path
+) -> None:
+    """A conversation started elsewhere is not left unlisted with nothing to press."""
+    async with driving(gateway_browser, tmp_path) as drive:
+        await drive.page.click("#chat-button")
+        follow = drive.page.locator("#chat-follow")
+        await expect(follow).to_contain_text("Following this chat")
+        held = drive.engine.recent_conversations
+
+        async def failing(**arguments: Any) -> Any:
+            raise ConversationStoreError("the index is unreadable")
+
+        drive.engine.recent_conversations = failing  # type: ignore[method-assign]
+        started = await drive.engine.start_conversation()
+        await expect(follow).to_contain_text("Stopped following", timeout=_IDLE_FOLLOWED)
+
+        drive.engine.recent_conversations = held  # type: ignore[method-assign]
+        await drive.page.click("#chat-follow-again")
+        await expect(drive.page.locator("#chat-conversations")).to_contain_text(
+            f"Conversation {started.id}"
+        )
+        await expect(follow).to_contain_text("Following this chat")

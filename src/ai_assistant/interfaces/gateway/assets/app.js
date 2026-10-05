@@ -8867,6 +8867,8 @@ const chat = {
   chosen: 0,
   entries: new Map(),
   deleted: new Set(),
+  // Messages older than what is loaded that a reply on screen names, read for the reply.
+  referenced: new Map(),
   oldest: null,
   state: null,
   devices: null,
@@ -8948,6 +8950,7 @@ function closeChat() {
   chat.selected = null;
   chat.entries = new Map();
   chat.deleted = new Set();
+  chat.referenced = new Map();
   chat.pending = [];
   el("chat-thread").hidden = true;
 }
@@ -9241,6 +9244,7 @@ function applyChanges(changes) {
       // §5:12: a device removes the message on seeing its marker.
       if (change.conversation_id === chat.selected) {
         chat.entries.delete(change.position);
+        chat.referenced.delete(change.position);
         chat.deleted.add(change.position);
         touched = true;
       }
@@ -9270,9 +9274,20 @@ function applyChanges(changes) {
     renderTranscript();
   }
   if (relist) {
-    void listChat(false);
+    void relistChat();
   }
   return touched;
+}
+
+// The listing read again because the stream said a conversation came or went. A failure
+// is not left for a later change to repair: it stops the following, and the owner's
+// press opens the chat again, listing included (`followAgain`).
+async function relistChat() {
+  const era = sessionEra;
+  if (!(await listChat(false)) && era === sessionEra && chat.open) {
+    chat.loaded = false;
+    stopFollowing(CHAT_STOPPED_REFUSED, true);
+  }
 }
 
 // ADR-0182 §7's two events, and nothing else, start following again of the page's own
@@ -9412,6 +9427,7 @@ async function selectChat(id) {
   chat.selected = id;
   chat.entries = new Map();
   chat.deleted = new Set();
+  chat.referenced = new Map();
   chat.oldest = null;
   chat.state = null;
   chat.devices = null;
@@ -9448,6 +9464,7 @@ function chatGone(said) {
   chat.selected = null;
   chat.entries = new Map();
   chat.deleted = new Set();
+  chat.referenced = new Map();
   chat.state = null;
   chat.devices = null;
   setReplyTo(null);
@@ -9508,6 +9525,7 @@ async function readTranscript(id, mine, before) {
       chat.oldest = 1;
     }
     renderTranscript(before === null);
+    void resolveReplies(id, mine);
     return true;
   } catch (_) {
     if (!sameSession(half, era)) {
@@ -9519,6 +9537,63 @@ async function readTranscript(id, mine, before) {
     }
     return true;
   }
+}
+
+// How many replies' targets one page of the transcript may send for: each is one read.
+const REPLY_LOOKUPS = 20;
+
+// The messages replies on screen name that are older than what is loaded, each read as
+// the one entry before the position after it — a message or its marker — so a reply to
+// a deleted message says so (§5:8) however far back that message was. A courtesy read:
+// where it cannot be made, the reply names the position, and nothing is read again.
+async function resolveReplies(id, mine) {
+  const half = headerHalf();
+  if (half === null) {
+    return;
+  }
+  const era = sessionEra;
+  const wanted = new Set();
+  chat.entries.forEach((entry) => {
+    const target = entry.replies_to;
+    if (
+      target !== null &&
+      !chat.entries.has(target) &&
+      !chat.deleted.has(target) &&
+      !chat.referenced.has(target)
+    ) {
+      wanted.add(target);
+    }
+  });
+  for (const target of [...wanted].slice(0, REPLY_LOOKUPS)) {
+    let body;
+    try {
+      body = await relay(
+        half,
+        "/chat/transcript",
+        { conversation_id: id, before: target + 1, limit: 1 },
+        "chat"
+      );
+    } catch (_) {
+      return;
+    }
+    if (!sameSession(half, era)) {
+      return;
+    }
+    if (body === null || mine !== chat.chosen) {
+      return;
+    }
+    body.transcript.entries.forEach((entry) => {
+      if (entry.position !== target) {
+        return;
+      }
+      if (entry.deleted) {
+        chat.deleted.add(target);
+      } else if (!chat.deleted.has(target)) {
+        chat.referenced.set(target, entry);
+      }
+    });
+  }
+  renderTranscript();
 }
 
 // Answers whether the read failed for the conversation still on screen: `false` where it
@@ -9582,7 +9657,9 @@ function renderChatState() {
 // Where a reply points: the message itself, a deleted message (§5:8), or one this page
 // has not loaded.
 function quoted(position) {
-  const held = chat.entries.get(position);
+  const held = chat.entries.has(position)
+    ? chat.entries.get(position)
+    : chat.referenced.get(position);
   if (held !== undefined) {
     const text = held.text.length > 120 ? `${held.text.slice(0, 120)}…` : held.text;
     return `In reply to: “${text}”`;
