@@ -6992,6 +6992,30 @@ def test_the_scope_options_help_names_every_use_a_new_grant_may_name(
 
 
 @pytest.mark.parametrize("command", ["grant", "amend"])
+def test_a_mistyped_scope_is_answered_with_the_new_grant_offer_alone(
+    output: StringIO, monkeypatch: pytest.MonkeyPatch, command: str
+) -> None:
+    """ADR-0294 §4 reaches the refusal of a typo as well as the help text.
+
+    A diagnostic that lists the choices is an offer too: Typer's own enum conversion
+    would answer ``--scope facets`` with every member of ``GrantScope``, ``ingest``
+    among them, and following that suggestion would meet a second refusal. So the
+    refusal names exactly the uses a new grant may name, on both commands.
+    """
+    engine = _amendable_engine() if command == "amend" else _granting_engine()
+    _wire(monkeypatch, engine)
+
+    result = CliRunner().invoke(cli.app, [command, "calendar", "--scope", "facets", "--yes"])
+
+    assert result.exit_code == 2
+    refusal = " ".join(result.output.split())
+    for use in GRANTABLE_SCOPES:
+        assert f"'{use.value}'" in refusal, use
+    assert GrantScope.INGEST.value not in refusal
+    assert engine.calls == []
+
+
+@pytest.mark.parametrize("command", ["grant", "amend"])
 def test_a_typed_ingest_scope_is_refused_at_the_door_and_nothing_is_sent(
     output: StringIO, monkeypatch: pytest.MonkeyPatch, command: str
 ) -> None:

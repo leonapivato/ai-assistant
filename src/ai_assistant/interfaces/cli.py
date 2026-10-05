@@ -698,12 +698,8 @@ def _distinct_scope(value: list[GrantScope]) -> list[GrantScope]:
     **Empty needs no check here**: the option is required, so Typer refuses a call
     that names no scope at all before this runs.
 
-    **A use a new grant may no longer name is refused here too** (ADR-0294 §4).
-    ``GrantScope`` keeps ``INGEST`` so that grants recorded with it still render,
-    which is why the option's *type* still parses the word; but the hub refuses it
-    with a ``ValueError``, so without this a typed ``--scope ingest`` would escape as
-    a traceback exactly as a repeated scope would. It is not offered either — see
-    :data:`_GRANT_SCOPE_OPTION`.
+    **A use a new grant may no longer name never reaches this**: :func:`_offered_scope`
+    refuses it during the parse, with the reason (ADR-0294 §4).
 
     Args:
         value: The scopes as the user repeated them.
@@ -713,20 +709,11 @@ def _distinct_scope(value: list[GrantScope]) -> list[GrantScope]:
         (ADR-0097 §10), not this adapter's.
 
     Raises:
-        BadParameter: If a scope is named more than once, or names a use a new grant
-            may no longer name.
+        BadParameter: If a scope is named more than once.
     """
     if len(set(value)) != len(value):
         named = ", ".join(use.value for use in value)
         msg = f"names a use more than once ({named}); each may be given at most once"
-        raise typer.BadParameter(msg)
-    retired = [use for use in value if use not in GRANTABLE_SCOPES]
-    if retired:
-        offered = ", ".join(f"'{use.value}'" for use in GRANTABLE_SCOPES)
-        msg = (
-            f"'{retired[0].value}' can no longer be granted: nothing reads a source for "
-            f"that use any more. Choose from {offered}"
-        )
         raise typer.BadParameter(msg)
     return value
 
@@ -736,6 +723,38 @@ def _distinct_scope(value: list[GrantScope]) -> list[GrantScope]:
 #: otherwise list the type's members, ``ingest`` among them, beside a help string
 #: that no longer offers it.
 _SCOPE_METAVAR: Final = "<" + "|".join(use.value for use in GRANTABLE_SCOPES) + ">"
+
+
+def _offered_scope(value: str) -> GrantScope:
+    """Parse one ``--scope`` value against the uses a new grant may name (ADR-0294 §4).
+
+    **The parse is this function's rather than Typer's enum conversion**, because
+    the latter's refusal of an unknown value enumerates the type's members — so a
+    typo would be answered with a list offering ``ingest``, which is the offer
+    ADR-0294 §4 withdraws, and following that suggestion would meet a second
+    refusal. Here an unknown value is answered with :data:`GRANTABLE_SCOPES` alone,
+    and ``ingest`` with a sentence saying why it can no longer be granted.
+
+    Args:
+        value: One ``--scope`` value as typed.
+
+    Returns:
+        The use it names.
+
+    Raises:
+        BadParameter: If it names no use a new grant may name.
+    """
+    offered = ", ".join(f"'{use.value}'" for use in GRANTABLE_SCOPES)
+    if value in {use.value for use in GRANTABLE_SCOPES}:
+        return GrantScope(value)
+    if value in {use.value for use in GrantScope}:
+        msg = (
+            f"'{value}' can no longer be granted: nothing reads a source for that use "
+            f"any more. Choose from {offered}"
+        )
+        raise typer.BadParameter(msg)
+    msg = f"'{value}' is not one of {offered}"
+    raise typer.BadParameter(msg)
 
 
 #: ``assistant grant``'s repeatable scope flag, hoisted to module scope for the
@@ -748,11 +767,12 @@ _SCOPE_METAVAR: Final = "<" + "|".join(use.value for use in GRANTABLE_SCOPES) + 
 #: narrowing ADR-0133 §6's every-member rule for this one offer). It is the hub's
 #: vocabulary for a *new* grant that the surface may not disagree with: offering a
 #: use the hub refuses would be the disagreement ADR-0097 §8 names, arriving from
-#: the other side. ``ingest`` is accepted by the parse — the type still carries it —
-#: and refused by :func:`_distinct_scope` with a sentence saying why.
+#: the other side. :func:`_offered_scope` is the parse, so a typo is answered with
+#: the same two uses and ``ingest`` with a sentence saying why it is refused.
 _GRANT_SCOPE_OPTION = typer.Option(
     ...,
     "--scope",
+    parser=_offered_scope,
     callback=_distinct_scope,
     metavar=_SCOPE_METAVAR,
     help=(
@@ -770,6 +790,7 @@ _GRANT_SCOPE_OPTION = typer.Option(
 _AMEND_SCOPE_OPTION = typer.Option(
     ...,
     "--scope",
+    parser=_offered_scope,
     callback=_distinct_scope,
     metavar=_SCOPE_METAVAR,
     help=(
