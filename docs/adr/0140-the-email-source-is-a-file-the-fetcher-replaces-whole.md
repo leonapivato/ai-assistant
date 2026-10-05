@@ -1,6 +1,6 @@
 # 140. The email source is a file the fetcher replaces whole, and the reader proposes envelopes, never bodies
 
-- Status: Partially superseded by ADR-0294 (§12:1's `email_reader_interval` row; §12:2; §12:5's interval half; §13:2's ingestion item)
+- Status: Partially superseded by ADR-0294 (§12:1's `email_reader_interval` row; §12:2; §12:5's interval half; §13:2's ingestion parts)
 - Date: 2026-08-12
 - **Note (2026-08-25): §10's second clause is ambiguous about which seam it names,
   it does not fire on another ADR's title, and the resolution belongs to the lane
@@ -67,12 +67,15 @@
 - Partially superseded: 2026-10-04 by ADR-0294 — four scopes, all of them the email
   source's scheduled ingestion. §12:1's `email_reader_interval` row, so `Settings`
   carries the other six fields; §12:2 entire; §12:5's interval half, so the source
-  ships disabled with `email_source_path` `None`; and §13:2's item for the ingestion
-  wiring and its scheduler job. The reader, its envelope proposals, its facet and
-  every other clause stand. This replacement takes effect on ratification of
-  ADR-0294. This reciprocal header record accompanies the numbered draft under
-  ADR-0070 and ADR-0082; prior supersessions and the ratified body below are
-  preserved.
+  ships disabled with `email_source_path` `None`; and every part of §13:2 whose
+  subject is ingestion: the item for the ingestion wiring and its scheduler job, the
+  registration item's ingestion consumer and its own instance, and the test items'
+  ingestion halves (the refusal of an interval set without a path, the grant
+  lifecycle on the ingestion path, and the registration test's ingestion driver).
+  The reader, its envelope proposals, its facet, §13:2's other items and every other
+  clause stand. This replacement takes effect on ratification of ADR-0294. This
+  reciprocal header record accompanies the numbered draft under ADR-0070 and
+  ADR-0082; prior supersessions and the ratified body below are preserved.
 
 ## Context
 

@@ -5,8 +5,8 @@
 - Scope: [#2578](https://github.com/leonapivato/ai-assistant/issues/2578), the channel redesign: the retirement of readers' scheduled ingestion into memory that ADR-0292 §13 names, taken ahead of the readers' channels.
 - Authorization: the owner ruled on 2026-10-04, in the review ADR-0292 records, that readers' scheduled ingestion into memory retires (ADR-0292 §13's table), and directed that it go now rather than wait for the readers' channel design. The dispatcher assigned 0294.
 - **Supersedes** [ADR-0142](0142-each-ingestion-source-is-its-own-stage-its-own-operation-and-its-own-row.md) — **whole.** Every clause rules how an ingestion source is armed, staged, operated and reported, and none survives the stages (§1 below).
-- **Partially supersedes** [ADR-0093](0093-a-sensor-reads-a-source-and-proposes-what-it-read.md) — **six scopes.** §3's memory as a reading's second consumer and ingestion's cadence; §6 entire; §7's and §7a's interval field (`calendar_sensor_interval`, spelled `calendar_reader_interval` in the code) and the states it makes with the path; §8's ingestion-side posture; §9's scheduled-ingestion clause; and §10's later-lane items for the ingestion stage, the `Engine` operation and the scheduler job. §1, §2, §4, §5, §7b, §11 and every other part of §3 and §7–§10 stand.
-- **Partially supersedes** [ADR-0140](0140-the-email-source-is-a-file-the-fetcher-replaces-whole.md) — **four scopes.** §12:1's `email_reader_interval` row, §12:2 entire, §12:5's interval half, and §13:2's item for the ingestion wiring and its scheduler job. Every other clause stands.
+- **Partially supersedes** [ADR-0093](0093-a-sensor-reads-a-source-and-proposes-what-it-read.md) — **six scopes, all of them scheduled ingestion.** §3:1's ingestion consumer and its schedule; §6:1, §6:3 and §6:4, the job; §7:2, the interval convention; §7a:1, the refusal of an interval set without a location; and §9:3, scheduled ingestion's idempotence gate. §6:2, which keeps ingestion out of a turn and bounds the facet's read, stands, as do §3:1's facet half and every other clause.
+- **Partially supersedes** [ADR-0140](0140-the-email-source-is-a-file-the-fetcher-replaces-whole.md) — **four scopes.** §12:1's `email_reader_interval` row, §12:2 entire, §12:5's interval half, and every part of §13:2 whose subject is ingestion: the item for the ingestion wiring and its scheduler job; the registration item's ingestion consumer and its own instance; and the test items' ingestion halves, which are the refusal of an interval set without a path, the grant lifecycle on the ingestion path, and the registration test's ingestion driver. §13:2's reader, facet, registration and documentation items, and every other clause, stand.
 - **Partially supersedes** [ADR-0133](0133-a-producers-read-is-a-third-use-of-a-source-and-the-user-grants-it-separately.md) — **two scopes.** §2:3's *any non-empty subset of the three*, for a new grant; and §6:6's help text naming all three. Every other clause stands.
 - **Partially supersedes** [ADR-0139](0139-a-standing-grant-is-read-from-the-store-not-from-the-sources-the-hub-can-offer.md) — **one scope.** §3:2, in which members a surface offering uses for a new grant carries. Every other clause stands.
 - **Partially supersedes** [ADR-0120](0120-a-measure-is-a-rate-over-the-trace-stream-read-offline-while-the-hub-is-stopped.md) — **one scope.** §3:2's `ingest` member of the machine set, which the code spells `ingest_calendar` and `ingest_email` under ADR-0142 §4. Every other clause stands.
@@ -68,6 +68,11 @@ a reader does, and leave what was already written where it is.
 > **Normative.** The retirement takes effect when this ADR's implementation lands,
 > and does not wait for that replacement. ADR-0292 §Decision:2 and §13:1 no longer
 > hold this mechanism in force; §13:2 binds the replacement when it is built.
+
+Clauses that bind an ingestion stage, driver or job where one exists are not
+superseded, because none exists after this: ADR-0093 §1:2, §1:3 and §6:2's
+first sentence, ADR-0096 §5:6, ADR-0097 §5:2 and §5a:5–§5a:6, ADR-0132 §3:4 and §4:4, and
+ADR-0185 §5:1 each bind nothing once the implementation lands.
 
 Until then a deployment that configured a reader keeps what the facet and the
 upcoming-event producer give it, and loses the rest. The facets carry counts and
