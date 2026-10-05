@@ -7212,6 +7212,44 @@ class Engine:
                 break
         return ruled
 
+    async def remove_device(self, device_id: str) -> bool:
+        """Remove a revoked device from "my devices" and every conversation's devices.
+
+        ADR-0298 §4:10: revoking a device removes it "from 'my devices' and from every
+        conversation's devices", and ADR-0296 §3:6 "as an end of every conversation".
+        The hub's owner act calls this once the device roster has revoked the device
+        (``service.admin``), so the device is already refused before it leaves the
+        sets.
+
+        **Maintenance surface, not contract surface**, for :meth:`purge_expired`'s
+        reason (ADR-0083 §8): its one caller is the hub, which holds an ``Engine``
+        and no concrete store, so it is a method on this class and not on
+        :class:`~ai_assistant.core.protocols.AssistantEngine` — no device may revoke
+        another over the wire, and roles are given only at the hub (ADR-0298 §4:12).
+        It runs as tracked work, so shutdown drains an act that races it.
+
+        One step against "my devices" and every conversation together, each removal
+        recorded as the change setting that set would record
+        (:meth:`~ai_assistant.core.protocols.ConversationStore.remove_device`), so
+        every other device sees it; safe to repeat.
+
+        Args:
+            device_id: The revoked device.
+
+        Returns:
+            Whether any set named the device.
+
+        Raises:
+            RuntimeError: If the engine is shutting down.
+            ValueError: If ``device_id`` is blank.
+            ConversationStoreError: If the store cannot be written.
+        """
+        self._reject_if_closing()
+        named = identifier(device_id, name="device_id")
+        return await self._tracked(
+            self._conversations.chat_space.remove_device(named), "remove_device"
+        )
+
     def _notification_surface(self) -> NotificationStore:
         """The wired notification store, or a legible refusal.
 

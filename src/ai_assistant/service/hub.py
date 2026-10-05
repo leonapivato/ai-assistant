@@ -791,7 +791,7 @@ async def _build_devices(
             store=store,
             registry=registry,
             roster=HubRoster(registry),
-            admin=AdminListener(registry, data_dir=data_dir),
+            admin=AdminListener(registry, data_dir=data_dir, remove_device=engine.remove_device),
             listener=None,
         )
     agent = local_agent(settings.hub_overlay_agent_socket)
@@ -813,7 +813,7 @@ async def _build_devices(
         store=store,
         registry=registry,
         roster=roster,
-        admin=AdminListener(registry, data_dir=data_dir),
+        admin=AdminListener(registry, data_dir=data_dir, remove_device=engine.remove_device),
         listener=RemoteListener(
             engine,
             settings,

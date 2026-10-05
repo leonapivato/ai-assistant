@@ -91,6 +91,7 @@ class FakeEngine:
         self.consolidated = 0
         self.reconsidered = 0
         self.noticed = 0
+        self.removed: list[str] = []
         #: Run inside ``start()``. Tests use it to signal the process at a point
         #: where the hub's own handlers are certainly installed.
         self.on_start: Callable[[], None] | None = None
@@ -148,6 +149,13 @@ class FakeEngine:
         self.reconsidered += 1
         _marker.info("fake_engine_reconsidered")
         return 0
+
+    async def remove_device(self, device_id: str) -> bool:
+        # ADR-0298 §4:10's removal from every set, which the control socket's
+        # revocation calls. Present because the hub hands it to that socket at
+        # startup, so a stand-in without it fails the start rather than the act.
+        self.removed.append(device_id)
+        return False
 
     async def aclose(self) -> None:
         self.closed += 1
@@ -1814,3 +1822,21 @@ async def test_the_remote_listener_holds_the_same_roster_as_the_local_socket(
         assert not devices.roster.knows("nHUB")
     finally:
         devices.store.close()
+
+
+async def test_a_revocation_at_the_control_socket_reaches_the_engines_removal(
+    settings: Settings, wired: dict[str, list[Any]], engine: FakeEngine
+) -> None:
+    """ADR-0298 §4:10: the hub hands its control socket the engine's removal, so the
+    owner's revocation takes the device out of "my devices" and its conversations."""
+    control = settings.data_dir / ADMIN_SOCKET_FILENAME
+    serving = asyncio.create_task(hub.serve(settings))
+    try:
+        reply = await _act_once_serving(control, {"act": "revoke", "identity": "nPHONE22CNTRL"})
+    finally:
+        os.kill(os.getpid(), signal.SIGTERM)
+        code = await serving
+
+    assert code == EXIT_OK
+    assert reply["ok"] is True
+    assert engine.removed == ["nPHONE22CNTRL"]
