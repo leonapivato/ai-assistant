@@ -427,7 +427,7 @@ def test_the_statement_reaches_a_user_driving_assistant_ask(
     engine.drive_withheld = DriveWithheld.ATTEMPT_PAUSED
     _wire(monkeypatch, engine)
 
-    result = CliRunner().invoke(cli.app, ["ask", "book the flight", "--yes"])
+    result = CliRunner().invoke(cli.app, ["ask", "book the flight", "--goal", "goal-1", "--yes"])
 
     assert result.exit_code == 0
     assert _STATEMENTS[DriveWithheld.ATTEMPT_PAUSED] in _flat(result.output)
@@ -445,7 +445,7 @@ def test_a_default_fake_turn_says_nothing_about_a_withheld_drive(
     engine = FakeAssistantEngine()
     _wire(monkeypatch, engine)
 
-    result = CliRunner().invoke(cli.app, ["ask", "book the flight", "--yes"])
+    result = CliRunner().invoke(cli.app, ["ask", "book the flight", "--goal", "goal-1", "--yes"])
     screen = _flat(result.output)
 
     assert result.exit_code == 0

@@ -483,7 +483,9 @@ def test_the_statement_reaches_a_user_driving_assistant_ask(
     engine.forecast_not_read = ForecastNotRead.SPEND_EXHAUSTED
     _wire(monkeypatch, engine)
 
-    result = CliRunner().invoke(cli.app, ["ask", "will it rain tomorrow?", "--yes"])
+    result = CliRunner().invoke(
+        cli.app, ["ask", "will it rain tomorrow?", "--goal", "goal-1", "--yes"]
+    )
     rendered = _flat(result.output)
 
     assert result.exit_code == 0
@@ -503,7 +505,9 @@ def test_a_default_fake_turn_says_nothing_about_a_forecast_driving_assistant_ask
     engine = FakeAssistantEngine()
     _wire(monkeypatch, engine)
 
-    result = CliRunner().invoke(cli.app, ["ask", "will it rain tomorrow?", "--yes"])
+    result = CliRunner().invoke(
+        cli.app, ["ask", "will it rain tomorrow?", "--goal", "goal-1", "--yes"]
+    )
 
     assert result.exit_code == 0
     assert "forecast" not in _flat(result.output).lower()

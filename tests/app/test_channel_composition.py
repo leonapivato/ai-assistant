@@ -163,9 +163,11 @@ async def test_real_cli_text_crosses_hub_and_common_receiver(
 ) -> None:
     rendered = StringIO()
     monkeypatch.setattr(cli, "console", Console(file=rendered, force_terminal=False))
-    result = await asyncio.to_thread(CliRunner().invoke, cli.app, ["ask", "Hello channel"])
+    result = await asyncio.to_thread(
+        CliRunner().invoke, cli.app, ["ask", "Hello channel", "--goal", "goal-1"]
+    )
     assert result.exit_code == 0, result.output
-    assert "Channel reply." in rendered.getvalue()
+    assert _SUMMARY in rendered.getvalue(), "the composed answer, printed whole"
     assert len(running_channels.resolved) == 1
     supplied = running_channels.resolved[0]
     assert supplied.text == "Hello channel"

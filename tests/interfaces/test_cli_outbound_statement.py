@@ -471,23 +471,17 @@ async def test_the_statement_stands_beside_the_reply_and_never_in_place_of_it(
 # --- §13 arm 11: the routed pass, and the two composers this surface has ------
 
 
-def _both_ways(outcome: TurnOutcome, output: StringIO) -> tuple[str, str]:
-    """Render one outcome as a whole reply and as a settled stream, and return both.
+def _whole(outcome: TurnOutcome, output: StringIO) -> str:
+    """Render one outcome as the whole reply ``assistant ask`` prints, and return it.
 
-    ADR-0173 §10's third clause is why the streamed half is never assumed from the
-    first: "the step account is rendered whether or not chunks were rendered", and a
-    renderer reached only on the one-result path would leave every streamed turn
-    silent — which is the path ``assistant ask`` actually takes.
+    The streamed half this once rendered beside it is gone with ``converse_streaming``
+    (ADR-0293 §11): a turn now answers as one result.
     """
     cli._render_turn(outcome)
-    one_result = _flat(output.getvalue())
-    output.truncate(0)
-    output.seek(0)
-    cli._render_turn(outcome, streamed=cli._StreamedReply())
-    return one_result, _flat(output.getvalue())
+    return _flat(output.getvalue())
 
 
-def test_a_routed_pass_that_is_not_a_park_renders_the_statement_both_ways(
+def test_a_routed_pass_that_is_not_a_park_renders_the_statement(
     output: StringIO,
 ) -> None:
     """§13 arm 11: "The whole-reply and streaming passes **render** §7's statement."
@@ -514,10 +508,7 @@ def test_a_routed_pass_that_is_not_a_park_renders_the_statement_both_ways(
         outbound_statement=_NOT_REACHED,
     )
 
-    one_result, streamed = _both_ways(routed, output)
-
-    assert "this turn reached nothing outside this system" in one_result
-    assert "this turn reached nothing outside this system" in streamed
+    assert "this turn reached nothing outside this system" in _whole(routed, output)
 
 
 def test_a_routed_park_renders_no_statement(output: StringIO) -> None:
@@ -564,7 +555,7 @@ def test_a_routed_park_renders_no_statement(output: StringIO) -> None:
     assert "cannot say whether" not in rendered
 
 
-async def test_a_conversational_pass_renders_the_statement_both_ways(
+async def test_a_conversational_pass_renders_the_statement(
     output: StringIO,
 ) -> None:
     """The same, on the composer the routed one is contrasted with.
@@ -576,10 +567,7 @@ async def test_a_conversational_pass_renders_the_statement_both_ways(
     turn = await engine.converse("when does it open?", timeout=PATIENT)
     whole = TurnOutcome(turn=turn.turn, reply=turn.reply, outbound_statement=_NOT_REACHED)
 
-    one_result, streamed = _both_ways(whole, output)
-
-    assert "this turn reached nothing outside this system" in one_result
-    assert "this turn reached nothing outside this system" in streamed
+    assert "this turn reached nothing outside this system" in _whole(whole, output)
 
 
 # --- the two issues this lane closes with lane 1 -----------------------------
@@ -683,7 +671,7 @@ def test_the_statement_reaches_a_user_driving_assistant_ask(
     engine.outbound_statement = _REACHED
     _wire(monkeypatch, engine)
 
-    result = CliRunner().invoke(cli.app, ["ask", "when does it open?", "--yes"])
+    result = CliRunner().invoke(cli.app, ["ask", "when does it open?", "--goal", "goal-1", "--yes"])
     rendered = _flat(result.output)
 
     assert result.exit_code == 0
@@ -704,7 +692,7 @@ def test_a_default_fake_turn_says_it_reached_nothing_driving_assistant_ask(
     engine = FakeAssistantEngine()
     _wire(monkeypatch, engine)
 
-    result = CliRunner().invoke(cli.app, ["ask", "when does it open?", "--yes"])
+    result = CliRunner().invoke(cli.app, ["ask", "when does it open?", "--goal", "goal-1", "--yes"])
 
     assert result.exit_code == 0
     assert "this turn reached nothing outside this system" in _flat(result.output)

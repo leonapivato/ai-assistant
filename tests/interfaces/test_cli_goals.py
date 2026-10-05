@@ -803,8 +803,8 @@ def test_answering_a_clarification_is_a_turn_and_not_a_verb_of_its_own(
     code = CliRunner().invoke(cli.app, ["ask", "the one at Melides", "--answering", QUESTION_ID])
 
     assert code.exit_code == 0
-    streamed = [call for call in engine.calls if call[0] == "converse_streaming"]
-    assert [call[1]["reference"] for call in streamed] == [TurnReference(question_id=QUESTION_ID)]
+    turns = [call for call in engine.calls if call[0] == "converse"]
+    assert [call[1]["reference"] for call in turns] == [TurnReference(question_id=QUESTION_ID)]
 
 
 def test_a_goal_is_taken_up_from_another_conversation_by_pointing_at_it(
@@ -823,21 +823,29 @@ def test_a_goal_is_taken_up_from_another_conversation_by_pointing_at_it(
     code = CliRunner().invoke(cli.app, ["ask", "make it Monday", "--goal", GOAL_ID])
 
     assert code.exit_code == 0
-    streamed = [call for call in engine.calls if call[0] == "converse_streaming"]
-    assert [call[1]["reference"] for call in streamed] == [TurnReference(goal_id=GOAL_ID)]
+    turns = [call for call in engine.calls if call[0] == "converse"]
+    assert [call[1]["reference"] for call in turns] == [TurnReference(goal_id=GOAL_ID)]
 
 
-def test_a_turn_carrying_neither_keyword_carries_no_reference(
+def test_a_turn_carrying_neither_keyword_is_refused_and_pointed_at_the_chat(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
-    """The ordinary turn is unchanged, which is what ``None`` defaulting is for."""
+    """The ordinary turn is the chat's now (ADR-0293 §11), so ``ask`` refuses it.
+
+    What is left of ``ask`` is the turn the chat cannot yet carry: one answering a
+    clarification or taking a goal up. A request carrying neither is a usage error
+    naming ``assistant chat``, refused before any engine is opened.
+    """
     engine = FakeAssistantEngine()
     _wire(monkeypatch, engine)
 
-    assert CliRunner().invoke(cli.app, ["ask", "what is two plus two?"]).exit_code == 0
+    result = CliRunner().invoke(cli.app, ["ask", "what is two plus two?"])
 
-    streamed = [call for call in engine.calls if call[0] == "converse_streaming"]
-    assert [call[1]["reference"] for call in streamed] == [None]
+    assert result.exit_code == 2
+    assert "to talk to the assistant, use 'assistant chat'" in _flat(
+        result.output.replace("│", " ")
+    )
+    assert engine.calls == []
 
 
 def test_naming_both_records_is_a_usage_error_before_any_engine_is_built(
@@ -945,7 +953,7 @@ def test_every_engagement_disposition_is_rendered_and_names_no_record(
     member: EngagementDisposition, monkeypatch: pytest.MonkeyPatch, output: StringIO
 ) -> None:
     """ADR-0250 §15's non-degradation clause over ``EngagementDisposition``'s four."""
-    _drive(monkeypatch, _engaged(member), ["ask", "book it"])
+    _drive(monkeypatch, _engaged(member), ["ask", "book it", "--goal", GOAL_ID])
 
     screen = _flat(output.getvalue())
     assert screen.strip()
@@ -978,7 +986,7 @@ def test_the_surface_composes_no_announcement_of_its_own(
             added=("the last weekend of September",),
             removed=("the last weekend of August",),
         ),
-        ["ask", "make it September"],
+        ["ask", "make it September", "--goal", GOAL_ID],
     )
 
     screen = _flat(output.getvalue())
@@ -1009,7 +1017,7 @@ def test_a_raised_clarification_appears_in_the_exchange_that_raised_it(
             goal_engagement=_engagement(EngagementDisposition.OPENED),
             clarification=_clarification(),
         ),
-        ["ask", "book the usual campsite"],
+        ["ask", "book the usual campsite", "--goal", GOAL_ID],
     )
 
     screen = _flat(output.getvalue())
@@ -1050,7 +1058,7 @@ def test_a_raised_clarification_is_not_reported_as_needing_no_action(
             goal_engagement=_engagement(EngagementDisposition.OPENED),
             clarification=_clarification(),
         ),
-        ["ask", "book the usual campsite"],
+        ["ask", "book the usual campsite", "--goal", GOAL_ID],
     )
 
     screen = _flat(output.getvalue())
@@ -1080,7 +1088,7 @@ def test_an_undecided_turn_is_not_reported_as_needing_no_action(
             reply="Is this about the campsite, or something new?",
             disambiguation=GoalDisambiguation(candidates=(OUTCOME,), elided=0),
         ),
-        ["ask", "make it Monday"],
+        ["ask", "make it Monday", "--goal", GOAL_ID],
     )
 
     screen = _flat(output.getvalue())

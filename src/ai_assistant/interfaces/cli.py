@@ -20,11 +20,11 @@ nothing here resolves a citation, computes an adjustment, or ever sees an id it
 could pass off as a warrant.
 
 ``conversations`` and ``forget-conversation`` are the conversation surface
-(ADR-0074 §2, §8, §10), and ``ask --conversation`` is how a turn continues one.
-Continuation is deliberately **an option on ``ask`` and never a second meaning for
-``resume``**, which transports consent for a parked confirmation: overloading that
-verb would put two unrelated flows behind one word in the surface where the
-distinction matters most. A conversation the user deleted reaches none of these —
+(ADR-0074 §2, §8, §10), and ``chat --conversation`` is how one is continued
+(ADR-0293). Continuation is deliberately **never a second meaning for ``resume``**,
+which transports consent for a parked confirmation: overloading that verb would put
+two unrelated flows behind one word in the surface where the distinction matters
+most. A conversation the user deleted reaches none of these —
 not because anything here filters it, but because the store hides a stamped
 conversation from every read that presents one.
 
@@ -274,7 +274,6 @@ from ai_assistant.core.errors import (
     UnusableIdentityError,
 )
 from ai_assistant.core.logging import configure_logging
-from ai_assistant.core.streams import closing_stream
 from ai_assistant.core.types import (
     CHAT_DEVICES_MAX,
     DEFAULT_NOTIFICATION_REACH,
@@ -312,15 +311,12 @@ from ai_assistant.core.types import (
     DriveWithheld,
     EgressBinding,
     EngagementDisposition,
-    FeedbackEvent,
-    FeedbackKind,
     ForecastNotRead,
     GoalAbandonment,
     GoalDisambiguation,
     GoalEngagement,
     GoalSummary,
     GrantScope,
-    LearnDecision,
     MemoryKind,
     MessageAddedChange,
     MessageAuthor,
@@ -339,7 +335,6 @@ from ai_assistant.core.types import (
     ProvisioningState,
     Question,
     QuestionState,
-    QueueOutcome,
     QuietWindow,
     QuoteView,
     ReadAnswerOutcome,
@@ -350,7 +345,6 @@ from ai_assistant.core.types import (
     RecipientGrantOutcome,
     RecordedInvocation,
     ReferenceOutcome,
-    ReplyChunk,
     RoutableOperation,
     RouteOutcome,
     SearchNotServiced,
@@ -394,7 +388,7 @@ from ai_assistant.wire import (
 from ai_assistant.wire.address import check_socket_path
 
 if TYPE_CHECKING:
-    from collections.abc import AsyncIterator, Awaitable, Callable, Mapping, Sequence
+    from collections.abc import Awaitable, Callable, Mapping, Sequence
 
     from ai_assistant.core.config import Settings
     from ai_assistant.core.protocols import AssistantEngine
@@ -415,11 +409,8 @@ if TYPE_CHECKING:
         EgressSpan,
         GrantableSource,
         HeldNotification,
-        IngestSummary,
-        LearnOutcome,
         NotificationCandidate,
         OperationConfirmation,
-        QueuedQuestion,
         RoutedListing,
         RoutedOperation,
         StepOutcome,
@@ -473,81 +464,6 @@ error_console = Console(stderr=True)
 _EXIT_OK = 0
 _EXIT_ERROR = 1
 
-#: How ``--memory-kind`` defaults from ``--kind`` when the user does not give one —
-#: **only where the value follows from what the user said** (ADR-0122 §2). Not
-#: exhaustive over ``FeedbackKind``, deliberately: ``CORRECTION`` has no entry, and
-#: a lookup that misses leaves the field ``None`` for ``orchestration`` to resolve.
-#:
-#: The two intents are not symmetric. A stated **preference** establishes a
-#: ``PreferenceMemory`` by its own intent — the user is not pointing at a stored
-#: belief, they are stating one — so no lookup is available and none is needed. A
-#: **correction** points at a belief that already exists, and its record type is a
-#: property of *that* belief; naming it here is not a default but a prediction, made
-#: at the one layer with no access to the target. This table used to make it anyway,
-#: citing ``FeedbackEvent``'s "a fact becomes a ``SemanticMemory``, not a
-#: preference" — an *illustration* that a correction's type varies with what it
-#: corrects, read as a rule that it is always semantic. That over-reading is #864:
-#: every correction filed as a fact, and the kind-scoped conflict probe then looking
-#: for its target only in the drawer this table named.
-#:
-#: Leaving it absent is the adapter reporting what it knows, which is what keeps
-#: golden rule 3 intact — the resolution is business logic, and none of it happens
-#: in ``interfaces/``.
-_DEFAULT_MEMORY_KIND = {
-    FeedbackKind.PREFERENCE: MemoryKind.PREFERENCE,
-}
-
-#: One human-readable line per :class:`~ai_assistant.orchestration.LearnDecision`,
-#: rendered under a ``learn`` result. Exhaustive: every member has a message, so a
-#: new decision surfaces at type-check time rather than as a missing line.
-#:
-#: ``DEFERRED`` is deliberately **absent**, because one line cannot cover it any
-#: more (ADR-0078 §10 item 9). The deferral now usually parks a question the user
-#: can answer, sometimes collides with one already asked, sometimes finds the queue
-#: full, and — for secret-tier data — is still not answerable at all. Those are four
-#: different sentences and the fact that distinguishes them arrives on the result, so
-#: :func:`_deferred_message` reads it instead of a table looking it up.
-_LEARN_MESSAGES = {
-    LearnDecision.STORED: "Stored a new memory.",
-    LearnDecision.REINFORCED: "Reinforced an existing memory.",
-    LearnDecision.SUPERSEDED: "Replaced a prior memory.",
-    LearnDecision.REJECTED: "Rejected — nothing was stored.",
-    LearnDecision.STORED_TEMPORARILY: "Stored temporarily.",
-}
-
-#: The line a deferral that **cannot** be answered from here keeps — the wording
-#: ``learn`` has carried since #422, retained verbatim for the one arm ADR-0078 does
-#: not close (§1, §10 item 9). ADR-0078 makes it false for a question that *is*
-#: queued, and it stays true for secret-tier data, which ADR-0004 §3 forbids a
-#: durable file: nothing was queued, so there is nothing to answer. Dropping "yet",
-#: which was a promise about a flow that has now arrived for every other arm.
-_NOT_ANSWERABLE = "Not stored — this needs review, which cannot be done from here."
-
-#: What a question in each state means for the user, at the moment ``learn`` tells
-#: them an existing one stood in the way of theirs (ADR-0078 §7). Total over
-#: :class:`~ai_assistant.orchestration.QuestionState` (:func:`_suppressor_message`),
-#: because the three states that can suppress a key each need a *different* sentence:
-#: rendering an interrupted answer as an answerable follow-up would advertise a
-#: question the user cannot act on.
-_SUPPRESSOR_MESSAGES = {
-    QuestionState.OPEN: ("Not stored yet — the same question is already waiting for your answer:"),
-    QuestionState.DECLINED: (
-        "Not stored — you already declined this question. Forget it to be asked again:"
-    ),
-    QuestionState.INTERRUPTED: (
-        "Not stored — an answer to this question was already begun and its outcome was "
-        "never recorded:"
-    ),
-    # A settled question's key no longer speaks for it, so it cannot suppress a fresh
-    # arrival (ADR-0078 §2). These three are unreachable through the queue's own
-    # rules and are given honest lines anyway, rather than a wildcard that would read
-    # as a decision nobody made.
-    QuestionState.APPLIED: "Not stored — a matching question was already answered:",
-    QuestionState.STALE: "Not stored — a matching question went stale:",
-    QuestionState.REDEFERRED: "Not stored — a matching question raised a follow-up:",
-}
-
-
 #: The only endpoint form ``--quiet-window`` takes, and the only one it can hold
 #: without changing: ``QuietWindow`` is minute-resolution and ``minute_of_day``
 #: truncates seconds deliberately, so a finer endpoint would be accepted and then
@@ -561,26 +477,11 @@ _HH_MM = re.compile(r"\d{2}:\d{2}")
 #: :func:`_page_argument`).
 _PAGE_BOUND = 2**63
 
-#: The ``learn`` command's enum-typed options, defined once at module scope. Typer
-#: options for an ``Enum`` parameter are hoisted here rather than called inline in
-#: the signature, the module-level-singleton form ruff's B008 requires (a plain
-#: ``str``/``bool`` option is exempt, an enum-annotated one is not).
-_LEARN_KIND_OPTION = typer.Option(
-    ..., "--kind", help="Whether this corrects a fact ('correction') or states a preference."
-)
-_LEARN_MEMORY_KIND_OPTION = typer.Option(
-    None,
-    "--memory-kind",
-    help=(
-        "Which typed memory to establish. Defaults from --kind "
-        "(correction -> semantic, preference -> preference); set it to override."
-    ),
-)
-
-#: The ``beliefs`` command's enum-typed filters, hoisted to module scope for the
-#: same reason the ``learn`` ones are. Each may be repeated; the values within one
-#: flag are a union and the two flags compose by conjunction, which is the façade's
-#: own rule relayed unchanged (ADR-0073 §1).
+#: The ``beliefs`` command's enum-typed filters, hoisted to module scope, the
+#: module-level-singleton form ruff's B008 requires of an enum-annotated option.
+#: Each may be repeated; the values within one flag are a union and the two flags
+#: compose by conjunction, which is the façade's own rule relayed unchanged
+#: (ADR-0073 §1).
 _BELIEFS_BAND_OPTION = typer.Option(
     None,
     "--band",
@@ -780,7 +681,7 @@ def _offered_scope(value: str) -> GrantScope:
 
 
 #: ``assistant grant``'s repeatable scope flag, hoisted to module scope for the
-#: reason the ``learn`` and ``beliefs`` enum options are (ruff's B008). Required
+#: reason the ``beliefs`` enum options are (ruff's B008). Required
 #: with no default, deliberately: ADR-0097 §2 refuses an empty scope at
 #: construction, and a *default* scope would be this adapter deciding what a user
 #: permitted — the one decision ADR-0097 §8 says nothing may make for them.
@@ -862,13 +763,11 @@ _UNREAD = _Unread()
 
 
 def _utcnow() -> datetime:
-    """The wall-clock 'now' the ``learn`` command stamps on a ``FeedbackEvent``.
+    """The wall-clock 'now' the notification listing is rendered against.
 
     The same module-level clock convention every subsystem uses
-    (``datetime.now(UTC)``); ``FeedbackEvent.created_at`` is a
-    :data:`~ai_assistant.core.types.UtcInstant`, so the reading is validated as
-    timezone-aware UTC at construction. Named so a test can substitute it for a
-    deterministic timestamp.
+    (``datetime.now(UTC)``). Named so a test can substitute it for a deterministic
+    timestamp.
     """
     return datetime.now(UTC)
 
@@ -938,74 +837,6 @@ def _positive_finite_seconds(value: float) -> float:
     return value
 
 
-def _present_content(value: str) -> str:
-    """Reject blank ``learn`` content during Typer's parameter parsing.
-
-    ``FeedbackEvent.content`` rejects whitespace-only text with a ``ValidationError``
-    (``core/types.py``), which is **not** an :class:`AssistantError`, so constructing
-    the event on blank input would escape both of :func:`_learn_feedback`'s error
-    boundaries as an uncaught traceback with no controlled exit code — the failure
-    ADR-0042 §7 forbids. Catching it here instead makes it a normal usage error
-    (exit code 2), before any engine is built, mirroring :func:`_positive_finite_seconds`.
-    The value is returned untouched; the event's own validator trims it.
-    """
-    if not value.strip():
-        msg = "must not be blank"
-        raise typer.BadParameter(msg)
-    return value
-
-
-def _present_subject(value: str | None) -> str | None:
-    r"""Reject a blank ``--about-person`` during parsing, **without stripping**.
-
-    The subject axis's route into ``FeedbackEvent`` (ADR-0100 §7), and it borrows
-    :func:`_present_source`'s shape rather than :func:`_present_content`'s for the
-    reason that separates them. ``FeedbackEvent.about_person`` is
-    ``NonBlankEncodableText``, which refuses a blank value and an unencodable one
-    with a ``ValidationError`` — **not** an :class:`AssistantError`, so
-    constructing the event on either would escape :func:`_learn_feedback`'s error
-    boundaries as an uncaught traceback with no controlled exit code, the failure
-    ADR-0042 §7 forbids. Both cases are real: ``--about-person ""`` is a slip a
-    shell makes easy, and Linux passes argv as bytes that Python decodes with
-    ``surrogateescape``, so ``assistant learn x --about-person $'\xe9'`` arrives as
-    a lone surrogate no UTF-8 encoder will accept.
-
-    **The value is returned byte for byte** (ADR-0100 §6). An adapter that
-    stripped it would store ``" Marta "`` as ``"Marta"``, and §6's third clause
-    keeps a label exactly as the user gave it precisely so that every later
-    matching rule stays available — none of them can be recovered from labels that
-    were quietly normalised on the way in. The refusal is allowed to *strip in
-    order to decide*; what it may not do is return the stripped value.
-
-    ``None`` — the option not given — is the "no subject stated" state and passes
-    through untouched, which is the one thing this callback must not turn into a
-    blank.
-
-    Args:
-        value: The subject as the user typed it, or ``None`` when unset.
-
-    Returns:
-        The value, unchanged.
-
-    Raises:
-        BadParameter: If the value is blank, or has no UTF-8 encoding.
-    """
-    if value is None:
-        return None
-    if not value.strip():
-        msg = "must not be blank"
-        raise typer.BadParameter(msg)
-    try:
-        encodable_text(value)
-    except ValueError as exc:
-        # Not echoed, for :func:`_present_source`'s reason: a value with no UTF-8
-        # encoding is one this process may not be able to write down, so reporting
-        # the fault would fail the same way the fault does.
-        msg = "must be text with a UTF-8 encoding"
-        raise typer.BadParameter(msg) from exc
-    return value
-
-
 def _present_id(value: str) -> str:
     r"""Reject a blank or unwritable id during Typer's parameter parsing, **stripping** it.
 
@@ -1069,7 +900,7 @@ def _present_id(value: str) -> str:
 def _present_optional_id(value: str | None) -> str | None:
     """:func:`_present_id` for the id parameters that may be absent.
 
-    ``ask --conversation`` and every parameter like it default to ``None``, which is
+    ``chat --conversation`` and every parameter like it default to ``None``, which is
     the "none named" state — the one thing this must not turn into a blank, and the
     reason it cannot simply be :func:`_present_id`. The shape
     :func:`_present_subject` uses for the same reason.
@@ -1086,8 +917,8 @@ def _present_optional_id(value: str | None) -> str | None:
     return None if value is None else _present_id(value)
 
 
-def _turn_reference(*, answering: str | None, goal: str | None) -> TurnReference | None:
-    """Build the turn's reference from the two keywords, or refuse the pair.
+def _turn_reference(*, answering: str | None, goal: str | None) -> TurnReference:
+    """Build the turn's reference from the two keywords, or refuse the pair or neither.
 
     ADR-0250 §11 admits exactly two shapes — "a ``question_id`` and no ``goal_id``,
     or a ``goal_id`` and no ``question_id``" — and states why the type refuses the
@@ -1098,19 +929,21 @@ def _turn_reference(*, answering: str | None, goal: str | None) -> TurnReference
     user sees which two flags conflict instead of a validation message out of
     ``core`` about members of a type they never named.
 
-    **Neither given is not an error.** A turn carrying no reference is the ordinary
-    turn, and ``reference`` defaults to ``None`` on ``converse`` for exactly that
-    reason — so this answers ``None`` rather than refusing.
+    **Neither given is refused too.** A turn carrying no reference is a message in a
+    conversation, and since ADR-0293 §11 that is the chat's: ``assistant chat``. What
+    is left of ``ask`` is the turn that answers a clarification or takes a goal up
+    (ADR-0250 §11, §13), which the chat cannot yet carry, so the refusal names where
+    the ordinary turn went.
 
     Args:
         answering: ``--answering``, a clarification's id, or ``None``.
         goal: ``--goal``, a goal's id, or ``None``.
 
     Returns:
-        The reference, or ``None`` where neither keyword was given.
+        The reference.
 
     Raises:
-        BadParameter: If both were given.
+        BadParameter: If both were given, or neither.
     """
     if answering is not None and goal is not None:
         msg = (
@@ -1122,7 +955,11 @@ def _turn_reference(*, answering: str | None, goal: str | None) -> TurnReference
         return TurnReference(question_id=answering)
     if goal is not None:
         return TurnReference(goal_id=goal)
-    return None
+    msg = (
+        "to talk to the assistant, use 'assistant chat'. ask answers a clarification "
+        "(--answering) or takes a goal up (--goal): give one of the two"
+    )
+    raise typer.BadParameter(msg)
 
 
 def _page_argument(value: int) -> int:
@@ -1135,8 +972,7 @@ def _page_argument(value: int) -> int:
     :class:`AssistantError`, so it would escape :func:`_list_beliefs`'s error
     boundary as an uncaught traceback with no controlled exit code — the failure
     ADR-0042 §7 forbids. Catching it during Typer's parameter parsing makes it a
-    normal usage error (exit code 2) before any engine is built, exactly as
-    :func:`_present_content` does for blank ``learn`` content.
+    normal usage error (exit code 2) before any engine is built.
     """
     if not 0 <= value < _PAGE_BOUND:
         msg = f"must be between 0 and {_PAGE_BOUND - 1}"
@@ -1368,7 +1204,7 @@ def _budget_argument(value: int | None) -> int | None:
 
 
 #: ``assistant tune``'s reach flag, hoisted to module scope for the reason the
-#: ``learn``, ``beliefs`` and ``grant`` enum options are (ruff's B008). Optional
+#: ``beliefs`` and ``grant`` enum options are (ruff's B008). Optional
 #: rather than required: ``tune`` writes only the axes the user named, and reach is
 #: one of three standing settings (ADR-0130 §6).
 _TUNE_REACH_OPTION = typer.Option(
@@ -1486,7 +1322,9 @@ def _tuning(
 
 @app.command()
 def ask(  # noqa: PLR0913 — one parameter per thing the user gives this turn: the request, the budget, the conversation, the two references and the approval flag
-    utterance: str = typer.Argument(..., help="What you want the assistant to do."),
+    utterance: str = typer.Argument(
+        ..., help="Your answer, or what to do next, in your own words."
+    ),
     timeout_seconds: float = typer.Option(
         60.0,
         "--timeout",
@@ -1528,7 +1366,13 @@ def ask(  # noqa: PLR0913 — one parameter per thing the user gives this turn: 
         False, "--yes", "-y", help="Approve any confirmation without prompting."
     ),
 ) -> None:
-    """Run one turn: plan it, drive its step, and render what happened.
+    """Answer a clarification, or take a goal up: one turn, rendered whole.
+
+    **Give exactly one of ``--answering`` and ``--goal``.** Talking to the assistant
+    is ``assistant chat``, and a correction is a reply there (``/reply N``); this
+    command is left for the two turns the chat cannot yet carry — answering a
+    clarification, and taking a goal up from another conversation (ADR-0250 §11,
+    §13).
 
     Every turn runs under a conversation, and the id it ran under is printed so you
     can continue it with ``--conversation``. Passing an id the assistant does not
@@ -1577,7 +1421,7 @@ def conversations(
 ) -> None:
     """List your recent conversations, most recently active first.
 
-    Each row shows the id ``assistant ask --conversation`` takes, when the
+    Each row shows the id ``assistant chat --conversation`` takes, when the
     conversation started, and when it was last active. A conversation you deleted is
     not listed, and neither is one whose record retention has already reclaimed.
 
@@ -1639,7 +1483,7 @@ def resume(
 ) -> None:
     """Answer confirmations parked by an earlier run — including across a restart.
 
-    A confirmable action from a previous ``ask`` may still be awaiting an answer: it
+    A confirmable action from a previous turn may still be awaiting an answer: it
     was parked durably (ADR-0052) and survives a process exit. This reconstructs
     each such confirmation from stored state, shows the action and the policy's
     reason, and relays the opaque token back to the engine to resolve it.
@@ -1807,91 +1651,6 @@ def abandon_goal(
     it back up means pointing at it — ``assistant ask "<what next>" --goal <goal-id>``.
     """
     code = asyncio.run(_abandon_goal(goal_id))
-    raise typer.Exit(code)
-
-
-@app.command()
-def learn(  # noqa: PLR0913 — the content plus one flag per axis of the event: two kinds, two subjects, and who may receive it
-    content: str = typer.Argument(
-        ..., help="The correction or preference, in your own words.", callback=_present_content
-    ),
-    kind: FeedbackKind = _LEARN_KIND_OPTION,
-    about: str | None = typer.Option(
-        None, "--about", "-a", help="Optional scope this feedback is about, e.g. 'units'."
-    ),
-    about_person: str | None = typer.Option(
-        None,
-        "--about-person",
-        callback=_present_subject,
-        help=(
-            "Whom this is about, if it is about someone other than you, e.g. 'Marta'. "
-            "A name as you write it; nothing looks it up. Leave it off for anything "
-            "about you or your world."
-        ),
-    ),
-    memory_kind: MemoryKind | None = _LEARN_MEMORY_KIND_OPTION,
-    *,
-    guarded: bool = typer.Option(
-        False,
-        "--guarded",
-        help=(
-            "Keep what this establishes for you alone: I will not say it on a channel "
-            "anyone else may hear. There is no flag for the opposite — leaving it off "
-            "is not a decision either way."
-        ),
-    ),
-) -> None:
-    """Teach the assistant from a correction or a stated preference.
-
-    Turns what you say into a ``FeedbackEvent`` and hands it to the engine, which
-    folds it into long-term memory. The result is a short summary of what memory did
-    with it — stored, reinforced, or superseded.
-
-    **``--memory-kind`` says which drawer, and says "do not look"** (ADR-0122 §6).
-    Give it and it is honoured unchanged, and the engine issues no lookup. Leave it
-    off and ``--kind preference`` still means a preference — a stated preference
-    establishes one by its own intent — while ``--kind correction`` leaves the
-    drawer for the engine to resolve from the belief you are correcting, which is
-    the only place that fact lives.
-
-    **``--about`` and ``--about-person`` are two different things** (ADR-0100 §7).
-    ``--about`` scopes a preference to a topic — ``--about 'email tone'``.
-    ``--about-person`` says whom the belief is about, and it is the only way a
-    belief about someone else can say so: without it ``assistant learn "Marta
-    prefers window seats"`` is stored with no subject, which the system reads as
-    *yours*. The person flag is spelled long because ``--about`` and ``-a`` were
-    already the scope axis's, on this very command.
-
-    **``--guarded`` says who may receive what this establishes, and it only ever
-    narrows** (ADR-0217 §7). Given, every record this feedback produces is placed
-    for you alone, so it is not said on a channel of unbounded audience; it is your
-    own act and no later model proposal lifts it. There is deliberately **no
-    ``--no-guarded``**: ADR-0217 adds a narrowing act at write and no widening one,
-    and leaving the flag off is not an act of any kind — it leaves the record with
-    the placement its class already has, which is not a record that you considered
-    this belief and declined to guard it. To widen one later, or to guard a belief
-    you have already told me, is a separate act on a stored record and not this
-    command's (§7, deferred to its own lane).
-
-    The flag is carried onto the event and nothing here reads it: deciding a
-    record's placement is not adapter work (``CLAUDE.md``, "Interface adapters are
-    thin"), so this sets a field and ``learning`` acts on it.
-    """
-    # `.get`, not `[...]`: `_DEFAULT_MEMORY_KIND` is deliberately not exhaustive, and
-    # a miss is the absent value ADR-0122 §2 requires rather than a lookup error.
-    declared_memory_kind = (
-        memory_kind if memory_kind is not None else _DEFAULT_MEMORY_KIND.get(kind)
-    )
-    code = asyncio.run(
-        _learn_feedback(
-            content,
-            kind=kind,
-            memory_kind=declared_memory_kind,
-            subject=about,
-            about_person=about_person,
-            guarded=guarded,
-        )
-    )
     raise typer.Exit(code)
 
 
@@ -3508,7 +3267,7 @@ def answer(
 ) -> None:
     """Answer one deferred question — accept the change, or decline it.
 
-    Accepting re-submits the proposal through the same gate ``assistant learn`` uses,
+    Accepting re-submits the proposal through the same gate a correction goes through,
     now carrying your authority for exactly what the question showed you: it may
     retire an earlier thing you told me, and it may retire nothing else.
 
@@ -3517,7 +3276,8 @@ def answer(
     (``assistant forget-question``) and teach me the correction again.
 
     The answer is binary on purpose. To say something different from either option,
-    use ``assistant learn`` — that is a new correction, not an answer to this one.
+    reply to what I got wrong in ``assistant chat`` — that is a new correction, not an
+    answer to this one.
     """
     code = asyncio.run(_answer_question(question_id, accept=accept))
     raise typer.Exit(code)
@@ -3538,8 +3298,8 @@ def forget_question(
 
     This destroys the question and the words it holds; it does **not** undo any
     memory write an interrupted answer may already have made. Check with
-    ``assistant beliefs`` afterwards and use ``assistant learn`` if the correction is
-    missing.
+    ``assistant beliefs`` afterwards and tell me again in ``assistant chat`` if the
+    correction is missing.
     """
     code = asyncio.run(_forget_question(question_id))
     raise typer.Exit(code)
@@ -3562,8 +3322,8 @@ def forget(
     rendering.
 
     Forgetting **destroys**: nothing is kept, not even in an export. To fix a belief
-    rather than lose it, use ``assistant learn --kind correction``, which retires the
-    old belief and keeps it on the record.
+    rather than lose it, correct me in ``assistant chat`` by replying to what I got
+    wrong.
     """
     code = asyncio.run(_forget_belief(belief_id, assume_yes=yes))
     raise typer.Exit(code)
@@ -5272,57 +5032,6 @@ async def _abandon_goal(goal_id: str) -> int:
     return await _drive_abandon_goal(engine, goal_id)
 
 
-async def _learn_feedback(  # noqa: PLR0913 — one parameter per field of the event this builds, each a separate thing the user said
-    content: str,
-    *,
-    kind: FeedbackKind,
-    memory_kind: MemoryKind | None,
-    subject: str | None,
-    about_person: str | None,
-    guarded: bool,
-) -> int:
-    """Load settings, build the engine, submit the feedback, and close it (ADR-0042 §2, §7).
-
-    The correction-leg counterpart to :func:`_ask`. It builds the
-    :class:`~ai_assistant.core.types.FeedbackEvent` from the parsed flags — parsing
-    input into the engine's request type is the adapter's own job (ADR-0042 §6) —
-    then one error boundary spans every stage that can fail: loading settings,
-    configuring logging, constructing the engine, the learn call, and shutdown, so
-    an :class:`AssistantError` is rendered and mapped to a non-zero exit code rather
-    than escaping (§7). The composition root builds the façade; this adapter closes
-    it. Returns the process exit code.
-
-    ``memory_kind`` is relayed exactly as the caller resolved it, ``None`` included:
-    an absent value is a *state of the request*, not a value to fill in here
-    (ADR-0122 §2), and the field's own default would fill it in the same way.
-
-    ``guarded`` is relayed the same way and is **set explicitly even when it is
-    ``False``**, rather than left to the field's default. The two values are the
-    same value, and stating it is what keeps this constructor honest about the flag
-    it was handed: an adapter that accepted ``--guarded`` and then omitted the
-    member here would write the default placement over an explicit owner act, which
-    is the one failure the route exists to prevent (ADR-0217 §10). Nothing is
-    interpreted on the way — the flag is a field this sets and `learning` reads
-    (ADR-0217 §7, ``CLAUDE.md``'s third golden rule).
-    """
-    event = FeedbackEvent(
-        kind=kind,
-        memory_kind=memory_kind,
-        content=content,
-        subject=subject,
-        about_person=about_person,
-        created_at=_utcnow(),
-        guarded=guarded,
-    )
-    try:
-        engine = await _open_engine()
-    except (AssistantError, TransportError) as exc:
-        _render_error(exc)
-        return _EXIT_ERROR
-
-    return await _drive_learn(engine, event)
-
-
 async def _list_beliefs(
     *,
     bands: list[BeliefBand] | None,
@@ -5391,7 +5100,7 @@ async def _forget_question(question_id: str) -> int:
     holds about the user — so ADR-0073 §5 requires the thing be rendered before
     consent is taken. A question is emphatically **not** a belief of any band
     (ADR-0078 §1): nothing is being un-believed, the correction it holds is one the
-    user can simply re-`learn`, and ADR-0073 §6 names ``DeferralStore.delete`` as
+    user can simply tell me again, and ADR-0073 §6 names ``DeferralStore.delete`` as
     exactly the verb for "destroy the record of having been asked". Showing it first
     would also need a single-question read the façade does not have and ADR-0078 §8
     does not name, and ``assistant questions`` has already rendered the question
@@ -6474,7 +6183,7 @@ def _render_goals(page: tuple[GoalSummary, ...], *, limit: int, offset: int) -> 
             )
             return
         _print(
-            "[dim]Nothing outstanding — 'assistant ask' starts something, and what it "
+            "[dim]Nothing outstanding — 'assistant chat' starts something, and what it "
             "starts shows up here.[/]"
         )
         return
@@ -6902,34 +6611,13 @@ async def _drive_turn(  # noqa: PLR0913 — one parameter per seam a turn is dri
     conversation_id: str | None = None,
     reference: TurnReference | None = None,
 ) -> int:
-    """Stream a turn, render it, and relay a confirmation if the engine parks one.
+    """Run a turn, render it, and relay a confirmation if the engine parks one.
 
-    **The turn is driven through** :meth:`AssistantEngine.converse_streaming`
-    (ADR-0173 §4), so the answer reaches the screen while it is still being
-    composed. That method is subject to every clause ``converse`` declares — same
-    arguments, same refusals, same failures, the same ``timeout`` budget relayed
-    unchanged — and the terminal :class:`TurnOutcome` it yields last is the one this
-    function goes on to render. The only outcome shape that reaches here and could
-    not reach ``converse`` is ADR-0173 §6's fourth: a :attr:`~TurnOutcome.reply` set
-    beside ``reply_degraded``, which :func:`_render_reply` renders per ADR-0173 §10.
-
-    **Iteration stops at the terminal frame and the iterator is closed either way.**
-    ADR-0173 §4 makes closing the caller's obligation and it is what hangs up the
-    connection, so the loop runs inside :func:`closing_stream`: breaking on the
-    outcome, an :class:`AssistantError` from the iteration, and a
-    ``KeyboardInterrupt`` or cancellation at any point all release the connection
-    rather than leaving a generator nobody finished. A stream abandoned mid-answer
-    does not abandon the *turn* (§9) — the hub runs it to completion and captures it
-    — but the socket is the adapter's to give back.
-
-    **And so is the line the answer was written on.** It is written with no ending so
-    the next chunk can continue it (§10), which means every exit from the read owes
-    :meth:`_StreamedReply.abandon` — including the two that are not errors and are
-    re-raised untouched, since ``asyncio.CancelledError`` and ``KeyboardInterrupt``
-    are ``BaseException`` and pass the handler that catches an
-    :class:`AssistantError`. That is the whole of what the last handler below does:
-    the exception's own path is unchanged, and what would otherwise be left is the
-    owner's next shell prompt on the same line as half a sentence (#1352).
+    **The turn is driven through** :meth:`AssistantEngine.converse` **and answers as
+    one result.** ADR-0293 §11 retires ``converse_streaming`` with the conversation it
+    carried: a conversation is now the chat, and what is left here is the turn that
+    carries a ``reference`` (ADR-0250 §11), which keeps ``converse`` until question
+    messages and their answers are built. Its reply is printed whole.
 
     **A routed park is answered through the same method and is not the same park**
     (ADR-0197 §7). It carries an ``OperationConfirmation`` rather than a
@@ -6955,33 +6643,18 @@ async def _drive_turn(  # noqa: PLR0913 — one parameter per seam a turn is dri
     parked turn and the resolution that answers it are two episodes in one
     conversation, and printing the same id twice would read as two.
 
-    **``reference`` reaches the streaming twin unchanged** (ADR-0250 §11, ADR-0173).
-    ``converse_streaming`` takes "exactly ``converse``'s arguments in exactly its"
-    order, so the keyword needs no record of its own and this relays it: a turn
-    answering a clarification streams its answer exactly as any other turn does. The
-    resumption that answers a parked confirmation carries none — it is the same turn
-    continuing, and ``resume`` takes no reference.
+    **``reference`` is relayed unchanged** (ADR-0250 §11). The resumption that answers
+    a parked confirmation carries none — it is the same turn continuing, and ``resume``
+    takes no reference.
     """
-    streamed = _StreamedReply()
     try:
-        settled = await _read_stream(
-            engine.converse_streaming(
-                utterance,
-                timeout=timeout,
-                conversation_id=conversation_id,
-                reference=reference,
-            ),
-            into=streamed,
+        outcome = await engine.converse(
+            utterance,
+            timeout=timeout,
+            conversation_id=conversation_id,
+            reference=reference,
         )
-        if settled is None:
-            streamed.abandon()
-            _print(
-                "[red]That turn's answer ended without a result[/], so I cannot say "
-                "what became of it. Nothing here was retried."
-            )
-            return _EXIT_ERROR
-        outcome = settled
-        failed = _render_turn(outcome, streamed=streamed)
+        failed = _render_turn(outcome)
         step = outcome.step
         routed = outcome.routed
         if step is not None and step.confirmation is not None:
@@ -7008,58 +6681,10 @@ async def _drive_turn(  # noqa: PLR0913 — one parameter per seam a turn is dri
             )
             failed = _render_turn(outcome)
     except (AssistantError, TransportError) as exc:
-        streamed.abandon()
         _render_error(exc)
         return _EXIT_ERROR
-    except BaseException:
-        # A cancellation is not an error and is not handled here — it is re-raised
-        # exactly as it arrived, and ADR-0173 §9 is explicit that abandoning the
-        # stream does not abandon the turn. What is owed is the line: the answer is
-        # written with no ending so the next chunk can continue it, and
-        # `asyncio.CancelledError` and `KeyboardInterrupt` are `BaseException`, so
-        # Ctrl-C after `half an ` had been rendered went past the handler above and
-        # put the next shell prompt on that same line (#1352). `abandon` is
-        # idempotent, so this costs nothing on a path that already settled.
-        streamed.abandon()
-        raise
     _render_conversation_footer(outcome)
     return _EXIT_ERROR if failed else _EXIT_OK
-
-
-async def _read_stream(
-    stream: AsyncIterator[ReplyChunk | TurnOutcome], *, into: _StreamedReply
-) -> TurnOutcome | None:
-    """Render the chunks of one streamed turn and return its terminal outcome.
-
-    **The union is resolved by type and the outcome ends the read** (ADR-0173 §4):
-    zero or more chunks, then exactly one :class:`TurnOutcome`, then stop. Stopping
-    at the outcome rather than reading on is what leaves a peer that kept writing
-    unable to add prose after the answer was settled, and :func:`closing_stream`
-    turns that early exit into the hang-up §4 makes the caller's obligation. The
-    same context manager closes the stream when the iteration raises, and when a
-    ``KeyboardInterrupt`` cancels the read part-way through an answer.
-
-    **``None`` is the contract's own impossibility, rendered rather than crashed.**
-    §4 has the outcome "always present unless the call raises", and both
-    implementations of it read until a terminal frame or fail loudly — so this
-    returns ``None`` only for a producer that ended the iteration silently, and the
-    caller says so instead of inventing an outcome or letting a traceback out
-    (ADR-0042 §7).
-
-    Args:
-        stream: What ``converse_streaming`` handed back, un-iterated.
-        into: The accumulator the chunks are rendered through.
-
-    Returns:
-        The turn's terminal outcome, or ``None`` if the stream ended without one.
-    """
-    async with closing_stream(stream) as values:
-        async for value in values:
-            if isinstance(value, ReplyChunk):
-                into.take(value)
-                continue
-            return value
-    return None
 
 
 async def _drive_conversations(engine: AssistantEngine, *, limit: int, offset: int) -> int:
@@ -7175,27 +6800,9 @@ async def _drive_forget_question(engine: AssistantEngine, question_id: str) -> i
     _print(
         "[green]Forgotten.[/] That question is destroyed. If an answer to it was "
         "already in flight, check 'assistant beliefs' — I cannot tell you whether "
-        "that write landed — and use 'assistant learn' again if the correction is "
-        "missing."
+        "that write landed — and tell me again in 'assistant chat' if the correction "
+        "is missing."
     )
-    return _EXIT_OK
-
-
-async def _drive_learn(engine: AssistantEngine, event: FeedbackEvent) -> int:
-    """Submit one feedback event and render what memory did with it (ADR-0042 §3, §6).
-
-    The correction leg of the pipeline: the adapter conveys the feedback and renders
-    the engine's :class:`~ai_assistant.orchestration.LearnOutcome` summary; it
-    authors no memory write and reaches no subsystem (ADR-0042 §6). An
-    :class:`AssistantError` from any stage is rendered and mapped to a non-zero exit
-    code — the adapter surfaces the failure, it does not swallow it.
-    """
-    try:
-        outcome = await engine.learn(event)
-        _render_learn(outcome)
-    except (AssistantError, TransportError) as exc:
-        _render_error(exc)
-        return _EXIT_ERROR
     return _EXIT_OK
 
 
@@ -8680,170 +8287,6 @@ def _print_marking_continuations(target: Console, segments: Sequence[str]) -> No
             target.print((gutter if marked else Text(indent)) + piece)
 
 
-#: What may follow a ``[`` in Rich markup, taken from the character class its
-#: escaper and its parser share (``\[[a-z#/@][^[]*?]``). A ``[`` followed by
-#: anything else is text under both, so :func:`_settled_prefix` need not hold it.
-_TAG_START: Final = frozenset("abcdefghijklmnopqrstuvwxyz#/@")
-
-
-def _settled_prefix(text: str) -> str:
-    r"""The longest prefix of ``text`` whose neutralisation later text cannot change.
-
-    **The renderer's own boundary, which is what ADR-0173 §10's second clause asks
-    for.** A streamed answer is neutralised "to text the adapter has *accumulated*,
-    never independently to each chunk as it arrives", and "an adapter that renders
-    progressively neutralises on boundaries its own renderer controls". This is that
-    boundary: everything before the cut neutralises to a fixed string no matter what
-    arrives next, so writing it out early can never be revised, and everything from
-    the cut is held until it settles. The hub chooses where the *chunks* break; it
-    never chooses where the *escaping* is decided.
-
-    Three things at the tail are unsettled, and each is a way :func:`_safe_prose`
-    would read the same characters differently once more text follows them:
-
-    - **An unclosed ``[`` that could still open a tag.** Rich escapes a *complete*
-      tag — its pattern is ``\[[a-z#/@][^[]*?]`` — so ``[/dim`` alone is left
-      verbatim and becomes ``\[/dim]`` the moment a ``]`` lands. Splitting there is
-      exactly the evasion §10 names, so the cut falls at the last ``[`` with no ``]``
-      after it. Only the *last* one can matter: the body admits no ``[``, so an
-      earlier one can never reach a ``]`` across a later one. And only one whose next
-      character is a tag start (or is not there yet) is held — ``[1`` and ``[Options``
-      can never become markup under either Rich's escaper or its parser, and holding
-      those would stall the rest of an ordinary answer behind a bracket, which is the
-      streaming this whole path exists to do. A ``[`` that already has a ``]`` after
-      it is settled: the match is lazy and ends at that ``]``.
-    - **A trailing run of ``\``.** Rich's escape doubles the backslashes running
-      into a tag and appends one to a value ending in an odd number of them, so a
-      run at the tail is rewritten by whatever follows it.
-    - **A trailing ``\r``.** :func:`_safe_prose` folds ``\r\n`` to one ``\n`` and a
-      lone ``\r`` to ``\n``; which of the two a final ``\r`` is depends on the next
-      character.
-
-    Args:
-        text: The answer as accumulated so far, verbatim and un-neutralised.
-
-    Returns:
-        The prefix safe to neutralise and write now. Possibly empty — a stream whose
-        first chunk is ``[dim`` settles nothing until its ``]`` arrives.
-    """
-    cut = len(text)
-    opening = text.rfind("[")
-    unclosed = opening != -1 and "]" not in text[opening:]
-    if unclosed and (opening + 1 == len(text) or text[opening + 1] in _TAG_START):
-        cut = opening
-    elif text.endswith("\r"):
-        cut -= 1
-    while cut > 0 and text[cut - 1] == "\\":
-        cut -= 1
-    return text[:cut]
-
-
-@final
-class _StreamedReply:
-    """One streamed answer, accumulated and written out as it settles (ADR-0173 §10).
-
-    **It holds the raw text, not the rendered text**, which is the whole of §10's
-    second clause. :func:`_safe_prose` is asked of the accumulation and never of a
-    chunk, so the escaping is decided over text this class holds rather than at a
-    boundary the producer picked; :func:`_settled_prefix` then says how much of that
-    accumulation can be written without the answer being revised later.
-
-    **Nothing is written that the terminal outcome does not confirm.** ADR-0173 §3
-    makes :attr:`TurnOutcome.reply` the answer and the chunks "a rendering of it in
-    flight", so :meth:`settle` writes the tail only where the authoritative reply
-    extends what is already on screen, and says so plainly where it does not. The
-    held-back remainder is deliberately not flushed on its own: it reaches the screen
-    from the outcome's ``reply``, or not at all.
-    """
-
-    def __init__(self) -> None:
-        """Start empty, having written nothing."""
-        self._accumulated = ""
-        self._settled = ""
-        self._written = ""
-        self._line_open = False
-
-    @property
-    def shown(self) -> str:
-        """The raw text already written to the terminal."""
-        return self._settled
-
-    def take(self, chunk: ReplyChunk) -> None:
-        """Accumulate one chunk and write however much of the answer it settles.
-
-        Args:
-            chunk: The instalment just yielded.
-        """
-        self._accumulated += chunk.text
-        self._write_through(_settled_prefix(self._accumulated))
-
-    def settle(self, reply: str | None) -> None:
-        """Finish the answer against the value ADR-0173 §3 makes authoritative.
-
-        Args:
-            reply: The terminal outcome's ``reply``. ``None`` where the turn owed no
-                answer or published none.
-        """
-        if reply is not None and reply.startswith(self._settled):
-            # The ordinary case, and the one a turn that streamed nothing takes too:
-            # every prefix extends the empty string, so this writes the whole reply.
-            self._write_through(reply)
-            self._end_line()
-            return
-        self._end_line()
-        if not self._settled:
-            return
-        # ADR-0173 §3: "no implementation treats an accumulated chunk sequence as the
-        # record of what the assistant said". The prose above is already on screen and
-        # cannot be recalled, so it is disowned in words and the answer stated after it.
-        _print(
-            "[yellow]Note:[/] the hub did not confirm the text above as this turn's "
-            "answer, so read what follows instead of it."
-        )
-        if reply is not None:
-            console.print(_safe_prose(reply))
-
-    def abandon(self) -> None:
-        """Give up on a stream that will produce no outcome, leaving the line whole.
-
-        A partly written answer has no trailing newline — it was written with none, so
-        the next chunk could continue the line — so an error rendered after it would
-        otherwise begin on the same line as the prose it is about.
-        """
-        self._end_line()
-
-    def _write_through(self, settled: str) -> None:
-        """Write the part of ``settled`` not already on screen.
-
-        ``settled`` extends what was written, so its neutralisation extends what was
-        neutralised, and the difference is what has not been seen yet.
-
-        Args:
-            settled: A raw prefix of the answer that is safe to neutralise now.
-        """
-        if len(settled) <= len(self._settled):
-            return
-        rendered = _safe_prose(settled)
-        console.print(rendered[len(self._written) :], end="", soft_wrap=True, highlight=False)
-        self._settled = settled
-        self._written = rendered
-        self._line_open = not rendered.endswith("\n")
-
-    def _end_line(self) -> None:
-        """Close the line the answer was written on, if one is open. Idempotent.
-
-        **Written without a line ending and closed once** — the parts arrive
-        mid-sentence, and Rich would otherwise break the answer wherever a chunk
-        happened to end. ``soft_wrap`` is for the same reason: wrapping each instalment
-        to the console width independently would hard-wrap an answer at whatever column
-        each chunk stopped at, and the terminal wraps the whole far better. Anything
-        printed after the answer therefore has to be given its own line first.
-        """
-        if self._line_open:
-            console.print()
-            self._line_open = False
-
-
 def _argument(value: str) -> str:
     """One value, rendered as a shell argument a person can paste (#984).
 
@@ -8921,8 +8364,7 @@ def _print_hint(line: str) -> None:
     it. Neither is exotic — no field a hint carries has a length limit, so the
     trigger is a long value plus a narrow terminal.
 
-    ``soft_wrap`` is the same answer :class:`_StreamedReply` reaches for one screen
-    over and for the same reason: Rich emits the line as it stands and the terminal
+    ``soft_wrap`` is the answer, for this reason: Rich emits the line as it stands and the terminal
     folds it, which costs a word break mid-word and keeps the line *one* line to
     anything that copies it. It is the whole of the decision, taken once here rather
     than per site — an ``overflow`` or ``crop`` setting would instead **truncate** a
@@ -8948,16 +8390,11 @@ def _print_hint(line: str) -> None:
     console.print(line, soft_wrap=True)
 
 
-def _render_turn(outcome: TurnOutcome, *, streamed: _StreamedReply | None = None) -> bool:
+def _render_turn(outcome: TurnOutcome) -> bool:
     """Render one turn's answer, its plan, its degraded notices, and its step outcome.
 
-    ``streamed`` is the answer already on screen when the turn was driven through
-    ``converse_streaming``; the reply is finished against it rather than printed
-    afresh (ADR-0173 §10). It is ``None`` for a one-result call — a ``resume``, or a
-    caller that chose ``converse`` — and then the reply is printed whole as before.
-    Either way **the step account is rendered whether or not chunks were rendered**,
-    which is §10's third clause and is the same obligation ADR-0170 §6 already
-    carried.
+    The reply is printed whole, and **the step account is rendered whatever the reply
+    was**, which is the obligation ADR-0170 §6 carries.
 
     **A routed pass renders its routed account and nothing else** (ADR-0197 §10). It
     drove no plan and no step — §1 ends the pipeline at a taken route and §8 makes
@@ -9025,7 +8462,7 @@ def _render_turn(outcome: TurnOutcome, *, streamed: _StreamedReply | None = None
         )
     if turn is not None and turn.memory_degraded:
         _print("[yellow]Note:[/] personal memory was unavailable, so this answer is generic.")
-    _render_reply(outcome, streamed=streamed)
+    _render_reply(outcome)
     # ADR-0264 §7 and ADR-0242 §9's two statements, **both rendered where a turn
     # carries both** (ADR-0264 §8), each in its own statement and neither suppressing
     # nor qualifying the other. They answer different questions — one says this turn
@@ -9222,7 +8659,7 @@ def _render_turn(outcome: TurnOutcome, *, streamed: _StreamedReply | None = None
     return _render_step(step) or unanswered
 
 
-def _render_reply(outcome: TurnOutcome, *, streamed: _StreamedReply | None = None) -> None:
+def _render_reply(outcome: TurnOutcome) -> None:
     """Print the composed answer, and say where composing it did not finish.
 
     Four shapes, read off two values (ADR-0170 §4 as ADR-0173 §6 widened it): no
@@ -9268,12 +8705,8 @@ def _render_reply(outcome: TurnOutcome, *, streamed: _StreamedReply | None = Non
 
     Args:
         outcome: The turn's terminal outcome.
-        streamed: The answer already written by ``converse_streaming``'s chunks, or
-            ``None`` where the turn was driven as one result.
     """
-    if streamed is not None:
-        streamed.settle(outcome.reply)
-    elif outcome.reply is not None:
+    if outcome.reply is not None:
         console.print(_safe_prose(outcome.reply))
     if not outcome.reply_degraded:
         return
@@ -9889,9 +9322,7 @@ def _render_outbound_statement(
     function is given a ``bool`` rather than the reply precisely so that it *cannot*
     read the prose: deciding from the words would be the model judgement §10
     refuses. The caller's test is ``outcome.reply is not None``, which is ADR-0170
-    §3's authoritative value and not what is on the screen — a stream whose chunks
-    were disowned by :meth:`_StreamedReply.settle` composed no reply, and the user
-    has just been told to read what follows instead of it.
+    §3's authoritative value.
 
     **It stands where the reply contradicts it** (§7, §10). No statement here is
     suppressed, softened or conditioned on what the model said, and nothing edits a
@@ -10843,8 +10274,8 @@ def _render_conversation_footer(outcome: TurnOutcome) -> None:
         return
     _print(
         f"\n[dim]Conversation:[/] {_safe(outcome.conversation_id)}  "
-        f"[dim](continue with: assistant ask --conversation "
-        f"{_safe(outcome.conversation_id)} ...)[/]"
+        f"[dim](continue with: assistant chat --conversation "
+        f"{_safe(outcome.conversation_id)})[/]"
     )
 
 
@@ -10858,7 +10289,7 @@ def _render_conversations(
     answered by asking for the next page, exactly as the belief listing answers it.
     """
     if not page:
-        _print("[dim]No conversations yet — 'assistant ask' starts one.[/]")
+        _print("[dim]No conversations yet — 'assistant chat' starts one.[/]")
         return
     _print(f"[bold]{len(page)} conversation(s)[/], most recently active first.")
     for conversation in page:
@@ -11032,96 +10463,6 @@ def _render_disposition(disposition: Disposition, tool_id: str | None) -> None:
         _print(message)
 
 
-def _render_learn(outcome: LearnOutcome) -> None:
-    """Render what one piece of feedback did to memory (ADR-0042 §6).
-
-    A short human-readable confirmation: a header counting the updates memory made,
-    then one line per proposal naming the ruling and its reason. The reason is
-    engine-supplied data, so it is neutralised for this terminal like any other
-    (``_safe``, ADR-0042 §4). Feedback that proposed no update at all is reported as
-    such rather than as a silent success.
-
-    A **deferral** gets its line from :func:`_deferred_message`, because since
-    ADR-0078 there is no single honest sentence for one: a question the user can go
-    and answer, a question already asked, a full queue, and secret-tier data that is
-    still not answerable are four outcomes, and the line has to say which.
-    """
-    if not outcome.results:
-        _print("[dim]Noted — nothing in that needed a memory update.[/]")
-        return
-    _print(
-        f"[green]Learned.[/] Folded {len(outcome.results)} update(s) into memory "
-        f"({outcome.stored} stored)."
-    )
-    for summary in outcome.results:
-        _print(f"  - {_message_for(summary)} [dim]({_safe(summary.reason)})[/]")
-
-
-def _message_for(summary: IngestSummary) -> str:
-    """The one line describing what became of one proposal (ADR-0078 §10 item 9)."""
-    if summary.decision is LearnDecision.DEFERRED:
-        return _deferred_message(summary.queued)
-    return _LEARN_MESSAGES[summary.decision]
-
-
-def _deferred_message(queued: QueuedQuestion | None) -> str:
-    """What a deferred ruling means for the user, by what the queue did (ADR-0078 §7).
-
-    Four sentences, and the split is the honesty rule this surface is built on. Until
-    ADR-0078 there was one line — "this needs review, which cannot be done from here
-    yet" — and it was true: nothing persisted a deferred proposal, so pointing the
-    user at a follow-up would have implied a flow that did not exist. That line is
-    now **false for the arms ADR-0078 closes** and still **true for the one it does
-    not**, so it is kept for exactly that one:
-
-    * **queued** — the question is waiting; name it and name the verb that answers it.
-      This is the reach that closes issue #423's own scenario: the user submits
-      feedback, is told it is deferred, and is pointed at the answer.
-    * **already asked** — an existing question stands in the way, and *which and in
-      what state* decides what to say (:data:`_SUPPRESSOR_MESSAGES`).
-    * **queue full** — there is no question to name, so the line names the **queue**:
-      answer or clear some of what is waiting, then submit again. Reported rather
-      than swallowed, which is the branch an implementation is most likely to leave
-      silent because nothing raises.
-    * **not queuable** — secret-tier data, which ADR-0004 §3 forbids a durable file,
-      so nothing was queued and there is nothing to answer. It keeps the existing
-      line and the existing reason: one message covering this and the cases above
-      would tell a user to go answer a question that was never asked.
-
-    ``None`` cannot arise for a deferral — the façade attaches a
-    :class:`~ai_assistant.orchestration.QueuedQuestion` to every one — and is
-    rendered as the honest non-answerable line rather than as an answerable one, so a
-    future gap fails safe.
-    """
-    if queued is None:
-        return _NOT_ANSWERABLE
-    match queued.outcome:
-        case QueueOutcome.NOT_QUEUABLE:
-            return _NOT_ANSWERABLE
-        case QueueOutcome.QUEUED:
-            return (
-                f"Not stored yet — I have a question for you: "
-                f"[bold cyan]{_safe(queued.question_id or '')}[/] "
-                f"[dim](see it with: assistant questions)[/]"
-            )
-        case QueueOutcome.ALREADY_ASKED:
-            state = queued.question_state
-            lead = (
-                _SUPPRESSOR_MESSAGES[state]
-                if state is not None
-                else "Not stored — a matching question stands in the way:"
-            )
-            return f"{lead} [bold cyan]{_safe(queued.question_id or '')}[/]"
-        case QueueOutcome.QUEUE_FULL:
-            return (
-                "Not stored — the question queue is full, so this could not be parked. "
-                "Answer or forget some of what is waiting ('assistant questions'), then "
-                "teach me this again."
-            )
-        case _:  # pragma: no cover — exhaustive over the enum
-            assert_never(queued.outcome)
-
-
 def _render_questions(
     waiting: tuple[Question, ...],
     stranded: tuple[Question, ...],
@@ -11215,8 +10556,8 @@ def _render_question(question: Question) -> None:
             f"{_uncopyable('Its id')}"
         )
         _print(
-            "  [dim]2.[/] Check 'assistant beliefs', and use 'assistant learn' again if "
-            "the correction is missing."
+            "  [dim]2.[/] Check 'assistant beliefs', and tell me again in 'assistant chat' "
+            "if the correction is missing."
         )
     else:
         _print_hint(
@@ -12142,8 +11483,8 @@ def _render_forget_prompt(belief: Belief) -> None:
     _print(f"\n  [yellow]{_forget_warning(belief.band)}[/]")
     _print(
         "  This destroys the record: nothing of it is kept, not even in an export. "
-        "To fix it instead, use [bold]assistant learn --kind correction[/], which "
-        "retires the old belief and keeps it on the record."
+        "To fix it instead, correct me in [bold]assistant chat[/] by replying to what "
+        "I got wrong."
     )
     _print(
         "  [dim]You are forgetting whatever belief that id names when you answer, "
