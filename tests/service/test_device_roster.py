@@ -546,6 +546,67 @@ def test_a_record_written_before_the_roster_gains_its_devices_with_no_role(
         store.close()
 
 
+def _older_record(path: Path, rows: list[tuple[str, datetime]]) -> None:
+    """Write an enrolment record as a hub from before the roster wrote one."""
+    with contextlib.closing(sqlite3.connect(path, isolation_level=None)) as older:
+        older.executescript(
+            """
+            CREATE TABLE enrolments (
+                id INTEGER PRIMARY KEY AUTOINCREMENT, overlay_identity TEXT NOT NULL,
+                verifier TEXT NOT NULL, enrolled_at TEXT NOT NULL, revoked_at TEXT
+            );
+            """
+        )
+        older.executemany(
+            "INSERT INTO enrolments (overlay_identity, verifier, enrolled_at, revoked_at) "
+            "VALUES (?, 'v', ?, NULL)",
+            [(identity, when.isoformat()) for identity, when in rows],
+        )
+
+
+def test_a_migrated_listing_is_newest_first_whatever_order_the_migration_wrote(
+    tmp_path: Path,
+) -> None:
+    """The listing is bounded and says older rows were omitted, so its order has to be
+    time and not the order a migration happened to insert rows in."""
+    path = tmp_path / ENROLMENTS_FILENAME
+    _older_record(path, [("z-old", _MOMENT - timedelta(days=30)), ("a-new", _MOMENT)])
+
+    store = EnrolmentStore(path)
+    try:
+        ((newest,), total) = store.recent_devices(limit=1)
+    finally:
+        store.close()
+
+    assert total == 2
+    assert newest.device_id == "a-new"
+
+
+def test_a_legacy_enrolment_of_the_hubs_own_identity_is_named_and_revocable(
+    tmp_path: Path,
+) -> None:
+    """ADR-0298 §3:4 refuses the hub's own overlay identity *as an enrolment*, and a
+    record written before it can hold a live one. The upgrade revokes nothing on the
+    owner's behalf; it says so at every start, and the owner's revocation ends it."""
+    path = tmp_path / ENROLMENTS_FILENAME
+    _older_record(path, [(_HUB, _MOMENT)])
+    store = EnrolmentStore(path)
+    try:
+        with structlog.testing.capture_logs() as captured:
+            registry = DeviceRegistry(store, hub_identity=_HUB)
+        assert "device_hub_identity_enrolled" in [entry["event"] for entry in captured]
+
+        revocation = registry.revoke_device(_HUB, now=_LATER)
+
+        assert revocation.enrolment
+        assert registry.live_enrolment_id(_HUB) is None
+        with structlog.testing.capture_logs() as captured:
+            DeviceRegistry(store, hub_identity=_HUB)
+        assert "device_hub_identity_enrolled" not in [entry["event"] for entry in captured]
+    finally:
+        store.close()
+
+
 def test_opening_the_record_twice_migrates_nothing_twice(tmp_path: Path) -> None:
     """The migration runs on every open, so it has to be idempotent."""
     first = EnrolmentStore(tmp_path / ENROLMENTS_FILENAME)

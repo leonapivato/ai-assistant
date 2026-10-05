@@ -793,7 +793,8 @@ class EnrolmentStore:
             The devices and how many the roster holds in all.
         """
         rows = self._conn.execute(
-            "SELECT device_id, kind, first_known_at FROM devices ORDER BY rowid DESC LIMIT ?",
+            "SELECT device_id, kind, first_known_at FROM devices "
+            "ORDER BY first_known_at DESC, rowid DESC LIMIT ?",
             (limit,),
         ).fetchall()
         roles = self.device_roles()
@@ -884,6 +885,21 @@ class DeviceRegistry:
         self._roles = store.device_roles()
         self._registered, self._withdrawn = store.registration_pairs()
         self._per_gateway = Counter(gateway for _, gateway in self._registered)
+        if hub_identity is not None and hub_identity in self._live:
+            # A record written before ADR-0298 §3:4 refused it can hold a live
+            # enrolment of the hub's own overlay identity. Nothing here revokes it on
+            # the owner's behalf — an upgrade is not an owner's act — so the owner is
+            # told, at every start, what to run.
+            _log.warning(
+                "device_hub_identity_enrolled",
+                overlay_identity=hub_identity,
+                detail=(
+                    "the hub's own overlay identity holds a live enrolment, which "
+                    "ADR-0298 §3 no longer allows: the hub's own machine reaches it "
+                    "through the local socket alone. Revoke it with "
+                    "'ai-assistant-device revoke <identity>'"
+                ),
+            )
 
     @property
     def hub_identity(self) -> str | None:
@@ -1215,9 +1231,14 @@ class DeviceRegistry:
             What was revoked.
 
         Raises:
-            RosterActError: For the hub's own machine, which is never revoked (§3:4).
+            RosterActError: For ``hub``, which is never revoked (§3:4).
         """
-        self._refuse_the_hub(device, act="revoked")
+        # ``hub`` alone, not the hub's own overlay identity as well: §3:4 refuses that
+        # identity *as an enrolment*, and a record written before ADR-0298 can hold
+        # one — the owner's revocation is the only act that ends it, and revoking
+        # can only take access away.
+        if device == HUB_DEVICE:
+            self._refuse_the_hub(device, act="revoked")
         revocation = self._store.revoke_device(device, now=now)
         self._live.pop(device, None)
         self._roles.pop(device, None)
