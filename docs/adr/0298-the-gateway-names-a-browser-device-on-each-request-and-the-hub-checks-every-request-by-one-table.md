@@ -5,6 +5,7 @@
 - Scope: [#2578](https://github.com/leonapivato/ai-assistant/issues/2578), the channel redesign: how the device session ADR-0296 decides is built — the browser device's name on the wire, the requesting device inside the hub, registration, the route table, the refusal, the change stream's membership and heartbeat, the trust boundary and the cutover.
 - Dependency: ADR-0296, ratified.
 - Authorization: the dispatcher, under the owner's standing direction that mechanism design is the lanes' (ADR-0296 decides what a device session is; this ADR decides how it is built). The dispatcher assigned 0298.
+- **Partially supersedes** [ADR-0296](0296-a-device-has-one-session-and-a-browser-is-a-device-of-its-own.md) — **one scope.** **§1:5's *"the hub accepts the name only for a browser device registered under that gateway"*, read with the sentence under it that the gateway "is not trusted to act as any other device", as they reach a machine a gateway names for the first time**: that naming is the listing reaching the hub and registers the machine under that gateway (§4 below), so the hub refuses a gateway's name only for a registration the owner revoked under it, for the hub's own machine, or beyond the gateway's bound; and a gateway is trusted for its listing, so it can act as any device it names that the hub accepts, with that device's roles (§8 below). §1:3 and §1:4, the owner's rulings, stand as written, as does every other clause.
 - **Partially supersedes** [ADR-0085](0085-the-promoted-engine-surface.md) — **one scope.** **§8a's *"these members, and no others"*, in the addition alone**: a `request` frame may carry one more member, `acting_for`, the name of the browser device the request is relayed for (§1 below); and §8b's worst case, which that member raises from 110 bytes to 261 inside the unchanged 512-byte reserve. §8a's correlation-id bound, §8b's reserve, §8c's limit and §8d's floor stand, and every earlier partial supersession stands.
 
 ## Context
@@ -307,13 +308,13 @@ and ADR-0124 §8's close stays the answer to a revoked *connecting* device.
 > included, each with its sequence number.
 
 > **Normative.** The change stream's unsequenced chunks are the current state (ADR-0296
-> §4:9), a conversation's snapshot (ADR-0296 §4:7), the device's own roles, and the
-> heartbeat.
+> §4:9), the device's own roles, and the heartbeat.
 
-ADR-0296 §4:3 lists a change, the current state and a heartbeat; §4:5 and §4:7 require
-the stream to carry the device's own roles and a snapshot too, and this ADR reads the
-three clauses together. A device's roles are not a change to the chat space, so they
-take no sequence number, as the current state takes none.
+ADR-0296 §4:3 lists a change, the current state and a heartbeat; §4:5 requires the
+stream to carry the device's own roles too, and this ADR reads the two clauses together.
+A device's roles are not a change to the chat space, so they take no sequence number, as
+the current state takes none. A snapshot (ADR-0296 §4:7) travels inside the change that
+calls for it, below.
 
 > **Normative.** Each chunk of the change stream is one concrete class in
 > `core/types.py` holding exactly one of those, so that
@@ -328,16 +329,26 @@ take no sequence number, as the current state takes none.
 So a device sees the change that removed it (ADR-0296 §4:8) and the change that added
 it, and nothing between.
 
-> **Normative.** After the change that makes a device a conversation's end for reading,
-> the stream sends that conversation's snapshot with the sequence number it is current
-> to, and the device applies that conversation's later changes only.
+> **Normative.** The change that makes a device a conversation's end for reading reaches
+> that device in the same chunk as the conversation's snapshot, so a device that has
+> applied the change, and moved its cursor past it, has the snapshot.
+
+> **Normative.** That snapshot is the conversation as it stood at that change: the
+> messages recorded at or before its sequence number, a message deleted since shown as
+> its marker (ADR-0293 §5:12), and nothing recorded after it.
+
+A device catching up from far behind therefore receives, for each interval in which it
+read a conversation, the snapshot at the interval's start, the changes inside it, and
+the change that ended it, and nothing recorded while it was not an end. A device whose
+connection drops between the change and its snapshot cannot exist, because they are
+one chunk.
 
 > **Normative.** The stream sends the device's roles when it opens and whenever they
 > change.
 
 > **Normative.** The device's roles and the heartbeat are written by the hub's session
-> layer — the wire server over the roster — and the changes, the current state and the
-> snapshots by the engine.
+> layer — the wire server over the roster — and the changes, with their snapshots, and
+> the current state by the engine.
 
 > **Normative.** The heartbeat interval is 15 seconds and the dead-peer timeout 45
 > seconds, fixed in `wire` and not configurable, so that changing either is a protocol
@@ -377,9 +388,10 @@ the kernel reports a closed peer at once.
 > machine, on the local socket, for a browser on its loopback listener.
 
 What a gateway can do follows, and this ADR states it rather than leaving it to be
-discovered. The hub cannot see a gateway's listing, so a gateway's naming is the
-listing (§4), and a machine already a device keeps its roles when named (ADR-0296
-§1:4). **A compromised gateway can therefore act as any device it names that the hub
+discovered, and records it as the partial supersession of ADR-0296 §1:5 its header
+names. The hub cannot see a gateway's listing, so a gateway's naming is the listing
+(§4), and a machine already a device keeps its roles when listed (ADR-0296 §1:4, the
+owner's ruling). **A compromised gateway can therefore act as any device it names that the hub
 accepts — every device except `hub`, the hub's own overlay identity, and devices whose
 registration under that gateway the owner has revoked — with that device's roles.**
 It is not limited to the machines its owner listed there, because no record at the hub
@@ -392,8 +404,15 @@ a machine it was not given.
 ### 9. The cutover
 
 > **Normative.** No device's roles are checked until one change switches enforcement
-> on, and that change lands after the roster, its acts on `ai-assistant-device` and
-> the wire server's checks have merged.
+> on, and that change lands after the roster, its acts on `ai-assistant-device`, the
+> wire server's checks and the engine's checks (§5, and §2's binding of
+> `UserMessage.device_id`) have all merged.
+
+> **Normative.** Until that change, the requesting device of every request is `hub`, so
+> the wire server's and the engine's checks are built and tested but refuse nothing.
+
+> **Normative.** The change that switches enforcement on is the one that makes the wire
+> server set a requesting device other than `hub`.
 
 > **Normative.** At the cutover every enrolled device and every registered browser
 > device holds no role, because a role is never inferred from what a device could reach
@@ -417,7 +436,8 @@ request, so it is known, and can be added to "my devices", once it has tried onc
 > **Normative.** `core/errors.py` gains `DeviceRefusedError` (§6).
 
 > **Normative.** `ConversationStore` gains three operations: the changes after a cursor
-> that one device may see under §7, the conversations one device reads, and the
+> that one device may see under §7, each adding change with its snapshot as of that
+> change, the conversations one device reads, and the
 > removal of one device from "my devices" and every conversation's devices with each
 > change recorded.
 
@@ -433,19 +453,19 @@ request, so it is known, and can be added to "my devices", once it has tried onc
 
 ### 11. Relationship to earlier decisions
 
-> **Normative.** This ADR supersedes ADR-0085 in the scope its header names, and no
-> clause of any other ADR.
+> **Normative.** This ADR supersedes ADR-0296 and ADR-0085 in the scopes its header
+> names, and no clause of any other ADR.
 
-> **Normative.** This numbered draft records its replacement on ADR-0085's status line
-> and in a dated header note, atomically with this ADR under ADR-0070 and ADR-0082,
-> preserving ADR-0085's ratified body; the replacement takes effect on this ADR's
-> ratification.
+> **Normative.** This numbered draft records its replacements on each superseded ADR's
+> status line and in a dated header note, atomically with this ADR under ADR-0070 and
+> ADR-0082, preserving their ratified bodies; each replacement takes effect on this
+> ADR's ratification.
 
 ADR-0124 §4:1 is untouched: `acting_for` names the device a request is for, never the
 connecting device, whose identity still comes only from the hub's overlay agent.
 ADR-0131 §4's bar on a device argument to `next_notification` is kept by §5's refusal
-of `acting_for` there. ADR-0296 is read, not amended: §3 and §8 read its §1:9, §7 reads
-its §4:3 with §4:5 and §4:7, and §4 reads its §1:3 and §1:5 as the request carrying the
+of `acting_for` there. Apart from §1:5, ADR-0296 is read, not amended: §3 and §8 read
+its §1:9, §7 reads its §4:3 with §4:5, and §4 reads its §1:3 as the request carrying the
 listing.
 
 ## Consequences
@@ -472,10 +492,12 @@ trusted (§8).
 3. **Wire session seam and gate** (`wire/`, `core/`): `acting_for`, the requesting
    device and its context value, the route table and its closure test, the local seam
    `Protocol`, `DeviceRefusedError`, the version.
-4. **Enforcement** (`service/`): the seam's implementation on both listeners, refusal
-   by registration, revocation ending sessions and removing memberships — the cutover.
-5. **Orchestration checks** (`orchestration/`): the membership rows of §5, binding
-   `UserMessage.device_id`, starting outliving work with no requesting device.
+4. **Orchestration checks** (`orchestration/`): the membership rows of §5, binding
+   `UserMessage.device_id`, starting outliving work with no requesting device — inert
+   until the cutover, since every request is still `hub`'s.
+5. **Enforcement** (`service/`, `wire/`): the seam's implementation on both listeners,
+   refusal by registration, revocation ending sessions and removing memberships, and the
+   wire server setting the real requesting device — the cutover.
 6. **The change stream** (`core/`, `orchestration/`, `wire/`): the streaming method,
    its chunk class, the heartbeat and the client's idle deadline; the version.
 7. **The gateway's relay** (`interfaces/gateway/`): naming browser devices, relaying the
@@ -499,8 +521,15 @@ and every name this ADR leaves to the change that adds it.
 - **A wire method by which a gateway reports its listing.** Declined: it buys nothing a
   first naming does not — the hub cannot check the report any more than it can check a
   naming — and it is one more method on the promoted surface.
-- **A registration the owner confirms at the hub.** Declined: ADR-0296 §1:3 makes the
-  listing the whole of a browser device's registration, with no second enrolment.
+- **A registration the owner confirms at the hub**, for every machine or only for one
+  that is already a device. Declined: ADR-0296 §1:3, the owner's ruling, makes the
+  listing the whole of a browser device's registration, with no second enrolment, and
+  §1:4 keeps an existing device's roles when it is listed. It is the one mechanism that
+  would hold a compromised gateway to the machines its owner listed, and adopting it is
+  a change to those rulings.
+- **Naming an existing device needs the gateway to hold the command role.** Declined
+  for the same reason: it makes a listing at such a gateway register nothing, which
+  §1:3–§1:4 do not allow.
 - **Giving every existing enrolment every role at the cutover.** Declined: that infers
   a role from what a device could reach, which ADR-0296 §2:5 forbids.
 - **The hub's machine named by its overlay identity.** Declined: its id would change
