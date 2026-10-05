@@ -274,17 +274,23 @@ the stop is the rare one whose step was entered before the mark. A walk that end
 mark leaves no disposal, so it is not a member of ADR-0255 §2's stop list and adds no
 `Disposition` member, as ADR-0261 §7:1 rules for a refused claim.
 
-> **Normative.** A stop cancels no task: a stage running when the mark is set runs to its
-> own end, bounded by the pass's deadline, and an effect already dispatched completes and
-> commits its own outcome before the stage returns.
+> **Normative.** A stop cancels no task and adds no deadline: a stage running when the
+> mark is set runs to its own end under the deadlines it already runs under, which gate
+> starting work and never cancel what is running (ADR-0255 §9), so it may outlast the
+> pass's budget as ADR-0228 §4 already allows.
+
+> **Normative.** Work already entered when the mark is set writes everything it owes as
+> it would had no stop been given — an effect's own disposal and its completion record,
+> an effort charge, an attempt's `EFFECT_UNRESOLVED` — before its stage returns.
 
 So ADR-0295 §2:3's *"not cut off"* holds because nothing is cut off, and ADR-0060 holds
 because nothing a seam acquired is abandoned mid-call. The cost is that a stop waits for
-the stage in flight, which ADR-0295 already records ("a stop is not instant").
+the stage in flight, for as long as that stage's own contracts let it run, which ADR-0295
+already records ("a stop is not instant").
 
-> **Normative.** A stopped pass writes nothing to the goal or the attempt beyond what its
-> stages wrote before the mark: no attempt is ended, paused or stamped on the stop's
-> account.
+> **Normative.** The stop itself writes nothing to the goal or the attempt: no goal or
+> attempt is ended, paused, stamped or charged because a stop was given, and the stages
+> the stop keeps from starting write nothing they would have written.
 
 ADR-0295 §4:1's *"the goal … stands as it was"* is then true of the attempt beneath it,
 and what the user does next decides both.
@@ -375,10 +381,11 @@ be stopped; that is the residual of §2's no-id case, stated rather than hidden.
 
 > **Normative.** The engine's tests assert, over a seeded fake: a stop during the drive
 > refuses the next claim and the pass ends `stopped`; an effect claimed before the stop
-> completes and records its outcome; a stop before the controller is entered, and one
-> during a stage that then fails, each end `stopped`; a stopped pass writes nothing into
-> its conversation and its waiting messages are then taken in (ADR-0295 §3:6); and each
-> of `ALREADY_ENDED` and `NO_SUCH_ACTIVATION` writes nothing.
+> completes, records its outcome and the bookkeeping it owes, even where that outlasts the
+> pass's budget; a stop before the controller is entered, and one during a stage that
+> then fails, each end `stopped`; a stopped pass writes nothing into its conversation and
+> its waiting messages are then taken in (ADR-0295 §3:6); and each of `ALREADY_ENDED` and
+> `NO_SUCH_ACTIVATION` writes nothing.
 
 ### 7. Relationship to earlier decisions
 
@@ -412,14 +419,16 @@ else"* are each stated over that decision; and ADR-0280 §4:2's member set took
 **What becomes clear.** A stop is two writes in one order, and each guarantee of ADR-0295
 has one place that keeps it: the store keeps *no effect after the stop*, the mark keeps
 *nothing new starts* and the stop's end entry, and the absence of any cancellation keeps
-*not cut off* and *nothing orphaned*. The goal and the attempt are untouched, so a stop
-followed by "go on" or "make it Sunday" finds them as they stood. The answer to a stop
+*not cut off* and *nothing orphaned*. The stop itself touches neither the goal nor the
+attempt, so a stop followed by "go on" or "make it Sunday" finds them as the work already
+under way left them. The answer to a stop
 says which of three things was true.
 
 **What it costs.** A stop waits for the stage in flight, a model call included, before the
-pass ends, bounded by the pass's deadline. The plan store gains a member, a conjunct and an
-export field, and the engine a member, a vocabulary and an error that cross the wire. The
-plan store holds one row per stop the user ever gave, until it is cleared.
+pass ends, for as long as that stage's own contracts let it run, a stop adding no
+deadline of its own. The plan store gains a member, a conjunct and an export field, and
+the engine a member, a vocabulary and an error that cross the wire. The plan store holds
+one row per stop the user ever gave, until it is cleared.
 
 **What follows from it.**
 
@@ -438,7 +447,8 @@ plan store holds one row per stop the user ever gave, until it is cleared.
   cost of deciding, per stage, what a cancelled call leaves; nothing here forbids a later
   decision taking it.
 - **How long to wait for an effect already sent** that has no deadline of its own, which
-  ADR-0295 left open and this ADR does not decide: the pass's deadline bounds it.
+  ADR-0295 left open and this ADR does not decide: a stop adds no bound, and the
+  effect's own deadlines govern.
 
 **Out of scope.** Takeover and stopping by words are the concurrency milestone's (ADR-0295
 §5); how a device finds an activation not started from a conversation is the device
