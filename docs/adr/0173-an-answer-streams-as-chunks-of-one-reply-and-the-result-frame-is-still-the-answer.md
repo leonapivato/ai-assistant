@@ -1,6 +1,6 @@
 # 173. An answer streams as chunks of one reply, and the result frame is still the answer
 
-- Status: Accepted
+- Status: Partially superseded by ADR-0293 (§4's `converse_streaming` as an entry on the engine surface, once the first build lands)
 - Date: 2026-08-21
 - Note (2026-09-18): ADR-0274 §4 adds `receive_streaming`, whose terminal
   value wraps a conversational outcome in `ChannelResult`. This uses §4's
@@ -14,6 +14,16 @@
   preserve the shared reply and size guarantees on the corresponding public
   projection. This explanatory record applies on ratification of ADR-0274 and
   changes no ratified text below. Refs ADR-0274 §10.
+- Partially superseded: 2026-10-04 by ADR-0293 — one scope, which takes effect when
+  built. §4's `converse_streaming`, as an entry on the engine surface: the conversation
+  is carried instead by the acts in the hub's chat space, and a device that takes pieces
+  of the assistant's message is sent them as they are produced, with only the finished
+  message recorded (ADR-0293 §6, §11). This takes effect when the first build lands;
+  until then `converse_streaming` keeps working exactly as this ADR decides it (ADR-0293
+  §Decision:2, ADR-0292 §13:1). The chunk and result frames, the streaming model seam
+  and every other clause stand. This reciprocal header record accompanies the numbered
+  draft under ADR-0070 and ADR-0082; prior supersessions and the ratified body below are
+  preserved.
 - **This ADR is milestone 18's ruling on `track:conversation` (#1312)**, the
   milestone whose exit test is *a streamed answer over the wire, resumed
   mid-conversation, from the CLI*. ADR-0170 gave the pipeline a stage that speaks

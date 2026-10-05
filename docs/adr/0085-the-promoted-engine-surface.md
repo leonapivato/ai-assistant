@@ -1,6 +1,6 @@
 # 85. The promoted engine surface: fifteen methods, twenty-four types, one closed graph
 
-- Status: Partially superseded by ADR-0107 (§4a's "`Belief` is unchanged … its counts stay derived from it", and §4's normative field rows for `Belief` and `BeliefSummary`) and ADR-0173 (§8a's enumeration of `kind` as one of five values, which gains a sixth for a streamed chunk; and §8c's enforcement clause "on results before return", as it reaches a method returning an async iterator) and ADR-0178 (§4's Group A field row for `Confirmation`, which enumerates five fields where there are now six) and ADR-0250 (§3's signature block, in `converse`'s parameter list and in the roster's count alone: `converse` gains one keyword parameter, `reference` (`TurnReference | None`, defaulting to `None`), and the surface gains `goals`, `withdraw_clarification` and `abandon_goal`. That one scope, and nothing else in this ADR: §3's every-annotation-is-spelled-out rule, its docstring obligations and its `DEFAULT_PAGE_SIZE` convention bind entire, §5's closed-graph obligation binds entire and is obeyed because every type that decision adds to the surface is `core`'s and reachable from it, and `converse_streaming` needs no record of its own because the streaming decision recorded above defines it as taking exactly `converse`'s arguments in exactly its order) and ADR-0274 (§1's restriction to its listed request methods "and nothing else", extended with receive and receive_streaming; existing signatures, types, and other rules are unchanged) and ADR-0275 (§1's method inventory, §3c's identifier normalization only for episode_chunk.episode_id, and §8's inspection result and error shapes) and ADR-0285 (every entry for `observe` and its two observation types — §3's signature, §4's Group E, §5's closure branch, §9's row and §10's mapping)
+- Status: Partially superseded by ADR-0107 (§4a's "`Belief` is unchanged … its counts stay derived from it", and §4's normative field rows for `Belief` and `BeliefSummary`) and ADR-0173 (§8a's enumeration of `kind` as one of five values, which gains a sixth for a streamed chunk; and §8c's enforcement clause "on results before return", as it reaches a method returning an async iterator) and ADR-0178 (§4's Group A field row for `Confirmation`, which enumerates five fields where there are now six) and ADR-0250 (§3's signature block, in `converse`'s parameter list and in the roster's count alone: `converse` gains one keyword parameter, `reference` (`TurnReference | None`, defaulting to `None`), and the surface gains `goals`, `withdraw_clarification` and `abandon_goal`. That one scope, and nothing else in this ADR: §3's every-annotation-is-spelled-out rule, its docstring obligations and its `DEFAULT_PAGE_SIZE` convention bind entire, §5's closed-graph obligation binds entire and is obeyed because every type that decision adds to the surface is `core`'s and reachable from it, and `converse_streaming` needs no record of its own because the streaming decision recorded above defines it as taking exactly `converse`'s arguments in exactly its order) and ADR-0274 (§1's restriction to its listed request methods "and nothing else", extended with receive and receive_streaming; existing signatures, types, and other rules are unchanged) and ADR-0275 (§1's method inventory, §3c's identifier normalization only for episode_chunk.episode_id, and §8's inspection result and error shapes) and ADR-0285 (every entry for `observe` and its two observation types — §3's signature, §4's Group E, §5's closure branch, §9's row and §10's mapping) and ADR-0293 (§1's inventory, §3's signatures, §9's rows and §10's mappings for `converse`, `learn`, `answer` and `forget_conversation`, each once its replacement is built)
 - Date: 2026-07-31
 - Partially superseded: 2026-09-18 by ADR-0274 — **§1's method-inventory
   restriction alone**, on ratification of ADR-0274. The words "carrying the
@@ -235,6 +235,20 @@
   replacements take effect on ratification of ADR-0285. This reciprocal header record
   accompanies the numbered draft under ADR-0070 and ADR-0082; prior supersessions and
   the ratified body below are preserved.
+- Partially superseded: 2026-10-04 by ADR-0293 — one scope, which takes effect when
+  built. §1's inventory, §3's signatures, §9's rows and §10's mappings, for four methods
+  (ADR-0293 §11). `converse` leaves the surface, the conversation being carried instead
+  by the acts in the hub's chat space (start, set devices, write, delete) and a read of
+  the changes after a cursor, which the surface gains; `learn` leaves it, a reply being
+  its replacement; and `forget_conversation` becomes memory-only, forgetting the
+  episodes on the conversation's place without deleting the conversation. Each of these
+  takes effect when the first build lands. `answer` leaves the surface when question
+  messages and their answers are built. Until then each keeps working exactly as this
+  ADR decides it (ADR-0293 §Decision:2, ADR-0292 §13:1). The signatures of what the
+  surface gains are the first build's contract change (ADR-0293 §11). Every other
+  method, type and clause stands. This reciprocal header record accompanies the numbered
+  draft under ADR-0070 and ADR-0082; prior supersessions and the ratified body below are
+  preserved.
 
 ## Context
 
