@@ -7731,6 +7731,17 @@ def _id_invocations(value: str) -> tuple[tuple[str, list[str]], ...]:
         # suffix, so the walk below cannot see it and this list is where it is held
         # — the residual that walk's own docstring names.
         ("tune --class", ["tune", "--class", value, "--reach", "interrupt"]),
+        # ADR-0293's chat space. `--device`, `--add` and `--remove` name devices
+        # without an `_id` suffix, so they are held here for the same reason.
+        ("chat --conversation", ["chat", "--conversation", value]),
+        ("chat --device", ["chat", "--device", value]),
+        ("conversation", ["conversation", value]),
+        ("delete-message", ["delete-message", value, "1", "--yes"]),
+        ("delete-conversation", ["delete-conversation", value, "--yes"]),
+        ("my-devices --add", ["my-devices", "--add", value, "--yes"]),
+        ("my-devices --remove", ["my-devices", "--remove", value]),
+        ("conversation-devices", ["conversation-devices", value]),
+        ("conversation-devices --add", ["conversation-devices", "c-1", "--add", value]),
     )
 
 
@@ -7878,6 +7889,13 @@ def test_every_id_parameter_on_the_surface_carries_an_id_callback() -> None:
         "ask:answering": True,
         "ask:conversation": True,
         "ask:goal": True,
+        # ADR-0293's chat space: `chat --conversation` is a fourth id spelled without
+        # an `_id` suffix, named here for the reason above.
+        "chat:conversation": True,
+        "conversation:conversation_id": True,
+        "conversation-devices:conversation_id": True,
+        "delete-conversation:conversation_id": True,
+        "delete-message:conversation_id": True,
         # ADR-0275 preserves exact store-valid episode addresses, including blanks.
         "episode:episode_id": False,
         "dismiss:notification_id": True,
