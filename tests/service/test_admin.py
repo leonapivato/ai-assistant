@@ -1274,3 +1274,42 @@ def test_a_revocation_says_the_device_left_your_devices(
     )
     assert code == EXIT_OK
     assert "Removed from your devices" in capsys.readouterr().out
+
+
+async def test_no_other_act_lands_while_a_revocation_awaits_the_store(tmp_path: Path) -> None:
+    """Review round 2 of PR #2727: a revocation decides whether it empties the device's
+    sets, then awaits the store. A restore landing in that gap would re-admit the
+    device under another gateway and still have its memberships erased. Acts are one
+    at a time, so the restore waits, and the outcome is the sequential one: revoked,
+    then restored with no role and an end of nothing.
+    """
+    space = await _sets_naming(_PHONE)
+    paused = asyncio.Event()
+    entered = asyncio.Event()
+
+    async def _paused(device: str) -> bool:
+        entered.set()
+        await paused.wait()
+        return await space.remove_device(device)
+
+    async with _admin(tmp_path, remove_device=_paused) as (listener, registry):
+        registry.accept_naming("hub", _PHONE, now=_MOMENT)
+        registry.accept_naming(_DEVICE, _PHONE, now=_MOMENT)
+        registry.revoke_registration(_PHONE, gateway=_DEVICE, now=_MOMENT)
+        revoking = asyncio.create_task(
+            _act(listener, {"act": "revoke", "identity": _PHONE, "gateway": "hub"})
+        )
+        await entered.wait()
+        restoring = asyncio.create_task(
+            _act(listener, {"act": "restore", "identity": _PHONE, "gateway": _DEVICE})
+        )
+        for _ in range(20):
+            await asyncio.sleep(0)
+        assert not restoring.done(), "the restore waits for the revocation"
+        paused.set()
+        revoked = await revoking
+        restored = await restoring
+
+    assert revoked == {"ok": True, "revoked": True, "memberships": True}
+    assert restored == {"ok": True, "restored": True, "roles": []}
+    assert await space.my_devices() == ()

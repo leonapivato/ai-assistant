@@ -44,6 +44,8 @@ the device withheld — refused every request and named in no set — and the re
 act follows in the same block, synchronous as ever: the commit, the live view's
 transition and the close of the device's connections are one step (ADR-0124 §8).
 A removal that fails revokes nothing and says so, so the owner runs the act again.
+The acts are performed one at a time, so no other act lands while a revocation
+awaits the store.
 
 **The credential crosses this socket exactly once and is never stored.** ADR-0124
 §6 mints it, discloses it "to the owner once at enrolment and never again", and
@@ -158,6 +160,11 @@ class AdminListener:
         """
         self._registry = registry
         self._remove_device = remove_device
+        # One act at a time. Every act but a revocation is synchronous and so atomic
+        # on the one event loop already; a revocation awaits the conversation store
+        # between deciding what it will do and doing it, and another act landing in
+        # that gap — a restore, an enrolment — would change what it decided on.
+        self._acting = asyncio.Lock()
         self._now = checked_clock(now, owner="AdminListener")
         self.path = admin_socket_path(data_dir)
         self._server: asyncio.Server | None = None
@@ -256,7 +263,8 @@ class AdminListener:
                     timeout=ADMIN_TIMEOUT,
                     idle_timeout=ADMIN_TIMEOUT,
                 )
-                reply = await self._perform(body)
+                async with self._acting:
+                    reply = await self._perform(body)
                 await write_frame(
                     writer,
                     json.dumps(reply).encode("utf-8"),
