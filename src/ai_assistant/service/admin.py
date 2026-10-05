@@ -45,7 +45,8 @@ act follows in the same block, synchronous as ever: the commit, the live view's
 transition and the close of the device's connections are one step (ADR-0124 §8).
 A removal that fails revokes nothing and says so, so the owner runs the act again.
 The acts are performed one at a time, so no other act lands while a revocation
-awaits the store.
+awaits the store, and an act once begun runs to its end even where the owner's
+command stopped waiting for the reply.
 
 **The credential crosses this socket exactly once and is never stored.** ADR-0124
 §6 mints it, discloses it "to the owner once at enrolment and never again", and
@@ -165,6 +166,9 @@ class AdminListener:
         # between deciding what it will do and doing it, and another act landing in
         # that gap — a restore, an enrolment — would change what it decided on.
         self._acting = asyncio.Lock()
+        # The acts under way, each run to completion whatever happens to the
+        # connection that asked for it (:meth:`_act_to_completion`).
+        self._acts: set[asyncio.Task[dict[str, Any]]] = set()
         self._now = checked_clock(now, owner="AdminListener")
         self.path = admin_socket_path(data_dir)
         self._server: asyncio.Server | None = None
@@ -236,11 +240,52 @@ class AdminListener:
 
     async def aclose(self) -> None:
         """Let go of any act still in flight once the engine has drained."""
-        for task in list(self._connections):
+        for task in [*self._connections, *self._acts]:
             task.cancel()
-        if self._connections:
-            await asyncio.gather(*self._connections, return_exceptions=True)
+        if self._connections or self._acts:
+            await asyncio.gather(*self._connections, *self._acts, return_exceptions=True)
         self._connections.clear()
+        self._acts.clear()
+
+    async def _act_to_completion(self, body: bytes) -> dict[str, Any]:
+        """Perform one act, alone, and to its end even if its asker stops waiting.
+
+        **One act at a time.** Every act but a revocation is synchronous and so atomic
+        on the one event loop already; a revocation awaits the conversation store
+        between deciding what it will do and doing it, and another act landing in
+        that gap — a restore, an enrolment — would change what it decided on.
+
+        **Once begun, an act finishes.** The wait for the lock is cancellable — an act
+        whose asker gave up before it began never runs — but the act itself is a task
+        of its own, shielded from the connection's deadline: a revocation whose reply
+        timed out still revokes the device after emptying its sets, and holds the
+        device withheld and the lock until it has, rather than stopping between the
+        two with the device admitted and its memberships gone.
+
+        Args:
+            body: The request frame's bytes.
+
+        Returns:
+            The reply's members.
+        """
+        await self._acting.acquire()
+        act = asyncio.ensure_future(self._perform_holding(body))
+        self._acts.add(act)
+        act.add_done_callback(self._settled)
+        return await asyncio.shield(act)
+
+    async def _perform_holding(self, body: bytes) -> dict[str, Any]:
+        """Perform one act with the lock already held, and release it at the end."""
+        try:
+            return await self._perform(body)
+        finally:
+            self._acting.release()
+
+    def _settled(self, act: asyncio.Task[dict[str, Any]]) -> None:
+        """Forget a finished act, logging a fault nobody was left waiting to see."""
+        self._acts.discard(act)
+        if not act.cancelled() and (fault := act.exception()) is not None:
+            _log.error("hub_admin_act_failed", error_class=type(fault).__name__, reason=str(fault))
 
     async def _accept(self, reader: asyncio.StreamReader, writer: asyncio.StreamWriter) -> None:
         """Serve one act: read one request frame, answer with one reply frame.
@@ -263,8 +308,7 @@ class AdminListener:
                     timeout=ADMIN_TIMEOUT,
                     idle_timeout=ADMIN_TIMEOUT,
                 )
-                async with self._acting:
-                    reply = await self._perform(body)
+                reply = await self._act_to_completion(body)
                 await write_frame(
                     writer,
                     json.dumps(reply).encode("utf-8"),

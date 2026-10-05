@@ -290,6 +290,13 @@ Do these on the hub's own machine, with the new hub running:
 3. **Give each remote gateway's device its role.** A gateway on another machine
    needs `commands` on its enrolled identity for the requests it makes as
    itself.
+
+   A gateway that does not yet name its browsers sends every browser's request
+   as its own. A message from a browser on such a gateway's remote listener
+   names that browser, not the gateway, so the hub refuses it. If you write from
+   a phone through a gateway on another machine, keep the old hub running until
+   that gateway names its browsers, or run the gateway on the hub's machine,
+   whose local socket keeps the device a message names.
 4. **Give each browser device its role.** Open the page once from each browser a
    gateway names. The first request is refused, and the browser is now
    registered. Find it under *Registrations*, check that the gateway named there

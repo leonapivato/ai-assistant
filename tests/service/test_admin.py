@@ -21,7 +21,7 @@ import pytest
 
 from ai_assistant.core.errors import ConversationStoreError, DeviceRefusal, DeviceRefusedError
 from ai_assistant.core.types import ChatDevice, DeviceAccess, DeviceRole, DevicesChangedChange
-from ai_assistant.service import device
+from ai_assistant.service import admin, device
 from ai_assistant.service.admin import (
     ADMIN_FRAME_BYTES,
     ADMIN_TIMEOUT,
@@ -1312,4 +1312,43 @@ async def test_no_other_act_lands_while_a_revocation_awaits_the_store(tmp_path: 
 
     assert revoked == {"ok": True, "revoked": True, "memberships": True}
     assert restored == {"ok": True, "restored": True, "roles": []}
+    assert await space.my_devices() == ()
+
+
+async def test_a_revocation_whose_reply_times_out_still_finishes(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """Review round 3 of PR #2727: the connection's deadline must not stop a revocation
+    between emptying the device's sets and revoking it, which would leave the device
+    admitted, with its roles, and an end of nothing. The act runs on, holding the
+    device withheld until the record has moved."""
+    space = await _sets_naming(_PHONE)
+    paused = asyncio.Event()
+    entered = asyncio.Event()
+
+    async def _slow(device: str) -> bool:
+        entered.set()
+        await paused.wait()
+        return await space.remove_device(device)
+
+    monkeypatch.setattr(admin, "ADMIN_TIMEOUT", timedelta(milliseconds=200))
+    async with _admin(tmp_path, remove_device=_slow) as (listener, registry):
+        registry.accept_naming("hub", _PHONE, now=_MOMENT)
+        registry.assign(_PHONE, DeviceRole.COMMANDS)
+        asking = asyncio.create_task(_act(listener, {"act": "revoke", "identity": _PHONE}))
+        await entered.wait()
+        with contextlib.suppress(Exception):
+            await asking
+        withheld_after_the_deadline = registry.is_withheld(_PHONE)
+        paused.set()
+        for _ in range(100):
+            if not registry.is_withheld(_PHONE):
+                break
+            await asyncio.sleep(0)
+        known = registry.is_known(_PHONE)
+        roles = registry.roles_of(_PHONE)
+
+    assert withheld_after_the_deadline
+    assert not known
+    assert roles == frozenset()
     assert await space.my_devices() == ()
