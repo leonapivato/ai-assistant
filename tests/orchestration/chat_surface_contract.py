@@ -260,6 +260,10 @@ class ChatSurfaceContract:
         assert page.entries == ()
         fits = await engine.write_message(conversation, message=said(_PHONE, "m", "x" * 3000))
         assert fits.outcome is SendOutcome.RECORDED
+        widest = await engine.write_message(
+            conversation, message=said(_PHONE, "m-2", "re", replies_to=2**63 - 1)
+        )
+        assert (widest.outcome, widest.position) == (SendOutcome.NO_SUCH_REPLY, None)
 
     # --- deleting, and forgetting (§2, §5) -----------------------------------
 
@@ -352,20 +356,23 @@ class ChatSurfaceContract:
         assert digest is not None
         assert digest.state == ConversationState(last_ended=ending)
 
-    async def test_the_state_shows_working_with_the_running_activation(
+    async def test_an_open_episode_alone_is_not_a_running_activation(
         self, chat_surface: ChatSurfaceSubject
     ) -> None:
-        """§8:2, ADR-0295 §1:2: "working…" names the activation a stop would name."""
+        """§8:2: "working…" is the assistant's account of what runs, not a stored record.
+
+        An open episode can outlive its activation — a failed capture whose
+        compensation could not delete it stays open until a restart closes it (ADR-0286
+        §5) — so the suite seeds one with no activation running, and the state is idle
+        but for how the last one ended.
+        """
         engine, memory = chat_surface.engine, chat_surface.memory
         conversation = await _started(engine, _PHONE)
         await memory.add(conversation_episode(conversation, "a-1", status=ProcessingStatus.FAILED))
         await memory.add(conversation_episode(conversation, "a-2", status=None, resolved=False))
-        await memory.add(conversation_episode("other", "a-3", status=None))
         digest = await engine.conversation(conversation)
         assert digest is not None
-        assert digest.state == ConversationState(
-            working=True, activation_id="a-2", last_ended=ActivationEnding.COULDNT_FINISH
-        )
+        assert digest.state == ConversationState(last_ended=ActivationEnding.COULDNT_FINISH)
 
     # --- the change stream (§5:10, §5:11) -----------------------------------
 

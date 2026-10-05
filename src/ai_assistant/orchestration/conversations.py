@@ -232,14 +232,13 @@ async def conversation_state(
 
     **Working is the assistant's own account of what it is running** (§1:6, §8:2):
     ``running`` is the activation id of every activation this process is running
-    that was started from the conversation — ``None`` for one whose id the factory
-    failed to mint, which shows "working…" with no id (ADR-0297 §5) — and the
-    newest id known is the one a stop names (ADR-0295 §1:2). It is held in process,
-    so an activation whose episode was forgotten or whose capture failed still
-    shows. An **open** episode on the place, found by :func:`started_from` from its
-    admission on, also counts as running: it is how a reader holding only the store
-    sees another holder's activation, and it supplies the id where ``running`` names
-    none.
+    that was started from the conversation, oldest first — ``None`` for one whose id
+    the factory failed to mint, which shows "working…" with no id (ADR-0297 §5) —
+    and the newest id known is the one a stop names (ADR-0295 §1:2). It is held in
+    process, so an activation whose episode was forgotten or whose capture failed
+    still shows, and **an open episode is never read as running**: one a failed
+    capture's compensation could not delete stays open until a restart closes it
+    (ADR-0286 §5), long after its activation ended.
 
     **How the last one ended is read from the episodes on the place**, the
     assistant's durable record of its activations, so a restart that closed an
@@ -258,17 +257,12 @@ async def conversation_state(
     """
     channel = conversation_channel(conversation_id)
     held = tuple(running)
-    opened = await _open_on(memory, channel)
-    known = [one for one in held if one is not None] + [
-        episode.processing_record.activation_id
-        for episode in opened
-        if episode.processing_record is not None
-    ]
+    known = [one for one in held if one is not None]
     ended = await memory.channel_episodes(channel, limit=1)
     last = ended.entries[-1].record if ended.entries else None
     return ConversationState(
-        working=bool(held) or bool(opened),
-        activation_id=known[0] if known else None,
+        working=bool(held),
+        activation_id=known[-1] if known else None,
         last_ended=activation_ending(last) if isinstance(last, EpisodicMemory) else None,
     )
 
@@ -299,7 +293,11 @@ def check_message_fits(conversation_id: str, message: UserMessage, *, max_bytes:
         written_at=_WIDEST_AT,
         author=MessageAuthor.USER,
         text=message.text,
-        replies_to=message.replies_to,
+        # As wide as the reply the message names, and below the probe's own position,
+        # which a recorded message's reference always is.
+        replies_to=None
+        if message.replies_to is None
+        else min(message.replies_to, _WIDEST_NUMBER - 1),
         device_id=message.device_id,
         message_id=message.message_id,
     )
