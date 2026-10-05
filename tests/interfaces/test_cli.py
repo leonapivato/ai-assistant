@@ -22,6 +22,7 @@ from itertools import count
 from pathlib import Path
 from typing import TYPE_CHECKING, Any, Final
 
+import click
 import pytest
 import typer.main
 from cli_open_recorder import wire_recording_opens
@@ -2187,7 +2188,9 @@ def test_ask_rejects_an_unusable_timeout(bad: str, monkeypatch: pytest.MonkeyPat
     assert result.exit_code == 2  # Typer's usage-error code, before the engine is built
     # The refusal is the timeout's own: the turn carries a valid reference, so it is not
     # `ask`'s missing-reference refusal standing in for it (ADR-0293 §11).
-    assert "--timeout" in result.output
+    # Read with its styling stripped: a terminal that forces colour (CI does) breaks the
+    # option's name with escape sequences.
+    assert "--timeout" in click.unstyle(result.output)
     assert opened == []
 
 
