@@ -527,6 +527,10 @@ _RECALL_EXPIRED: Final = "the pass's deadline expired during recall"
 _WINDOWS_EXPIRED: Final = "the pass's deadline expired while assembling the windows"
 
 
+class _NothingTakenInError(Exception):
+    """The reader's activation marked none of its input taken in, so it did nothing."""
+
+
 def _unchecked(_result: object) -> None:
     """No output check: the reader's activation returns to no caller (ADR-0293 §10).
 
@@ -9461,23 +9465,36 @@ class Engine:
         _log.warning("activation_capture_degraded", stage="chat_reader", reason="identifier")
         return _uuid()
 
-    async def _read_in(self, taken: ChatInput) -> None:
-        """Run the activation the chat's reader took an input in for, then write (§6, §10).
+    async def _read_in(self, taken: ChatInput) -> bool:
+        """Admit the activation for the reader's input, then write what it ends with.
 
         The input is admitted as a typed message on the conversation channel, with the
-        id its messages were marked taken in by, and runs as a typed turn of a bounded
-        audience — the conversation's own devices — with the reader's window as its
-        channel window (§6:4). What it ends with is written into the conversation it
-        came from by the adapter: the reply, or *couldn't finish* listing what did
-        happen (§10:1, §10:2).
+        id the reader minted, and its **first step, once its episode is written, marks
+        the messages taken in** under that id (ADR-0293 §6:8): so whatever cancels it, a
+        shutdown included, leaves an episode closed interrupted, and its messages are
+        either marked by it or still waiting (§6:9). It then runs as a typed turn of a
+        bounded audience — the conversation's own devices — with the reader's window as
+        its channel window (§6:4). What it ends with is written into the conversation
+        it came from by the adapter: the reply, or *couldn't finish* listing what did
+        happen (§10:1, §10:2). An activation that marked nothing — a store that refused
+        the marking, or messages gone since they were read — did nothing, and nothing
+        is written for it.
 
         **A shutdown that cancels it writes nothing** (§9:2): the cancellation is
         re-raised before the adapter is reached, the activation's episode is closed
         interrupted, and the conversation's state reads *interrupted* (§8:3).
 
+        Returns:
+            Whether the activation marked anything taken in; ``False`` too where the
+            engine was already closing, and nothing was admitted.
+
         Raises:
             CancelledError: If the activation, or this read, was cancelled.
         """
+        if self._closing:
+            return False
+        reader = self._chat_reader
+        assert reader is not None  # noqa: S101 — only the reader calls this
         accepted = ChannelInput(
             target=ChannelIdentity(channel_type="conversation", instance_id=taken.conversation_id),
             payload=TextChannelPayload(text=taken.text),
@@ -9489,10 +9506,18 @@ class Engine:
             id_factory=lambda: taken.activation_id,
             stage_limit=self._stage_record_limit,
         )
+        marked: list[tuple[int, ...]] = []
+
+        async def turn() -> TurnOutcome:
+            marked.append(await reader.take_in(taken))
+            if not marked[0]:
+                raise _NothingTakenInError
+            return await self._chat_turn(taken)
+
         deadline = asyncio.get_running_loop().time() + self._chat_turn_budget.total_seconds()
-        task = self._admitted_task(
+        task = self._activation_task(
             ActivationScope(state),
-            lambda: self._chat_turn(taken),
+            turn,
             seam="chat_reader",
             check_output=_unchecked,
             deadline=deadline,
@@ -9502,7 +9527,10 @@ class Engine:
             outcome, _report = await task
         except asyncio.CancelledError:
             raise
-        except Exception:
+        except Exception:  # every failure of the pass is §10:2's ending
+            if not (marked and marked[0]):
+                _log.warning("chat_input_not_taken_in", stage="chat_reader", exc_info=True)
+                return False
             _log.warning("chat_activation_failed", stage="chat_reader", exc_info=True)
         driven = state.working.driven if isinstance(state.working, _TurnPass) else None
         reply = chat_reply(
@@ -9513,6 +9541,7 @@ class Engine:
             await self._chat_writer.send(taken.conversation_id, reply)
         except ConversationStoreError:
             _log.warning("chat_message_unwritten", stage="chat_writer", exc_info=True)
+        return True
 
     async def _chat_turn(self, taken: ChatInput) -> TurnOutcome:
         """The reader's input as one typed turn, composed whole, over its window."""
@@ -9540,21 +9569,6 @@ class Engine:
         check_output: Callable[[T], None],
         deadline: float | None = None,
     ) -> asyncio.Task[tuple[T, EpisodeCaptureReport | None]]:
-        """Refuse a closing engine, then admit the activation (:meth:`_admitted_task`)."""
-        self._reject_if_closing()
-        return self._admitted_task(
-            scope, work, seam=seam, check_output=check_output, deadline=deadline
-        )
-
-    def _admitted_task[T](
-        self,
-        scope: ActivationScope,
-        work: Callable[[], Awaitable[T]],
-        *,
-        seam: str,
-        check_output: Callable[[T], None],
-        deadline: float | None = None,
-    ) -> asyncio.Task[tuple[T, EpisodeCaptureReport | None]]:
         """Enter cleanup before cancellation is possible, register, then release work.
 
         The deferred callable prevents an un-awaited processing coroutine when
@@ -9574,13 +9588,8 @@ class Engine:
         itself and is classified as its kind classifies it, and the freeze's read
         settles whether the cut-off insert landed (ADR-0286 §3:4).
 
-        Called directly, without :meth:`_activation_task`'s refusal of a closing engine,
-        by the chat's reader alone: messages it has already marked taken in by this
-        activation are admitted even where a shutdown began while they were being
-        marked, so they are never marked by an activation that did not run (ADR-0293
-        §6:9). The read that admits it is itself tracked and awaits it, so the drain
-        still reaches it.
         """
+        self._reject_if_closing()
         admitted = asyncio.Event()
 
         async def run() -> tuple[T, EpisodeCaptureReport | None]:

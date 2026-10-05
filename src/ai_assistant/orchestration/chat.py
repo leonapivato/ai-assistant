@@ -19,12 +19,13 @@ refused, and when the activation ends the reader looks again and takes in everyt
 waiting **together, as one input**.
 
 **The reader's bookkeeping** (§6:6-§6:9) is the conversation store's ``take_in``,
-which holds no text: the messages are marked taken in, by the activation's id, in the
-step that admits it — the id is minted first, the messages are marked under it, and
-the activation is admitted with that same id. After a restart, a message an
-interrupted activation took in is marked and is not taken in again, since it may have
-been acted on; a message never taken in is found by ``conversations_awaiting`` and
-taken in as usual (:meth:`ChatReader.notice_awaiting`).
+which holds no text: the messages are marked taken in, by the activation's id, when
+the activation is admitted — its first step once its episode is written, before any
+of its processing (:meth:`ChatReader.take_in`). So an activation a shutdown cancels at
+any point is one whose episode closes interrupted: either it marked its messages, and
+after a restart they are not taken in again, since it may have acted on them, or it
+did not, and they are taken in as usual. A message never taken in is found by
+``conversations_awaiting`` (:meth:`ChatReader.notice_awaiting`).
 
 **The window** (§6:4, §6:5) is the conversation's recent transcript, read by the
 reader with the input and handed to the activation beside it: each message keeps its
@@ -94,10 +95,13 @@ CHAT_WINDOW_SIZE: Final = 20
 #: default.
 CHAT_TURN_BUDGET: Final = timedelta(seconds=60)
 
-#: How many waiting messages one input takes in at most: ``take_in``'s own bound. Every
-#: message waiting is taken in together (ADR-0293 §6:3); a conversation holding more
-#: than this many waiting is taken in over successive inputs, oldest first.
-_INPUT_MESSAGES_MAX: Final = 1000
+#: How many positions one ``take_in`` call marks: the store's own bound. Every message
+#: waiting is taken in together, as one input (ADR-0293 §6:3), so an input holding more
+#: is marked over several calls under the one activation's id.
+_MARK_CHUNK: Final = 1000
+
+#: The read of what waits asks for every waiting message: the store's own ceiling.
+_WAITING_ALL: Final = 2**63 - 1
 
 #: How many conversation ids one page of the restart walk reads.
 _AWAITING_PAGE: Final = 100
@@ -236,7 +240,7 @@ class ChatReader:
         self,
         *,
         conversations: ConversationStore,
-        activate: Callable[[ChatInput], Awaitable[None]],
+        activate: Callable[[ChatInput], Awaitable[bool]],
         spawn: Callable[[Coroutine[None, None, None]], object],
         closing: Callable[[], bool],
         mint: Callable[[], str],
@@ -247,14 +251,15 @@ class ChatReader:
         Args:
             conversations: The chat space, whose bookkeeping, waiting messages and
                 transcript the reader reads and writes.
-            activate: Runs one activation for an input, writing its reply. It returns
-                once the reply is written, or raises ``CancelledError`` where a shutdown
-                cancelled it.
+            activate: Admits one activation for an input, which marks the input taken
+                in (:meth:`take_in`) and writes its reply. It returns whether anything
+                was marked, once the reply is written, or raises ``CancelledError``
+                where a shutdown cancelled it.
             spawn: Starts a read as a task the engine tracks, so shutdown drains it.
             closing: Whether the engine has begun shutting down, after which no new
                 input is taken in.
-            mint: The activation id the next input is marked taken in by, and admitted
-                with.
+            mint: The activation id the next input is admitted with, and marked taken
+                in by.
             window_size: How many recent messages the window holds.
         """
         self._conversations = conversations
@@ -266,8 +271,8 @@ class ChatReader:
         # A conversation is a key while a read of it runs; its value is whether it was
         # noticed again since that read last looked.
         self._reading: dict[str, bool] = {}
-        # The activation each conversation's read has taken an input in for, from the
-        # marking until its reply is written.
+        # The activation each conversation's read has admitted for an input, until its
+        # reply is written.
         self._current: dict[str, str] = {}
 
     def notice(self, conversation_id: str) -> None:
@@ -312,10 +317,36 @@ class ChatReader:
     def working(self, conversation_id: str) -> str | None:
         """The activation this reader has an input in for, until its reply is written.
 
-        From the marking to the written reply, so a conversation shows "working…"
+        From its admission to the written reply, so a conversation shows "working…"
         until the message answering it is in the transcript (§8:2).
         """
         return self._current.get(conversation_id)
+
+    async def take_in(self, taken: ChatInput) -> tuple[int, ...]:
+        """Mark the input's messages taken in by its activation (§6:6, §6:8).
+
+        Called by the activation once it is admitted, so the marking and the episode
+        that records the activation stand or fall together. Every message of the input
+        is marked under the one id, in as many calls as the store's bound needs.
+
+        Returns:
+            The positions this activation marked, ascending. A message deleted, or
+            taken in elsewhere, since it was read as waiting is not among them.
+
+        Raises:
+            ConversationStoreError: If the store cannot be written.
+        """
+        positions = [message.position for message in taken.messages]
+        marked: list[int] = []
+        for start in range(0, len(positions), _MARK_CHUNK):
+            marked.extend(
+                await self._conversations.take_in(
+                    taken.conversation_id,
+                    positions=positions[start : start + _MARK_CHUNK],
+                    activation_id=taken.activation_id,
+                )
+            )
+        return tuple(sorted(marked))
 
     async def _read(self, conversation_id: str) -> None:
         """Take in what waits in one conversation, one input at a time, until none does."""
@@ -323,17 +354,17 @@ class ChatReader:
             while not self._closing():
                 self._reading[conversation_id] = False
                 waiting = await self._conversations.untaken_messages(
-                    conversation_id, limit=_INPUT_MESSAGES_MAX
+                    conversation_id, limit=_WAITING_ALL
                 )
                 if not waiting:
                     if self._reading[conversation_id]:
                         continue
                     return
-                taken = await self._take_in(conversation_id, waiting)
+                taken = await self._admit(conversation_id, waiting)
                 if not taken and not self._reading[conversation_id]:
-                    # Nothing was marked: what was read as waiting was deleted, or taken
-                    # in elsewhere, in between. Stop rather than re-read in a loop; a
-                    # later notice or sweep looks again.
+                    # Nothing was marked: the engine began closing, the store refused
+                    # the marking, or what was read as waiting went in between. Stop
+                    # rather than re-read in a loop; a later notice or sweep looks again.
                     return
         except asyncio.CancelledError:
             raise
@@ -345,45 +376,34 @@ class ChatReader:
         finally:
             self._reading.pop(conversation_id, None)
 
-    async def _take_in(self, conversation_id: str, waiting: Sequence[TranscriptMessage]) -> bool:
-        """Mark the waiting messages taken in, then run their activation (§6:6-§6:8).
+    async def _admit(self, conversation_id: str, waiting: Sequence[TranscriptMessage]) -> bool:
+        """Bring the waiting messages in, with the window, as one activation's input.
 
         Returns:
-            Whether any message was marked, and so an activation run.
+            Whether the activation marked anything taken in.
         """
         window = await self._window(conversation_id, waiting)
         activation_id = self._mint()
-        marked = frozenset(
-            await self._conversations.take_in(
-                conversation_id,
-                positions=[message.position for message in waiting],
-                activation_id=activation_id,
-            )
-        )
-        taken = tuple(message for message in waiting if message.position in marked)
-        if not taken:
-            return False
         self._current[conversation_id] = activation_id
         try:
-            await self._activate(
+            return await self._activate(
                 ChatInput(
                     conversation_id=conversation_id,
                     activation_id=activation_id,
-                    messages=taken,
-                    window=_narrowed(window, taken),
+                    messages=tuple(waiting),
+                    window=window,
                 )
             )
         finally:
             self._current.pop(conversation_id, None)
-        return True
 
     async def _window(
         self, conversation_id: str, waiting: Sequence[TranscriptMessage]
     ) -> TranscriptWindow:
         """The conversation's recent transcript and what the input replies to (§6:4).
 
-        Read before anything is marked, so a read that fails leaves the messages
-        waiting rather than taken in by an activation that never ran.
+        The recent messages without the input's own; then each earlier message an
+        input message replies to that they do not show, read by its position.
         """
         positions = {message.position for message in waiting}
         page = await self._conversations.transcript(
@@ -408,20 +428,6 @@ class ChatReader:
         return TranscriptWindow(
             conversation=conversation_channel(conversation_id),
             messages=recent,
-            input_positions=tuple(sorted(positions)),
+            input_messages=tuple(waiting),
             replied_to=tuple(replied),
         )
-
-
-def _narrowed(window: TranscriptWindow, taken: Sequence[TranscriptMessage]) -> TranscriptWindow:
-    """The window as read, its input positions narrowed to the messages taken in.
-
-    A message read as waiting and not marked — deleted in between — is neither input
-    nor window: it is left out of both.
-    """
-    return TranscriptWindow(
-        conversation=window.conversation,
-        messages=window.messages,
-        input_positions=tuple(message.position for message in taken),
-        replied_to=window.replied_to,
-    )
