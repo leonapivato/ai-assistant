@@ -1,7 +1,15 @@
 # 22. The closed learning loop in `orchestration`
 
-- Status: Partially superseded by ADR-0084 (§2's placement of `TurnResult` outside `core/types.py`, and its sole graduation trigger) and ADR-0108 (§4's same-id collision resolution) and ADR-0158 (§3's Retrieval row, in the scope of the episodic supplement's own read)
+- Status: Partially superseded by ADR-0084 (§2's placement of `TurnResult` outside `core/types.py`, and its sole graduation trigger) and ADR-0108 (§4's same-id collision resolution) and ADR-0158 (§3's Retrieval row, in the scope of the episodic supplement's own read) and ADR-0293 (§1's `learn`, as the route by which the user's feedback reaches the assistant)
 - Date: 2026-07-20
+- Partially superseded: 2026-10-04 by ADR-0293 — one scope. §1's `learn`, as the route
+  by which the user's feedback reaches the assistant: the user corrects the assistant by
+  a message replying to the message it corrects, written into the hub's chat space and
+  brought in by the chat's reader as a push (ADR-0293 §4). `learn` keeps working until
+  the first build replaces it (ADR-0293 §11, ADR-0292 §13:1). Every other clause stands,
+  the write path of §4 included. This replacement takes effect on ratification of
+  ADR-0293. This reciprocal header record accompanies the numbered draft under ADR-0070
+  and ADR-0082; prior supersessions and the ratified body below are preserved.
 - Partially superseded: 2026-08-15 by ADR-0158 — **§3's Retrieval row no longer
   states the whole of what a retrieval failure does: a failing *episodic
   supplement* keeps the belief composition already in hand and does not set

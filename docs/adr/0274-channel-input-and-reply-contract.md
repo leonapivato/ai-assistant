@@ -1,6 +1,6 @@
 # 274. Channel inputs share an assistant receiver, and reply delivery is optional
 
-- Status: Partially superseded by ADR-0275 (§1, §3 and §5–§8's event/context and speech-ending persistence, capture reporting and post-processing cleanup) and ADR-0276 (§5's third clause, in its prompt and reference-resolution halves alone: the understanding stage renders supplied context into its own prompt as quoted data and resolves the input's references against it)
+- Status: Partially superseded by ADR-0275 (§1, §3 and §5–§8's event/context and speech-ending persistence, capture reporting and post-processing cleanup) and ADR-0276 (§5's third clause, in its prompt and reference-resolution halves alone: the understanding stage renders supplied context into its own prompt as quoted data and resolves the input's references against it) and ADR-0293 (§2–§6, in so far as they govern a typed text input to the conversation and its reply)
 - Date: 2026-09-17
 - Scope: [Milestone 1](https://github.com/leonapivato/ai-assistant/milestone/1), [#2521](https://github.com/leonapivato/ai-assistant/issues/2521).
 - Owner authorization: Reviewed and authorized for ratification on 2026-09-18; the owner assigned ADR-0274.
@@ -29,6 +29,18 @@
   replacement recorded by the ADR-0276 note above took effect then; that note's
   "which remains Proposed" was true when written and is stale. The Status line above
   is unchanged (#2569).
+- Partially superseded: 2026-10-04 by ADR-0293 — one scope. §2–§6, in so far as they
+  govern a typed text input to the conversation and its reply: such an input is a
+  message written into a conversation as an act in the hub's chat space, a hosted medium
+  (ADR-0293 §4); it names no channel and supplies no history or replied-to item, and its
+  reply is not returned on the request but written into a conversation by the chat's
+  writer (ADR-0293 §6). A replied-to entry survives as a message's reference into the
+  transcript. `converse`, `converse_streaming` and the text conversational combination
+  of `receive` and `receive_streaming` keep working until the first build replaces them
+  (ADR-0293 §11, ADR-0292 §13:1). The spoken combination, informational events and every
+  other clause stand. This replacement takes effect on ratification of ADR-0293. This
+  reciprocal header record accompanies the numbered draft under ADR-0070 and ADR-0082;
+  prior supersessions and the ratified body below are preserved.
 
 ## Context
 
