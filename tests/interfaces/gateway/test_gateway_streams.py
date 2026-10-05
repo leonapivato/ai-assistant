@@ -1245,15 +1245,20 @@ async def test_the_browser_forgets_one_conversation(harness: Harness) -> None:
     origin can spend, and the honest accounting is that it widens it by less than what
     is already there": ADR-0168 §6's residual has covered ``converse`` since milestone
     13, and a turn can approve a tool, execute it and durably commit a non-idempotent
-    effect."""
+    effect.
+
+    Since ADR-0293 §11:4 forgetting is memory-only: the episodes go and the
+    conversation stays listed."""
     harness.engine.hold_conversation("c-1")
+    await harness.engine.converse("hello", conversation_id="c-1", timeout=timedelta(seconds=5))
 
     status, body = await harness.whole("POST", "/conversation/forget", {"conversation_id": "c-1"})
 
     assert (status, body) == (200, {"destroyed": True})
     assert ("forget_conversation", {"conversation_id": "c-1"}) in harness.engine.calls
+    assert await harness.engine.episode_memory.export() == []
     _, listed = await harness.whole("POST", "/conversations", {})
-    assert listed["conversations"] == []
+    assert [one["id"] for one in listed["conversations"]] == ["c-1"]
 
 
 async def test_a_conversation_the_hub_declined_is_reported_as_a_declined_request() -> None:

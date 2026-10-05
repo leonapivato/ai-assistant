@@ -90,9 +90,6 @@ class ActivationWriter:
         #: The captures in flight, by address, from the admission write until each
         #: settles — so a ``forget`` can reach one and a restart's close passes over it.
         self._in_flight: dict[str, list[EpisodeProgress]] = {}
-        #: The conversations today's ``forget_conversation`` destroyed in this process,
-        #: whose captures are forgotten at their next write (:meth:`retiring`).
-        self._retired: set[str] = set()
 
     def forgetting(self, address: str) -> None:
         """Tell any capture in flight at ``address`` that its record is being forgotten.
@@ -109,25 +106,6 @@ class ActivationWriter:
         for the user's act.
         """
         for progress in self._in_flight.get(address, ()):
-            progress.forgotten = True
-
-    def retiring(self, conversation_id: str) -> None:
-        """Tell every capture of ``conversation_id`` that the conversation is forgotten.
-
-        Today's ``forget_conversation`` — the route ADR-0293 §Decision:2 keeps, which
-        deletes the conversation and forgets its place — calls this **before** it walks
-        the place. A capture of the conversation is then forgotten at its next write,
-        as :meth:`forgetting` forgets one by its address (ADR-0286 §8:2), so one whose
-        admission write had not yet landed when the walk passed — and so was found by
-        neither enumeration — is not written back after the forgetting. In-process, as
-        :meth:`forgetting` is: one resident process per data directory owns both.
-        """
-        self._retired.add(conversation_id)
-
-    def _retire_if_forgotten(self, state: ActivationState) -> None:
-        """Mark the capture forgotten where its conversation was retired (:meth:`retiring`)."""
-        progress = state.capture
-        if progress is not None and state.conversation_id in self._retired:
             progress.forgotten = True
 
     def holds(self, address: str) -> bool:
@@ -199,7 +177,6 @@ class ActivationWriter:
         failure ends capture and deletes the episode (§5), and the pass runs on.
         Never raises but for a cancellation.
         """
-        self._retire_if_forgotten(state)
         progress = state.capture
         if progress is None or progress.ended or progress.frozen:
             return
@@ -254,7 +231,6 @@ class ActivationWriter:
             if state.capture is not None:
                 await self._settle(state.capture, drain)
             return state.degraded_report()
-        self._retire_if_forgotten(state)
         writes = _Writes()
         conversation_id = state.conversation_id
         try:

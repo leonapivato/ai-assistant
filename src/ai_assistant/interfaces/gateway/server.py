@@ -2710,7 +2710,10 @@ class Gateway:
         return _rendered({"conversation": _digest_view(digest)})
 
     async def _forget_conversation(self, request: Request) -> Response:
-        """Destroy one conversation and the episodes its turns index (ADR-0175 §6).
+        """Forget the episodes on one conversation's place (ADR-0175 §6, ADR-0293 §2:4).
+
+        Memory-only since ADR-0293 §11:4: the conversation and its transcript stay,
+        and ``destroyed`` answers whether an episode was forgotten.
 
         **This widens what a script on the gateway's own origin can spend, by less
         than what is already there**, and ADR-0175 §6 states the accounting rather

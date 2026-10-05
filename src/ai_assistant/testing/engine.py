@@ -3661,31 +3661,30 @@ class FakeAssistantEngine:
         return self._checked(digest, "conversation")
 
     async def forget_conversation(self, conversation_id: Identifier) -> bool:
-        """Destroy one conversation and the episodes on its place, as the engine does.
-
-        The route ADR-0293 §Decision:2 keeps working: the conversation deleted, then
-        its place forgotten — which is :meth:`delete_conversation` and then the place's
-        episodes, here as in the engine.
-        """
+        """Forget the episodes on a conversation's place, and leave it (ADR-0293 §2:4)."""
         named = identifier(conversation_id, name="conversation_id")
         check_arguments(
             "forget_conversation", max_bytes=self._max_payload_bytes, conversation_id=named
         )
         self.calls.append(("forget_conversation", {"conversation_id": named}))
-        destroyed = await self._deleted(named)
-        # The place is walked as the engine walks it (§2:4-§2:6), and so is the
-        # membership this fake keeps beside it.
+        # The place is walked as the engine walks it (§2:4-§2:6), whether or not the
+        # conversation stands, and so is the membership this fake keeps beside it.
         members = {
             episode
             for episode, conversation in self._episode_conversations.items()
             if conversation == named
         }
         members.update(await episodes_on_place(self.episode_memory, named))
+        forgot = False
         for episode in sorted(members):
-            await self.episode_memory.delete(episode)
+            if await self.episode_memory.delete(episode):
+                forgot = True
             self._episode_conversations.pop(episode, None)
             self.deliveries.pop(episode, None)
-        return self._checked(destroyed, "forget_conversation")
+        digest = self.conversations_held.get(named)
+        if digest is not None:
+            self.conversations_held[named] = digest.model_copy(update={"recorded_turns": 0})
+        return self._checked(forgot, "forget_conversation")
 
     # --- the chat space: acts in the medium and its reads (ADR-0293 §11) ---
 

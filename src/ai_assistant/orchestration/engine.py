@@ -7358,28 +7358,26 @@ class Engine:
         )
 
     async def forget_conversation(self, conversation_id: Identifier) -> bool:
-        """Destroy a conversation and every episode on its place (ADR-0074 §8).
+        """Forget the episodes on a conversation's place, and leave it (ADR-0293 §2:4).
 
-        ADR-0004 §6's right at the unit the user thinks in. **The route ADR-0293
-        §Decision:2 keeps working until the first build replaces it**: it becomes
-        memory-only (§11:4) when the interfaces move to :meth:`delete_conversation`,
-        and until then it is composed from the two acts that replace it — the episodes
-        on its place forgotten, every capture of it told first so no later write
-        re-creates one (§2:6), then the conversation deleted. Unconditional, like
-        every other deletion on this façade.
+        Memory-only since ADR-0293 §11:4: every episode on the conversation's place
+        is destroyed — an open one told first, so no later write re-creates it (§2:6)
+        — whether or not the conversation still stands (§2:5), and the conversation,
+        its transcript and its devices are not reached (§5:6). Removing those is
+        :meth:`delete_conversation`, and no single operation both deletes and
+        forgets (§2:7). Unconditional, like every other deletion on this façade.
 
         Args:
             conversation_id: The conversation the user named, taken as opaque.
 
         Returns:
-            ``True`` if this call stamped it; ``False`` if it was already stamped or
-            the id names nothing. Its place is forgotten either way.
+            Whether an episode was forgotten. ``False`` where the place held none.
 
         Raises:
             RuntimeError: If the engine is shutting down.
-            ConversationStoreError: If the conversation could not be deleted.
-            MemoryStoreError: If an episode could not be destroyed. The conversation
-                still stands, and a repeat finishes it.
+            MemoryStoreError: If an episode could not be read or destroyed. What was
+                destroyed stays destroyed, the conversation stands, and a repeat
+                finishes the walk.
         """
         self._reject_if_closing()
         named = identifier(conversation_id, name="conversation_id")
@@ -7387,7 +7385,7 @@ class Engine:
             "forget_conversation", max_bytes=self._max_payload_bytes, conversation_id=named
         )
         return await self._tracked(
-            self._conversations.delete_and_forget(named), "forget_conversation", checked=True
+            self._conversations.forget(named), "forget_conversation", checked=True
         )
 
     # --- the chat space: acts in the medium and its reads (ADR-0293 §11) ---

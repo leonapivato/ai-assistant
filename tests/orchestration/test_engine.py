@@ -4587,11 +4587,10 @@ async def test_recent_conversations_projects_what_a_person_chooses_from() -> Non
     assert listed[0].last_active_at == listed[0].started_at
 
 
-async def test_forget_conversation_shows_the_span_then_destroys_everything() -> None:
-    """§8: show-then-confirm at the unit the user thinks in, then the ordered deletion.
+async def test_forget_conversation_shows_the_span_then_forgets_the_episodes() -> None:
+    """§8's show-then-confirm, then ADR-0293 §2:4: the episodes go, the conversation stays.
 
-    The route ADR-0293 §Decision:2 keeps working: the conversation deleted, then the
-    episodes on its place forgotten.
+    Deleting it is the separate act, and forgets nothing (§2:3, §2:7).
     """
     goals = iter(f"g-{n}" for n in range(1, 10))
     harness = Harness(planner=NoStepPlanner(), loop_id_factory=lambda: next(goals))
@@ -4606,10 +4605,15 @@ async def test_forget_conversation_shows_the_span_then_destroys_everything() -> 
 
     assert await harness.engine.forget_conversation(first.conversation_id) is True
 
+    assert await harness.memory.export() == [], "every episode it recorded is forgotten"
+    after = await harness.engine.conversation(first.conversation_id)
+    assert after is not None, "forgetting leaves the conversation"
+    assert after.recorded_turns == 0
+    assert await harness.engine.forget_conversation(first.conversation_id) is False
+
+    assert await harness.engine.delete_conversation(first.conversation_id) is True
     assert await harness.engine.conversation(first.conversation_id) is None
     assert await harness.engine.recent_conversations() == ()
-    assert await harness.memory.export() == [], "every episode it recorded is gone"
-    assert await harness.engine.forget_conversation(first.conversation_id) is False
 
 
 # --- lost evidence: tombstones and presented confidence (ADR-0077 §6) ----

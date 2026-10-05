@@ -761,9 +761,12 @@ def test_the_conversation_a_view_is_reading_is_the_tabs_and_not_the_origins() ->
 
 
 def test_the_conversation_is_destroyed_with_the_session_it_sits_beside() -> None:
-    """Three routes end one and all three go through the same place: this view's
-    session half being forgotten, a new bootstrap exchange, and forgetting the
-    conversation itself.
+    """Two routes end one and both go through the same place: this view's session
+    half being forgotten, and a new bootstrap exchange.
+
+    Forgetting the conversation is no longer one: since ADR-0293 §11:4 it forgets the
+    conversation's episodes and leaves the conversation, which the owner can go on
+    talking in (§5:7).
 
     **Tidiness rather than a guarantee, and the difference is worth stating.** A
     conversation is the hub's and outlives every gateway session by construction —
@@ -777,7 +780,7 @@ def test_the_conversation_is_destroyed_with_the_session_it_sits_beside() -> None
 
     assert "changeConversation(null);" in functions["forgetHeaderHalf"]
     assert "changeConversation(null);" in functions["startSession"]
-    assert "changeConversation(null);" in functions["forgetConversation"]
+    assert "changeConversation(null);" not in functions["forgetConversation"]
     assert "window.sessionStorage.removeItem(CONVERSATION_KEY);" in functions["setConversation"]
 
 
@@ -971,10 +974,10 @@ def test_continuing_a_thread_is_not_conditional_on_the_read_that_describes_it() 
 def test_a_forget_states_what_the_hub_answered_rather_than_what_was_asked() -> None:
     """#1371's third clause, and the half of it that is a correctness fix.
 
-    ``forget_conversation`` "returns whether a conversation was destroyed — ``False``
-    where the id named nothing live", and this page had been discarding that answer:
-    a race with a terminal or another tab destroyed nothing and was reported as a
-    destruction. Both facts are said, and they are said differently.
+    ``forget_conversation`` answers whether an episode was forgotten (memory-only
+    since ADR-0293 §11:4), and this page had once discarded that answer. Both facts
+    are said, and they are said differently; the forgotten one says plainly that the
+    conversation and its transcript stay and only deleting removes them (§5:7).
     """
     document = _asset("index.html")
     functions = _functions(_code("app.js"))
@@ -985,8 +988,12 @@ def test_a_forget_states_what_the_hub_answered_rather_than_what_was_asked() -> N
     )
     stated = functions["statedForget"]
     assert "if (!destroyed)" in stated
-    assert "so nothing was destroyed." in stated
-    assert "is gone." in stated
+    assert "so nothing was forgotten." in stated
+    assert "no longer recalls them anywhere else" in stated
+    assert "only deleting removes them." in stated
+    confirming = functions["forgetConversation"]
+    assert "Forget conversation" in confirming
+    assert "still reads it while you keep talking there" in confirming
 
 
 def test_the_forget_outcome_is_written_after_the_refresh_it_triggered() -> None:

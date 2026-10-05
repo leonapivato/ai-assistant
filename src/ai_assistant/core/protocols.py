@@ -15447,28 +15447,27 @@ class AssistantEngine(Protocol):
         ...
 
     async def forget_conversation(self, conversation_id: Identifier) -> bool:
-        """Destroy one conversation and the episodes on its place.
+        """Forget the episodes on a conversation's place, and leave the conversation.
 
-        **The route ADR-0293 §Decision:2 keeps working until the first build
-        replaces it.** It becomes memory-only when the interfaces move to the acts
-        in the medium (§11:4): forgetting the episodes on the place and leaving the
-        conversation, which :meth:`delete_conversation` then removes. Until then it
-        destroys both, as it did; the episodes on the place are reached whether or
-        not the conversation still stands (§2:5), and an open one is forgotten so no
-        later write re-creates it (§2:6).
+        **Memory-only** (ADR-0293 §2:4, §11:4): forgetting is a command on the
+        assistant's memory, and it reaches the episodes on the conversation's place
+        alone (§2:8). The conversation, its transcript and its devices stay as they
+        were (§5:6) — removing those is :meth:`delete_conversation`, and no single
+        operation both deletes and forgets (§2:7). It reaches those episodes
+        **whether or not the conversation still stands** in the medium (§2:5), so
+        a conversation deleted first can still be forgotten by its id, and it
+        forgets an episode still open on the place as :meth:`forget` forgets an
+        open episode, so no later write re-creates it (§2:6, ADR-0286 §8).
 
         Args:
-            conversation_id: The conversation to destroy.
+            conversation_id: The conversation whose episodes to forget.
 
         Returns:
-            Whether a conversation was destroyed. ``False`` where the id named
-            nothing live; the episodes on its place are forgotten either way.
+            Whether an episode was forgotten. ``False`` where the place held none.
 
         Raises:
             ValueError: If ``conversation_id`` is blank.
-            ConversationStoreError: If reading or updating the conversation index
-                failed.
-            MemoryStoreError: If destroying the episodes failed.
+            MemoryStoreError: If an episode could not be read or forgotten.
         """
         ...
 

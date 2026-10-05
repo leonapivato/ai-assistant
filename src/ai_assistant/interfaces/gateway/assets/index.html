@@ -327,8 +327,10 @@
           went is off the top of the panel by the time the refresh lands.
 
           **It reports the answer rather than the request**: `forget_conversation`
-          returns whether there was one to destroy, and "there was nothing left to
-          forget" is a different fact from "it is gone" and is said as one.
+          returns whether an episode was forgotten (memory-only since ADR-0293
+          §11:4, the conversation and its transcript staying), and "there was
+          nothing to forget" is a different fact from "it was forgotten" and is
+          said as one.
 
           It is not a confirmation and does not become one. ADR-0175 §6 rules that a
           front-end confirmation "is not a control and is not required here"; this is

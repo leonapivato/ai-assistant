@@ -2426,7 +2426,8 @@ from ai_assistant.wire.errors import (
 #:     ``set_my_devices``, ``set_conversation_devices``, ``write_message``,
 #:     ``delete_message``, ``delete_conversation``, ``transcript`` and
 #:     ``chat_changes`` — and the chat types they carry; ``conversation``'s digest
-#:     gains the current state and the conversation's devices.
+#:     gains the current state and the conversation's devices, and
+#:     ``forget_conversation`` becomes memory-only.
 PROTOCOL_VERSION: Final[int] = 76
 
 #: ADR-0085 §8a: "The correlation id is a UUID string and is at most 36 bytes.
