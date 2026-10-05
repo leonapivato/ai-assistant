@@ -167,28 +167,6 @@ def jobs_for(engine: Engine, settings: Settings) -> tuple[Job, ...]:
       run any number of times", and ADR-0076 §5 is explicit that the scheduler
       "inherits this method unchanged" — so this job is that method, not a copy of
       it.
-    * **Calendar reader** — leg 6's read-only ingestion (ADR-0093 §6), and the one
-      job whose disabled default is *only* about consent. §7 is emphatic that
-      "nothing may read a user's personal files because a default said so — not
-      that anything technical is missing", so ``calendar_reader_interval`` is
-      ``None`` until an operator sets it (§7a) and the job is simply absent until
-      then.
-
-      **It was never observation's kind of disabled, and §6 says so in as many
-      words**: "A reader's job may ship enabled once §9's gate is discharged. The
-      reason observation ships disabled is specific to observation and does not
-      transfer." Observation no longer runs at all (ADR-0285 §3), which changes
-      nothing here. This job stays off until an operator sets a path and an
-      interval, because what its default would decide is a **grant** over a file
-      the assistant does not own — "a fresh install that read a calendar unasked
-      would be making the grant decision by omission". Stating this is the point
-      of that ADR — left unstated, the next lane reads one job's default as
-      the house posture for every scheduled job.
-
-      ``Settings`` refuses an interval whose source path is unset (ADR-0093 §7a),
-      so this entry can never arm a job with nothing to read: the incoherent
-      fourth state of §7a's matrix fails at load, where a scheduler that omitted
-      the requested job would instead report health while running nothing.
     * **Notification reconsideration** — ADR-0130 §5's required job, re-ruling
       every held record whose ``reconsider_at`` has arrived. It is a **new row on
       this table**, which ADR-0130 §12 records as an addition of the kind ADR-0093
@@ -215,66 +193,25 @@ def jobs_for(engine: Engine, settings: Settings) -> tuple[Job, ...]:
       run after that, so by 08:05 at the default. §5 rules ``reconsider_at`` a
       floor rather than a deadline, so the remedy available to a deployment is a
       shorter interval rather than a different guarantee.
-    * **The upcoming-event producer** — ADR-0132's job, and the **second** row over
-      the calendar. It is a new row of the kind ADR-0093 §6 and ADR-0130 §5 each
+    * **The upcoming-event producer** — ADR-0132's job, and the one row that reads
+      a source. It is a new row of the kind ADR-0093 §6 and ADR-0130 §5 each
       already added, and it adds no mechanism: the body is a bound public engine
       method holding no store, no reader and no subsystem import (§7, §8).
 
-      **Its interval is its own and is never ``calendar_reader_interval``**
-      (ADR-0132 §4). The two consumers read the same file at their own cadence
-      (ADR-0093 §3) — ingestion's sized for how often beliefs should be refreshed,
-      this one's sized against its lead window — so arming or retuning one changes
-      the other in no way, and an operator who could not set one without setting
-      the other would have one cadence chosen for two jobs with different needs.
-
-      **Disabled by default for the calendar reader's reason exactly** (§7): a
-      fresh install that read a user's calendar unasked would be making that
-      decision by omission. ``Settings`` refuses an interval whose source path is
-      unset, and refuses a lead window that is not strictly greater than this
-      interval — a lead no longer than the gap between ticks leaves occurrences
-      that no tick ever sees, silently, while the job runs and reports health.
+      **Disabled by default, and the reason is consent** (ADR-0093 §7): "nothing
+      may read a user's personal files because a default said so — not that
+      anything technical is missing", so ``calendar_upcoming_interval`` is
+      ``None`` until an operator sets it and the job is simply absent until then.
+      ``Settings`` refuses an interval whose source path is unset, and refuses a
+      lead window that is not strictly greater than this interval — a lead no
+      longer than the gap between ticks leaves occurrences that no tick ever sees,
+      silently, while the job runs and reports health.
 
       **A late tick still opens a hole this table cannot close**, and ADR-0132 §4
       names it rather than smoothing it over: §7 schedules from *completion*, so
       the real gap is the interval plus the run, and the remedy available to a
       deployment is a lead comfortably larger than its interval. That is this
       producer's coverage argument and it is a bounded one.
-
-    * **Email reader** — ADR-0140's ingestion, and the **second source** on this
-      table rather than a second use of the first. ADR-0142 §4 gives each source
-      its own no-argument operation and §5 names all three of its artefacts from
-      one stem: the reader declares ``email``, so the row is ``email_reader``, the
-      arming field is ``email_reader_interval`` and the engine call is
-      ``ingest_email``. Three artefacts named by one rule are three a registry can
-      later enumerate mechanically, which is what §8 trades against not building
-      one yet.
-
-      **Its interval is its own and is never ``calendar_reader_interval``**
-      (ADR-0142 §1). The clause is bidirectional and marked: "No ingestion source's
-      arming field is derived from, defaulted from, or conditioned on another
-      source's." A deployment may run any subset of the configured sources'
-      ingestion jobs, including none and including all — so the calendar's row
-      being absent says nothing about this one, and the reverse.
-
-      **The reason the clause is marked rather than inferred** is that the breach
-      is silent and one-directional: defaulting ``email_reader_interval`` to
-      ``calendar_reader_interval`` when the former is unset would arm a read of the
-      user's mail because they had armed a read of their calendar. That is
-      ADR-0093 §7's consent failure arriving through a default rather than through
-      a flag, and it passes every test that only asks whether both jobs exist.
-
-      **Disabled by default for the calendar reader's reason exactly** (ADR-0093
-      §7), and ``Settings`` refuses an interval whose ``email_source_path`` is
-      unset (ADR-0140 §12) — so this entry can never arm a job with nothing to
-      read. The converse state *is* legal and is deliberately reachable: a path
-      with no interval builds the stage, arms no row, and leaves
-      ``Engine.ingest_email`` callable and reaching its grant gate (ADR-0142 §2).
-
-      **A failure here is this source's alone** (ADR-0142 §7). One ingestion job
-      raising ``ReaderError`` every tick neither disarms nor alters the outcome of
-      any other source's job; what the two share is §7's serial duty cycle, so a
-      long calendar read delays a due mail read by its own duration and a late tick
-      is never a correctness bug.
 
     * **Consolidation** — leg 7's chunked walk (ADR-0106, ADR-0111), and the
       **last** row, which is a scheduling decision rather than a listing order.
@@ -317,6 +254,10 @@ def jobs_for(engine: Engine, settings: Settings) -> tuple[Job, ...]:
       the cursor: ``Engine.consolidate`` takes no argument, and this row holds a
       bound method and neither reads the cursor, writes it, nor passes it.
 
+    **No reader ingests on this table** (ADR-0294 §1). The calendar's and the email
+    source's scheduled ingestion rows are retired and nothing replaces them here: a
+    source's content reaches memory only as what an activation concludes.
+
     **Confirmation deadlines are deliberately not here.** The roadmap names them as
     this scheduler's, and §7 is the one place that sentence does not survive contact
     with what is ratified below it: there is no operation to reclaim an expired
@@ -338,7 +279,6 @@ def jobs_for(engine: Engine, settings: Settings) -> tuple[Job, ...]:
     table: tuple[tuple[str, timedelta | None, JobBody], ...] = (
         ("retention_purge", settings.retention_purge_interval, engine.purge_expired),
         ("conversation_sweep", settings.conversation_sweep_interval, engine.start),
-        ("calendar_reader", settings.calendar_reader_interval, engine.ingest_calendar),
         (
             "notification_reconsider",
             settings.notification_reconsider_interval,
@@ -349,7 +289,6 @@ def jobs_for(engine: Engine, settings: Settings) -> tuple[Job, ...]:
             settings.calendar_upcoming_interval,
             engine.notice_upcoming_events,
         ),
-        ("email_reader", settings.email_reader_interval, engine.ingest_email),
         ("consolidation", settings.consolidation_interval, engine.consolidate),
     )
     return tuple(

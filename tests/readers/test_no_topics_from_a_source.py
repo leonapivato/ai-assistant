@@ -1,10 +1,12 @@
 """ADR-0213 §12.18 at the two concrete readers (issue #1836).
 
-§6: "A ``Reader`` states no topics, and no proposal reaching ``IngestionStage``
-carries any. A source's own categories, folder, labels, tags or headers are **not**
-a route by which a topic reaches a record." §12.18 words the obligation as a test:
-"A reader's proposal carries the empty tuple, whatever the source entry contains —
-including a source entry whose own fields are named like labels."
+§6: "A ``Reader`` states no topics, and no proposal reaching ``IngestionStage`` carries
+any. A source's own categories, folder, labels, tags or headers are **not** a route by
+which a topic reaches a record." §12.18 words the obligation as a test: "A reader's
+proposal carries the empty tuple, whatever the source entry contains — including a
+source entry whose own fields are named like labels." The stage is retired (ADR-0294
+§1); the reader half of the clause is what stands, and this module is where it is
+pinned.
 
 ADR-0183 §3's list of what a source may not set did not name topics because topics
 did not exist, and §6 adds this axis to it rather than reading the omission as
@@ -13,14 +15,13 @@ drives a **destructive** act in one of §2's deferred consumers, so an adversary
 can place bytes in a source would otherwise be choosing which of the owner's records
 a later "forget everything about X" destroys.
 
-**What this adds to what is already pinned.** PR #1832 discharges §12.18 at the seam
-§6 words it at — ``tests/orchestration/test_ingestion.py::
-test_no_proposal_reaching_this_stage_carries_a_topic`` — over a ``FakeReader``
-carrying label-shaped text. A fake states whatever the case hands it, so that arm
-pins the *stage*, not the producers: neither ``CalendarReader`` nor ``EmailReader``
-passes a ``topics=`` argument today, and nothing said so but the source. A later lane
-routing a source's own categories, folder, labels, tags or headers into that field
-would pass every check this project ran before this file.
+**What this pins.** PR #1832 discharged §12.18 at the stage §6 words it at, over a
+``FakeReader`` carrying label-shaped text, and that arm left with the stage. A fake
+states whatever the case hands it, so it pinned the *stage*, not the producers: neither
+``CalendarReader`` nor ``EmailReader`` passes a ``topics=`` argument today, and nothing
+said so but the source. A later lane routing a source's own categories, folder, labels,
+tags or headers into that field would pass every check this project ran before this
+file.
 
 **One module for both readers, not a case appended to each reader's own suite.** The
 clause is one rule over the set of producers, and the two readers' modules are each

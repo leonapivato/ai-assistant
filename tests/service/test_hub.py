@@ -77,8 +77,6 @@ class FakeEngine:
         self.started = 0
         self.closed = 0
         self.purged = 0
-        self.ingested = 0
-        self.mail_ingested = 0
         self.consolidated = 0
         self.reconsidered = 0
         self.noticed = 0
@@ -111,46 +109,29 @@ class FakeEngine:
         # (ADR-0119 §10) — the honest report for a stand-in that holds no store.
         return PurgeReport(records=0, questions=0, traces=None)
 
-    async def ingest_calendar(self) -> None:
-        # Leg 6's read-only ingestion (ADR-0093 §6). Present whether or not a
-        # deployment arms the job, because `jobs_for` builds §7's whole table
-        # before filtering it by interval — a stand-in missing a method the real
-        # façade carries fails the hub's *startup*, not just the job.
-        self.ingested += 1
-        _marker.info("fake_engine_ingested")
-
-    async def ingest_email(self) -> None:
-        # ADR-0140's ingestion, and the **second source's own operation** rather
-        # than an argument to the first (ADR-0142 §4). Present for
-        # `ingest_calendar`'s reason exactly — `jobs_for` builds §7's whole table
-        # before filtering it by interval — which is why this stand-in acquiring
-        # the method is what the two-source table costs a fake engine, and why
-        # omitting it fails the hub's startup rather than one job.
-        self.mail_ingested += 1
-        _marker.info("fake_engine_ingested_email")
-
     async def consolidate(self) -> None:
-        # Leg 7's chunked walk (ADR-0106, ADR-0111). Present for `ingest_calendar`'s reason:
-        # `jobs_for` builds §7's whole table before filtering it by interval, so a
-        # stand-in missing a method the real façade carries fails the hub's
-        # *startup* rather than only the job it would have armed.
+        # Leg 7's chunked walk (ADR-0106, ADR-0111). Present whether or not a
+        # deployment arms the job, because `jobs_for` builds §7's whole table
+        # before filtering it by interval, so a stand-in missing a method the real
+        # façade carries fails the hub's *startup* rather than only the job it
+        # would have armed.
         self.consolidated += 1
         _marker.info("fake_engine_consolidated")
 
     async def notice_upcoming_events(self) -> int:
-        # ADR-0132's upcoming-event producer. Present for ``ingest_calendar``'s reason
+        # ADR-0132's upcoming-event producer. Present for ``consolidate``'s reason
         # exactly — ``jobs_for`` builds §7's whole table before filtering it by
-        # interval — and disabled for ``ingest_calendar``'s reason too: nothing may read a
-        # user's personal files because a default said so (ADR-0093 §7, ADR-0132
-        # §4), so ``calendar_upcoming_interval`` is ``None`` until an operator sets
-        # it and this method exists only so the table can be built.
+        # interval — and disabled because nothing may read a user's personal files
+        # because a default said so (ADR-0093 §7, ADR-0132 §4), so
+        # ``calendar_upcoming_interval`` is ``None`` until an operator sets it and
+        # this method exists only so the table can be built.
         self.noticed += 1
         _marker.info("fake_engine_noticed")
         return 0
 
     async def reconsider_notifications(self) -> int:
         # Leg 10's reconsideration drain (ADR-0130 §5), and the one job on §7's
-        # table that ships **enabled** — so unlike `ingest` and `consolidate` this
+        # table that ships **enabled** — so unlike `consolidate` this
         # stand-in is actually driven by the default table rather than merely
         # required to exist for it to be built.
         self.reconsidered += 1

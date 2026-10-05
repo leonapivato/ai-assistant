@@ -1,10 +1,11 @@
 """The calendar reader's operator recipe, held to the identifiers it names (#1022).
 
 :mod:`ai_assistant.readers.calendar`'s module docstring is the deployment recipe for
-this reader: the ``vdirsyncer`` pairing, the settings that arm each of the two jobs,
-and the three independent acts that arm unprompted contact. Nothing asserted it, and
-a docstring is exactly where a rename lands without a failure — the identifier moves,
-the prose keeps naming the old one, and every check this project runs still passes.
+this reader: the ``vdirsyncer`` pairing, the settings that configure the source and arm
+its producer, and the three independent acts that arm unprompted contact. Nothing
+asserted it, and a docstring is exactly where a rename lands without a failure — the
+identifier moves, the prose keeps naming the old one, and every check this project runs
+still passes.
 
 **It is not a hypothetical.** A false claim about a duration parser shipped green in
 this very docstring — it said the settings took ISO-8601 durations only, and
@@ -40,12 +41,11 @@ RECIPE: Final = calendar.__doc__ or ""
 PREFIX: Final = str(Settings.model_config["env_prefix"])
 
 #: The settings whose absence would leave the recipe unable to arm what it describes:
-#: the file to read, the ingestion job's cadence, the producer's cadence, its lead,
-#: and the window the lead is bounded by. Named as *fields*, so a rename fails here
+#: the file to read, the producer's cadence, its lead, and the window the lead is
+#: bounded by. Named as *fields*, so a rename fails here
 #: rather than being renamed in one place and left standing in the prose.
 ARMED: Final = (
     "calendar_reader_path",
-    "calendar_reader_interval",
     "calendar_upcoming_interval",
     "calendar_upcoming_lead",
     "calendar_window_future",
@@ -83,9 +83,9 @@ def test_every_setting_the_recipe_names_is_one_the_configuration_defines() -> No
 def test_the_recipe_still_names_each_setting_its_arming_steps_turn_on(field: str) -> None:
     """The other direction: a setting the recipe stopped naming is a step nobody can take.
 
-    ADR-0132 §4 makes the two jobs independent — arming ingestion arms no producer
-    and vice versa — so each cadence has to be named where the operator is reading,
-    and the lead and the window are the pair whose coherence rule is refused at load.
+    The producer's cadence has to be named where the operator is reading, and the
+    lead and the window are the pair whose coherence rule is refused at load
+    (ADR-0132 §4).
     """
     assert Settings.model_fields[field] is not None, "the roster here is over real fields"
     assert f"{PREFIX}{field.upper()}" in RECIPE
@@ -107,9 +107,9 @@ def test_every_scope_the_recipe_offers_is_a_member_of_the_type() -> None:
     """ADR-0133 §6's obligation applied to the recipe that tells an operator what to type.
 
     Every ``--scope`` the recipe spells has to be a use ``GrantScope`` actually
-    admits: a stale one is a command that fails at the door, and the three the recipe
-    walks through — ``facet``, ``ingest`` and the ``notify`` that neither back-fills
-    — are the whole of what arming unprompted contact needs.
+    admits: a stale one is a command that fails at the door, and the two the recipe
+    walks through — ``facet`` and the ``notify`` it does not back-fill — are the
+    whole of what arming unprompted contact needs.
     """
     offered = set(re.findall(r"--scope (\w+)", RECIPE))
     admitted = {scope.value for scope in GrantScope}

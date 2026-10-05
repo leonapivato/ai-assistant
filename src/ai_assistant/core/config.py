@@ -2965,14 +2965,11 @@ class Settings(BaseSettings):
     # may present it as one: a field here cannot be revoked by the user through
     # the assistant, cannot be scoped, and leaves no audit record (§7, #629).
     #
-    # **The two nullable fields interact, so §7a names the four states rather than
-    # leaving them to compose**: both unset is fully disabled (the default); a path
-    # with no interval is the **facet-only** state, which is *reserved, not
-    # enabled* — no adapter may ship before `CurrentContext` grows the calendar
-    # field, so today it configures a source nothing reads; both set is the live
-    # arrangement, subject to §9's gates; and an interval with no path is
-    # incoherent and is refused at load by `_a_reader_interval_needs_a_source`
-    # below.
+    # **The path is the source, and no field here arms a scheduled read of it into
+    # memory** (ADR-0294 §1). `calendar_reader_interval`, which armed scheduled
+    # ingestion, is retired with the job; the path configures the source that the
+    # request-path facet reads and the upcoming-event producer reads on its own
+    # interval below.
     calendar_reader_path: Path | None = Field(
         default=None,
         description=(
@@ -3016,22 +3013,6 @@ class Settings(BaseSettings):
             raise ValueError(msg)
         return expanded
 
-    # ADR-0083 §7's convention exactly, and for its reason: the scheduler re-arms
-    # from *completion*, so an interval of zero makes the job due again the instant
-    # it finishes, and "off" and "as fast as possible" look identical in a config
-    # file. Hence **disabled is `None`, never `0`**.
-    #
-    # The job this arms is a later lane (ADR-0093 §10's closing paragraph); the
-    # field lands here because §7a names it, and because the incoherent-state
-    # refusal below cannot be expressed without it.
-    calendar_reader_interval: _NullableDuration = Field(
-        default=None,
-        gt=timedelta(0),
-        description=(
-            "How often the hub reads the configured calendar; None disables the "
-            "scheduled ingestion job (ADR-0093 §7a). Never 0."
-        ),
-    )
     # The window is **two fields, not one**, because a calendar's usefulness is
     # asymmetric: the future is what the assistant needs to know about, and the
     # past is wanted only so that "this morning" is still in view. One symmetric
@@ -3132,14 +3113,9 @@ class Settings(BaseSettings):
     )
 
     # --- The upcoming-event producer (ADR-0132 §4) ------------------------
-    # **Two fields of its own, and neither is `calendar_reader_interval`.** §4 is
-    # explicit that "arming or retuning one of these two changes ingestion's
-    # cadence in no way, and arming ingestion arms no producer": the two consumers
-    # read the same file at their own cadence (ADR-0093 §3), ingestion's sized for
-    # how often beliefs should be refreshed and this one's sized against the lead
-    # window by the cross-field rule below. A figure good for one is routinely
-    # wrong for the other, and an operator who cannot set one without setting the
-    # other has one cadence chosen for two jobs with different needs.
+    # **Two fields of its own** (§4). The producer reads the file at its own
+    # cadence (ADR-0093 §3), sized against the lead window by the cross-field rule
+    # below, and no other consumer's figure stands in for it.
     #
     # **The interval is `None` until an operator sets it**, which is ADR-0093 §7's
     # rule for the same source unchanged — "nothing may read a user's personal
@@ -3176,10 +3152,12 @@ class Settings(BaseSettings):
     def _an_upcoming_interval_needs_a_source(self) -> Settings:
         """Refuse an armed producer with nothing to read (ADR-0132 §4).
 
-        ``calendar_reader_interval``'s refusal below, for the second job over the
-        same source and for its reason unchanged: "An armed producer with no
-        source to read is an incoherent state and is refused as one rather than
-        discovered at the first tick."
+        "An armed producer with no source to read is an incoherent state and is
+        refused as one rather than discovered at the first tick." Every alternative
+        is worse and silently different: a scheduler that omits the requested job
+        reports health while running nothing, one that arms it re-runs a failing
+        job forever, and one that treats it as a source fault turns a
+        configuration mistake into an infinite retry.
 
         Raises:
             ValueError: If an interval is set with no path beside it.
@@ -3267,29 +3245,6 @@ class Settings(BaseSettings):
             raise ValueError(msg)
         return self
 
-    @model_validator(mode="after")
-    def _a_reader_interval_needs_a_source(self) -> Settings:
-        """Refuse a scheduled read of a source that is not configured (ADR-0093 §7a).
-
-        The fourth state of §7a's matrix, and the only incoherent one. The refusal
-        follows this module's own posture — a figure the runtime would refuse must
-        fail at load — and the alternative outcomes are all worse and all silently
-        different: a scheduler that omits the requested job reports health while
-        running nothing, one that arms it re-runs a failing job forever, and one
-        that treats it as a source fault turns a configuration mistake into an
-        infinite retry.
-
-        Raises:
-            ValueError: If an interval is set with no path beside it.
-        """
-        if self.calendar_reader_interval is not None and self.calendar_reader_path is None:
-            msg = (
-                "calendar_reader_interval is set but calendar_reader_path is not; a "
-                "scheduled read needs a source to read (ADR-0093 §7a)"
-            )
-            raise ValueError(msg)
-        return self
-
     # --- The email source (ADR-0140 §12) ----------------------------------
     # **Seven fields, derived from this source rather than copied from the
     # calendar's nine** (§12). What is *absent* is as decided as what is here: no
@@ -3338,14 +3293,6 @@ class Settings(BaseSettings):
             raise ValueError(msg)
         return expanded
 
-    email_reader_interval: _NullableDuration = Field(
-        default=None,
-        gt=timedelta(0),
-        description=(
-            "How often the hub reads the configured email store; None disables the "
-            "scheduled ingestion job (ADR-0140 §12). Never 0."
-        ),
-    )
     # **One window edge, not two, and it may not be zero.** A calendar is
     # asymmetric because the future is what the assistant needs; a mailbox has no
     # future, so an `email_window_future` would bound nothing. The remaining edge
@@ -3423,33 +3370,6 @@ class Settings(BaseSettings):
             "before each proposal is built (ADR-0140 §12)."
         ),
     )
-
-    @model_validator(mode="after")
-    def _an_email_interval_needs_a_source(self) -> Settings:
-        """Refuse a scheduled read of a source that is not configured (ADR-0140 §12).
-
-        ``_a_reader_interval_needs_a_source`` above, for the equivalent pair and
-        for ADR-0093 §7a's reason unchanged: every alternative outcome is worse
-        and every one is silently different. A scheduler that omits the requested
-        job reports health while running nothing, one that arms it re-runs a
-        failing job forever, and one that treats it as a source fault turns a
-        configuration mistake into an infinite retry.
-
-        **The converse pair is coherent and is deliberately not refused.** A path
-        with no interval is the facet-only state — a source a request-path
-        assembly may read while nothing ingests from it on a schedule — which is
-        one of ADR-0140 §9's three scopes being granted without the other.
-
-        Raises:
-            ValueError: If an interval is set with no path beside it.
-        """
-        if self.email_reader_interval is not None and self.email_source_path is None:
-            msg = (
-                "email_reader_interval is set but email_source_path is not; a "
-                "scheduled read needs a source to read (ADR-0140 §12)"
-            )
-            raise ValueError(msg)
-        return self
 
     # --- The local-file fetch root and its bounds (ADR-0230 §4, §6) -------
     # **Off until configured, which is what makes the standing cost zero** (§6).

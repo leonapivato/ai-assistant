@@ -100,8 +100,7 @@ class _FailsOnTheRecheck:
     whose own ``fail_live`` script arms *every* call — while the case under test
     needs the failure to arrive **between** two of them. Everything the driver
     observes is the canonical fake's; what is scripted here is only when the arming
-    happens. ``tests/orchestration/test_ingestion.py`` carries the same double for
-    the same clause over the other driver.
+    happens.
     """
 
     def __init__(self, inner: FakeSourceGrants) -> None:
@@ -597,11 +596,10 @@ async def test_a_conforming_reading_cannot_carry_a_blank_sentence() -> None:
 
     ``NotificationCandidate.summary`` is non-blank while a ``MemoryRecord``'s
     ``content`` is not, so the obvious defensive move is to skip a proposal that
-    rendered to nothing. It is declined, on ``IngestionStage``'s own posture: "No
-    check stands between the reader and the writer, deliberately… re-asserting them
-    here would be a second copy of a rule the seam already holds, sited where a
-    reader's non-conformance would be reported as an ingestion fault rather than as
-    the contract breach it is."
+    rendered to nothing. It is declined: re-asserting a producer-side obligation here
+    would be a second copy of a rule the seam already holds, sited where a reader's
+    non-conformance would be reported as this stage's fault rather than as the
+    contract breach it is.
 
     The canonical fake is the evidence that the corpus already treats this as
     producer-side: ``attested_proposal`` refuses a blank rendering outright, and the

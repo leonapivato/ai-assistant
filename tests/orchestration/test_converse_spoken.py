@@ -1032,7 +1032,7 @@ async def test_an_engine_with_no_speech_seams_refuses_rather_than_failing() -> N
 
     ``TranscriptionFailedError`` would report a hub that has no transcriber as one
     whose transcription failed, and would invite a retry that cannot succeed. This
-    is ``Engine.ingest_email``'s shape, and it is a property of *this object's*
+    is ``Engine.notice_upcoming_events``'s shape, and it is a property of *this object's*
     wiring rather than of the contract — the standing ``AssistantEngine``'s own
     docstring gives a shutting-down engine's ``RuntimeError``.
     """

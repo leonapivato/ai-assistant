@@ -43,16 +43,16 @@ The readers here are :class:`~ai_assistant.readers.calendar.CalendarReader` and
 :class:`~ai_assistant.readers.email.EmailReader` — two implementations of one
 behaviour, which ADR-0095 §3 named as "precisely and only what a shared
 conformance suite is for" and as the condition under which that suite starts
-paying. Each reading has the **two consumers ADR-0093 §3 gives one, reading at their
-own cadences**: the ``context/`` facet reads at assembly time, ingestion reads on
-its schedule, and neither derives its answer from the other's reading. The two are
-not meant to agree — a facet read at 10:00 and a belief written from an 09:00 run
-*should* state different things — which is what a reading's own instants are for.
+paying. Each source may have **more than one consumer, each reading at its own
+cadence** (ADR-0093 §3): the ``context/`` facet reads at assembly time, the
+calendar's upcoming-event producer reads on its schedule (ADR-0132), and neither
+derives its answer from the other's reading. Nothing reads a source into memory on
+a schedule: that consumer is retired (ADR-0294 §1).
 
 **Each consumer holds its own reader instance rather than sharing one**
 (ADR-0096 §5), because ADR-0093 §7 bounds a reader at one outstanding worker *per
-instance*: a shared one would let a scheduled ingestion read suppress the
-request-path facet for as long as it ran, coupling a request cadence to a periodic
+instance*: a shared one would let a scheduled read suppress the request-path
+facet for as long as it ran, coupling a request cadence to a periodic
 job in the direction that makes an advisory facet wait.
 
 Which objects hold those two ends is deliberately not named here. The leaf

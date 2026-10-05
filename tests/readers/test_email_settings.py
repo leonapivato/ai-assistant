@@ -45,7 +45,6 @@ from hostile_values import (
 from pydantic import ValidationError
 
 from ai_assistant.core.config import _MAX_EMAIL_WINDOW, Settings, load_settings
-from ai_assistant.core.errors import ConfigurationError
 from ai_assistant.readers import (
     DEFAULT_EMAIL_MAX_BYTES,
     DEFAULT_EMAIL_MAX_CONTENT_BYTES,
@@ -63,7 +62,7 @@ _ABSOLUTE = Path("/srv/mail/inbox.mbox")
 
 
 def test_the_email_reader_ships_disabled() -> None:
-    """Both nullable fields ``None``, so a fresh install reads no mail.
+    """The source path ``None``, so a fresh install reads no mail.
 
     ADR-0093 §7's reason unchanged — "nothing may read a user's personal files
     because a default said so" — and it places the default correctly relative to
@@ -75,7 +74,6 @@ def test_the_email_reader_ships_disabled() -> None:
     settings = Settings()
 
     assert settings.email_source_path is None
-    assert settings.email_reader_interval is None
 
 
 def test_the_settings_defaults_are_the_readers_defaults() -> None:
@@ -90,8 +88,8 @@ def test_the_settings_defaults_are_the_readers_defaults() -> None:
     assert _MAX_EMAIL_WINDOW == MAX_EMAIL_WINDOW == timedelta(days=3650)
 
 
-def test_the_table_is_seven_fields_and_a_field_added_is_a_decision() -> None:
-    """§12 says "exactly these seven", and the absences are as decided as the entries.
+def test_the_table_is_six_fields_and_a_field_added_is_a_decision() -> None:
+    """§12's seven, less the interval ADR-0294 §5 retires; the absences are decided too.
 
     No ``email_window_future``, because a mailbox has no future and the field would
     bound nothing. No expansion budget, because a mailbox has no generator — the
@@ -104,7 +102,6 @@ def test_the_table_is_seven_fields_and_a_field_added_is_a_decision() -> None:
 
     assert email_fields == {
         "email_source_path",
-        "email_reader_interval",
         "email_window_past",
         "email_max_messages",
         "email_max_bytes",
@@ -137,39 +134,21 @@ def test_a_source_path_is_expanded_but_not_required_to_exist() -> None:
     assert not str(expanded).startswith("~")
 
 
-def test_an_interval_with_no_source_is_refused_at_load(monkeypatch: pytest.MonkeyPatch) -> None:
-    """The one incoherent state of the pair (ADR-0140 §12).
+def test_the_retired_ingestion_interval_is_ignored_and_arms_nothing(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """ADR-0294 §5: the field and its load-time refusal are gone, and the variable is inert.
 
-    The alternatives are all worse and all silently different: a scheduler that
-    omits the requested job reports health while running nothing, one that arms it
-    re-runs a failing job forever, and one that treats it as a source fault turns a
-    configuration mistake into an infinite retry.
+    A deployment that set ``ASSISTANT_EMAIL_READER_INTERVAL`` before the change still
+    starts — ``Settings`` ignores a variable that names no field — and nothing reads
+    it, including the refusal that once paired it with ``email_source_path``.
     """
-    with pytest.raises(ValidationError, match="needs a source to read"):
-        Settings(email_reader_interval=timedelta(hours=1))
-
     monkeypatch.setenv("ASSISTANT_EMAIL_READER_INTERVAL", "PT1H")
-    with pytest.raises(ConfigurationError, match="invalid configuration"):
-        load_settings()
 
+    settings = load_settings()
 
-def test_the_three_coherent_states_load() -> None:
-    """Fully disabled, a source with no scheduled read, and both live."""
-    assert Settings().email_reader_interval is None
-    assert Settings(email_source_path=_ABSOLUTE).email_reader_interval is None
-    both = Settings(email_source_path=_ABSOLUTE, email_reader_interval=timedelta(hours=6))
-    assert both.email_reader_interval == timedelta(hours=6)
-
-
-def test_disabled_is_none_and_never_zero() -> None:
-    """ADR-0083 §7's convention, and its reason applies unmodified.
-
-    The scheduler re-arms a job from its *completion*, so an interval of zero makes
-    it due again the instant it finishes — and "off" and "as fast as possible" look
-    identical in a config file.
-    """
-    with pytest.raises(ValidationError):
-        Settings(email_source_path=_ABSOLUTE, email_reader_interval=timedelta(0))
+    assert "email_reader_interval" not in Settings.model_fields
+    assert settings.email_source_path is None
 
 
 # --- the ranges §12 names ----------------------------------------------------

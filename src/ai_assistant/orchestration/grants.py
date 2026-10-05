@@ -21,11 +21,10 @@ exist; ADR-0093 §2 forbids any subsystem importing the reader package and
 §10 excluded the rule from that store's conformance suite for exactly this reason.
 Nothing here imports ``ai_assistant.readers`` either: the composition root reads
 each identity off the :class:`~ai_assistant.core.protocols.Reader` object it built
-and hands over the result, which is golden rule 1 and is what ``IngestionStage``
-already does with the reader itself.
+and hands over the result, which is golden rule 1.
 
 **This object is the only holder of a ``SourceGrantStore``** (ADR-0097 §3, §9;
-ADR-0102 §7). Every driver — the ingestion stage, the calendar context source —
+ADR-0102 §7). Every driver — the context sources, the upcoming-event producer —
 holds the narrow :class:`~ai_assistant.core.protocols.SourceGrants` instead, which
 is the split that makes "only a user act creates a grant" a type rather than a
 promise.
@@ -74,9 +73,8 @@ _IDENTIFIER: Final = TypeAdapter[str](Identifier)
 class HeldSource:
     """One source the composition root built, as this layer sees it (ADR-0102 §7).
 
-    A plain internal class rather than a `core` model, for
-    :class:`~ai_assistant.orchestration.ingestion.IngestionReport`'s reason: it
-    crosses no subsystem boundary. It is the composition root's *input* to this
+    A plain internal class rather than a `core` model, because it crosses no
+    subsystem boundary. It is the composition root's *input* to this
     object, and what leaves this object is :class:`GrantableSource`, which is
     `core`'s.
 

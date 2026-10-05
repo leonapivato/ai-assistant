@@ -37,9 +37,9 @@ state** (ADR-0140 §3), and §5's own argument transfers clause for clause: the
 window moves with the clock, so every run recomputes it from scratch. What that
 costs is stated rather than assumed — it holds for as long as the fetcher's
 retention exceeds this reader's window, and where it does not, messages are lost
-to ingestion permanently. That is §5's already-accepted price arriving through the
-fetcher rather than through the clock, and the operator's remedy is the same:
-lengthen the retention or shorten the interval, knowingly.
+to this reader permanently. That is §5's already-accepted price arriving through
+the fetcher rather than through the clock, and the operator's remedy is to
+lengthen the retention, knowingly.
 
 **Envelopes only, and the argument is minimisation before it is injection**
 (ADR-0140 §5). What leaves this reader is a sender string, a subject string and
@@ -248,7 +248,7 @@ half-implements.
 - **A retention exceeding the reader's window, and a credential that never
   enters the hub** (§13, §11). ``retention`` is the fetcher's and must exceed
   ``ASSISTANT_EMAIL_WINDOW_PAST`` below, because §3 leaves no cursor: a message
-  that leaves the store before a read sees it is lost to ingestion permanently.
+  that leaves the store before a read sees it is lost to this reader permanently.
   It must also stay inside ``ASSISTANT_EMAIL_MAX_MESSAGES``, which refuses rather
   than truncates — a retention that outgrows the cap takes the source offline
   rather than reading the recent tail (§12). The credential is the fetcher's
@@ -292,18 +292,16 @@ from.
   response with no matching item are both skipped, which keeps the failure
   per-message — the same shape §5 gives the reader for a header it cannot use.
 
-**Arming the read** is two settings, and the hub reads nothing on the strength of
-them::
+**Configuring the source** is one setting, and the hub reads nothing on the
+strength of it::
 
     ASSISTANT_EMAIL_SOURCE_PATH=/home/you/.mail/assistant.mbox
-    ASSISTANT_EMAIL_READER_INTERVAL=PT15M
 
 The path must be absolute — a relative one is refused at load, since it would
-resolve against each process's working directory — and ``~`` is expanded. The two
-are a matrix ``Settings`` refuses to leave incoherent: an interval with no path
-fails at load, while a **path with no interval is coherent and deliberately
-allowed**, being the facet-only state where a request-path assembly may read the
-store while nothing ingests from it on a schedule (§12). The five remaining
+resolve against each process's working directory — and ``~`` is expanded. It
+configures the source a request-path assembly may read; nothing reads the store
+into memory on a schedule, because scheduled ingestion is retired (ADR-0294 §1),
+so there is no interval to arm. The five remaining
 fields — ``ASSISTANT_EMAIL_WINDOW_PAST`` (7 days), ``ASSISTANT_EMAIL_MAX_MESSAGES``
 (2,000), ``ASSISTANT_EMAIL_MAX_BYTES`` (8 MiB), ``ASSISTANT_EMAIL_READ_TIMEOUT``
 (10 s) and ``ASSISTANT_EMAIL_MAX_CONTENT_BYTES`` (4 MiB) — carry §12's defaults
@@ -321,12 +319,12 @@ the one that starts cleanly.
 
 **The grant is a separate act, and configuration is not consent** (§9, ADR-0097
 §5). Until the user grants the source through a client the store is not
-resolved, not opened and not parsed, and the scheduler's job fails every tick
-with ``SourceNotGrantedError`` rather than reading::
+resolved, not opened and not parsed, and the request-path facet contributes
+nothing::
 
     assistant sources                                 # what is offered, and from where
-    assistant grant email --scope facet --scope ingest
-    assistant amend email --scope ingest              # narrow or widen; two acts, both recorded
+    assistant grant email --scope facet
+    assistant amend email --scope facet --scope notify  # narrow or widen; two acts, both recorded
     assistant revoke email                            # prospective (ADR-0097 §6)
 
 The source is **positional**; there is no ``--source`` option. A source holds one

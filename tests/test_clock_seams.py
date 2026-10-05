@@ -137,7 +137,6 @@ from ai_assistant.orchestration import (
     Engine,
     ForecastServicer,
     GrantOperations,
-    IngestionStage,
     LearningLoop,
     MemoryWriteStage,
     ParkedReadOperations,
@@ -886,18 +885,6 @@ async def _fake_goal_authorization_store(now: Clock) -> None:
     await FakeGoalAuthorizationStore(now=now).live_for("goal-1", "tool-1")
 
 
-async def _ingestion(now: Clock) -> None:
-    """The stage stamps the read it records from its own clock."""
-    memory = FakeMemoryStore(now=lambda: _AWARE)
-    await IngestionStage(
-        reader=FakeReader(),
-        writes=_writes(memory),
-        grants=FakeSourceGrants([source_grant()]),
-        reads=FakeSourceReadRecorder(),
-        now=now,
-    ).ingest()
-
-
 async def _planner(now: Clock) -> None:
     """The plan the model's reply becomes is stamped ``created_at`` from the clock."""
     await ModelBackedPlanner(FakeModelProvider(_PLAN_REPLY), now=now).plan(
@@ -1250,7 +1237,6 @@ SEAMS = [
     Seam("FakeGoalAuthorizations", _fake_goal_authorizations, ClockReadingError),
     Seam("FakeRecipientGrantStore", _fake_recipient_grant_store, ClockReadingError),
     Seam("FakeRecipientGrants", _fake_recipient_grants, ClockReadingError),
-    Seam("IngestionStage", _ingestion, ClockReadingError),
     Seam("ModelBackedPlanner", _planner, PlanningError),
     Seam("QuestionStage", _questions, DeferralStoreError),
     Seam("RuleBasedFeedbackProcessor", _rule_based_processor, ClockReadingError),
@@ -1588,7 +1574,6 @@ PROPAGATED: Final[dict[str, str]] = {
     "FakeGoalAuthorizations": ("the second face of that same double, with its clause verbatim"),
     "FakeRecipientGrantStore": _UNDECLARED,
     "FakeRecipientGrants": _UNDECLARED,
-    "IngestionStage": _UNDECLARED,
     "RuleBasedFeedbackProcessor": (
         "documented at ``learning/processor.py:146``, and `learning` owns no error class"
     ),

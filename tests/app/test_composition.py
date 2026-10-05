@@ -189,8 +189,8 @@ async def test_build_engine_wires_one_read_trail_into_every_driver_and_the_facad
     """The trail the drivers record into is the trail the engine reads (ADR-0186 §10).
 
     **The single-instance obligation with the most ways to get it wrong**, because
-    this object is passed **four** times and under two different types: narrowed to
-    ``SourceReadRecorder`` at each of the three drivers, and whole as a
+    this object is passed to every driver and to the façade, under two different
+    types: narrowed to ``SourceReadRecorder`` at each driver, and whole as a
     ``SourceReadTrail`` at the façade (ADR-0185 §4). Structural typing is what makes
     that sound, and it is also what makes the mistake invisible — a *second*
     ``SqliteSourceReadTrail`` satisfies both seams just as well, so nothing but
@@ -204,9 +204,10 @@ async def test_build_engine_wires_one_read_trail_into_every_driver_and_the_facad
     #1485 records for the audit trail one store over — a correct value with no
     reader — arriving as a wiring slip rather than as a missing surface.
 
-    The calendar source is configured so that all three drivers exist: with it unset
-    the two ingestion stages and the upcoming stage are ``None`` and the case would
-    assert only the façade's half, which is the half that cannot be wrong on its own.
+    The calendar source is configured so that both of its drivers exist: with it
+    unset the upcoming stage is ``None`` and no context source is registered, and the
+    case would assert only the façade's half, which is the half that cannot be wrong
+    on its own.
     """
     settings = Settings(
         embedder=EmbedderKind.HASHING,
@@ -220,11 +221,9 @@ async def test_build_engine_wires_one_read_trail_into_every_driver_and_the_facad
 
         # Every driver ADR-0185 §5 wires a recorder into, reached through the engine
         # rather than rebuilt — so this asserts the object the façade actually holds.
-        assert engine._calendar_ingestion is not None
-        assert engine._calendar_ingestion._reads is trail
         assert engine._upcoming is not None
         assert engine._upcoming._reads is trail
-        # The context source's own recorder, the third driver (ADR-0185 §5).
+        # The context source's own recorder, the second driver (ADR-0185 §5).
         provider = engine._loop._context
         assert isinstance(provider, AssemblingContextProvider)  # narrows the Protocol seam
         sources = [
@@ -1611,7 +1610,7 @@ async def _grant_the_mail(engine: Engine) -> None:
     grant naming anything else covers nothing — which is also what makes ADR-0142
     §7's "no grant on one source authorises a read of another" testable at all.
     """
-    await engine.grant(EMAIL_READER_NAME, scope=[GrantScope.FACET, GrantScope.INGEST])
+    await engine.grant(EMAIL_READER_NAME, scope=[GrantScope.FACET])
 
 
 async def _grant_the_calendar(engine: Engine) -> None:
@@ -1627,9 +1626,10 @@ async def _grant_the_calendar(engine: Engine) -> None:
 
     ``CALENDAR_READER_NAME`` rather than a literal, because ADR-0097 §1 keys a
     grant to the reader's **declared** identity and a grant naming anything else
-    covers nothing.
+    covers nothing. ``FACET`` alone, so a case that needs the upcoming-event
+    producer's ``NOTIFY`` grants it in so many words.
     """
-    await engine.grant(CALENDAR_READER_NAME, scope=[GrantScope.FACET, GrantScope.INGEST])
+    await engine.grant(CALENDAR_READER_NAME, scope=[GrantScope.FACET])
 
 
 async def test_build_engine_wires_both_drivers_on_a_configured_path(
@@ -1644,8 +1644,8 @@ async def test_build_engine_wires_both_drivers_on_a_configured_path(
     the *grant* decides whether anything is read.
 
     Both halves are covered because the property that matters is that neither
-    reads the file before the user says so: the stage exists and refuses, and the
-    context source is registered and contributes nothing.
+    reads the file before the user says so: the upcoming-event stage exists and
+    refuses, and the context source is registered and contributes nothing.
     """
     settings = Settings(
         embedder=EmbedderKind.HASHING,
@@ -1653,12 +1653,12 @@ async def test_build_engine_wires_both_drivers_on_a_configured_path(
     )
     engine = build_engine(settings, data_dir=tmp_path)
     try:
-        assert engine._calendar_ingestion is not None
+        assert engine._upcoming is not None
         assert len(_calendar_sources(engine)) == 1
         # ADR-0097 §8: an installation that has been reading a source stops
         # reading it until the user grants. Nothing is minted from configuration.
         with pytest.raises(SourceNotGrantedError):
-            await engine.ingest_calendar()
+            await engine.notice_upcoming_events()
         assert (await engine._loop._context.assemble()).calendar is None
     finally:
         await engine.aclose()
@@ -2102,7 +2102,7 @@ async def test_the_notification_surface_answers_instead_of_refusing(
     """ADR-0130 §9's five methods work on a composed hub (#948).
 
     Until this wiring existed every one of them raised ``ConfigurationError`` in
-    ``Engine.ingest_calendar``'s shape — and "no store is composed" and "nothing is held"
+    ``Engine.notice_upcoming_events``'s shape — and "no store is composed" and "nothing is held"
     are different facts, so answering an empty page would have reported the second
     while the first was true. The read, the preferences and the maintenance drain
     are asserted together because it is exactly the *pairing* the engine refuses
@@ -2468,7 +2468,7 @@ async def test_the_drivers_and_the_grant_operations_share_one_store(
     )
     engine = build_engine(settings, data_dir=tmp_path)
     try:
-        stage = engine._calendar_ingestion
+        stage = engine._upcoming
         assert stage is not None
         (facet_source,) = _calendar_sources(engine)
         assert stage._grants is engine._grants._store
@@ -2482,31 +2482,23 @@ async def test_a_granted_source_becomes_readable_and_a_revocation_stops_it(
 ) -> None:
     """Leg 6's exit test, reachable by a user rather than by a fake (#684).
 
-    The whole loop through the real surface: nothing is read, the user grants,
-    ingestion runs, the user revokes, and ingestion stops. What ADR-0102 §7 buys is
-    that every step here is one a person can take at a terminal.
-
-    **Revoking retires nothing**, which is asserted rather than assumed: ADR-0097
-    §6 makes revocation prospective, so the belief the granted read produced is
-    still held afterwards. A test that only checked the refusal would pass against
-    an implementation that deleted what it had ingested.
+    The whole loop through the real surface: nothing is read, the user grants, the
+    request-path facet reads, the user revokes, and the facet stops. What ADR-0102
+    §7 buys is that every step here is one a person can take at a terminal.
     """
     settings = Settings(
         embedder=EmbedderKind.HASHING,
-        calendar_reader_path=_one_event_calendar(tmp_path),
+        calendar_reader_path=_in_progress_calendar(tmp_path),
     )
     engine = build_engine(settings, data_dir=tmp_path)
     try:
-        with pytest.raises(SourceNotGrantedError):
-            await engine.ingest_calendar()
+        assert (await engine._loop._context.assemble()).calendar is None
 
         await _grant_the_calendar(engine)
-        assert (await engine.ingest_calendar()).stored == 1
+        assert (await engine._loop._context.assemble()).calendar is not None
 
         assert await engine.revoke(CALENDAR_READER_NAME) is not None
-        with pytest.raises(SourceNotGrantedError):
-            await engine.ingest_calendar()
-        assert len(await engine.beliefs()) == 1
+        assert (await engine._loop._context.assemble()).calendar is None
     finally:
         await engine.aclose()
 
@@ -2523,16 +2515,10 @@ async def test_build_engine_registers_the_configured_mail_source_on_its_own_read
     test in ADR-0140's list constructs its subject directly, so every one of them
     passes on an engine that wires none of them.
 
-    **All three registrations, and the instance assertion beside them.** The source
-    is offered by ``grantable_sources()`` under the declared identity ``email``, the
-    facet adapter is composed into the provider a turn assembles from, and the
-    ingestion stage is held — and the two readers are asserted **not to be the same
-    object**. That last half is not redundant with the presence checks: ADR-0096 §5
-    forbids the two consumers to share a reader and ADR-0093 §7 bounds each instance
-    at one outstanding worker, so a root injecting one reader into both wires a hub
-    in which a running scheduled ingest makes the request-path facet raise
-    ``ReaderError`` and vanish — passing every presence check while breaching a
-    ratified clause.
+    **Both registrations.** The source is offered by ``grantable_sources()`` under
+    the declared identity ``email``, and the facet adapter is composed into the
+    provider a turn assembles from. §13's third registration, the ingestion stage, is
+    retired (ADR-0294 §1).
     """
     store = _one_message_mailbox(tmp_path)
     settings = Settings(embedder=EmbedderKind.HASHING, email_source_path=store)
@@ -2542,11 +2528,7 @@ async def test_build_engine_registers_the_configured_mail_source_on_its_own_read
         assert [one.source for one in offered] == [EMAIL_READER_NAME]
         assert offered[0].location == str(store)
 
-        (facet_source,) = _email_sources(engine)
-        stage = engine._email_ingestion
-        assert stage is not None
-
-        assert stage._reader is not facet_source._reader
+        assert len(_email_sources(engine)) == 1
     finally:
         await engine.aclose()
 
@@ -2558,8 +2540,8 @@ async def test_build_engine_registers_nothing_for_email_without_a_path(
 
     ADR-0140 §13: "with it unset, none of the three is registered at all, because a
     source with nothing to read is 'I/O on personal data in exchange for nothing'".
-    All three absences are asserted, because a lane that keyed one of them off a
-    different field would pass a test of the other two.
+    Both remaining absences are asserted, because a lane that keyed one of them off a
+    different field would pass a test of the other.
 
     ``email_source_path`` defaults to ``None`` (ADR-0140 §12), so this is the
     shipping default rather than a configuration a test had to construct.
@@ -2567,10 +2549,7 @@ async def test_build_engine_registers_nothing_for_email_without_a_path(
     engine = build_engine(Settings(embedder=EmbedderKind.HASHING), data_dir=tmp_path)
     try:
         assert not _email_sources(engine)
-        assert engine._email_ingestion is None
         assert await engine.grantable_sources() == ()
-        with pytest.raises(ConfigurationError):
-            await engine.ingest_email()
     finally:
         await engine.aclose()
 
@@ -2578,21 +2557,19 @@ async def test_build_engine_registers_nothing_for_email_without_a_path(
 async def test_every_consumer_of_every_source_holds_its_own_reader(
     tmp_path: Path,
 ) -> None:
-    """ADR-0142 §9 test 4: five instances, no two of them one object.
+    """ADR-0142 §9 test 4's clause: one instance per consumer, no two of them one object.
 
     The clause is ADR-0096 §5's — each consumer of a source holds its **own** reader
     instance — and ADR-0142 §3 carries it across the second source rather than
     restating it for one. What this catches is a lane reusing one construction,
     "which no behavioural test in this list would notice": on a single-threaded test
     the shared instance answers every read correctly, and the breach only surfaces
-    on a running hub as a scheduled ingest suppressing the request-path facet.
+    on a running hub as one consumer's read suppressing another's.
 
-    **Asserted across sources as well as within them.** §9's item says the email
-    ingestion stage's reader "is not the instance the email ``context/`` adapter
-    holds, and is no calendar reader either", so identity is checked pairwise over
-    the whole set rather than within each source — a lane that shared one *calendar*
-    reader between the calendar's two consumers would otherwise pass an
-    email-only check.
+    **Asserted across sources as well as within them**, so identity is checked
+    pairwise over the whole set — the calendar's facet and its upcoming-event
+    producer, and the email facet — rather than within each source. No consumer
+    ingests (ADR-0294 §1), so the set has three members.
     """
     settings = Settings(
         embedder=EmbedderKind.HASHING,
@@ -2601,21 +2578,15 @@ async def test_every_consumer_of_every_source_holds_its_own_reader(
     )
     engine = build_engine(settings, data_dir=tmp_path)
     try:
-        calendar_ingestion = engine._calendar_ingestion
-        email_ingestion = engine._email_ingestion
         upcoming = engine._upcoming
-        assert calendar_ingestion is not None
-        assert email_ingestion is not None
         assert upcoming is not None
         (calendar_facet,) = _calendar_sources(engine)
         (email_facet,) = _email_sources(engine)
 
         readers = [
             calendar_facet._reader,
-            calendar_ingestion._reader,
             upcoming._reader,
             email_facet._reader,
-            email_ingestion._reader,
         ]
 
         assert len({id(reader) for reader in readers}) == len(readers)
@@ -2626,37 +2597,35 @@ async def test_every_consumer_of_every_source_holds_its_own_reader(
 async def test_no_grant_on_one_source_authorises_a_read_of_another(
     tmp_path: Path,
 ) -> None:
-    """ADR-0142 §9 test 7: a granted calendar buys no mail, and the mirror.
+    """ADR-0142 §9 test 7's clause, on the facets: a granted calendar buys no mail.
 
-    §7's marked clause: "Each source's ingestion read is gated on a live ``INGEST``
-    grant for **that source's** declared identity. No grant on one source authorises
-    a read of another, whatever its scope." ADR-0097 §5 and ADR-0133 §2 already rule
-    it; it is asserted here because a shared stage or a shared operation is exactly
-    how it would be breached by accident, and because the composition root is where
-    the wrong grant lookup would be injected.
+    ADR-0097 §5 and ADR-0133 §2 rule that no grant on one source authorises a read
+    of another, whatever its scope. It is asserted here because the composition
+    root is where the wrong grant lookup would be injected, and the facets are the
+    drivers left on both sources once ingestion is retired (ADR-0294 §1).
 
-    **Both directions, because one grant proves only one of them.** A stage
+    **Both directions, because one grant proves only one of them.** A driver
     constructed over the wrong source's grant lookup refuses the source that *is*
-    granted and admits the one that is not, so asserting a refusal alone is passed
-    by an engine that refuses everything.
+    granted and admits the one that is not, so asserting an absence alone is passed
+    by an engine that reads nothing.
     """
     settings = Settings(
         embedder=EmbedderKind.HASHING,
-        calendar_reader_path=_one_event_calendar(tmp_path),
+        calendar_reader_path=_in_progress_calendar(tmp_path),
         email_source_path=_one_message_mailbox(tmp_path),
     )
     engine = build_engine(settings, data_dir=tmp_path)
     try:
         await _grant_the_calendar(engine)
-        assert (await engine.ingest_calendar()).source == CALENDAR_READER_NAME
-        with pytest.raises(SourceNotGrantedError):
-            await engine.ingest_email()
+        context = await engine._loop._context.assemble()
+        assert context.calendar is not None
+        assert context.email is None
 
         assert await engine.revoke(CALENDAR_READER_NAME) is not None
         await _grant_the_mail(engine)
-        assert (await engine.ingest_email()).source == EMAIL_READER_NAME
-        with pytest.raises(SourceNotGrantedError):
-            await engine.ingest_calendar()
+        context = await engine._loop._context.assemble()
+        assert context.email is not None
+        assert context.calendar is None
     finally:
         await engine.aclose()
 
@@ -2675,7 +2644,7 @@ async def test_each_source_is_offered_under_its_own_identity_and_its_own_locatio
 
     **Each source's instances still deduplicate to one row**, which is ADR-0102 §7's
     other half and is what makes the count assertion below meaningful: two calendar
-    consumers and two email consumers, four readers, two offers.
+    consumers and one email consumer, three readers, two offers.
     """
     calendar = _one_event_calendar(tmp_path)
     store = _one_message_mailbox(tmp_path)
@@ -2691,41 +2660,6 @@ async def test_each_source_is_offered_under_its_own_identity_and_its_own_locatio
         assert set(offered) == {CALENDAR_READER_NAME, EMAIL_READER_NAME}
         assert offered[CALENDAR_READER_NAME].location == str(calendar)
         assert offered[EMAIL_READER_NAME].location == str(store)
-    finally:
-        await engine.aclose()
-
-
-async def test_an_ingested_mail_belief_is_readable_through_the_surface_the_user_has(
-    tmp_path: Path,
-) -> None:
-    """The second source's whole path: an mbox on disk becomes an inspectable belief.
-
-    The claim the wiring exists to support, and the one nothing below the composition
-    root can make — ``lint-imports`` forbids every subsystem to import
-    ``ai_assistant.readers``, so this layer is the only place a concrete reader and a
-    real store meet (ADR-0093 §2, ADR-0095 §3). It also pins the direction ADR-0093
-    §1 rules on for a source it had never been applied to: the reader proposed, and
-    the gate disposed.
-
-    Asserting on the *report's* source as well as the belief is what separates this
-    from the calendar's identical case: a lane that wired the calendar's reader into
-    ``email_ingestion`` would store a belief and report ``calendar``.
-    """
-    settings = Settings(
-        embedder=EmbedderKind.HASHING,
-        email_source_path=_one_message_mailbox(tmp_path),
-    )
-    engine = build_engine(settings, data_dir=tmp_path)
-    try:
-        await _grant_the_mail(engine)
-        report = await engine.ingest_email()
-
-        assert report.source == EMAIL_READER_NAME
-        assert report.proposed == 1
-        assert report.stored == 1
-        beliefs = await engine.beliefs()
-        assert len(beliefs) == 1
-        assert "Standup moved to ten" in beliefs[0].content
     finally:
         await engine.aclose()
 
@@ -2777,16 +2711,13 @@ async def test_a_granted_calendar_reaches_the_assembled_context_as_a_facet(
 
     The claim nothing below this layer can make: ``lint-imports`` forbids every
     subsystem to import ``ai_assistant.readers``, so this is the only place a real
-    ``CalendarReader`` and a real provider meet. It is the counterpart to the
-    ingestion end-to-end case — a file on disk becomes a *facet* rather than a
-    belief — and it is what would fail if the reader stopped populating
+    ``CalendarReader`` and a real provider meet — a file on disk becomes a *facet* —
+    and it is what would fail if the reader stopped populating
     ``SourceReading.facet`` and the adapter went back to contributing ``{}`` for
     every deployment.
 
     **It asserts the stamp and the count and nothing about the entry**, because the
-    facet carries no entry text at all: "Dentist" reaches memory through the
-    proposals and must not reach the situational context by a second route with a
-    different stamp (ADR-0096 §6).
+    facet carries no entry text at all (ADR-0096 §6:4).
     """
     settings = Settings(
         embedder=EmbedderKind.HASHING,
@@ -2835,9 +2766,10 @@ async def test_the_two_consumers_hold_separate_reader_instances(
     """ADR-0096 §5, decided there rather than left for this layer to pick by accident.
 
     ADR-0093 §7 bounds a reader at **one outstanding worker**, and that reservation
-    is per instance. Share one and a scheduled ingestion read suppresses the
-    request-path facet for as long as it runs — coupling a request cadence to a
-    periodic job, in the direction that makes an advisory facet wait on it.
+    is per instance. Share one and the upcoming-event producer's scheduled read
+    suppresses the request-path facet for as long as it runs — coupling a request
+    cadence to a periodic job, in the direction that makes an advisory facet wait on
+    it.
     """
     settings = Settings(
         embedder=EmbedderKind.HASHING,
@@ -2845,7 +2777,7 @@ async def test_the_two_consumers_hold_separate_reader_instances(
     )
     engine = build_engine(settings, data_dir=tmp_path)
     try:
-        stage = engine._calendar_ingestion
+        stage = engine._upcoming
         assert stage is not None
         (facet_source,) = _calendar_sources(engine)
         assert stage._reader is not facet_source._reader
@@ -2860,71 +2792,15 @@ async def test_build_engine_wires_no_reader_when_no_source_is_configured(
 
     "Every reader ships **disabled by default**, and the reason is that nothing may
     read a user's personal files because a default said so." So the ordinary
-    deployment builds no stage — and asking it to ingest is a wiring fault it
-    refuses, rather than an empty report indistinguishable from a source that had
-    nothing to say (§8).
+    deployment builds no stage — and asking it to notice upcoming events is a wiring
+    fault it refuses, rather than an empty count indistinguishable from a source
+    that had nothing to say (§8).
     """
     engine = build_engine(Settings(embedder=EmbedderKind.HASHING), data_dir=tmp_path)
     try:
-        assert engine._calendar_ingestion is None
+        assert engine._upcoming is None
         with pytest.raises(ConfigurationError):
-            await engine.ingest_calendar()
-    finally:
-        await engine.aclose()
-
-
-async def test_build_engine_wires_the_ingestion_stage_over_the_one_memory_store(
-    tmp_path: Path,
-) -> None:
-    """ADR-0028 §4's obligation applied to a **third** producer (ADR-0093 §6).
-
-    The stage writes through the *same* write stage the learn leg uses, which is
-    ADR-0078 §3's one wiring obligation: a producer
-    holding a ``MemoryWriter`` of its own "gets the ratified policy and applier and
-    silently loses the queue", and a reader's proposals reach nobody in the moment,
-    so a lost question is one nobody is ever asked. Over a second store an ingested
-    belief would be unreadable and unforgettable through the surfaces the user
-    actually has.
-    """
-    settings = Settings(
-        embedder=EmbedderKind.HASHING,
-        calendar_reader_path=_one_event_calendar(tmp_path),
-    )
-    engine = build_engine(settings, data_dir=tmp_path)
-    try:
-        stage = engine._calendar_ingestion
-        assert stage is not None
-        assert stage._writes is engine._loop._writes
-    finally:
-        await engine.aclose()
-
-
-async def test_an_ingested_belief_is_readable_through_the_surface_the_user_has(
-    tmp_path: Path,
-) -> None:
-    """The whole path, end to end: a file on disk becomes an inspectable belief.
-
-    This is the claim the wiring exists to support and the one nothing below the
-    composition root can make — ``lint-imports`` forbids every subsystem to import
-    ``ai_assistant.readers``, so this layer is the only place a concrete reader and
-    a real store meet (ADR-0093 §2, ADR-0095 §3). It also pins the direction
-    ADR-0093 §1 rules on: the reader proposed, and the gate disposed.
-    """
-    settings = Settings(
-        embedder=EmbedderKind.HASHING,
-        calendar_reader_path=_one_event_calendar(tmp_path),
-    )
-    engine = build_engine(settings, data_dir=tmp_path)
-    try:
-        await _grant_the_calendar(engine)
-        report = await engine.ingest_calendar()
-
-        assert report.source == "calendar"
-        assert report.proposed == 1
-        assert report.stored == 1
-        beliefs = await engine.beliefs()
-        assert len(beliefs) == 1
-        assert "Dentist" in beliefs[0].content
+            await engine.notice_upcoming_events()
     finally:
         await engine.aclose()
 
@@ -2947,14 +2823,14 @@ async def test_a_configured_but_missing_source_fails_at_run_time_and_not_at_buil
     )
     engine = build_engine(settings, data_dir=tmp_path)
     try:
-        assert engine._calendar_ingestion is not None
+        assert engine._upcoming is not None
         # Granted first, so the failure this reaches is the *read* rather than the
         # gate: ADR-0097 §5 refuses before the source is resolved, so an ungranted
         # engine would raise ``SourceNotGrantedError`` and prove nothing about a
         # missing file.
-        await _grant_the_calendar(engine)
+        await engine.grant(CALENDAR_READER_NAME, scope=[GrantScope.NOTIFY])
         with pytest.raises(ReaderError):
-            await engine.ingest_calendar()
+            await engine.notice_upcoming_events()
     finally:
         await engine.aclose()
 
@@ -3613,7 +3489,7 @@ async def test_build_engine_wires_no_producer_when_no_source_is_configured(
     wiring fault it refuses, rather than a zero count indistinguishable from a
     calendar with nothing starting soon. A deployment whose stage failed to wire
     would otherwise look healthy forever while noticing nothing, which is the shape
-    ADR-0022 §4a refuses and the reason ``ingest`` refuses in the same place.
+    ADR-0022 §4a refuses.
     """
     engine = build_engine(Settings(embedder=EmbedderKind.HASHING), data_dir=tmp_path)
     try:
@@ -3624,42 +3500,14 @@ async def test_build_engine_wires_no_producer_when_no_source_is_configured(
         await engine.aclose()
 
 
-async def test_the_three_calendar_consumers_hold_separate_reader_instances(
-    tmp_path: Path,
-) -> None:
-    """ADR-0132 §3 joins ADR-0096 §5's ruling as a third instance.
-
-    "The producer performs its own ``Reader.read()`` on its own schedule, and
-    derives nothing from the facet path's reading or from the ingestion job's."
-    ADR-0093 §7 bounds a reader at one outstanding worker *per instance*, so a
-    shared reader would let one scheduled read suppress another — and a producer
-    reading a snapshot ingestion left behind would be reading durable
-    cross-subsystem state ADR-0093 §5 forbids outright.
-    """
-    settings = Settings(
-        embedder=EmbedderKind.HASHING, calendar_reader_path=_one_event_calendar(tmp_path)
-    )
-    engine = build_engine(settings, data_dir=tmp_path)
-    try:
-        ingestion = engine._calendar_ingestion
-        producer = engine._upcoming
-        assert ingestion is not None
-        assert producer is not None
-        (facet_source,) = _calendar_sources(engine)
-
-        readers = {id(ingestion._reader), id(producer._reader), id(facet_source._reader)}
-        assert len(readers) == 3
-    finally:
-        await engine.aclose()
-
-
 async def test_the_producer_reads_only_on_a_notify_grant(tmp_path: Path) -> None:
     """ADR-0132 §2 and ADR-0133 §2, over the surface a person actually uses.
 
-    The three uses are independent, so granting the two that existed before the
-    member was minted authorises nothing here: "a live ``INGEST`` grant on this
-    calendar authorises this read no more than a ``FACET`` one does", and ADR-0133
-    §3 rules that no grant recorded before the member existed acquires it. This is
+    The uses are independent, so a grant naming ``FACET`` authorises nothing here:
+    "a live ``INGEST`` grant on this calendar authorises this read no more than a
+    ``FACET`` one does", and ADR-0133 §3 rules that no grant recorded before the
+    member existed acquires it. ``INGEST`` itself can no longer be granted through
+    the surface (ADR-0294 §4), so the stage's own cases carry that half. This is
     what makes "do not raise my calendar with me unprompted" a sentence the user
     can say while still letting the assistant answer questions from it.
     """
@@ -3671,7 +3519,7 @@ async def test_the_producer_reads_only_on_a_notify_grant(tmp_path: Path) -> None
         with pytest.raises(SourceNotGrantedError):
             await engine.notice_upcoming_events()
 
-        # The two older uses, granted in full — and still not this one.
+        # The facet use, granted — and still not this one.
         await _grant_the_calendar(engine)
         with pytest.raises(SourceNotGrantedError):
             await engine.notice_upcoming_events()
@@ -3683,7 +3531,7 @@ async def test_the_producer_reads_only_on_a_notify_grant(tmp_path: Path) -> None
         assert await engine.revoke(CALENDAR_READER_NAME) is not None
         await engine.grant(
             CALENDAR_READER_NAME,
-            scope=[GrantScope.FACET, GrantScope.INGEST, GrantScope.NOTIFY],
+            scope=[GrantScope.FACET, GrantScope.NOTIFY],
         )
         assert await engine.notice_upcoming_events() == 1
     finally:

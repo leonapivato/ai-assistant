@@ -4,8 +4,8 @@ That note tells an operator, in terms, that every duration setting on this chain
 takes "either an ISO-8601 duration or an ``HH:MM:SS`` clock string", that a clock
 string is read **from the left as hours**, and that the wrong-by-a-factor-of-sixty
 form is dangerous precisely because it *loads*: ``15:00`` on
-``ASSISTANT_CALENDAR_READER_INTERVAL`` arms a read every fifteen **hours** and
-nothing refuses it. Nothing pinned any of that. ``test_calendar_settings.py``'s
+``ASSISTANT_CALENDAR_WINDOW_PAST`` reaches fifteen **hours** back and nothing
+refuses it. Nothing pinned any of that. ``test_calendar_settings.py``'s
 one environment-path duration case sets ``PT1H`` — a spelling in which
 hours-versus-minutes cannot be got wrong — and every other ``PT`` literal under
 ``tests/readers/`` is a ``DURATION:`` property inside an ``.ics`` fixture rather
@@ -14,7 +14,7 @@ than a settings load.
 **The claim is about the loader, so the cases load through the loader.** Each one
 puts the text an operator would export into the environment and reads the field
 off a real :class:`~ai_assistant.core.config.Settings`, because the subject is what
-``ASSISTANT_CALENDAR_READER_INTERVAL=15:00`` does — not what
+``ASSISTANT_CALENDAR_WINDOW_PAST=15:00`` does — not what
 ``timedelta(hours=15)`` does, which is not in doubt and is what a constructor
 argument would have asserted.
 
@@ -68,8 +68,11 @@ _PREFIX: Final = "ASSISTANT_"
 #: existence is a run-time property under ADR-0093 §7, not a load-time one.
 _SOURCE: Final = "/srv/calendars/personal.ics"
 
-#: The interval the note's own example arms, and the one an operator copies.
-_INTERVAL: Final = f"{_PREFIX}CALENDAR_READER_INTERVAL"
+#: The setting the note's loading example names, and the one an operator copies.
+#: It was ``ASSISTANT_CALENDAR_READER_INTERVAL`` until ADR-0294 §5 retired that
+#: field with scheduled ingestion; the past window is the duration on this chain a
+#: clock string reaches with no cross-field rule to catch it.
+_WINDOW_PAST: Final = f"{_PREFIX}CALENDAR_WINDOW_PAST"
 
 #: ADR-0132 §4's producer cadence — a second job over the same source, with its
 #: own cross-field rule and therefore its own failure mode for one spelling.
@@ -79,9 +82,8 @@ _UPCOMING: Final = f"{_PREFIX}CALENDAR_UPCOMING_INTERVAL"
 #: ``(variable, field)``. The note quantifies over "every duration setting" on this
 #: chain and says the refusal is "the same for every duration setting here", so the
 #: spelling cases below run over all of them rather than over the one the note's
-#: example happens to arm — a promise about a set is not pinned by a case about one
-#: member, and three of these use a different type alias
-#: (``_DurationSetting``) from the two the note's own examples name.
+#: example happens to name — a promise about a set is not pinned by a case about
+#: one member.
 #:
 #: ``calendar_upcoming_interval`` is deliberately absent: it cannot be varied alone,
 #: because ADR-0132 §4 ties it to the lead. It runs over the same two tables in its
@@ -89,7 +91,6 @@ _UPCOMING: Final = f"{_PREFIX}CALENDAR_UPCOMING_INTERVAL"
 #: :func:`test_the_roster_is_every_calendar_duration_setting` is what keeps the two
 #: halves adding up to the whole.
 _VARIED: Final = [
-    pytest.param(f"{_PREFIX}CALENDAR_READER_INTERVAL", "calendar_reader_interval", id="interval"),
     pytest.param(f"{_PREFIX}CALENDAR_UPCOMING_LEAD", "calendar_upcoming_lead", id="lead"),
     pytest.param(f"{_PREFIX}CALENDAR_WINDOW_PAST", "calendar_window_past", id="window-past"),
     pytest.param(f"{_PREFIX}CALENDAR_WINDOW_FUTURE", "calendar_window_future", id="window-future"),
@@ -173,7 +174,7 @@ def test_each_documented_spelling_loads_to_the_duration_the_note_states(
     assert getattr(Settings(), field) == duration
 
 
-def test_a_fifteen_hour_interval_is_hours_and_is_not_fifteen_minutes(
+def test_a_fifteen_hour_window_is_hours_and_is_not_fifteen_minutes(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
     """The headline (#1063), as a duration and never as a rate.
@@ -189,12 +190,12 @@ def test_a_fifteen_hour_interval_is_hours_and_is_not_fifteen_minutes(
     while pinning the duration makes any restatement of the cadence checkable
     against a number the loader actually produced.
     """
-    _armed(monkeypatch, **{_INTERVAL: "15:00"})
+    _armed(monkeypatch, **{_WINDOW_PAST: "15:00"})
 
-    interval = Settings().calendar_reader_interval
+    window = Settings().calendar_window_past
 
-    assert interval == timedelta(hours=15) == timedelta(seconds=54_000)
-    assert interval != timedelta(minutes=15)
+    assert window == timedelta(hours=15) == timedelta(seconds=54_000)
+    assert window != timedelta(minutes=15)
 
 
 # --- what it refuses, and how the refusal is classified ----------------------
@@ -213,10 +214,10 @@ def test_a_spelling_the_note_calls_refused_is_refused_at_load(
     the parser while ``15:00`` is accepted by it and only sometimes caught later,
     and those two sentences are true of different code.
 
-    **Exactly one error**, and that is the assertion doing the work on the two
-    nullable fields: their annotation is a union, so a parse that reported one error
-    per member would be a different operator experience for the same mistake, and
-    the note describes one.
+    **Exactly one error**, which is the assertion that does the work on a nullable
+    field — its annotation is a union, so a parse that reported one error per member
+    would be a different operator experience for the same mistake, and the note
+    describes one. The producer's nullable interval is held to it below.
     """
     _armed(monkeypatch, **{variable: spelling})
 
@@ -239,7 +240,7 @@ def test_a_bare_number_of_seconds_names_an_identifier_nobody_typed(
     note wrong. A failure here is the signal to rewrite that sentence, not a defect
     in this chain.
     """
-    _armed(monkeypatch, **{_INTERVAL: "15"})
+    _armed(monkeypatch, **{_WINDOW_PAST: "15"})
 
     with pytest.raises(ValidationError, match="day"):
         Settings()
@@ -255,7 +256,7 @@ def test_a_parse_refusal_reaches_an_operator_as_a_configuration_error(
     stay-down deployment fault with a legible class rather than a ``ValidationError``
     escaping through the composition root.
     """
-    _armed(monkeypatch, **{_INTERVAL: "5:00"})
+    _armed(monkeypatch, **{_WINDOW_PAST: "5:00"})
 
     with pytest.raises(ConfigurationError, match="invalid configuration"):
         load_settings()
@@ -268,7 +269,7 @@ def test_a_parse_refusal_reaches_an_operator_as_a_configuration_error(
 def test_the_producer_interval_takes_the_same_spellings_under_a_coherent_lead(
     monkeypatch: pytest.MonkeyPatch, spelling: str, duration: timedelta
 ) -> None:
-    """The sixth duration setting, held to the same table as the other five.
+    """The producer's duration setting, held to the same table as the others.
 
     It is absent from :data:`_VARIED` because it cannot be varied alone — ADR-0132
     §4 requires a strictly greater lead, so an accepted spelling only *loads* beside
@@ -280,7 +281,7 @@ def test_the_producer_interval_takes_the_same_spellings_under_a_coherent_lead(
     never loads: ``ASSISTANT_CALENDAR_UPCOMING_INTERVAL=00:05:00`` could start
     failing while every other case in this module stayed green, and the note
     promises the clock spelling for this setting in the same breath as for the
-    reader's.
+    others.
     """
     lead = f"PT{int(duration.total_seconds()) * 2}S"
     _armed(monkeypatch, **{_UPCOMING: spelling, f"{_PREFIX}CALENDAR_UPCOMING_LEAD": lead})
@@ -319,8 +320,8 @@ def test_the_producer_refuses_a_fifteen_hour_interval_at_stock_defaults(
 ) -> None:
     """The note's second claim, and the half worth pinning most (#1063).
 
-    ``ASSISTANT_CALENDAR_UPCOMING_INTERVAL=15:00`` parses exactly as the reader's
-    does — and is then refused, because ADR-0132 §4 requires the lead to be
+    ``ASSISTANT_CALENDAR_UPCOMING_INTERVAL=15:00`` parses exactly as the past
+    window's does — and is then refused, because ADR-0132 §4 requires the lead to be
     **strictly greater** than the interval and the lead's default is thirty
     minutes. So the difference between "the loader catches this" and "it does not"
     is which of two settings the operator typed it on, which is the whole reason
@@ -340,22 +341,22 @@ def test_the_producer_refuses_a_fifteen_hour_interval_at_stock_defaults(
     assert _refusals(refusal.value) == ["value_error"]
 
 
-def test_the_same_spelling_on_the_ingestion_cadence_loads(
+def test_the_same_spelling_on_the_past_window_loads(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
     """The contrast the coherence case needs to mean anything.
 
-    One text, two settings, opposite outcomes: nothing refuses fifteen hours
-    between reads, because ingestion has no second setting to be incoherent with
-    (ADR-0093 §7a's matrix is a path and an interval). Armed together here so the
-    pair is one observation — a change that made both refuse, or both load, breaks
-    this rather than leaving two independent cases each still true of one half.
+    One text, two settings, opposite outcomes: nothing refuses a fifteen-hour past
+    window, because it has no second setting to be incoherent with. Armed together
+    here so the pair is one observation — a change that made both refuse, or both
+    load, breaks this rather than leaving two independent cases each still true of
+    one half.
     """
-    _armed(monkeypatch, **{_INTERVAL: "15:00", _UPCOMING: "PT5M"})
+    _armed(monkeypatch, **{_WINDOW_PAST: "15:00", _UPCOMING: "PT5M"})
 
     settings = Settings()
 
-    assert settings.calendar_reader_interval == timedelta(hours=15)
+    assert settings.calendar_window_past == timedelta(hours=15)
     assert settings.calendar_upcoming_interval == timedelta(minutes=5)
 
 
@@ -380,7 +381,7 @@ def test_an_armed_producer_without_a_source_is_refused_before_the_lead_rule(
 
 
 def test_the_roster_is_every_calendar_duration_setting() -> None:
-    """A seventh calendar duration added later fails here rather than going unpinned.
+    """A calendar duration added later fails here rather than going unpinned.
 
     The note's promise is universally quantified — "every duration setting takes
     either an ISO-8601 duration or an ``HH:MM:SS`` clock string" — so a module that
@@ -394,7 +395,7 @@ def test_the_roster_is_every_calendar_duration_setting() -> None:
     greater lead, so a spelling case on it is a case about two settings. It is
     covered by :func:`test_the_producer_interval_takes_the_same_spellings_under_a_
     coherent_lead` and its refusal case, over the same two tables — named here
-    rather than excluded by a predicate, which would also have swallowed a seventh.
+    rather than excluded by a predicate, which would also have swallowed a new one.
     """
     durations = {
         name

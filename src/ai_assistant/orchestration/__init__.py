@@ -104,7 +104,7 @@ reaches memory. It holds the ratified ``MemoryWriter`` *and* the ``DeferralStore
 so an ``ASK_USER`` ruling's question is parked durably instead of vanishing when the
 proposal goes out of scope — the drop issue #423 reports, closed by a wiring choice
 rather than by a new writer. Every producer's stage (``LearningLoop``,
-``IngestionStage``, ``ConsolidationStage``) writes through it rather than through a
+``ConsolidationStage``) writes through it rather than through a
 ``MemoryWriter`` handle of its own, which is the one obligation ADR-0078 §3 places
 on this lane.
 
@@ -148,16 +148,6 @@ A reply is **not** a tool: no registry lookup, no ``ToolDefinition``, no
 degrades the turn rather than failing it, and the set of failures that degrade is
 closed (§8).
 
-``IngestionStage`` is the **ingestion stage** (ADR-0093 §6), the third producer's
-stage: it reads the injected ``Reader`` once, within that reader's own bound, and
-puts every belief the reading proposes through the same write path — because a
-reader "holds no store handle" and "may not decide the fate of anything it
-proposes" (§1), so selecting when it runs and ingesting what it returns are this
-layer's. It is driven by a scheduler job and never by a turn (§6), and it holds no
-cursor: §5's bound is a function of the clock, the reader's configuration and the
-source's own content, which is what makes a periodic re-read honest without new
-durable state.
-
 ``NotificationWriteStage`` is ADR-0130 §3's **producer seam**, concrete: it holds
 the deterministic policy and hands it to the store, so the duplicate lookup, the
 cap check, the budget read, the ruling and the write stay one atomic act *in the
@@ -195,7 +185,6 @@ from ai_assistant.orchestration.engine import (
 )
 from ai_assistant.orchestration.executor import StepExecutor
 from ai_assistant.orchestration.grants import GrantOperations, HeldSource
-from ai_assistant.orchestration.ingestion import IngestionReport, IngestionStage
 from ai_assistant.orchestration.loop import LearningLoop
 from ai_assistant.orchestration.notifications import NotificationWriteStage, hand_off
 from ai_assistant.orchestration.parked_reads import ParkedReadOperations
@@ -231,8 +220,6 @@ __all__ = [
     "ForecastServicer",
     "GrantOperations",
     "HeldSource",
-    "IngestionReport",
-    "IngestionStage",
     "LearningLoop",
     "MemoryWriteStage",
     "NotificationWriteStage",

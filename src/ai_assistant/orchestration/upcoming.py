@@ -3,14 +3,12 @@
 ADR-0132's decision in one object. It is a stage in `orchestration` driven by a
 public operation on the concrete engine, which is in turn driven by a job on
 ADR-0083 §7's scheduler whose body is that bound method and which "holds no store,
-no reader and no subsystem import" — ``Engine.ingest``'s shape reused rather than
-a new one (§1).
+no reader and no subsystem import" (§1).
 
-**It is not a second ingestion path** (§1). Whether a calendar entry becomes a
-belief is ADR-0093's decision and the ingestion job's; whether it becomes a
-candidate is ADR-0132's, and the two are independent both ways — a deployment may
-run either, both or neither. So this stage holds no ``MemoryStore``, no
-``MemoryWriter`` and no ``MemoryPolicy``, and it proposes no belief.
+**It is not an ingestion path** (§1). Whether a calendar entry becomes a candidate
+is ADR-0132's decision, and nothing reads a source to propose what it read into
+memory (ADR-0294 §1). So this stage holds no ``MemoryStore``, no ``MemoryWriter``
+and no ``MemoryPolicy``, and it proposes no belief.
 
 **What it may not conclude is as much of the decision as what it does** (§8). It
 performs no model call and holds no ``ModelProvider`` and no ``Embedder``; it
@@ -122,11 +120,10 @@ CONFIDENCE: Final = 0.9
 def _refusal(source: str) -> str:
     """The refusal message ADR-0097 §8 makes an operator-legible obligation.
 
-    **The identity and the use, and nothing else** — the shape
-    :mod:`ai_assistant.orchestration.ingestion` already uses for the same reason.
-    The scheduler logs a failed job's ``str(exc)`` verbatim (ADR-0083 §7), so this
-    string is the log line, and a path or an entry's text here would be Tier 1
-    data in an operational log (ADR-0004 §5). A reader's identity is safe by
+    **The identity and the use, and nothing else.** The scheduler logs a failed
+    job's ``str(exc)`` verbatim (ADR-0083 §7), so this string is the log line, and
+    a path or an entry's text here would be Tier 1 data in an operational log
+    (ADR-0004 §5). A reader's identity is safe by
     construction: ADR-0093 §7 makes it *declared* rather than configured.
     """
     return (
@@ -254,12 +251,10 @@ class UpcomingEventStage:
         Args:
             reader: The producer's **own** instance, given its own source and its
                 own bound (ADR-0093 §1, §5), so this stage neither locates the
-                source nor widens the read. **Not shared with the ingestion stage
-                or the context adapter**: ADR-0093 §7's one-outstanding-worker
-                reservation is per instance, and ADR-0132 §3 requires this read to
-                be independent of both — "Neither may derive its answer from the
-                other's reading", and a producer reading a snapshot ingestion left
-                behind would inherit a cadence chosen for a different job.
+                source nor widens the read. **Not shared with the context
+                adapter**: ADR-0093 §7's one-outstanding-worker reservation is per
+                instance, and ADR-0132 §3 requires this read to be independent of
+                it — "Neither may derive its answer from the other's reading".
             grants: The **query** seam ADR-0133 §5 gates this stage on, and never
                 a ``SourceGrantStore``. Required with no default, which is
                 ADR-0097 §5's third clause applied to the third use of a source:
@@ -584,11 +579,11 @@ class UpcomingEventStage:
         # **No guard stands between the reading and the candidate, deliberately.**
         # `NotificationCandidate.summary` is non-blank while a `MemoryRecord`'s
         # `content` is not, so a reader emitting a blank rendering raises out of
-        # here — and that is the right outcome rather than a case to skip. It is
-        # `IngestionStage`'s own posture, in its words: re-asserting a producer-side
-        # obligation here would be "a second copy of a rule the seam already holds,
-        # sited where a reader's non-conformance would be reported as an ingestion
-        # fault rather than as the contract breach it is". The `Reader` conformance
+        # here — and that is the right outcome rather than a case to skip.
+        # Re-asserting a producer-side obligation here would be a second copy of a
+        # rule the seam already holds, sited where a reader's non-conformance would
+        # be reported as this stage's fault rather than as the contract breach it
+        # is. The `Reader` conformance
         # suite pins what a reader may emit; this stage is not a second place to
         # pin it, and absorbing the defect would hide a broken reader behind a
         # quiet calendar.
@@ -624,10 +619,9 @@ class UpcomingEventStage:
             # identifier resolved through an existing ratified read", and this
             # producer holds no identifier that meets it: the reader "mints its own
             # id per record" (ADR-0093 §5, ADR-0092 §6), so the id on the proposal
-            # in hand is fresh on every read and, where ingestion is not running at
-            # all, names nothing in any store. Citing it would put a dangling
-            # identifier on a durable record and make a surface that tried to
-            # resolve it fail — the shape §2's clause exists to prevent. The
+            # in hand is fresh on every read and names nothing in any store. Citing
+            # it would put a dangling identifier on a durable record and make a
+            # surface that tried to resolve it fail — the shape §2's clause exists to prevent. The
             # subject is an occurrence in a source this system does not own, which
             # is not a record this system holds (#963).
             references=(),

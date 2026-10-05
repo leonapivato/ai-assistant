@@ -29,7 +29,7 @@ from __future__ import annotations
 
 import asyncio
 import sys
-from typing import TYPE_CHECKING
+from typing import TYPE_CHECKING, Final
 
 import m24_harness
 import pytest
@@ -164,18 +164,28 @@ async def _drive_the_six(world: World, use: GrantScope, source: str) -> list[Dri
 
 # --- arm (a): completeness ---------------------------------------------------
 
+#: Every use a driver reads under, paired with the readers it is driven over. A use
+#: with no driver has nothing to record: ``INGEST``'s stage is retired (ADR-0294 §1).
+_DRIVEN: Final = (
+    (GrantScope.FACET, CALENDAR),
+    (GrantScope.FACET, EMAIL),
+    (GrantScope.NOTIFY, CALENDAR),
+)
+
 
 async def _run_arm_a(world: World) -> tuple[list[Driven], list[SourceReadRecord]]:
     """Drive arm (a)'s run: eighteen attempts, then export.
 
-    Six outcomes over three uses, alternating the two declared readers so that both
-    identities appear under every use — §11's "across all three uses and both
-    readers, including at least one of each of ``ReadOutcome``'s six members".
-    Eighteen is far below :data:`~m24_harness.ROOMY`, so nothing is pruned.
+    Six outcomes over every use a driver reads under, and both declared readers —
+    §11's "across all three uses and both readers, including at least one of each of
+    ``ReadOutcome``'s six members". Since ADR-0294 §1 retired the ``INGEST`` driver
+    there are two uses with a driver, so the facet is driven over both readers and
+    the upcoming-event producer over the calendar it serves. Eighteen is far below
+    :data:`~m24_harness.ROOMY`, so nothing is pruned.
     """
     driven: list[Driven] = []
-    for index, use in enumerate(GrantScope):
-        driven += await _drive_the_six(world, use, CALENDAR if index % 2 == 0 else EMAIL)
+    for use, source in _DRIVEN:
+        driven += await _drive_the_six(world, use, source)
     return driven, await world.trail.export()
 
 
@@ -261,7 +271,7 @@ async def test_arm_a_records_the_two_failed_shapes_indistinguishably(world: Worl
     await outstanding.occupy()
     try:
         refused_before_starting = await world.drive(
-            GrantScope.INGEST,
+            GrantScope.NOTIFY,
             reader=outstanding,  # type: ignore[arg-type]  # a duck-typed reader over the real OneWorker
             gate=gate,
             outcome=ReadOutcome.FAILED,
@@ -270,7 +280,7 @@ async def test_arm_a_records_the_two_failed_shapes_indistinguishably(world: Worl
         await outstanding.release()
 
     failed_with_bytes = await world.drive(
-        GrantScope.INGEST,
+        GrantScope.NOTIFY,
         reader=failing_reader(CALENDAR),
         gate=gate,
         outcome=ReadOutcome.FAILED,
@@ -345,7 +355,7 @@ async def _run_arm_b(world: World) -> list[Driven]:
 
     driven.append(
         await world.drive(
-            GrantScope.INGEST,
+            GrantScope.NOTIFY,
             reader=seeded_reader(CALENDAR, proposals=SEEDED),
             gate=granted,
             outcome=ReadOutcome.COMPLETED,
@@ -359,7 +369,7 @@ async def _run_arm_b(world: World) -> list[Driven]:
     mid_read.inner.revoke_after(1)
     driven.append(
         await world.drive(
-            GrantScope.INGEST,
+            GrantScope.NOTIFY,
             reader=seeded_reader(CALENDAR, proposals=SEEDED),
             gate=mid_read,
             outcome=ReadOutcome.DISCARDED,
@@ -371,7 +381,7 @@ async def _run_arm_b(world: World) -> list[Driven]:
     # are different facts, and ADR-0097 §5 requires an operator to tell them apart.
     driven.append(
         await world.drive(
-            GrantScope.INGEST,
+            GrantScope.NOTIFY,
             reader=seeded_reader(CALENDAR, proposals=SEEDED),
             gate=world.granted(CALENDAR),
             outcome=ReadOutcome.UNCONFIRMED,
@@ -388,7 +398,7 @@ async def _run_arm_b(world: World) -> list[Driven]:
     for _ in range(3):
         driven.append(
             await world.drive(
-                GrantScope.INGEST,
+                GrantScope.NOTIFY,
                 reader=seeded_reader(CALENDAR, proposals=SEEDED),
                 gate=revoked,
                 outcome=ReadOutcome.REFUSED,
@@ -520,7 +530,7 @@ async def test_arm_c_no_exported_field_carries_a_byte_of_the_source(
     window = READ_AT - READ_AT.replace(hour=0)
     reader = CalendarReader(source, now=lambda: READ_AT, window_past=window, window_future=window)
     await world.drive(
-        GrantScope.INGEST,
+        GrantScope.NOTIFY,
         reader=reader,
         gate=world.granted(reader.name),
         outcome=ReadOutcome.COMPLETED,
@@ -533,7 +543,7 @@ async def test_arm_c_no_exported_field_carries_a_byte_of_the_source(
         window_future=window,
     )
     await world.drive(
-        GrantScope.INGEST,
+        GrantScope.NOTIFY,
         reader=missing,
         gate=world.granted(missing.name),
         outcome=ReadOutcome.FAILED,
@@ -641,19 +651,6 @@ async def test_arm_e_nothing_comes_of_an_unrecorded_attempt(world: World) -> Non
         await facet.contribute()  # type: ignore[attr-defined]  # the FACET driver
     leaked += len(refusing.written)
 
-    ingestion_gate = world.granted(CALENDAR)
-    ingestion = world.driver(
-        GrantScope.INGEST,
-        reader=seeded_reader(CALENDAR, proposals=SEEDED),
-        gate=ingestion_gate,
-        recorder=refusing,
-    )
-    with pytest.raises(ReadTrailError):
-        await ingestion.ingest()  # type: ignore[attr-defined]  # the INGEST driver
-    # Nothing was proposed: the reading is discarded whole, exactly as it is across
-    # a revocation (ADR-0185 §5).
-    leaked += len((await world.memory.search("reported thing", limit=10)).records)
-
     notify_gate = world.granted(CALENDAR)
     upcoming = world.driver(
         GrantScope.NOTIFY,
@@ -690,19 +687,18 @@ async def test_arm_e_nothing_comes_of_an_unrecorded_attempt(world: World) -> Non
     inflight_gate = world.granted(CALENDAR)
     inflight_gate.begin()
     stage = world.driver(
-        GrantScope.INGEST,
+        GrantScope.NOTIFY,
         reader=seeded_reader(CALENDAR, proposals=SEEDED),
         gate=inflight_gate,
         recorder=holding,
     )
-    pending = asyncio.ensure_future(stage.ingest())  # type: ignore[attr-defined]
+    pending = asyncio.ensure_future(stage.notice())  # type: ignore[attr-defined]
     await held.reached()
     pending.cancel()
     held.release()
     with pytest.raises(asyncio.CancelledError):
         await pending
     await settle()
-    leaked += len((await world.memory.search("reported thing", limit=10)).records)
     leaked += len(world.notifications.offered)
 
     report(

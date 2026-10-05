@@ -10,9 +10,10 @@ with their denominators.
 
 **What is real here and what is a double, stated once so nobody has to infer it.**
 Everything on the path either arm measures is the shipping class: the real
-``CalendarReader`` over a planted ``.ics``, the real ``IngestionStage`` behind a
-live grant, the real ``MemoryWriteStage`` over the real ``MemoryIngestor`` and the
-real ``DefaultMemoryPolicy``, the real ``LearningLoop`` retrieving from the real
+``CalendarReader`` over a planted ``.ics`` whose reading reaches the real
+``MemoryIngestor`` through ``MemoryWriter.ingest_reading`` (:class:`PriorIngestion`),
+the real ``MemoryWriteStage`` over that writer and the real
+``DefaultMemoryPolicy``, the real ``LearningLoop`` retrieving from the real
 ``InMemoryMemoryStore``, the real ``ModelBackedPlanner``, the real ``Engine``, the
 real ``StepRunner``, the real ``ThresholdActionPolicy``, the real
 ``EgressBindingSeam``, the real ``send_email`` declaration and implementation, and
@@ -115,7 +116,6 @@ from ai_assistant.orchestration.conversations import ConversationLifecycle
 from ai_assistant.orchestration.destination_trust import DestinationTrustOperations
 from ai_assistant.orchestration.executor import StepExecutor
 from ai_assistant.orchestration.grants import GrantOperations
-from ai_assistant.orchestration.ingestion import IngestionStage
 from ai_assistant.orchestration.loop import LearningLoop
 from ai_assistant.orchestration.questions import QuestionStage
 from ai_assistant.orchestration.recipient_grants import RecipientGrantOperations
@@ -123,7 +123,7 @@ from ai_assistant.orchestration.runner import StepRunner
 from ai_assistant.orchestration.writes import MemoryWriteStage
 from ai_assistant.permissions import ThresholdActionPolicy
 from ai_assistant.planning import ModelBackedPlanner
-from ai_assistant.readers import CALENDAR_READER_NAME, CalendarReader
+from ai_assistant.readers import CalendarReader
 from ai_assistant.testing import (
     FakeAuditTrail,
     FakeConnectionProvisioner,
@@ -137,13 +137,11 @@ from ai_assistant.testing import (
     FakeOutboundTransport,
     FakePlanStore,
     FakeRecipientGrantStore,
-    FakeSourceGrants,
     FakeSourceGrantStore,
     FakeSourceReadTrail,
     FakeStreamingCompleter,
     FakeTraceRetention,
     FakeTraceSink,
-    source_grant,
 )
 from ai_assistant.tools.builtin import (
     build_default_registry,
@@ -498,7 +496,8 @@ class World:
             and the consolidation walks — the composition root's same-store
             obligation (ADR-0028 §4), discharged here by there being one object.
         writes: The one write stage every producer's proposals go through.
-        ingestion: The real ingestion stage over the planted source.
+        ingestion: What the retired scheduled ingestion wrote, replayed over the
+            planted source (:class:`PriorIngestion`).
         consolidations: A factory for a consolidation stage over a named walk.
         trail: The audit trail every ruling is recorded in, and where a forbidden
             act would be visible under ADR-0021 §4.
@@ -514,13 +513,37 @@ class World:
     engine: Engine
     store: InMemoryMemoryStore
     writes: MemoryWriteStage
-    ingestion: IngestionStage
+    ingestion: PriorIngestion
     consolidations: _Consolidations
     trail: FakeAuditTrail
     planner_model: FakeModelProvider
     consolidation_model: FakeModelProvider
     connector: Connector
     source: Path
+
+
+@dataclass(frozen=True, slots=True)
+class PriorIngestion:
+    """What a hub's scheduled ingestion wrote before ADR-0294 retired it.
+
+    ADR-0294 §1 retires the stage that read a source into memory on a schedule, and
+    §3 keeps everything it wrote: "The retirement retires no belief, closes no
+    validity window, deletes no record and alters no stored record." So a store
+    still holds ``ATTESTED`` beliefs carrying a third party's text, and consolidation
+    still walks them — which is the population both arms measure. This replays how
+    they got there: the real reader's reading, put whole through the real writer's
+    reading-level path, which ADR-0294 §2 keeps standing.
+
+    It is a stand-in for history rather than a live mechanism, so it holds no grant
+    gate and parks no deferral: nothing either arm asserts reads one.
+    """
+
+    reader: CalendarReader
+    writer: MemoryIngestor
+
+    async def ingest(self) -> None:
+        """Read the planted source once and write the whole reading."""
+        await self.writer.ingest_reading(await self.reader.read())
 
 
 class _Consolidations(Protocol):
@@ -562,17 +585,10 @@ def build_world(
     source = tmp_path / "calendar.ics"
     plant(source, cycle=0, records=2, hostile=False)
     reader = CalendarReader(source, now=lambda: NOW, window_past=WINDOW, window_future=WINDOW)
-    # One trail, narrowed to `SourceReadRecorder` here and handed whole to the
-    # engine below, exactly as the composition root wires it (ADR-0185 §4,
-    # ADR-0186 §10).
+    # The engine's read trail. Nothing records into it here, since the reading
+    # below is replayed history rather than a gated read (ADR-0185 §4).
     reads = FakeSourceReadTrail()
-    ingestion = IngestionStage(
-        reader=reader,
-        writes=writes,
-        grants=FakeSourceGrants([source_grant(CALENDAR_READER_NAME)]),
-        reads=reads,
-        now=lambda: NOW,
-    )
+    ingestion = PriorIngestion(reader=reader, writer=writer)
 
     connector = Connector()
     integration = build_send_email_integration(
@@ -647,7 +663,6 @@ def build_world(
         plans=plans,
         trail=trail,
         spend=trail,
-        # The very trail the ingestion stage above records into (ADR-0186 §10).
         reads=reads,
         memory=store,
         deferrals=deferrals,

@@ -277,9 +277,9 @@ class _GrantedFacetSource:
     watching a facet blink in and out will be tempted to read something into the
     pattern; ADR-0096 §4 forbids exactly that.
 
-    **Its reader is its own** (ADR-0096 §5). The ingestion stage holds a separate
-    instance of the same reader: ADR-0093 §7 bounds a reader at one outstanding
-    worker, per instance, so sharing one would let a scheduled ingestion read
+    **Its reader is its own** (ADR-0096 §5). Any other consumer of the source holds a
+    separate instance of the same reader: ADR-0093 §7 bounds a reader at one
+    outstanding worker, per instance, so sharing one would let a scheduled read
     suppress the request-path facet for as long as it runs — coupling a request
     cadence to a periodic job, in the direction that makes an advisory facet wait.
     ADR-0140 §6 is where that clause "acquires a second instance for the first
@@ -306,7 +306,7 @@ class _GrantedFacetSource:
         Args:
             reader: The producer, holding its own source and its own bound
                 (ADR-0093 §1, §5) — so this source neither locates the source nor
-                widens the read. **Not shared with the ingestion stage**, for the
+                widens the read. **Not shared with any other consumer**, for the
                 reason in the class docstring.
             grants: The **query** seam, and never a ``SourceGrantStore``
                 (ADR-0097 §3, §5). Required, with no default: a composition that
