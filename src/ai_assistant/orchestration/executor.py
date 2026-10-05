@@ -42,6 +42,7 @@ from pydantic import ValidationError
 from ai_assistant.core.clock import ClockReadingError, checked_clock
 from ai_assistant.core.errors import (
     AssistantError,
+    ClaimStopped,
     PlanningError,
     RetriesExhaustedError,
     SpendError,
@@ -467,7 +468,10 @@ class StepExecutor:
                 that activation has no id. Threaded exactly as ``attempt_id`` is:
                 passed to the ``StepTransition`` and read for nothing else, so the
                 store refuses a claim of a stopped activation with
-                :class:`~ai_assistant.core.errors.ClaimStopped`, which propagates.
+                :class:`~ai_assistant.core.errors.ClaimStopped`. On the **initial**
+                claim that propagates: nothing was invoked. On a retry's **re-claim**
+                it ends the loop as the tracker's ceiling does, returning the state the
+                last invocation committed, so the step that ran is not lost (§4).
             reach: ADR-0264 §2's pre-callable observer, written through as the drive
                 runs (:class:`CallableReach`). ``None``, the default, observes nothing
                 and changes no behaviour — it is what every caller that does not carry
@@ -596,6 +600,16 @@ class StepExecutor:
                 # an ordinary end to this loop rather than a fault: the step is
                 # already durably FAILED with the reason the tool gave.
                 _log.info("step_retries_exhausted", step_id=step_id)
+                return Dispatch(state)
+            except ClaimStopped:
+                # ADR-0297 §2: a re-claim names the same activation as the first claim,
+                # and the store refuses it once that activation is stopped. That ends
+                # the loop exactly as the ceiling does — the invocation that already ran
+                # is durably FAILED with the reason the tool gave, and this state is what
+                # it committed. Raising would discard that executed step from what the
+                # caller reports (§4). The *initial* claim's refusal still propagates:
+                # nothing was invoked there, so there is no step outcome to report.
+                _log.info("step_retry_stopped", step_id=step_id)
                 return Dispatch(state)
 
     # --- the effect claim (ADR-0259 §2) ---------------------------------
