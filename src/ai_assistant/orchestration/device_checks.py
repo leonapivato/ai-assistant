@@ -59,7 +59,13 @@ from ai_assistant.core.types import (
 if TYPE_CHECKING:
     from collections.abc import Sequence
 
-    from ai_assistant.core.types import ChatDevice, DeviceAccess, RequestingDevice, UserMessage
+    from ai_assistant.core.types import (
+        ChatChange,
+        ChatDevice,
+        DeviceAccess,
+        RequestingDevice,
+        UserMessage,
+    )
     from ai_assistant.orchestration.conversations import ConversationLifecycle
 
 #: The ``channel_type`` of a channel whose input is a conversation's, which makes a
@@ -331,29 +337,50 @@ def _reason(held: bool | None) -> DeviceRefusal:
     return DeviceRefusal.NO_ROLE if held is False else DeviceRefusal.NOT_ALLOWED
 
 
-def device_page(page: ChatChanges, conversation_ids: Sequence[str] | None) -> ChatChanges:
-    """Restrict a device's page of changes to the conversations its caller named.
+async def device_changes(
+    conversations: ConversationLifecycle,
+    device_id: str,
+    *,
+    after: int,
+    conversation_ids: Sequence[str] | None,
+    limit: int,
+) -> ChatChanges:
+    """The changes after a cursor that a device may see, restricted as its caller asked.
 
-    As ``ConversationStore.changes`` restricts a page: the named conversations'
-    changes, together with the changes to "my devices", which belong to no
-    conversation. The cursor is the device's page's own, so a restricted read still
-    moves across every change the device's page passed over.
+    ``ConversationStore.device_changes``, restricted as ``ConversationStore.changes``
+    restricts a page: the named conversations' changes, together with the changes to
+    "my devices", which belong to no conversation. The restriction is applied before
+    the page is cut, not after: the device's pages are read on until ``limit``
+    changes are kept or its changes run out, so a page shorter than ``limit`` still
+    means the reader has caught up (``ChatChanges``), however many changes in other
+    conversations stood in between.
 
     Args:
-        page: What ``ConversationStore.device_changes`` answered.
+        conversations: The chat space.
+        device_id: The device.
+        after: The cursor.
         conversation_ids: The conversations the caller asked about, or ``None`` for
             every one the device may see.
+        limit: Page size.
 
     Returns:
-        The page, restricted.
+        The page, and the cursor to ask from next.
     """
     if conversation_ids is None:
-        return page
+        return await conversations.device_changes(device_id, after=after, limit=limit)
     named = frozenset(conversation_ids)
-    kept = tuple(
-        one for one in page.changes if one.conversation_id is None or one.conversation_id in named
-    )
-    return ChatChanges(changes=kept, next_after=page.next_after)
+    kept: list[ChatChange] = []
+    cursor = after
+    while True:
+        page = await conversations.device_changes(device_id, after=cursor, limit=limit)
+        for one in page.changes:
+            if one.conversation_id is None or one.conversation_id in named:
+                kept.append(one)
+                if len(kept) == limit:
+                    return ChatChanges(changes=tuple(kept), next_after=one.seq)
+        if len(page.changes) < limit or page.next_after <= cursor:
+            return ChatChanges(changes=tuple(kept), next_after=page.next_after)
+        cursor = page.next_after
 
 
 def _raise(message: str, reason: DeviceRefusal) -> NoReturn:
@@ -361,4 +388,4 @@ def _raise(message: str, reason: DeviceRefusal) -> NoReturn:
     raise DeviceRefusedError(message, reason=reason)
 
 
-__all__ = ["CONVERSATION_CHANNEL", "DeviceChecks", "device_page"]
+__all__ = ["CONVERSATION_CHANNEL", "DeviceChecks", "device_changes"]
