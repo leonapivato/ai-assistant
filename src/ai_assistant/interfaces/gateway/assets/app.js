@@ -9629,8 +9629,10 @@ async function resolveOnce(id, mine) {
         applyEntry(entry, chat.referenced);
       }
     });
+    // On screen before the next lookup is awaited, so what this one brought — a marker
+    // above all (§5:12) — is shown whatever becomes of the next.
+    renderTranscript();
   }
-  renderTranscript();
   return true;
 }
 
