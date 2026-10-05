@@ -1,6 +1,6 @@
 # 140. The email source is a file the fetcher replaces whole, and the reader proposes envelopes, never bodies
 
-- Status: Accepted
+- Status: Partially superseded by ADR-0294 (§12:1's `email_reader_interval` row; §12:2; §12:5's interval half; §13:2's ingestion item)
 - Date: 2026-08-12
 - **Note (2026-08-25): §10's second clause is ambiguous about which seam it names,
   it does not fire on another ADR's title, and the resolution belongs to the lane
@@ -64,6 +64,15 @@
   appended dated note is the whole record and no `Status` edit is owed (ADR-0082 §1).
   Refs #1432, #663, ADR-0098 §5, ADR-0098 §12, ADR-0106 §1, ADR-0106 §8,
   ADR-0106 §11, ADR-0181 §12.
+- Partially superseded: 2026-10-04 by ADR-0294 — four scopes, all of them the email
+  source's scheduled ingestion. §12:1's `email_reader_interval` row, so `Settings`
+  carries the other six fields; §12:2 entire; §12:5's interval half, so the source
+  ships disabled with `email_source_path` `None`; and §13:2's item for the ingestion
+  wiring and its scheduler job. The reader, its envelope proposals, its facet and
+  every other clause stand. This replacement takes effect on ratification of
+  ADR-0294. This reciprocal header record accompanies the numbered draft under
+  ADR-0070 and ADR-0082; prior supersessions and the ratified body below are
+  preserved.
 
 ## Context
 

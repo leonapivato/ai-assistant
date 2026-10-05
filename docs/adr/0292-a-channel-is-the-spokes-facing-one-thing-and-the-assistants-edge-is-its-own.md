@@ -1,12 +1,20 @@
 # 292. A channel is the spokes facing one thing, and the assistant's edge is its own
 
-- Status: Accepted
+- Status: Partially superseded by ADR-0294 (§Decision:2's and §13:1's hold on readers' scheduled ingestion)
 - Date: 2026-10-04
 - Scope: [#2578](https://github.com/leonapivato/ai-assistant/issues/2578), the channel redesign, rethought: the model the conversation channel ([#2680](https://github.com/leonapivato/ai-assistant/pull/2680)), the device session and stopping an activation apply, in place of ADR-0290 and ADR-0291.
 - Authorization: the owner accepted proposal #2682 on 2026-10-04, at `36031075`, after walking the model through item by item the same day, and the dispatcher assigned 0292. This ADR is that proposal converted under `docs/proposals/README.md` → "When it is decided".
 - **Supersedes** [ADR-0290](0290-a-channel-is-needed-exactly-where-something-crosses-the-hubs-edge.md) — **whole.** The edge becomes the assistant's (§1), a channel becomes the group of spokes facing one thing (§2), and the activating and service sorts give way to push and pull per input (§6). What survives is restated in §5 and §12. Its earlier partial supersession by ADR-0291 stays on its status line as history.
 - **Supersedes** [ADR-0291](0291-a-channels-record-is-its-own-and-what-it-keeps-is-its-kinds-choice.md) — **whole.** Channels keep nothing; a hosted medium keeps its own content, and ADR-0291's rules for a channel's record move onto it (§3).
 - **Partially supersedes** [ADR-0283](0283-a-channels-history-is-its-episodes-and-the-turn-index-is-retired.md) — **one scope.** **§1's index, in what an episode is indexed by, and §1:2's order, read as channel and place**: an episode is indexed by its channel and its place, and records the spokes its input came through; the `ChannelIdentity` that §1:3 indexes and §1:2 orders is a channel together with a place, a conversation's (`conversation`, id) being (the chat, that conversation) (§10 below). Under that mapping §1:3's columns, §3's reads and §8's deletion and reclaim read exactly what they read today, scoped to the place. ADR-0291's scope on §1:2 has nothing left to reach once no channel keeps a record (§3 below): §1:2 orders every place's episodes and every channel's across its places, and a hosted medium's content is ordered as its kind declares. §4:1's history read and §8:1's deletion stay in force under the Decision's opening clause until the conversation channel's ADR replaces them for the chat. Every other clause stands.
+- Partially superseded: 2026-10-04 by ADR-0294 — one scope. §Decision:2's and
+  §13:1's hold on the table's last row: readers' scheduled ingestion into memory
+  retires when ADR-0294's implementation lands, before its replacement is built, on
+  the owner's ruling of 2026-10-04. §13:2 binds that replacement when it is built,
+  and §13:3, the rest of the table and every other clause stand. This replacement
+  takes effect on ratification of ADR-0294. This reciprocal header record
+  accompanies the numbered draft under ADR-0070 and ADR-0082; prior supersessions
+  and the ratified body below are preserved.
 
 ## Context
 
