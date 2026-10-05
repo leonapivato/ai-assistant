@@ -72,7 +72,12 @@ notification *review* surface — ``notifications``, ``dismiss_notification``,
 ``forget_notification``, ``notification_preferences``,
 ``set_notification_preferences`` — and the connection surface —
 ``connect_account``, ``reprovision_account``, ``disconnect_account``,
-``connected_accounts``, ``recent_connection_acts``.
+``connected_accounts``, ``recent_connection_acts``. ADR-0296's record on ADR-0177
+§1:1 adds the chat space's acts in the medium and its change read (ADR-0293 §11:2) —
+``start_conversation``, ``my_devices``, ``set_my_devices``,
+``set_conversation_devices``, ``write_message``, ``delete_message``,
+``delete_conversation``, ``transcript`` and ``chat_changes`` — and its record on §1:5
+the one value the gateway supplies of its own for them: the browser's device.
 ``next_notification`` remains the gateway's **own** poll and is none of the thirty,
 because no browser request resolves to it — :class:`.delivery.DeliveryFanOut`
 originates it, no browser request names it, and no browser argument reaches it
@@ -145,11 +150,14 @@ from ai_assistant.core.errors import (
     ResidualCredentialError,
     TranscriptionFailedError,
     UnknownConnectionError,
+    UnknownConversationError,
     UnusableIdentityError,
 )
 from ai_assistant.core.streams import closing_stream
 from ai_assistant.core.types import (
+    CHAT_DEVICES_MAX,
     DEFAULT_PAGE_SIZE,
+    TRANSCRIPT_MESSAGE_MAX_CHARS,
     AnswerOutcome,
     Attestation,
     AuthorizationProjection,
@@ -157,6 +165,8 @@ from ai_assistant.core.types import (
     Belief,
     BeliefBand,
     BeliefSummary,
+    ChatChanges,
+    ChatDevice,
     Clarification,
     ClassReach,
     Confirmation,
@@ -165,10 +175,16 @@ from ai_assistant.core.types import (
     ConnectedAccount,
     ConnectionAct,
     ContinuationToken,
+    ConversationDeletedChange,
     ConversationDigest,
+    ConversationStartedChange,
+    ConversationState,
     ConversationSummary,
     CoverageUnrecordedBinding,
     CoverageView,
+    DeletedMessage,
+    DeviceAccess,
+    DevicesChangedChange,
     Disposition,
     EgressBinding,
     EgressSpan,
@@ -181,6 +197,9 @@ from ai_assistant.core.types import (
     GrantScope,
     HeldNotification,
     MemoryKind,
+    MessageAddedChange,
+    MessageDeletedChange,
+    MessageReceipt,
     NotificationPreferences,
     NotificationReach,
     OriginUnrecordedBinding,
@@ -201,8 +220,11 @@ from ai_assistant.core.types import (
     SpokenTurn,
     StepOutcome,
     SuccessorLink,
+    TranscriptMessage,
+    TranscriptPage,
     TurnOutcome,
     TurnReference,
+    UserMessage,
     ValueBound,
     Warrant,
     routed_listing_arm,
@@ -254,6 +276,7 @@ if TYPE_CHECKING:  # pragma: no cover — imported for typing alone
     from ai_assistant.core.protocols import AssistantEngine
     from ai_assistant.core.types import (
         CanonicalDestination,
+        ChatChange,
         RoutableOperation,
         RoutedListing,
         RoutedOperation,
@@ -345,6 +368,33 @@ _DELIVERIES_PATH: Final = "/deliveries"
 _CONVERSATIONS_PATH: Final = "/conversations"
 _CONVERSATION_PATH: Final = "/conversation"
 _FORGET_CONVERSATION_PATH: Final = "/conversation/forget"
+
+#: ADR-0293 §11:2's acts in the medium and the read of the changes after a cursor,
+#: which ADR-0296's record on ADR-0177 §1:1 adds to the browser's enumeration ("§1:1's
+#: enumeration, which gains the acts in the medium (ADR-0293 §11:2) and the change
+#: stream"). **The change stream itself is a later lane's**: until the hub serves one
+#: (ADR-0296 §4), a device catches up by asking for every change after its cursor
+#: (ADR-0293 §5:11, §11:1), and :data:`_CHAT_CHANGES_PATH` is that one request.
+#:
+#: One path per operation, the verb last for :data:`_CANCEL_READ_PATH`'s reason. The
+#: listing and the digest are not repeated here: ``recent_conversations`` and
+#: ``conversation`` "remain reads" (ADR-0293 §11:3) and keep their paths above, the
+#: digest gaining the current state and the devices.
+_CHAT_START_PATH: Final = "/chat/start"
+_CHAT_DEVICES_PATH: Final = "/chat/devices"
+_CHAT_SET_DEVICES_PATH: Final = "/chat/devices/set"
+_CHAT_CONVERSATION_DEVICES_PATH: Final = "/chat/conversation/devices/set"
+_CHAT_WRITE_PATH: Final = "/chat/message/write"
+_CHAT_DELETE_MESSAGE_PATH: Final = "/chat/message/delete"
+_CHAT_DELETE_CONVERSATION_PATH: Final = "/chat/conversation/delete"
+_CHAT_TRANSCRIPT_PATH: Final = "/chat/transcript"
+_CHAT_CHANGES_PATH: Final = "/chat/changes"
+
+#: The device id of the hub's own machine. ADR-0296 §1:7 makes a browser on the
+#: gateway's own machine "that machine's hub device", and the id ADR-0298 §3 (held,
+#: PR #2698) gives the hub's own machine is ``hub`` "in every configuration". So a
+#: loopback browser of a gateway whose hub is on the same machine is ``hub``.
+_HUB_DEVICE: Final = "hub"
 
 #: ADR-0177 §6's grant surface. **Five paths for five operations, and the two
 #: readings are two paths rather than one answered twice**: ADR-0139 §3's fourth
@@ -509,6 +559,15 @@ _ASSISTANT_PATHS: Final[Mapping[tuple[str, str], str]] = {
     ("POST", _CONVERSATIONS_PATH): "recent_conversations",
     ("POST", _CONVERSATION_PATH): "conversation",
     ("POST", _FORGET_CONVERSATION_PATH): "forget_conversation",
+    ("POST", _CHAT_START_PATH): "start_conversation",
+    ("POST", _CHAT_DEVICES_PATH): "my_devices",
+    ("POST", _CHAT_SET_DEVICES_PATH): "set_my_devices",
+    ("POST", _CHAT_CONVERSATION_DEVICES_PATH): "set_conversation_devices",
+    ("POST", _CHAT_WRITE_PATH): "write_message",
+    ("POST", _CHAT_DELETE_MESSAGE_PATH): "delete_message",
+    ("POST", _CHAT_DELETE_CONVERSATION_PATH): "delete_conversation",
+    ("POST", _CHAT_TRANSCRIPT_PATH): "transcript",
+    ("POST", _CHAT_CHANGES_PATH): "chat_changes",
     ("POST", _SOURCES_PATH): "grantable_sources",
     ("POST", _GRANT_PATH): "grant",
     ("POST", _REVOKE_PATH): "revoke",
@@ -1313,6 +1372,13 @@ class Gateway:
             _CONVERSATIONS_PATH: self._recent_conversations,
             _CONVERSATION_PATH: self._conversation,
             _FORGET_CONVERSATION_PATH: self._forget_conversation,
+            _CHAT_START_PATH: self._start_conversation,
+            _CHAT_SET_DEVICES_PATH: self._set_my_devices,
+            _CHAT_CONVERSATION_DEVICES_PATH: self._set_conversation_devices,
+            _CHAT_DELETE_MESSAGE_PATH: self._delete_message,
+            _CHAT_DELETE_CONVERSATION_PATH: self._delete_conversation,
+            _CHAT_TRANSCRIPT_PATH: self._transcript,
+            _CHAT_CHANGES_PATH: self._chat_changes,
             _SOURCES_PATH: self._grantable_sources,
             _GRANT_PATH: self._grant,
             _REVOKE_PATH: self._revoke,
@@ -1343,6 +1409,17 @@ class Gateway:
             _DISCONNECT_PATH: self._disconnect_account,
             _CONNECTIONS_PATH: self._connected_accounts,
             _CONNECTION_ACTS_PATH: self._recent_connection_acts,
+        }
+        #: The two shapes that need the name of the browser device the request comes
+        #: from, which ADR-0296's record on ADR-0177 §1:5 adds to the closed class of
+        #: what the gateway supplies of its own. Kept apart from :attr:`_unary` so the
+        #: name reaches these two handlers and no other: writing a message carries it
+        #: as ``UserMessage.device_id`` (ADR-0293 §4:1), and reading "my devices" tells
+        #: the page which device it is, so it can offer to add itself (§3:1). Nothing
+        #: else of the browser's connection reaches a handler.
+        self._named: Mapping[str, Callable[[Request, str | None], Awaitable[Response]]] = {
+            _CHAT_DEVICES_PATH: self._my_devices,
+            _CHAT_WRITE_PATH: self._write_message,
         }
 
     @property
@@ -2284,7 +2361,7 @@ class Gateway:
         # §3 to §7's conditions, so nothing is recorded and the connection survives.
         return _fault(404, "Not Found", "no-such-path", close=False)
 
-    async def _assistant(
+    async def _assistant(  # noqa: PLR0911 — one return per shape class, and the split is the point
         self, request: Request, header_half: str | None, connection: _Connection
     ) -> Response | _Streamed:
         """Resolve one admitted assistant request onto ADR-0177 §1's enumeration.
@@ -2323,6 +2400,8 @@ class Gateway:
         if barred is not None:
             return barred
         try:
+            if request.path in self._named:
+                return await self._named[request.path](request, self._browser_device(connection))
             if shape not in _STREAMED_SHAPES:
                 return await self._unary[request.path](request)
             handle = None if header_half is None else self._sessions.handle(header_half)
@@ -2335,6 +2414,34 @@ class Gateway:
             return self._delivery_stream(handle)
         except _Refused as refused:
             return refused.response
+
+    def _browser_device(self, connection: _Connection) -> str | None:
+        """The device a browser request comes from, as the gateway names it (ADR-0296 §1).
+
+        A device is the machine, never a tab or a process (§1:6), and the gateway names
+        it from facts of its own and never from anything the browser asserts:
+
+        * **On the remote listener**, the overlay identity ADR-0174 §3 obtained for the
+          connection from the gateway's own agent — the browser device of §1:1.
+        * **On the loopback listener**, the gateway's own machine, which §1:7 makes
+          that machine's hub device. Where the hub is on this machine too, that is
+          ``hub`` (:data:`_HUB_DEVICE`).
+
+        **A loopback browser of a gateway whose hub is remote has no name here**, and
+        ``None`` says so rather than inventing one: that machine's device id is its
+        overlay identity, and nothing in this process can learn its own. So a write
+        from it is refused as its own condition (:meth:`_write_message`) instead of
+        being recorded under an id the hub would not know the machine by.
+
+        Args:
+            connection: The connection the request arrived on.
+
+        Returns:
+            The device's id, or ``None`` where the gateway cannot name it.
+        """
+        if connection.remote:
+            return connection.device
+        return _HUB_DEVICE if self._hub_carries_connections else None
 
     def _connections_refused(self, path: str, connection: _Connection) -> Response | None:
         """ADR-0177 §3's two refusals, decided from the listener and the shape alone.
@@ -2727,6 +2834,167 @@ class Gateway:
         named = _required_string(_payload(request), "conversation_id")
         destroyed = await self._relayed(partial(self._engine.forget_conversation, named))
         return _rendered({"destroyed": destroyed})
+
+    # --- ADR-0293 §11: the chat space's acts in the medium and its reads ---
+    #
+    # One handler per operation, each one engine call (ADR-0168 §1). Every argument is
+    # the browser's own but one: the device a message is written from, which is the
+    # gateway's to name (ADR-0296's record on ADR-0177 §1:5) and which no body member
+    # can supply. A conversation the hub says is gone is ``no-such-conversation``, the
+    # condition :meth:`_conversation` already answers with, so the page treats a
+    # conversation deleted elsewhere the same way whichever act met it.
+
+    async def _start_conversation(
+        self,
+        request: Request,  # noqa: ARG002 — one signature per entry in `_unary`
+    ) -> Response:
+        """Start an empty conversation, shown on "my devices" (ADR-0293 §2:1)."""
+        started = await self._relayed(self._engine.start_conversation)
+        return _rendered({"conversation": _summary_view(started)})
+
+    async def _my_devices(
+        self,
+        request: Request,  # noqa: ARG002 — one signature per entry in `_named`
+        device: str | None,
+    ) -> Response:
+        """Read "my devices", and say which device this browser is (ADR-0293 §3:1).
+
+        ``this_device`` is the gateway's naming of the browser's own machine
+        (:meth:`_browser_device`), carried so the page can offer to add itself to the
+        set rather than asking the owner to type an overlay identity. ``None`` where
+        the gateway cannot name it.
+        """
+        held = await self._relayed(self._engine.my_devices)
+        return _rendered({"devices": [_device_view(one) for one in held], "this_device": device})
+
+    async def _set_my_devices(self, request: Request) -> Response:
+        """Replace "my devices" with the set the browser sent (ADR-0293 §3:1, §3:2).
+
+        The whole set travels, as the surface takes it: the page adds or removes a
+        device by sending the set it now wants, so nothing here composes a change out
+        of the set it last read.
+        """
+        devices = _chat_devices(_payload(request))
+        changed = await self._relayed(partial(self._engine.set_my_devices, devices))
+        return _rendered({"changed": changed})
+
+    async def _set_conversation_devices(self, request: Request) -> Response:
+        """Choose one conversation's devices, leaving "my devices" alone (ADR-0293 §3:3)."""
+        payload = _payload(request)
+        named = _required_string(payload, "conversation_id")
+        devices = _chat_devices(payload)
+        changed = await self._relayed(
+            partial(self._engine.set_conversation_devices, named, devices=devices),
+            fault=_chat_fault,
+        )
+        return _rendered({"changed": changed})
+
+    async def _write_message(self, request: Request, device: str | None) -> Response:
+        """Write the owner's message into a conversation, and answer *received* (§4).
+
+        **The device is the gateway's naming and never the browser's**: no body member
+        is read for it, so a page cannot write as another device. The message id is
+        the browser's, chosen once per message and sent again with a repeat (§4:1,
+        §4:2), so a send the page could not confirm is safe for the owner to press
+        again.
+
+        **Two refusals are answered before the hub is asked**, each as its own
+        condition: a browser whose device the gateway cannot name
+        (:meth:`_browser_device`), and a message over the size bound, which §4:7 has
+        "refused, with the error on the send" — the bound is the type's, so the same
+        figure the hub would refuse on. Everything else is the hub's answer, and a
+        receipt with no position (``not_an_end``, ``no_such_reply``) is an answer, not
+        a fault: the page says what it means.
+        """
+        payload = _payload(request)
+        named = _required_string(payload, "conversation_id")
+        message_id = _required_string(payload, "message_id")
+        text = _required_string(payload, "text")
+        replies_to = _optional_position(payload, "replies_to")
+        if device is None:
+            return _fault(
+                422,
+                "Unprocessable Content",
+                "device-unnamed",
+                detail=_DEVICE_UNNAMED,
+                close=False,
+            )
+        if len(text) > TRANSCRIPT_MESSAGE_MAX_CHARS:
+            return _fault(
+                422,
+                "Unprocessable Content",
+                "message-too-long",
+                detail=f"A message is at most {TRANSCRIPT_MESSAGE_MAX_CHARS} characters.",
+                close=False,
+            )
+        try:
+            message = UserMessage(
+                device_id=device, message_id=message_id, text=text, replies_to=replies_to
+            )
+        except ValidationError:
+            # Blank text or a blank message id: a value the browser owns and the type
+            # refuses, answered as malformed without the rejected value in the body.
+            raise _malformed() from None
+        receipt = await self._relayed(
+            partial(self._engine.write_message, named, message=message), fault=_chat_fault
+        )
+        return _rendered({"receipt": _receipt_view(receipt)})
+
+    async def _delete_message(self, request: Request) -> Response:
+        """Delete one message of either author, leaving its marker (ADR-0293 §5:8, §5:9)."""
+        payload = _payload(request)
+        named = _required_string(payload, "conversation_id")
+        position = _required_position(payload, "position")
+        deleted = await self._relayed(
+            partial(self._engine.delete_message, named, position=position), fault=_chat_fault
+        )
+        return _rendered({"deleted": deleted})
+
+    async def _delete_conversation(self, request: Request) -> Response:
+        """Delete a conversation and its transcript, forgetting nothing (ADR-0293 §2:3).
+
+        The other act the page offers beside forgetting, never composed with it: no
+        single operation both deletes and forgets (§2:7), so the page sends this or
+        :data:`_FORGET_CONVERSATION_PATH`, and the gateway holds nothing between them.
+        """
+        named = _required_string(_payload(request), "conversation_id")
+        deleted = await self._relayed(partial(self._engine.delete_conversation, named))
+        return _rendered({"deleted": deleted})
+
+    async def _transcript(self, request: Request) -> Response:
+        """Read a conversation's recent messages, or the ones before a position (§5:13)."""
+        payload = _payload(request)
+        named = _required_string(payload, "conversation_id")
+        before = _optional_position(payload, "before")
+        limit = _page(payload, "limit", DEFAULT_PAGE_SIZE)
+        page = await self._relayed(
+            partial(self._engine.transcript, named, before=before, limit=limit)
+        )
+        if page is None:
+            return _fault(404, "Not Found", "no-such-conversation", close=False)
+        return _rendered({"transcript": _transcript_view(page)})
+
+    async def _chat_changes(self, request: Request) -> Response:
+        """Read every change to the chat space after the browser's cursor (§5:11).
+
+        One request, answered at once (ADR-0293 §11:1): following the changes as they
+        happen is the change stream's, a later lane's (ADR-0296 §4). The cursor is the
+        browser's own — "a device keeps one cursor for the chat space" — and this
+        gateway holds none.
+        """
+        payload = _payload(request)
+        after = _required_cursor(payload, "after")
+        conversations = _optional_ids(payload, "conversation_ids")
+        limit = _page(payload, "limit", DEFAULT_PAGE_SIZE)
+        page = await self._relayed(
+            partial(
+                self._engine.chat_changes,
+                after=after,
+                conversation_ids=conversations,
+                limit=limit,
+            )
+        )
+        return _rendered(_changes_view(page))
 
     # --- ADR-0177 §6: the grant surface -----------------------------------
     #
@@ -3712,6 +3980,111 @@ def _page(payload: Mapping[str, Any], name: str, fallback: int) -> int:
     return value
 
 
+def _required_cursor(payload: Mapping[str, Any], name: str) -> int:
+    """The change stream's cursor, which must be there: ``0`` for none (ADR-0293 §5:11).
+
+    Required rather than defaulted, because ``chat_changes`` declares no default for
+    it and ADR-0177 §1 has the gateway default no argument the surface leaves to its
+    caller. Its range is the surface's own, ``[0, 2**63)``.
+
+    Raises:
+        _Refused: If the member is absent or is not an integer in that range.
+    """
+    if name not in payload:
+        raise _malformed()
+    return _page(payload, name, 0)
+
+
+def _optional_position(payload: Mapping[str, Any], name: str) -> int | None:
+    """A transcript position that may be absent or null: ``None``, or an integer ≥ 1.
+
+    Raises:
+        _Refused: If the member is present, not null, and not an integer in
+            ``[1, 2**63)``.
+    """
+    if name not in payload or payload[name] is None:
+        return None
+    return _required_position(payload, name)
+
+
+def _required_position(payload: Mapping[str, Any], name: str) -> int:
+    """A transcript position that must be there, an integer in ``[1, 2**63)`` (§4:4).
+
+    Raises:
+        _Refused: If the member is absent or is not such an integer.
+    """
+    if name not in payload:
+        raise _malformed()
+    value = _integer(payload, name, 0)
+    if value is None or not 1 <= value < _PAGE_CEILING:
+        raise _malformed()
+    return value
+
+
+def _optional_ids(payload: Mapping[str, Any], name: str) -> tuple[str, ...] | None:
+    """A list of conversation ids that may be absent or null, meaning every one.
+
+    The bound and the blank check are the surface's own (``chat_conversation_ids``),
+    and are left to it: what is refused here is only a shape that is not a list of
+    strings, since nothing downstream could tell what it meant.
+
+    Raises:
+        _Refused: If the member is present, not null, and not a list of strings.
+    """
+    if name not in payload or payload[name] is None:
+        return None
+    value = payload[name]
+    if not isinstance(value, list) or not all(isinstance(one, str) for one in value):
+        raise _malformed()
+    return tuple(value)
+
+
+def _chat_devices(payload: Mapping[str, Any]) -> tuple[ChatDevice, ...]:
+    """The ``devices`` member: a whole set of devices, each ``{device_id, access}``.
+
+    Each entry is read as ADR-0293 §3 shapes it and nothing more: the device's id and
+    whether it is an end for reading, writing or both (§3:5). Whether the set names a
+    device twice is the surface's to refuse, and it does (``checked_chat_devices``),
+    as a relay fault the page renders.
+
+    Raises:
+        _Refused: If the member is absent, is not a list, holds more than
+            ``CHAT_DEVICES_MAX`` entries, or holds an entry that is not an object of
+            exactly those two members with a known access.
+    """
+    value = payload.get("devices")
+    if not isinstance(value, list) or len(value) > CHAT_DEVICES_MAX:
+        raise _malformed()
+    held: list[ChatDevice] = []
+    for one in value:
+        if not isinstance(one, dict) or set(one) != {"device_id", "access"}:
+            raise _malformed()
+        device_id, access = one["device_id"], one["access"]
+        if not isinstance(device_id, str) or access not in _ACCESSES:
+            raise _malformed()
+        try:
+            held.append(ChatDevice(device_id=device_id, access=DeviceAccess(access)))
+        except ValidationError:
+            raise _malformed() from None
+    return tuple(held)
+
+
+#: The three ways a device may be one of a conversation's ends (ADR-0293 §3:5), as
+#: their wire values, so a browser value is matched against the enumeration rather
+#: than handed to its constructor.
+_ACCESSES: Final = frozenset(one.value for one in DeviceAccess)
+
+#: What the page is told where the gateway cannot name the browser's device
+#: (:meth:`Gateway._browser_device`). The owner's words, and the remedy is where to go.
+_DEVICE_UNNAMED: Final = (
+    "This gateway cannot name this browser's device, so it cannot write a message from "
+    "here: its hub is on another machine, and a browser on the gateway's own machine is "
+    "that machine's device, whose overlay identity this gateway does not know. Write "
+    "from a browser on the hub's own machine, or from another device through the "
+    "gateway's remote listener."
+)
+
+
 def _flag(payload: Mapping[str, Any], name: str) -> bool:
     """One boolean member that must be there, read as a boolean and nothing else.
 
@@ -4442,6 +4815,21 @@ def _relay_fault(exc: Exception) -> Response:
             422, "Unprocessable Content", "assistant-declined", detail=str(exc), close=False
         )
     return _fault(400, "Bad Request", "rejected", detail=str(exc), close=False)
+
+
+def _chat_fault(exc: Exception) -> Response:
+    """One failed act on a named conversation: gone is its own condition, the rest relayed.
+
+    An act in the medium raises ``UnknownConversationError`` where "the id names no
+    conversation, or one deleted" (ADR-0293 §2:2), and the page meets the same fact on
+    a read as ``no-such-conversation`` (:meth:`Gateway._conversation`). Answering it
+    here under that name, rather than as :func:`_relay_fault`'s ``assistant-declined``,
+    is what lets the page drop a conversation deleted on another device whichever act
+    found it out. Everything else is ADR-0168 §9's three conditions, unchanged.
+    """
+    if isinstance(exc, UnknownConversationError):
+        return _fault(404, "Not Found", "no-such-conversation", close=False)
+    return _relay_fault(exc)
 
 
 #: What this project says about each way a transcription can fail (ADR-0200 §4). A
@@ -5532,7 +5920,111 @@ def _digest_view(digest: ConversationDigest) -> dict[str, Any]:
         "started_at": digest.started_at.isoformat(),
         "last_turn_at": None if digest.last_turn_at is None else digest.last_turn_at.isoformat(),
         "recorded_turns": digest.recorded_turns,
+        "state": _state_view(digest.state),
+        "devices": [_device_view(one) for one in digest.devices],
     }
+
+
+def _state_view(state: ConversationState) -> dict[str, Any]:
+    """What a conversation's devices are shown about the assistant (ADR-0293 §8).
+
+    Relayed and never derived: "working…" while an activation started from the
+    conversation runs (§8:2), and how the last one ended (§8:3, with ADR-0295 §3:4's
+    *stopped*). The page renders it beside the transcript and never into it (§8:1).
+    """
+    return {
+        "working": state.working,
+        "activation_id": state.activation_id,
+        "last_ended": None if state.last_ended is None else state.last_ended.value,
+    }
+
+
+def _device_view(device: ChatDevice) -> dict[str, Any]:
+    """One device of a set, "my devices" or a conversation's (ADR-0293 §3)."""
+    return {"device_id": device.device_id, "access": device.access.value}
+
+
+def _receipt_view(receipt: MessageReceipt) -> dict[str, Any]:
+    """The answer to a send: the outcome, and the position that is *received* (§4:4)."""
+    return {
+        "conversation_id": receipt.conversation_id,
+        "outcome": receipt.outcome.value,
+        "position": receipt.position,
+    }
+
+
+def _entry_view(entry: TranscriptMessage | DeletedMessage) -> dict[str, Any]:
+    """One transcript entry: a message with ADR-0293 §5:2's properties, or its marker.
+
+    **A deleted message crosses as its marker alone** — its position and that it was
+    deleted, with no text (§5:12) — so a reply naming it is shown as naming a deleted
+    message (§5:8). An enumeration for :func:`_outcome_view`'s reason: what may reach
+    the page is decided here and not by whatever the type later carries.
+    """
+    if isinstance(entry, DeletedMessage):
+        return {"position": entry.position, "deleted": True}
+    return {
+        "position": entry.position,
+        "deleted": False,
+        "written_at": entry.written_at.isoformat(),
+        "author": entry.author.value,
+        "text": entry.text,
+        "replies_to": entry.replies_to,
+        "options": list(entry.options),
+        "cut_off": entry.cut_off,
+        "device_id": entry.device_id,
+        "message_id": entry.message_id,
+    }
+
+
+def _transcript_view(page: TranscriptPage) -> dict[str, Any]:
+    """Part of a conversation's transcript, and the cursor it was read at (§5:13)."""
+    return {
+        "conversation_id": page.conversation_id,
+        "entries": [_entry_view(one) for one in page.entries],
+        "as_of": page.as_of,
+    }
+
+
+def _change_view(change: ChatChange) -> dict[str, Any]:
+    """One change to the chat space, told apart by its ``kind`` (ADR-0293 §5:10).
+
+    Each kind carries the conversation it is about (``None`` for "my devices") beside
+    its sequence number, so the page applies it without a lookup.
+    """
+    head: dict[str, Any] = {"kind": change.kind, "seq": change.seq}
+    match change:
+        case MessageAddedChange():
+            return {
+                **head,
+                "conversation_id": change.conversation_id,
+                "message": _entry_view(change.message),
+            }
+        case MessageDeletedChange():
+            return {
+                **head,
+                "conversation_id": change.conversation_id,
+                "position": change.marker.position,
+            }
+        case ConversationStartedChange():
+            return {
+                **head,
+                "conversation_id": change.conversation_id,
+                "devices": [_device_view(one) for one in change.devices],
+            }
+        case ConversationDeletedChange():
+            return {**head, "conversation_id": change.conversation_id}
+        case DevicesChangedChange():
+            return {
+                **head,
+                "conversation_id": change.conversation_id,
+                "devices": [_device_view(one) for one in change.devices],
+            }
+
+
+def _changes_view(page: ChatChanges) -> dict[str, Any]:
+    """The changes after a cursor, and the cursor to ask from next (§5:10, §5:11)."""
+    return {"changes": [_change_view(one) for one in page.changes], "next_after": page.next_after}
 
 
 def _source_view(source: GrantableSource) -> dict[str, Any]:
