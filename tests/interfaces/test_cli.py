@@ -2182,9 +2182,12 @@ def test_ask_rejects_an_unusable_timeout(bad: str, monkeypatch: pytest.MonkeyPat
     """
     opened = _wire_recording_opens(monkeypatch, FakeAssistantEngine())
 
-    result = CliRunner().invoke(cli.app, ["ask", "hello", "--timeout", bad])
+    result = CliRunner().invoke(cli.app, ["ask", "hello", "--goal", "goal-1", "--timeout", bad])
 
     assert result.exit_code == 2  # Typer's usage-error code, before the engine is built
+    # The refusal is the timeout's own: the turn carries a valid reference, so it is not
+    # `ask`'s missing-reference refusal standing in for it (ADR-0293 §11).
+    assert "--timeout" in result.output
     assert opened == []
 
 
@@ -6710,7 +6713,10 @@ def _id_invocations(value: str) -> tuple[tuple[str, list[str]], ...]:
         ("answer", ["answer", value, "--accept"]),
         ("forget-question", ["forget-question", value]),
         ("forget-conversation", ["forget-conversation", value, "--yes"]),
-        ("ask --conversation", ["ask", "hello", "--conversation", value, "--yes"]),
+        (
+            "ask --conversation",
+            ["ask", "hello", "--goal", "goal-1", "--conversation", value, "--yes"],
+        ),
         ("dismiss", ["dismiss", value]),
         ("forget-notification", ["forget-notification", value]),
         # `tune --class` is the second id-shaped parameter spelled without an `_id`
@@ -6743,7 +6749,7 @@ def test_every_id_argument_refuses_a_blank_before_any_client_is_built(
     raises before any I/O — so it arrives *inside* the command's
     ``except (AssistantError, TransportError)`` boundary and is caught by neither.
     Refusing during Typer's parameter parsing makes it a usage error instead, the
-    treatment blank ``learn`` content and a blank ``source`` already get.
+    treatment a blank ``source`` already gets.
 
     **And no client is opened**, which is the half this case's name promised and did
     not check (#728). Exit 2 alone is passed by a refusal that first built a client
