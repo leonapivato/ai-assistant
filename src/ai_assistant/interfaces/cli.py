@@ -2300,7 +2300,7 @@ def chat(
     """Talk in a conversation: its recent messages, then each one as it arrives.
 
     Each line you type is written into the conversation as a message, and is
-    *received* once the conversation has recorded it. The assistant's messages, and
+    received once the conversation has recorded it. The assistant's messages, and
     any written from your other devices, are shown as they arrive, and so is what the
     assistant is doing: working, or how it last ended. Writing while it works is
     fine — your message waits and is taken in when it is done.
