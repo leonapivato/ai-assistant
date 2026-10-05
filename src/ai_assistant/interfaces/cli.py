@@ -282,6 +282,7 @@ from ai_assistant.core.types import (
     SECRET_VALUE_MAX_BYTES,
     TRANSCRIPT_MESSAGE_MAX_CHARS,
     ActivationEnding,
+    ActivationStop,
     AnswerKind,
     AttemptOutcome,
     AttemptReport,
@@ -2226,6 +2227,41 @@ _ENDING_PHRASES: Final = {
     ActivationEnding.STOPPED: "The assistant was stopped.",
 }
 
+#: What a stop found, as fixed text (ADR-0297 §5:8, ADR-0295 §2). **Only what the
+#: answer means is said**: ``STOPPED`` promises what ADR-0295 §2 guarantees from the
+#: moment the stop landed and nothing more — a stage already running finishes under
+#: its own deadlines (ADR-0297 §4), so "stopped" is never said to mean "halted now",
+#: and nothing already sent is said to be called back. The two non-acting answers
+#: say that nothing was written, which is §5:5's and §5:6's whole content; the
+#: second claims no more than that the hub holds nothing saying the activation ran.
+_STOP_PHRASES: Final = {
+    ActivationStop.STOPPED: (
+        "[bold]Stopped.[/] Nothing new starts in that work from now on, and it writes "
+        "nothing more into its conversation. What it was in the middle of finishes "
+        "first, and anything it had already sent is not called back; how that turned "
+        "out is recorded. No goal is given up by stopping."
+    ),
+    ActivationStop.ALREADY_ENDED: (
+        "[yellow]That had already ended,[/] so this stopped nothing and recorded nothing."
+    ),
+    ActivationStop.NO_SUCH_ACTIVATION: (
+        "[yellow]Nothing here says work of that id ran,[/] so nothing was stopped. While "
+        "the assistant works, 'assistant chat' and 'assistant conversation' show the id "
+        "to give."
+    ),
+}
+
+#: The exit code of each answer to a stop. **A table rather than a membership test**,
+#: so a member added to the vocabulary is a ``KeyError`` here rather than a silent
+#: arrival on whichever side an expression negated — :data:`_CANCELLATIONS_THAT_ACTED`'s
+#: reason. Only ``STOPPED`` acted; the other two wrote nothing (ADR-0297 §5:5, §5:6), so
+#: a script reading success off either would be reading a stop that did not happen.
+_STOP_EXIT_CODES: Final = {
+    ActivationStop.STOPPED: _EXIT_OK,
+    ActivationStop.ALREADY_ENDED: _EXIT_ERROR,
+    ActivationStop.NO_SUCH_ACTIVATION: _EXIT_ERROR,
+}
+
 #: What the chat prompt understands besides a message.
 _CHAT_HELP: Final = (
     "[dim]Type a message and press Enter to send it. '/reply N <text>' replies to "
@@ -2408,6 +2444,30 @@ def delete_conversation(
             )
         )
     )
+
+
+@app.command()
+def stop(
+    activation_id: str = typer.Argument(
+        ...,
+        callback=_present_id,
+        help="The id 'assistant chat' or 'assistant conversation' shows while it works.",
+    ),
+) -> None:
+    """Stop what the assistant is working on, naming it by its id.
+
+    Nothing new starts in that work once the stop lands, and it writes nothing more
+    into its conversation. **It is not cut off mid-step**: what it was in the middle
+    of finishes first, and anything it had already sent is not called back — how that
+    turned out is recorded. The conversation then shows it as stopped.
+
+    Stopping gives up no goal; 'assistant abandon-goal' is that. Writing "stop" in a
+    conversation is a message, not a stop — it waits like any other.
+
+    Where the work had already ended, or nothing here says it ran, this says so and
+    changes nothing.
+    """
+    raise typer.Exit(asyncio.run(_with_engine(lambda engine: _drive_stop(engine, activation_id))))
 
 
 @app.command("my-devices")
@@ -2630,8 +2690,13 @@ class _ChatView:
         if previous is not None and previous == state:
             return
         if state.working:
-            if previous is None or not previous.working:
+            if (
+                previous is None
+                or not previous.working
+                or previous.activation_id != state.activation_id
+            ):
                 _print("[dim]The assistant is working… you can keep writing.[/]")
+                _print_stop_hint(state)
             return
         if state.last_ended is None:
             return
@@ -3043,6 +3108,18 @@ async def _drive_show_conversation(
     return _EXIT_OK
 
 
+async def _drive_stop(engine: AssistantEngine, activation_id: str) -> int:
+    """Relay one stop and print what the answer means (ADR-0297 §5:8).
+
+    One engine call and one fixed sentence per :class:`ActivationStop` member; the
+    exit code is :data:`_STOP_EXIT_CODES`'. A failure to reach the hub is the caller's
+    (:func:`_with_engine`), so it is rendered and exits non-zero rather than escaping.
+    """
+    answer = await engine.stop_activation(activation_id)
+    _print(_STOP_PHRASES[answer])
+    return _STOP_EXIT_CODES[answer]
+
+
 async def _drive_delete_message(
     engine: AssistantEngine, conversation_id: str, position: int, *, confirm: Callable[[], bool]
 ) -> int:
@@ -3291,6 +3368,20 @@ def _render_devices_full() -> None:
         f"[yellow]Nothing added:[/] a set of devices holds at most {CHAT_DEVICES_MAX}; "
         "remove one first."
     )
+
+
+def _print_stop_hint(state: ConversationState) -> None:
+    """Say how to stop the running activation, where the state names it (ADR-0297 §5:7).
+
+    The id is the current state's and only the current state's (ADR-0295 §1:2): this
+    command line holds no running activation of its own to name. Where the state shows
+    "working…" with no id, nothing is said — that activation cannot be stopped, which is
+    ADR-0297 §5's residual of a failed id factory, and offering a command it would only
+    refuse would be worse than silence.
+    """
+    if state.activation_id is None:
+        return
+    _print(f"[dim]To stop it: assistant stop {_safe(state.activation_id)}[/]")
 
 
 def _print_chat_hint(conversation_id: str) -> None:
