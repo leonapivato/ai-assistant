@@ -8845,6 +8845,9 @@ const chat = {
   // Bumped whenever following starts or stops, so a read in flight across either
   // schedules nothing when it comes back.
   ticks: 0,
+  // Whether a read of the changes is out. One at a time: two reads overlapping would
+  // each answer from a cursor the other has moved.
+  reading: false,
   timer: null,
   quickUntil: 0,
   // `undefined` until read; `null` where the gateway cannot name this browser's device.
@@ -8899,14 +8902,17 @@ function rememberChat() {
 // The owner opening the chat, or a reload restoring the chat this tab had open.
 function openChat() {
   show("chat", true);
-  rememberChat();
   if (!chat.open) {
     chat.open = true;
+    // Read before anything is written back, so a reload keeps the conversation it had.
     if (chat.selected === null) {
       chat.selected = storedChatConversation();
     }
+    rememberChat();
     void loadChat();
+    return;
   }
+  rememberChat();
 }
 
 // The session ended: the chat stops following and forgets what it held.
@@ -9052,6 +9058,10 @@ function stopFollowing(said, offer) {
 }
 
 function scheduleFollow(delay) {
+  // The read in flight schedules the next one itself, when it is back.
+  if (chat.reading) {
+    return;
+  }
   if (chat.timer !== null) {
     window.clearTimeout(chat.timer);
   }
@@ -9077,55 +9087,85 @@ function followAgain() {
   startFollowing(CHAT_ASKED_AGAIN);
 }
 
-// One read of the changes after the cursor, and the next one scheduled.
+// One read of the changes after the cursor, and the next one scheduled. One read is out
+// at a time (`chat.reading`), so no answer is ever read against a cursor another read
+// has moved; whatever wanted a read meanwhile gets it when this one is back.
 async function followChat() {
-  const tick = chat.ticks;
+  if (chat.reading) {
+    return;
+  }
+  chat.reading = true;
+  let next = null;
+  try {
+    next = await readChanges(chat.ticks);
+  } finally {
+    chat.reading = false;
+  }
+  if (next !== null && chat.following) {
+    scheduleFollow(next);
+  }
+}
+
+// The read itself. Answers the delay before the next read, or `null` where following
+// stopped — unless following was stopped and started again while this read was out, in
+// which case this read's answer is dropped and the next is due at once.
+async function readChanges(tick) {
   const half = headerHalf();
   if (half === null) {
     stopFollowing(null, false);
-    return;
+    return null;
   }
   const era = sessionEra;
+  const after = chat.cursor;
   let body;
   try {
-    body = await relay(half, "/chat/changes", { after: chat.cursor }, "chat");
+    body = await relay(half, "/chat/changes", { after: after }, "chat");
   } catch (_) {
     if (!sameSession(half, era)) {
-      return;
+      return null;
     }
-    if (tick === chat.ticks) {
-      stopFollowing(CHAT_STOPPED_GONE, true);
-      fault(GATEWAY_GONE, "chat");
+    if (tick !== chat.ticks) {
+      return 0;
     }
-    return;
+    stopFollowing(CHAT_STOPPED_GONE, true);
+    fault(GATEWAY_GONE, "chat");
+    return null;
   }
-  if (!sameSession(half, era) || tick !== chat.ticks) {
-    return;
+  if (!sameSession(half, era)) {
+    return null;
+  }
+  if (tick !== chat.ticks) {
+    return 0;
   }
   if (body === null) {
     stopFollowing(CHAT_STOPPED_REFUSED, true);
-    return;
+    return null;
   }
-  // A chat space with fewer changes than this page's cursor claims was started afresh,
-  // so what is on screen describes nothing that exists: read it all again.
-  if (body.next_after < chat.cursor) {
+  // A chat space with fewer changes than the cursor this read was sent with was started
+  // afresh, so what is on screen describes nothing that exists: read it all again.
+  if (body.next_after < after) {
     chat.cursor = null;
     void loadChat();
-    return;
+    return null;
   }
   const touched = applyChanges(body.changes);
   chat.cursor = body.next_after;
+  // The state is read with the changes, and a failure of that read stops the following
+  // exactly as a failure of the changes does: nothing is tried again of its own motion.
   if (chat.selected !== null && (touched || followingQuickly())) {
-    await readChatDigest(chat.selected, chat.chosen);
-  }
-  if (tick !== chat.ticks) {
-    return;
+    const read = await readChatDigest(chat.selected, chat.chosen);
+    if (tick !== chat.ticks) {
+      return 0;
+    }
+    if (!read) {
+      stopFollowing(CHAT_STOPPED_REFUSED, true);
+      return null;
+    }
   }
   if (body.changes.length >= CHAT_PAGE) {
-    scheduleFollow(0);
-  } else {
-    scheduleFollow(followingQuickly() ? FOLLOW_QUICK_MILLISECONDS : FOLLOW_IDLE_MILLISECONDS);
+    return 0;
   }
+  return followingQuickly() ? FOLLOW_QUICK_MILLISECONDS : FOLLOW_IDLE_MILLISECONDS;
 }
 
 // Apply changes in sequence order (ADR-0293 §5:10). Each is safe to apply twice, since a
@@ -9136,7 +9176,7 @@ function applyChanges(changes) {
   let relist = false;
   changes.forEach((change) => {
     if (change.kind === "message_added") {
-      if (change.conversation_id === chat.selected) {
+      if (change.conversation_id === chat.selected && !chat.deleted.has(change.message.position)) {
         chat.entries.set(change.message.position, change.message);
         touched = true;
       } else {
@@ -9373,10 +9413,13 @@ async function readTranscript(id, mine, before) {
       return;
     }
     const entries = body.transcript.entries;
+    // A marker is authoritative whichever arrived first: a page read before a deletion
+    // the following has already applied must not bring the message back (§5:12).
     entries.forEach((entry) => {
       if (entry.deleted) {
         chat.deleted.add(entry.position);
-      } else {
+        chat.entries.delete(entry.position);
+      } else if (!chat.deleted.has(entry.position)) {
         chat.entries.set(entry.position, entry);
       }
     });
@@ -9397,31 +9440,40 @@ async function readTranscript(id, mine, before) {
   }
 }
 
+// Answers whether the read failed for the conversation still on screen: `false` where it
+// was refused or never answered, `true` otherwise — a read for a conversation the owner
+// has since left is not a failure of anything they are looking at.
 async function readChatDigest(id, mine) {
   const half = headerHalf();
   if (half === null) {
-    return;
+    return false;
   }
   const era = sessionEra;
   try {
     const body = await relay(half, "/conversation", { conversation_id: id }, "chat");
     if (!sameSession(half, era)) {
-      return;
+      return true;
     }
-    if (body === null || mine !== chat.chosen) {
-      return;
+    if (mine !== chat.chosen) {
+      return true;
+    }
+    if (body === null) {
+      return false;
     }
     chat.state = body.conversation.state;
     chat.devices = body.conversation.devices;
     renderChatState();
     renderConversationDevices();
+    return true;
   } catch (_) {
     if (!sameSession(half, era)) {
-      return;
+      return true;
     }
     if (mine === chat.chosen) {
       fault(GATEWAY_GONE, "chat");
+      return false;
     }
+    return true;
   }
 }
 
@@ -9457,9 +9509,24 @@ function renderTranscript(toEnd) {
   const list = el("chat-transcript");
   const atEnd = list.scrollHeight - list.scrollTop - list.clientHeight < 80;
   clearNode(list);
-  // A pending message the conversation has since recorded is shown as the record.
+  // A pending message the conversation has since recorded is shown as the record, or not
+  // at all where it has since been deleted — found by its position where a receipt said
+  // it, and by this device's message id where the receipt was lost (§4:1), so a send
+  // whose answer never came is not shown twice.
+  const recorded = new Set();
+  chat.entries.forEach((entry) => {
+    if (entry.author === "user" && entry.device_id === chat.thisDevice) {
+      recorded.add(entry.message_id);
+    }
+  });
   chat.pending = chat.pending.filter(
-    (one) => one.position === null || !(one.conversation === chat.selected && chat.entries.has(one.position))
+    (one) =>
+      one.conversation !== chat.selected ||
+      !(
+        (one.position !== null &&
+          (chat.entries.has(one.position) || chat.deleted.has(one.position))) ||
+        recorded.has(one.messageId)
+      )
   );
   const positions = [...chat.entries.keys()].sort((a, b) => a - b);
   const waiting = chat.pending.filter((one) => one.conversation === chat.selected);

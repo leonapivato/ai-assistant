@@ -4060,7 +4060,9 @@ def _chat_devices(payload: Mapping[str, Any]) -> tuple[ChatDevice, ...]:
         if not isinstance(one, dict) or set(one) != {"device_id", "access"}:
             raise _malformed()
         device_id, access = one["device_id"], one["access"]
-        if not isinstance(device_id, str) or access not in _ACCESSES:
+        if not isinstance(device_id, str) or not isinstance(access, str):
+            raise _malformed()
+        if access not in _ACCESSES:
             raise _malformed()
         try:
             held.append(ChatDevice(device_id=device_id, access=DeviceAccess(access)))

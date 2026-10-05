@@ -9484,12 +9484,25 @@ def test_the_chat_is_followed_on_a_clock_that_reads_and_retries_nothing() -> Non
     for opener in ("fetch(", "relay(", "watchDeliveries(", "rearm(", "deliverChat("):
         assert opener not in clock[0], opener
         assert opener not in follow, opener
-    following = functions["followChat"]
-    assert following.count("await relay(") == 1
-    assert 'await relay(half, "/chat/changes", { after: chat.cursor }, "chat")' in following
-    # A failure stops it, says why, and hands the owner the control: no retry.
-    assert "stopFollowing(CHAT_STOPPED_GONE, true);" in following
-    assert "stopFollowing(CHAT_STOPPED_REFUSED, true);" in following
+    # One read is out at a time, and what it asks is the changes after the cursor and the
+    # state of the conversation on screen — nothing else.
+    assert "if (chat.reading) {" in functions["followChat"]
+    assert "if (chat.reading) {" in follow
+    assert "relay(" not in functions["followChat"]
+    reading = functions["readChanges"]
+    assert reading.count("await relay(") == 1
+    assert 'await relay(half, "/chat/changes", { after: after }, "chat")' in reading
+    assert "await readChatDigest(" in reading
+    # A failure of either read stops it, says why, and hands the owner the control: no
+    # retry. Both stopping sentences are in the read, and nowhere else schedules one.
+    assert "stopFollowing(CHAT_STOPPED_GONE, true);" in reading
+    assert reading.count("stopFollowing(CHAT_STOPPED_REFUSED, true);") == 2
+    assert {name for name, body in functions.items() if "scheduleFollow(" in body} == {
+        "scheduleFollow",
+        "startFollowing",
+        "followChat",
+        "deliverChat",
+    }
     # And only ADR-0182 §7's two events start it again of the page's own motion.
     assert 'document.addEventListener("visibilitychange", chatVisibility);' in script
     assert 'window.addEventListener("online", chatOnline);' in script
