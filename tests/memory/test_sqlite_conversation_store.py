@@ -31,7 +31,16 @@ from ai_assistant.core.errors import (
     ConversationStoreError,
     IncompatibleStateError,
 )
-from ai_assistant.core.types import SpokenDelivery, SpokenDeliveryState
+from ai_assistant.core.types import (
+    ChatDevice,
+    DeletedMessage,
+    DeviceAccess,
+    MessageAuthor,
+    NewMessage,
+    SendOutcome,
+    SpokenDelivery,
+    SpokenDeliveryState,
+)
 from ai_assistant.memory._episode_format import EPISODE_RECORD_FORMAT
 from ai_assistant.memory.conversation_store import SqliteConversationStore, _run_to_completion
 from ai_assistant.testing.cancellation import (
@@ -42,7 +51,7 @@ from ai_assistant.testing.cancellation import (
 )
 
 if TYPE_CHECKING:
-    from collections.abc import AsyncIterator, Callable, Iterator, Sequence
+    from collections.abc import AsyncIterator, Awaitable, Callable, Iterator, Sequence
 
     from ai_assistant.core.protocols import ConversationStore
     from ai_assistant.testing.cancellation import SuspendedCall
@@ -69,6 +78,18 @@ _SYNC_METHODS = {
     "stamped_conversation_ids": "_stamped_ids_sync",
     "recent": "_recent_sync",
     "export": "_export_sync",
+    "append_message": "_append_message_sync",
+    "delete_message": "_delete_message_sync",
+    "set_conversation_devices": "_set_conversation_devices_sync",
+    "take_in": "_take_in_sync",
+    "set_my_devices": "_set_my_devices_sync",
+    "transcript": "_transcript_sync",
+    "changes": "_changes_sync",
+    "my_devices": "_my_devices_sync",
+    "conversation_devices": "_conversation_devices_sync",
+    "untaken_messages": "_untaken_sync",
+    "conversations_awaiting": "_awaiting_sync",
+    "taken_in": "_taken_in_sync",
 }
 
 _NOW = datetime(2026, 6, 1, tzinfo=UTC)
@@ -1521,3 +1542,162 @@ def test_fresh_conversation_initialization_rolls_back_and_can_retry(
         assert raw.execute("SELECT version FROM episode_record_format").fetchall() == [
             (EPISODE_RECORD_FORMAT,)
         ]
+
+
+# --- the chat space (ADR-0293) ------------------------------------------------
+
+_PHONE = ChatDevice(device_id="phone", access=DeviceAccess.READ_WRITE)
+
+
+def _said(text: str, message_id: str) -> NewMessage:
+    return NewMessage(
+        author=MessageAuthor.USER, text=text, device_id="phone", message_id=message_id
+    )
+
+
+@pytest.mark.integration
+async def test_the_chat_space_survives_a_reopen_and_its_numbering_goes_on(tmp_path: Path) -> None:
+    """Transcripts, devices, the stream and the bookkeeping are durable (ADR-0293 §1:4).
+
+    The sequence counter is the one ``AUTOINCREMENT`` keeps, so a reopened store
+    goes on numbering after the last change rather than reusing a number a device
+    already holds as its cursor (§5:10).
+    """
+    path = tmp_path / "conversations.db"
+    store = SqliteConversationStore(path=path, now=_fixed_now)
+    try:
+        await store.set_my_devices([_PHONE])
+        conversation = (await store.start()).id
+        await store.append_message(conversation, _said("one", "m-1"))
+        await store.append_message(conversation, _said("two", "m-2"))
+        await store.delete_message(conversation, 2)
+        await store.take_in(conversation, positions=[1], activation_id="a-1")
+        head = (await store.changes(after=0)).next_after
+        before = await store.transcript(conversation)
+    finally:
+        store.close()
+
+    reopened = SqliteConversationStore(path=path, now=_fixed_now)
+    try:
+        assert await reopened.transcript(conversation) == before
+        assert await reopened.my_devices() == (_PHONE,)
+        assert await reopened.taken_in(conversation, positions=[1]) == {1: "a-1"}
+        repeated = await reopened.append_message(conversation, _said("two", "m-2"))
+        assert (repeated.outcome, repeated.position) == (SendOutcome.REPEATED, 2)
+        await reopened.append_message(conversation, _said("three", "m-3"))
+        (added,) = (await reopened.changes(after=head)).changes
+        assert added.seq == head + 1
+    finally:
+        reopened.close()
+
+
+@pytest.mark.integration
+async def test_a_file_written_before_the_chat_space_opens_with_empty_transcripts(
+    tmp_path: Path,
+) -> None:
+    """The chat tables are created on open; no existing row changes shape (ADR-0293).
+
+    Simulated by dropping them from a file this build wrote, which leaves exactly
+    what a build before them wrote: the format marker, the conversations and the
+    delivery rows.
+    """
+    path = tmp_path / "conversations.db"
+    store = SqliteConversationStore(path=path, now=_fixed_now)
+    try:
+        conversation = (await store.start()).id
+    finally:
+        store.close()
+    raw = sqlite3.connect(path)
+    try:
+        for table in (
+            "messages",
+            "chat_devices",
+            "conversation_devices",
+            "chat_changes",
+            "taken_in",
+        ):
+            raw.execute(f"DROP TABLE {table}")
+        raw.execute("DELETE FROM sqlite_sequence")
+        raw.commit()
+    finally:
+        raw.close()
+
+    reopened = SqliteConversationStore(path=path, now=_fixed_now)
+    try:
+        page = await reopened.transcript(conversation)
+        assert page is not None
+        assert page.entries == ()
+        assert await reopened.conversation_devices(conversation) == ()
+        assert await reopened.set_conversation_devices(conversation, [_PHONE]) is True
+        receipt = await reopened.append_message(conversation, _said("hello", "m-1"))
+        assert receipt.position == 1
+    finally:
+        reopened.close()
+
+
+@pytest.mark.integration
+@pytest.mark.parametrize(
+    ("statement", "read"),
+    [
+        ("UPDATE messages SET cut_off = 7", "transcript"),
+        ("UPDATE messages SET options = 'not json'", "transcript"),
+        ("UPDATE messages SET author = 'stranger'", "transcript"),
+        ("UPDATE messages SET written_at = 1.5", "export"),
+        ("UPDATE chat_changes SET kind = 'mystery'", "changes"),
+        (
+            "UPDATE chat_changes SET devices = '[{\"device_id\": 3}]' WHERE devices IS NOT NULL",
+            "changes",
+        ),
+        ("UPDATE conversation_devices SET access = 'everything'", "devices"),
+        ("UPDATE taken_in SET activation_id = ' '", "taken_in"),
+    ],
+)
+async def test_a_corrupt_chat_row_is_a_store_fault_on_the_read(
+    tmp_path: Path, statement: str, read: str
+) -> None:
+    """A row this module did not write reads as corruption, never as data."""
+    path = tmp_path / "conversations.db"
+    store = SqliteConversationStore(path=path, now=_fixed_now)
+    try:
+        await store.set_my_devices([_PHONE])
+        conversation = (await store.start()).id
+        await store.append_message(conversation, _said("hello", "m-1"))
+        await store.take_in(conversation, positions=[1], activation_id="a-1")
+        store._conn.execute(statement)
+        reads: dict[str, Callable[[], Awaitable[object]]] = {
+            "transcript": lambda: store.transcript(conversation),
+            "export": store.export,
+            "changes": lambda: store.changes(after=0),
+            "devices": lambda: store.conversation_devices(conversation),
+            "taken_in": lambda: store.taken_in(conversation, positions=[1]),
+        }
+        with pytest.raises(ConversationStoreError):
+            await reads[read]()
+    finally:
+        store.close()
+
+
+@pytest.mark.integration
+async def test_a_deleted_message_keeps_no_text_in_the_file(tmp_path: Path) -> None:
+    """ADR-0293 §5:12: the marker carries its id and that it was deleted, no text."""
+    path = tmp_path / "conversations.db"
+    store = SqliteConversationStore(path=path, now=_fixed_now)
+    try:
+        await store.set_my_devices([_PHONE])
+        conversation = (await store.start()).id
+        await store.append_message(conversation, _said("my PIN is 1234", "m-1"))
+        assert await store.delete_message(conversation, 1) is True
+        page = await store.transcript(conversation)
+        assert page is not None
+        assert page.entries == (DeletedMessage(conversation_id=conversation, position=1),)
+    finally:
+        store.close()
+
+    raw = sqlite3.connect(path)
+    try:
+        rows = raw.execute("SELECT text, author, written_at, options FROM messages").fetchall()
+        changes = raw.execute("SELECT kind FROM chat_changes ORDER BY seq").fetchall()
+    finally:
+        raw.close()
+    assert rows == [(None, None, None, None)]
+    assert ("message_added",) not in changes

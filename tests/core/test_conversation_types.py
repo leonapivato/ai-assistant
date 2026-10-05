@@ -1,8 +1,9 @@
-"""The conversation values ADR-0074 §9 adds to ``core/types.py``, as ADR-0285 leaves them.
+"""The conversation values ADR-0074 §9 adds to ``core/types.py``, with ADR-0293's chat space.
 
 What is asserted here is what the *types* guarantee on their own — frozen, every
-instant timezone-aware, and an export that carries the conversations and nothing
-else (ADR-0283 §4:3). Store behaviour belongs to the conformance suite, not here.
+instant timezone-aware, a message shaped as its author's (ADR-0293 §5:2), and an
+export that carries the conversations and their transcripts and no episode
+(ADR-0283 §4:3, ADR-0293 §5:3). Store behaviour belongs to the conformance suite.
 """
 
 from __future__ import annotations
@@ -12,7 +13,27 @@ from datetime import UTC, datetime, timedelta
 import pytest
 from pydantic import ValidationError
 
-from ai_assistant.core.types import Conversation, ConversationExport, ParkedBinding
+from ai_assistant.core.types import (
+    MESSAGE_OPTIONS_MAX,
+    TRANSCRIPT_MESSAGE_MAX_CHARS,
+    ChatChanges,
+    ChatDevice,
+    Conversation,
+    ConversationDeletedChange,
+    ConversationExport,
+    DeletedMessage,
+    DeviceAccess,
+    DevicesChangedChange,
+    MessageAddedChange,
+    MessageAuthor,
+    MessageReceipt,
+    NewMessage,
+    ParkedBinding,
+    SendOutcome,
+    TranscriptMessage,
+    TranscriptPage,
+    checked_chat_devices,
+)
 
 _NOW = datetime(2026, 6, 1, tzinfo=UTC)
 _LATER = _NOW + timedelta(hours=1)
@@ -127,3 +148,142 @@ def test_the_export_refuses_a_version_that_is_not_the_shape_it_carries(version: 
     """The export label describes the transcript-carrying ADR-0293 §5 shape exactly."""
     with pytest.raises(ValidationError):
         ConversationExport.model_validate({"schema_version": version, "exported_at": _NOW})
+
+
+# --- the chat space (ADR-0293) --------------------------------------------------
+
+
+def _message(position: int = 1, **overrides: object) -> TranscriptMessage:
+    fields: dict[str, object] = {
+        "conversation_id": "c-1",
+        "position": position,
+        "written_at": _NOW,
+        "author": MessageAuthor.ASSISTANT,
+        "text": "hello",
+    }
+    fields.update(overrides)
+    return TranscriptMessage.model_validate(fields)
+
+
+@pytest.mark.parametrize(
+    "fields",
+    [
+        {"author": "user", "text": "hi"},
+        {"author": "user", "text": "hi", "device_id": "phone"},
+        {"author": "user", "text": "hi", "device_id": "phone", "message_id": "m", "cut_off": True},
+        {"author": "assistant", "text": "hi", "device_id": "phone"},
+        {"author": "assistant", "text": "hi", "message_id": "m"},
+        {"author": "assistant", "text": " "},
+        {"author": "assistant", "text": "x" * (TRANSCRIPT_MESSAGE_MAX_CHARS + 1)},
+        {"author": "assistant", "text": "?", "options": ("yes", "yes")},
+        {"author": "assistant", "text": "?", "options": tuple(str(i) for i in range(13))},
+        {"author": "assistant", "text": "?", "options": ("x" * 201,)},
+        {"author": "assistant", "text": "hi", "replies_to": 0},
+        {"author": "assistant", "text": "hi", "cut_off": 1},
+    ],
+)
+def test_a_new_message_is_shaped_as_its_authors(fields: dict[str, object]) -> None:
+    """§5:2's table: the device and id are the user's and required; cut off the assistant's.
+
+    And §4:7's bound, on the type: a message over it cannot be constructed.
+    """
+    with pytest.raises(ValidationError):
+        NewMessage.model_validate(fields)
+
+
+def test_a_message_within_every_bound_is_constructed() -> None:
+    """The bounds admit what they name, so a refusal above is the bound and not the shape."""
+    question = NewMessage(
+        author=MessageAuthor.ASSISTANT,
+        text="x" * TRANSCRIPT_MESSAGE_MAX_CHARS,
+        options=tuple(str(index) for index in range(MESSAGE_OPTIONS_MAX)),
+    )
+    said = NewMessage(author=MessageAuthor.USER, text="hi", device_id="phone", message_id="m")
+
+    assert len(question.options) == MESSAGE_OPTIONS_MAX
+    assert said.cut_off is False
+
+
+def test_a_recorded_message_replies_only_to_an_earlier_one() -> None:
+    """§4:5: a reply names an *earlier* message."""
+    assert _message(position=3, replies_to=2).replies_to == 2
+    with pytest.raises(ValidationError):
+        _message(position=3, replies_to=3)
+
+
+def test_a_receipt_carries_a_position_exactly_where_the_message_is_recorded() -> None:
+    """§4:4: *received* is the position; its absence says the message is not there."""
+    assert MessageReceipt(conversation_id="c", outcome=SendOutcome.RECORDED, position=1)
+    assert MessageReceipt(conversation_id="c", outcome=SendOutcome.NOT_AN_END)
+    with pytest.raises(ValidationError):
+        MessageReceipt(conversation_id="c", outcome=SendOutcome.REPEATED)
+    with pytest.raises(ValidationError):
+        MessageReceipt(conversation_id="c", outcome=SendOutcome.NO_SUCH_REPLY, position=1)
+
+
+def test_a_transcript_page_is_one_conversation_in_ascending_order() -> None:
+    """A page and its markers are one conversation's, by position."""
+    marker = DeletedMessage(conversation_id="c-1", position=2)
+    assert TranscriptPage(conversation_id="c-1", entries=(_message(1), marker), as_of=0)
+    with pytest.raises(ValidationError):
+        TranscriptPage(conversation_id="c-1", entries=(marker, _message(1)), as_of=0)
+    with pytest.raises(ValidationError):
+        TranscriptPage(conversation_id="c-2", entries=(_message(1),), as_of=0)
+
+
+def test_changes_are_in_sequence_and_round_trip_by_kind() -> None:
+    """§5:10: a page is ascending; each change decodes back to its own kind."""
+    page = ChatChanges(
+        changes=(
+            MessageAddedChange(seq=1, message=_message(1)),
+            DevicesChangedChange(
+                seq=2, devices=(ChatDevice(device_id="p", access=DeviceAccess.READ),)
+            ),
+            ConversationDeletedChange(seq=4, conversation_id="c-1"),
+        ),
+        next_after=9,
+    )
+
+    assert ChatChanges.model_validate_json(page.model_dump_json()) == page
+    assert [one.conversation_id for one in page.changes] == ["c-1", None, "c-1"]
+    with pytest.raises(ValidationError):
+        ChatChanges(changes=page.changes[::-1], next_after=9)
+    with pytest.raises(ValidationError):
+        ChatChanges(changes=page.changes, next_after=3)
+
+
+def test_a_device_access_says_what_it_lets_a_device_do() -> None:
+    """§3:5: writing, reading, or both."""
+    assert [(one.writes, one.reads) for one in DeviceAccess] == [
+        (False, True),
+        (True, False),
+        (True, True),
+    ]
+
+
+def test_a_set_of_devices_is_checked_and_put_in_one_order() -> None:
+    """One order, no device twice, nothing that is not a device, a bounded size."""
+    phone = ChatDevice(device_id="phone", access=DeviceAccess.READ_WRITE)
+    watch = ChatDevice(device_id="watch", access=DeviceAccess.READ)
+
+    assert checked_chat_devices([watch, phone]) == (phone, watch)
+    for bad in (
+        [phone, phone.model_copy(update={"access": DeviceAccess.READ})],
+        "phone",
+        ["phone"],
+        [ChatDevice(device_id=f"d-{index}", access=DeviceAccess.READ) for index in range(65)],
+    ):
+        with pytest.raises(ValueError, match="devices"):
+            checked_chat_devices(bad)
+
+
+def test_an_export_carries_only_its_own_conversations_messages_once_each() -> None:
+    """§5:3: a message's conversation is in the document, and no message is there twice."""
+    with pytest.raises(ValidationError):
+        ConversationExport(exported_at=_NOW, conversations=(), messages=(_message(1),))
+    with pytest.raises(ValidationError):
+        ConversationExport(
+            exported_at=_NOW,
+            conversations=(_conversation(),),
+            messages=(_message(1), _message(1, text="again")),
+        )
