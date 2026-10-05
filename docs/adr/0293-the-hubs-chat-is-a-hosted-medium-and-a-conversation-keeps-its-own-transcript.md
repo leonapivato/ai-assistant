@@ -1,6 +1,6 @@
 # 293. The hub's chat is a hosted medium, and a conversation keeps its own transcript
 
-- Status: Partially superseded by ADR-0295 (§8:3's list of endings, in the addition alone; §9:1 and §10:2, for a stopped activation)
+- Status: Partially superseded by ADR-0295 (§8:3's list of endings, in the addition alone; §9:1 and §10:2, for a stopped activation) and ADR-0296 (§11:1's delivery poll as the change stream's transport, once the change stream is built)
 - Date: 2026-10-04
 - Scope: [#2578](https://github.com/leonapivato/ai-assistant/issues/2578), the channel redesign: the conversation channel, the first channel ADR-0292's model is applied to.
 - Authorization: the owner accepted proposal #2680 on 2026-10-04, at `f21aeb7b`, after walking it through section by section the same day, and the dispatcher assigned 0293. This ADR is that proposal converted under `docs/proposals/README.md` → "When it is decided".
@@ -20,6 +20,14 @@
 - **Partially supersedes** [ADR-0085](0085-the-promoted-engine-surface.md) — **one scope, which takes effect when built.** **§1's inventory, §3's signatures, §9's rows and §10's mappings, for `converse`, `learn`, `answer` and `forget_conversation`**: `converse` and `learn` leave the surface and `forget_conversation` becomes memory-only when the first build lands, and `answer` leaves it when question messages and their answers are built (§11 below); the surface gains the acts in the medium and a read of the changes after a cursor. Until then each keeps working exactly as ADR-0085 decides it (ADR-0292 §13:1). Every other method, type and clause stands.
 - **Partially supersedes** [ADR-0173](0173-an-answer-streams-as-chunks-of-one-reply-and-the-result-frame-is-still-the-answer.md) — **one scope, which takes effect when built.** **§4's `converse_streaming`, as an entry on the engine surface**: it leaves the surface when the first build lands, the conversation being carried by the acts in the medium, and a device that takes pieces of a message being sent them as they are produced (§6, §11 below). Until then it keeps working exactly as ADR-0173 decides it. The chunk and result frames, the streaming model seam and every other clause stand.
 - **Partially supersedes** [ADR-0286](0286-an-episode-is-open-while-its-activation-runs-and-frozen-when-it-ends.md) — **one scope.** **§4:4's and §7:3's deletion of the episode where `record_turn` returns `None`**: a finalization, and a restart's close, keep the episode when the conversation was deleted (§2 below). Every other clause stands, §8's forgetting of an open episode included.
+- Partially superseded: 2026-10-04 by ADR-0296 — one scope, which takes effect when
+  built. §11:1's delivery poll, as the change stream's transport: a device follows the
+  change stream as one streaming method on the existing wire, opened with its cursor
+  (ADR-0296 §4). The acts in the medium stay requests. This takes effect when the change
+  stream is built; until then devices fetch it through the delivery poll exactly as
+  §11:1 decides (ADR-0296 §Decision:2). Every other clause stands. This reciprocal
+  header record accompanies the numbered draft under ADR-0070 and ADR-0082; prior
+  supersessions and the ratified body below are preserved.
 
 ## Context
 

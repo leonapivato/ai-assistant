@@ -1,6 +1,6 @@
 # 168. The gateway serves one device's browsers over loopback, and a web session is minted at the gateway and dies with it
 
-- Status: Partially superseded by ADR-0174 (§2's loopback-only bind clause, §2's one-gateway-one-device clause, §4's sole-admitter clause, and §6's exclusive record enumeration, each only as it reaches a separately configured remote browser listener) and ADR-0175 (§8's read-deadline clause, only as it reaches a connection carrying a response the gateway has not finished writing) and ADR-0182 (§5's one-bootstrap-value-per-process cardinality and its one-session-per-process clause)
+- Status: Partially superseded by ADR-0174 (§2's loopback-only bind clause, §2's one-gateway-one-device clause, §4's sole-admitter clause, and §6's exclusive record enumeration, each only as it reaches a separately configured remote browser listener) and ADR-0175 (§8's read-deadline clause, only as it reaches a connection carrying a response the gateway has not finished writing) and ADR-0182 (§5's one-bootstrap-value-per-process cardinality and its one-session-per-process clause) and ADR-0296 (§3:3's bar on a per-browser identifier reaching the hub, and §3:4, each only as it reaches a browser device its gateway names)
 - Date: 2026-08-21
 - Partially superseded: 2026-08-21 by ADR-0174 — **four clauses, one listener,
   and the deferral §2 wrote for exactly this is discharged rather than replaced.**
@@ -255,6 +255,20 @@
   and both are answered here**: whether this is one ADR or two (§11 — one), and
   whether the front-end bundle lives in this repository or a sibling (§10 —
   this one).
+- Partially superseded: 2026-10-04 by ADR-0296 — one scope. §3:3's *no per-browser
+  identifier* and its bar on any member, argument or convention by which a browser
+  identity reaches the hub, and §3:4, as they reach a browser device: a machine a
+  gateway admits is registered at the hub as a browser device under that gateway, the
+  gateway names it on every request it relays, the hub accepts the name only for a
+  browser device registered under that gateway, and the device acts with its own roles
+  rather than with the gateway device's whole authority (ADR-0296 §1, §2). No session
+  identity, session value or session token crosses the wire, the hub's admission of the
+  gateway's own connection stays ADR-0124 §7's two facts, two browsers on one machine
+  stay one device, and every other clause stands. This replacement takes effect on
+  ratification of ADR-0296; until the session is built, every browser keeps reaching
+  what the gateway's device reaches (ADR-0296 §Decision:2). This reciprocal header
+  record accompanies the numbered draft under ADR-0070 and ADR-0082; prior supersessions
+  and the ratified body below are preserved.
 
 ## Context
 

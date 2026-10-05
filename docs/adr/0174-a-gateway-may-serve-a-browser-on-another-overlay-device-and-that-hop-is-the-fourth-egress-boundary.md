@@ -1,6 +1,6 @@
 # 174. A gateway may serve a browser on another overlay device, and that hop is the fourth egress boundary
 
-- Status: Partially superseded by ADR-0202 (§7's plain-HTTP clause with the transport-layer security arrangement §11 deferred alongside it, §8's empty default for the remote host-name list as it reaches a configured remote browser listener, and §6's delegation to §8 of when that list is refused, as it reaches certificate coverage)
+- Status: Partially superseded by ADR-0202 (§7's plain-HTTP clause with the transport-layer security arrangement §11 deferred alongside it, §8's empty default for the remote host-name list as it reaches a configured remote browser listener, and §6's delegation to §8 of when that list is refused, as it reaches certificate coverage) and ADR-0296 (§4:4's bars on keying a rule on the list beyond admission, on recording or revoking anything and on a browser identity crossing the wire, and §3:3's no-other-record clause, each only as it reaches the hub's registration of a listed machine)
 - Date: 2026-08-21
 - Note: 2026-08-23 — **the revisit §9 said this was not has landed, and it chose
   process-bound.** §9 ruled "this is not ADR-0168 §5's revisit… Milestone 16 is,
@@ -151,6 +151,18 @@
   being reinforced: a secure context is a browser classification, not a channel.
   §6's `Host`-admission and resolves-nothing clauses gain no rule — ADR-0202 adds no
   name-admission rule, no resolution step, and asks no resolver what any name means.
+- Partially superseded: 2026-10-04 by ADR-0296 — two scopes. §4:4's bars on keying any
+  rule on the list beyond admission, on citing it toward a device-scoped permission, on
+  recording anything durable or revoking anything, and on any browser identity crossing
+  the wire: listing a machine at a gateway registers it at the hub as a browser device
+  under that gateway, with no roles; the hub keeps that registration and revokes it, and
+  checks the device's roles on every request the gateway names it on (ADR-0296 §1–§3).
+  §3:3's *and to no other record*: the hub's registration of a browser device may keep
+  the overlay identity that names it (ADR-0296 §1). A listed device is still no
+  enrolment under ADR-0124 §6, no ADR-0097 grant and no principal, and every other
+  clause stands, §4:3 and §4:5 included. These replacements take effect on ratification
+  of ADR-0296. This reciprocal header record accompanies the numbered draft under
+  ADR-0070 and ADR-0082; prior supersessions and the ratified body below are preserved.
 
 ## Context
 
