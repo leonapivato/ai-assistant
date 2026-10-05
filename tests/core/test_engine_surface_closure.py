@@ -1467,6 +1467,12 @@ def test_the_promoted_surface_and_the_protocol_version_are_both_pinned() -> None
     ``ControllerRule`` and ``ProcessingReason`` each gain ``stopped`` on the
     wire-carried episode record, which a peer at 76 refuses as unknown.
 
+    **78 is ADR-0298 §1:4 and §6:3, on the envelope and the error mapping.** A
+    ``request`` frame may carry ``acting_for``, which a peer at 77 refuses as a member
+    no protocol version declares, and ``DeviceRefusedError`` joins the error mapping,
+    which a client at 77 cannot reconstruct. **The method set does not move and stays
+    at 78.**
+
     **ADR-0124 §9 decides no mechanical check and creates none**, saying one is
     owed and leaving its shape open. This is not that check — it is a *pin*, and
     a deliberately crude one: it fails when either number moves, which is the
@@ -1475,7 +1481,7 @@ def test_the_promoted_surface_and_the_protocol_version_are_both_pinned() -> None
     """
     from ai_assistant.wire.envelope import PROTOCOL_VERSION  # noqa: PLC0415 — asserted about
 
-    assert (len(_method_names()), PROTOCOL_VERSION) == (78, 77), (
+    assert (len(_method_names()), PROTOCOL_VERSION) == (78, 78), (
         "the promoted method set and the protocol version are pinned together "
         "(ADR-0124 §9); move either and this pin makes you name the limb you are "
         "under — the method set, or a wire-carried core type"

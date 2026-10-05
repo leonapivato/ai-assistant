@@ -39,8 +39,10 @@ from typing import TYPE_CHECKING, Any, Final, Protocol
 import structlog
 
 from ai_assistant.core.channel_validation import validate_combination
-from ai_assistant.core.errors import AssistantError
+from ai_assistant.core.device_context import serving_device
+from ai_assistant.core.errors import AssistantError, DeviceRefusal, DeviceRefusedError
 from ai_assistant.core.streams import closing_stream
+from ai_assistant.core.types import HUB_DEVICE_ID, HUB_REQUESTING_DEVICE
 from ai_assistant.wire import envelope as env
 from ai_assistant.wire.codec import ENVELOPE_RESERVE_BYTES
 from ai_assistant.wire.errors import (
@@ -54,6 +56,7 @@ from ai_assistant.wire.errors import (
     error_payload,
 )
 from ai_assistant.wire.framing import read_frame, write_frame
+from ai_assistant.wire.routes import check_request
 from ai_assistant.wire.surface import (
     METHODS,
     STREAMING_METHODS,
@@ -69,6 +72,7 @@ if TYPE_CHECKING:
     from datetime import timedelta
 
     from ai_assistant.core.protocols import AssistantEngine
+    from ai_assistant.core.types import RequestingDevice
 
 _log = structlog.get_logger(__name__)
 
@@ -278,6 +282,124 @@ class DeliveryRegistry(Protocol):
         """
 
 
+class DeviceRoster(Protocol):
+    """The seam between the wire server and the device roster (ADR-0298 §10:7).
+
+    **``wire`` declares the seam and the hub implements it**, as :class:`Admission`
+    is: the roster is deployment state kept beside the enrolments (ADR-0298 §4:1),
+    and ``wire`` depends on ``core`` alone. It is a local ``Protocol``, not
+    ``core/protocols.py`` surface — §10:7 says so in terms.
+
+    **Both methods are synchronous, for :class:`Admission`'s reason.** The decision
+    of the requesting device, the check the wire server makes against its roles and
+    the dispatch they authorise then have no suspension point between them, on a
+    system that composes on one event loop, so no revocation lands between a role
+    read and the request it allowed.
+
+    **A listener passes none until the cutover** (ADR-0298 §9). Without a roster the
+    requesting device of every request is the hub's own machine (§9:2), so the
+    checks are built and tested but refuse nothing; the change that passes one is
+    the change that makes the wire server set a requesting device other than ``hub``
+    (§9:3).
+    """
+
+    def requesting_device(self, *, connecting: str, acting_for: str | None) -> RequestingDevice:
+        """Decide a request's requesting device (ADR-0298 §2:1).
+
+        The device ``acting_for`` names where the request carries the member and the
+        hub accepts the name, registering a machine the gateway names for the first
+        time (§4:2); otherwise the connecting device. Either way with the roles the
+        roster records for it now (§2:3). The wire server has already refused a
+        naming of ``hub`` (§3:3) before it asks.
+
+        Args:
+            connecting: The connecting device: the overlay identity
+                :meth:`Admission.device` gives on the remote listener, and
+                :data:`~ai_assistant.core.types.HUB_DEVICE_ID` on the local socket.
+            acting_for: The frame's ``acting_for``, already held to §1:3, or
+                ``None``.
+
+        Returns:
+            The requesting device.
+
+        Raises:
+            DeviceRefusedError: With :attr:`~ai_assistant.core.errors.DeviceRefusal.
+                NOT_ACCEPTED` where the hub does not accept the name under that
+                gateway (§6:2). A registration made in deciding it stands (§6:1).
+        """
+
+    def knows(self, device_id: str) -> bool:
+        """Whether the hub knows an id as a device (ADR-0298 §4:12).
+
+        Args:
+            device_id: An id a request names.
+
+        Returns:
+            Whether it is ``hub``, an enrolled hub device whose enrolment is live, or
+            a browser device with a live registration.
+        """
+
+
+@dataclass(frozen=True, slots=True)
+class _Session:
+    """What a served connection needs to decide each request's device (ADR-0298 §2).
+
+    Attributes:
+        connecting: The connecting device: the admitted overlay identity on the
+            remote listener, ``hub`` on the local socket (§2:1).
+        roster: The roster seam, or ``None`` before the cutover (§9:2).
+    """
+
+    connecting: str
+    roster: DeviceRoster | None
+
+
+def _requesting_device(session: _Session, acting_for: str | None) -> RequestingDevice:
+    """Decide one request's requesting device (ADR-0298 §2:1).
+
+    Raises:
+        DeviceRefusedError: If the request names ``hub`` (§3:3), or the roster does
+            not accept the name it carries (§6:2).
+    """
+    if session.roster is None:
+        return HUB_REQUESTING_DEVICE
+    if acting_for == HUB_DEVICE_ID:
+        msg = "no gateway may name the hub's own machine; it reaches the hub on its own socket"
+        raise DeviceRefusedError(msg, reason=DeviceRefusal.NOT_ACCEPTED)
+    return session.roster.requesting_device(connecting=session.connecting, acting_for=acting_for)
+
+
+def _admitted(
+    session: _Session, frame: env.Envelope, arguments: dict[str, Any]
+) -> RequestingDevice:
+    """Decide a request's device and check its roster-only rows, before dispatch.
+
+    ADR-0298 §5:6's half of the route table the wire server owns, run after the
+    arguments are validated — a row can depend on the input's target (§5:2) — and
+    before the engine is called, so a refusal has changed nothing (§6:1).
+
+    Returns:
+        The requesting device, for the dispatch to run as.
+
+    Raises:
+        DeviceRefusedError: If the request is refused under ADR-0298.
+    """
+    method = frame.method
+    if method is None:  # pragma: no cover — `_read_request` admits only requests
+        msg = "a dispatch reached a frame that names no method"
+        raise UndecodableFrameError(msg)
+    device = _requesting_device(session, frame.acting_for)
+    roster = session.roster
+    check_request(
+        method,
+        arguments,
+        device=device,
+        acting_for=frame.acting_for,
+        knows=(lambda _: True) if roster is None else roster.knows,
+    )
+    return device
+
+
 async def serve_connection(  # noqa: PLR0913 — the engine, the two stream halves, and one keyword per policy the listener supplies
     engine: AssistantEngine,
     reader: asyncio.StreamReader,
@@ -287,6 +409,7 @@ async def serve_connection(  # noqa: PLR0913 — the engine, the two stream halv
     on_handshake: Callable[[], None] | None = None,
     admission: Admission | None = None,
     delivery: DeliveryRegistry | None = None,
+    roster: DeviceRoster | None = None,
 ) -> None:
     """Drive one accepted connection to its end.
 
@@ -316,6 +439,8 @@ async def serve_connection(  # noqa: PLR0913 — the engine, the two stream halv
         delivery: The hub's one delivery registry (ADR-0131 §3), or ``None`` where
             a caller serves no delivery — which makes every ``next_notification``
             close the connection under §2 rather than silently claiming nothing.
+        roster: The device roster (ADR-0298 §10:7), or ``None`` until the cutover,
+            when every request's requesting device is the hub's own machine (§9:2).
     """
     claimed: list[str | None] = []
     try:
@@ -331,6 +456,7 @@ async def serve_connection(  # noqa: PLR0913 — the engine, the two stream halv
             admission=admission,
             delivery=delivery,
             claimed=claimed,
+            roster=roster,
         )
     except DeviceExpelledError as exc:
         # Its own clause, above the protocol faults, because it is not one: the
@@ -594,6 +720,7 @@ async def _serve_requests(  # noqa: PLR0913 — the engine, the two stream halve
     admission: Admission | None,
     delivery: DeliveryRegistry | None = None,
     claimed: list[str | None] | None = None,
+    roster: DeviceRoster | None = None,
 ) -> None:
     """Read requests one at a time, and refuse a second one that overlaps.
 
@@ -638,6 +765,9 @@ async def _serve_requests(  # noqa: PLR0913 — the engine, the two stream halve
     """
     is_delivery = False
     carried_other = False
+    session = _Session(
+        connecting=HUB_DEVICE_ID if admission is None else admission.device(), roster=roster
+    )
     while True:
         try:
             frame = await _read_request(reader, limits=limits, idle=limits.read_timeout)
@@ -663,7 +793,13 @@ async def _serve_requests(  # noqa: PLR0913 — the engine, the two stream halve
             # it does not come back with a reply to write here (ADR-0173 §1).
             try:
                 await _dispatch_stream(
-                    engine, frame, writer, watcher, limits=limits, admission=admission
+                    engine,
+                    frame,
+                    writer,
+                    watcher,
+                    limits=limits,
+                    admission=admission,
+                    session=session,
                 )
             finally:
                 overlapped = await _settle(watcher)
@@ -672,12 +808,14 @@ async def _serve_requests(  # noqa: PLR0913 — the engine, the two stream halve
             carried_other = True
             continue
         if polling:
-            reply = await _dispatch_poll(engine, frame, watcher, limit=limits.payload_limit)
+            reply = await _dispatch_poll(
+                engine, frame, watcher, limit=limits.payload_limit, session=session
+            )
             if reply is None:
                 return
         else:
             try:
-                reply = await _dispatch(engine, frame, limit=limits.payload_limit)
+                reply = await _dispatch(engine, frame, limit=limits.payload_limit, session=session)
             finally:
                 overlapped = await _settle(watcher)
             if overlapped:
@@ -801,6 +939,7 @@ async def _dispatch_poll(
     watcher: asyncio.Future[env.Envelope],
     *,
     limit: int,
+    session: _Session,
 ) -> env.Envelope | None:
     """Run a long poll, watching for the connection going away underneath it.
 
@@ -830,7 +969,7 @@ async def _dispatch_poll(
     Raises:
         ProtocolError: If the peer wrote a frame while the poll was outstanding.
     """
-    dispatch = asyncio.ensure_future(_dispatch(engine, frame, limit=limit))
+    dispatch = asyncio.ensure_future(_dispatch(engine, frame, limit=limit, session=session))
     try:
         return await _await_poll(dispatch, watcher)
     finally:
@@ -984,7 +1123,9 @@ async def _read_request(
     return frame
 
 
-async def _dispatch(engine: AssistantEngine, frame: env.Envelope, *, limit: int) -> env.Envelope:
+async def _dispatch(
+    engine: AssistantEngine, frame: env.Envelope, *, limit: int, session: _Session
+) -> env.Envelope:
     """Run one request against the engine and render its answer as a frame.
 
     **The call is shaped by the Protocol's own signature, not splatted as keywords**
@@ -999,6 +1140,10 @@ async def _dispatch(engine: AssistantEngine, frame: env.Envelope, *, limit: int)
         engine: The engine to call.
         frame: The request.
         limit: The contract limit an error payload must fit inside.
+        session: The connection's device facts (ADR-0298 §2). The request runs as
+            the requesting device decided from them, set for the call's duration
+            (§2:2), and a refusal under ADR-0298 is answered as an error frame
+            before the engine is called (§6:1).
 
     Returns:
         The result or error frame to write back.
@@ -1017,9 +1162,12 @@ async def _dispatch(engine: AssistantEngine, frame: env.Envelope, *, limit: int)
     if method is None or method not in METHODS:
         msg = f"a request names {method!r}, which this build's engine surface does not declare"
         raise UndecodableFrameError(msg)
-    positional, keyword = call_shape(method, _decode_arguments(method, frame.payload))
+    arguments = _decode_arguments(method, frame.payload)
+    positional, keyword = call_shape(method, arguments)
     try:
-        result = await getattr(engine, method)(*positional, **keyword)
+        device = _admitted(session, frame, arguments)
+        with serving_device(device):
+            result = await getattr(engine, method)(*positional, **keyword)
     except AssistantError as exc:
         return env.Envelope(
             kind=env.FrameKind.ERROR,
@@ -1037,6 +1185,7 @@ async def _dispatch_stream(  # noqa: PLR0913 — the engine, the request, the wr
     *,
     limits: ConnectionLimits,
     admission: Admission | None,
+    session: _Session,
 ) -> None:
     """Run one streaming request, writing its frames as the engine yields them.
 
@@ -1077,7 +1226,8 @@ async def _dispatch_stream(  # noqa: PLR0913 — the engine, the request, the wr
     if method is None:  # pragma: no cover — `_read_request` admits only requests
         msg = "a streamed dispatch reached a frame that names no method"
         raise UndecodableFrameError(msg)
-    positional, keyword = call_shape(method, _decode_arguments(method, frame.payload))
+    arguments = _decode_arguments(method, frame.payload)
+    positional, keyword = call_shape(method, arguments)
     chunk = chunk_type(method)
 
     async def emit(kind: env.FrameKind, payload: Any) -> None:
@@ -1094,18 +1244,29 @@ async def _dispatch_stream(  # noqa: PLR0913 — the engine, the request, the wr
             max_frame_bytes=limits.max_frame_bytes,
         )
 
-    started: AsyncIterator[Any] = getattr(engine, method)(*positional, **keyword)
-    async with closing_stream(started) as values:
-        try:
-            async for value in values:
-                # Which type is a chunk is the Protocol's answer, read off the
-                # annotation by `wire.surface` rather than named here (ADR-0173 §4).
-                await emit(
-                    env.FrameKind.CHUNK if isinstance(value, chunk) else env.FrameKind.RESULT,
-                    value,
-                )
-        except AssistantError as exc:
-            await emit(env.FrameKind.ERROR, error_payload(exc, max_bytes=limits.payload_limit))
+    try:
+        device = _admitted(session, frame, arguments)
+    except DeviceRefusedError as exc:
+        # Refused before the engine is called, so no iterator exists to close and
+        # the operation has changed nothing (ADR-0298 §6:1); the refusal is the
+        # stream's one terminal frame, as any declared failure is.
+        await emit(env.FrameKind.ERROR, error_payload(exc, max_bytes=limits.payload_limit))
+        return
+    # **The whole stream runs as the requesting device** (ADR-0298 §2:2): the
+    # engine's iterator is created, driven and closed inside the block.
+    with serving_device(device):
+        started: AsyncIterator[Any] = getattr(engine, method)(*positional, **keyword)
+        async with closing_stream(started) as values:
+            try:
+                async for value in values:
+                    # Which type is a chunk is the Protocol's answer, read off the
+                    # annotation by `wire.surface` rather than named here (ADR-0173 §4).
+                    await emit(
+                        env.FrameKind.CHUNK if isinstance(value, chunk) else env.FrameKind.RESULT,
+                        value,
+                    )
+            except AssistantError as exc:
+                await emit(env.FrameKind.ERROR, error_payload(exc, max_bytes=limits.payload_limit))
 
 
 def _decode_arguments(method: str, payload: object) -> dict[str, Any]:

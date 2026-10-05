@@ -7,6 +7,7 @@ Add new, specific subclasses rather than raising bare ``Exception``.
 
 from __future__ import annotations
 
+from enum import StrEnum
 from typing import TYPE_CHECKING, ClassVar
 
 from ai_assistant.core.types import SpeechFailure, encodable_text
@@ -1910,6 +1911,66 @@ class ActivationStoppedError(AssistantError):
     (ADR-0297 §6:3), reconstructed by name on the far side like every other
     ``AssistantError``.
     """
+
+
+class DeviceRefusal(StrEnum):
+    """Why a request was refused under ADR-0298, one of three (ADR-0298 §6:2).
+
+    So the owner can tell "this phone was revoked" from "this phone has no role yet"
+    from "this phone has no role for that", and a device can tell when to drop what
+    it holds (§7).
+
+    Attributes:
+        NOT_ACCEPTED: The device named is not accepted under that gateway: a revoked
+            registration, ``hub``, the hub's own overlay identity, or a naming beyond
+            §4's bound.
+        NO_ROLE: The device holds no role.
+        NOT_ALLOWED: The device's roles do not allow the request.
+    """
+
+    NOT_ACCEPTED = "not_accepted"
+    NO_ROLE = "no_role"
+    NOT_ALLOWED = "not_allowed"
+
+
+class DeviceRefusedError(AssistantError):
+    """A request was refused for the device it was served for (ADR-0298 §6:1).
+
+    Raised before the request's operation has changed anything; a registration
+    ADR-0298 §4 makes on that request, and its record, stand. **It leaves the
+    connection open**: a gateway's connection serves other devices, and ADR-0124
+    §8's close stays the answer to a revoked *connecting* device.
+
+    **Its reason is required, and that is safe on the wire because the payload is
+    never reduced.** ADR-0085 §10a's reduction drops ``details`` from an error
+    payload that does not fit the contract limit, and a reconstruction of a reduced
+    payload calls this type with the message alone, which a required keyword
+    refuses. The refusals this project writes are short, fixed sentences, and
+    ``tests/wire/test_device_gate.py`` pins that every one of them, carrying an id at
+    ADR-0298 §1:3's bound, fits at ADR-0085 §8d's floor unreduced. A default would
+    instead mislabel a refusal: :attr:`DeviceRefusal.NO_ROLE` tells a device to drop
+    what it holds (§7), so no reason is safe to assume.
+
+    Attributes:
+        reason: Which of ADR-0298 §6:2's three reasons refused the request.
+    """
+
+    def __init__(self, message: str, *, reason: DeviceRefusal) -> None:
+        """Carry one reason across the promoted boundary.
+
+        Args:
+            message: What the owner reads. Never more than a device id and this
+                project's own words.
+            reason: The reason. Coerced to a :class:`DeviceRefusal` member, so a
+                reconstruction from ADR-0085 §10a's ``details`` object — where the
+                member arrived as its own string value — holds the member the hub
+                raised rather than a bare ``str`` that merely compares equal.
+
+        Raises:
+            ValueError: If ``reason`` names no member of the vocabulary.
+        """
+        super().__init__(message)
+        self.reason: DeviceRefusal = DeviceRefusal(reason)
 
 
 class ActiveExecutionError(PlanningError):

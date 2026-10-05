@@ -15976,6 +15976,66 @@ def checked_chat_devices(devices: object) -> tuple[ChatDevice, ...]:
     return tuple(sorted(held, key=lambda one: one.device_id))
 
 
+# --- the device session (ADR-0298) -------------------------------------------
+
+#: The hub's own machine as a device, in every configuration and whether or not the
+#: hub has an overlay identity (ADR-0298 §3:1). A stable id keeps "my devices" and a
+#: conversation's devices unchanged when the remote listener is turned on or off.
+HUB_DEVICE_ID: Final = "hub"
+
+
+class DeviceRole(StrEnum):
+    """A role the device roster records for a device (ADR-0298 §4:1, §10:1).
+
+    Two of ADR-0296 §2's three roles. The third, the user's end of conversations, is
+    no roster entry: it is a device's membership of "my devices" and of
+    conversations, which the conversation store keeps (ADR-0293 §3), so it is not a
+    member here.
+
+    Attributes:
+        COMMANDS: The role of source of commands and queries.
+        SPOKES: The role of host of spokes, which no device holds until the first
+            device-hosted spoke (ADR-0296 §3:4).
+    """
+
+    COMMANDS = "commands"
+    SPOKES = "spokes"
+
+
+class RequestingDevice(BaseModel):
+    """The device a request is served for, decided by the wire server (ADR-0298 §2:3).
+
+    The device ``acting_for`` names where a request carries the member and the hub
+    accepts the name, and otherwise the connecting device (§2:1). It reaches the
+    engine through :mod:`ai_assistant.core.device_context` rather than through any
+    ``AssistantEngine`` argument (§2:2).
+
+    Attributes:
+        device_id: The device's id: an overlay identity, or :data:`HUB_DEVICE_ID`
+            for the hub's own machine (§3:1).
+        roles: The roles the roster records for it at dispatch (§4:1).
+    """
+
+    model_config = ConfigDict(frozen=True, extra="forbid")
+
+    device_id: Identifier
+    roles: frozenset[DeviceRole] = frozenset()
+
+    @property
+    def is_hub(self) -> bool:
+        """Whether this is the hub's own machine (ADR-0298 §3:1)."""
+        return self.device_id == HUB_DEVICE_ID
+
+
+#: The hub's own machine as a requesting device, holding every role (ADR-0298 §3:2).
+#: It is the requesting device of a request on the local socket with no
+#: ``acting_for``, of a caller inside the hub's own process (§2:5), and of every
+#: request until the cutover (§9:2).
+HUB_REQUESTING_DEVICE: Final = RequestingDevice(
+    device_id=HUB_DEVICE_ID, roles=frozenset(DeviceRole)
+)
+
+
 def _check_message_shape(
     author: MessageAuthor,
     *,

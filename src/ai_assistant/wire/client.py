@@ -61,6 +61,7 @@ from typing import TYPE_CHECKING, Any, ClassVar, Final
 from pydantic import ValidationError
 
 from ai_assistant.core.channel_validation import snapshot
+from ai_assistant.core.device_context import current_acting_for
 from ai_assistant.core.episode_encoding import check_detail, check_list
 from ai_assistant.core.types import (
     DEFAULT_PAGE_SIZE,
@@ -502,6 +503,7 @@ class HubClient:
         the clause binds both halves so a client is never silently less capable than
         the engine it stands in for.
         """
+        relayed_for = _outbound_name()
         reader, writer, limit = await self._connect()
         try:
             check_payload(payload, max_bytes=limit, subject=f"the arguments to {method}()")
@@ -514,6 +516,7 @@ class HubClient:
                         id=correlation,
                         payload=payload,
                         method=method,
+                        acting_for=relayed_for,
                     )
                 ),
                 max_frame_bytes=limit + ENVELOPE_RESERVE_BYTES,
@@ -1600,6 +1603,7 @@ class HubClient:
         project(payload)
         if _bound_payload is not None:
             project(_bound_payload)
+        relayed_for = _outbound_name()
         reader, writer, limit = await self._connect()
         try:
             if _bound_payload is not None:
@@ -1616,6 +1620,7 @@ class HubClient:
                         id=correlation,
                         payload=payload,
                         method=method,
+                        acting_for=relayed_for,
                     )
                 ),
                 max_frame_bytes=limit + ENVELOPE_RESERVE_BYTES,
@@ -2268,6 +2273,26 @@ class HubEngineClient(HubClient):
             await hang_up(writer)
             raise
         return Opened(reader=reader, writer=writer, connect_payload=payload)
+
+
+def _outbound_name() -> str | None:
+    """The ``acting_for`` this call's request frame carries, checked before any I/O.
+
+    The value a gateway set around the call (ADR-0298 §1:5), read here and never the
+    requesting device (§1:6). It is read when the call starts, which for a streamed
+    call is its first iteration — inside the block a gateway holds around the whole
+    iteration — and checked against §1:3 before a connection is opened, so a name
+    the hub would close on is refused locally, as ADR-0085 §9 refuses a malformed
+    argument.
+
+    Returns:
+        The name, or ``None`` where the call is the connecting device's own.
+
+    Raises:
+        ValueError: If the name breaks ADR-0298 §1:3.
+    """
+    name = current_acting_for()
+    return None if name is None else env.checked_acting_for(name)
 
 
 def _raise_handshake_error(payload: object) -> None:
