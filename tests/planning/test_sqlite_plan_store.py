@@ -17,7 +17,7 @@ import sqlite3
 import threading
 from concurrent.futures import ThreadPoolExecutor
 from datetime import UTC, datetime, timedelta
-from typing import TYPE_CHECKING, Final
+from typing import TYPE_CHECKING, Any, Final
 
 import pytest
 from plan_store_contract import (
@@ -69,7 +69,7 @@ from ai_assistant.core.types import (
     StepStatus,
     StepTransition,
 )
-from ai_assistant.planning import SqlitePlanStore
+from ai_assistant.planning import SqlitePlanStore, sqlite_store
 from ai_assistant.planning.sqlite_store import (
     _META_SCHEMA,
     _UPGRADABLE_FROM,
@@ -765,6 +765,75 @@ async def test_two_connections_race_an_attempt_transition_and_one_loses(
     finally:
         a.close()
         b.close()
+
+
+async def test_a_stop_cannot_land_between_the_claims_lookup_and_its_write(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """ADR-0297 §2: the stop record and the claim are decided in one indivisible step.
+
+    Raced across **separate connections**, which share no in-process lock, so what
+    orders them is the claim's own ``BEGIN IMMEDIATE``. The claiming worker is parked
+    **after** it has read the stop records and **before** it writes the step; a stop
+    on the other connection is then started and must not commit while the claim is
+    parked. An implementation that read the records outside the claim's transaction
+    would let the stop commit inside that window and the claim then land after it —
+    the "third case" §2 says the store's total order admits none of.
+
+    So the stop waits for the claim, the claim lands (it was first), and the stop then
+    lands too and refuses the activation's next claim.
+    """
+    path = tmp_path / "plans.db"
+    claimer = SqlitePlanStore(path=path, now=_fixed_now)
+    stopper = SqlitePlanStore(path=path, now=_fixed_now)
+    looked_up = threading.Event()
+    release = threading.Event()
+    original = sqlite_store._is_stopped
+
+    def parked(conn: sqlite3.Connection, activation_id: str) -> bool:
+        answer = original(conn, activation_id)
+        looked_up.set()
+        release.wait(timeout=10)
+        return answer
+
+    in_flight: list[asyncio.Future[Any]] = []
+    try:
+        await claimer.save_goal(_goal())
+        await claimer.save_plan(_plan(steps=2))
+        state = await claimer.start_execution("p1")
+        await claimer.open_attempt(
+            GoalAttempt(id="a1", goal_id="g1", opened_at=_AT, execution_ids=(state.id,))
+        )
+        monkeypatch.setattr(sqlite_store, "_is_stopped", parked)
+
+        claiming = asyncio.ensure_future(
+            claimer.commit_transition(_claim(state, activation_id="act-1"))
+        )
+        in_flight.append(claiming)
+        await asyncio.to_thread(looked_up.wait, 10)
+        stopping = asyncio.ensure_future(stopper.record_stop("act-1"))
+        in_flight.append(stopping)
+        await asyncio.sleep(0.2)
+        stopped_inside_the_claim = stopping.done()
+        release.set()
+
+        claimed = await claiming
+        await stopping
+        monkeypatch.setattr(sqlite_store, "_is_stopped", original)
+
+        assert not stopped_inside_the_claim, "the stop committed inside the claim's step"
+        landed = claimed.step("s1")
+        assert landed is not None
+        assert landed.status is StepStatus.RUNNING, "the claim was first, so it stands"
+        with pytest.raises(ClaimStopped):
+            await claimer.commit_transition(_claim(claimed, "s2", activation_id="act-1"))
+    finally:
+        # Released and drained before either connection closes: closing under a worker
+        # still inside its statement is a native crash rather than a reported failure.
+        release.set()
+        await asyncio.gather(*in_flight, return_exceptions=True)
+        claimer.close()
+        stopper.close()
 
 
 async def test_two_connections_do_not_reuse_an_execution_id(tmp_path: Path) -> None:
