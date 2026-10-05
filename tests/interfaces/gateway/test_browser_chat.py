@@ -26,6 +26,7 @@ from ai_assistant.core.types import (
     MessageAuthor,
     NewMessage,
 )
+from ai_assistant.wire.errors import HubUnavailableError
 
 if TYPE_CHECKING:
     from pathlib import Path
@@ -215,3 +216,146 @@ async def test_a_deleted_message_leaves_its_reply_naming_a_deleted_message(
         assert ("delete_message", {"conversation_id": conversation, "position": 1}) in (
             drive.engine.calls
         )
+
+
+async def test_a_send_whose_answer_was_lost_is_shown_once_it_is_recorded(
+    gateway_browser: Browser, tmp_path: Path
+) -> None:
+    """§4:2: a send the page got no answer to, which the hub did record, is not shown twice.
+
+    The hub records the message and the answer never reaches the page (a transport
+    failure past the write). The page says it does not know, and when following brings
+    the message in it is matched by this device's message id and shown as recorded.
+    """
+    async with driving(gateway_browser, tmp_path) as drive:
+        await _open(drive)
+        held = drive.engine.write_message
+
+        async def lost(conversation_id: str, *, message: Any) -> Any:
+            await held(conversation_id, message=message)
+            raise HubUnavailableError("the connection went away after the write")
+
+        drive.engine.write_message = lost  # type: ignore[method-assign]
+        await _send(drive, "Did this arrive?")
+        pending = drive.page.locator("#chat-transcript li.pending")
+        await expect(pending).to_contain_text("not known whether this arrived")
+
+        await expect(pending).to_have_count(0, timeout=_IDLE_FOLLOWED)
+        await expect(drive.page.locator("#chat-transcript li.from-user")).to_have_count(1)
+
+
+async def test_a_state_read_that_fails_while_working_stops_the_following(
+    gateway_browser: Browser, tmp_path: Path
+) -> None:
+    """ADR-0182 §7: the state read is not tried again of the page's own motion either."""
+    async with driving(gateway_browser, tmp_path) as drive:
+        await _open(drive)
+        held = drive.engine.conversation
+        reads: list[str] = []
+
+        async def working_then_failing(conversation_id: str) -> Any:
+            reads.append(conversation_id)
+            if len(reads) > 1:
+                raise ConversationStoreError("the index is unreadable")
+            digest = await held(conversation_id)
+            assert digest is not None
+            return digest.model_copy(update={"state": ConversationState(working=True)})
+
+        drive.engine.conversation = working_then_failing  # type: ignore[method-assign]
+        await _send(drive, "Start something.")
+        follow = drive.page.locator("#chat-follow")
+        await expect(follow).to_contain_text("Stopped following", timeout=_IDLE_FOLLOWED)
+        stopped_at = len(reads)
+        await drive.page.wait_for_timeout(5_000)
+        assert len(reads) == stopped_at
+
+
+async def test_a_reload_keeps_the_conversation_the_chat_was_reading(
+    gateway_browser: Browser, tmp_path: Path
+) -> None:
+    """The tab's chat and its conversation survive a reload, as the ask's thread does."""
+    async with driving(gateway_browser, tmp_path) as drive:
+        conversation = await _open(drive)
+        await drive.page.reload()
+
+        await expect(drive.page.locator("#chat-heading")).to_have_text(
+            f"Conversation {conversation}"
+        )
+
+
+#: Holds the page's reading of the first answer to ``path`` until the case releases it,
+#: after the gateway has answered — so the body released is the gateway's own, read before
+#: whatever the case changed meanwhile (``test_browser_conversations``' device).
+_HOLDING = """(path) => {
+  window.__held = { path: path, reached: false, release: null, open: 0, most: 0 };
+  const realFetch = window.fetch;
+  window.fetch = async function (resource, options) {
+    const asked = typeof resource === "string" ? resource : resource.url;
+    const mine = new URL(asked, location.href).pathname === window.__held.path;
+    if (mine) {
+      window.__held.open += 1;
+      window.__held.most = Math.max(window.__held.most, window.__held.open);
+    }
+    try {
+      const response = await realFetch.call(this, resource, options);
+      if (mine && !window.__held.reached) {
+        window.__held.reached = true;
+        await new Promise((resolve) => {
+          window.__held.release = resolve;
+        });
+      }
+      return response;
+    } finally {
+      if (mine) {
+        window.__held.open -= 1;
+      }
+    }
+  };
+}
+"""
+
+
+async def test_a_transcript_read_before_a_deletion_does_not_bring_the_message_back(
+    gateway_browser: Browser, tmp_path: Path
+) -> None:
+    """§5:12: a marker the following applied outranks a snapshot read before it."""
+    async with driving(gateway_browser, tmp_path) as drive:
+        conversation = await _open(drive)
+        await _send(drive, "Delete me later.")
+        await expect(
+            drive.page.locator("#chat-transcript li.from-user:not(.pending)")
+        ).to_have_count(1, timeout=_FOLLOWED)
+        await drive.page.click("#chat-start")
+        await expect(drive.page.locator("#chat-heading")).not_to_have_text(
+            f"Conversation {conversation}"
+        )
+
+        await drive.page.evaluate(_HOLDING, "/chat/transcript")
+        await drive.page.locator("#chat-conversations button", has_text="Open").click()
+        await drive.page.wait_for_function("() => window.__held.reached")
+        await drive.engine.delete_message(conversation, position=1)
+        await drive.page.wait_for_function("() => chat.deleted.has(1)", timeout=_IDLE_FOLLOWED)
+        await drive.page.evaluate("window.__held.release()")
+
+        await drive.page.wait_for_function("() => !window.__held.open")
+        await expect(drive.page.locator("#chat-transcript li.from-user")).to_have_count(0)
+
+
+async def test_a_send_never_puts_a_second_changes_read_beside_one_in_flight(
+    gateway_browser: Browser, tmp_path: Path
+) -> None:
+    """One read of the changes at a time, whatever asks for the next one meanwhile."""
+    async with driving(gateway_browser, tmp_path) as drive:
+        await _open(drive)
+        await drive.page.evaluate(_HOLDING, "/chat/changes")
+        await drive.page.wait_for_function("() => window.__held.reached", timeout=_IDLE_FOLLOWED)
+        await _send(drive, "While a read is out.")
+        await expect(drive.page.locator("#chat-transcript li.pending")).to_contain_text("Received.")
+        await drive.page.wait_for_timeout(3_000)
+        assert await drive.page.evaluate("window.__held.most") == 1
+
+        await drive.page.evaluate("window.__held.release()")
+        await expect(drive.page.locator("#chat-transcript li.pending")).to_have_count(
+            0, timeout=_FOLLOWED
+        )
+        assert await drive.page.evaluate("window.__held.most") == 1
