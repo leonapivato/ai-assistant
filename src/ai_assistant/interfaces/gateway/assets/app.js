@@ -8867,8 +8867,9 @@ const chat = {
   chosen: 0,
   entries: new Map(),
   deleted: new Set(),
-  // Messages older than what is loaded that a reply on screen names, read for the reply,
-  // and the selection a run of that reading is out for (`resolveReplies`).
+  // Messages older than what is loaded that a reply on screen names, read for the reply;
+  // the positions already asked about, answered or not; and the selection a run of that
+  // reading is out for (`resolveReplies`).
   referenced: new Map(),
   unfound: new Set(),
   resolving: null,
@@ -9519,15 +9520,7 @@ async function readTranscript(id, mine, before) {
     const entries = body.transcript.entries;
     // A marker is authoritative whichever arrived first: a page read before a deletion
     // the following has already applied must not bring the message back (§5:12).
-    entries.forEach((entry) => {
-      if (entry.deleted) {
-        chat.deleted.add(entry.position);
-        chat.entries.delete(entry.position);
-        chat.referenced.delete(entry.position);
-      } else if (!chat.deleted.has(entry.position)) {
-        chat.entries.set(entry.position, entry);
-      }
-    });
+    entries.forEach((entry) => applyEntry(entry, chat.entries));
     if (entries.length > 0) {
       const first = entries[0].position;
       chat.oldest = chat.oldest === null ? first : Math.min(chat.oldest, first);
@@ -9549,12 +9542,25 @@ async function readTranscript(id, mine, before) {
   }
 }
 
+// One entry of a transcript read, applied to `into` — the loaded transcript, or the
+// replies' targets. A marker is applied everywhere a copy of the message is kept, so
+// whichever read brings it, the text leaves the screen (§5:12).
+function applyEntry(entry, into) {
+  if (entry.deleted) {
+    chat.deleted.add(entry.position);
+    chat.entries.delete(entry.position);
+    chat.referenced.delete(entry.position);
+  } else if (!chat.deleted.has(entry.position)) {
+    into.set(entry.position, entry);
+  }
+}
+
 // The messages replies on screen name that are older than what is loaded, each read as
 // the one entry before the position after it — a message or its marker — so a reply to
 // a deleted message says so (§5:8) however far back that message was. Every target is
-// read, one read at a time; a run asked for while one is out runs again when it ends,
-// so a reply arriving meanwhile is not missed. A courtesy read: where it cannot be made,
-// the reply names the position, and nothing is read again of the page's own motion.
+// read once, one read at a time; a run asked for while one is out runs again when it
+// ends, so a reply arriving meanwhile is not missed. Where a read cannot be made the
+// reply names the position, and that target is not read again of the page's own motion.
 async function resolveReplies(id, mine) {
   if (chat.resolving === mine) {
     chat.resolveAgain = true;
@@ -9596,6 +9602,10 @@ async function resolveOnce(id, mine) {
     }
   });
   for (const target of wanted) {
+    // Asked about once per selection, answered or not: a lookup that failed is not
+    // made again of the page's own motion (ADR-0182 §7); opening the conversation again
+    // is the owner's way to ask again.
+    chat.unfound.add(target);
     let body;
     try {
       body = await relay(
@@ -9613,18 +9623,10 @@ async function resolveOnce(id, mine) {
     if (body === null || mine !== chat.chosen) {
       return false;
     }
-    // A position the transcript does not hold is asked about once per selection.
-    chat.unfound.add(target);
     body.transcript.entries.forEach((entry) => {
-      if (entry.position !== target) {
-        return;
-      }
-      chat.unfound.delete(target);
-      if (entry.deleted) {
-        chat.deleted.add(target);
-        chat.referenced.delete(target);
-      } else if (!chat.deleted.has(target)) {
-        chat.referenced.set(target, entry);
+      if (entry.position === target) {
+        chat.unfound.delete(target);
+        applyEntry(entry, chat.referenced);
       }
     });
   }

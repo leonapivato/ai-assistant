@@ -714,15 +714,23 @@ async def test_a_listing_that_could_not_be_read_again_stops_the_following(
 async def test_every_old_reply_target_is_read_including_one_a_live_reply_names(
     gateway_browser: Browser, tmp_path: Path
 ) -> None:
-    """§5:8 for more targets than one batch, and for a reply that arrives while open."""
+    """§5:8 for more targets than any one batch, and for a reply that arrives while open.
+
+    Every target sits outside the opening snapshot (the latest 50 entries): 26 deleted
+    messages, then 50 fillers, then 25 replies to the first 25 of them.
+    """
     async with driving(gateway_browser, tmp_path) as drive:
         await drive.engine.set_my_devices(
             [ChatDevice(device_id="hub", access=DeviceAccess.READ_WRITE)]
         )
         started = await drive.engine.start_conversation()
-        for index in range(1, 31):
+        for index in range(1, 27):
             await drive.engine.chat.append_message(
                 started.id, NewMessage(author=MessageAuthor.ASSISTANT, text=f"Old {index}.")
+            )
+        for index in range(1, 51):
+            await drive.engine.chat.append_message(
+                started.id, NewMessage(author=MessageAuthor.ASSISTANT, text=f"Filler {index}.")
             )
         for index in range(1, 26):
             await drive.engine.chat.append_message(
@@ -738,12 +746,13 @@ async def test_every_old_reply_target_is_read_including_one_a_live_reply_names(
         await drive.page.locator("#chat-conversations button", has_text="Open").click()
         replies = drive.page.locator("#chat-transcript li", has_text="About ")
         await expect(replies).to_have_count(25)
-        await expect(
-            drive.page.locator("#chat-transcript li", has_text="About 25.")
-        ).to_contain_text("In reply to a message that was deleted.")
+        assert await drive.page.evaluate("() => chat.oldest") > 26
         await expect(
             drive.page.locator("#chat-transcript li", has_text="In reply to message")
         ).to_have_count(0)
+        await expect(
+            drive.page.locator("#chat-transcript li", has_text="About 1.")
+        ).to_contain_text("In reply to a message that was deleted.")
 
         await drive.engine.chat.append_message(
             started.id,
@@ -753,6 +762,50 @@ async def test_every_old_reply_target_is_read_including_one_a_live_reply_names(
         await expect(late).to_contain_text(
             "In reply to a message that was deleted.", timeout=_IDLE_FOLLOWED
         )
+
+
+async def test_a_reply_target_lookup_that_failed_is_not_made_again_unasked(
+    gateway_browser: Browser, tmp_path: Path
+) -> None:
+    """ADR-0182 §7: a later message does not re-issue a lookup that failed."""
+    async with driving(gateway_browser, tmp_path) as drive:
+        await drive.engine.set_my_devices(
+            [ChatDevice(device_id="hub", access=DeviceAccess.READ_WRITE)]
+        )
+        started = await drive.engine.start_conversation()
+        for index in range(1, 60):
+            await drive.engine.chat.append_message(
+                started.id, NewMessage(author=MessageAuthor.ASSISTANT, text=f"Note {index}.")
+            )
+        await drive.engine.chat.append_message(
+            started.id,
+            NewMessage(author=MessageAuthor.ASSISTANT, text="About the first.", replies_to=1),
+        )
+        held = drive.engine.transcript
+        lookups: list[int | None] = []
+
+        async def failing_lookups(conversation_id: str, **keywords: Any) -> Any:
+            if keywords.get("limit") == 1:
+                lookups.append(keywords.get("before"))
+                raise ConversationStoreError("the transcript is unreadable")
+            return await held(conversation_id, **keywords)
+
+        drive.engine.transcript = failing_lookups  # type: ignore[method-assign]
+        await drive.page.click("#chat-button")
+        await drive.page.locator("#chat-conversations button", has_text="Open").click()
+        reply = drive.page.locator("#chat-transcript li", has_text="About the first.")
+        await expect(reply).to_contain_text("In reply to message 1.")
+        await drive.page.wait_for_function("() => chat.resolving === null")
+        assert lookups == [2]
+
+        await drive.engine.chat.append_message(
+            started.id, NewMessage(author=MessageAuthor.ASSISTANT, text="Unrelated.")
+        )
+        await expect(drive.page.locator("#chat-transcript")).to_contain_text(
+            "Unrelated.", timeout=_IDLE_FOLLOWED
+        )
+        await drive.page.wait_for_function("() => chat.resolving === null")
+        assert lookups == [2]
 
 
 async def test_a_read_reply_target_deleted_later_is_named_as_deleted(
