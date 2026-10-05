@@ -163,7 +163,7 @@ async def test_chat_starts_a_conversation_on_my_devices_after_asking_to_add_this
     started = _calls(engine, "start_conversation")
     assert len(started) == 1
     rendered = _flat(output.getvalue())
-    assert "This device (hub) is not one of your devices for writing." in rendered
+    assert "This device (hub) is not one of your devices for reading and writing." in rendered
     assert "says its screen is private" in rendered
     assert "Started a conversation:" in rendered
     assert "No messages yet." in rendered
@@ -211,6 +211,35 @@ async def test_chat_offers_this_device_to_a_conversation_without_it(output: Stri
     assert await engine.my_devices() == (PHONE,)
     assert "not one of this conversation's devices" in _flat(output.getvalue())
     assert "for this conversation" in _flat(output.getvalue())
+
+
+@pytest.mark.parametrize("access", [DeviceAccess.WRITE, DeviceAccess.READ])
+async def test_chat_offers_both_to_a_device_that_only_writes_or_only_reads(
+    output: StringIO, access: DeviceAccess
+) -> None:
+    """§3:5: a write-only end is not shown the conversation, a read-only one cannot write."""
+    engine = FakeAssistantEngine()
+    conversation = await _started(engine, ChatDevice(device_id="hub", access=access))
+    await engine.chat.append_message(
+        conversation, NewMessage(author=MessageAuthor.ASSISTANT, text="the secret plan")
+    )
+
+    code = await _chat(engine, conversation, _lines(), confirm=False)
+
+    assert code == 0
+    assert "the secret plan" not in output.getvalue()
+    assert "for reading and writing" in _flat(output.getvalue())
+    assert _calls(engine, "transcript") == []
+
+
+async def test_chat_started_on_a_write_only_device_asks_first(output: StringIO) -> None:
+    engine = FakeAssistantEngine()
+    await engine.set_my_devices((ChatDevice(device_id="hub", access=DeviceAccess.WRITE),))
+
+    await _chat(engine, None, _lines())
+
+    assert await engine.my_devices() == (HUB,)
+    assert "for reading and writing" in _flat(output.getvalue())
 
 
 async def test_chat_reports_a_conversation_it_cannot_show(output: StringIO) -> None:
@@ -443,6 +472,61 @@ async def test_a_conversation_deleted_elsewhere_ends_the_chat(output: StringIO) 
     assert "This conversation was deleted." in output.getvalue()
 
 
+async def test_a_device_no_longer_shown_the_conversation_ends_the_chat(
+    output: StringIO,
+) -> None:
+    """§3:5: once this device may only write, it is not shown the conversation."""
+    engine = FakeAssistantEngine()
+    conversation = await _started(engine, HUB)
+
+    async def _narrow_soon() -> None:
+        await _until(output, "/reply N <text>")
+        await engine.set_conversation_devices(
+            conversation, devices=(ChatDevice(device_id="hub", access=DeviceAccess.WRITE),)
+        )
+
+    narrowing = asyncio.create_task(_narrow_soon())
+    code = await _chat(engine, conversation, _never(), poll_seconds=0.01)
+    await narrowing
+
+    assert code == 0
+    assert "This device is no longer shown this conversation." in output.getvalue()
+
+
+class _HoldsTheSend(FakeAssistantEngine):
+    """A hub that never answers a send, as one whose connection hangs."""
+
+    def __init__(self) -> None:
+        super().__init__()
+        self.sending = asyncio.Event()
+
+    async def write_message(
+        self, conversation_id: Identifier, *, message: UserMessage
+    ) -> MessageReceipt:
+        self.sending.set()
+        await asyncio.Event().wait()
+        raise AssertionError  # pragma: no cover — never reached
+
+
+async def test_a_send_still_waiting_does_not_hold_off_the_end(output: StringIO) -> None:
+    """The follower ending ends the chat, and the send is said to be of unknown outcome."""
+    engine = _HoldsTheSend()
+    conversation = await _started(engine, HUB)
+
+    async def _delete_while_sending() -> None:
+        await engine.sending.wait()
+        await FakeAssistantEngine.delete_conversation(engine, conversation)
+
+    deleting = asyncio.create_task(_delete_while_sending())
+    code = await _chat(engine, conversation, _lines("hello?"), poll_seconds=0.01)
+    await deleting
+
+    assert code == 0
+    rendered = _flat(output.getvalue())
+    assert "This conversation was deleted." in rendered
+    assert "may or may not have been received" in rendered
+
+
 async def test_a_chat_space_started_afresh_is_shown_again(output: StringIO) -> None:
     """A cursor past the newest change means a fresh store: resynchronise from a snapshot."""
     engine = FakeAssistantEngine()
@@ -542,6 +626,50 @@ async def test_a_conversation_shows_its_devices_state_and_messages(output: Strin
     assert "│ line two" in rendered
     assert "Cut off before it finished" in rendered
     assert "replying to #1, a deleted message" in rendered
+
+
+async def test_a_reply_to_a_deleted_message_older_than_the_page_says_so(
+    output: StringIO,
+) -> None:
+    """§5:8: the reference names a deleted message wherever the message was."""
+    engine = FakeAssistantEngine()
+    conversation = await _started(engine, HUB)
+    await engine.write_message(
+        conversation, message=UserMessage(device_id="hub", message_id="m-1", text="oops")
+    )
+    await engine.write_message(
+        conversation,
+        message=UserMessage(device_id="hub", message_id="m-2", text="fixed", replies_to=1),
+    )
+    await engine.delete_message(conversation, position=1)
+
+    await cli._drive_show_conversation(engine, conversation, before=None, limit=1)
+    assert "replying to #1, a deleted message" in _flat(output.getvalue())
+    output.truncate(0)
+    output.seek(0)
+    await _chat(engine, conversation, _lines())
+
+    assert "replying to #1, a deleted message" in _flat(output.getvalue())
+
+
+async def test_a_reply_arriving_to_a_deleted_message_says_so(output: StringIO) -> None:
+    engine = FakeAssistantEngine()
+    phone = ChatDevice(device_id="phone", access=DeviceAccess.READ_WRITE)
+    conversation = await _started(engine, HUB, phone)
+    await engine.write_message(
+        conversation, message=UserMessage(device_id="phone", message_id="m-1", text="oops")
+    )
+    await engine.delete_message(conversation, position=1)
+    view = cli._ChatView(conversation, device_id="hub", cursor=0)
+    await engine.write_message(
+        conversation,
+        message=UserMessage(device_id="phone", message_id="m-2", text="fixed", replies_to=1),
+    )
+    view.cursor = (await engine.chat_changes(after=0)).next_after - 1
+
+    await cli._poll_chat(engine, view)
+
+    assert "replying to #1, a deleted message" in _flat(output.getvalue())
 
 
 async def test_a_conversation_reads_further_back(output: StringIO) -> None:
