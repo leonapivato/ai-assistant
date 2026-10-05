@@ -709,3 +709,80 @@ async def test_a_listing_that_could_not_be_read_again_stops_the_following(
             f"Conversation {started.id}"
         )
         await expect(follow).to_contain_text("Following this chat")
+
+
+async def test_every_old_reply_target_is_read_including_one_a_live_reply_names(
+    gateway_browser: Browser, tmp_path: Path
+) -> None:
+    """§5:8 for more targets than one batch, and for a reply that arrives while open."""
+    async with driving(gateway_browser, tmp_path) as drive:
+        await drive.engine.set_my_devices(
+            [ChatDevice(device_id="hub", access=DeviceAccess.READ_WRITE)]
+        )
+        started = await drive.engine.start_conversation()
+        for index in range(1, 31):
+            await drive.engine.chat.append_message(
+                started.id, NewMessage(author=MessageAuthor.ASSISTANT, text=f"Old {index}.")
+            )
+        for index in range(1, 26):
+            await drive.engine.chat.append_message(
+                started.id,
+                NewMessage(
+                    author=MessageAuthor.ASSISTANT, text=f"About {index}.", replies_to=index
+                ),
+            )
+        for index in range(1, 27):
+            await drive.engine.delete_message(started.id, position=index)
+
+        await drive.page.click("#chat-button")
+        await drive.page.locator("#chat-conversations button", has_text="Open").click()
+        replies = drive.page.locator("#chat-transcript li", has_text="About ")
+        await expect(replies).to_have_count(25)
+        await expect(
+            drive.page.locator("#chat-transcript li", has_text="About 25.")
+        ).to_contain_text("In reply to a message that was deleted.")
+        await expect(
+            drive.page.locator("#chat-transcript li", has_text="In reply to message")
+        ).to_have_count(0)
+
+        await drive.engine.chat.append_message(
+            started.id,
+            NewMessage(author=MessageAuthor.ASSISTANT, text="About 26.", replies_to=26),
+        )
+        late = drive.page.locator("#chat-transcript li", has_text="About 26.")
+        await expect(late).to_contain_text(
+            "In reply to a message that was deleted.", timeout=_IDLE_FOLLOWED
+        )
+
+
+async def test_a_read_reply_target_deleted_later_is_named_as_deleted(
+    gateway_browser: Browser, tmp_path: Path
+) -> None:
+    """A marker outranks the text kept for a reply, whichever path brought the marker."""
+    async with driving(gateway_browser, tmp_path) as drive:
+        await drive.engine.set_my_devices(
+            [ChatDevice(device_id="hub", access=DeviceAccess.READ_WRITE)]
+        )
+        started = await drive.engine.start_conversation()
+        await drive.engine.chat.append_message(
+            started.id, NewMessage(author=MessageAuthor.ASSISTANT, text="The secret.")
+        )
+        for index in range(2, 60):
+            await drive.engine.chat.append_message(
+                started.id, NewMessage(author=MessageAuthor.ASSISTANT, text=f"Filler {index}.")
+            )
+        await drive.engine.chat.append_message(
+            started.id,
+            NewMessage(author=MessageAuthor.ASSISTANT, text="About the secret.", replies_to=1),
+        )
+        await drive.page.click("#chat-button")
+        await drive.page.locator("#chat-conversations button", has_text="Open").click()
+        reply = drive.page.locator("#chat-transcript li", has_text="About the secret.")
+        await expect(reply).to_contain_text("The secret.")
+
+        # Stop following, delete it elsewhere, and bring the marker in by loading back.
+        await drive.page.evaluate("() => stopFollowing(null, true)")
+        await drive.engine.delete_message(started.id, position=1)
+        await drive.page.click("#chat-older")
+        await expect(reply).to_contain_text("In reply to a message that was deleted.")
+        await expect(reply).not_to_contain_text("“The secret.”")

@@ -8867,8 +8867,12 @@ const chat = {
   chosen: 0,
   entries: new Map(),
   deleted: new Set(),
-  // Messages older than what is loaded that a reply on screen names, read for the reply.
+  // Messages older than what is loaded that a reply on screen names, read for the reply,
+  // and the selection a run of that reading is out for (`resolveReplies`).
   referenced: new Map(),
+  unfound: new Set(),
+  resolving: null,
+  resolveAgain: false,
   oldest: null,
   state: null,
   devices: null,
@@ -8951,6 +8955,7 @@ function closeChat() {
   chat.entries = new Map();
   chat.deleted = new Set();
   chat.referenced = new Map();
+  chat.unfound = new Set();
   chat.pending = [];
   el("chat-thread").hidden = true;
 }
@@ -9272,6 +9277,8 @@ function applyChanges(changes) {
   });
   if (touched) {
     renderTranscript();
+    // A reply that came in may name a message older than what is loaded.
+    void resolveReplies(chat.selected, chat.chosen);
   }
   if (relist) {
     void relistChat();
@@ -9428,6 +9435,7 @@ async function selectChat(id) {
   chat.entries = new Map();
   chat.deleted = new Set();
   chat.referenced = new Map();
+  chat.unfound = new Set();
   chat.oldest = null;
   chat.state = null;
   chat.devices = null;
@@ -9465,6 +9473,7 @@ function chatGone(said) {
   chat.entries = new Map();
   chat.deleted = new Set();
   chat.referenced = new Map();
+  chat.unfound = new Set();
   chat.state = null;
   chat.devices = null;
   setReplyTo(null);
@@ -9514,6 +9523,7 @@ async function readTranscript(id, mine, before) {
       if (entry.deleted) {
         chat.deleted.add(entry.position);
         chat.entries.delete(entry.position);
+        chat.referenced.delete(entry.position);
       } else if (!chat.deleted.has(entry.position)) {
         chat.entries.set(entry.position, entry);
       }
@@ -9539,17 +9549,37 @@ async function readTranscript(id, mine, before) {
   }
 }
 
-// How many replies' targets one page of the transcript may send for: each is one read.
-const REPLY_LOOKUPS = 20;
-
 // The messages replies on screen name that are older than what is loaded, each read as
 // the one entry before the position after it — a message or its marker — so a reply to
-// a deleted message says so (§5:8) however far back that message was. A courtesy read:
-// where it cannot be made, the reply names the position, and nothing is read again.
+// a deleted message says so (§5:8) however far back that message was. Every target is
+// read, one read at a time; a run asked for while one is out runs again when it ends,
+// so a reply arriving meanwhile is not missed. A courtesy read: where it cannot be made,
+// the reply names the position, and nothing is read again of the page's own motion.
 async function resolveReplies(id, mine) {
+  if (chat.resolving === mine) {
+    chat.resolveAgain = true;
+    return;
+  }
+  chat.resolving = mine;
+  try {
+    do {
+      chat.resolveAgain = false;
+      if (!(await resolveOnce(id, mine))) {
+        return;
+      }
+    } while (chat.resolveAgain && mine === chat.chosen);
+  } finally {
+    if (chat.resolving === mine) {
+      chat.resolving = null;
+    }
+  }
+}
+
+// One pass over the targets not yet known. Answers whether it completed.
+async function resolveOnce(id, mine) {
   const half = headerHalf();
   if (half === null) {
-    return;
+    return false;
   }
   const era = sessionEra;
   const wanted = new Set();
@@ -9559,12 +9589,13 @@ async function resolveReplies(id, mine) {
       target !== null &&
       !chat.entries.has(target) &&
       !chat.deleted.has(target) &&
-      !chat.referenced.has(target)
+      !chat.referenced.has(target) &&
+      !chat.unfound.has(target)
     ) {
       wanted.add(target);
     }
   });
-  for (const target of [...wanted].slice(0, REPLY_LOOKUPS)) {
+  for (const target of wanted) {
     let body;
     try {
       body = await relay(
@@ -9574,26 +9605,31 @@ async function resolveReplies(id, mine) {
         "chat"
       );
     } catch (_) {
-      return;
+      return false;
     }
     if (!sameSession(half, era)) {
-      return;
+      return false;
     }
     if (body === null || mine !== chat.chosen) {
-      return;
+      return false;
     }
+    // A position the transcript does not hold is asked about once per selection.
+    chat.unfound.add(target);
     body.transcript.entries.forEach((entry) => {
       if (entry.position !== target) {
         return;
       }
+      chat.unfound.delete(target);
       if (entry.deleted) {
         chat.deleted.add(target);
+        chat.referenced.delete(target);
       } else if (!chat.deleted.has(target)) {
         chat.referenced.set(target, entry);
       }
     });
   }
   renderTranscript();
+  return true;
 }
 
 // Answers whether the read failed for the conversation still on screen: `false` where it
@@ -9654,18 +9690,19 @@ function renderChatState() {
 
 // --- the transcript -----------------------------------------------------------
 
-// Where a reply points: the message itself, a deleted message (§5:8), or one this page
-// has not loaded.
+// Where a reply points: a deleted message (§5:8), the message itself, or one this page
+// has not read.
 function quoted(position) {
+  // A marker outranks every copy of the text, wherever it was kept (§5:12).
+  if (chat.deleted.has(position)) {
+    return "In reply to a message that was deleted.";
+  }
   const held = chat.entries.has(position)
     ? chat.entries.get(position)
     : chat.referenced.get(position);
   if (held !== undefined) {
     const text = held.text.length > 120 ? `${held.text.slice(0, 120)}…` : held.text;
     return `In reply to: “${text}”`;
-  }
-  if (chat.deleted.has(position)) {
-    return "In reply to a message that was deleted.";
   }
   return `In reply to message ${position}.`;
 }
