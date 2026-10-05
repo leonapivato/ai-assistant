@@ -33,6 +33,7 @@ from ai_assistant.core.clock import ClockReadingError, checked_clock
 from ai_assistant.core.errors import (
     ActiveExecutionError,
     ClaimRefused,
+    ClaimStopped,
     IllegalTransitionError,
     PlanningError,
     RetriesExhaustedError,
@@ -339,6 +340,27 @@ def _revalidated_row_ids(named: Sequence[str], *, what: str) -> tuple[Identifier
         return _ROW_IDS.validate_python(named)
     except ValidationError as exc:
         msg = f"the ids to {what} are not a container of identifiers: {exc}"
+        raise PlanningError(msg) from exc
+
+
+#: Mirror of :data:`ai_assistant.planning.stops._ACTIVATION_ID`; see the module docstring
+#: on duplication.
+_ACTIVATION_ID: Final[TypeAdapter[Identifier]] = TypeAdapter(Identifier)
+
+
+def _revalidated_activation_id(activation_id: object) -> Identifier:
+    """Return ``activation_id`` as the identifier a claim would name, or refuse it.
+
+    Re-implemented here rather than imported from ``ai_assistant.planning``, for the
+    reason this module's docstring gives for the transition graph (ADR-0297 §1).
+
+    Raises:
+        PlanningError: If the value is not an identifier.
+    """
+    try:
+        return _ACTIVATION_ID.validate_python(activation_id)
+    except ValidationError as exc:
+        msg = f"a stop record names an activation id, and {activation_id!r} is not one"
         raise PlanningError(msg) from exc
 
 
@@ -1070,6 +1092,8 @@ class FakePlanStore:
         # could not ask about a completed effect under **this** action whose key is not
         # this call's.
         self._effects: dict[tuple[str, str], EffectRecord] = {}
+        # ADR-0297 §1: one stop record per activation, carrying the id alone.
+        self._stopped: set[str] = set()
         self._clock = checked_clock(now, owner="FakePlanStore")
         self._sequence = 0
         # A per-instance random nonce, matching ``InMemoryPlanStore``: the
@@ -2859,6 +2883,15 @@ class FakePlanStore:
         # interpretation revision, and a plan carrying no revision at all — the one
         # route being a row ADR-0249 §12 migrated — is not driven either.
         if transition.to_status is StepStatus.RUNNING:
+            # ADR-0297 §2's stop conjunct, read inside the same step as the claim. A
+            # claim naming no activation, or another one, is not this conjunct's.
+            if transition.activation_id is not None and transition.activation_id in self._stopped:
+                msg = (
+                    f"activation {transition.activation_id} was stopped, so its claim of "
+                    f"step {transition.step_id} on execution {transition.execution_id} is "
+                    f"refused (ADR-0297 §2)"
+                )
+                raise ClaimStopped(msg)
             plan = self._plans.get(stored.plan_id)
             goal = None if plan is None else self._goals.get(plan.goal_id)
             if plan is not None and goal is not None and plan.targets_revision != goal.revision:
@@ -3202,6 +3235,18 @@ class FakePlanStore:
                 if state.is_active
             ]
 
+    async def record_stop(self, activation_id: str, /) -> None:
+        """Write a stop record naming ``activation_id``, idempotently (ADR-0297 §1).
+
+        Under the modelled resource, like every other write.
+
+        Raises:
+            PlanningError: If ``activation_id`` is not an identifier.
+        """
+        named = _revalidated_activation_id(activation_id)
+        async with self._resource.held():
+            self._stopped.add(named)
+
     async def export(self) -> PlanExport:
         """Return a portable, internally consistent snapshot — under the resource (#397)."""
         async with self._resource.held():
@@ -3222,6 +3267,8 @@ class FakePlanStore:
                 effects=tuple(
                     self._effects[key].model_copy(deep=True) for key in sorted(self._effects)
                 ),
+                # ADR-0297 §1: every stop record, in a deterministic order.
+                stopped_activations=tuple(sorted(self._stopped)),
             )
 
     async def delete_goal(self, goal_id: str) -> GoalDeletion:
@@ -3302,6 +3349,7 @@ class FakePlanStore:
                 + len(self._plans)
                 + len(self._executions)
                 + len(self._effects)
+                + len(self._stopped)
             )
             self._goals.clear()
             self._attempts.clear()
@@ -3311,6 +3359,7 @@ class FakePlanStore:
             self._plans.clear()
             self._executions.clear()
             self._effects.clear()
+            self._stopped.clear()
         return removed
 
 

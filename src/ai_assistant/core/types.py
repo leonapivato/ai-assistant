@@ -14134,9 +14134,21 @@ class StepTransition(BaseModel):
     membership and its state — is read inside the same indivisible step as the
     claim.
 
+    **A claim also names the activation it is made under** (ADR-0297 §2), so that a
+    store holding a stop record for that activation refuses it with
+    :class:`~ai_assistant.core.errors.ClaimStopped`. :attr:`activation_id` is
+    **optional** on a ``→ RUNNING`` transition and forbidden on every other — not
+    required as :attr:`attempt_id` is, because the one activation that has no id (its
+    id factory failed, ADR-0275 §6:1) can be named by no stop, so requiring the field
+    would cost that activation every action it takes and buy no refusal. It is
+    **compared and not stored**: ``StepExecution`` gains no field for it, and the
+    step's committed row is unchanged.
+
     Attributes:
         attempt_id: The :class:`GoalAttempt` a ``→ RUNNING`` claim is made under,
             and ``None`` on every other transition.
+        activation_id: The activation a ``→ RUNNING`` claim is made under, ``None``
+            where that activation has no id, and ``None`` on every other transition.
     """
 
     model_config = ConfigDict(extra="forbid", frozen=True)
@@ -14149,6 +14161,13 @@ class StepTransition(BaseModel):
     approval_ref: Identifier | None = None
     attempt_id: Identifier | None = Field(
         default=None, description="The attempt a `→ RUNNING` claim is made under (ADR-0255 §3)."
+    )
+    activation_id: Identifier | None = Field(
+        default=None,
+        description=(
+            "The activation a `→ RUNNING` claim is made under (ADR-0297 §2). Compared "
+            "against the store's stop records and not stored."
+        ),
     )
     output: FrozenJsonValue = None
     skip_reason: SkipReason | None = None
@@ -14258,6 +14277,23 @@ class StepTransition(BaseModel):
                 raise ValueError(msg)
         elif self.attempt_id is not None:
             msg = "attempt_id is only valid for a transition to RUNNING"
+            raise ValueError(msg)
+        return self
+
+    @model_validator(mode="after")
+    def _only_a_claim_names_its_activation(self) -> StepTransition:
+        """Forbid ``activation_id`` on every transition but a claim (ADR-0297 §2).
+
+        Its own validator, for :meth:`_a_claim_names_its_attempt`'s reason. Only the
+        forbidding half: a claim **may** carry no activation, where the activation it
+        is made under has no id, and no lane omits the id on any other ground.
+
+        Raises:
+            ValueError: If a transition to any status but ``RUNNING`` carries an
+                ``activation_id``.
+        """
+        if self.to_status is not StepStatus.RUNNING and self.activation_id is not None:
+            msg = "activation_id is only valid for a transition to RUNNING"
             raise ValueError(msg)
         return self
 
@@ -15026,8 +15062,20 @@ class PlanExport(BaseModel):
     internally consistent — every ``goal_id``/``plan_id`` referenced by an
     included record resolves within the same export.
 
-    **``schema_version`` is 16 because the document gains ``effects``, and
-    ``StepExecution`` gains the two satisfaction marks** (ADR-0259 §9). Two
+    **``schema_version`` is 17 because the document gains ``stopped_activations``**
+    (ADR-0297 §1): the activation ids the store holds a stop record for, carried so
+    that ADR-0004 §6's view and export limbs reach the one datum that decision adds
+    rather than taking a scope on them. One ground, and sufficient on its own: an older
+    reader's ``extra="forbid"`` refuses the new member, which ``model_dump()`` emits on
+    **every** document. A stop record names no goal, plan or execution, so ADR-0014
+    §5's closure rule is **extended by nothing** — the member closes over nothing the
+    document carries — and the only constraint stated over it is that no id appears
+    twice, a duplicate being the same defect a duplicate goal id is. **A stored-record
+    version and not a wire ground**: ``PlanExport`` crosses no frame and is emitted by
+    no peer, and ADR-0297 §6:3 lists what of that decision crosses the wire without it.
+
+    **It was 16 because the document gained ``effects``, and
+    ``StepExecution`` gained the two satisfaction marks** (ADR-0259 §9). Two
     independent grounds, each sufficient on its own: an older reader's
     ``extra="forbid"`` refuses the new member on the document itself, and refuses
     ``satisfied_by_execution``/``satisfied_by_step`` emitted as ``null`` on every step
@@ -15227,12 +15275,12 @@ class PlanExport(BaseModel):
 
     model_config = ConfigDict(extra="forbid", frozen=True)
 
-    schema_version: Literal[16] = Field(
-        default=16,
+    schema_version: Literal[17] = Field(
+        default=17,
         description=(
-            "Shape of this export, pinned to exactly 16 (ADR-0039 §10, ADR-0259 §9): an "
+            "Shape of this export, pinned to exactly 17 (ADR-0039 §10, ADR-0297 §1): an "
             "export outlives the code that wrote it, so the label must be a fact about "
-            "the document rather than a producer's unchecked claim. ``Literal[16]`` "
+            "the document rather than a producer's unchecked claim. ``Literal[17]`` "
             "refuses every other value — a document of any earlier shape does not "
             "validate against this contract at all — so the advertised version cannot "
             "be mislabelled."
@@ -15246,6 +15294,30 @@ class PlanExport(BaseModel):
     questions: tuple[GoalQuestion, ...] = ()
     evidence: tuple[EvidenceHistory, ...] = ()
     effects: tuple[EffectRecord, ...] = ()
+    stopped_activations: tuple[Identifier, ...] = Field(
+        default=(),
+        description=(
+            "The activation ids the store holds a stop record for (ADR-0297 §1). A "
+            "record carries the id alone: no instant, no reason, no conversation and "
+            "no content."
+        ),
+    )
+
+    @model_validator(mode="after")
+    def _a_stop_record_appears_once(self) -> PlanExport:
+        """Refuse a document naming one stopped activation twice (ADR-0297 §1).
+
+        A store holds at most one stop record per activation — ``record_stop`` is
+        idempotent — so a document carrying a duplicate states a record the store
+        cannot hold, the same defect as a duplicate goal id.
+
+        Raises:
+            ValueError: If an activation id appears more than once.
+        """
+        if len(set(self.stopped_activations)) != len(self.stopped_activations):
+            msg = "export contains duplicate stopped activation ids"
+            raise ValueError(msg)
+        return self
 
     @model_validator(mode="after")
     def _references_resolve_within_the_export(self) -> PlanExport:

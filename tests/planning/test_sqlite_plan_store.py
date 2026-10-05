@@ -36,7 +36,7 @@ from plan_store_contract import (
 )
 from pydantic import ValidationError
 
-from ai_assistant.core.errors import ClaimRefused, PlanningError
+from ai_assistant.core.errors import ClaimRefused, ClaimStopped, PlanningError
 from ai_assistant.core.types import (
     MAX_ASSOCIATION_CANDIDATES,
     MAX_GOAL_EVIDENCE,
@@ -209,6 +209,8 @@ _SYNC_METHODS = {
     "has_outstanding_effect": "_has_outstanding_effect_sync",
     # ADR-0259 §2's member, and a compare-and-swap for the same reason.
     "claim_effect": "_claim_effect_sync",
+    # ADR-0297 §1's member: the write every later claim is decided against.
+    "record_stop": "_record_stop_sync",
 }
 
 
@@ -3729,14 +3731,14 @@ async def test_a_version_5_plan_store_reads_its_goals_with_no_quotes(
         assert await store.for_action("g1", "ia1") == (), "an absence and never a fault"
 
         export = await store.export()
-        assert export.schema_version == 16
+        assert export.schema_version == 17
         assert export.goals[0].quotes == ()
     finally:
         store.close()
 
     with sqlite3.connect(path) as conn:
         assert conn.execute("SELECT value FROM meta WHERE key = 'schema_version'").fetchone() == (
-            "8",
+            "9",
         )
         assert conn.execute("SELECT data FROM goals WHERE id = 'g1'").fetchone()[0] == before, (
             "the migration converts nothing: the blob is the one the previous release wrote"
@@ -3868,13 +3870,13 @@ async def test_the_upgrade_repairs_every_live_attempt_of_an_abandoned_goal(
         assert held is not None
         assert held.quotes == ()
         assert held.quotes_elided == 0
-        assert (await store.export()).schema_version == 16
+        assert (await store.export()).schema_version == 17
     finally:
         store.close()
 
     with sqlite3.connect(path) as conn:
         assert conn.execute("SELECT value FROM meta WHERE key = 'schema_version'").fetchone() == (
-            "8",
+            "9",
         )
 
 
@@ -3916,13 +3918,13 @@ async def test_a_version_6_plan_store_upgrades_and_repairs_nothing_it_need_not(
         assert goal.status is GoalStatus.ACTIVE
         assert await store.attempts_of("g1") == ()
         export = await store.export()
-        assert export.schema_version == 16
+        assert export.schema_version == 17
     finally:
         store.close()
 
     with sqlite3.connect(path) as conn:
         assert conn.execute("SELECT value FROM meta WHERE key = 'schema_version'").fetchone() == (
-            "8",
+            "9",
         )
 
 
@@ -3981,7 +3983,7 @@ async def test_an_earlier_plan_store_opens_with_an_empty_effects_table(
     store = SqlitePlanStore(path=path, now=_fixed_now)
     try:
         export = await store.export()
-        assert export.schema_version == 16
+        assert export.schema_version == 17
         assert export.effects == (), "the table is created empty rather than reconstructed"
         assert export.goals[0].quotes == (), "and every earlier pass ran, not just the last"
 
@@ -4002,8 +4004,151 @@ async def test_an_earlier_plan_store_opens_with_an_empty_effects_table(
 
     with sqlite3.connect(path) as conn:
         assert conn.execute("SELECT value FROM meta WHERE key = 'schema_version'").fetchone() == (
-            "8",
+            "9",
         )
+
+
+def _version_8_database(path: Path) -> None:
+    """Build the database this store shipped **after** ADR-0259 and before ADR-0297.
+
+    The **previous** version, which is the one ADR-0297 §1's table is added over:
+    ADR-0259 §9's migration created ``goal_effects`` and moved the marker, and nothing
+    else, so a version 8 file is the version 7 one with that table beside it. Built
+    from the rung below rather than from scratch, which keeps the two statements one.
+
+    Args:
+        path: Where to build it.
+    """
+    _version_7_database(path)
+    with sqlite3.connect(path) as conn:
+        conn.execute("PRAGMA foreign_keys = ON")
+        conn.execute(
+            "CREATE TABLE goal_effects("
+            "goal_id TEXT NOT NULL REFERENCES goals(id), intended_action_id TEXT NOT NULL, "
+            "execution_id TEXT NOT NULL, step_id TEXT NOT NULL, data TEXT NOT NULL, "
+            "PRIMARY KEY (goal_id, intended_action_id))"
+        )
+        conn.execute("UPDATE meta SET value = '8' WHERE key = 'schema_version'")
+
+
+@pytest.mark.parametrize(
+    "build",
+    [
+        pytest.param(_version_5_database, id="from-version-5"),
+        pytest.param(_version_7_database, id="from-version-7"),
+        pytest.param(_version_8_database, id="from-version-8"),
+    ],
+)
+async def test_an_earlier_plan_store_opens_holding_no_stop_record(
+    tmp_path: Path, build: Callable[[Path], None]
+) -> None:
+    """ADR-0297 §1's table, created **empty** on every earlier file, at version 9.
+
+    No earlier store held a stop, so the migration writes no record and rewrites no
+    row; the marker moves for ADR-0049 §1's downgrade reading, since an older build
+    would ignore the table and commit a claim a record refuses. Driven from version 5
+    as well as 8, because the migrations compose: the older file takes ADR-0259 §9's
+    table and this one in the same open.
+    """
+    path = tmp_path / "plans.db"
+    build(path)
+
+    store = SqlitePlanStore(path=path, now=_fixed_now)
+    try:
+        export = await store.export()
+        assert export.stopped_activations == (), "the table is created empty"
+        assert export.effects == ()
+
+        await store.record_stop("act-1")
+        await store.save_plan(_plan("p2"))
+        state = await store.start_execution("p2")
+        await store.open_attempt(
+            GoalAttempt(id="a9", goal_id="g1", opened_at=_AT, execution_ids=(state.id,))
+        )
+        with pytest.raises(ClaimStopped):
+            await store.commit_transition(_claim(state, attempt_id="a9", activation_id="act-1"))
+        assert (await store.export()).stopped_activations == ("act-1",)
+    finally:
+        store.close()
+
+    with sqlite3.connect(path) as conn:
+        assert conn.execute("SELECT value FROM meta WHERE key = 'schema_version'").fetchone() == (
+            "9",
+        )
+
+
+async def test_a_stop_record_survives_a_restart(tmp_path: Path) -> None:
+    """ADR-0297 §1 on the durable store: a record outlives the process that wrote it.
+
+    "No stop record is removed while the store holds its rows" — so a claim a stopped
+    activation's work makes after the hub reopened its store is refused exactly as it
+    would have been before.
+    """
+    path = tmp_path / "plans.db"
+    store = SqlitePlanStore(path=path, now=_fixed_now)
+    try:
+        await store.save_goal(_goal())
+        await store.save_plan(_plan())
+        state = await store.start_execution("p1")
+        await store.open_attempt(
+            GoalAttempt(id="a1", goal_id="g1", opened_at=_AT, execution_ids=(state.id,))
+        )
+        await store.record_stop("act-1")
+    finally:
+        store.close()
+
+    reopened = SqlitePlanStore(path=path, now=_fixed_now)
+    try:
+        held = await reopened.get_execution(state.id)
+        assert held is not None
+        with pytest.raises(ClaimStopped):
+            await reopened.commit_transition(_claim(held, activation_id="act-1"))
+        assert (await reopened.export()).stopped_activations == ("act-1",)
+    finally:
+        reopened.close()
+
+
+async def test_a_blanked_stop_record_is_refused_as_planning_s_own_error(
+    tmp_path: Path,
+) -> None:
+    """A record an outside writer blanked or nulled is refused at the export.
+
+    It is read back as the identifier it was written as, so the refusal is
+    ``planning``'s own error rather than a raw validation failure of the document.
+    """
+    path = tmp_path / "plans.db"
+    store = SqlitePlanStore(path=path, now=_fixed_now)
+    try:
+        await store.record_stop("act-1")
+    finally:
+        store.close()
+    with sqlite3.connect(path) as conn:
+        conn.execute("UPDATE stopped_activations SET activation_id = NULL")
+
+    reopened = SqlitePlanStore(path=path, now=_fixed_now)
+    try:
+        with pytest.raises(PlanningError) as refusal:
+            await reopened.export()
+        assert not isinstance(refusal.value, ValidationError)
+    finally:
+        reopened.close()
+
+
+async def test_a_stop_table_without_its_key_is_refused_at_open(tmp_path: Path) -> None:
+    """``record_stop``'s idempotence rests on the activation id being the primary key.
+
+    ``CREATE TABLE IF NOT EXISTS`` is a no-op against a pre-existing table of another
+    shape (#373), so a hand-built ``stopped_activations`` with no key would let one
+    activation hold two rows and the export carry a duplicate the document refuses.
+    """
+    path = tmp_path / "plans.db"
+    SqlitePlanStore(path=path, now=_fixed_now).close()
+    with sqlite3.connect(path) as conn:
+        conn.execute("DROP TABLE stopped_activations")
+        conn.execute("CREATE TABLE stopped_activations(activation_id TEXT)")
+
+    with pytest.raises(PlanningError, match="stopped_activations"):
+        SqlitePlanStore(path=path, now=_fixed_now)
 
 
 async def test_a_version_4_plan_store_reads_its_goals_with_no_intended_actions(
@@ -4037,14 +4182,14 @@ async def test_a_version_4_plan_store_reads_its_goals_with_no_intended_actions(
         assert goal.intended_actions == (), "and nothing is invented for it"
 
         export = await store.export()
-        assert export.schema_version == 16
+        assert export.schema_version == 17
         assert export.goals[0].intended_actions == ()
     finally:
         store.close()
 
     with sqlite3.connect(path) as conn:
         assert conn.execute("SELECT value FROM meta WHERE key = 'schema_version'").fetchone() == (
-            "8",
+            "9",
         )
         assert conn.execute("SELECT data FROM goals WHERE id = 'g1'").fetchone()[0] == before, (
             "the migration converts nothing: the blob is the one the previous release wrote"
@@ -4082,14 +4227,14 @@ async def test_a_version_3_plan_store_gains_the_evidence_table_and_its_counter(
         assert await store.evidence_of("g1") == EvidenceHistory(goal_id="g1")
 
         export = await store.export()
-        assert export.schema_version == 16
+        assert export.schema_version == 17
         assert export.evidence == (EvidenceHistory(goal_id="g1"),)
     finally:
         store.close()
 
     with sqlite3.connect(path) as conn:
         assert conn.execute("SELECT value FROM meta WHERE key = 'schema_version'").fetchone() == (
-            "8",
+            "9",
         )
         assert conn.execute("SELECT COUNT(*) FROM goal_evidence").fetchone() == (0,)
         assert conn.execute("SELECT evidence_elided FROM goals").fetchall() == [(0,)]
@@ -4133,14 +4278,14 @@ async def test_a_version_2_plan_store_is_taken_the_whole_way_to_the_current_shap
         assert page.elided == 0
 
         export = await store.export()
-        assert export.schema_version == 16
+        assert export.schema_version == 17
         assert export.questions == ()
     finally:
         store.close()
 
     with sqlite3.connect(path) as conn:
         assert conn.execute("SELECT value FROM meta WHERE key = 'schema_version'").fetchone() == (
-            "8",
+            "9",
         )
         columns = {str(row[1]) for row in conn.execute("PRAGMA table_info(goals)").fetchall()}
         assert {"conversation_id", "last_engaged_in", "evidence_elided"} <= columns
@@ -4251,7 +4396,7 @@ async def test_a_pre_decision_plan_store_upgrades_and_stays_exportable(
         assert plan.targets_revision is None, "each plans row's targets_revision is absent"
 
         export = await store.export()
-        assert export.schema_version == 16
+        assert export.schema_version == 17
         assert [one.id for one in export.goals] == ["g1"]
         assert export.attempts == ()
 
@@ -4265,7 +4410,7 @@ async def test_a_pre_decision_plan_store_upgrades_and_stays_exportable(
         # 3, because every pass runs inside the one setup transaction and the marker is
         # stamped last.
         assert conn.execute("SELECT value FROM meta WHERE key = 'schema_version'").fetchone() == (
-            "8",
+            "9",
         )
 
 

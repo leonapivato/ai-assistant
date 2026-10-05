@@ -28,6 +28,7 @@ from pydantic import ValidationError
 from ai_assistant.core.errors import (
     ActiveExecutionError,
     ClaimRefused,
+    ClaimStopped,
     IllegalTransitionError,
     PlanningError,
     RetriesExhaustedError,
@@ -527,11 +528,18 @@ def _answered_without_suspending(call: Coroutine[Any, Any, bool]) -> bool:
     raise AssertionError(message)  # pragma: no cover — as above
 
 
-def _claim(state: ExecutionState, step_id: str = "s1", *, attempt_id: str = "a1") -> StepTransition:
+def _claim(
+    state: ExecutionState,
+    step_id: str = "s1",
+    *,
+    attempt_id: str = "a1",
+    activation_id: str | None = None,
+) -> StepTransition:
     """The transition that claims a step — bound tool, authorisation, attempt.
 
     ``attempt_id`` is required on a ``→ RUNNING`` transition (ADR-0255 §3) and names
     the attempt :func:`_owned` opens, which is the one every arm here claims under.
+    ``activation_id`` is optional on it (ADR-0297 §2), and only the stop arms name one.
     """
     return StepTransition(
         execution_id=state.id,
@@ -541,6 +549,7 @@ def _claim(state: ExecutionState, step_id: str = "s1", *, attempt_id: str = "a1"
         bound_tool="smtp",
         approval_ref="perm-1",
         attempt_id=attempt_id,
+        activation_id=activation_id,
     )
 
 
@@ -888,6 +897,27 @@ class _ExportOp(_ReadOp):
         return store.export()
 
 
+class _RecordStopOp:
+    """The ``record_stop`` write (ADR-0297 §1), naming two independent activations."""
+
+    name = "record_stop"
+
+    async def prepare(self, store: PlanStore) -> None:
+        """Nothing: a stop record names no row the store must already hold."""
+
+    def first(self, store: PlanStore) -> Coroutine[Any, Any, object]:
+        """Stop activation A — the call that is cancelled."""
+        return store.record_stop("act-A")
+
+    def second(self, store: PlanStore) -> Coroutine[Any, Any, object]:
+        """Stop activation B concurrently."""
+        return store.record_stop("act-B")
+
+    async def verify(self, store: PlanStore) -> None:
+        """Activation B's record is held; the store still serves reads."""
+        assert "act-B" in (await store.export()).stopped_activations
+
+
 class _RecordEvidenceOp:
     """The ``record_evidence`` write, on two independent goals' histories."""
 
@@ -1150,6 +1180,8 @@ _CANCELLATION_OPS: tuple[Callable[[], _CancellationOp], ...] = (
     # ADR-0259 §2's member is one more lock site, and a compare-and-swap one for the
     # same reason: its read, its comparison and its write are one indivisible step.
     _ClaimEffectOp,
+    # ADR-0297 §1's member is one more lock site: the write a claim is decided against.
+    _RecordStopOp,
 )
 
 
@@ -4323,7 +4355,7 @@ class PlanStoreContract:
 
         export = await store.export()
 
-        assert export.schema_version == 16
+        assert export.schema_version == 17
         assert [one.id for one in export.attempts] == ["a1"]
         assert export.attempts[0].plan_ids == ("p1",)
 
@@ -5682,7 +5714,7 @@ class PlanStoreContract:
         await store.save_plan(_plan(read_request=_READ_REQUEST))
         export = await store.export()
 
-        assert export.schema_version == 16
+        assert export.schema_version == 17
         assert export.plans[0].read_request == _READ_REQUEST
 
     async def test_export_round_trips_a_plans_read_request(self, store: PlanStore) -> None:
@@ -8599,3 +8631,199 @@ class PlanStoreContract:
             "no re-read reopens a closed goal; only ADR-0250 §13's user act does"
         )
         assert await store.attempts_of("g1") == ()
+
+    # --- ADR-0297: the stop record and the claim it refuses ---------------
+
+    async def test_a_claim_naming_a_stopped_activation_is_refused_and_writes_nothing(
+        self, store: PlanStore
+    ) -> None:
+        """§2: refused with ``ClaimStopped``, nothing committed (§6:5).
+
+        The step stays at its entry status **and its stored version** (ADR-0255 §3:22),
+        and the class is its own: not a ``StaleExecutionError``, because no re-read makes
+        the claim land, and not a ``ClaimRefused``, whose two raisers ADR-0261 §7:3 fixes.
+        """
+        state = await self._started(store)
+        await store.record_stop("act-1")
+
+        with pytest.raises(ClaimStopped) as refusal:
+            await store.commit_transition(_claim(state, activation_id="act-1"))
+
+        assert isinstance(refusal.value, PlanningError)
+        assert not isinstance(refusal.value, StaleExecutionError | ClaimRefused)
+        held = await store.get_execution(state.id)
+        assert held is not None
+        assert held.version == state.version, "nothing committed"
+        step = held.step("s1")
+        assert step is not None
+        assert step.status is StepStatus.PENDING
+        assert step.attempts == 0
+
+    async def test_a_claim_committed_before_the_stop_record_stands(self, store: PlanStore) -> None:
+        """§2: where the claim lands first, it stands and its disposal records the outcome.
+
+        The stop bites at a claim and at no other write, so the step's own ``→
+        SUCCEEDED`` after the stop commits. And the activation id is **compared and not
+        stored**: the committed step carries no field for it.
+        """
+        state = await self._started(store)
+        claimed = await store.commit_transition(_claim(state, activation_id="act-1"))
+
+        await store.record_stop("act-1")
+
+        running = claimed.step("s1")
+        assert running is not None
+        assert running.status is StepStatus.RUNNING
+        assert "activation_id" not in running.model_dump(), "compared and not stored"
+        done = await store.commit_transition(
+            StepTransition(
+                execution_id=state.id,
+                step_id="s1",
+                to_status=StepStatus.SUCCEEDED,
+                expected_version=claimed.version,
+                output={"sent": True},
+            )
+        )
+        finished = done.step("s1")
+        assert finished is not None
+        assert finished.status is StepStatus.SUCCEEDED
+
+    @pytest.mark.parametrize("stop_first", [True, False])
+    async def test_exactly_one_of_landed_and_refused_holds_for_one_claim_and_one_stop(
+        self, store: PlanStore, stop_first: bool
+    ) -> None:
+        """§2: "there is no third case", over both orderings of the pair.
+
+        For one claim and one stop of its activation, exactly one of {the claim landed,
+        the claim was refused} holds, and which is decided by which the store took first.
+        """
+        state = await self._started(store)
+
+        landed = refused = False
+        if stop_first:
+            await store.record_stop("act-1")
+        try:
+            await store.commit_transition(_claim(state, activation_id="act-1"))
+            landed = True
+        except ClaimStopped:
+            refused = True
+        if not stop_first:
+            await store.record_stop("act-1")
+
+        assert landed is not refused
+        assert refused is stop_first
+
+    async def test_record_stop_is_idempotent(self, store: PlanStore) -> None:
+        """§1: a second record of one activation writes nothing and raises nothing."""
+        state = await self._started(store)
+
+        await store.record_stop("act-1")
+        await store.record_stop("act-1")  # raises nothing
+
+        assert (await store.export()).stopped_activations == ("act-1",)
+        with pytest.raises(ClaimStopped):
+            await store.commit_transition(_claim(state, activation_id="act-1"))
+
+    async def test_record_stop_refuses_no_activation_it_does_not_know(
+        self, store: PlanStore
+    ) -> None:
+        """§1: "it refuses no activation id, since the store knows nothing of which
+        activations ran" — so an id no claim has named is recorded like any other.
+        """
+        await store.record_stop("never-ran")
+
+        assert (await store.export()).stopped_activations == ("never-ran",)
+
+    async def test_a_claim_naming_no_activation_or_another_is_unaffected(
+        self, store: PlanStore
+    ) -> None:
+        """§2: the conjunct reads the named activation and nothing else (§6:5).
+
+        A claim naming **no** activation is the one an activation with no id makes, and
+        no stop can name it; a claim naming **another** activation is that activation's.
+        """
+        await store.save_goal(_goal())
+        await store.save_plan(_plan(steps=2))
+        state = await _owned(store, await store.start_execution("p1"))
+        await store.record_stop("act-1")
+
+        first = await store.commit_transition(_claim(state, "s1"))
+        second = await store.commit_transition(_claim(first, "s2", activation_id="act-2"))
+
+        assert [step.status for step in second.steps] == [StepStatus.RUNNING] * 2
+
+    @pytest.mark.parametrize(
+        "to_status",
+        [status for status in StepStatus if status is not StepStatus.RUNNING],
+    )
+    async def test_an_activation_is_unconstructible_off_a_claim(
+        self, store: PlanStore, to_status: StepStatus
+    ) -> None:
+        """§2: ``activation_id`` is forbidden on every ``to_status`` but ``RUNNING``.
+
+        Asserted unconstructible rather than refused, so no store is asked to refuse a
+        transition it can never receive (§6:5).
+        """
+        state = await self._started(store)
+        payload: dict[str, Any] = {}
+        if to_status is StepStatus.SKIPPED:
+            payload["skip_reason"] = SkipReason.APPROVAL_DENIED
+        if to_status in {StepStatus.FAILED, StepStatus.INDETERMINATE}:
+            payload["failure"] = StepFailure(message="boom")
+
+        with pytest.raises(ValidationError, match="activation_id is only valid"):
+            StepTransition(
+                execution_id=state.id,
+                step_id="s1",
+                to_status=to_status,
+                expected_version=state.version,
+                activation_id="act-1",
+                **payload,
+            )
+
+    async def test_the_export_carries_the_stop_records_and_clear_erases_them(
+        self, store: PlanStore
+    ) -> None:
+        """§1: ``stopped_activations`` carries every record once; ``clear`` erases them.
+
+        Erased with the store's other rows and counted among them, so a claim naming
+        a formerly stopped activation lands after the ``clear``: the record is gone,
+        not merely hidden from the document.
+        """
+        await store.record_stop("act-2")
+        await store.record_stop("act-1")
+
+        export = await store.export()
+        assert export.schema_version == 17
+        assert sorted(export.stopped_activations) == ["act-1", "act-2"]
+        assert type(export).model_validate_json(export.model_dump_json()) == export
+
+        assert await store.clear() == 2
+        assert (await store.export()).stopped_activations == ()
+
+        state = await self._started(store)
+        claimed = await store.commit_transition(_claim(state, activation_id="act-1"))
+        step = claimed.step("s1")
+        assert step is not None
+        assert step.status is StepStatus.RUNNING
+
+    async def test_delete_goal_reaches_no_stop_record(self, store: PlanStore) -> None:
+        """§1: "``delete_goal`` reaches none, since a stop record names no goal"."""
+        await store.save_goal(_goal())
+        await store.record_stop("act-1")
+
+        assert (await store.delete_goal("g1")).deleted
+
+        assert (await store.export()).stopped_activations == ("act-1",)
+
+    async def test_record_stop_refuses_a_value_that_is_no_identifier(
+        self, store: PlanStore
+    ) -> None:
+        """A blank id names no activation a claim could carry, and is refused as input.
+
+        The refusal is ``planning``'s own error, and it writes nothing.
+        """
+        with pytest.raises(PlanningError):
+            await store.record_stop("   ")
+
+        assert (await store.export()).stopped_activations == ()
