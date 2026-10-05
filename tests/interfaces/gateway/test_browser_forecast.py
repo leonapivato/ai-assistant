@@ -86,8 +86,7 @@ async def _ask(drive: Drive, outcome: TurnOutcome) -> str:
     """
     assert outcome.reply is not None
     drive.engine.turn_outcome = outcome
-    await drive.page.fill("#utterance", _QUESTION)
-    await drive.page.click("#ask-button")
+    await drive.ask(_QUESTION)
     await drive.page.wait_for_selector("#answer:not([hidden])")
     await drive.page.wait_for_function(
         "expected => document.getElementById('answer-body').textContent.includes(expected)",
@@ -225,13 +224,10 @@ async def test_a_member_outside_the_enumeration_is_said_rather_than_shown_raw(
     forecast statement, so the honest ending is to say what is known and no more.
 
     Driven by substituting the response body, because a value outside the enumeration is
-    one no conforming gateway sends and ``_outcome_view`` cannot be made to send it. The
-    stream is switched off first so that the substituted path is the one the page asks —
-    ``/ask`` carries the whole outcome as one body, where ``/ask/stream`` carries it as
-    the last value of an NDJSON sequence.
+    one no conforming gateway sends and ``_outcome_view`` cannot be made to send it.
+    ``/ask`` carries the whole outcome as one body, and is the one entry the page asks.
     """
     async with driving(gateway_browser, tmp_path) as drive:
-        await drive.page.uncheck("#stream-answer")
         await _substitute(
             drive,
             path="/ask",
@@ -244,8 +240,7 @@ async def test_a_member_outside_the_enumeration_is_said_rather_than_shown_raw(
                 '"forecast_not_read": "a_later_member", "authorizations": []}}'
             ),
         )
-        await drive.page.fill("#utterance", _QUESTION)
-        await drive.page.click("#ask-button")
+        await drive.ask(_QUESTION)
         await drive.page.wait_for_selector("#answer:not([hidden])")
         said = await drive.answer()
         await _stop_substituting(drive)

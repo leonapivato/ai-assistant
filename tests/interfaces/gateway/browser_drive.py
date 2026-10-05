@@ -43,7 +43,7 @@ from gateway_mint import bootstrap_value
 from gateway_timing import Clock, Timers
 
 from ai_assistant.core.config import Settings
-from ai_assistant.core.types import SpokenAudio, SpokenAudioFormat
+from ai_assistant.core.types import GoalStatus, GoalSummary, SpokenAudio, SpokenAudioFormat
 from ai_assistant.interfaces.gateway.server import Gateway, packaged_bundle
 from ai_assistant.models.speech_container import encode_mono
 from ai_assistant.testing import FakeAssistantEngine
@@ -84,6 +84,17 @@ _TONE_HERTZ = 440.0
 #: a press the page answers with "nothing was recorded" and sends nowhere — and short
 #: enough that it costs the layer nothing.
 PRESS_MILLISECONDS = 400
+
+#: The goal :meth:`Drive.take_up_a_goal` points at when a case needs a turn and scripts
+#: no goal of its own. Its outcome statement is what locates its row in the listing.
+DRIVE_GOAL: Final = GoalSummary(
+    id="goal-drive-0001",
+    outcome="The goal a drive takes up to carry a turn.",
+    status=GoalStatus.ACTIVE,
+    paused=False,
+    last_engaged_at=None,
+    clarification=None,
+)
 
 #: The window a case gets when it asks for none: Playwright's own default, stated
 #: here rather than left implicit because the parameter that overrides it takes
@@ -350,6 +361,35 @@ class Drive:
     async def answer(self) -> str:
         """Everything the answer panel is currently saying."""
         return await self.page.inner_text("#answer-body")
+
+    async def take_up_a_goal(self) -> None:
+        """Attach a goal reference the way an owner does: from the goal listing.
+
+        **The page sends a turn only with a reference attached** (ADR-0293 §11): the
+        ordinary turn is a message in the chat now, and what is left of ``/ask`` is the
+        turn the chat cannot yet carry — answering a clarification or taking a goal up
+        (ADR-0250 §11, §13). So a case that needs a turn's outcome on screen takes a goal
+        up first, through the listing and its own control, rather than planting the
+        reference from outside. The goal is added to the fake's listing if the case has
+        not scripted it, beside whatever the case did script.
+        """
+        if not any(summary.id == DRIVE_GOAL.id for summary in self.engine.goal_summaries):
+            self.engine.goal_summaries = [*self.engine.goal_summaries, DRIVE_GOAL]
+        await self.page.click("#goals-button")
+        await self.page.wait_for_selector("#goals:not([hidden])")
+        row = self.page.locator("#goal-list > div", has_text=DRIVE_GOAL.outcome)
+        await row.get_by_role("button", name="Take this up here").click()
+        await self.page.wait_for_selector("#ask-form:not([hidden])")
+
+    async def ask(self, utterance: str) -> None:
+        """Send one turn through the page's own form, taking a goal up to carry it.
+
+        Args:
+            utterance: What the owner types.
+        """
+        await self.take_up_a_goal()
+        await self.page.fill("#utterance", utterance)
+        await self.page.click("#ask-button")
 
     async def admit(self) -> None:
         """Exchange a freshly minted bootstrap value through the page's own form.

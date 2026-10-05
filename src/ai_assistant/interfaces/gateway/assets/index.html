@@ -52,28 +52,21 @@
       </section>
 
       <section id="console" class="panel" hidden>
-        <h2>Ask</h2>
-        <form id="ask-form">
-          <label for="utterance">What do you want the assistant to do?</label>
-          <textarea id="utterance" name="utterance" rows="3" required></textarea>
-          <!--
-            Which entry a turn takes is the owner's, and visibly so (ADR-0175 §3).
-            The gateway never falls back from one to the other, so on a build whose
-            provider cannot stream this checkbox is the path that still answers.
-          -->
-          <!--
-            The box is inside its own label (#1440): the pair is one flex item, so a
-            narrow viewport cannot wrap the words away from the box they belong to,
-            and the whole strip is the tap target rather than a 1.15rem square.
-          -->
-          <p class="choice">
-            <label class="check" for="stream-answer">
-              <input type="checkbox" id="stream-answer" name="stream-answer" checked />
-              Show the answer as it is written
-            </label>
-          </p>
-          <button type="submit" id="ask-button">Ask</button>
-        </form>
+        <h2>Talk</h2>
+        <!--
+          The chat is where the assistant is talked to (ADR-0293): typed messages go
+          into a conversation there, and the assistant writes its reply back. This page
+          has no free-text Ask box any more — the one turn the chat cannot yet carry,
+          answering a clarification or taking a goal up, is offered beside the goal it
+          is about, in "What I am working on" (ADR-0250 §11, §13).
+        -->
+        <!--
+          Opened by the owner rather than on load, because following the chat reads
+          the hub on a timer (ADR-0293 §11:1) and that is the owner's to start.
+        -->
+        <p class="choice">
+          <button type="button" id="chat-button">Chat</button>
+        </p>
         <!--
           Push to talk (ADR-0200 §10). One button, held down for as long as you are
           speaking: the press ends before the request begins, which is why this needs
@@ -99,15 +92,15 @@
         -->
         <button type="button" id="talk-button" hidden>Hold to talk</button>
         <!--
-          The way out of a spoken wait, and the reason it is a second control rather than
-          a share of the Ask panel's (#1500, ADR-0182 §7's fifth clause). `fetch` carries
+          The way out of a spoken wait, and the reason it is a control of its own rather
+          than a share of the reference turn's (#1500, ADR-0182 §7's fifth clause). `fetch` carries
           no deadline of its own, so a socket that dies without settling leaves the page
           waiting for ever with the button greyed out; this is what ends that wait. It
           sends nothing and cancels nothing — a control that re-recorded would be the
           silent retry ADR-0168 §9 forbids, wearing a button's clothes.
 
-          Hidden until there is a wait to leave. It is `type="button"` and outside the
-          ask form, so nothing about it can submit a question.
+          Hidden until there is a wait to leave. It is `type="button"` and outside any
+          form, so nothing about it can submit a question.
         -->
         <button type="button" id="stop-talking" hidden>Stop waiting</button>
         <!--
@@ -150,20 +143,6 @@
         -->
         <p class="hint" id="resumed" hidden></p>
         <!--
-          What this next turn is about, where the owner has pointed at one (ADR-0250
-          §11, §13). Answering a clarification and taking a goal up from another
-          conversation are the same thing here — a `reference` beside the request —
-          because answering "is a turn and not an operation of its own, and that is the
-          whole reason `converse` gains a keyword rather than the surface gaining a
-          fifth verb".
-
-          It is shown only while one is set, and it carries its own way out, because a
-          reference left attached to a turn the owner has since changed their mind
-          about would answer a question they no longer meant to answer.
-        -->
-        <p class="hint" id="referencing" hidden></p>
-        <button type="button" id="clear-reference" hidden>Never mind that one</button>
-        <!--
           The way out of a thread, and the only one there was not (#1429, adversarial
           review round 3). Until this page kept a conversation across a reload, a
           reload *was* the way to start a fresh one; now the selection comes back, so
@@ -176,13 +155,6 @@
           would be a control that does nothing.
         -->
         <button type="button" id="new-conversation" hidden>Start a new conversation</button>
-        <!--
-          The chat (ADR-0293): conversations that keep their own transcript, written
-          into as the owner's acts and answered by the assistant writing a message
-          back. Opened by the owner rather than on load, because following it reads
-          the hub on a timer (ADR-0293 §11:1) and that is the owner's to start.
-        -->
-        <button type="button" id="chat-button">Chat</button>
         <button type="button" id="conversations-button">Conversations</button>
         <button type="button" id="confirmations-button">What is waiting for your answer</button>
       </section>
@@ -562,6 +534,23 @@
           with that question attached. Pointing at a goal here is the only way one
           moves between conversations — nothing searches across them on its own.
         </p>
+        <!--
+          The one turn the chat cannot yet carry (ADR-0293 §11, ADR-0250 §11, §13):
+          answering a clarification, or taking a goal up from another conversation.
+          Shown only while one of the goal acts below has attached a reference, and it
+          carries its own way out, because a reference left attached to a turn the
+          owner has since changed their mind about would answer a question they no
+          longer meant to answer. What the turn did is shown under "What happened".
+        -->
+        <form id="ask-form" hidden>
+          <p class="hint" id="referencing"></p>
+          <label for="utterance">In your own words</label>
+          <textarea id="utterance" name="utterance" rows="3" required></textarea>
+          <p class="choice">
+            <button type="submit" id="ask-button">Send</button>
+            <button type="button" id="clear-reference">Never mind that one</button>
+          </p>
+        </form>
         <!--
           What the last act on this panel did, in the vocabulary's own words (ADR-0250
           §12). It is not a fault slot: every member of both vocabularies is something

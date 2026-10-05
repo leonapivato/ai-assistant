@@ -83,8 +83,7 @@ async def test_the_page_asks_the_gateway_for_everything_and_no_other_origin_for_
         await drive.page.reload()
         await drive.page.wait_for_selector("#bootstrap-form")
         await drive.admit()
-        await drive.page.fill("#utterance", "what is on today")
-        await drive.page.click("#ask-form button[type=submit]")
+        await drive.ask("what is on today")
         await drive.page.wait_for_selector("#answer:not([hidden])")
 
         assert asked != []

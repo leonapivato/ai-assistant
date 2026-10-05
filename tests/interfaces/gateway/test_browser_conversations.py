@@ -533,12 +533,13 @@ async def test_an_answer_landing_first_is_not_undone_by_the_digest_behind_it(
         await _open_listing(drive)
         await _first_row(drive).get_by_role("button", name="Continue").click()
         await reached.wait()
-        await drive.page.fill("#utterance", "what did we decide?")
-        await drive.page.click("#ask-button")
+        await drive.ask("what did we decide?")
         # `releaseAsk` is the page's own "this turn is over", and it runs after the
         # outcome has been rendered -- so past this the answer has already reached
-        # `setConversation`.
-        await drive.page.wait_for_selector("#ask-button:not([disabled])")
+        # `setConversation`. Read as state rather than visibility: the turn ran, so the
+        # reference it carried was given up and the form hidden with it (ADR-0293 §11).
+        await drive.page.wait_for_selector("#ask-button:not([disabled])", state="attached")
+        await drive.page.wait_for_selector("#answer:not([hidden])")
         assert await drive.page.is_hidden("#resumed")
         released.set()
         await settled.wait()

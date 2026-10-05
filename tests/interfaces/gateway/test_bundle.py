@@ -340,7 +340,7 @@ def test_a_checkbox_and_the_words_beside_it_are_one_element() -> None:
     # Every checkbox in the document, and there is no other way to write one: a box
     # outside a `.check` label is the shape this test exists to keep off the page.
     boxes = re.findall(r'<input\s+type="checkbox"[^>]*id="([a-z-]+)"', document)
-    assert set(boxes) == {"stream-answer", "band-asserted", "band-derived", "band-attested"}
+    assert set(boxes) == {"band-asserted", "band-derived", "band-attested"}
     for box in boxes:
         pair = re.search(
             rf'<label class="check" for="{box}">\s*<input\s+type="checkbox" id="{box}"',
@@ -1245,7 +1245,7 @@ _SEGMENTS_THAT_ACCOUNT_FOR_AN_ACT: Final = frozenset({("forgetBelief", 2)})
 #: — ADR-0139 §4's three outcomes, ADR-0177 §7's not-known branch — that a guard has to be
 #: fitted to rather than dropped into, and that issue owes an arm per path. It empties
 #: this set when it lands, exactly as :data:`_OUTSIDE_THE_HIDE_SWEEP` is emptied.
-_REPORTS_WITHOUT_A_SESSION_GUARD: Final = frozenset({"askWhole", "askStreaming", "sendRecording"})
+_REPORTS_WITHOUT_A_SESSION_GUARD: Final = frozenset({"askWhole", "sendRecording"})
 
 
 def test_every_resumed_relay_that_displays_anything_compares_its_session() -> None:
@@ -1587,7 +1587,6 @@ def test_the_page_resolves_a_stream_value_by_its_kind_and_never_by_its_shape() -
     """
     script = _code("app.js")
 
-    assert 'value.kind === "chunk"' in script
     assert 'value.kind === "notification"' in script
     assert "TERMINAL_KINDS.has(value.kind)" in script
 
@@ -1598,10 +1597,9 @@ def test_the_page_tells_a_terminal_value_from_a_body_that_simply_stopped() -> No
     as one, which is ADR-0168 §9's distinction reaching the browser"."""
     script = _code("app.js")
 
-    assert "terminal === null" in script
-    assert "ANSWER_STREAM_CUT" in script
     assert "DELIVERY_STREAM_CUT" in script
-    assert script.count("ended before the gateway finished it") == 2
+    # One stream, and so one sentence, since ADR-0293 §11 retired the streamed answer.
+    assert script.count("ended before the gateway finished it") == 1
 
 
 def test_a_line_that_is_not_one_json_object_is_refused_by_the_reader_that_frames_it() -> None:
@@ -1641,58 +1639,6 @@ def test_a_line_that_is_not_one_json_object_is_refused_by_the_reader_that_frames
     assert script.count("JSON.parse(") == 1
 
 
-def test_a_misframed_answer_stream_is_not_told_as_a_gateway_that_had_gone() -> None:
-    """The ending #2008 is about, and the two sentences it is deliberately not.
-
-    It is not ``GATEWAY_GONE`` — "The gateway did not answer, so it may have stopped",
-    whose remedy is a restart and a fresh bootstrap value — because the gateway wrote a
-    head and a whole line of body. Announcing an act as an outcome it is known not to
-    have is ADR-0139 §4's direction breached, and the remedy threw the session away.
-
-    And it is not ``ANSWER_STREAM_CUT``, which opens "ended before the gateway finished
-    it": a gateway that wrote a whole unreadable line did not stop part way through
-    writing one, and saying it did would be a wrong explanation rather than a missing
-    one. ADR-0175 §2's third clause leaves "the exact framing of a value on a stream" to
-    the implementing lane, and this page already carries four sentences inside the one
-    transport-failure limb because "the condition is the same; what was cut is not".
-    """
-    script = _code("app.js")
-    stream = _functions(script)["askStreaming"]
-    said = _joined(_constant(script, "ANSWER_STREAM_MISFRAMED"))
-
-    assert "could not read as a value on it" in said
-    assert "what became of the turn is not known" in said
-    assert "The gateway did answer" in said
-    assert "Nothing was re-sent and nothing was cancelled." in said
-    assert _constant(script, "ANSWER_STREAM_MISFRAMED").rstrip().endswith("WHERE_TO_LOOK")
-    # Neither of the two sentences it exists to displace.
-    assert "ended before the gateway finished it" not in said
-    assert "may have stopped" not in said
-    # One declaration, and one site: the two arms of that site are one `fault` call.
-    assert script.count("ANSWER_STREAM_MISFRAMED") == 3
-    assert "ANSWER_STREAM_MISFRAMED" in stream
-
-    # Exactly one condition is taken from the read, and every other one is re-thrown to
-    # `ask`, which is where an abort is told from a connection that failed.
-    assert "if (!(error instanceof MisframedValue)) {" in stream
-    assert stream.index("if (!(error instanceof MisframedValue)) {") < stream.index("throw error;")
-    # The partial text goes where `ANSWER_STREAM_CUT` sends it, and the clause about the
-    # screen is added only where there was something on it.
-    misframed = stream.index("if (!(error instanceof MisframedValue)) {")
-    assert stream.index("clearNode(panel);", misframed) < stream.index(
-        "ANSWER_STREAM_MISFRAMED", misframed
-    )
-    assert stream.index('show("answer", false);', misframed) < stream.index(
-        "ANSWER_STREAM_MISFRAMED", misframed
-    )
-    assert "waiting.heard ? `${ANSWER_STREAM_MISFRAMED} ${PARTIAL_CLEARED}`" in stream
-    # And the owner's own act still wins: an abort raises on the *next* read, so a line
-    # already buffered can be found unreadable after `abandonAsk` has said what happened.
-    assert stream.index("if (waiting.stopping.signal.aborted) {", misframed) < stream.index(
-        "clearNode(panel);", misframed
-    )
-
-
 def test_the_two_misframed_endings_are_not_one_message_either() -> None:
     """One reader, two consumers, and therefore two sentences (adversarial review,
     round 1, ``blocker``).
@@ -1726,63 +1672,14 @@ def test_the_two_misframed_endings_are_not_one_message_either() -> None:
     assert read.index("error instanceof MisframedValue") < read.index('fault(GATEWAY_GONE, "not')
 
 
-def test_a_cut_answer_stream_leaves_no_partial_answer_on_screen() -> None:
-    """§2 makes a body that ended without a terminal value a **transport failure**, and
-    ADR-0173 §3 makes the terminal outcome's ``reply`` the answer — "no front end
-    treats an accumulated chunk sequence as the record of what the assistant said".
-
-    Leaving the chunks on screen renders a non-answer exactly as ADR-0173 §6's fourth
-    shape is rendered: an answer owed and *partly* produced, which arrives as a
-    terminal outcome carrying ``reply_degraded`` and is said to be incomplete in the
-    same breath. That distinction is what ``renderReply``'s middle branch exists to
-    keep, and a cut stream is not that shape.
-
-    Nothing is lost by clearing it: ADR-0175 §10 declines resuming an interrupted
-    stream (#1314), so the whole of the recovery is asking again.
-    """
-    streaming = _functions(_code("app.js"))["askStreaming"]
-    cut = streaming.index("if (terminal === null) {")
-
-    assert streaming.index("clearNode(panel);", cut) < streaming.index("ANSWER_STREAM_CUT")
-    assert streaming.index('show("answer", false);', cut) < streaming.index("ANSWER_STREAM_CUT")
-
-
-def test_the_two_stream_endings_are_not_one_message() -> None:
-    """One wording served both while the delivery stream was the second reader of it,
-    and it told an owner whose notifications had stopped that "the connection carrying
-    that answer" had gone.
-
-    The condition is the same one — §2's body that ended without a terminal value —
-    and what was cut is not, so the sentence about what to do next is not either.
+def test_the_page_renders_the_outcome_whole_through_the_guard() -> None:
+    """The turn answers as one result since ADR-0293 §11 retired the streamed one, and
+    its outcome reaches the screen through ``couldRenderOutcome`` (#1622): the guard
+    runs the render, and ``renderOutcome`` clears the panel before rendering.
     """
     script = _code("app.js")
 
-    assert "A cut stream is asked again, not resumed." in script
-    assert "this browser has stopped watching" in script
-    assert "Start watching again." in script
-    assert "ANSWER_STREAM_CUT" in _functions(script)["askStreaming"]
-    assert "DELIVERY_STREAM_CUT" in _functions(script)["readDeliveries"]
-
-
-def test_the_page_renders_the_terminal_reply_over_what_it_accumulated() -> None:
-    """§3: "The terminal ``TurnOutcome``'s ``reply`` is the answer; where a rendered
-    chunk sequence and it disagree, the front end renders the terminal ``reply``; and
-    no front end treats an accumulated chunk sequence as the record of what the
-    assistant said."
-
-    ``renderOutcome`` clears the panel before rendering, so the chunks the owner
-    watched arrive are replaced by the outcome's own reply rather than left standing
-    beside it.
-
-    Reached through ``couldRenderOutcome`` since #1622, which changes nothing about this
-    clause: the guard runs the same render and adds an ending for the case where it
-    threw, so the terminal reply is still what replaces the chunks wherever there is one
-    to render.
-    """
-    script = _code("app.js")
-
-    assert "composing.textContent += value.text;" in script
-    assert "couldRenderOutcome(terminal.outcome, chosenAt)" in script
+    assert "couldRenderOutcome(body.outcome, chosenAt)" in _functions(script)["askWhole"]
     assert (
         "renderOutcome(outcome, chosenAt, provenance);" in _functions(script)["couldRenderOutcome"]
     )
@@ -1805,26 +1702,26 @@ def test_the_page_renders_a_partly_composed_answer_as_incomplete() -> None:
     assert "No answer could be composed for this turn" in script
 
 
-def test_the_page_offers_both_turn_entries_and_falls_back_to_neither() -> None:
-    """§3: keeping the non-streaming entry "is a decision and not inertia" — ADR-0173
-    §5 makes a provider that cannot stream a ``ModelError`` before any delta, so a
-    browser with only the streaming entry would answer nothing at all on a build where
-    the CLI answered normally.
-
-    And the fallback is refused: ADR-0168 §9 forbids the gateway retrying silently,
-    ADR-0173 §7 refuses the same fallback one layer in, and "a second attempt is the
-    caller asking again" — which is why the choice is a control the owner can see.
+def test_the_page_offers_one_turn_entry_and_only_with_a_reference() -> None:
+    """ADR-0293 §11 retires the streamed turn and the free-text Ask box with it: the
+    ordinary turn is a message in the chat. What is left is ``/ask`` for the turn the
+    chat cannot yet carry — answering a clarification or taking a goal up (ADR-0250
+    §11, §13) — so the page sends one only with a reference attached, and the form is on
+    screen only while one is.
     """
     script = _code("app.js")
+    document = _markup("index.html")
+    asking = _functions(script)["ask"]
 
-    assert '"/ask/stream"' in script
+    assert '"/ask/stream"' not in script
     assert '"/ask"' in script
-    assert 'el("stream-answer").checked' in script
-    # Each entry is named exactly twice — where it is defined, and at the one call
-    # site the checkbox reaches. A third mention would be a second way in, which is
-    # what an automatic fallback from a failed stream would have to be.
+    assert "stream-answer" not in document
+    # Named exactly twice — where it is defined, and at its one call site.
     assert script.count("askWhole(") == 2
-    assert script.count("askStreaming(") == 2
+    assert asking.index("if (reference === null) {") < asking.index("askWhole(")
+    assert "asked.reference = waiting.reference.value;" in asking
+    assert 'el("ask-form").hidden = reference === null;' in _functions(script)["showReference"]
+    assert '<form id="ask-form" hidden>' in document
 
 
 #: The three browser speech APIs ADR-0200 §10 forbids by name, and the one that is a
@@ -2652,11 +2549,10 @@ def test_an_ask_whose_answer_never_arrives_does_not_hold_the_owners_control_for_
     # `fetch` settle rather than merely marking it settled.
     assert "stopping: new AbortController()," in asking
     assert "waiting.stopping.abort();" in abandon
-    # Carried into both turn entries, which is what puts the abort on the socket rather
-    # than only on this page's own bookkeeping.
-    assert "await askStreaming(half, asked, chosenAt, waiting);" in asking
+    # Carried into the turn's one entry, which is what puts the abort on the socket
+    # rather than only on this page's own bookkeeping.
     assert "await askWhole(half, asked, chosenAt, waiting);" in asking
-    assert script.count("signal: waiting.stopping.signal,") == 2
+    assert script.count("signal: waiting.stopping.signal,") == 1
     # The owner's act reaches it, from a control that ships nowhere in the document and
     # is built beside the button it stands in for.
     assert 'id="stop-waiting"' not in document
@@ -2684,8 +2580,7 @@ def test_stopping_a_wait_says_the_turns_outcome_is_not_known_and_claims_nothing_
     script = _code("app.js")
     abandon = _functions(script)["abandonAsk"]
 
-    assert "const said = waiting.heard ? ASK_ABANDONED_MIDWAY : ASK_ABANDONED;" in abandon
-    assert '`${said} ${PARTIAL_CLEARED}` : said, "console"' in abandon
+    assert 'fault(waiting.heard ? ASK_ABANDONED_MIDWAY : ASK_ABANDONED, "goals");' in abandon
     assert "What became of the turn is not known" in script
     assert "may have carried it out and may never have received it" in script
     assert "Nothing was re-sent and nothing was cancelled" in script
@@ -2712,8 +2607,8 @@ def test_the_wait_is_ended_by_the_owner_and_by_no_clock_of_the_pages_own() -> No
     motion is left exactly as ADR-0182 §7 left it — two events and one clock.
 
     **Any figure would pace something the gateway paces, and no head discloses it.**
-    ``server.py``'s ``_TURN_BUDGET`` gives every turn sixty seconds — ``_ask`` and
-    ``_pump_answer`` both pass it — and it reaches the browser in no header, no value and
+    ``server.py``'s ``_TURN_BUDGET`` gives every turn sixty seconds — ``_ask`` passes it
+    — and it reaches the browser in no header, no value and
     no setting. A page-side deadline would be a second number that can silently disagree
     with it, which is ``SILENT_CADENCES``' own argument one surface out, and deriving one
     from ``usableCadence``'s figure would be the substitution that rule refuses.
@@ -2732,7 +2627,7 @@ def test_the_wait_is_ended_by_the_owner_and_by_no_clock_of_the_pages_own() -> No
     assert len(_page_clocks(script)) == 1
     assert "setInterval" not in script
     # And no deadline reaches the ask at all: neither the delivery bound nor a new one.
-    for function in ("ask", "abandonAsk", "askWhole", "askStreaming", "releaseAsk"):
+    for function in ("ask", "abandonAsk", "askWhole", "releaseAsk"):
         body = _functions(script)[function]
         for clock in ("setTimeout", "HEAD_DEADLINE_MILLISECONDS", "SILENT_CADENCES", "cadence"):
             assert clock not in body, (function, clock)
@@ -2769,18 +2664,13 @@ def test_a_settled_ask_does_not_hand_back_a_control_a_later_question_took() -> N
 
 
 def test_an_abandoned_ask_leaves_no_answer_shaped_nothing_on_screen() -> None:
-    """What an abort must not be allowed to render, on the three paths it can land on.
+    """What an abort must not be allowed to render, on the paths it can land on.
 
-    ADR-0173 §3 makes the terminal outcome's ``reply`` the answer and forbids treating
-    "an accumulated chunk sequence as the record of what the assistant said", so partial
-    text has to go the way ``ANSWER_STREAM_CUT`` sends it — cleared, not left standing
-    under a fault.
-
-    ``readBody`` is the subtler half. It answers anything unreadable with an empty object
+    ``readBody`` is the subtle half. It answers anything unreadable with an empty object
     rather than throwing, which is the right rule for a body the gateway wrote badly and
     the wrong one for a read the owner stopped: ``{}`` rendered as an outcome is an
     answer-shaped nothing, and reported as a refusal it is a condition the gateway never
-    named. Both entries check the signal instead of trusting the throw.
+    named. The entry checks the signal instead of trusting the throw.
 
     And the guard in ``ask``'s own ``catch`` is the last one: an abort the owner asked
     for is not the gateway having gone, and saying it was would be a wrong explanation
@@ -2789,15 +2679,12 @@ def test_an_abandoned_ask_leaves_no_answer_shaped_nothing_on_screen() -> None:
     script = _code("app.js")
     abandon = _functions(script)["abandonAsk"]
 
-    assert 'clearNode(el("answer-body"));' in abandon
-    assert 'show("answer", false);' in abandon
-    assert abandon.index("if (mine) {") < abandon.index('clearNode(el("answer-body"));')
-    # The reads an abort can land in the middle of. Three since #2008: the two body
-    # reads, and the streamed entry's misframed-line ending, which is reached from a
-    # line already buffered when the owner stopped waiting — an abort raises on the
-    # *next* read, so that ending and the abandonment can both be true at once, and the
-    # act is what the owner is told about.
-    assert script.count("if (waiting.stopping.signal.aborted) {") == 3
+    # Nothing this turn wrote is on screen while it waits — it answers whole — so
+    # abandoning it hides the panel only on the refusal endings and clears nothing.
+    assert 'clearNode(el("answer-body"));' not in abandon
+    # The read an abort can land in the middle of: the one body read, since ADR-0293 §11
+    # retired the streamed entry and its two.
+    assert script.count("if (waiting.stopping.signal.aborted) {") == 1
     whole = _functions(script)["askWhole"]
     assert whole.index("const body = await readBody(response);") < whole.index(
         "if (waiting.stopping.signal.aborted) {"
@@ -2807,15 +2694,11 @@ def test_an_abandoned_ask_leaves_no_answer_shaped_nothing_on_screen() -> None:
     assert whole.index("if (waiting.stopping.signal.aborted) {") < whole.rindex(
         "if (response.ok) {"
     )
-    stream = _functions(script)["askStreaming"]
-    assert stream.index("if (waiting.stopping.signal.aborted) {") < stream.index(
-        'show("answer", false);'
-    )
     # And the catch, which stays silent for an ending the owner already has words for.
     asking = _functions(script)["ask"]
     assert "if (!waiting.stopping.signal.aborted) {" in asking
     assert asking.index("if (!waiting.stopping.signal.aborted) {") < asking.index(
-        'fault(GATEWAY_GONE, "console");'
+        'fault(GATEWAY_GONE, "goals");'
     )
 
 
@@ -2829,21 +2712,14 @@ def test_the_announcement_is_read_off_what_this_browser_actually_observed() -> N
     *did* receive the question — and ADR-0182 §7 requires the page's announcement to be
     accurate rather than merely present.
 
-    **The two facts are separate and are set by different evidence.** ``heard`` says the
-    question reached the assistant, and what proves it differs by entry: ``/ask`` answers
-    only once ``converse`` has returned (``_ask`` awaits it), so its response head is the
-    proof, while ``/ask/stream``'s head is written and drained *before* ``_pump_answer``
-    is awaited (``_write_stream``) and proves nothing about the assistant — there the
-    first chunk is. ``composing`` says this turn has taken the answer panel over, which is
-    what makes the text in it this turn's to throw away: an owner who asks a second
-    question and stops waiting before its head lands still has the *first* question's
-    complete answer on screen, and clearing that is destroying a good answer because a
-    later request failed.
+    **``heard`` says the question reached the assistant**: ``/ask`` answers only once
+    ``converse`` has returned (``_ask`` awaits it), so its response head is the proof.
+    The streamed entry, whose first chunk was the proof there and whose panel this turn
+    could own, went with ADR-0293 §11.
     """
     script = _code("app.js")
     abandon = _functions(script)["abandonAsk"]
     whole = _functions(script)["askWhole"]
-    stream = _functions(script)["askStreaming"]
 
     # `/ask`: a **successful** head is the proof, and only that. A refusal is decided by
     # `_check_door` or `_session_bound` before `_assistant` is reached, so a refusal head
@@ -2858,23 +2734,10 @@ def test_the_announcement_is_read_off_what_this_browser_actually_observed() -> N
     assert whole.index("waiting.heard = true;") < whole.index(
         "const body = await readBody(response);"
     )
-    assert script.count("waiting.heard = true;") == 2
-    # `/ask/stream`: the head takes the panel and claims nothing about the assistant, and
-    # the first chunk is what says the question got there.
-    assert "waiting.composing = composing;" in stream
-    assert stream.index('show("answer", true);') < stream.index("waiting.composing = composing;")
-    assert stream.index("waiting.composing = composing;") < stream.index("waiting.heard = true;")
-    assert stream.index('if (value.kind === "chunk") {') < stream.index("waiting.heard = true;")
-    assert stream.index("waiting.heard = true;") < stream.index("composing.textContent +=")
-    # The node is held nowhere else, so the whole entry never clears a panel it never took.
-    assert script.count("waiting.composing = ") == 1
-    assert "waiting.composing" not in whole
-    # And ownership is asked about *now*: the node is in the document exactly while the
-    # panel is still this turn's, so a park answered into it — `renderOutcome` replaces
-    # the panel — takes it back without any bookkeeping having to be kept in step.
-    assert "const mine = waiting.composing !== null && waiting.composing.isConnected;" in abandon
-    assert "if (mine) {" in abandon
-    assert "mine && waiting.heard ?" in abandon
+    assert script.count("waiting.heard = true;") == 1
+    # No answer panel is this turn's while it waits, so abandoning one clears nothing.
+    assert "waiting.composing" not in script
+    assert 'clearNode(el("answer-body"));' not in abandon
     # And the two sentences differ in exactly the clauses the evidence decides. The one
     # that claims nothing was received says so only where nothing was; the other says the
     # question got there and narrows what is unknown to the ending.
@@ -2907,12 +2770,10 @@ def test_the_announcement_is_read_off_what_this_browser_actually_observed() -> N
     # entry's unreadable-answer ending (#2005), which points at the listing for the same
     # reason the other six do: the turn may have run and this browser cannot say.
     #
-    # **Eight rather than seven since #2008**, and the eighth is not an abandonment
-    # either: ``ANSWER_STREAM_MISFRAMED`` is the streamed entry's ending for a line it
-    # could not read as a value at all, one step earlier than the value it read and could
-    # not take an outcome from. It carries this clause for the same reason and neither of
-    # the two counted above it.
-    assert script.count("WHERE_TO_LOOK") == 9
+    # **Eight rather than seven since #2008**, and the eighth was the streamed entry's
+    # misframed-line ending. **Six since ADR-0293 §11**, which retired that entry with
+    # both of its endings, ``STREAMED_ANSWER_UNREADABLE`` and ``ANSWER_STREAM_MISFRAMED``.
+    assert script.count("WHERE_TO_LOOK") == 7
     assert "though a turn whose record " in script
     assert "could not be written does not appear there" in script
 
@@ -2968,7 +2829,6 @@ def test_an_answer_that_cannot_be_put_on_screen_is_not_rendered_as_one() -> None
     # is matched on its opening rather than on the whole argument list.
     for entry, passed in (
         ("askWhole", "body.outcome, chosenAt"),
-        ("askStreaming", "terminal.outcome, chosenAt"),
         ("renderSpokenTurn", "turn.outcome, chosenAt"),
         ("answerConfirmation", "body.outcome, chosenAt, unaccounted ?"),
     ):
@@ -2986,58 +2846,34 @@ def test_an_answer_that_cannot_be_put_on_screen_is_not_rendered_as_one() -> None
     )
 
 
-def test_an_unreadable_answer_says_the_turn_ran_only_where_that_was_read() -> None:
-    """The two sentences #1622's endings need, and the clause that separates them.
+def test_an_unreadable_answer_says_the_turn_ran_because_that_was_read() -> None:
+    """The sentence #1622's ending needs, and the clause that makes it true.
 
     ADR-0139 §4 is a rule in both directions — an act is reported as one of exactly three
     outcomes "and never as either of the other two" — so a turn known to have run and
     announced as one that may never have happened breaches it exactly as the reverse does.
-    That is the mistake adversarial review found on rounds 3 and 5 of the abandonment
-    sentences, and the evidence differs by entry for the reason ``askWhole`` and
-    ``askStreaming`` already record about ``heard``.
 
     ``/ask`` answers only once ``converse`` has returned, so a successful head is proof
     the turn ran and the head is intact evidence here — it is the *body* this page could
-    not read. ``/ask/stream``'s head is written and drained before ``_pump_answer`` is
-    awaited and proves nothing about the assistant, and the only other evidence is the
-    terminal value the page has just found it cannot read an outcome from. So the streamed
-    sentence claims less, rather than reading "the turn ran" off the ``kind`` member of a
-    frame whose ``outcome`` member is missing.
+    not read. (The streamed entry, whose sentence claimed less for want of that proof,
+    went with ADR-0293 §11.)
     """
     script = _code("app.js")
     functions = _functions(script)
 
     said = _joined(_constant(script, "ANSWER_UNREADABLE"))
-    streamed = _joined(_constant(script, "STREAMED_ANSWER_UNREADABLE"))
 
     # What is not known is what the turn did, and the whole entry says the turn ran.
     assert "could not read an outcome from the answer" in said
     assert "what the turn did is not known" in said
     assert "The turn itself ran" in said
-    # And the streamed one says neither of those, because neither was read.
-    assert "could not read an outcome from" in streamed
-    assert "what became of the turn is not known" in streamed
-    assert "ran" not in streamed
-    # Neither re-sends and neither cancels, which is the clause every not-known ending on
-    # this page carries, and both end at the one route back.
-    for sentence in (said, streamed):
-        assert "Nothing was re-sent and nothing was cancelled." in sentence
-    for named in ("ANSWER_UNREADABLE", "STREAMED_ANSWER_UNREADABLE"):
-        assert _constant(script, named).rstrip().endswith("WHERE_TO_LOOK"), named
-    # Each is said at its own entry and nowhere else. Counted with the prefix excluded,
-    # because the streamed name ends in the other one and a bare count reads five.
+    assert "Nothing was re-sent and nothing was cancelled." in said
+    assert _constant(script, "ANSWER_UNREADABLE").rstrip().endswith("WHERE_TO_LOOK")
+    # Said at its own entry and nowhere else.
     assert len(re.findall(r"(?<!_)ANSWER_UNREADABLE", script)) == 2, "one declaration, one site"
-    assert script.count("STREAMED_ANSWER_UNREADABLE") == 3, "one declaration, two arms of one site"
-    assert 'fault(ANSWER_UNREADABLE, "console");' in functions["askWhole"]
-    stream = functions["askStreaming"]
-    assert "STREAMED_ANSWER_UNREADABLE" in stream
+    assert "STREAMED_ANSWER_UNREADABLE" not in script
+    assert 'fault(ANSWER_UNREADABLE, "goals");' in functions["askWhole"]
     assert "ANSWER_UNREADABLE" not in functions["answerConfirmation"]
-    # The partial text goes the way `ANSWER_STREAM_CUT` sends it, and the clause about the
-    # screen is added only where there was something on it — a stream that ended before
-    # its first chunk cleared an empty panel, and saying so would be a sentence about
-    # nothing. `abandonAsk`'s own division, on the ending that is not an abandonment.
-    assert "waiting.heard" in stream[stream.index("couldRenderOutcome(terminal.outcome") :]
-    assert "PARTIAL_CLEARED}`" in stream
 
 
 def test_a_wait_stopped_after_a_session_refusal_is_re_entry_and_not_an_unknown_outcome() -> None:
@@ -3069,7 +2905,6 @@ def test_a_wait_stopped_after_a_session_refusal_is_re_entry_and_not_an_unknown_o
     script = _code("app.js")
     abandon = _functions(script)["abandonAsk"]
     whole = _functions(script)["askWhole"]
-    stream = _functions(script)["askStreaming"]
 
     # The table, and the two statuses in it, read off the gateway's own mapping rather
     # than transcribed: a condition given a second condition's status would fail here as
@@ -3088,30 +2923,24 @@ def test_a_wait_stopped_after_a_session_refusal_is_re_entry_and_not_an_unknown_o
     for fault in statuses.values():
         assert f'body.fault === "{fault}"' in _functions(script)["sessionLost"]
 
-    # The head is recorded on both entries, before either touches a body — which is the
-    # whole of why it survives a body that never arrives.
+    # The head is recorded before the body is touched — which is the whole of why it
+    # survives a body that never arrives.
     assert "waiting.refusedWith = response.status;" in whole
     assert whole.index("waiting.refusedWith = response.status;") < whole.index(
         "const body = await readBody(response);"
     )
-    assert "waiting.refusedWith = response.status;" in stream
-    assert stream.index("waiting.refusedWith = response.status;") < stream.index(
-        "const body = await readBody(response);"
-    )
-    assert script.count("waiting.refusedWith = response.status;") == 2
-    # `heard` is the other branch of the same test on the entry that has both, so no ask
-    # can ever carry a refusal status and a claim that the assistant was reached.
+    assert script.count("waiting.refusedWith = response.status;") == 1
+    # `heard` is the other branch of the same test, so no ask can ever carry a refusal
+    # status and a claim that the assistant was reached.
     ok_branch = whole[whole.index("if (response.ok) {") : whole.index("  } else {")]
     assert "waiting.heard = true;" in ok_branch
     assert "waiting.heard" not in whole[whole.index("  } else {") :]
-    assert "waiting.heard" not in stream[: stream.index("waiting.refusedWith")]
 
     # Stopping the wait then takes re-entry, and takes it *before* the wording and the
     # tidying of an outcome nobody read.
     assert "const ended = SESSION_LOST_STATUS.get(waiting.refusedWith);" in abandon
     assert "if (ended !== undefined) {" in abandon
-    assert abandon.index("if (ended !== undefined) {") < abandon.index("const mine =")
-    assert abandon.index("if (ended !== undefined) {") < abandon.index("const said =")
+    assert abandon.index("if (ended !== undefined) {") < abandon.index("ASK_ABANDONED_MIDWAY")
     # Through `sessionLost`, which is what forgets the half, stops the stream and shows
     # the bootstrap entry — the three things §6 asks for, none of them re-implemented here.
     assert "sessionLost(named, `${describe(named, waiting.refusedWith)}" in abandon
@@ -3178,8 +3007,10 @@ def test_a_wait_stopped_after_any_other_refusal_head_says_a_reply_was_read() -> 
     assert abandon.index("if (ended !== undefined) {") < abandon.index(
         "if (waiting.refusedWith !== null) {"
     )
-    assert abandon.index("if (waiting.refusedWith !== null) {") < abandon.index("const said =")
-    assert 'fault(refusalAbandoned(waiting.refusedWith), "console");' in abandon
+    assert abandon.index("if (waiting.refusedWith !== null) {") < abandon.index(
+        "ASK_ABANDONED_MIDWAY"
+    )
+    assert 'fault(refusalAbandoned(waiting.refusedWith), "goals");' in abandon
     # It is a fault rather than re-entry: nothing about the session ended, so the control
     # comes back into a console that is still the owner's.
     for reentry in ("sessionLost(", "forgetHeaderHalf(", "showBootstrap("):
@@ -3442,9 +3273,10 @@ def test_a_stream_abandoned_for_silence_says_so_and_hands_the_control_back() -> 
     # is the stream that was abandoned rather than any earlier one.
     assert "${SILENT_CADENCES} times the keep-alive cadence this gateway stated when it" in script
     # A third ending and not a re-wording of the second: a body that ended is the
-    # connection going away, and a body still open and silent is not.
+    # connection going away, and a body still open and silent is not. (One stream since
+    # ADR-0293 §11, so the cut has one sentence.)
     assert "stopped saying anything" in script
-    assert script.count("ended before the gateway finished it") == 2
+    assert script.count("ended before the gateway finished it") == 1
     assert read.index("if (silent) {") < read.index("fault(GATEWAY_GONE,")
 
 
@@ -4003,10 +3835,8 @@ def test_the_page_says_why_a_session_ended_while_it_was_only_watching() -> None:
     stream ends under it — and the bare vocabulary entry for ``no-live-session`` reads,
     to the owner of that page, as though something went wrong.
 
-    The sentence is on the **delivery** ending alone and deliberately: an answer
-    stream's own request refreshed the timeout on its way in, so the idle bound is not
-    what ended that stream's session, and saying it was would be a wrong explanation
-    rather than a missing one.
+    The sentence is on the **delivery** ending, the one stream this page reads since
+    ADR-0293 §11 retired the answer stream.
 
     **And it names all three of a session's endings rather than the idle one** (#2498).
     §7's fourth clause ends a stream for any ending of the session under it, and the
@@ -4023,7 +3853,6 @@ def test_the_page_says_why_a_session_ended_while_it_was_only_watching() -> None:
         assert bound in script, bound
     assert 'value.fault === "no-live-session"' in _functions(script)["describeDeliveryEnd"]
     assert "describeDeliveryEnd" in _functions(script)["readDeliveries"]
-    assert "describeDeliveryEnd" not in _functions(script)["askStreaming"]
 
 
 def test_the_page_says_that_a_session_ends_with_the_gateway() -> None:
@@ -4234,7 +4063,6 @@ def test_the_page_reads_a_conversation_before_it_forgets_one() -> None:
 _FETCH_SITES: Final = {
     "startSession": "startSession",
     "askWhole": "ask",
-    "askStreaming": "ask",
     "readDeliveries": "readDeliveries",
     "relay": "listConversations",
     # The spoken entry (ADR-0200 §10). Its own guard rather than one shared with `ask`,
@@ -9397,14 +9225,10 @@ def test_the_reference_is_given_up_only_by_a_turn_that_reached_the_assistant() -
     ADR-0168 §6 classifies a request "from its method and path alone", and the door takes
     an expired session, a malformed body and the connection ceiling **before**
     ``_assistant`` is reached — so such a turn settled no question and engaged no goal.
-    ``waiting.ran`` is set exactly where an entry establishes that the assistant took the
-    question: ``askWhole``'s ok head, which "is proof the turn ran" on that entry;
-    ``askStreaming``'s first chunk, "what proves the question reached the assistant"; and
-    a terminal **outcome** value, because ADR-0173 §4 yields "zero or more chunks, then
-    exactly one ``TurnOutcome``" and a turn composed in one piece carries no chunk.
-
-    A terminal **fault** is none of the three, and the branch that renders one returns
-    before the flag is set. Adversarial review, round 2, ``major``.
+    ``waiting.ran`` is set exactly where the entry establishes that the assistant took
+    the question: ``askWhole``'s ok head, which "is proof the turn ran". A refusal head is
+    not, and the flag is set on the ok branch alone. Adversarial review, round 2,
+    ``major``.
     """
     functions = _functions(_code("app.js"))
 
@@ -9429,16 +9253,10 @@ def test_the_reference_is_given_up_only_by_a_turn_that_reached_the_assistant() -
     assert abandon.index("reconcileReference(waiting);") < abandon.index(
         "waiting.stopping.abort();"
     )
-    whole, streamed = functions["askWhole"], functions["askStreaming"]
-    assert "waiting.ran = true;" in whole
+    whole = functions["askWhole"]
     assert whole.count("waiting.ran = true;") == 1
-    assert streamed.count("waiting.ran = true;") == 2
-    # The terminal-fault branch returns before the flag, so a refused exchange never
-    # reaches it.
-    fault_branch = streamed.index('if (terminal.kind === "fault") {')
-    assert streamed.index("waiting.ran = true;", fault_branch) > streamed.index(
-        "return;", fault_branch
-    )
+    ok_branch = whole[whole.index("if (response.ok) {") : whole.index("  } else {")]
+    assert "waiting.ran = true;" in ok_branch
 
 
 def test_a_reference_already_sent_is_not_offered_as_one_that_can_be_taken_back() -> None:

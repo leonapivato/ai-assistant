@@ -1180,8 +1180,7 @@ async def test_pressing_the_act_withdraws_the_question_and_says_which_state_it_r
         # The park on screen **twice**, which is this page's own arrangement and the
         # state the act has to reach both of: a turn that parks renders its question with
         # the answer, and the recovery listing renders the same park again.
-        await drive.page.fill("#utterance", "what did the survey say")
-        await drive.page.click("#ask-form button[type=submit]")
+        await drive.ask("what did the survey say")
         await expect(drive.page.locator("#answer-body")).to_contain_text(
             "This lookup is parked until you answer it."
         )
@@ -1628,8 +1627,7 @@ async def test_a_success_this_page_cannot_read_as_an_outcome_settles_nothing(
         # survives the listing read this act starts — the park really is withdrawn at the
         # hub whatever body the browser then reads, so the recovery listing has nothing
         # left to render and the question's other row goes with it.
-        await drive.page.fill("#utterance", "what did the survey say")
-        await drive.page.click("#ask-form button[type=submit]")
+        await drive.ask("what did the survey say")
         await expect(drive.page.locator("#answer-body")).to_contain_text(
             "This lookup is parked until you answer it."
         )
@@ -1818,8 +1816,7 @@ async def test_an_act_that_ended_no_answer_hides_no_answers_unknown_outcome(
             turn=None, conversation_id="c-1", read_confirmation=question
         )
 
-        await drive.page.fill("#utterance", "what did the survey say")
-        await drive.page.click("#ask-form button[type=submit]")
+        await drive.ask("what did the survey say")
         await expect(drive.page.locator("#answer-body")).to_contain_text(
             "This lookup is parked until you answer it."
         )

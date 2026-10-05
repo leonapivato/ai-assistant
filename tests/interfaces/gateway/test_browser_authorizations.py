@@ -1229,8 +1229,7 @@ async def test_an_announcement_names_the_handle_and_where_the_act_is_taken(
     async with driving(gateway_browser, tmp_path, viewport=DESKTOP) as drive:
         drive.engine.authorizations = (_view("auth-train", rail, money_bound("50")),)
 
-        await drive.page.fill("#utterance", "up to fifty for the train")
-        await drive.page.click("#ask-button")
+        await drive.ask("up to fifty for the train")
         await drive.page.wait_for_selector("#answer:not([hidden])")
 
         body = drive.page.locator("#answer-body")
@@ -1590,8 +1589,7 @@ async def test_an_act_that_opened_two_authorities_is_announced_as_two(
             )
         )
 
-        await drive.page.fill("#utterance", "up to fifty for the train and a hundred for the hotel")
-        await drive.page.click("#ask-button")
+        await drive.ask("up to fifty for the train and a hundred for the hotel")
         await drive.page.wait_for_selector("#answer:not([hidden])")
 
         body = drive.page.locator("#answer-body")
