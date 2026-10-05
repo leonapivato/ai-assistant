@@ -15,6 +15,8 @@ import pytest
 
 from ai_assistant.core.errors import (
     AssistantError,
+    DeviceRefusal,
+    DeviceRefusedError,
     MemoryStoreError,
     ModelRateLimitError,
     OversizedValueError,
@@ -82,6 +84,7 @@ def test_the_code_names_the_concrete_type_and_never_a_declared_base() -> None:
         OversizedValueError("too big", limit=10, size=99, field="utterance"),
         OversizedValueError("too big", limit=10, size=99, field=None),
         UnknownContinuationError("that handle is from a previous process life"),
+        DeviceRefusedError("this phone has no role for that", reason=DeviceRefusal.NOT_ALLOWED),
     ],
 )
 def test_a_declared_failure_round_trips_with_its_structured_state(exc: AssistantError) -> None:
