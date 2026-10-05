@@ -11,7 +11,7 @@ import uuid
 
 import pytest
 
-from ai_assistant.wire.codec import CONNECT_PAYLOAD_BYTES
+from ai_assistant.wire.codec import CONNECT_PAYLOAD_BYTES, ENVELOPE_RESERVE_BYTES, canonical_payload
 from ai_assistant.wire.envelope import (
     ACK_BUILD,
     ACK_MAX_FRAME_BYTES,
@@ -32,6 +32,8 @@ from ai_assistant.wire.envelope import (
     read_connect_ack,
 )
 from ai_assistant.wire.errors import ProtocolError, UndecodableFrameError
+from ai_assistant.wire.overlay import MAX_OVERLAY_IDENTITY_BYTES
+from ai_assistant.wire.surface import METHODS
 
 
 def test_an_envelope_round_trips() -> None:
@@ -306,3 +308,97 @@ def test_the_sixth_kind_does_not_touch_the_envelope_reserve() -> None:
     assert len(FrameKind.CHUNK.value.encode("utf-8")) < len(
         FrameKind.CONNECT_ACK.value.encode("utf-8")
     )
+
+
+# --- the browser device's name (ADR-0298 §1) ---------------------------------
+
+
+def test_a_request_round_trips_with_the_device_it_is_relayed_for() -> None:
+    """§1:1: a gateway names the browser device in the request's ``acting_for``."""
+    envelope = Envelope(
+        kind=FrameKind.REQUEST,
+        id="c-1",
+        payload={"record_id": "r-1"},
+        method="forget",
+        acting_for="phone.tail-net.ts.net",
+    )
+    assert decode_envelope(encode_envelope(envelope)) == envelope
+
+
+def test_a_request_with_no_name_carries_no_member() -> None:
+    """§1:2: the member is absent where the request is the connecting device's own."""
+    raw = encode_envelope(Envelope(kind=FrameKind.REQUEST, id="c-1", payload={}, method="goals"))
+    assert b"acting_for" not in raw
+    assert decode_envelope(raw).acting_for is None
+
+
+@pytest.mark.parametrize("kind", [kind for kind in FrameKind if kind is not FrameKind.REQUEST])
+def test_only_a_request_may_carry_the_name(kind: FrameKind) -> None:
+    """§1:2: ``acting_for`` appears on a ``request`` frame only."""
+    raw = encode_envelope(Envelope(kind=kind, id="c-1", payload=None, acting_for="phone"))
+    with pytest.raises(UndecodableFrameError, match="only a request"):
+        decode_envelope(raw)
+
+
+@pytest.mark.parametrize(
+    ("member", "why"),
+    [
+        (b"7", "text"),
+        (b"null", "text"),
+        (b'""', "blank"),
+        (b'"   "', "blank"),
+        (b'" phone"', "surrounding space"),
+        (b'"phone\\n"', "surrounding space"),
+        (b'"pho\\"ne"', "escapes"),
+        (b'"pho\\\\ne"', "escapes"),
+        (b'"pho\\u0007ne"', "escapes"),
+        (b'"pho\\ud800ne"', "UTF-8"),
+        (b'"' + b"x" * 129 + b'"', "129 bytes"),
+        (('"' + "é" * 65 + '"').encode(), "130 bytes"),
+    ],
+)
+def test_a_name_breaking_any_condition_makes_the_frame_undecodable(member: bytes, why: str) -> None:
+    """§1:3, condition by condition: each takes ADR-0084 §3's close.
+
+    The size is counted in UTF-8 bytes, so 65 two-byte characters are over a bound
+    that 128 ASCII characters are inside.
+    """
+    rest = b',"id":"c-1","kind":"request","method":"goals","payload":{}}'
+    raw = b'{"acting_for":' + member + rest
+    with pytest.raises(UndecodableFrameError, match=why):
+        decode_envelope(raw)
+
+
+def test_a_name_at_the_bound_is_admitted() -> None:
+    """The discriminating half: 128 bytes is an overlay identity's whole allowance."""
+    name = "x" * MAX_OVERLAY_IDENTITY_BYTES
+    raw = encode_envelope(
+        Envelope(kind=FrameKind.REQUEST, id="c-1", payload={}, method="goals", acting_for=name)
+    )
+    assert decode_envelope(raw).acting_for == name
+
+
+def test_the_name_keeps_the_worst_case_envelope_inside_the_reserve() -> None:
+    """§1's arithmetic: 261 bytes with the name, inside ADR-0085 §8b's 512.
+
+    Measured rather than restated: the longest ``kind``, the longest method on the
+    surface as it stands, a 36-byte correlation id and a name at its bound, with the
+    payload's own bytes taken away. A method name longer than the one ADR-0298
+    counted raises the figure, and this says whether the reserve still holds it.
+    """
+    longest_kind = max(FrameKind, key=lambda kind: len(kind.value))
+    longest_method = max(METHODS, key=len)
+    payload = {"x": 1}
+    raw = encode_envelope(
+        Envelope(
+            kind=longest_kind,
+            id=str(uuid.uuid4()),
+            payload=payload,
+            method=longest_method,
+            acting_for="x" * MAX_OVERLAY_IDENTITY_BYTES,
+        )
+    )
+    envelope_bytes = len(raw) - len(canonical_payload(payload))
+    assert envelope_bytes == 11 + len(longest_method) + 36 + 128 + 58
+    assert envelope_bytes <= ENVELOPE_RESERVE_BYTES
+    assert len(longest_method) == 28, "ADR-0298 §1 counted 28; re-check the reserve if this moved"
