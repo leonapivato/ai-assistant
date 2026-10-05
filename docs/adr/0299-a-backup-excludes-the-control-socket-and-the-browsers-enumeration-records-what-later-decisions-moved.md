@@ -1,6 +1,6 @@
 # 299. A backup excludes the control socket, and the browser's enumeration records what later decisions moved
 
-- Status: Proposed
+- Status: Accepted
 - Date: 2026-10-05
 - Scope: record-keeping the device-session and conversation work left: [#2721](https://github.com/leonapivato/ai-assistant/issues/2721) (the backup and `admin.sock`), [#2714](https://github.com/leonapivato/ai-assistant/issues/2714) (`stop_activation` and ADR-0177), and the two older gaps of the same shape on the same clause, [#2274](https://github.com/leonapivato/ai-assistant/issues/2274) (`cancel_read`) and [#2394](https://github.com/leonapivato/ai-assistant/issues/2394) (`standing_authorizations` and `revoke_authorization`).
 - Authorization: the dispatcher, under the owner's standing direction that the overnight run may open issues and keep records straight. The dispatcher assigned 0299.
