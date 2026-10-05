@@ -377,6 +377,23 @@ PROMOTED: Final[frozenset[str]] = frozenset(
         "StoryLogPage",
         "StoryLogLine",
         "StoryPage",
+        # ADR-0293 §11's chat space, and the types it carries. Declared beside the
+        # conversation store that holds them, so the walk meets them as leaves; named
+        # here so that a member no method reaches fails rather than goes unnoticed.
+        # The five change kinds are not named: ``ChatChanges`` carries them through the
+        # ``ChatChange`` type alias, which the walk does not expand.
+        "UserMessage",
+        "ChatDevice",
+        "DeviceAccess",
+        "MessageReceipt",
+        "SendOutcome",
+        "TranscriptPage",
+        "TranscriptMessage",
+        "DeletedMessage",
+        "MessageAuthor",
+        "ChatChanges",
+        "ConversationState",
+        "ActivationEnding",
     }
 )
 
@@ -761,8 +778,15 @@ def test_the_surface_carries_the_methods_the_adrs_fixed() -> None:
     **ADR-0289 §4 adds nine**, the story surface — five writes and four reads — so the
     count rises to sixty-eight. §5 rules that no browser or gateway surface reads or
     writes a story, so ADR-0177 §1's enumeration does not move either.
+
+    **ADR-0293 §11 adds nine**, the conversation's chat space — ``start_conversation``,
+    ``set_my_devices``, ``set_conversation_devices``, ``write_message``,
+    ``delete_message`` and ``delete_conversation`` as acts in the medium, and
+    ``my_devices``, ``transcript`` and ``chat_changes`` as its reads — so the count
+    rises to seventy-seven. The gateway serves none of them yet: that is ADR-0296
+    §5's, whose browser enumeration gains them when the interfaces move.
     """
-    assert len(_method_names()) == 68
+    assert len(_method_names()) == 77
 
 
 def test_a_streaming_method_declares_its_union_chunk_first_terminal_last() -> None:
@@ -1425,6 +1449,11 @@ def test_the_promoted_surface_and_the_protocol_version_are_both_pinned() -> None
     §5's own ground for the bump, which ADR-0124 §9:2 reaches through "a method's
     arguments". **The method set does not move and stays at 68.**
 
+    **76 is ADR-0293 §11, under the first limb.** ``AssistantEngine`` gains the nine
+    members of the conversation's chat space, so the method set rises to **77**: a
+    client at 76 may call an operation a hub at 75 does not answer, and
+    ``conversation``'s digest gains two members a client at 75 refuses as unknown.
+
     **ADR-0124 §9 decides no mechanical check and creates none**, saying one is
     owed and leaving its shape open. This is not that check — it is a *pin*, and
     a deliberately crude one: it fails when either number moves, which is the
@@ -1433,7 +1462,7 @@ def test_the_promoted_surface_and_the_protocol_version_are_both_pinned() -> None
     """
     from ai_assistant.wire.envelope import PROTOCOL_VERSION  # noqa: PLC0415 — asserted about
 
-    assert (len(_method_names()), PROTOCOL_VERSION) == (68, 75), (
+    assert (len(_method_names()), PROTOCOL_VERSION) == (77, 76), (
         "the promoted method set and the protocol version are pinned together "
         "(ADR-0124 §9); move either and this pin makes you name the limb you are "
         "under — the method set, or a wire-carried core type"

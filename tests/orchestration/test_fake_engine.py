@@ -59,6 +59,7 @@ from assistant_engine_contract import (
     spoken_routed_park_outcome,
     spoken_step_park_outcome,
 )
+from chat_surface_contract import CHAT_LIMIT, CHAT_SURFACE_AT, ChatSurfaceSubject
 from episode_inspection_contract import (
     INSPECTION_AT,
     INSPECTION_LIMIT,
@@ -215,6 +216,14 @@ def _recorded_confirm(binding: EgressBinding | None) -> PermissionDecision:
 
 class TestFakeAssistantEngineContract(AssistantEngineContract):
     """The canonical fake, held to the shared contract."""
+
+    @pytest.fixture
+    def chat_surface(self) -> ChatSurfaceSubject:
+        """The canonical fake over an injected memory store, at the chat bound."""
+        memory = FakeMemoryStore(now=lambda: CHAT_SURFACE_AT)
+        built = FakeAssistantEngine(max_payload_bytes=CHAT_LIMIT)
+        built.episode_memory = memory
+        return ChatSurfaceSubject(engine=built, memory=memory)
 
     @pytest.fixture
     def story_surface(self) -> StorySurfaceSubject:

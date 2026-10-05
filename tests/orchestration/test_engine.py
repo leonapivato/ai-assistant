@@ -4556,7 +4556,10 @@ async def test_engine_start_consumes_the_stamped_enumeration(
 
 
 async def test_engine_start_finishes_a_deletion_a_previous_run_left_unfinished() -> None:
-    """ADR-0074 §8: the reclaim runs "by the deleting call, **at engine start**"."""
+    """ADR-0074 §8: the reclaim runs "by the deleting call, **at engine start**".
+
+    Since ADR-0293 §2:3 finishing it forgets nothing: the episode stays on its place.
+    """
     harness = Harness(planner=NoStepPlanner())
     outcome = await harness.engine.converse("hello", timeout=PATIENT)
     assert outcome.conversation_id is not None
@@ -4567,7 +4570,8 @@ async def test_engine_start_finishes_a_deletion_a_previous_run_left_unfinished()
 
     await harness.engine.start()
 
-    assert await harness.memory.get(episode_id) is None, "the leak was swept"
+    assert await harness.memory.get(episode_id) is not None, "deleting forgets nothing"
+    assert await harness.engine.conversation(outcome.conversation_id) is None
 
 
 async def test_recent_conversations_projects_what_a_person_chooses_from() -> None:
@@ -4584,7 +4588,11 @@ async def test_recent_conversations_projects_what_a_person_chooses_from() -> Non
 
 
 async def test_forget_conversation_shows_the_span_then_destroys_everything() -> None:
-    """§8: show-then-confirm at the unit the user thinks in, then the ordered deletion."""
+    """§8: show-then-confirm at the unit the user thinks in, then the ordered deletion.
+
+    The route ADR-0293 §Decision:2 keeps working: the conversation deleted, then the
+    episodes on its place forgotten.
+    """
     goals = iter(f"g-{n}" for n in range(1, 10))
     harness = Harness(planner=NoStepPlanner(), loop_id_factory=lambda: next(goals))
     first = await harness.engine.converse("hello", timeout=PATIENT)
@@ -4601,6 +4609,7 @@ async def test_forget_conversation_shows_the_span_then_destroys_everything() -> 
     assert await harness.engine.conversation(first.conversation_id) is None
     assert await harness.engine.recent_conversations() == ()
     assert await harness.memory.export() == [], "every episode it recorded is gone"
+    assert await harness.engine.forget_conversation(first.conversation_id) is False
 
 
 # --- lost evidence: tombstones and presented confidence (ADR-0077 §6) ----

@@ -68,9 +68,14 @@ from ai_assistant.core.types import (
     EpisodePage,
     ProcessingStatus,
     SpokenDeliveryState,
+    chat_conversation_ids,
+    check_chat_cursor,
+    check_chat_position,
     check_story_page,
+    checked_chat_devices,
     secret_value,
     story_members,
+    user_message,
 )
 from ai_assistant.wire import envelope as env
 from ai_assistant.wire.codec import (
@@ -114,6 +119,8 @@ if TYPE_CHECKING:
         ChannelIdentity,
         ChannelInput,
         ChannelResult,
+        ChatChanges,
+        ChatDevice,
         ClarificationWithdrawal,
         Confirmation,
         ConnectedAccount,
@@ -133,6 +140,7 @@ if TYPE_CHECKING:
         Identifier,
         LearnOutcome,
         MemoryKind,
+        MessageReceipt,
         NonBlankEncodableText,
         NotificationDelivery,
         NotificationPreferences,
@@ -159,8 +167,10 @@ if TYPE_CHECKING:
         StoryPage,
         StoryView,
         StreamingTextReply,
+        TranscriptPage,
         TurnOutcome,
         TurnReference,
+        UserMessage,
         UtcInstant,
         WholeTextReply,
     )
@@ -1094,7 +1104,7 @@ class HubClient:
         return await self._call("conversation", conversation_id=named)  # type: ignore[no-any-return]
 
     async def forget_conversation(self, conversation_id: Identifier) -> bool:
-        """Destroy one conversation.
+        """Destroy one conversation and the episodes on its place.
 
         Args:
             conversation_id: Which conversation.
@@ -1105,6 +1115,91 @@ class HubClient:
         named = identifier(conversation_id, name="conversation_id")
         return await self._call(  # type: ignore[no-any-return]
             "forget_conversation", conversation_id=named
+        )
+
+    # --- the chat space: acts in the medium and its reads (ADR-0293 §11) ----
+    #
+    # Each argument is refused here as the engine would refuse it, before any frame
+    # is written: the wire carries only ``AssistantError`` subclasses, so a
+    # ``ValueError`` raised on the hub would reach this caller as a closed connection
+    # rather than as the refusal both implementations owe.
+
+    async def start_conversation(self) -> ConversationSummary:
+        """Start an empty conversation, shown on "my devices" (ADR-0293 §2:1)."""
+        return await self._call("start_conversation")  # type: ignore[no-any-return]
+
+    async def my_devices(self) -> tuple[ChatDevice, ...]:
+        """Read "my devices" (ADR-0293 §3:1)."""
+        return await self._call("my_devices")  # type: ignore[no-any-return]
+
+    async def set_my_devices(self, devices: Sequence[ChatDevice]) -> bool:
+        """Replace "my devices" (ADR-0293 §3:1)."""
+        held = checked_chat_devices(devices)
+        return await self._call("set_my_devices", devices=held)  # type: ignore[no-any-return]
+
+    async def set_conversation_devices(
+        self, conversation_id: Identifier, *, devices: Sequence[ChatDevice]
+    ) -> bool:
+        """Choose one conversation's devices (ADR-0293 §3:3)."""
+        named = identifier(conversation_id, name="conversation_id")
+        held = checked_chat_devices(devices)
+        return await self._call(  # type: ignore[no-any-return]  # Method adapter validates.
+            "set_conversation_devices", conversation_id=named, devices=held
+        )
+
+    async def write_message(
+        self, conversation_id: Identifier, *, message: UserMessage
+    ) -> MessageReceipt:
+        """Write the user's message, and answer *received* (ADR-0293 §4)."""
+        named = identifier(conversation_id, name="conversation_id")
+        sent = user_message(message)
+        return await self._call(  # type: ignore[no-any-return]  # Method adapter validates.
+            "write_message", conversation_id=named, message=sent
+        )
+
+    async def delete_message(self, conversation_id: Identifier, *, position: int) -> bool:
+        """Delete one message, leaving its marker (ADR-0293 §5:8)."""
+        named = identifier(conversation_id, name="conversation_id")
+        at = check_chat_position(position, name="position")
+        return await self._call(  # type: ignore[no-any-return]  # Method adapter validates.
+            "delete_message", conversation_id=named, position=at
+        )
+
+    async def delete_conversation(self, conversation_id: Identifier) -> bool:
+        """Delete a conversation and its transcript, forgetting nothing (ADR-0293 §2:3)."""
+        named = identifier(conversation_id, name="conversation_id")
+        return await self._call(  # type: ignore[no-any-return]
+            "delete_conversation", conversation_id=named
+        )
+
+    async def transcript(
+        self,
+        conversation_id: Identifier,
+        *,
+        before: int | None = None,
+        limit: int = DEFAULT_PAGE_SIZE,
+    ) -> TranscriptPage | None:
+        """Read a conversation's recent messages, or older ones (ADR-0293 §5:13)."""
+        named = identifier(conversation_id, name="conversation_id")
+        below = None if before is None else check_chat_position(before, name="before")
+        page_argument(limit, name="limit")
+        return await self._call(  # type: ignore[no-any-return]  # Method adapter validates.
+            "transcript", conversation_id=named, before=below, limit=limit
+        )
+
+    async def chat_changes(
+        self,
+        *,
+        after: int,
+        conversation_ids: Sequence[Identifier] | None = None,
+        limit: int = DEFAULT_PAGE_SIZE,
+    ) -> ChatChanges:
+        """Read every change to the chat space after a cursor (ADR-0293 §5:11)."""
+        cursor = check_chat_cursor(after, name="after")
+        named = chat_conversation_ids(conversation_ids)
+        page_argument(limit, name="limit")
+        return await self._call(  # type: ignore[no-any-return]  # Method adapter validates.
+            "chat_changes", after=cursor, conversation_ids=named, limit=limit
         )
 
     async def pending_confirmations(self) -> tuple[Confirmation, ...]:

@@ -169,13 +169,18 @@ from ai_assistant.core.types import (
     TurnResult,
     Warrant,
     WholeTextReply,
+    chat_conversation_ids,
+    check_chat_cursor,
+    check_chat_position,
     check_story_page,
+    checked_chat_devices,
     describe_untrusted,
     encodable_text,
     is_live_confirmation_park,
     rests_on_recorded_external_content,
     secret_value,
     story_members,
+    user_message,
 )
 from ai_assistant.orchestration.authorization_surface import is_live, view_of
 from ai_assistant.orchestration.channels import (
@@ -185,6 +190,12 @@ from ai_assistant.orchestration.channels import (
     conversation_target,
     spoken_result,
     text_result,
+)
+from ai_assistant.orchestration.conversations import (
+    conversation_state,
+    episodes_on_place,
+    fit_changes,
+    fit_transcript,
 )
 
 # ADR-0206 §3's placement is **named rather than copied**, exactly as ADR-0207 §5's
@@ -218,6 +229,7 @@ from ai_assistant.orchestration.speech import SPOKEN_PARK_SENTENCE
 from ai_assistant.orchestration.stories import fitted, resolved_view, unknown_activation
 from ai_assistant.testing.activation import FakeActivation
 from ai_assistant.testing.connections import FakeConnectionProvisioner
+from ai_assistant.testing.conversations import FakeConversationStore
 from ai_assistant.testing.destination_trust import FakeDestinationTrustStore
 from ai_assistant.testing.goal_authorizations import (
     AUTHORIZATION_NOW,
@@ -239,6 +251,8 @@ if TYPE_CHECKING:
 
     from ai_assistant.core.protocols import AuditTrail, SourceReadTrail, SpendLedger
     from ai_assistant.core.types import (
+        ChatChanges,
+        ChatDevice,
         ConnectedAccount,
         ConnectionAct,
         DurableIdentifier,
@@ -246,6 +260,7 @@ if TYPE_CHECKING:
         FeedbackEvent,
         HeldNotification,
         Identifier,
+        MessageReceipt,
         NonBlankEncodableText,
         NotificationPreferences,
         RoutedListing,
@@ -255,6 +270,8 @@ if TYPE_CHECKING:
         StoryLogPage,
         StoryPage,
         StoryView,
+        TranscriptPage,
+        UserMessage,
         UtcInstant,
     )
 
@@ -555,8 +572,15 @@ class FakeAssistantEngine:
         #: "that question is not open" is what the surface has to say about it.
         self.questions_settled: dict[str, Question] = {}
         self.conversations_held: dict[str, ConversationDigest] = {}
-        self._deleting_conversations: set[str] = set()
         self._used_conversation_ids: set[str] = set()
+        #: The chat space (ADR-0293): transcripts, devices, the change stream — the
+        #: canonical conversation store, public so a consumer can seed or inspect it.
+        #: It mints the id each conversation joins it under from
+        #: :attr:`_joining`, so a conversation keeps the id :attr:`conversations_held`
+        #: knows it by.
+        self._joining: list[str] = []
+        self.chat = FakeConversationStore(now=lambda: _AT, new_id=self._joining_id)
+        self._in_chat: set[str] = set()
         self._conversation_ids = count(1)
         #: When each conversation was last active — set at creation and refreshed
         #: whenever a turn begins against it (ADR-0074 §2). Held beside the digests
@@ -1205,7 +1229,7 @@ class FakeAssistantEngine:
             candidate = f"c-{next(self._conversation_ids)}"
             while candidate in self._used_conversation_ids:
                 candidate = f"c-{next(self._conversation_ids)}"
-            return self.start_conversation(candidate)
+            return self.hold_conversation(candidate)
         if conversation_id not in self.conversations_held:
             msg = f"no conversation {conversation_id!r}"
             raise UnknownConversationError(msg)
@@ -3612,38 +3636,218 @@ class FakeAssistantEngine:
         return self._checked(held[offset : offset + limit], "recent_conversations")
 
     async def conversation(self, conversation_id: Identifier) -> ConversationDigest | None:
-        """Show the count and span destroying one conversation would destroy."""
+        """Read one conversation: count and span, current state and devices."""
         named = identifier(conversation_id, name="conversation_id")
         check_arguments("conversation", max_bytes=self._max_payload_bytes, conversation_id=named)
         self.calls.append(("conversation", {"conversation_id": named}))
-        return self._checked(self.conversations_held.get(named), "conversation")
+        digest = self.conversations_held.get(named)
+        if digest is not None:
+            # The state is read off the episodes as the engine reads it (ADR-0293 §8),
+            # by the one function both use.
+            devices = (
+                await self.chat.conversation_devices(named)
+                if named in self._in_chat
+                else await self.chat.my_devices()
+            )
+            digest = digest.model_copy(
+                update={
+                    "state": await conversation_state(self.episode_memory, named),
+                    "devices": devices or (),
+                }
+            )
+        return self._checked(digest, "conversation")
 
     async def forget_conversation(self, conversation_id: Identifier) -> bool:
-        """Destroy one conversation, reporting whether there was one to destroy."""
+        """Destroy one conversation and the episodes on its place, as the engine does.
+
+        The route ADR-0293 §Decision:2 keeps working: the conversation deleted, then
+        its place forgotten — which is :meth:`delete_conversation` and then the place's
+        episodes, here as in the engine.
+        """
         named = identifier(conversation_id, name="conversation_id")
         check_arguments(
             "forget_conversation", max_bytes=self._max_payload_bytes, conversation_id=named
         )
         self.calls.append(("forget_conversation", {"conversation_id": named}))
-        # Remove live membership before the first await. Capture's existing
-        # before/after-write existence checks now see this deletion immediately.
-        # Keep the tombstone and episode membership until every deletion succeeds
-        # so a failed memory deletion can be retried safely.
-        if self.conversations_held.pop(named, None) is not None:
-            self._deleting_conversations.add(named)
-        members = tuple(
+        destroyed = await self._deleted(named)
+        # The place is walked as the engine walks it (§2:4-§2:6), and so is the
+        # membership this fake keeps beside it.
+        members = {
             episode
             for episode, conversation in self._episode_conversations.items()
             if conversation == named
-        )
-        for episode in members:
+        }
+        members.update(await episodes_on_place(self.episode_memory, named))
+        for episode in sorted(members):
             await self.episode_memory.delete(episode)
             self._episode_conversations.pop(episode, None)
             self.deliveries.pop(episode, None)
-        self.activity.pop(named, None)
-        removed = named in self._deleting_conversations
-        self._deleting_conversations.discard(named)
-        return self._checked(removed, "forget")
+        return self._checked(destroyed, "forget_conversation")
+
+    # --- the chat space: acts in the medium and its reads (ADR-0293 §11) ---
+
+    def _joining_id(self) -> str:
+        """The id the chat space mints next: the conversation joining it."""
+        if not self._joining:
+            msg = "the fake's chat space mints only for a conversation joining it"
+            raise AssertionError(msg)
+        return self._joining.pop()
+
+    async def _joined(self, conversation_id: str) -> None:
+        """Bring a held conversation into the chat space, once (ADR-0293 §2:1).
+
+        A conversation this engine does not hold is left alone, so the store answers
+        for it — refused, ``None`` or ``False`` — exactly as for a deleted one.
+        """
+        if conversation_id in self._in_chat or conversation_id not in self.conversations_held:
+            return
+        self._joining.append(conversation_id)
+        await self.chat.start()
+        self._in_chat.add(conversation_id)
+
+    async def start_conversation(self) -> ConversationSummary:
+        """Start an empty conversation, shown on "my devices" (ADR-0293 §2:1)."""
+        self.calls.append(("start_conversation", {}))
+        candidate = f"c-{next(self._conversation_ids)}"
+        while candidate in self._used_conversation_ids:
+            candidate = f"c-{next(self._conversation_ids)}"
+        held = self.hold_conversation(candidate)
+        await self._joined(held)
+        digest = self.conversations_held[held]
+        return self._checked(
+            ConversationSummary(
+                id=held,
+                started_at=digest.started_at,
+                last_active_at=self.activity[held],
+                last_turn_at=None,
+            ),
+            "start_conversation",
+        )
+
+    async def my_devices(self) -> tuple[ChatDevice, ...]:
+        """Read "my devices" (ADR-0293 §3:1)."""
+        self.calls.append(("my_devices", {}))
+        return self._checked(await self.chat.my_devices(), "my_devices")
+
+    async def set_my_devices(self, devices: Sequence[ChatDevice]) -> bool:
+        """Replace "my devices" (ADR-0293 §3:1)."""
+        held = checked_chat_devices(devices)
+        check_arguments("set_my_devices", max_bytes=self._max_payload_bytes, devices=held)
+        self.calls.append(("set_my_devices", {"devices": held}))
+        return self._checked(await self.chat.set_my_devices(held), "set_my_devices")
+
+    async def set_conversation_devices(
+        self, conversation_id: Identifier, *, devices: Sequence[ChatDevice]
+    ) -> bool:
+        """Choose one conversation's devices (ADR-0293 §3:3)."""
+        named = identifier(conversation_id, name="conversation_id")
+        held = checked_chat_devices(devices)
+        check_arguments(
+            "set_conversation_devices",
+            max_bytes=self._max_payload_bytes,
+            conversation_id=named,
+            devices=held,
+        )
+        self.calls.append(("set_conversation_devices", {"conversation_id": named, "devices": held}))
+        await self._joined(named)
+        changed = await self.chat.set_conversation_devices(named, held)
+        return self._checked(changed, "set_conversation_devices")
+
+    async def write_message(
+        self, conversation_id: Identifier, *, message: UserMessage
+    ) -> MessageReceipt:
+        """Write the user's message, and answer *received* (ADR-0293 §4)."""
+        named = identifier(conversation_id, name="conversation_id")
+        sent = user_message(message)
+        check_arguments(
+            "write_message", max_bytes=self._max_payload_bytes, conversation_id=named, message=sent
+        )
+        self.calls.append(("write_message", {"conversation_id": named, "message": sent}))
+        await self._joined(named)
+        receipt = await self.chat.append_message(named, sent.as_new_message())
+        return self._checked(receipt, "write_message")
+
+    async def delete_message(self, conversation_id: Identifier, *, position: int) -> bool:
+        """Delete one message, leaving its marker (ADR-0293 §5:8)."""
+        named = identifier(conversation_id, name="conversation_id")
+        at = check_chat_position(position, name="position")
+        check_arguments(
+            "delete_message", max_bytes=self._max_payload_bytes, conversation_id=named, position=at
+        )
+        self.calls.append(("delete_message", {"conversation_id": named, "position": at}))
+        await self._joined(named)
+        return self._checked(await self.chat.delete_message(named, at), "delete_message")
+
+    async def delete_conversation(self, conversation_id: Identifier) -> bool:
+        """Delete a conversation and its transcript, forgetting nothing (ADR-0293 §2:3)."""
+        named = identifier(conversation_id, name="conversation_id")
+        check_arguments(
+            "delete_conversation", max_bytes=self._max_payload_bytes, conversation_id=named
+        )
+        self.calls.append(("delete_conversation", {"conversation_id": named}))
+        return self._checked(await self._deleted(named), "delete_conversation")
+
+    async def _deleted(self, conversation_id: str) -> bool:
+        """Delete a conversation from every read, its episodes left (ADR-0293 §2:3).
+
+        The episodes and their membership stay, so forgetting still reaches them by the
+        id (§2:5).
+        """
+        held = self.conversations_held.pop(conversation_id, None) is not None
+        self.activity.pop(conversation_id, None)
+        stamped = conversation_id in self._in_chat and await self.chat.stamp_deleted(
+            conversation_id
+        )
+        return held or stamped
+
+    async def transcript(
+        self,
+        conversation_id: Identifier,
+        *,
+        before: int | None = None,
+        limit: int = DEFAULT_PAGE_SIZE,
+    ) -> TranscriptPage | None:
+        """Read a conversation's recent messages, or older ones (ADR-0293 §5:13)."""
+        named = identifier(conversation_id, name="conversation_id")
+        below = None if before is None else check_chat_position(before, name="before")
+        page_argument(limit, name="limit")
+        check_arguments(
+            "transcript",
+            max_bytes=self._max_payload_bytes,
+            conversation_id=named,
+            before=below,
+            limit=limit,
+        )
+        self.calls.append(
+            ("transcript", {"conversation_id": named, "before": below, "limit": limit})
+        )
+        await self._joined(named)
+        page = await self.chat.transcript(named, before=below, limit=limit)
+        return self._checked(fit_transcript(page, max_bytes=self._max_payload_bytes), "transcript")
+
+    async def chat_changes(
+        self,
+        *,
+        after: int,
+        conversation_ids: Sequence[Identifier] | None = None,
+        limit: int = DEFAULT_PAGE_SIZE,
+    ) -> ChatChanges:
+        """Read every change to the chat space after a cursor (ADR-0293 §5:11)."""
+        cursor = check_chat_cursor(after, name="after")
+        named = chat_conversation_ids(conversation_ids)
+        page_argument(limit, name="limit")
+        check_arguments(
+            "chat_changes",
+            max_bytes=self._max_payload_bytes,
+            after=cursor,
+            conversation_ids=named,
+            limit=limit,
+        )
+        self.calls.append(
+            ("chat_changes", {"after": cursor, "conversation_ids": named, "limit": limit})
+        )
+        page = await self.chat.changes(after=cursor, conversation_ids=named, limit=limit)
+        return self._checked(fit_changes(page, max_bytes=self._max_payload_bytes), "chat_changes")
 
     # --- durable recovery --------------------------------------------------
 
@@ -4667,8 +4871,14 @@ class FakeAssistantEngine:
                 self.questions_settled[question_id] = question
         return question
 
-    def start_conversation(self, conversation_id: str) -> str:
+    def hold_conversation(self, conversation_id: str) -> str:
         """Record one conversation, and return its id.
+
+        The seeding lever, and what a turn call naming no conversation uses. The
+        conversation joins the chat space (:attr:`chat`) the first time an act or a
+        read of the chat space names it, given "my devices" as they then stand;
+        :meth:`start_conversation`, the act in the medium, joins it at once
+        (ADR-0293 §2:1).
 
         Its activity stamp starts one tick later than the last conversation's, so
         "most recently active first" is a fact the ordering can be tested against

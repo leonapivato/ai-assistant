@@ -410,14 +410,15 @@ async def test_deleting_a_conversation_deletes_every_episode_on_its_channel(
     assert await composed.held(_conversation(other)) == [other.capture.episode_id]
 
 
-async def test_an_episode_write_that_commits_then_cancels_on_a_deleted_conversation_leaves_none(
+async def test_an_episode_write_that_commits_then_cancels_on_a_deleted_conversation(
     composed: Composed, monkeypatch: pytest.MonkeyPatch
 ) -> None:
-    """§7:4: the deletion sweep finishes first, then the episode lands, then cancels.
+    """ADR-0293 §2:7: a deleted conversation's episode is kept, cancelled or not.
 
-    The conversation's deletion runs to completion before the delayed write commits,
-    so the sweep cannot have taken the episode: what removes it is the writer's
-    compensation, run through the drain (ADR-0275 §8:11).
+    The conversation is deleted before the delayed admission write commits, and the
+    pass is then cancelled. Before ADR-0293 the writer's fence destroyed the episode
+    because the conversation was gone; now the pass is frozen ``interrupted`` and its
+    episode stays on the place beside the earlier one, until the user forgets them.
     """
     first = await composed.say("hello")
     conversation_id = _conversation(first)
@@ -429,10 +430,9 @@ async def test_an_episode_write_that_commits_then_cancels_on_a_deleted_conversat
         episode = [write.record.id for write in writes if write.record.id.startswith("activation:")]
         if not episode or episode[0] == first.capture.episode_id or landed:
             return await original(writes)
-        assert await composed.engine.forget_conversation(conversation_id) is True
-        assert await composed.held(conversation_id) == [], "the sweep has finished"
+        assert await composed.engine.delete_conversation(conversation_id) is True
         await original(writes)
-        assert await memory.get(episode[0]) is not None, "the episode landed after the sweep"
+        assert await memory.get(episode[0]) is not None, "the episode landed after the delete"
         landed.append(episode[0])
         raise asyncio.CancelledError
 
@@ -442,16 +442,17 @@ async def test_an_episode_write_that_commits_then_cancels_on_a_deleted_conversat
         await asyncio.ensure_future(composed.say("and again", conversation_id))
 
     assert landed, "the second episode's write committed and then cancelled"
-    assert await memory.get(landed[0]) is None
-    assert await composed.held(conversation_id) == []
+    kept = await memory.get(landed[0])
+    assert isinstance(kept, EpisodicMemory)
+    assert kept.processing_record is not None
+    assert kept.processing_record.status is ProcessingStatus.INTERRUPTED
+    assert await composed.held(conversation_id) == [first.capture.episode_id, landed[0]]
 
 
-async def test_a_conversation_deleted_while_a_pass_runs_leaves_no_episode(
+async def _paused_on(
     composed: Composed, monkeypatch: pytest.MonkeyPatch
-) -> None:
-    """§7, §8: the pass's capture degrades and leaves nothing behind it."""
-    first = await composed.say("hello")
-    conversation_id = _conversation(first)
+) -> tuple[asyncio.Event, asyncio.Event]:
+    """Hold the pass saying "slow" once its conversation stage has run."""
     entered, release = asyncio.Event(), asyncio.Event()
     original = composed.engine._begin_conversation_stage
 
@@ -462,6 +463,38 @@ async def test_a_conversation_deleted_while_a_pass_runs_leaves_no_episode(
             await release.wait()
 
     monkeypatch.setattr(composed.engine, "_begin_conversation_stage", held)
+    return entered, release
+
+
+async def test_a_conversation_deleted_while_a_pass_runs_keeps_its_episode(
+    composed: Composed, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """ADR-0293 §2:7: the pass's capture degrades, and its episode stays on the place."""
+    first = await composed.say("hello")
+    conversation_id = _conversation(first)
+    entered, release = await _paused_on(composed, monkeypatch)
+    task = asyncio.create_task(composed.say("slow", conversation_id))
+    await entered.wait()
+    try:
+        assert await composed.engine.delete_conversation(conversation_id) is True
+    finally:
+        release.set()
+    result = await task
+
+    assert result.capture.state == "degraded"
+    address = f"activation:{result.capture.activation_id}"
+    assert await composed.memory.get(address) is not None
+    assert await composed.held(conversation_id) == [first.capture.episode_id, address]
+
+
+async def test_a_conversation_forgotten_while_a_pass_runs_leaves_no_episode(
+    composed: Composed, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """ADR-0293 §2:6: the open episode is forgotten as ADR-0286 §8 forgets one, and
+    ``forget_conversation``, the route §Decision:2 keeps, deletes the conversation."""
+    first = await composed.say("hello")
+    conversation_id = _conversation(first)
+    entered, release = await _paused_on(composed, monkeypatch)
     task = asyncio.create_task(composed.say("slow", conversation_id))
     await entered.wait()
     try:
@@ -470,10 +503,10 @@ async def test_a_conversation_deleted_while_a_pass_runs_leaves_no_episode(
         release.set()
     result = await task
 
-    assert result.capture.state == "degraded"
     address = f"activation:{result.capture.activation_id}"
     assert await composed.memory.get(address) is None
     assert await composed.held(conversation_id) == []
+    assert await composed.engine.conversation(conversation_id) is None
 
 
 @pytest.mark.parametrize("composed", [timedelta(days=30)], indirect=True, ids=["finite"])

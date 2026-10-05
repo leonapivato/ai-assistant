@@ -38,44 +38,52 @@ async def _receive(
     )
 
 
-async def test_deletion_fences_new_capture_and_failed_deletion_can_be_retried(
-    monkeypatch: pytest.MonkeyPatch,
-) -> None:
+async def test_deletion_fences_new_capture_and_keeps_the_episodes() -> None:
+    """ADR-0293 §2:2, §2:3: no capture joins a deleted conversation, and none is lost."""
     engine = FakeAssistantEngine()
     first = await _receive(engine)
     assert first.channel is not None
-    entered, release = asyncio.Event(), asyncio.Event()
+    assert first.capture.episode_id is not None
+
+    assert await engine.delete_conversation(first.channel.instance_id) is True
+
+    with pytest.raises(UnknownConversationError):
+        await _receive(engine, first.channel)
+    assert await engine.conversation(first.channel.instance_id) is None
+    assert await engine.recent_conversations() == ()
+    assert await engine.episode_chunk(first.capture.episode_id) is not None
+    assert await engine.forget_conversation(first.channel.instance_id) is False, "deleted"
+    assert (await engine.episodes()).items == (), "its place is forgotten all the same"
+
+
+async def test_a_failed_forget_can_be_retried(monkeypatch: pytest.MonkeyPatch) -> None:
+    """The conversation is deleted first, and a repeat finishes the forgetting."""
+    engine = FakeAssistantEngine()
+    first = await _receive(engine)
+    assert first.channel is not None
+    assert first.capture.episode_id is not None
     delete = engine.episode_memory.delete
 
     async def fail(_record_id: str) -> bool:
-        entered.set()
-        await release.wait()
         raise MemoryStoreError("controlled deletion failure")
 
     monkeypatch.setattr(engine.episode_memory, "delete", fail)
-    forgetting = asyncio.create_task(engine.forget_conversation(first.channel.instance_id))
-    await entered.wait()
-    try:
-        with pytest.raises(UnknownConversationError):
-            await _receive(engine, first.channel)
-    finally:
-        release.set()
-        with pytest.raises(MemoryStoreError):
-            await forgetting
+    with pytest.raises(MemoryStoreError):
+        await engine.forget_conversation(first.channel.instance_id)
     assert await engine.conversation(first.channel.instance_id) is None
-    assert await engine.recent_conversations() == ()
-    assert first.capture.episode_id is not None
     assert await engine.episode_chunk(first.capture.episode_id) is not None
     with pytest.raises(UnknownConversationError):
         await _receive(engine, first.channel)
+
     monkeypatch.setattr(engine.episode_memory, "delete", delete)
-    assert await engine.forget_conversation(first.channel.instance_id)
+    assert await engine.forget_conversation(first.channel.instance_id) is False
     assert (await engine.episodes()).items == ()
 
 
 async def test_a_capture_pending_at_deletion_cannot_join_a_new_conversation(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
+    """ADR-0293 §2:7: the pending capture keeps its episode, on the deleted place."""
     engine = FakeAssistantEngine()
     first = await _receive(engine)
     assert first.channel is not None
@@ -95,7 +103,7 @@ async def test_a_capture_pending_at_deletion_cannot_join_a_new_conversation(
     pending = asyncio.create_task(_receive(engine, first.channel))
     await entered.wait()
     try:
-        assert await engine.forget_conversation(first.channel.instance_id)
+        assert await engine.delete_conversation(first.channel.instance_id)
         fresh = await _receive(engine)
         assert fresh.channel != first.channel
     finally:
@@ -103,6 +111,9 @@ async def test_a_capture_pending_at_deletion_cannot_join_a_new_conversation(
         old = await pending
     assert old.capture.state == "degraded"
     assert old.capture.episode_id is None
+    assert fresh.channel is not None
+    assert await engine.forget_conversation(fresh.channel.instance_id) is True
     assert {row.position.episode_id for row in (await engine.episodes()).items} == {
-        fresh.capture.episode_id
-    }
+        first.capture.episode_id,
+        f"activation:{old.capture.activation_id}",
+    }, "the pending one stayed on the deleted place, not the fresh one"

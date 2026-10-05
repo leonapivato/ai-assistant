@@ -63,6 +63,7 @@ from assistant_engine_contract import (
     seeded_spend_ledger,
     seeded_trail,
 )
+from chat_surface_contract import CHAT_LIMIT, CHAT_SURFACE_AT, ChatSurfaceSubject
 from episode_inspection_contract import (
     INSPECTION_AT,
     INSPECTION_LIMIT,
@@ -683,6 +684,17 @@ def _wire(  # noqa: PLR0913 — one knob per state the shared suite needs a subj
 
 class TestEngineContract(AssistantEngineContract):
     """The concrete engine, held to the shared contract."""
+
+    @pytest.fixture
+    async def chat_surface(self) -> AsyncIterator[ChatSurfaceSubject]:
+        """The production engine over an injected memory store, at the chat bound."""
+        memory = FakeMemoryStore(now=lambda: CHAT_SURFACE_AT)
+        built = _wire(memory=memory, max_payload_bytes=CHAT_LIMIT)
+        await built.start()
+        try:
+            yield ChatSurfaceSubject(engine=built, memory=memory)
+        finally:
+            await built.aclose()
 
     @pytest.fixture
     async def story_surface(self) -> AsyncIterator[StorySurfaceSubject]:

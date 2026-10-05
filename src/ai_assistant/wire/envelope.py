@@ -2421,7 +2421,13 @@ from ai_assistant.wire.errors import (
 #:     ``activation_stories`` — and the story types they carry.
 #: 75: ADR-0294 §4 makes ``AssistantEngine.grant`` refuse a scope naming ``INGEST``,
 #:     which a hub at 74 accepted (ADR-0124 §9:2's test, in the refusing direction).
-PROTOCOL_VERSION: Final[int] = 75
+#: 76: ADR-0293 §11 adds the conversation's chat space to the promoted
+#:     ``AssistantEngine`` method set — ``start_conversation``, ``my_devices``,
+#:     ``set_my_devices``, ``set_conversation_devices``, ``write_message``,
+#:     ``delete_message``, ``delete_conversation``, ``transcript`` and
+#:     ``chat_changes`` — and the chat types they carry; ``conversation``'s digest
+#:     gains the current state and the conversation's devices.
+PROTOCOL_VERSION: Final[int] = 76
 
 #: ADR-0085 §8a: "The correlation id is a UUID string and is at most 36 bytes.
 #: Bounding it is what makes the reserve a constant rather than an aspiration; a

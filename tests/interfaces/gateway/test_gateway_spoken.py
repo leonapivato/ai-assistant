@@ -293,7 +293,7 @@ async def test_the_three_browser_owned_members_reach_the_engine() -> None:
     it would be choosing the rendering's format on the browser's behalf.
     """
     engine = FakeAssistantEngine()
-    engine.start_conversation("conv-1")
+    engine.hold_conversation("conv-1")
     async with _harness(engine) as one:
         status, _ = await one.whole(
             "POST",
@@ -745,7 +745,7 @@ async def test_the_fourth_browser_owned_member_reaches_the_engine_whole() -> Non
     into the promoted surface's own type and not into a second shape.
     """
     engine = FakeAssistantEngine()
-    engine.start_conversation("conv-1")
+    engine.hold_conversation("conv-1")
     async with _harness(engine) as one:
         status, _ = await one.whole(
             "POST", _SPOKEN, _body(conversation_id="conv-1", delivery=_report())
@@ -769,7 +769,7 @@ async def test_the_gateway_reads_no_fifth_member() -> None:
     by nothing and refuses nothing, exactly as before.
     """
     engine = FakeAssistantEngine()
-    engine.start_conversation("conv-1")
+    engine.hold_conversation("conv-1")
     async with _harness(engine) as one:
         status, _ = await one.whole(
             "POST",
@@ -875,7 +875,7 @@ async def test_an_unknown_report_is_refused_by_the_promoted_surface() -> None:
     hub's own refusal, ADR-0168 §9's ``rejected``.
     """
     engine = FakeAssistantEngine()
-    engine.start_conversation("conv-1")
+    engine.hold_conversation("conv-1")
     async with _harness(engine) as one:
         status, body = await one.whole(
             "POST",
@@ -922,7 +922,7 @@ async def test_an_explicit_null_delivery_is_the_absence_json_has_a_word_for() ->
     it.
     """
     engine = FakeAssistantEngine()
-    engine.start_conversation("conv-1")
+    engine.hold_conversation("conv-1")
     async with _harness(engine) as one:
         status, _ = await one.whole("POST", _SPOKEN, _body(conversation_id="conv-1", delivery=None))
 
