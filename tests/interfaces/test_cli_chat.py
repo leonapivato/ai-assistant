@@ -666,8 +666,12 @@ async def test_the_chat_follows_the_change_stream_from_its_snapshot(output: Stri
 async def test_a_lost_stream_is_opened_again_from_the_last_change_applied(
     output: StringIO,
 ) -> None:
-    """ADR-0296 §4:4: the cursor is the acknowledgement, so nothing is shown twice or missed."""
-    engine = _OverTheWire(lose=[1])
+    """ADR-0296 §4:4: the cursor is the acknowledgement, so nothing is shown twice or missed.
+
+    Lost after the engine's second chunk: the state the stream opens with (#2740),
+    then the first message.
+    """
+    engine = _OverTheWire(lose=[2])
     phone = ChatDevice(device_id="phone", access=DeviceAccess.READ_WRITE)
     conversation = await _started(engine, HUB, phone)
 

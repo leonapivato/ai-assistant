@@ -170,11 +170,14 @@ async def test_a_message_written_after_opening_arrives_as_a_change() -> None:
     cursor = (await engine.chat_changes(after=0)).next_after
     async with _harness(engine) as one:
         values = _values(await _follow(one, cursor))
+        opened = await _next(values)
         await engine.chat.append_message(
             started.id, NewMessage(author=MessageAuthor.ASSISTANT, text="Pinecrest, Friday.")
         )
         value = await _next(values)
 
+    assert opened["kind"] == "state", "the stream opens with the state (#2740)"
+    assert opened["conversation_id"] == started.id
     assert value["kind"] == "change"
     assert value["snapshot"] is None
     change = value["change"]

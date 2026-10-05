@@ -204,11 +204,15 @@ async def _engine_with_a_conversation() -> tuple[FakeAssistantEngine, str]:
 async def test_every_frame_is_a_chunk_of_the_one_request_and_opens_with_the_roles(
     tmp_path: Path,
 ) -> None:
-    """ADR-0173 §1:1 kept: chunks carrying the request's id and no method; roles first."""
+    """ADR-0173 §1:1 kept: chunks carrying the request's id and no method; roles first.
+
+    Then the engine's: the conversation's state as the stream opens (#2740), and its
+    changes.
+    """
     engine, conversation = await _engine_with_a_conversation()
     async with _raw(engine, tmp_path) as peer:
         await peer.send(_follow("r-1"))
-        frames = [await peer.receive() for _ in range(3)]
+        frames = [await peer.receive() for _ in range(4)]
         await engine.write_message(conversation, message=_said("m-1"))
         frames.append(await peer.receive())
 
@@ -216,7 +220,9 @@ async def test_every_frame_is_a_chunk_of_the_one_request_and_opens_with_the_role
     assert all(one.id == "r-1" and one.method is None for one in frames)
     chunks = [_chunk(one) for one in frames]
     assert chunks[0] == ChatStreamChunk(roles=(DeviceRole.COMMANDS, DeviceRole.SPOKES))
-    changes = [one.change for one in chunks[1:]]
+    assert chunks[1].state is not None
+    assert chunks[1].state.conversation_id == conversation
+    changes = [one.change for one in chunks[2:]]
     assert all(one is not None for one in changes)
     live = chunks[-1].change
     assert live is not None
