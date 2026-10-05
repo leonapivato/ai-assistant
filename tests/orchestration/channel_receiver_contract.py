@@ -4,7 +4,7 @@ from __future__ import annotations
 
 from datetime import timedelta
 from typing import TYPE_CHECKING
-from uuid import UUID
+from uuid import UUID, uuid4
 
 import pytest
 
@@ -14,6 +14,8 @@ if TYPE_CHECKING:
     from ai_assistant.core.protocols import AssistantEngine
 from ai_assistant.core.streams import closing_stream
 from ai_assistant.core.types import (
+    ActivationEnding,
+    ActivationStop,
     ChannelContext,
     ChannelContextItem,
     ChannelIdentity,
@@ -145,6 +147,46 @@ class ChannelReceiverContract:
         )
         assert len((await engine.episodes()).items) == 3
         assert await read_episode(engine, episodes[0].id) == episodes[0]
+
+    async def test_a_stop_naming_an_ended_activation_answers_already_ended(
+        self, engine: AssistantEngine
+    ) -> None:
+        """ADR-0297 §5:4: its episode stands at its address, and nothing is written."""
+        result = await engine.receive(
+            ChannelInput(target=NewConversation(), payload=TextChannelPayload(text="Hello")),
+            reply=WholeTextReply(),
+            timeout=_BUDGET,
+        )
+        before = await captured_episode(engine, result)
+        assert result.capture.activation_id is not None
+
+        answer = await engine.stop_activation(result.capture.activation_id)
+
+        assert answer is ActivationStop.ALREADY_ENDED
+        after = await read_episode(engine, before.id)
+        assert after == before
+        assert after.processing_record is not None
+        assert after.processing_record.reason is not ProcessingReason.STOPPED
+        assert result.channel is not None
+        digest = await engine.conversation(result.channel.instance_id)
+        assert digest is not None
+        assert digest.state.last_ended is ActivationEnding.DONE
+
+    async def test_a_stop_naming_no_activation_answers_no_such_activation(
+        self, engine: AssistantEngine
+    ) -> None:
+        """ADR-0297 §5:5: nothing running, no episode at its address, nothing written."""
+        before = await engine.episodes()
+
+        answer = await engine.stop_activation(str(uuid4()))
+
+        assert answer is ActivationStop.NO_SUCH_ACTIVATION
+        assert await engine.episodes() == before
+
+    async def test_a_stop_naming_no_identifier_is_refused(self, engine: AssistantEngine) -> None:
+        """An activation id is an identifier, refused before anything is read."""
+        with pytest.raises(ValueError, match="activation_id"):
+            await engine.stop_activation("  ")
 
     async def test_channel_supplied_context_does_not_require_a_stored_transcript(
         self,

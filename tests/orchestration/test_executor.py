@@ -23,6 +23,7 @@ from ai_assistant.core.errors import (
     AssistantError,
     AuditError,
     AuthorisationSpentError,
+    ClaimStopped,
     PlanningError,
     SpendCeilingError,
     SpendUndeterminedError,
@@ -2580,3 +2581,33 @@ async def test_a_cancellation_out_of_the_seam_commits_the_interrupted_outcome() 
     assert step.failure is not None
     assert step.failure.kind is None
     assert seam.tool.calls == []
+
+
+# --- ADR-0297 §2: every claim names its activation ----------------------------------------
+
+
+async def test_the_claim_names_its_activation_and_a_stopped_one_invokes_nothing() -> None:
+    """§2:2, §2:5: the store refuses a claim of a stopped activation; nothing runs."""
+    store = FakePlanStore()
+    state = await a_claimed_execution(store)
+    implementation = Spy()
+    seam = FakeToolInvoker(
+        [(tool(), implementation)], ledger=_AdmittingLedger(), gate=FakeAuditTrail()
+    )
+    activation = "0b8f8f0e-2a5c-4c55-9a6c-6a2c1f0b0d11"
+    await store.record_stop(activation)
+
+    with pytest.raises(ClaimStopped):
+        await executor_over(store, seam).execute(
+            state,
+            step_id=STEP,
+            call=call_for(tool(), execution_id=state.id),
+            attempt_id=ATTEMPT,
+            timeout=PATIENT,
+            activation_id=activation,
+        )
+
+    step = await stored_step(store, state)
+    assert step.status is StepStatus.PENDING
+    assert step.attempts == 0
+    assert implementation.calls == []

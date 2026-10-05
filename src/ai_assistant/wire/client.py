@@ -628,9 +628,14 @@ class HubClient:
 
         Returns:
             Which of ADR-0297 §5's three answers the hub reached.
+
+        Raises:
+            ValueError: If ``activation_id`` is not an identifier, refused here before
+                anything is sent, as the engine refuses it (ADR-0085 §9).
         """
-        return await self._call(  # type: ignore[no-any-return]
-            "stop_activation", activation_id=activation_id
+        named = identifier(activation_id, name="activation_id")
+        return await self._call(  # type: ignore[no-any-return]  # Method adapter validates.
+            "stop_activation", activation_id=named
         )
 
     async def goals(

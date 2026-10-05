@@ -25,6 +25,7 @@ from ai_assistant.orchestration.controller import (
     StageRecord,
     StageResult,
     TolerantStage,
+    run_recorded,
 )
 
 _AT: Final = datetime(2026, 9, 27, tzinfo=UTC)
@@ -651,3 +652,158 @@ def test_nothing_is_appended_after_the_end_entry() -> None:
 def test_a_bound_below_two_is_refused() -> None:
     with pytest.raises(ValueError, match="first entry and its end entry"):
         StageRecord().bounded(1)
+
+
+# --- ADR-0297 §4: a stopped pass -------------------------------------------------------
+
+
+@dataclass
+class _Mark:
+    """An activation's stop mark, as the controller reads it."""
+
+    stopped: bool = False
+
+    def __call__(self) -> bool:
+        return self.stopped
+
+
+@dataclass
+class _StoppingStage(_FakeStage):
+    """A stage that sets the stop mark while it runs, then ends as scripted."""
+
+    mark: _Mark = field(default_factory=_Mark)
+
+    async def run(self, state: _Facts) -> StageResult:
+        self.mark.stopped = True
+        return await super().run(state)
+
+
+def _stoppable(mark: _Mark, *stages: _FakeStage) -> ActivationController[_Facts]:
+    _, now = _clock()
+    return ActivationController(
+        stages=stages,
+        clock=now,  # type: ignore[arg-type]  # a plain callable
+        stopped=mark,
+    )
+
+
+async def test_a_mark_set_before_the_controller_runs_no_stage_and_ends_stopped() -> None:
+    """§4:1-§4:3: read before the rules are evaluated, so nothing is due and nothing runs."""
+    mark = _Mark(stopped=True)
+    stage = _FakeStage(ControllerStage.EVENT_SUMMARY, "event_summarized")
+    record = StageRecord()
+
+    await _stoppable(mark, stage).run(_Facts(informational_event=True), record)
+
+    assert stage.runs == 0
+    assert _shape(record) == [(ControllerStage.END, ControllerRule.STOPPED, StageOutcome.DONE)]
+
+
+async def test_a_mark_set_during_a_stage_ends_the_pass_before_the_next() -> None:
+    """§4:1: read again once the stage's result is in hand; the next stage never starts."""
+    mark = _Mark()
+    first = _StoppingStage(ControllerStage.UNDERSTANDING, "understanding_decided", mark=mark)
+    second = _FakeStage(ControllerStage.EVENT_SUMMARY, "event_summarized")
+    record = StageRecord()
+
+    await _stoppable(mark, first, second).run(
+        _Facts(informational_event=True, understanding_wired=True, windows_decided=True), record
+    )
+
+    assert (first.runs, second.runs) == (1, 0)
+    assert _shape(record) == [
+        (ControllerStage.UNDERSTANDING, ControllerRule.NOT_UNDERSTOOD, StageOutcome.DONE),
+        (ControllerStage.END, ControllerRule.STOPPED, StageOutcome.DONE),
+    ]
+
+
+@pytest.mark.parametrize(
+    ("outcome", "error"),
+    [
+        (StageOutcome.FAILED, PlanningError("refused")),
+        (StageOutcome.TIMED_OUT, ModelTimeoutError("late")),
+    ],
+)
+async def test_a_stage_failing_after_the_mark_ends_stopped_and_is_not_reraised(
+    outcome: StageOutcome, error: Exception
+) -> None:
+    """§4:4: the stop was taken in first, so it is what ended the pass."""
+    mark = _Mark()
+    failing = _StoppingStage(
+        ControllerStage.EVENT_SUMMARY, result=StageResult(outcome, error), mark=mark
+    )
+    record = StageRecord()
+
+    await _stoppable(mark, failing).run(_Facts(informational_event=True), record)
+
+    assert _shape(record) == [
+        (ControllerStage.EVENT_SUMMARY, ControllerRule.EVENT_UNSUMMARIZED, outcome),
+        (ControllerStage.END, ControllerRule.STOPPED, StageOutcome.DONE),
+    ]
+
+
+async def test_a_cancellation_reaching_a_marked_pass_propagates_with_the_stops_end_entry() -> None:
+    """§4:3: no task is cancelled by a stop, but one that is still propagates (ADR-0060)."""
+    mark = _Mark()
+    entered = asyncio.Event()
+
+    async def hang(_: _Facts) -> None:
+        mark.stopped = True
+        entered.set()
+        await asyncio.Event().wait()
+
+    record = StageRecord()
+    _, now = _clock()
+    controller = ActivationController(
+        stages=(Stage(ControllerStage.EVENT_SUMMARY, hang),),
+        clock=now,  # type: ignore[arg-type]  # a plain callable
+        stopped=mark,
+    )
+    task = asyncio.create_task(controller.run(_Facts(informational_event=True), record))
+    await entered.wait()
+    task.cancel()
+    with pytest.raises(asyncio.CancelledError):
+        await task
+    assert _shape(record) == [(ControllerStage.END, ControllerRule.STOPPED, StageOutcome.DONE)]
+
+
+async def test_a_pass_ended_by_a_rule_is_not_moved_by_a_later_mark() -> None:
+    """§3:3: the end entry appended first decides; the mark cannot rewrite it."""
+    mark = _Mark()
+    record = StageRecord()
+
+    await _stoppable(mark).run(_Facts(informational_event=True, event_summarized=True), record)
+    mark.stopped = True
+
+    assert _shape(record) == [(ControllerStage.END, ControllerRule.NOTHING_DUE, StageOutcome.DONE)]
+
+
+async def test_a_recorded_stage_that_raises_after_the_mark_ends_stopped_and_reraises() -> None:
+    """The resume path's record (ADR-0284 §5:5): the stop's end entry, the error kept.
+
+    A resume that ended on a raise has no outcome to return, so the raise continues to its
+    caller, which reports the stop in its place.
+    """
+    mark = _Mark()
+    record = StageRecord()
+    _, now = _clock()
+    error = PlanningError("refused")
+
+    async def body() -> None:
+        mark.stopped = True
+        raise error
+
+    with pytest.raises(PlanningError) as caught:
+        await run_recorded(
+            lambda: record,
+            ControllerStage.DRIVE,
+            ControllerRule.PARK_ANSWERED,
+            clock=now,  # type: ignore[arg-type]  # a plain callable
+            body=body,
+            stopped=mark,
+        )
+    assert caught.value is error
+    assert _shape(record) == [
+        (ControllerStage.DRIVE, ControllerRule.PARK_ANSWERED, StageOutcome.FAILED),
+        (ControllerStage.END, ControllerRule.STOPPED, StageOutcome.DONE),
+    ]
