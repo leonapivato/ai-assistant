@@ -36,7 +36,12 @@ from ai_assistant.core.types import (
 )
 from ai_assistant.interfaces import cli
 from ai_assistant.testing import FakeAssistantEngine
-from ai_assistant.wire import OverlayIdentityUnavailableError, TransportError
+from ai_assistant.wire import (
+    ConnectionClosedError,
+    OverlayIdentityUnavailableError,
+    ProtocolError,
+    TransportError,
+)
 
 if TYPE_CHECKING:
     from collections.abc import AsyncIterator, Awaitable, Callable, Sequence
@@ -155,16 +160,27 @@ class _OverTheWire(FakeAssistantEngine):
     async def _lost(self) -> None:
         if self.on_loss is not None:
             await self.on_loss()
-        msg = "the connection closed"
-        raise TransportError(msg)
+        msg = "the peer closed the connection"
+        raise ConnectionClosedError(msg)
 
 
 class _Scripted(FakeAssistantEngine):
-    """A fake whose change stream is the chunks given, once ``chunks`` is set."""
+    """A fake whose change stream is the chunks given, once ``chunks`` is set.
 
-    def __init__(self) -> None:
+    Each read of a conversation takes the next of ``states`` as its current state,
+    while any are left.
+    """
+
+    def __init__(self, states: Sequence[ConversationState] = ()) -> None:
         super().__init__()
         self.chunks: Sequence[ChatStreamChunk | ChatStreamEnd] = ()
+        self.states = list(states)
+
+    async def conversation(self, conversation_id: Identifier) -> ConversationDigest | None:
+        digest = await super().conversation(conversation_id)
+        if digest is None or not self.states:
+            return digest
+        return digest.model_copy(update={"state": self.states.pop(0)})
 
     def follow_chat(self, *, after: int) -> AsyncIterator[ChatStreamChunk | ChatStreamEnd]:
         del after
@@ -961,6 +977,53 @@ async def test_working_and_how_it_ended_are_shown_as_they_change(output: StringI
     assert rendered.count("The assistant is done.") == 1
     assert rendered.index("working") < rendered.index("is done")
     assert "stopped" not in rendered
+
+
+async def test_a_stream_reopened_inside_the_client_is_caught_up_on(output: StringIO) -> None:
+    """ADR-0298 §7:13: a quiet stream reopens inside the client, roles first; the state is read.
+
+    An activation that ended while the stream was quiet is no change the reopened
+    stream pushes, so the roles it opens with are what has the conversation read again.
+    """
+    working = ConversationState(working=True, activation_id="a-1")
+    done = ConversationState(last_ended=ActivationEnding.DONE)
+    engine = _Scripted(states=())
+    conversation = await _started(engine, HUB)
+    engine.states = [working, done]
+    view = cli._ChatView(conversation, device_id="hub", cursor=0)
+    engine.chunks = (
+        ChatStreamChunk(roles=(DeviceRole.COMMANDS,)),
+        ChatStreamChunk(heartbeat=True),
+        ChatStreamChunk(roles=(DeviceRole.COMMANDS,)),
+    )
+
+    assert await cli._follow_stream(engine, view, opened=lambda: None) is None
+
+    rendered = output.getvalue()
+    assert rendered.count("The assistant is working") == 1
+    assert rendered.index("working") < rendered.index("The assistant is done.")
+
+
+class _Mismatched(FakeAssistantEngine):
+    """A hub that came back speaking another protocol version than this client."""
+
+    def follow_chat(self, *, after: int) -> AsyncIterator[ChatStreamChunk | ChatStreamEnd]:
+        del after
+        msg = "the hub speaks protocol 81 and this client 80"
+        raise ProtocolError(msg)
+
+
+async def test_a_failure_waiting_cannot_mend_ends_the_chat(output: StringIO) -> None:
+    """Only a hub not listening, or a closed connection, is waited out; this is rendered."""
+    engine = _Mismatched()
+    conversation = await _started(engine, HUB)
+
+    code = await _chat(engine, conversation, _never(), retry_seconds=0.01)
+
+    assert code == cli._EXIT_ERROR
+    rendered = _flat(output.getvalue())
+    assert "the hub speaks protocol 81 and this client 80" in rendered
+    assert "Lost the hub" not in rendered
 
 
 def test_working_names_the_activation_a_stop_would_name(output: StringIO) -> None:
