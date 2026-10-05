@@ -25,6 +25,7 @@ from ai_assistant.core.streams import closing_stream
 from ai_assistant.core.types import (
     CHAT_DEVICES_MAX,
     HUB_REQUESTING_DEVICE,
+    ChatChanges,
     ChatDevice,
     ChatStreamChunk,
     ChatStreamEnd,
@@ -78,9 +79,15 @@ class _Engine:
         self.closing = False
         self.forgotten = 0
         self.states: dict[str, ConversationState] = {}
+        #: Where set, a state read waits on it, having set ``reading``.
+        self.gate: asyncio.Event | None = None
+        self.reading = asyncio.Event()
 
     async def state_of(self, conversation_id: str, running: Sequence[str | None]) -> object:
         del running
+        if self.gate is not None:
+            self.reading.set()
+            await self.gate.wait()
         return self.states.get(conversation_id, ConversationState())
 
 
@@ -227,6 +234,30 @@ async def test_a_device_removed_part_way_through_a_page_is_sent_nothing_more_of_
     assert first.change is not None
     assert first.change.conversation_id is None, "my devices, before the removal"
     assert [type(one.change) for one in rest] == [DevicesChangedChange], "its removal alone"
+
+
+async def test_a_device_removed_while_its_state_is_read_is_not_sent_it() -> None:
+    """§7:5 again after the state's own read: the episodes take a read of their own."""
+    chat = FakeConversationStore()
+    conversation = await _chat(chat, _PHONE, _WATCH)
+    engine = _Engine()
+    engine.gate = asyncio.Event()
+    async with _Following(_stream(chat, engine).follow(WATCH, after=0)) as following:
+        await following.drain()
+        engine.activity = {conversation: Activity(turns=1, running=("a-1",))}
+        async with asyncio.timeout(_SETTLE):
+            await engine.reading.wait()
+        await chat.set_conversation_devices(conversation, [_PHONE])
+        engine.gate.set()
+        sent: list[ChatStreamChunk] = []
+        while (chunk := await following.next(0.2)) is not None:
+            assert isinstance(chunk, ChatStreamChunk)
+            sent.append(chunk)
+
+    assert [one.state for one in sent if one.state is not None] == []
+    assert [type(one.change.change) for one in sent if one.change is not None] == [
+        DevicesChangedChange
+    ], "its removal alone"
 
 
 async def test_destroyed_episodes_send_every_read_conversations_state_again() -> None:
@@ -517,3 +548,28 @@ def test_a_set_of_devices_admitted_is_one_its_chunk_can_carry() -> None:
     chunk = ChatStreamChunk(change=DeviceChange(change=change, snapshot=emptied))
 
     assert len(canonical_payload(chunk)) <= limit
+
+
+def test_a_message_recorded_before_the_stream_existed_fits_its_chunk() -> None:
+    """A record admitted when only the two pages were measured still fits one chunk.
+
+    The second round's case: ``check_message_fits`` measured the transcript page and
+    the change page before this stream was built, and a record it admitted then at the
+    boundary is still in the chat space. A chunk leaves its absent members out, so it
+    is no wider than that change page, and the stream carries it.
+    """
+    for limit in (1024, 2048, 4096):
+        low, high = 1, limit
+        while high - low > 1:
+            middle = (low + high) // 2
+            said = UserMessage(device_id="phone", message_id="m", text="x" * middle)
+            chunk = _widest_chunk(_UUID_WIDE, said.as_new_message())
+            assert chunk.change is not None
+            page = ChatChanges(changes=(chunk.change.change,), next_after=_WIDEST)
+            if len(canonical_payload(page)) <= limit:
+                low = middle
+            else:
+                high = middle
+        said = UserMessage(device_id="phone", message_id="m", text="x" * low)
+        chunk = _widest_chunk(_UUID_WIDE, said.as_new_message())
+        assert len(canonical_payload(chunk)) <= limit

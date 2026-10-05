@@ -41,9 +41,11 @@ from pydantic import (
     Field,
     NonNegativeInt,
     SecretStr,
+    SerializerFunctionWrapHandler,
     TypeAdapter,
     ValidationInfo,
     field_validator,
+    model_serializer,
     model_validator,
 )
 from pydantic.functional_serializers import PlainSerializer
@@ -16600,6 +16602,20 @@ class DeviceConversation(BaseModel):
         return self
 
 
+def _members_held(handler: SerializerFunctionWrapHandler, value: BaseModel) -> dict[str, Any]:
+    """``value``'s members with each absent one — ``None``, or a flag not raised — left out.
+
+    The change stream's chunk holds exactly one of several members, so writing every
+    other one as ``null`` would put a member name and a ``null`` on the wire for each,
+    on every chunk. Leaving them out makes a chunk carrying a change no wider than the
+    one-change page of ``chat_changes``, so a message recorded within the limit before
+    the stream existed is one a chunk can still carry. Decoding is unchanged: an
+    absent member takes its default.
+    """
+    dumped: dict[str, Any] = handler(value)
+    return {name: held for name, held in dumped.items() if held is not None and held is not False}
+
+
 class DeviceChange(BaseModel):
     """One change a device may see, with its snapshot where it adds the device (ADR-0298 §7).
 
@@ -16640,6 +16656,10 @@ class DeviceChange(BaseModel):
             msg = f"a change's snapshot holds at most {CHAT_SNAPSHOT_ENTRIES} entries"
             raise ValueError(msg)
         return self
+
+    @model_serializer(mode="wrap")
+    def _without_absent_members(self, handler: SerializerFunctionWrapHandler) -> dict[str, Any]:
+        return _members_held(handler, self)
 
     @property
     def seq(self) -> int:
@@ -16710,7 +16730,9 @@ class ChatStreamChunk(BaseModel):
 
     Only a ``change`` moves a device's cursor; the other three carry no sequence number.
     One concrete class, so the wire tells a chunk from the stream's end by type, as it
-    does for a reply stream (§7:3).
+    does for a reply stream (§7:3). **The members it does not hold are left out of its
+    encoding** rather than written as ``null`` (:func:`_members_held`), which is what
+    lets a chunk carry every change ``chat_changes`` can.
     """
 
     model_config = ConfigDict(extra="forbid", frozen=True)
@@ -16737,6 +16759,10 @@ class ChatStreamChunk(BaseModel):
             msg = "a device's roles are distinct and in their one order, ascending"
             raise ValueError(msg)
         return self
+
+    @model_serializer(mode="wrap")
+    def _without_absent_members(self, handler: SerializerFunctionWrapHandler) -> dict[str, Any]:
+        return _members_held(handler, self)
 
 
 class ChatStreamEnd(BaseModel):

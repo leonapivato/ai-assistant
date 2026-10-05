@@ -271,12 +271,18 @@ class ChangeStream:
     async def _state(
         self, device: RequestingDevice, conversation_id: str, now: Running
     ) -> CurrentState | None:
-        """The conversation's current state, where the device reads it now, else ``None``."""
+        """The conversation's current state, where the device reads it now, else ``None``.
+
+        Whether it reads is asked again once the state is read, so a device removed
+        while the episodes were being read is not sent it (ADR-0298 §7:5).
+        """
         if not await self._reads(device, conversation_id):
             return None
         held = now.get(conversation_id)
         running = () if held is None else held.running
         state = await self._read(self._state_of(conversation_id, running))
+        if not await self._reads(device, conversation_id):
+            return None
         return CurrentState(conversation_id=conversation_id, state=state)
 
 
