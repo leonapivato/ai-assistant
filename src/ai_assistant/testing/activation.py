@@ -52,6 +52,7 @@ from ai_assistant.core.types import (
     UnderstandingProducer,
     is_live_confirmation_park,
 )
+from ai_assistant.orchestration.activation_cleanup import drain_registered
 
 if TYPE_CHECKING:
     from collections.abc import Callable, Coroutine, Mapping
@@ -116,25 +117,15 @@ async def _drained(cleanup: Coroutine[object, object, None]) -> None:
     """Run ``cleanup`` to its end through any cancellation, then pass a cancellation on.
 
     A forgotten capture's compensation is safety work (ADR-0275 §8:11): cancelling
-    the caller must not cut it short and leave a forgotten episode stored. A failure
-    of the cleanup itself is dropped, as the engine's compensation logs and drops
-    one; the cancellation it outlived is raised once it is done.
+    the caller must not cut it short and leave a forgotten episode stored. The drain
+    is the engine's own (``drain_registered``, as its safety work uses it), so the
+    fake and the engine hold a caller's cancellation the same way — including one
+    that lands after the cleanup has finished (ADR-0060). A failure of the cleanup
+    itself is dropped, as the engine's compensation logs and drops one; the
+    cancellation it outlived is raised once it is done.
     """
-    task = asyncio.ensure_future(cleanup)
-    cancelled = False
-    while not task.done():
-        try:
-            await asyncio.shield(task)
-        except asyncio.CancelledError:
-            if not task.done():
-                cancelled = True
-        except Exception:  # noqa: S110 — the cleanup's own failure is dropped, as above
-            pass
-    if not task.cancelled():
-        with contextlib.suppress(Exception):
-            task.result()
-    if cancelled:
-        raise asyncio.CancelledError
+    with contextlib.suppress(Exception):
+        await drain_registered(asyncio.ensure_future(cleanup), cancel_on_interrupt=False)
 
 
 @dataclass

@@ -1850,3 +1850,47 @@ async def test_a_forgotten_captures_cleanup_outlasts_its_callers_cancellation() 
 
     assert landed
     assert await memory.get(landed[0]) is None
+
+
+async def test_a_cancellation_landing_as_the_cleanup_finishes_still_cancels_the_turn() -> None:
+    """ADR-0060, ADR-0293 §2:6: a cancellation is never lost to a finished cleanup.
+
+    The withdrawal is released and the turn cancelled with no yield between, so the
+    cleanup ends before the turn handles its cancellation. The turn still ends
+    cancelled, and the episode is still gone (#2696 round 7).
+    """
+    engine = FakeAssistantEngine()
+    conversation = (await engine.start_conversation()).id
+    memory = engine.episode_memory
+    writing, write_go = asyncio.Event(), asyncio.Event()
+    deleting, delete_go = asyncio.Event(), asyncio.Event()
+    write, delete = memory.write_atomic, memory.delete
+    landed: list[str] = []
+
+    async def held_write(writes: Sequence[MemoryWrite]) -> Sequence[str]:
+        writing.set()
+        await write_go.wait()
+        landed.extend(one.record.id for one in writes)
+        return await write(writes)
+
+    async def held_delete(record_id: str) -> bool:
+        deleting.set()
+        await delete_go.wait()
+        return await delete(record_id)
+
+    memory.write_atomic = held_write  # type: ignore[method-assign]
+    turn = asyncio.create_task(
+        engine.receive(_hello(conversation), reply=WholeTextReply(), timeout=timedelta(seconds=5))
+    )
+    await writing.wait()
+    await engine.forget_conversation(conversation)
+    memory.delete = held_delete  # type: ignore[method-assign]
+    write_go.set()
+    await deleting.wait()
+    delete_go.set()
+    turn.cancel()
+    with pytest.raises(asyncio.CancelledError):
+        await turn
+
+    assert landed
+    assert await memory.get(landed[0]) is None
