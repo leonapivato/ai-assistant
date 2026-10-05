@@ -10944,19 +10944,22 @@ class ConversationStore(Protocol):
     when the change was recorded:
 
     * **A change reaches a device by membership as of that change.** A change in a
-      conversation — a message added or deleted, the conversation deleted — reaches
-      a device only if the device was that conversation's end for reading as the
-      conversation's devices stood when the change was recorded; a change that sets
-      a conversation's devices, or "my devices", reaches every device in the set
-      before it or after it, whatever its access, and starting a conversation sets
-      its devices from none. So a device sees the change that added it and the
-      change that removed it (ADR-0296 §4:7, §4:8), and no change in that
-      conversation from before the one or after the other: the snapshot it takes on
-      joining covers what came before (ADR-0293 §5:13).
-    * **A deletion keeps who its ends were.** Deleting a conversation removes its
-      devices with its transcript, so the store keeps, beside the deletion's change
-      and in nothing a read presents, which devices were its ends when it was
-      deleted, and the deletion reaches the ones that read it.
+      conversation — a message added or deleted — reaches a device only if the
+      device was that conversation's end for reading as the conversation's devices
+      stood when the change was recorded; a change that sets a conversation's
+      devices, or "my devices", reaches every device in the set before it or after
+      it, whatever its access, and starting a conversation sets its devices from
+      none. So a device sees the change that added it and the change that removed it
+      (ADR-0296 §4:7, §4:8), and no change in that conversation from before the one
+      or after the other: the snapshot it takes on joining covers what came before
+      (ADR-0293 §5:13).
+    * **A deletion reaches every device that read the conversation.** Deleting a
+      conversation removes every earlier change of it from the stream, a device's
+      removal among them, so the deletion stands in for all of them: the store keeps,
+      beside the deletion's change and in nothing a read presents, every device that
+      was the conversation's end for reading at any point of its recorded history,
+      and the deletion reaches each of those — so a device removed and not yet caught
+      up still learns it holds a conversation it must drop (ADR-0296 §4:8).
     """
 
     async def start(self) -> Conversation:
@@ -11744,12 +11747,15 @@ class ConversationStore(Protocol):
         """Read every change after a cursor that ``device_id`` may see (ADR-0296 §4:5).
 
         :meth:`changes` filtered to one device by the class docstring's rule: a
-        change in a conversation where the device was that conversation's end for
-        reading as the conversation's devices stood when the change was recorded,
-        and a change that sets a conversation's devices, or "my devices", where the
-        device is in the set before it or after it. So the change that removes the
-        device from a conversation reaches it (ADR-0296 §4:8), and the conversation's
-        changes from before the change that adds it do not (§4:7).
+        message added or deleted where the device was that conversation's end for
+        reading as the conversation's devices stood when the change was recorded; a
+        change that sets a conversation's devices, or "my devices", where the device
+        is in the set before it or after it; and a conversation's deletion where the
+        device read the conversation at any point of its recorded history. So the
+        change that removes the device from a conversation reaches it, or the
+        conversation's deletion does where it removed that change from the stream
+        (ADR-0296 §4:8), and the conversation's changes from before the change that
+        adds it do not (§4:7).
 
         The page and its cursor are :meth:`changes`' own: in sequence order, at most
         ``limit`` changes, and ``next_after`` moves across every change passed over,

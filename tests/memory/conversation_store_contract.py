@@ -37,6 +37,7 @@ from pydantic import ValidationError
 
 from ai_assistant.core.errors import ConversationStoreError, UnknownConversationError
 from ai_assistant.core.types import (
+    CHAT_DEVICES_MAX,
     TRANSCRIPT_MESSAGE_MAX_CHARS,
     ChatDevice,
     ConversationDeletedChange,
@@ -2870,10 +2871,54 @@ class ConversationStoreContract:
         def deleted(seen: list[Any]) -> set[str]:
             return {one.conversation_id for one in seen if one.kind == "conversation_deleted"}
 
+        # The watch read the stamped conversation before it was moved off it, and the
+        # deletion cleared that removal from the stream, so it carries the news.
         assert deleted(await _seen_by(store, "phone")) == {stamped, reclaimed}
-        assert deleted(await _seen_by(store, "watch")) == {reclaimed}
+        assert deleted(await _seen_by(store, "watch")) == {stamped, reclaimed}
         assert deleted(await _seen_by(store, "keyboard")) == set()
         assert deleted(await _seen_by(store, "laptop")) == set()
+
+    async def test_a_removed_device_catching_up_after_a_deletion_still_drops_it(
+        self, factory: ConversationStoreFactory
+    ) -> None:
+        """ADR-0296 §4:8: the deletion that clears a removal tells the removed device."""
+        clock = MovableClock()
+        store = _build(factory, now=clock, new_id=ScriptedIds(["stamped", "reclaimed"]))
+        await store.set_my_devices([_PHONE, _WATCH])
+        stamped = (await store.start()).id
+        reclaimed = (await store.start()).id
+        saved = (await store.device_changes("watch", after=0)).next_after
+        for conversation in (stamped, reclaimed):
+            await store.set_conversation_devices(conversation, [_PHONE])
+        await store.set_conversation_devices(stamped, [_PHONE, _KEYBOARD])
+
+        await store.stamp_deleted(stamped)
+        clock.advance(_RETENTION)
+        assert await store.drop_if_eligible(reclaimed) is True
+
+        caught_up = await _seen_by(store, "watch", after=saved)
+        assert {one.conversation_id for one in caught_up if one.kind == "conversation_deleted"} == {
+            stamped,
+            reclaimed,
+        }
+        assert not [
+            one for one in await _seen_by(store, "keyboard") if one.kind == "conversation_deleted"
+        ]
+
+    async def test_a_deletion_reaches_readers_beyond_one_sets_bound(
+        self, store: ConversationStore
+    ) -> None:
+        """Each set holds at most ``CHAT_DEVICES_MAX``; a history of readers does not."""
+        conversation = await _chat(store)
+        for index in range(CHAT_DEVICES_MAX + 3):
+            reader = ChatDevice(device_id=f"reader-{index:03}", access=DeviceAccess.READ)
+            await store.set_conversation_devices(conversation, [_PHONE, reader])
+
+        await store.stamp_deleted(conversation)
+
+        for device in ("watch", "reader-000", f"reader-{CHAT_DEVICES_MAX + 2:03}"):
+            seen = await _seen_by(store, device)
+            assert [one.kind for one in seen][-1] == "conversation_deleted"
 
     async def test_a_deleted_messages_addition_reaches_no_device(
         self, store: ConversationStore

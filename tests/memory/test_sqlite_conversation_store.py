@@ -1669,6 +1669,7 @@ async def test_a_file_written_before_the_chat_space_opens_with_empty_transcripts
             "device_changes",
         ),
         ("UPDATE conversations SET started_at = 'then'", "device_conversations"),
+        ("UPDATE conversation_devices SET access = 'everything'", "device_conversations"),
     ],
 )
 async def test_a_corrupt_chat_row_is_a_store_fault_on_the_read(
@@ -1787,14 +1788,14 @@ async def test_a_change_that_cannot_be_recorded_leaves_the_transcript_as_it_was(
 
 
 @pytest.mark.integration
-async def test_a_deletion_recorded_before_its_ends_were_kept_reaches_every_device(
+async def test_a_deletion_recorded_before_its_readers_were_kept_reaches_no_device(
     tmp_path: Path,
 ) -> None:
-    """A ``conversation_deleted`` row with no ends is read as reaching every device.
+    """A ``conversation_deleted`` row with no readers kept reaches no device (ADR-0296 §4:5).
 
-    Such a row was written by a build before the deletion kept who its ends were
-    (ADR-0296 §4:5). It carries an opaque id alone, and a device left holding a
-    deleted conversation is the worse error.
+    Such a row was written by a build before the deletion kept who read the
+    conversation, when no device followed the change stream, so no device holds what
+    it names; and a device's stream carries only what that device may see.
     """
     path = tmp_path / "conversations.db"
     store = SqliteConversationStore(path=path, now=_fixed_now)
@@ -1808,11 +1809,28 @@ async def test_a_deletion_recorded_before_its_ends_were_kept_reaches_every_devic
 
         for device in ("phone", "stranger"):
             seen = (await store.device_changes(device, after=0)).changes
-            assert [one.conversation_id for one in seen if one.kind == "conversation_deleted"] == [
-                conversation
-            ]
+            assert [one for one in seen if one.kind == "conversation_deleted"] == []
+        assert [one.kind for one in (await store.changes(after=0)).changes][-1] == (
+            "conversation_deleted"
+        )
     finally:
         store.close()
+
+
+def test_the_set_a_change_was_recorded_under_is_found_without_walking_messages(
+    tmp_path: Path,
+) -> None:
+    """The membership lookup uses the partial index, so a long conversation is not quadratic."""
+    path = tmp_path / "conversations.db"
+    SqliteConversationStore(path=path, now=_fixed_now).close()
+    raw = sqlite3.connect(path)
+    try:
+        plan = raw.execute(
+            "EXPLAIN QUERY PLAN " + conversation_store._DEVICE_CHANGES_SQL, (0, 10)
+        ).fetchall()
+    finally:
+        raw.close()
+    assert any("chat_changes_membership" in str(row[-1]) for row in plan), plan
 
 
 @pytest.mark.integration

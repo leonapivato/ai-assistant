@@ -226,13 +226,16 @@ _SEARCH_DRAW_COLUMNS: Final = (
 #: removed (§5:10); a change row holds no text, and a ``message_added`` row is read
 #: with the message it names. A ``devices_changed`` or ``conversation_started`` row
 #: holds the whole set it set, so a conversation's devices as of any change are the
-#: set of the latest such row before it (ADR-0296 §4:5); a ``conversation_deleted``
-#: row holds the ends the conversation had when it was deleted, which no read presents
-#: and only :meth:`SqliteConversationStore.device_changes` consults, because the
-#: deletion clears every earlier row it could be read from. ``NULL`` there is a row
-#: written before it was kept, read as reaching every device: a deletion carries an id
-#: alone, and a device left holding a deleted conversation is the worse error. The
-#: ``conversation_devices_device`` index serves a device's own reads and its removal.
+#: set of the latest such row before it (ADR-0296 §4:5), which the partial
+#: ``chat_changes_membership`` index finds without walking a conversation's messages; a
+#: ``conversation_deleted`` row holds every device that read the conversation at any
+#: point of its recorded history, which no read presents and only
+#: :meth:`SqliteConversationStore.device_changes` consults: the deletion clears every
+#: earlier row of the conversation, a device's removal among them, so it stands in for
+#: all of them (§4:8). ``NULL`` there is a row written before it was kept, and reaches
+#: no device: no device followed the stream before it was kept, so none holds what it
+#: names. The ``conversation_devices_device`` index serves a device's own reads and its
+#: removal.
 #: Every table but ``chat_changes`` and ``chat_devices``
 #: cascades from its conversation, and each is also cleared explicitly where a
 #: conversation goes, for the reason ``drop_if_eligible`` gives for the deliveries.
@@ -255,6 +258,8 @@ _CHAT_SCHEMA: Final = (
     "seq INTEGER PRIMARY KEY AUTOINCREMENT, kind TEXT NOT NULL, conversation_id TEXT, "
     "position INTEGER, devices TEXT)",
     "CREATE INDEX IF NOT EXISTS chat_changes_conversation ON chat_changes(conversation_id, seq)",
+    "CREATE INDEX IF NOT EXISTS chat_changes_membership ON chat_changes(conversation_id, seq) "
+    "WHERE kind IN ('conversation_started', 'devices_changed')",
     "CREATE TABLE IF NOT EXISTS taken_in("
     "conversation_id TEXT NOT NULL REFERENCES conversations(id) ON DELETE CASCADE, "
     "position INTEGER NOT NULL, activation_id TEXT NOT NULL, "
@@ -279,10 +284,11 @@ _ACTIVATION_ID: Final[TypeAdapter[str]] = TypeAdapter(Identifier)
 #: ``ChatDevice`` holds its id in, so a name no set could hold is refused before I/O.
 _DEVICE_ID: Final[TypeAdapter[str]] = TypeAdapter(Identifier)
 
-#: The access values that make a device one of a conversation's ends for reading
-#: (ADR-0293 §3:5), as the JSON array :meth:`SqliteConversationStore.device_conversations`
-#: binds.
-_READING_ACCESS: Final = json.dumps(sorted(one.value for one in DeviceAccess if one.reads))
+#: The access values that leave a device an end for writing alone (ADR-0293 §3:5), as
+#: the JSON array :meth:`SqliteConversationStore.device_conversations` excludes. Excluded
+#: rather than the reading values selected, so a stored value that is neither reaches
+#: :class:`DeviceConversation`'s validation and is a store fault, not a row withheld.
+_WRITING_ONLY: Final = json.dumps(sorted(one.value for one in DeviceAccess if not one.reads))
 
 #: The read behind :meth:`SqliteConversationStore.device_changes` (ADR-0296 §4:5): the
 #: changes after a cursor, each with the message an addition names and with the set of
@@ -916,6 +922,29 @@ def _change_from(row: Sequence[Any]) -> ChatChange:
     raise ConversationStoreError(msg)
 
 
+def _readers_from(conversation_id: object, value: object) -> tuple[ChatDevice, ...]:
+    """Rebuild the readers a deletion row keeps, surfacing corruption as this seam's error.
+
+    Unlike a set of devices, the readers of a conversation's whole history are not
+    bounded by :data:`~ai_assistant.core.types.CHAT_DEVICES_MAX`: each set was, and a
+    device may have come and gone.
+
+    Raises:
+        ConversationStoreError: If the stored value is not a JSON list of distinct
+            devices.
+    """
+    try:
+        decoded = [ChatDevice.model_validate(one) for one in _json_list_of(value)]
+    except (ValueError, TypeError) as exc:
+        described = describe_untrusted(conversation_id)
+        msg = f"a stored deletion's readers could not be decoded for {described}"
+        raise ConversationStoreError(msg) from exc
+    if len({one.device_id for one in decoded}) != len(decoded):
+        msg = f"a stored deletion names a reader twice for {describe_untrusted(conversation_id)}"
+        raise ConversationStoreError(msg)
+    return tuple(decoded)
+
+
 def _set_of(conversation_id: object, value: object) -> tuple[ChatDevice, ...]:
     """A stored set of devices, ``NULL`` read as no set: none before the first."""
     return () if value is None else _devices_from(conversation_id, value)
@@ -931,10 +960,10 @@ def _reaches(device: str, row: Sequence[Any]) -> bool:
 
     ``row`` is one of :data:`_DEVICE_CHANGES_SQL`'s: the change's own set is column 4
     and the set it was recorded under the last. A change that sets a set reaches every
-    device in it before or after; a deletion, the ends that read the conversation when
-    it was deleted (every device, where a row written before those were kept holds
-    none); every other change, the ends that read its conversation as its devices
-    stood when it was recorded.
+    device in it before or after; a deletion, every device that read the conversation
+    at any point of its recorded history (none, where a row written before those were
+    kept holds none); every other change, the ends that read its conversation as
+    its devices stood when it was recorded.
 
     Raises:
         ConversationStoreError: If a stored set of devices does not decode, or the
@@ -947,9 +976,7 @@ def _reaches(device: str, row: Sequence[Any]) -> bool:
             or _named(device, _set_of(conversation_id, before)) is not None
         )
     if kind == "conversation_deleted":
-        if own is None:
-            return True
-        ends = _set_of(conversation_id, own)
+        ends = () if own is None else _readers_from(conversation_id, own)
     elif kind in {"message_added", "message_deleted"}:
         ends = _set_of(conversation_id, before)
     else:
@@ -1316,6 +1343,37 @@ class SqliteConversationStore:
             "VALUES (?, ?, ?, ?)",
             (kind, conversation_id, position, None if devices is None else _devices_json(devices)),
         )
+
+    @classmethod
+    def _readers_of(cls, conn: sqlite3.Connection, conversation_id: str) -> tuple[ChatDevice, ...]:
+        """Every device that read the conversation at any point of its recorded history.
+
+        What its deletion keeps (ADR-0296 §4:8): the deletion clears every change of
+        the conversation, so a device removed before it, whose removal it clears, is
+        told by the deletion instead. Read from each set the stream recorded, and
+        from the devices the conversation has now, since one started before the chat
+        space had a stream has no set recorded. Each device with its latest reading
+        access, ``device_id`` ascending.
+
+        Raises:
+            ConversationStoreError: If the store cannot be read, or a row is corrupt.
+        """
+        rows = cls._fetch(
+            conn,
+            "read a conversation's history of devices",
+            "SELECT devices FROM chat_changes WHERE conversation_id = ? "
+            "AND kind IN ('conversation_started', 'devices_changed') ORDER BY seq ASC",
+            (conversation_id,),
+        )
+        readers: dict[str, ChatDevice] = {}
+        for (value,) in rows:
+            for one in _set_of(conversation_id, value):
+                if one.access.reads:
+                    readers[one.device_id] = one
+        for one in cls._devices_of(conn, conversation_id):
+            if one.access.reads:
+                readers[one.device_id] = one
+        return tuple(readers[one] for one in sorted(readers))
 
     @staticmethod
     def _clear_chat_of(conn: sqlite3.Connection, conversation_id: str) -> None:
@@ -1786,8 +1844,8 @@ class SqliteConversationStore:
             )
             # ADR-0293 §2:3: the transcript goes with the conversation, and its
             # devices learn of it from the one change left in the stream, which
-            # keeps who they were (ADR-0296 §4:5).
-            ends = self._devices_of(conn, conversation_id)
+            # keeps every device that read it (ADR-0296 §4:5, §4:8).
+            ends = self._readers_of(conn, conversation_id)
             self._clear_chat_of(conn, conversation_id)
             self._record_change(conn, "conversation_deleted", conversation_id, devices=ends)
             return True
@@ -1860,7 +1918,7 @@ class SqliteConversationStore:
                 conn.execute("DELETE FROM taken_in WHERE conversation_id = ?", (conversation_id,))
             else:
                 # A reclaim is a deletion as far as the conversation's devices go.
-                ends = self._devices_of(conn, conversation_id)
+                ends = self._readers_of(conn, conversation_id)
                 self._clear_chat_of(conn, conversation_id)
                 self._record_change(conn, "conversation_deleted", conversation_id, devices=ends)
             conn.execute("DELETE FROM conversations WHERE id = ?", (conversation_id,))
@@ -2478,9 +2536,9 @@ class SqliteConversationStore:
             "SELECT c.id, c.started_at, c.last_active_at, c.last_turn_at, c.deleted_at, "
             "d.access FROM conversations c JOIN conversation_devices d "
             "ON d.conversation_id = c.id WHERE c.deleted_at IS NULL AND d.device_id = ? "
-            "AND d.access IN (SELECT value FROM json_each(?)) "
+            "AND d.access NOT IN (SELECT value FROM json_each(?)) "
             "ORDER BY c.last_active_at DESC, c.id ASC LIMIT ? OFFSET ?",
-            (device, _READING_ACCESS, limit, offset),
+            (device, _WRITING_ONLY, limit, offset),
         )
 
     async def remove_device(self, device_id: str) -> bool:
