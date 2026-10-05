@@ -62,6 +62,7 @@ from ai_assistant.core.types import (
     ConversationExport,
     ConversationStartedChange,
     DeletedMessage,
+    DeviceConversation,
     DevicesChangedChange,
     Identifier,
     MessageAddedChange,
@@ -133,6 +134,14 @@ _DEFAULT_TRANSCRIPT_PAGE: Final = 50
 _DEFAULT_CHANGES_PAGE: Final = 100
 _DEFAULT_AWAITING_PAGE: Final = 100
 
+#: The page size :meth:`FakeConversationStore.device_conversations` defaults to:
+#: ``recent``'s, since it is ``recent`` for one device.
+_DEFAULT_DEVICE_CONVERSATIONS_PAGE: Final = 50
+
+#: The device a device-scoped call names goes through the type a ``ChatDevice``
+#: holds its id in, exactly as the production store's does.
+_DEVICE_ID: Final[TypeAdapter[str]] = TypeAdapter(Identifier)
+
 
 def _check_position(name: str, value: object) -> int:
     """Refuse a position that is not an exact ``int`` in ``[1, 2**63)``.
@@ -169,6 +178,27 @@ def _checked_positions(positions: object) -> tuple[int, ...]:
     for one in held:
         _check_position("a position", one)
     return held
+
+
+def _checked_device_id(device_id: object) -> str:
+    """Check the device a device-scoped call names, before anything is read.
+
+    Duplicated from the production store rather than shared, for :data:`_PAGE_BOUND`'s
+    reason.
+
+    Raises:
+        ValueError: If ``device_id`` is not a non-blank ``str``.
+    """
+    try:
+        return _DEVICE_ID.validate_python(device_id, strict=True)
+    except ValidationError as exc:
+        msg = f"device_id must be a non-blank str, got {describe_untrusted(device_id)}"
+        raise ValueError(msg) from exc
+
+
+def _access_of(device: str, devices: tuple[ChatDevice, ...]) -> ChatDevice | None:
+    """The entry ``devices`` holds for ``device``, or ``None``."""
+    return next((one for one in devices if one.device_id == device), None)
 
 
 def _checked_conversation_ids(conversation_ids: object) -> tuple[str, ...] | None:
@@ -413,6 +443,10 @@ class FakeConversationStore:
         #: The change stream (§5:10), in sequence order, and its counter.
         self._changes: list[ChatChange] = []
         self._seq = 0
+        #: Per deletion's sequence number, the ends its conversation had when it was
+        #: deleted: what the store keeps beside the deletion, read by
+        #: :meth:`device_changes` alone (ADR-0296 §4:5).
+        self._deleted_ends: dict[int, tuple[ChatDevice, ...]] = {}
         #: The reader's bookkeeping (§6:6): per conversation, position to activation.
         self._taken: dict[str, dict[int, str]] = {}
         self._start_lock = asyncio.Lock()
@@ -530,6 +564,35 @@ class FakeConversationStore:
     def _drop_changes_of(self, conversation_id: str) -> None:
         """Remove every change of one conversation from the stream."""
         self._changes = [one for one in self._changes if one.conversation_id != conversation_id]
+
+    def _record_deletion(self, conversation_id: str, ends: tuple[ChatDevice, ...]) -> None:
+        """Record a conversation's deletion, keeping the ends it had (ADR-0296 §4:5)."""
+        seq = self._next_seq()
+        self._deleted_ends[seq] = ends
+        self._changes.append(ConversationDeletedChange(seq=seq, conversation_id=conversation_id))
+
+    def _reaches(
+        self, device: str, change: ChatChange, devices: dict[str | None, tuple[ChatDevice, ...]]
+    ) -> bool:
+        """Whether ``change`` reaches ``device``, ``devices`` holding the sets before it.
+
+        The class docstring's rule on the Protocol: a change that sets a set reaches
+        every device in it before or after; a deletion, the ends that read the
+        conversation when it was deleted; every other change, the ends that read its
+        conversation as its devices stood when it was recorded.
+        """
+        if isinstance(change, (ConversationStartedChange, DevicesChangedChange)):
+            before = devices.get(change.conversation_id, ())
+            return (
+                _access_of(device, before) is not None
+                or _access_of(device, change.devices) is not None
+            )
+        if isinstance(change, ConversationDeletedChange):
+            ends = self._deleted_ends.get(change.seq, ())
+        else:
+            ends = devices.get(change.conversation_id, ())
+        held = _access_of(device, ends)
+        return held is not None and held.access.reads
 
     def _clear_chat_of(self, conversation_id: str) -> None:
         """Remove the transcript, devices and bookkeeping kept under a conversation."""
@@ -783,12 +846,12 @@ class FakeConversationStore:
                 update={"deleted_at": self._now()}
             )
             # ADR-0293 §2:3: the conversation's transcript goes with it, and its
-            # devices learn of it from the one change left in the stream.
+            # devices learn of it from the one change left in the stream, which
+            # keeps who they were (ADR-0296 §4:5).
+            ends = self._devices.get(conversation_id, ())
             self._clear_chat_of(conversation_id)
             self._drop_changes_of(conversation_id)
-            self._changes.append(
-                ConversationDeletedChange(seq=self._next_seq(), conversation_id=conversation_id)
-            )
+            self._record_deletion(conversation_id, ends)
             return True
 
     async def drop_if_eligible(self, conversation_id: str) -> bool:
@@ -819,15 +882,14 @@ class FakeConversationStore:
             if not eligible:
                 return False
             self._deliveries.pop(conversation_id, None)  # ADR-0283 §6:7
+            ends = self._devices.get(conversation_id, ())
             self._clear_chat_of(conversation_id)
             del self._conversations[conversation_id]
             if not stamped:
                 # A reclaim is a deletion as far as the conversation's devices go;
                 # a stamped one recorded its deletion when it was stamped.
                 self._drop_changes_of(conversation_id)
-                self._changes.append(
-                    ConversationDeletedChange(seq=self._next_seq(), conversation_id=conversation_id)
-                )
+                self._record_deletion(conversation_id, ends)
             return True
 
     async def export(self) -> ConversationExport:
@@ -1118,3 +1180,106 @@ class FakeConversationStore:
                 return {}
             taken = self._taken[conversation_id]
             return {one: taken[one] for one in named if one in taken}
+
+    # --- the chat space: one device's view (ADR-0296 §3, §4) ------------------
+
+    async def device_changes(
+        self, device_id: str, *, after: int, limit: int = _DEFAULT_CHANGES_PAGE
+    ) -> ChatChanges:
+        """Read the changes after ``after`` that ``device_id`` may see (ADR-0296 §4:5).
+
+        Walks the whole stream from its start, carrying each set of devices forward
+        as the changes that set it pass, so each change is judged against the set as
+        it stood when it was recorded — the walk the ``sqlite3`` store does per change
+        with a subquery.
+
+        Raises:
+            ValueError: If ``device_id`` is malformed, or ``after`` or ``limit`` is
+                out of range.
+        """
+        device = _checked_device_id(device_id)
+        _check_page_bound("after", after)
+        _check_page_bound("limit", limit)
+        async with self._resource.held():  # a locked read on the durable store (#492)
+            if limit == 0:
+                return ChatChanges(next_after=after)
+            devices: dict[str | None, tuple[ChatDevice, ...]] = {}
+            page: list[ChatChange] = []
+            for one in self._changes:
+                if one.seq > after and self._reaches(device, one, devices):
+                    page.append(one)
+                    if len(page) == limit:
+                        return ChatChanges(changes=tuple(page), next_after=page[-1].seq)
+                if isinstance(one, (ConversationStartedChange, DevicesChangedChange)):
+                    devices[one.conversation_id] = one.devices
+            return ChatChanges(changes=tuple(page), next_after=self._seq)
+
+    async def device_conversations(
+        self,
+        device_id: str,
+        *,
+        limit: int = _DEFAULT_DEVICE_CONVERSATIONS_PAGE,
+        offset: int = 0,
+    ) -> list[DeviceConversation]:
+        """List the unstamped conversations ``device_id`` reads, as ``recent`` orders them.
+
+        Raises:
+            ValueError: If ``device_id`` is malformed, or ``limit`` or ``offset`` is
+                out of range.
+        """
+        device = _checked_device_id(device_id)
+        _check_page_bound("limit", limit)
+        _check_page_bound("offset", offset)
+        if limit == 0:
+            return []
+        async with self._resource.held():  # a locked read on the durable store (#492)
+            access = {
+                conversation_id: held
+                for conversation_id, devices in self._devices.items()
+                if (held := _access_of(device, devices)) is not None and held.access.reads
+            }
+            live = [
+                one
+                for one in self._conversations.values()
+                if one.deleted_at is None and one.id in access
+            ]
+        return [
+            DeviceConversation(conversation=one, access=access[one.id].access)
+            for one in _by_last_activity(live)[offset : offset + limit]
+        ]
+
+    async def remove_device(self, device_id: str) -> bool:
+        """Remove a device from every set of devices, as one step (ADR-0296 §3:6).
+
+        Held under the lock ``start`` and ``set_my_devices`` take, inside the
+        modelled resource every per-conversation mutation also holds, so nothing on
+        "my devices" or on any conversation lands between two of its removals.
+
+        Raises:
+            ValueError: If ``device_id`` is malformed.
+        """
+        device = _checked_device_id(device_id)
+        async with self._start_lock, self._resource.held():
+            await asyncio.sleep(0)
+            removed = False
+            if _access_of(device, self._my_devices) is not None:
+                self._my_devices = tuple(one for one in self._my_devices if one.device_id != device)
+                self._changes.append(
+                    DevicesChangedChange(seq=self._next_seq(), devices=self._my_devices)
+                )
+                removed = True
+            for conversation_id in sorted(self._devices):
+                devices = self._devices[conversation_id]
+                # A stamp clears its conversation's devices, so every set held here
+                # is a standing conversation's.
+                if _access_of(device, devices) is None:
+                    continue
+                kept = tuple(one for one in devices if one.device_id != device)
+                self._devices[conversation_id] = kept
+                self._changes.append(
+                    DevicesChangedChange(
+                        seq=self._next_seq(), conversation_id=conversation_id, devices=kept
+                    )
+                )
+                removed = True
+            return removed

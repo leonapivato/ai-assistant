@@ -158,6 +158,7 @@ if TYPE_CHECKING:
         DeferredProposal,
         DestinationTrust,
         DestinationTrustRecord,
+        DeviceConversation,
         DurableIdentifier,
         EffectKey,
         EffectOutcome,
@@ -10831,7 +10832,9 @@ class ConversationStore(Protocol):
     ADR-0293's acts in the medium added); each observes the conversation, decides, and
     writes as one indivisible step. :meth:`set_my_devices` and :meth:`start` are
     likewise one step each against "my devices", so a conversation is started with one
-    whole version of the set, never half of one. **The change stream is written
+    whole version of the set, never half of one. :meth:`remove_device` is one step
+    against "my devices" and every conversation together, so no act on any of them
+    lands between two of its removals (ADR-0296 §3:6). **The change stream is written
     inside the same step as the change it records**, so a change and its sequence
     number are one fact: no reader sees a change without its number, a number
     without its change, or a later number committed before an earlier one. An ``asyncio.Lock``
@@ -10846,7 +10849,8 @@ class ConversationStore(Protocol):
     **A conversation stamped deleted is absent from every read that presents
     it** — :meth:`get`, :meth:`recent`, :meth:`export`, :meth:`deliveries`,
     :meth:`transcript`, :meth:`conversation_devices`, :meth:`untaken_messages`,
-    :meth:`conversations_awaiting` and :meth:`taken_in` — while
+    :meth:`conversations_awaiting`, :meth:`taken_in` and :meth:`device_conversations`
+    — while
     :meth:`stamped_conversation_ids` still enumerates it, so the deletion
     sweep can find the tombstone and delete every episode on its channel (ADR-0283
     §8). That distinction is what keeps a tombstone from being a readable record of
@@ -10927,10 +10931,32 @@ class ConversationStore(Protocol):
       first build separates forgetting from deleting (§11:4).
     * **"My devices"** is copied onto a conversation when it starts (§3:1); a
       conversation's devices then change only by :meth:`set_conversation_devices`
-      (§3:3). Only a conversation's devices that may write can write a user's
-      message in it (§7:2): the store, as the medium's host, refuses any other.
+      (§3:3), and by :meth:`remove_device`, which revokes a device (ADR-0296 §3:6).
+      Only a conversation's devices that may write can write a user's message in it
+      (§7:2): the store, as the medium's host, refuses any other.
     * **The reader's bookkeeping is not the conversation's** (§6:7): it is in no
       transcript read and no change, and holds no text.
+
+    **One device's view** (ADR-0296 §3, §4). Device ids stay opaque here: what a
+    device is, its roles and its registration are the device session's, and nothing
+    here checks a role. What this seam adds is what only the medium's host can
+    answer, because only it holds each change together with the devices that stood
+    when the change was recorded:
+
+    * **A change reaches a device by membership as of that change.** A change in a
+      conversation — a message added or deleted, the conversation deleted — reaches
+      a device only if the device was that conversation's end for reading as the
+      conversation's devices stood when the change was recorded; a change that sets
+      a conversation's devices, or "my devices", reaches every device in the set
+      before it or after it, whatever its access, and starting a conversation sets
+      its devices from none. So a device sees the change that added it and the
+      change that removed it (ADR-0296 §4:7, §4:8), and no change in that
+      conversation from before the one or after the other: the snapshot it takes on
+      joining covers what came before (ADR-0293 §5:13).
+    * **A deletion keeps who its ends were.** Deleting a conversation removes its
+      devices with its transcript, so the store keeps, beside the deletion's change
+      and in nothing a read presents, which devices were its ends when it was
+      deleted, and the deletion reaches the ones that read it.
     """
 
     async def start(self) -> Conversation:
@@ -11709,6 +11735,102 @@ class ConversationStore(Protocol):
             ValueError: Before any I/O, as :meth:`take_in`'s ``positions``.
             ConversationStoreError: If the store cannot be read, or a stored row
                 is corrupt.
+        """
+        ...
+
+    # --- the chat space: one device's view (ADR-0296 §3, §4) ----------------------
+
+    async def device_changes(self, device_id: str, *, after: int, limit: int = 100) -> ChatChanges:
+        """Read every change after a cursor that ``device_id`` may see (ADR-0296 §4:5).
+
+        :meth:`changes` filtered to one device by the class docstring's rule: a
+        change in a conversation where the device was that conversation's end for
+        reading as the conversation's devices stood when the change was recorded,
+        and a change that sets a conversation's devices, or "my devices", where the
+        device is in the set before it or after it. So the change that removes the
+        device from a conversation reaches it (ADR-0296 §4:8), and the conversation's
+        changes from before the change that adds it do not (§4:7).
+
+        The page and its cursor are :meth:`changes`' own: in sequence order, at most
+        ``limit`` changes, and ``next_after`` moves across every change passed over,
+        seen or not, so a device whose conversations are quiet keeps up and sees the
+        gaps ADR-0296 §4:6 rules it sees. A device the store has never heard of
+        sees nothing and is no error: the device session, not this store, knows
+        which devices exist.
+
+        A read, so it takes no exclusion; it answers from one consistent reading.
+
+        Args:
+            device_id: The device, as the device session names it; a non-blank
+                ``str``.
+            after: The cursor: the last sequence number the device applied, ``0``
+                for none.
+            limit: Page size, at most ``2**63 - 1``; ``0`` returns no change and
+                leaves ``next_after`` at ``after``.
+
+        Returns:
+            The changes the device may see, and the cursor to ask from next.
+
+        Raises:
+            ValueError: Before any I/O, if ``device_id`` is not a non-blank ``str``,
+                or ``after`` or ``limit`` is outside ``[0, 2**63)``.
+            ConversationStoreError: If the store cannot be read, or a stored row
+                is corrupt.
+        """
+        ...
+
+    async def device_conversations(
+        self, device_id: str, *, limit: int = 50, offset: int = 0
+    ) -> list[DeviceConversation]:
+        """List the conversations ``device_id`` reads, with its access in each.
+
+        The conversations where the device is one of the conversation's ends for
+        reading, as their devices stand now (ADR-0293 §3:5, ADR-0296 §4:5) — what a
+        device takes its snapshots of on joining (§4:7) and what a listing of its
+        conversations holds. A conversation the device only writes in is not shown
+        to it and is not listed; a conversation stamped deleted is not listed.
+
+        Ordered and paged as :meth:`recent`: ``last_active_at`` descending, ``id``
+        ascending, ``limit`` and ``offset`` with ADR-0073 §2's range posture. A
+        device in no conversation, or one the store has never heard of, is answered
+        with an empty list.
+
+        Returns:
+            The page of the device's conversations, each with its access.
+
+        Raises:
+            ValueError: Before any I/O, if ``device_id`` is not a non-blank ``str``,
+                or ``limit`` or ``offset`` is outside ``[0, 2**63)``.
+            ConversationStoreError: If the store cannot be read, or a stored row
+                is corrupt.
+        """
+        ...
+
+    async def remove_device(self, device_id: str) -> bool:
+        """Remove ``device_id`` from "my devices" and from every conversation's devices.
+
+        Revoking a device removes it as an end of every conversation (ADR-0296
+        §3:6), and from "my devices", so it is an end of no new one. One step
+        against "my devices" and every conversation together (the class
+        docstring's exclusion): each set that names the device is set to itself
+        without it, and each such removal is recorded as the ``DevicesChangedChange``
+        :meth:`set_my_devices` or :meth:`set_conversation_devices` would record for
+        it — "my devices" first, then the conversations by ``id`` ascending — so
+        every other device sees the removal, and so would the device itself
+        (:meth:`device_changes`). A conversation stamped deleted has no devices
+        left to remove the device from.
+
+        Nothing is revoked here beyond the sets: roles, registrations and open
+        streams are the device session's.
+
+        Returns:
+            ``True`` where the device was removed from at least one set; ``False``
+            where no set named it, and nothing was recorded — removing is safe to
+            repeat.
+
+        Raises:
+            ValueError: Before any I/O, if ``device_id`` is not a non-blank ``str``.
+            ConversationStoreError: If the store cannot be written.
         """
         ...
 
