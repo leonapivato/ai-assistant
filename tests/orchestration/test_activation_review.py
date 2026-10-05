@@ -4,14 +4,13 @@ from __future__ import annotations
 
 import asyncio
 from datetime import timedelta
-from typing import TYPE_CHECKING
 
 import pytest
 from test_activation_writer import Wiring
 from test_engine import AT, PATIENT, Harness
 from test_engine_routing import _parked, _routed_harness, _seed_belief, _token
 
-from ai_assistant.core.errors import ConversationStoreError, OversizedValueError
+from ai_assistant.core.errors import OversizedValueError
 from ai_assistant.core.types import (
     ChannelIdentity,
     ChannelInput,
@@ -21,32 +20,7 @@ from ai_assistant.core.types import (
 )
 from ai_assistant.orchestration.activation_state import ActivationScope
 from ai_assistant.orchestration.engine import DrainPhase
-from ai_assistant.testing import FakeAssistantEngine, FakeConversationStore
-
-if TYPE_CHECKING:
-    from datetime import datetime
-
-    from ai_assistant.core.types import Conversation, SpokenDelivery
-
-
-class StampedThenUnknown(FakeConversationStore):
-    """``record_turn`` meets a conversation deleted meanwhile, and its outcome is unknown.
-
-    The episode is frozen by then (ADR-0286 §4), so the writer's compensation re-reads
-    the conversation, finds it gone, and destroys the episode through the drain (§7:4,
-    ADR-0275 §8:11).
-    """
-
-    async def record_turn(
-        self,
-        conversation_id: str,
-        *,
-        episode_id: str,
-        occurred_at: datetime,
-        delivery: SpokenDelivery | None = None,
-    ) -> Conversation | None:
-        await self.stamp_deleted(conversation_id)
-        raise ConversationStoreError("private provider diagnostics")
+from ai_assistant.testing import FakeAssistantEngine
 
 
 async def _hold(entered: asyncio.Event, release: asyncio.Event, cancelled: asyncio.Event) -> None:
@@ -58,38 +32,38 @@ async def _hold(entered: asyncio.Event, release: asyncio.Event, cancelled: async
         raise
 
 
-@pytest.mark.parametrize("stage", ["verify", "delete"])
 async def test_shutdown_does_not_cancel_safety_work_already_in_its_snapshot(
     monkeypatch: pytest.MonkeyPatch,
-    stage: str,
 ) -> None:
-    wiring = Wiring(conversations=StampedThenUnknown(now=lambda: AT))
+    """ADR-0275 §8:11: the drained deletion of a forgotten capture outlives shutdown.
+
+    The user forgets the episode while its activation runs (ADR-0286 §8), so capture's
+    next write deletes it through the drain; shutdown arriving while that deletion is
+    held must not cancel it. Before ADR-0293 §2:7 a deleted conversation's fence was
+    the other such work; deleting a conversation now forgets nothing, so forgetting is
+    what is left to drain.
+    """
+    wiring = Wiring()
     memory = wiring.memory
     state = await wiring.state()
     assert state.conversation_id is not None
     entered, release, cancelled, closed = (asyncio.Event() for _ in range(4))
-    original_get = wiring.conversations.get
     original_delete = memory.delete
 
-    async def get(conversation_id: str) -> Conversation | None:
-        if stage == "verify":
-            await _hold(entered, release, cancelled)
-        return await original_get(conversation_id)
-
     async def delete(record_id: str) -> bool:
-        if stage == "delete":
-            await _hold(entered, release, cancelled)
+        await _hold(entered, release, cancelled)
         return await original_delete(record_id)
 
     async def close() -> None:
         closed.set()
 
-    monkeypatch.setattr(wiring.conversations, "get", get)
     monkeypatch.setattr(memory, "delete", delete)
     harness = Harness(closers=(close,), drain_timeout=timedelta(0))
     harness.engine._activation_coordinator._writer = wiring.writer
 
     async def work() -> str:
+        assert state.episode_address is not None
+        wiring.writer.forgetting(state.episode_address)
         return "answer"
 
     task = harness.engine._activation_task(

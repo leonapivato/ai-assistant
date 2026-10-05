@@ -69,8 +69,6 @@ class _Writes:
 
     #: ``record_turn`` returned the conversation: it stands, and it knows the turn.
     verified: bool = False
-    #: ``record_turn`` returned ``None``: the conversation is absent or stamped.
-    gone: bool = False
 
 
 class ActivationWriter:
@@ -219,11 +217,11 @@ class ActivationWriter:
         whatever the conversation's state.
 
         **Once the freeze is confirmed, ``record_turn`` follows** (§4:4, as ADR-0287
-        left it), and it is the deletion verification (ADR-0283 §7:2). A ``None``
-        from it means the conversation was deleted, and the fence deletes the
-        episode; an indeterminate one re-reads the conversation (§7:4). That fence
-        runs through ``drain`` (ADR-0275 §8:11), so a cancellation of this call cannot
-        strand an episode on a conversation the user deleted.
+        left it). A ``None`` from it means the conversation was deleted, and **the
+        episode is kept** (ADR-0293 §2:7, superseding ADR-0283 §7:2 and §7:4 and
+        ADR-0286 §4:4 in their deletion): deleting a conversation forgets nothing, and
+        its episodes stay on its place until the user forgets them. The report stays
+        degraded, since the conversation never recorded the turn.
 
         **A record the user forgets while it is captured leaves nothing** (ADR-0286
         §8).
@@ -269,7 +267,7 @@ class ActivationWriter:
         try:
             if progress.frozen:
                 if conversation_id is not None and not writes.verified:
-                    await drain(self._fence(conversation_id, progress, writes))
+                    await drain(self._fence(progress))
             elif not progress.ended:
                 # Cut short before the freeze was confirmed — cancelled, timed out or
                 # raised: §5:2's capture failure.
@@ -295,10 +293,10 @@ class ActivationWriter:
         ``hub_stopped`` with outcome ``done``, at this clock's one reading. The
         placement and ``Provenance.derived_from_external`` stay as stored, and
         ``record_turn`` is called with no delivery only where the episode is on a
-        conversation's channel; a ``None`` from it deletes the
-        episode (§7:3). The closed record is measured against ADR-0275 §9:1's bound
-        as every write of an episode is (§3:6), and one that exceeds it is deleted
-        by its id as a capture failure (§5:2).
+        conversation's channel; a ``None`` from it keeps the episode (ADR-0293 §2:7,
+        superseding §7:3 in its deletion). The closed record is measured against
+        ADR-0275 §9:1's bound as every write of an episode is (§3:6), and one that
+        exceeds it is deleted by its id as a capture failure (§5:2).
 
         Raises:
             MemoryStoreError: If the store cannot be read or written (§7:4).
@@ -368,11 +366,10 @@ class ActivationWriter:
         channel = processing.trigger.channel
         if channel is None or channel.channel_type != "conversation":
             return
-        standing = await self._conversations.record_turn(
+        # A ``None`` is a deleted conversation, and the episode is kept (ADR-0293 §2:7).
+        await self._conversations.record_turn(
             channel.instance_id, episode_id=stored.id, occurred_at=stored.occurred_at
         )
-        if standing is None:
-            await self._memory.delete(stored.id)
 
     async def _freeze(  # noqa: PLR0913 — the capture, its record, its writes and the three seams
         self,
@@ -556,7 +553,7 @@ class ActivationWriter:
             capture_loss("record_turn", "failed")
             return
         if standing is None:
-            writes.gone = True
+            # The conversation was deleted; the episode is kept (ADR-0293 §2:7).
             return
         writes.verified = True
         state.recorded_episode_id = episode.id
@@ -570,28 +567,17 @@ class ActivationWriter:
         if not held:
             del self._in_flight[progress.address]
 
-    async def _fence(
-        self, conversation_id: str, progress: EpisodeProgress, writes: _Writes
-    ) -> None:
-        """Destroy a frozen episode where its conversation is gone (§7:2, §7:4).
-
-        ``record_turn``'s ``None`` is the conversation's own answer and needs no
-        re-read. Every other unverified path re-reads the conversation, and an
-        unreadable one leaves the writes standing: where it was in fact stamped,
-        recovery's sweep finds the episode on its channel while the tombstone stands
-        (ADR-0283 §8).
+    async def _fence(self, progress: EpisodeProgress) -> None:
+        """Destroy a frozen episode the user forgot while it was captured (ADR-0286 §8).
 
         **A forgotten capture is destroyed whatever its conversation's state**,
-        because the user's act named the record itself (ADR-0286 §8).
+        because the user's act named the record itself. **Nothing else is**: where
+        ``record_turn`` answered ``None``, or could not be told, the conversation's
+        state decides nothing, because deleting a conversation forgets nothing
+        (ADR-0293 §2:7, superseding ADR-0283 §7:2 and §7:4 in their deletion).
         """
-        if not writes.gone and not progress.forgotten:
-            try:
-                standing = await self._conversations.get(conversation_id)
-            except Exception:
-                capture_loss("verify", "uncertain")
-                return
-            if standing is not None:
-                return
+        if not progress.forgotten:
+            return
         try:
             await self._memory.delete(progress.address)
         except Exception:

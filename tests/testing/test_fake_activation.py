@@ -61,7 +61,7 @@ async def test_empty_speech_keeps_exact_transcript_and_never_falls_back(target: 
     engine = FakeAssistantEngine()
     engine.spoken_transcript = " \t\n"
     if target == "existing":
-        engine.start_conversation("room")
+        engine.hold_conversation("room")
     result = await engine.receive(
         ChannelInput(
             target=NewConversation()
@@ -78,9 +78,11 @@ async def test_empty_speech_keeps_exact_transcript_and_never_falls_back(target: 
     assert result.result.outcome.episode_id is None
     episodes = await engine.episode_memory.export()
     if target == "missing":
+        # ADR-0293 §2:7: an absent conversation does not cost the activation its
+        # episode; the conversation never recorded it, so the capture is degraded.
         assert result.capture.state == "degraded"
         assert result.capture.episode_id is None
-        assert episodes == []
+        assert [one.id for one in episodes] == [f"activation:{result.capture.activation_id}"]
         return
     assert result.capture.state == "recorded"
     (episode,) = episodes
@@ -140,7 +142,7 @@ async def test_rejected_legacy_input_persists_nothing() -> None:
 
 async def test_recovered_control_degrades_and_replay_does_not_capture() -> None:
     engine = FakeAssistantEngine()
-    engine.start_conversation("unrelated")
+    engine.hold_conversation("unrelated")
     confirmation = engine.park("private-token")
     first = await engine.resume(confirmation.token, approved=False, timeout=_BUDGET)
     assert first.capture_degraded
@@ -225,7 +227,7 @@ async def test_a_streamed_episode_is_in_its_conversation_from_the_first_chunk(
     """ADR-0283 §7, §8: a consumer that stops early, or a deletion between chunks,
     still leaves the landed episode inside its conversation's deletion."""
     engine = FakeAssistantEngine()
-    engine.start_conversation("room")
+    engine.hold_conversation("room")
     stream = engine.receive_streaming(
         ChannelInput(
             target=ChannelIdentity(channel_type="conversation", instance_id="room"),

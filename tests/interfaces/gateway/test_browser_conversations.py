@@ -87,7 +87,7 @@ _HOLDING = """(path) => {
 def _seed(drive: Drive, conversation_id: str, *, turns: int) -> None:
     """Hold one conversation on the engine, with a history behind it.
 
-    ``FakeAssistantEngine.start_conversation`` records a *fresh* one — no turn yet,
+    ``FakeAssistantEngine.hold_conversation`` records a *fresh* one — no turn yet,
     nothing recorded — which is the state #1371's first clause is about and the
     opposite of the state its second one is. A thread worth resuming already holds
     something, so the digest it recorded is replaced with one that does.
@@ -97,7 +97,7 @@ def _seed(drive: Drive, conversation_id: str, *, turns: int) -> None:
         conversation_id: The id to hold.
         turns: How many recorded turns its digest reports.
     """
-    drive.engine.start_conversation(conversation_id)
+    drive.engine.hold_conversation(conversation_id)
     held = drive.engine.conversations_held[conversation_id]
     drive.engine.conversations_held[conversation_id] = held.model_copy(
         update={"recorded_turns": turns, "last_turn_at": _LAST_TURN}
@@ -373,7 +373,7 @@ async def test_a_thread_with_nothing_in_it_says_so_rather_than_printing_a_broken
     already keeps one line up for the listing's own hint.
     """
     async with driving(gateway_browser, tmp_path) as drive:
-        drive.engine.start_conversation("c-1")
+        drive.engine.hold_conversation("c-1")
         await _open_listing(drive)
         await _first_row(drive).get_by_role("button", name="Continue").click()
         await drive.page.wait_for_selector("#resumed:not([hidden])")

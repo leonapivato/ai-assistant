@@ -215,12 +215,17 @@ from ai_assistant.core.types import (
     UnderstandingOmission,
     WholeTextReply,
     band_of,
+    chat_conversation_ids,
+    check_chat_cursor,
+    check_chat_position,
     check_story_page,
+    checked_chat_devices,
     describe_untrusted,
     is_live_confirmation_park,
     rests_on_recorded_external_content,
     secret_value,
     story_members,
+    user_message,
 )
 from ai_assistant.orchestration.activation_coordinator import ActivationCoordinator
 from ai_assistant.orchestration.activation_state import (
@@ -256,6 +261,7 @@ from ai_assistant.orchestration.controller import (
     Verdict,
     run_recorded,
 )
+from ai_assistant.orchestration.conversations import fit_changes, fit_transcript
 from ai_assistant.orchestration.disclosure import (
     BoundedAudienceSupply,
     TurnSupply,
@@ -357,6 +363,8 @@ if TYPE_CHECKING:
         ActionPlan,
         AnswerOutcome,
         BeliefBand,
+        ChatChanges,
+        ChatDevice,
         ConnectedAccount,
         ConnectionAct,
         Conversation,
@@ -373,6 +381,7 @@ if TYPE_CHECKING:
         HeldNotification,
         Identifier,
         MemoryRecord,
+        MessageReceipt,
         NonBlankEncodableText,
         NotificationCandidate,
         NotificationDisposition,
@@ -393,6 +402,8 @@ if TYPE_CHECKING:
         StoryLogPage,
         StoryPage,
         StoryView,
+        TranscriptPage,
+        UserMessage,
         UtcInstant,
     )
     from ai_assistant.orchestration.authorization_surface import AuthorizationOperations
@@ -7332,37 +7343,28 @@ class Engine:
         return await self._tracked(self._conversations.digest(named), "conversation", checked=True)
 
     async def forget_conversation(self, conversation_id: Identifier) -> bool:
-        """Destroy a conversation and every episode it recorded (ADR-0074 §8).
+        """Destroy a conversation and every episode on its place (ADR-0074 §8).
 
-        ADR-0004 §6's right at the unit the user thinks in. Unconditional, like
-        every other deletion on this façade: the store deletes what it is told to
-        delete, and no kind- or band-conditional refusal is added, because a store
-        that can refuse a data-rights operation is one where that right is
-        conditional on its own classification.
-
-        Three ordered steps, and the ordering is a **protocol rather than a
-        preference** (§8): stamp the conversation, which is durable and refuses
-        every later append; destroy every episode the index names, including one
-        whose write is still in flight; then drop the index and the record, once
-        nothing is left that resolves and the grace has passed. If this process
-        dies part-way the tombstone survives, still naming every episode involved,
-        and :meth:`start` finishes it on the next run.
+        ADR-0004 §6's right at the unit the user thinks in. **The route ADR-0293
+        §Decision:2 keeps working until the first build replaces it**: it becomes
+        memory-only (§11:4) when the interfaces move to :meth:`delete_conversation`,
+        and until then it is composed from the two acts that replace it — the
+        conversation deleted, then the episodes on its place forgotten, an open one
+        told first so no later write re-creates it (§2:6). Unconditional, like every
+        other deletion on this façade.
 
         Args:
             conversation_id: The conversation the user named, taken as opaque.
 
         Returns:
-            ``True`` if this call stamped it; ``False`` if it was already stamped
-            or the id names nothing — which the adapter renders and maps to an exit
-            code, exactly as :meth:`forget` does for a belief. The sweep behind the
-            stamp is run either way, because §8's protocol is re-runnable.
+            ``True`` if this call stamped it; ``False`` if it was already stamped or
+            the id names nothing. Its place is forgotten either way.
 
         Raises:
             RuntimeError: If the engine is shutting down.
-            ConversationStoreError: If the index cannot be read or written.
-            MemoryStoreError: If an episode could not be destroyed. The tombstone
-                stands and the next sweep finishes the job; reporting success over
-                content the user asked to be gone would be the worse failure.
+            ConversationStoreError: If the conversation could not be deleted.
+            MemoryStoreError: If an episode could not be destroyed. The conversation is
+                deleted by then, and a repeat finishes the forgetting.
         """
         self._reject_if_closing()
         named = identifier(conversation_id, name="conversation_id")
@@ -7370,8 +7372,211 @@ class Engine:
             "forget_conversation", max_bytes=self._max_payload_bytes, conversation_id=named
         )
         return await self._tracked(
-            self._conversations.delete(named), "forget_conversation", checked=True
+            self._conversations.delete_and_forget(named), "forget_conversation", checked=True
         )
+
+    # --- the chat space: acts in the medium and its reads (ADR-0293 §11) ---
+
+    async def start_conversation(self) -> ConversationSummary:
+        """Start an empty conversation, shown on "my devices" (ADR-0293 §2:1, §3:1).
+
+        Raises:
+            RuntimeError: If the engine is shutting down.
+            ConversationStoreError: If the conversation could not be started.
+        """
+        self._reject_if_closing()
+        return await self._tracked(self._started(), "start_conversation", checked=True)
+
+    async def _started(self) -> ConversationSummary:
+        return conversation_summary(await self._conversations.start())
+
+    async def my_devices(self) -> tuple[ChatDevice, ...]:
+        """Read "my devices" (ADR-0293 §3:1).
+
+        Raises:
+            RuntimeError: If the engine is shutting down.
+            ConversationStoreError: If the set could not be read.
+        """
+        self._reject_if_closing()
+        return await self._tracked(self._conversations.my_devices(), "my_devices", checked=True)
+
+    async def set_my_devices(self, devices: Sequence[ChatDevice]) -> bool:
+        """Replace "my devices" (ADR-0293 §3:1, §3:2).
+
+        Raises:
+            RuntimeError: If the engine is shutting down.
+            ValueError: If ``devices`` is not a set of devices the store accepts.
+            ConversationStoreError: If the set could not be written.
+        """
+        self._reject_if_closing()
+        held = checked_chat_devices(devices)
+        check_arguments("set_my_devices", max_bytes=self._max_payload_bytes, devices=held)
+        return await self._tracked(
+            self._conversations.set_my_devices(held), "set_my_devices", checked=True
+        )
+
+    async def set_conversation_devices(
+        self, conversation_id: Identifier, *, devices: Sequence[ChatDevice]
+    ) -> bool:
+        """Choose one conversation's devices (ADR-0293 §3:3).
+
+        Raises:
+            RuntimeError: If the engine is shutting down.
+            ValueError: If the id is blank or ``devices`` is refused.
+            UnknownConversationError: If the id names no conversation, or one deleted.
+            ConversationStoreError: If the set could not be written.
+        """
+        self._reject_if_closing()
+        named = identifier(conversation_id, name="conversation_id")
+        held = checked_chat_devices(devices)
+        check_arguments(
+            "set_conversation_devices",
+            max_bytes=self._max_payload_bytes,
+            conversation_id=named,
+            devices=held,
+        )
+        return await self._tracked(
+            self._conversations.set_conversation_devices(named, held),
+            "set_conversation_devices",
+            checked=True,
+        )
+
+    async def write_message(
+        self, conversation_id: Identifier, *, message: UserMessage
+    ) -> MessageReceipt:
+        """Write the user's message into a conversation, answering *received* (§4).
+
+        Recorded and answered here; taking it in is the chat's reader's (§6).
+
+        Raises:
+            RuntimeError: If the engine is shutting down.
+            ValueError: If the id is blank or ``message`` is not a ``UserMessage``.
+            UnknownConversationError: If the id names no conversation, or one deleted.
+            ConversationStoreError: If the message could not be written.
+        """
+        self._reject_if_closing()
+        named = identifier(conversation_id, name="conversation_id")
+        sent = user_message(message)
+        check_arguments(
+            "write_message", max_bytes=self._max_payload_bytes, conversation_id=named, message=sent
+        )
+        return await self._tracked(
+            self._conversations.write(named, sent), "write_message", checked=True
+        )
+
+    async def delete_message(self, conversation_id: Identifier, *, position: int) -> bool:
+        """Delete one message, leaving its marker (ADR-0293 §5:8, §5:12).
+
+        Raises:
+            RuntimeError: If the engine is shutting down.
+            ValueError: If the id is blank or ``position`` is out of range.
+            UnknownConversationError: If the id names no conversation, or one deleted.
+            ConversationStoreError: If the message could not be deleted.
+        """
+        self._reject_if_closing()
+        named = identifier(conversation_id, name="conversation_id")
+        at = check_chat_position(position, name="position")
+        check_arguments(
+            "delete_message", max_bytes=self._max_payload_bytes, conversation_id=named, position=at
+        )
+        return await self._tracked(
+            self._conversations.delete_message(named, at), "delete_message", checked=True
+        )
+
+    async def delete_conversation(self, conversation_id: Identifier) -> bool:
+        """Delete a conversation and its transcript, forgetting nothing (ADR-0293 §2:3).
+
+        Raises:
+            RuntimeError: If the engine is shutting down.
+            ValueError: If the id is blank.
+            ConversationStoreError: If the deletion could not be written.
+        """
+        self._reject_if_closing()
+        named = identifier(conversation_id, name="conversation_id")
+        check_arguments(
+            "delete_conversation", max_bytes=self._max_payload_bytes, conversation_id=named
+        )
+        return await self._tracked(
+            self._conversations.delete(named), "delete_conversation", checked=True
+        )
+
+    async def transcript(
+        self,
+        conversation_id: Identifier,
+        *,
+        before: int | None = None,
+        limit: int = DEFAULT_PAGE_SIZE,
+    ) -> TranscriptPage | None:
+        """Read a conversation's recent messages, or older ones (ADR-0293 §5:13).
+
+        A page that does not fit the payload limit is shortened from its oldest end.
+
+        Raises:
+            RuntimeError: If the engine is shutting down.
+            ValueError: If an argument is out of range.
+            ConversationStoreError: If the transcript could not be read.
+        """
+        self._reject_if_closing()
+        named = identifier(conversation_id, name="conversation_id")
+        below = None if before is None else check_chat_position(before, name="before")
+        page_argument(limit, name="limit")
+        check_arguments(
+            "transcript",
+            max_bytes=self._max_payload_bytes,
+            conversation_id=named,
+            before=below,
+            limit=limit,
+        )
+        return await self._tracked(
+            self._transcript(named, before=below, limit=limit), "transcript", checked=True
+        )
+
+    async def _transcript(
+        self, conversation_id: str, *, before: int | None, limit: int
+    ) -> TranscriptPage | None:
+        page = await self._conversations.transcript(conversation_id, before=before, limit=limit)
+        return fit_transcript(page, max_bytes=self._max_payload_bytes)
+
+    async def chat_changes(
+        self,
+        *,
+        after: int,
+        conversation_ids: Sequence[Identifier] | None = None,
+        limit: int = DEFAULT_PAGE_SIZE,
+    ) -> ChatChanges:
+        """Read every change to the chat space after a cursor (ADR-0293 §5:10, §5:11).
+
+        A page that does not fit the payload limit is shortened from its newest end.
+
+        Raises:
+            RuntimeError: If the engine is shutting down.
+            ValueError: If an argument is out of range.
+            ConversationStoreError: If the changes could not be read.
+        """
+        self._reject_if_closing()
+        cursor = check_chat_cursor(after, name="after")
+        named = chat_conversation_ids(conversation_ids)
+        page_argument(limit, name="limit")
+        check_arguments(
+            "chat_changes",
+            max_bytes=self._max_payload_bytes,
+            after=cursor,
+            conversation_ids=named,
+            limit=limit,
+        )
+        return await self._tracked(
+            self._chat_changes(after=cursor, conversation_ids=named, limit=limit),
+            "chat_changes",
+            checked=True,
+        )
+
+    async def _chat_changes(
+        self, *, after: int, conversation_ids: tuple[str, ...] | None, limit: int
+    ) -> ChatChanges:
+        page = await self._conversations.changes(
+            after=after, conversation_ids=conversation_ids, limit=limit
+        )
+        return fit_changes(page, max_bytes=self._max_payload_bytes)
 
     async def pending_confirmations(self) -> tuple[Confirmation, ...]:
         """Recover, from durable state, every confirmation a user may still answer (ADR-0052 §1).

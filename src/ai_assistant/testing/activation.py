@@ -382,7 +382,7 @@ class FakeActivation:
             return UnderstandingOmission.ROUTED
         return None if self.understood else UnderstandingOmission.NOT_REACHED
 
-    async def finish(  # noqa: C901, PLR0911, PLR0913 — bounded capture stages and truthful early-loss returns
+    async def finish(  # noqa: PLR0913 — bounded capture stages and truthful early-loss returns
         self,
         *,
         memory: MemoryStore,
@@ -410,8 +410,9 @@ class FakeActivation:
             ):
                 return degraded()
             if self.conversation_id is not None:
-                if self.conversation_id not in conversations:
-                    return degraded()
+                # A conversation deleted mid-turn still gets its episode: deleting a
+                # conversation forgets nothing (ADR-0293 §2:7), and the engine's open
+                # episode, written at admission, is frozen and kept the same way.
                 self.episode_id = allocate(self.conversation_id)
                 self.resolved(self.conversation_id)
             address = self.episode_id or f"activation:{self.activation_id}"
@@ -427,9 +428,12 @@ class FakeActivation:
                 [MemoryWrite(record=record, mode=MemoryWriteMode.INSERT_IF_ABSENT)]
             )
             if self.conversation_id is not None and self.conversation_id not in conversations:
-                await memory.delete(address)
-                self.episode_id = None
-                return degraded()
+                # Kept, as the engine keeps it where ``record_turn`` answers ``None``
+                # (ADR-0293 §2:7); the conversation never recorded the turn, so the
+                # report stays degraded and names no episode, as the engine's does.
+                return EpisodeCaptureReport(
+                    activation_id=self.activation_id, episode_id=None, state="degraded"
+                )
         except Exception:
             return degraded()
         return EpisodeCaptureReport(

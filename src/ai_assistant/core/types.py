@@ -16279,6 +16279,195 @@ class ChatChanges(BaseModel):
         return self
 
 
+class UserMessage(BaseModel):
+    """A message the user writes into a conversation from one of its devices (ADR-0293 §4).
+
+    What ``AssistantEngine.write_message`` takes: the text, the device it came from and
+    the message id that device chose (§4:1), and optionally the earlier message it
+    replies to (§4:5). **It names no author**, because the author is the hub's
+    statement, never the content's (ADR-0292 §5:1): every message arriving on this
+    route is the user's (ADR-0293 §4:8), and the assistant's own messages are written
+    only through the chat's writer. A caller of the surface therefore cannot write an
+    assistant's message, rather than being refused one.
+
+    **The size bound is on the type**, as on :class:`NewMessage`: a message over
+    :data:`TRANSCRIPT_MESSAGE_MAX_CHARS` cannot be constructed, so it is refused with
+    the error on the send and nothing is recorded (§4:7).
+
+    A message answering a question names the question and its option (§4:6); question
+    messages and their answers are not built (ADR-0293 §11:5), so this carries neither.
+    """
+
+    model_config = ConfigDict(extra="forbid", frozen=True)
+
+    device_id: Identifier = Field(description="The device the message is sent from.")
+    message_id: Identifier = Field(
+        description="The id the device chose, unique per device; a repeat is the same message."
+    )
+    text: NonBlankEncodableText = Field(max_length=TRANSCRIPT_MESSAGE_MAX_CHARS)
+    replies_to: int | None = Field(
+        default=None,
+        strict=True,
+        ge=1,
+        lt=_CHAT_INT_BOUND,
+        description="The position of an earlier message in the same conversation (§4:5).",
+    )
+
+    def as_new_message(self) -> NewMessage:
+        """The message as the conversation store writes it: the user's, from its device."""
+        return NewMessage(
+            author=MessageAuthor.USER,
+            text=self.text,
+            replies_to=self.replies_to,
+            device_id=self.device_id,
+            message_id=self.message_id,
+        )
+
+
+#: How many conversations one read of the chat space's changes may name (ADR-0293
+#: §5:11), the bound the conversation store's ``changes`` puts on its filter.
+CHAT_CHANGES_CONVERSATIONS_MAX: Final = 1000
+
+_IDENTIFIER_ADAPTER: Final[TypeAdapter[str]] = TypeAdapter(Identifier)
+
+
+def check_chat_position(value: object, *, name: str) -> int:
+    """Refuse a transcript position that is not an exact ``int`` in ``[1, 2**63)``.
+
+    Shared by every ``AssistantEngine`` implementation, so each refuses the same
+    positions before any I/O (ADR-0085 §9). A ``bool`` is refused: a flag is not a
+    position.
+
+    Raises:
+        ValueError: If ``value`` is not such an ``int``.
+    """
+    if type(value) is not int or not 1 <= value < _CHAT_INT_BOUND:
+        msg = f"{name} must be an integer in [1, 2**63), got {describe_untrusted(value)}"
+        raise ValueError(msg)
+    return value
+
+
+def check_chat_cursor(value: object, *, name: str) -> int:
+    """Refuse a change-stream cursor that is not an exact ``int`` in ``[0, 2**63)``.
+
+    Raises:
+        ValueError: If ``value`` is not such an ``int``.
+    """
+    if type(value) is not int or not 0 <= value < _CHAT_INT_BOUND:
+        msg = f"{name} must be an integer in [0, 2**63), got {describe_untrusted(value)}"
+        raise ValueError(msg)
+    return value
+
+
+def chat_conversation_ids(value: object) -> tuple[str, ...] | None:
+    """Snapshot a changes read's conversation filter, each id an ``Identifier``.
+
+    ``None`` stays ``None`` (every change). A sequence is read **once**, before
+    anything else (ADR-0065), each element validated as an
+    :data:`Identifier` — refused where blank and stripped where padded, as every
+    identifier argument on the surface is (ADR-0085 §3c). A bare ``str`` is refused
+    rather than read as its characters.
+
+    Raises:
+        ValueError: If ``value`` is a ``str``, not a sequence, holds more than
+            :data:`CHAT_CHANGES_CONVERSATIONS_MAX` ids, or holds one that is not a
+            non-blank ``str``.
+    """
+    if value is None:
+        return None
+    if isinstance(value, (str, bytes)) or not isinstance(value, Sequence):
+        msg = f"conversation_ids must be a sequence of ids, got {describe_untrusted(value)}"
+        raise ValueError(msg)
+    held = tuple(value)
+    if len(held) > CHAT_CHANGES_CONVERSATIONS_MAX:
+        msg = (
+            f"conversation_ids names at most {CHAT_CHANGES_CONVERSATIONS_MAX} conversations, "
+            f"got {len(held)}"
+        )
+        raise ValueError(msg)
+    checked: list[str] = []
+    for one in held:
+        if not isinstance(one, str):
+            msg = f"conversation_ids holds something that is not an id: {describe_untrusted(one)}"
+            raise ValueError(msg)
+        try:
+            checked.append(_IDENTIFIER_ADAPTER.validate_python(one))
+        except ValueError as exc:  # pydantic's refusal is a ValueError
+            msg = "conversation_ids holds a blank id"
+            raise ValueError(msg) from exc
+    return tuple(checked)
+
+
+def user_message(value: object) -> UserMessage:
+    """Refuse a ``write_message`` argument that is not a :class:`UserMessage`.
+
+    Shared by every ``AssistantEngine`` implementation, so each refuses the same
+    value before any I/O (ADR-0085 §9).
+
+    Raises:
+        ValueError: If ``value`` is not a ``UserMessage``.
+    """
+    if not isinstance(value, UserMessage):
+        msg = f"message must be a UserMessage, got {describe_untrusted(value)}"
+        raise ValueError(msg)
+    return value
+
+
+class ActivationEnding(StrEnum):
+    """How the last activation started from a conversation ended (ADR-0293 §8:3).
+
+    The current state's account of the assistant, never written into the transcript
+    (§8:1). A **closed** enumeration, added to and never renamed.
+
+    Attributes:
+        DONE: It ended having answered, asked or noticed, as an activation should.
+        COULDNT_FINISH: It ended without finishing — the case ADR-0293 §9:1 has the
+            fixed *couldn't finish* message written for.
+        INTERRUPTED: It was cut short, a restart closing it among them (§9:2), so a
+            device can offer "interrupted; send again?".
+        STOPPED: The user stopped it (ADR-0295 §3:4). Nothing produces it until a
+            stop is built.
+    """
+
+    DONE = "done"
+    COULDNT_FINISH = "couldnt_finish"
+    INTERRUPTED = "interrupted"
+    STOPPED = "stopped"
+
+
+class ConversationState(BaseModel):
+    """What a conversation's devices are shown about the assistant (ADR-0293 §8).
+
+    Read with the conversation and never written into its transcript (§8:1); it is the
+    assistant's, not the conversation's (§1:6). Two facts, each independent of the
+    other:
+
+    * **working** — an activation started from the conversation is running (§8:2).
+      It is informational: the user's input stays open (§6:2). ``activation_id`` names
+      that activation where its id is known, which is what a stop control beside
+      "working…" names (ADR-0295 §1:2); it is absent while nothing runs.
+    * **last_ended** — how the last activation started from the conversation that has
+      ended, ended (§8:3, as ADR-0295 §3:4 adds *stopped*), or ``None`` where none has.
+
+    Nothing running and nothing ended is the idle conversation, and the default.
+    """
+
+    model_config = ConfigDict(extra="forbid", frozen=True)
+
+    working: bool = Field(default=False, strict=True)
+    activation_id: Identifier | None = Field(
+        default=None, description="The running activation, where one runs and its id is known."
+    )
+    last_ended: ActivationEnding | None = None
+
+    @model_validator(mode="after")
+    def _an_activation_only_while_working(self) -> Self:
+        if self.activation_id is not None and not self.working:
+            msg = "a conversation's state names a running activation only while working"
+            raise ValueError(msg)
+        return self
+
+
 class ConversationExport(BaseModel):
     """A portable snapshot of the conversation store's own state (ADR-0074 §9, ADR-0004 §6).
 
@@ -26514,6 +26703,12 @@ class ConversationDigest(BaseModel):
             turns**, not surviving episodes: a turn whose episode expired or was
             destroyed still happened, and this is the ceremony for destroying the
             conversation rather than a report on its content.
+        state: What its devices are shown about the assistant (ADR-0293 §8): whether
+            an activation started from it is running, and how the last one ended.
+            Read with the conversation, as §8:1 has it, and never part of its
+            transcript.
+        devices: Its devices, ``device_id`` ascending (ADR-0293 §3:3) — the ends a
+            device catching up from a snapshot has no change to learn from.
     """
 
     model_config = ConfigDict(extra="forbid", frozen=True)
@@ -26524,6 +26719,15 @@ class ConversationDigest(BaseModel):
         description="When a turn was last recorded, or ``None`` if none ever was."
     )
     recorded_turns: int = Field(ge=0, description="How many turns its index holds.")
+    state: ConversationState = Field(
+        default_factory=ConversationState,
+        description="What its devices are shown about the assistant (ADR-0293 §8).",
+    )
+    devices: tuple[ChatDevice, ...] = Field(
+        default=(),
+        max_length=CHAT_DEVICES_MAX,
+        description="Its devices, device_id ascending (ADR-0293 §3:3).",
+    )
 
 
 class Warrant(BaseModel):

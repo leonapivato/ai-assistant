@@ -497,7 +497,7 @@ async def test_a_partly_composed_answer_arrives_with_the_flag_that_says_so(
     """
     harness.engine.turn_outcome = TurnOutcome(
         turn=_turn("what is on today"),
-        conversation_id=harness.engine.start_conversation("c-partial"),
+        conversation_id=harness.engine.hold_conversation("c-partial"),
         reply="half an answer",
         reply_degraded=True,
     )
@@ -1178,8 +1178,8 @@ async def test_the_browser_lists_conversations_most_recently_active_first(
     """§6's ``recent_conversations``. ADR-0074 §2's sort key is activity and never
     "has a turn landed", and both instants cross so the page can render the
     difference rather than borrowing one reading for the other."""
-    harness.engine.start_conversation("c-old")
-    harness.engine.start_conversation("c-new")
+    harness.engine.hold_conversation("c-old")
+    harness.engine.hold_conversation("c-new")
 
     status, body = await harness.whole("POST", "/conversations", {})
 
@@ -1198,7 +1198,7 @@ async def test_a_page_of_conversations_can_be_asked_for(harness: Harness) -> Non
     the gateway "composes no behaviour the promoted engine surface does not offer"
     (ADR-0168 §1), so paging is the engine's and this is the request shape for it."""
     for name in ("c-1", "c-2", "c-3"):
-        harness.engine.start_conversation(name)
+        harness.engine.hold_conversation(name)
 
     _, body = await harness.whole("POST", "/conversations", {"limit": 1, "offset": 1})
 
@@ -1222,7 +1222,7 @@ async def test_the_browser_reads_a_conversations_count_and_span_before_destroyin
     """§6's ``conversation``. ADR-0073 §5's show-then-confirm at the unit the user
     thinks in — "the count and the span, rather than a transcript nobody can read"
     (ADR-0074 §8)."""
-    harness.engine.start_conversation("c-1")
+    harness.engine.hold_conversation("c-1")
 
     status, body = await harness.whole("POST", "/conversation", {"conversation_id": "c-1"})
 
@@ -1246,7 +1246,7 @@ async def test_the_browser_forgets_one_conversation(harness: Harness) -> None:
     is already there": ADR-0168 §6's residual has covered ``converse`` since milestone
     13, and a turn can approve a tool, execute it and durably commit a non-idempotent
     effect."""
-    harness.engine.start_conversation("c-1")
+    harness.engine.hold_conversation("c-1")
 
     status, body = await harness.whole("POST", "/conversation/forget", {"conversation_id": "c-1"})
 

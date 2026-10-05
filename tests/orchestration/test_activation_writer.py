@@ -355,16 +355,23 @@ async def test_an_unreadable_conversation_cannot_claim_recorded() -> None:
         report = await wiring.write(state)
     assert report.state == "degraded"
     assert await wiring.memory.get(_ADDRESS) is not None
-    assert [row["stage"] for row in logs] == ["record_turn", "verify"]
+    # No fence re-read: the conversation's state decides nothing about the episode
+    # (ADR-0293 §2:7).
+    assert [row["stage"] for row in logs] == ["record_turn"]
     assert all("private" not in str(row) for row in logs)
 
 
 @pytest.mark.parametrize("cancelled", [False, True])
-async def test_commit_then_failure_on_a_deleted_conversation_leaves_no_episode(
+async def test_commit_then_failure_on_a_deleted_conversation_ends_by_the_freeze_alone(
     cancelled: bool,
 ) -> None:
-    """§7:4, §14:2: an episode write that commits and then propagates cancellation (or
-    fails), on a conversation deleted meanwhile, leaves no episode."""
+    """ADR-0293 §2:7: the conversation's deletion decides nothing about the episode.
+
+    An episode write that commits and then fails is confirmed by its read, so the
+    episode is frozen and kept though the conversation was deleted meanwhile. One
+    that propagates cancellation is a capture failure before the freeze is confirmed
+    (ADR-0286 §5:2), so its episode is deleted whatever the conversation's state.
+    """
     memory = CommitThenFail(cancelled=cancelled)
     wiring = Wiring(memory=memory)
     state = await wiring.state()
@@ -380,8 +387,9 @@ async def test_commit_then_failure_on_a_deleted_conversation_leaves_no_episode(
         with capture_logs() as logs:
             assert (await wiring.write(state)).state == "degraded"
         assert all("secret" not in str(row) for row in logs)
-    assert await wiring.memory.export() == []
-    assert await wiring.on_channel(state) == []
+    kept = [] if cancelled else [_ADDRESS]
+    assert [one.id for one in await wiring.memory.export()] == kept
+    assert await wiring.on_channel(state) == kept
     assert state.recorded_episode_id is None
 
 
@@ -417,9 +425,10 @@ async def test_an_indeterminate_freeze_that_did_not_land_leaves_no_episode() -> 
     ]
 
 
-async def test_a_conversation_deleted_before_record_turn_keeps_no_episode() -> None:
-    """§7:2, §14:2: ``record_turn``'s ``None`` deletes the episode, and the capture is
-    degraded."""
+async def test_a_conversation_deleted_before_record_turn_keeps_its_episode() -> None:
+    """ADR-0293 §2:7: ``record_turn``'s ``None`` keeps the episode, since deleting a
+    conversation forgets nothing; the capture is degraded, since the conversation never
+    recorded the turn."""
     memory = CommitThen()
     wiring = Wiring(memory=memory)
     state = await wiring.state()
@@ -431,8 +440,8 @@ async def test_a_conversation_deleted_before_record_turn_keeps_no_episode() -> N
     report = await wiring.write(state)
     assert report.state == "degraded"
     assert report.episode_id is None
-    assert await wiring.memory.export() == []
-    assert await wiring.on_channel(state) == []
+    assert [one.id for one in await wiring.memory.export()] == [_ADDRESS]
+    assert await wiring.on_channel(state) == [_ADDRESS]
 
 
 async def test_a_write_known_not_to_have_committed_reaches_nothing_else() -> None:
@@ -682,6 +691,22 @@ async def test_a_close_under_a_lowered_stage_limit_still_extends_the_stored_reco
     assert processing.stages[:2] == (stored[0], stored[2])
     assert processing.stages[-1].due is ControllerRule.HUB_STOPPED
     assert processing.stages_elided == 1
+
+
+async def test_a_close_on_a_deleted_conversation_keeps_the_episode() -> None:
+    """ADR-0293 §2:7, superseding ADR-0286 §7:3 in its deletion: a restart's close
+    finds the conversation deleted, and the closed episode stays on its place."""
+    wiring = Wiring()
+    state = await wiring.state()
+    await wiring.admit(state)
+    await wiring.conversations.stamp_deleted(str(state.conversation_id))
+
+    await _restarted(wiring).close_open(stage_limit=8, payload_limit=1024)
+
+    closed = await wiring.memory.get(_ADDRESS)
+    assert isinstance(closed, EpisodicMemory)
+    assert closed.processing_record is not None
+    assert closed.processing_record.reason is ProcessingReason.HUB_STOPPED
 
 
 def _restarted(wiring: Wiring) -> ActivationWriter:

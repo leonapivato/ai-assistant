@@ -72,6 +72,7 @@ from typing import TYPE_CHECKING, ClassVar, Final, get_type_hints
 
 import pytest
 from channel_receiver_contract import ChannelReceiverContract
+from chat_surface_contract import ChatSurfaceContract
 from episode_inspection_contract import EpisodeInspectionContract
 from pydantic import SecretStr
 from story_surface_contract import StorySurfaceContract
@@ -1388,7 +1389,11 @@ UNSPEAKABLE_NOTIFICATION: Final = SPEAKABLE_NOTIFICATION.model_copy(
 
 
 class AssistantEngineContract(
-    ChannelReceiverContract, EpisodeInspectionContract, StorySurfaceContract, ABC
+    ChannelReceiverContract,
+    EpisodeInspectionContract,
+    StorySurfaceContract,
+    ChatSurfaceContract,
+    ABC,
 ):
     """What every ``AssistantEngine`` implementation must do."""
 
@@ -2066,7 +2071,14 @@ class AssistantEngineContract(
 
     @pytest.mark.parametrize(
         "method",
-        ["beliefs", "questions", "interrupted_questions", "recent_conversations"],
+        [
+            "beliefs",
+            "questions",
+            "interrupted_questions",
+            "recent_conversations",
+            "transcript",
+            "chat_changes",
+        ],
     )
     def test_the_page_size_default_is_the_declared_one(
         self, engine: AssistantEngine, method: str
@@ -2105,6 +2117,7 @@ class AssistantEngineContract(
             "forget_question",
             "conversation",
             "forget_conversation",
+            "delete_conversation",
         ],
     )
     async def test_a_blank_identifier_is_refused_locally(

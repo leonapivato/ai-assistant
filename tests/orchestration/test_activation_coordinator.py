@@ -132,9 +132,10 @@ async def test_cleanup_budget_cancels_and_waits_for_the_registered_write(
 
 
 async def test_second_cancellation_drains_registered_deletion_compensation() -> None:
-    """The conversation is deleted once the episode's freeze has committed, so
-    ``record_turn`` answers ``None`` and the fence's deletion runs as a safety task,
-    which two cancellations of the finalization wait for (ADR-0275 §8:11)."""
+    """The episode is forgotten once its freeze has committed, so the fence's deletion
+    runs as a safety task, which two cancellations of the finalization wait for
+    (ADR-0275 §8:11, ADR-0286 §8). Before ADR-0293 §2:7 a conversation deleted at that
+    point set the fence off too; deleting one now forgets nothing."""
     memory = CommitThen()
     wiring = Wiring(memory=memory)
     state = await wiring.state()
@@ -150,9 +151,9 @@ async def test_second_cancellation_drains_registered_deletion_compensation() -> 
     ready = asyncio.Event()
     release = asyncio.Event()
 
-    async def deleted() -> None:
-        assert state.conversation_id is not None
-        await wiring.conversations.stamp_deleted(state.conversation_id)
+    async def forgotten() -> None:
+        assert state.episode_address is not None
+        wiring.writer.forgetting(state.episode_address)
         held = memory.suspend_next_operation()
 
         async def gate() -> None:
@@ -166,7 +167,7 @@ async def test_second_cancellation_drains_registered_deletion_compensation() -> 
         drivers.append(driver)
 
     drivers: list[asyncio.Task[None]] = []
-    memory.after = deleted
+    memory.after = forgotten
     parent = asyncio.create_task(coordinator.finish(state, failure=None, check_output=lambda: None))
     await ready.wait()
     parent.cancel()

@@ -21,7 +21,7 @@ from datetime import UTC, datetime, timedelta
 from typing import TYPE_CHECKING
 
 import pytest
-from channel_episodes import channel_ids, channel_numbers, conversation_episode
+from channel_episodes import channel_ids, conversation_episode
 
 from ai_assistant.core.errors import (
     AssistantError,
@@ -503,17 +503,16 @@ async def test_a_binding_parked_in_a_deleted_conversation_finds_none() -> None:
     assert await wiring.stage.conversation_of_binding(BINDING) is None
 
 
-# --- deletion: the ordered steps (ADR-0283 §8:1) -------------------------
+# --- deletion: the ordered steps (ADR-0283 §8:1, ADR-0293 §2:3) ---------
 
 
 async def test_deletion_runs_its_steps_in_the_ratified_order(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
-    """§8:1, as ADR-0287 §4 left it: parked-reads drop, the channel walk, then the drop.
+    """§8:1, as ADR-0293 §2:3 left it: the parked-reads drop, then the record's drop.
 
-    The walk reads the channel page by page until a read comes back empty — so the
-    last ``channel_episode_ids`` call answers nothing and is followed only by
-    ``drop_if_eligible``.
+    No channel is walked and no episode deleted: deleting a conversation forgets
+    nothing.
     """
     log: list[str] = []
     clock = MovableClock()
@@ -552,27 +551,38 @@ async def test_deletion_runs_its_steps_in_the_ratified_order(
         conversations=Conversations(now=clock, retention=RETENTION, tombstone_grace=GRACE),
     )
     conversation_id, episodes = await _seed_turns(wiring, 2)
-    last = list((await channel_numbers(memory, conversation_id)).values())[-1]
     log.clear()
 
     assert await wiring.stage.delete(conversation_id) is True
 
-    assert log == [
-        "drop_for_conversation",
-        "channel_episode_ids(after=None) -> 2",
-        f"delete({episodes[0]})",
-        f"delete({episodes[1]})",
-        f"channel_episode_ids(after={last}) -> 0",
-        "drop_if_eligible",
-    ]
+    assert log == ["drop_for_conversation", "drop_if_eligible"]
+    assert await channel_ids(memory, conversation_id) == episodes
 
 
-async def test_deleting_a_conversation_deletes_every_episode_on_its_channel() -> None:
-    """§8:1: completed or not, expired but unpurged, or not yet valid.
+async def test_deleting_a_conversation_keeps_every_episode_on_its_channel() -> None:
+    """ADR-0293 §2:3: the conversation goes, and none of the episodes on its place."""
+    clock = MovableClock()
+    wiring = Wiring(clock=clock)
+    conversation_id, episodes = await _seed_turns(wiring, 2)
+
+    assert await wiring.stage.delete(conversation_id) is True
+
+    assert await wiring.conversations.get(conversation_id) is None
+    assert await channel_ids(wiring.memory, conversation_id) == episodes
+    # The tombstone outlives the deleting call by its grace, as it did (§8).
+    assert await wiring.conversations.stamped_conversation_ids() == [conversation_id]
+    clock.advance(GRACE)
+    assert await wiring.stage.sweep_deletions() == 1
+    assert await wiring.conversations.stamped_conversation_ids() == []
+    assert await channel_ids(wiring.memory, conversation_id) == episodes
+
+
+async def test_forgetting_a_conversation_forgets_every_episode_on_its_channel() -> None:
+    """ADR-0293 §2:4: completed or not, expired but unpurged, or not yet valid.
 
     The enumeration is what the store physically holds; a read filtered by liveness
     or validity in its place would leave the last two behind (ADR-0275 §6:6).
-    Another conversation's episodes are untouched.
+    Another conversation's episodes are untouched, and the conversation stands.
     """
     clock = MovableClock()
     wiring = Wiring(clock=clock)
@@ -587,26 +597,33 @@ async def test_deleting_a_conversation_deletes_every_episode_on_its_channel() ->
     clock.advance(HOUR)  # the expired one is now past its horizon and not yet purged
     assert len(await channel_ids(wiring.memory, conversation.id)) == 4
 
-    assert await wiring.stage.delete(conversation.id) is True
+    assert await wiring.stage.forget(conversation.id) is True
 
     assert await channel_ids(wiring.memory, conversation.id) == []
     assert await channel_ids(wiring.memory, other_id) == other_episodes
-    assert await wiring.conversations.get(conversation.id) is None
-    # The tombstone deliberately outlives the deleting call: the grace is what keeps
-    # the only record naming a pending intent alive past the deletion, so a capture
-    # that commits and then dies is still swept (§8).
-    assert await wiring.conversations.stamped_conversation_ids() == [conversation.id]
+    assert await wiring.conversations.get(conversation.id) is not None, "§5:6: it stands"
+    assert await wiring.stage.forget(conversation.id) is False, "nothing left to forget"
 
+
+async def test_forgetting_reaches_a_deleted_conversations_episodes() -> None:
+    """ADR-0293 §2:5: whether or not the conversation still stands in the medium."""
+    clock = MovableClock()
+    wiring = Wiring(clock=clock)
+    conversation_id, _ = await _seed_turns(wiring, 2)
+    await wiring.stage.delete(conversation_id)
     clock.advance(GRACE)
-    assert await wiring.stage.sweep_deletions() == 1
-    assert await wiring.conversations.stamped_conversation_ids() == []
+    await wiring.stage.sweep_deletions()
+
+    assert await wiring.stage.forget(conversation_id) is True
+
+    assert await channel_ids(wiring.memory, conversation_id) == []
 
 
-async def test_a_deletion_interrupted_part_way_is_completed_by_a_re_run() -> None:
-    """§8:1: idempotent by re-walking the channel.
+async def test_forgetting_interrupted_part_way_is_completed_by_a_re_run() -> None:
+    """ADR-0293 §2:4: idempotent by re-walking the channel.
 
-    A run that dies part-way leaves the tombstone and the episodes it had not yet
-    reached on the channel; the re-run walks from the beginning and finds only those.
+    A run that dies part-way leaves the episodes it had not yet reached on the
+    channel; the re-run walks from the beginning and finds only those.
     """
     clock = MovableClock()
     interrupt = 3
@@ -630,17 +647,15 @@ async def test_a_deletion_interrupted_part_way_is_completed_by_a_re_run() -> Non
     memory.arm = True
 
     with pytest.raises(MemoryStoreError):
-        await wiring.stage.delete(conversation_id)
+        await wiring.stage.forget(conversation_id)
 
-    assert await wiring.conversations.stamped_conversation_ids() == [conversation_id]
     assert await channel_ids(memory, conversation_id) == episodes[interrupt:]
 
     memory.arm = False
-    clock.advance(GRACE)
-    assert await wiring.stage.sweep_deletions() == 1
+    assert await wiring.stage.forget(conversation_id) is True
 
     assert await channel_ids(memory, conversation_id) == []
-    assert await wiring.conversations.stamped_conversation_ids() == []
+    assert await wiring.conversations.get(conversation_id) is not None
 
 
 async def test_the_sweep_reaches_a_tombstone_no_presenting_read_will_show() -> None:
@@ -681,12 +696,11 @@ async def test_deleting_something_that_is_already_gone_is_not_an_error() -> None
     assert await wiring.stage.delete("nobody") is False
 
 
-async def test_an_episode_landing_inside_the_grace_is_swept() -> None:
-    """§8: the reach the grace buys, now that the channel is the enumeration.
+async def test_an_episode_landing_after_the_stamp_is_kept() -> None:
+    """ADR-0293 §2:7: a capture racing the deletion keeps its episode.
 
-    An episode that lands on the channel after the stamp — a capture racing the
-    deletion — is found by the next sweep's channel walk while the tombstone stands,
-    and the sweep is idempotent once the record is dropped.
+    The sweep drops the record once the grace has passed, destroys nothing, and is
+    idempotent once the record is dropped.
     """
     clock = MovableClock()
     wiring = Wiring(clock=clock)
@@ -695,7 +709,7 @@ async def test_an_episode_landing_inside_the_grace_is_swept() -> None:
     await wiring.memory.add(conversation_episode(conversation_id, "activation:late"))
 
     assert await wiring.stage.sweep_deletions() == 0, "the grace has not elapsed"
-    assert await wiring.memory.get("activation:late") is None, "step 2 runs regardless"
+    assert await wiring.memory.get("activation:late") is not None, "deleting forgets nothing"
 
     clock.advance(GRACE)
     assert await wiring.stage.sweep_deletions() == 1
@@ -815,9 +829,9 @@ async def test_the_start_up_sweep_drops_the_parks_a_crashed_deletion_left() -> N
 async def test_a_park_store_fault_aborts_step_two_and_the_tombstone_stands() -> None:
     """The residue of a partial failure is one the user can still reach and destroy.
 
-    The parks are dropped before any episode is deleted, so a store that cannot be
-    written leaves the episodes exactly where ``forget`` and the next sweep can still
-    find them. The tombstone stands, which is what makes the next sweep finish it.
+    The parks are dropped before the record, so a store that cannot be written leaves
+    the tombstone standing, which is what makes the next sweep finish it; the episodes
+    are not the deletion's to touch either way (ADR-0293 §2:3).
     """
     parks = FakeParkedReads()
     wiring = Wiring(parked_reads=parks)
@@ -843,7 +857,7 @@ async def test_a_stage_with_no_park_store_deletes_exactly_as_it_did_before() -> 
 
     assert await wiring.stage.delete(conversation_id) is True
 
-    assert await wiring.memory.get(episodes[0]) is None
+    assert await wiring.memory.get(episodes[0]) is not None, "deleting forgets nothing"
     assert await wiring.conversations.get(conversation_id) is None
 
 
@@ -854,8 +868,8 @@ async def test_the_deletion_sweep_finishes_what_a_previous_run_left() -> None:
     """ADR-0076: before this read existed, nothing could *find* a crashed deletion.
 
     The stamp hides a conversation from every presenting read, so a process that
-    died between the stamp and the drop left episodes that were never destroyed and
-    a record that outlived its grace indefinitely.
+    died between the stamp and the drop left a record that outlived its grace
+    indefinitely. It destroys no episode (ADR-0293 §2:3).
     """
     clock = MovableClock()
     wiring = Wiring(clock=clock)
@@ -868,9 +882,9 @@ async def test_the_deletion_sweep_finishes_what_a_previous_run_left() -> None:
 
     assert await wiring.stage.sweep_deletions() == 2
 
-    for episode_id in [*first_episodes, *second_episodes]:
-        assert await wiring.memory.get(episode_id) is None
-    assert await wiring.memory.get(live_episodes[0]) is not None, "an unstamped one is untouched"
+    for episode_id in [*first_episodes, *second_episodes, *live_episodes]:
+        assert await wiring.memory.get(episode_id) is not None
+    assert await wiring.conversations.stamped_conversation_ids() == []
     assert await wiring.conversations.get(live) is not None
 
 
@@ -899,7 +913,7 @@ async def test_the_deletion_sweep_drains_every_batch_of_tombstones() -> None:
     assert await wiring.stage.sweep_deletions() == 7
 
     assert await wiring.conversations.stamped_conversation_ids() == []
-    assert await wiring.memory.export() == []
+    assert len(await wiring.memory.export()) == 7, "deleting forgets nothing"
 
 
 async def test_a_sweep_continues_past_a_conversation_someone_else_finished() -> None:
@@ -1021,7 +1035,9 @@ async def test_a_crashed_deletion_is_finished_after_the_index_is_reopened(tmp_pa
 
         assert await restarted.sweep_deletions() == 1
 
-        assert await memory.get("activation:before-the-crash") is None, "the leak was destroyed"
+        assert await memory.get("activation:before-the-crash") is not None, (
+            "deleting forgets nothing (ADR-0293 §2:3)"
+        )
         assert await reopened.stamped_conversation_ids() == []
         assert await reopened.get(conversation.id) is None
     finally:

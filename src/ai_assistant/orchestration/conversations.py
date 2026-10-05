@@ -14,20 +14,26 @@ handles by injection — owns the cross-store sequences:
   delivery row;
 * **resume association** (§5) — a binding resolved through the episode that parked
   it;
-* **deletion** (§8) — stamp, destroy every episode the conversation's channel
-  holds, drop the record conditionally;
+* **deletion** (§8, as ADR-0293 §2:3 partially supersedes it) — stamp, which
+  deletes the transcript, drop the conversation's parked reads and the record
+  conditionally, and **destroy no episode**: deleting a conversation forgets
+  nothing;
+* **forgetting** (ADR-0293 §2:4-§2:8) — destroy every episode the conversation's
+  channel holds, open ones told first, and leave the conversation and its
+  transcript;
+* **the chat space** (ADR-0293 §2-§5, §8) — the acts in the medium and their reads,
+  relayed to the store, and the current state, read from the episodes;
 * **retention reclaim** (§8) — which **destroys nothing**: it only asks whether the
   channel still holds an episode, and drops a conversation record that holds none.
 
 Capture itself is the :class:`~ai_assistant.orchestration.activation_writer.ActivationWriter`'s
 (ADR-0283 §7), which this stage builds over the same two stores.
 
-**The two sweeps are opposite, and collapsing them is the error to avoid.**
-Finishing a user deletion destroys episodes because that is the request being
-carried out. Retention reclaim destroys nothing, because episodes leave on their
-own ``expires_at``, stamped at capture from the horizon in force when they were
-written. Stated as one sequence, a retention sweep would destroy a live episode
-for the crime of belonging to an old conversation.
+**Neither sweep destroys an episode.** Finishing a user deletion removes the
+conversation and its transcript, and forgetting is the command that reaches the
+episodes (ADR-0293 §2:3, §2:4). Retention reclaim destroys nothing, because episodes
+leave on their own ``expires_at``, stamped at capture from the horizon in force when
+they were written.
 
 Nothing concrete is imported: both stores arrive by injection and are seen only
 through their Protocols (CLAUDE.md golden rule 1).
@@ -48,14 +54,20 @@ from ai_assistant.core.errors import (
     UnknownConversationError,
 )
 from ai_assistant.core.types import (
+    ActivationEnding,
     ChannelIdentity,
+    ChatChanges,
     ConversationDigest,
+    ConversationState,
+    EpisodicMemory,
     MemoryKind,
+    ProcessingStatus,
 )
 from ai_assistant.orchestration.activation_writer import ActivationWriter
+from ai_assistant.orchestration.payloads import canonical_payload, check_payload
 
 if TYPE_CHECKING:
-    from collections.abc import Mapping
+    from collections.abc import Mapping, Sequence
     from datetime import timedelta
 
     from ai_assistant.core.clock import Clock
@@ -65,11 +77,15 @@ if TYPE_CHECKING:
         ParkedReads,
     )
     from ai_assistant.core.types import (
+        ChatDevice,
         Conversation,
         MemoryRecord,
+        MessageReceipt,
         ParkedBinding,
         SpokenDelivery,
         SpokenDeliveryReport,
+        TranscriptPage,
+        UserMessage,
     )
 
 _log = structlog.get_logger(__name__)
@@ -107,9 +123,12 @@ _RECLAIM_PAGE = 50
 #: prompt nobody sized.
 HISTORY_REPLAY_BOUND: Final = 20
 
-#: How many identifiers one ``channel_episode_ids`` page asks for while a deletion
-#: or a reclaim walks a conversation's channel (ADR-0283 §8). The read's own bound.
+#: How many identifiers one ``channel_episode_ids`` page asks for while forgetting or
+#: a reclaim walks a conversation's channel (ADR-0283 §8). The read's own bound.
 _CHANNEL_PAGE: Final = 1000
+
+#: How many open episodes one page of the current state's walk reads (ADR-0293 §8:2).
+_OPEN_PAGE: Final = 100
 
 
 def conversation_channel(conversation_id: str) -> ChannelIdentity:
@@ -119,6 +138,164 @@ def conversation_channel(conversation_id: str) -> ChannelIdentity:
 
 def _utcnow() -> datetime:
     return datetime.now(UTC)
+
+
+#: How the last activation started from a conversation ended, read off its episode's
+#: status (ADR-0293 §8:3). An activation that answered, asked a question (ADR-0295 §1:
+#: "an activation that asked the user a question has ended") or heard no words is done;
+#: one that failed could not finish; one cut short — a restart's close among them
+#: (ADR-0286 §7) — was interrupted.
+_ENDINGS: Final[dict[ProcessingStatus, ActivationEnding]] = {
+    ProcessingStatus.COMPLETED: ActivationEnding.DONE,
+    ProcessingStatus.WAITING: ActivationEnding.DONE,
+    ProcessingStatus.FAILED: ActivationEnding.COULDNT_FINISH,
+    ProcessingStatus.INTERRUPTED: ActivationEnding.INTERRUPTED,
+}
+
+
+def activation_ending(episode: EpisodicMemory) -> ActivationEnding | None:
+    """How the activation an ended episode records ended, or ``None`` for an open one.
+
+    Shared by the engine and the canonical fake engine, so both read the current
+    state's ending off the same episode the same way (ADR-0293 §8:3).
+    """
+    record = episode.processing_record
+    if record is None or record.status is None:
+        return None
+    return _ENDINGS[record.status]
+
+
+def started_from(record: MemoryRecord, channel: ChannelIdentity) -> EpisodicMemory | None:
+    """``record`` as an episode of an activation started from ``channel``, or ``None``.
+
+    An ended episode is on its channel (ADR-0283 §1). **An open one may not be yet**:
+    a conversational pass names the conversation its episode is written for once the
+    conversation is resolved (ADR-0275 §4:5 as ADR-0283 reads it), so until then its
+    trigger's ``channel`` is unset and only its ``target`` names the conversation.
+    Either is read here, so a running activation is found from its admission on.
+    """
+    if not isinstance(record, EpisodicMemory) or record.processing_record is None:
+        return None
+    trigger = record.processing_record.trigger
+    target = getattr(trigger, "target", None)
+    if trigger.channel == channel or (isinstance(target, ChannelIdentity) and target == channel):
+        return record
+    return None
+
+
+async def _open_on(memory: MemoryStore, channel: ChannelIdentity) -> list[EpisodicMemory]:
+    """Every open episode of an activation started from ``channel``, oldest first.
+
+    The open episodes are walked whole (ADR-0286 §12:1's enumeration): they are this
+    process's running activations, since a restart closes every one a dead process
+    left (§7), so the walk is short.
+    """
+    found: list[EpisodicMemory] = []
+    after: int | None = None
+    while True:
+        page = await memory.open_episodes(after=after, limit=_OPEN_PAGE)
+        found.extend(episode for entry in page if (episode := started_from(entry.record, channel)))
+        if len(page) < _OPEN_PAGE:
+            return found
+        after = page[-1].number
+
+
+async def episodes_on_place(memory: MemoryStore, conversation_id: str) -> list[str]:
+    """The id of every episode on a conversation's place, open ones first (ADR-0293 §2:4).
+
+    What forgetting the conversation destroys, shared by the engine and the canonical
+    fake engine: the running activations' open episodes, found by
+    :func:`started_from` since one may not yet be on the channel (§2:6), then every
+    episode ``channel_episode_ids`` holds on the channel — the enumeration of what the
+    store physically holds, expired and not-yet-valid ones included (ADR-0275 §6:6) —
+    whether or not the conversation still stands (§2:5). Each id once.
+
+    Raises:
+        MemoryStoreError: If the store cannot be read.
+    """
+    channel = conversation_channel(conversation_id)
+    found = [episode.id for episode in await _open_on(memory, channel)]
+    after: int | None = None
+    while held := await memory.channel_episode_ids(channel, after=after, limit=_CHANNEL_PAGE):
+        found.extend(one.episode_id for one in held)
+        after = held[-1].number
+    return list(dict.fromkeys(found))
+
+
+async def conversation_state(memory: MemoryStore, conversation_id: str) -> ConversationState:
+    """What a conversation's devices are shown about the assistant (ADR-0293 §8).
+
+    **Read from the episodes on the conversation's place**, which are the assistant's
+    own record of its activations (§1:6), so a restart that closed an activation as
+    interrupted is read back as interrupted (§9:2). Shared by the engine and the
+    canonical fake engine, so both read one state from one store the same way. Two
+    reads:
+
+    * an **open** episode on the place is an activation started from the conversation
+      that is running, and its ``activation_id`` is the one a stop names (§8:2,
+      ADR-0295 §1:2), found by :func:`started_from` from its admission on, the newest
+      taken;
+    * the place's newest **ended** episode is the last activation that ended, and its
+      status says how (:func:`activation_ending`).
+
+    An activation that wrote no episode — capture degraded, or forgotten — is not
+    seen, and a conversation whose episodes were forgotten reads as idle: what the
+    assistant forgot it no longer knows ran.
+
+    Raises:
+        MemoryStoreError: If the episodes cannot be read.
+    """
+    channel = conversation_channel(conversation_id)
+    running = await _open_on(memory, channel)
+    newest = running[-1].processing_record if running else None
+    ended = await memory.channel_episodes(channel, limit=1)
+    last = ended.entries[-1].record if ended.entries else None
+    return ConversationState(
+        working=bool(running),
+        activation_id=None if newest is None else newest.activation_id,
+        last_ended=activation_ending(last) if isinstance(last, EpisodicMemory) else None,
+    )
+
+
+def fit_transcript(page: TranscriptPage | None, *, max_bytes: int) -> TranscriptPage | None:
+    """The page shortened from its oldest end until it fits the payload limit.
+
+    A snapshot keeps its most recent entries, and the first position left is where
+    the next ``before`` reads from, so nothing is lost (ADR-0293 §5:13). Where not
+    even one entry fits, the original page earns the ordinary size error.
+
+    Raises:
+        OversizedValueError: If no non-empty page fits.
+    """
+    if page is None or len(canonical_payload(page)) <= max_bytes:
+        return page
+    for start in range(1, len(page.entries)):
+        fitted = page.model_copy(update={"entries": page.entries[start:]})
+        if len(canonical_payload(fitted)) <= max_bytes:
+            return fitted
+    check_payload(page, max_bytes=max_bytes, subject="the result of transcript()")
+    raise AssertionError("an oversized transcript page was unexpectedly admitted")
+
+
+def fit_changes(page: ChatChanges, *, max_bytes: int) -> ChatChanges:
+    """The changes shortened from their newest end until they fit the payload limit.
+
+    ``next_after`` becomes the last change returned, so the next read resumes after
+    it and nothing is lost (ADR-0293 §5:11). Where not even one change fits, the
+    original page earns the ordinary size error.
+
+    Raises:
+        OversizedValueError: If no non-empty page fits.
+    """
+    if len(canonical_payload(page)) <= max_bytes:
+        return page
+    for count in range(len(page.changes) - 1, 0, -1):
+        kept = page.changes[:count]
+        fitted = ChatChanges(changes=kept, next_after=kept[-1].seq)
+        if len(canonical_payload(fitted)) <= max_bytes:
+            return fitted
+    check_payload(page, max_bytes=max_bytes, subject="the result of chat_changes()")
+    raise AssertionError("an oversized changes page was unexpectedly admitted")
 
 
 @dataclass(frozen=True, slots=True)
@@ -392,12 +569,13 @@ class ConversationLifecycle:
     # --- deletion (§8) -------------------------------------------------------
 
     async def digest(self, conversation_id: str) -> ConversationDigest | None:
-        """The count and span a deletion ceremony shows, or ``None`` (ADR-0283 §4:2).
+        """One conversation as it is read, or ``None`` (ADR-0283 §4:2, ADR-0293 §8).
 
-        Two reads and no walk: the record for the span and ``last_turn_at``, which is
-        the conversation's own, and an **unfiltered** ``channel_episodes`` read of its
-        channel, whose ``total`` is the count — every live episode on the channel,
-        eligible or not, whatever the page held.
+        The record for the span and ``last_turn_at``, which is the conversation's own,
+        and an **unfiltered** ``channel_episodes`` read of its channel, whose ``total``
+        is the count — every live episode on the channel, eligible or not, whatever
+        the page held; then the conversation's devices and its current state
+        (:meth:`state`).
 
         Returns:
             The digest, or ``None`` when the id names nothing or names a
@@ -412,39 +590,148 @@ class ConversationLifecycle:
         if conversation is None:
             return None
         page = await self._memory.channel_episodes(conversation_channel(conversation_id), limit=1)
+        devices = await self._conversations.conversation_devices(conversation_id)
         return ConversationDigest(
             id=conversation.id,
             started_at=conversation.started_at,
             last_turn_at=conversation.last_turn_at,
             recorded_turns=page.total,
+            state=await self.state(conversation_id),
+            devices=devices or (),
         )
 
+    async def state(self, conversation_id: str) -> ConversationState:
+        """What the conversation's devices are shown about the assistant (ADR-0293 §8).
+
+        :func:`conversation_state` over this stage's memory store.
+
+        Raises:
+            MemoryStoreError: If the episodes cannot be read.
+        """
+        return await conversation_state(self._memory, conversation_id)
+
+    # --- the chat space's acts and reads (ADR-0293 §2-§5) --------------------
+
+    async def start(self) -> Conversation:
+        """Start an empty conversation, given "my devices" (ADR-0293 §2:1, §3:1)."""
+        return await self._conversations.start()
+
+    async def my_devices(self) -> tuple[ChatDevice, ...]:
+        """Read "my devices" (ADR-0293 §3:1)."""
+        return await self._conversations.my_devices()
+
+    async def set_my_devices(self, devices: Sequence[ChatDevice]) -> bool:
+        """Replace "my devices" (ADR-0293 §3:1, §3:2)."""
+        return await self._conversations.set_my_devices(devices)
+
+    async def set_conversation_devices(
+        self, conversation_id: str, devices: Sequence[ChatDevice]
+    ) -> bool:
+        """Replace one conversation's devices (ADR-0293 §3:3)."""
+        return await self._conversations.set_conversation_devices(conversation_id, devices)
+
+    async def write(self, conversation_id: str, message: UserMessage) -> MessageReceipt:
+        """Record the user's message and answer for it (ADR-0293 §4).
+
+        The store answers *received*, a repeat, a device that is not an end for
+        writing and a reply to nothing; it starts no activation, which is the
+        reader's (§6).
+        """
+        return await self._conversations.append_message(conversation_id, message.as_new_message())
+
+    async def delete_message(self, conversation_id: str, position: int) -> bool:
+        """Delete one message, leaving its marker (ADR-0293 §5:8, §5:12)."""
+        return await self._conversations.delete_message(conversation_id, position)
+
+    async def transcript(
+        self, conversation_id: str, *, before: int | None, limit: int
+    ) -> TranscriptPage | None:
+        """Read part of a conversation's transcript (ADR-0293 §5:13)."""
+        return await self._conversations.transcript(conversation_id, before=before, limit=limit)
+
+    async def changes(
+        self, *, after: int, conversation_ids: Sequence[str] | None, limit: int
+    ) -> ChatChanges:
+        """Read the chat space's changes after a cursor (ADR-0293 §5:10, §5:11)."""
+        return await self._conversations.changes(
+            after=after, conversation_ids=conversation_ids, limit=limit
+        )
+
+    # --- forgetting (ADR-0293 §2:4-§2:8) -------------------------------------
+
+    async def forget(self, conversation_id: str) -> bool:
+        """Forget every episode on the conversation's place, and nothing else (§2:4).
+
+        Memory's act alone: the conversation, its transcript and its devices are
+        not reached (§5:6), and the place is walked whether or not the conversation
+        still stands (§2:5), by :func:`episodes_on_place`. Each episode's capture in
+        flight is told before its deletion, as ``forget`` tells one (ADR-0286 §8:1),
+        so no later write re-creates it (§2:6). Idempotent by re-walking.
+
+        Returns:
+            Whether an episode was forgotten.
+
+        Raises:
+            MemoryStoreError: If the store cannot be read or an episode deleted.
+        """
+        forgot = False
+        for episode_id in await episodes_on_place(self._memory, conversation_id):
+            self.activation_writer.forgetting(episode_id)
+            forgot = await self._memory.delete(episode_id) or forgot
+        return forgot
+
+    async def delete_and_forget(self, conversation_id: str) -> bool:
+        """Today's ``forget_conversation``: delete the conversation, then forget its place.
+
+        The superseded route ADR-0293 §Decision:2 keeps working until the first build
+        replaces it, composed from the two acts that replace it — :meth:`delete`, then
+        :meth:`forget` — so it destroys what it destroyed before: the conversation and
+        every episode on its place. Deleting first means a capture racing the call
+        meets a deleted conversation and keeps its episode on the place (§2:7), where
+        the forgetting that follows finds it; an open one is told first (§2:6).
+
+        Returns:
+            ``True`` if this call stamped the conversation, as :meth:`delete` answers.
+
+        Raises:
+            ConversationStoreError: If the conversation store cannot be written.
+            MemoryStoreError: If an episode could not be destroyed. The conversation is
+                deleted by then, and a repeat finishes the forgetting.
+            AssistantError: If this conversation's parked reads could not be dropped.
+        """
+        stamped = await self.delete(conversation_id)
+        await self.forget(conversation_id)
+        return stamped
+
+    async def _forget_one(self, episode_id: str) -> bool:
+        """Tell any capture in flight at the id, then destroy it (ADR-0286 §8:1)."""
+        self.activation_writer.forgetting(episode_id)
+        return await self._memory.delete(episode_id)
+
     async def delete(self, conversation_id: str) -> bool:
-        """Destroy a conversation: stamp, purge, drop (§8, ADR-0004 §6).
+        """Delete a conversation: stamp, drop its parked reads, drop the record (§8).
 
-        The three steps normally run to completion here, and the tombstone is what
-        makes a crash survivable rather than final. If this process dies at any
-        point — or a racing capture writes its episode after step 2 — the stamped
-        record is still there and the episodes are still on the conversation's
-        channel, so :meth:`sweep_deletions` finishes it (ADR-0283 §8).
+        ADR-0283 §8:1 as ADR-0293 §2:3 partially supersedes it: deleting removes the
+        conversation and its transcript, **and none of the episodes on its place**.
+        The stamp is the act in the medium — the store deletes the transcript, the
+        devices and the reader's bookkeeping in the same step and records the change
+        — and the record is dropped once its grace has passed. If this process dies
+        between the steps the stamped record is still there, so
+        :meth:`sweep_deletions` finishes it (ADR-0076).
 
-        **Step 2 destroys this conversation's parked reads too** (ADR-0244 §3), through
+        **The conversation's parked reads go with it** (ADR-0244 §3), through
         ``ParkedReads.drop_for_conversation`` and never through a concrete store —
         :meth:`_finish_deletion` carries the placement and its argument.
 
         Returns:
             ``True`` if this call stamped the conversation; ``False`` if it was
             already stamped or the id names nothing. Either way the sweep behind it
-            is run, because §8's protocol is explicitly re-runnable.
+            is run, because the deletion is re-runnable.
 
         Raises:
             ConversationStoreError: If the store cannot be read or written.
-            MemoryStoreError: If an episode could not be destroyed. The tombstone
-                stands and the next sweep finishes the job; reporting success over
-                content the user asked to be gone would be the worse failure.
-            AssistantError: If this conversation's parked reads could not be dropped,
-                which aborts step 2 before any episode is deleted. The tombstone stands
-                here too, for the same reason.
+            AssistantError: If this conversation's parked reads could not be dropped.
+                The tombstone stands, and the next sweep finishes the job.
         """
         stamped = await self._conversations.stamp_deleted(conversation_id)
         try:
@@ -461,8 +748,9 @@ class ConversationLifecycle:
 
         The start-up half of §8's reclaim. Before ADR-0076 nothing could find this
         work: the stamp hides a conversation from every presenting read, so a
-        process that died between the stamp and the drop left episodes that were
-        never destroyed and an index that outlived its grace indefinitely.
+        process that died between the stamp and the drop left a record that outlived
+        its grace indefinitely. Since ADR-0293 §2:3 it destroys no episode, as the
+        deletion it finishes destroys none.
 
         Walks the tombstones to an **empty batch**, because finishing one batch and
         stopping is the failure §9's own multi-batch clause forbids, and the cursor
@@ -494,16 +782,13 @@ class ConversationLifecycle:
             cursor = batch[-1]
 
     async def _finish_deletion(self, conversation_id: str) -> bool:
-        """Destroy this conversation's parked reads and episodes, then ask for the drop (§8).
+        """Destroy this conversation's parked reads, then ask for the drop (§8).
 
-        ADR-0283 §8:1, in order, as ADR-0287 left it: the parked reads' drop, then
-        **every episode ``channel_episode_ids`` returns for the conversation's
-        channel**, page by page until a read is empty, then ``drop_if_eligible``. That
-        enumeration is what the store physically holds — expired but unpurged and not
-        yet valid episodes included — and no read filtered by liveness or validity is
-        used in its place (ADR-0275 §6:6). Idempotent by re-walking: a run that dies
-        part-way is re-run from the beginning, and the episodes it already deleted are
-        no longer on the channel.
+        ADR-0283 §8:1, in order, as ADR-0293 §2:3 leaves it: the parked reads' drop,
+        then ``drop_if_eligible``. **No episode is destroyed**: deleting a conversation
+        forgets nothing, and its episodes stay on its place until the user forgets
+        them (ADR-0293 §2:4). Idempotent: a run that dies part-way is re-run from the
+        beginning.
 
         **The parked reads go first, and the position is argued rather than free**
         (ADR-0244 §3). It is inside **step 2** and never after step 3, because
@@ -537,15 +822,6 @@ class ConversationLifecycle:
         """
         if self._parked_reads is not None:
             await self._parked_reads.drop_for_conversation(conversation_id)
-        channel = conversation_channel(conversation_id)
-        after: int | None = None
-        while True:
-            held = await self._memory.channel_episode_ids(channel, after=after, limit=_CHANNEL_PAGE)
-            if not held:
-                break
-            for one in held:
-                await self._memory.delete(one.episode_id)
-            after = held[-1].number
         return await self._conversations.drop_if_eligible(conversation_id)
 
     # --- retention reclaim (§7) ---------------------------------------------
@@ -668,5 +944,10 @@ __all__ = [
     "ConversationDigest",
     "ConversationLifecycle",
     "ParkingOrigin",
+    "activation_ending",
     "conversation_channel",
+    "conversation_state",
+    "episodes_on_place",
+    "fit_changes",
+    "fit_transcript",
 ]

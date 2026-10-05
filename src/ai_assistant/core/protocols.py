@@ -273,6 +273,7 @@ if TYPE_CHECKING:
         TransportEndpoint,
         TurnOutcome,
         TurnReference,
+        UserMessage,
         UtcInstant,
         VisibleIdentifier,
         WalkPosition,
@@ -15423,11 +15424,15 @@ class AssistantEngine(Protocol):
         ...
 
     async def conversation(self, conversation_id: Identifier) -> ConversationDigest | None:
-        """Show what destroying one conversation would destroy, or ``None`` if absent.
+        """Read one conversation: its count and span, its current state and its devices.
 
         ADR-0073 §5's show-then-confirm at the unit the user thinks in: the count
         and the span, rather than a transcript nobody can read at a prompt
-        (ADR-0074 §8).
+        (ADR-0074 §8). **It gains the conversation's current state** (ADR-0293
+        §8, §11:3) — whether an activation started from it is running, which one,
+        and how the last one ended — and its devices (§3:3), which a device that
+        caught up from a snapshot has no change to learn from. Its transcript is
+        :meth:`transcript`'s.
 
         Args:
             conversation_id: The conversation to describe.
@@ -15442,20 +15447,249 @@ class AssistantEngine(Protocol):
         ...
 
     async def forget_conversation(self, conversation_id: Identifier) -> bool:
-        """Destroy one conversation and the episodes its turns index.
+        """Destroy one conversation and the episodes on its place.
+
+        **The route ADR-0293 §Decision:2 keeps working until the first build
+        replaces it.** It becomes memory-only when the interfaces move to the acts
+        in the medium (§11:4): forgetting the episodes on the place and leaving the
+        conversation, which :meth:`delete_conversation` then removes. Until then it
+        destroys both, as it did; the episodes on the place are reached whether or
+        not the conversation still stands (§2:5), and an open one is forgotten so no
+        later write re-creates it (§2:6).
 
         Args:
             conversation_id: The conversation to destroy.
 
         Returns:
             Whether a conversation was destroyed. ``False`` where the id named
-            nothing live.
+            nothing live; the episodes on its place are forgotten either way.
 
         Raises:
             ValueError: If ``conversation_id`` is blank.
             ConversationStoreError: If reading or updating the conversation index
                 failed.
-            MemoryStoreError: If destroying the indexed episodes failed.
+            MemoryStoreError: If destroying the episodes failed.
+        """
+        ...
+
+    # --- the chat space: acts in the medium and its reads (ADR-0293 §11) ---
+    #
+    # ADR-0293 §11:2's replacement for the conversation's turn calls, beside them
+    # until the first build retires those (§Decision:2). Each act is the user's in
+    # the hosted medium (§2); a written message is recorded and answered *received*
+    # (§4:4), and what the assistant does with it is the chat's reader's (§6).
+    # Device identifiers are opaque here: which devices may act is the device
+    # session's (ADR-0293 §2, ADR-0296).
+
+    async def start_conversation(self) -> ConversationSummary:
+        """Start an empty conversation, shown on "my devices" (ADR-0293 §2:1, §3:1).
+
+        An act in the medium: the conversation is created empty, given "my devices"
+        as they stand, and the change is recorded. It is the one route that creates
+        a conversation without a message (§2:2).
+
+        Returns:
+            The new conversation, with no turn recorded.
+
+        Raises:
+            ConversationStoreError: If the conversation could not be started.
+        """
+        ...
+
+    async def my_devices(self) -> tuple[ChatDevice, ...]:
+        """Read "my devices", the chat space's own set, ``device_id`` ascending (§3:1).
+
+        Raises:
+            ConversationStoreError: If the set could not be read.
+        """
+        ...
+
+    async def set_my_devices(self, devices: Sequence[ChatDevice]) -> bool:
+        """Replace "my devices" (ADR-0293 §3:1, §3:2).
+
+        An act in the medium, and the user's statement that each device's screen is
+        private. A conversation started later is shown on the set as it then
+        stands; one already started keeps its own devices (§3:3).
+
+        Args:
+            devices: The whole set, each device once, at most
+                :data:`~ai_assistant.core.types.CHAT_DEVICES_MAX`. Read once, before
+                the first ``await``.
+
+        Returns:
+            Whether the set changed.
+
+        Raises:
+            ValueError: If ``devices`` is a ``str``, holds something that is not a
+                ``ChatDevice``, names one device twice or holds too many.
+            ConversationStoreError: If the set could not be written.
+        """
+        ...
+
+    async def set_conversation_devices(
+        self, conversation_id: Identifier, *, devices: Sequence[ChatDevice]
+    ) -> bool:
+        """Choose one conversation's devices, away from "my devices" (ADR-0293 §3:3).
+
+        An act in the medium; "my devices" is not touched.
+
+        Args:
+            conversation_id: The conversation.
+            devices: Its whole set of devices, as :meth:`set_my_devices` takes one.
+
+        Returns:
+            Whether the set changed.
+
+        Raises:
+            ValueError: If ``conversation_id`` is blank, or ``devices`` as
+                :meth:`set_my_devices` refuses it.
+            UnknownConversationError: If the id names no conversation, or one deleted.
+            ConversationStoreError: If the set could not be written.
+        """
+        ...
+
+    async def write_message(
+        self, conversation_id: Identifier, *, message: UserMessage
+    ) -> MessageReceipt:
+        """Write the user's message into a conversation, and answer *received* (§4).
+
+        An act in the medium from one of the conversation's devices. Once the
+        conversation has recorded the message, the answer carries its position,
+        which is *received* (§4:4). Sending is safe to repeat: the same device's
+        same message id is the same message, recorded once, deleted or not (§4:2,
+        §4:3). A device that is not one of the conversation's ends for writing, or a
+        reply naming a position the conversation never held, is answered with an
+        outcome and no position, and nothing is recorded (§7:2, §4:5).
+
+        The message is recorded and answered; it starts no activation here. Taking
+        it in is the chat's reader's (§6).
+
+        Args:
+            conversation_id: The conversation written into.
+            message: The message. Its size bound is its type's, so an oversized one
+                cannot be sent (§4:7).
+
+        Returns:
+            The receipt: the outcome, and the position where the message is.
+
+        Raises:
+            ValueError: If ``conversation_id`` is blank.
+            UnknownConversationError: If the id names no conversation, or one
+                deleted — a conversation is never created by a message (§2:2).
+            ConversationStoreError: If the message could not be written.
+        """
+        ...
+
+    async def delete_message(self, conversation_id: Identifier, *, position: int) -> bool:
+        """Delete one message of either author, leaving its marker (§5:8, §5:9, §5:12).
+
+        A reply to it stays, naming a deleted message. Deleting forgets nothing.
+
+        Args:
+            conversation_id: The conversation holding the message.
+            position: The message's position, at least 1.
+
+        Returns:
+            ``True`` where this call deleted it; ``False`` where the conversation
+            never held that position or it was already deleted.
+
+        Raises:
+            ValueError: If ``conversation_id`` is blank, or ``position`` is not an
+                ``int`` in ``[1, 2**63)``.
+            UnknownConversationError: If the id names no conversation, or one deleted.
+            ConversationStoreError: If the message could not be deleted.
+        """
+        ...
+
+    async def delete_conversation(self, conversation_id: Identifier) -> bool:
+        """Delete a conversation and its transcript, forgetting nothing (§2:3).
+
+        An act in the medium. The conversation leaves every read and the change is
+        recorded; the episodes on its place stay, and forgetting them is
+        :meth:`forget_conversation`'s (§2:4, §2:7).
+
+        Args:
+            conversation_id: The conversation to delete.
+
+        Returns:
+            ``True`` where this call deleted it; ``False`` where it was already
+            deleted or the id names nothing.
+
+        Raises:
+            ValueError: If ``conversation_id`` is blank.
+            ConversationStoreError: If the deletion could not be written.
+        """
+        ...
+
+    async def transcript(
+        self,
+        conversation_id: Identifier,
+        *,
+        before: int | None = None,
+        limit: int = DEFAULT_PAGE_SIZE,
+    ) -> TranscriptPage | None:
+        """Read a conversation's recent messages, or older ones (ADR-0293 §5:13).
+
+        ``before=None`` is the snapshot a device far behind, or new, takes;
+        ``before=<position>`` loads the messages before it as the user scrolls back.
+        A deleted message reads as its marker. The page's ``as_of`` is where the
+        device follows :meth:`chat_changes` from.
+
+        **A page that does not fit the payload limit is shortened, not refused**:
+        the oldest entries are left off, and the page's first position is where the
+        next ``before`` reads from, so nothing is lost.
+
+        Args:
+            conversation_id: The conversation.
+            before: ``None`` for the most recent messages, or a position to read
+                below.
+            limit: How many entries at most; defaults to
+                :data:`~ai_assistant.core.types.DEFAULT_PAGE_SIZE`.
+
+        Returns:
+            The page, or ``None`` where the id names no conversation, or one deleted.
+
+        Raises:
+            ValueError: If ``conversation_id`` is blank, ``before`` is not ``None``
+                or an ``int`` in ``[1, 2**63)``, or ``limit`` is outside
+                ``[0, 2**63)``.
+            ConversationStoreError: If the transcript could not be read.
+        """
+        ...
+
+    async def chat_changes(
+        self,
+        *,
+        after: int,
+        conversation_ids: Sequence[Identifier] | None = None,
+        limit: int = DEFAULT_PAGE_SIZE,
+    ) -> ChatChanges:
+        """Read every change to the chat space after a cursor (ADR-0293 §5:10, §5:11).
+
+        A device keeps one cursor and catches up with one request for every change
+        after it, and asks again from ``next_after``. A plain request, answered at
+        once; following the stream as it happens is the device session's
+        (ADR-0296).
+
+        **A page that does not fit the payload limit is shortened, not refused**:
+        the newest changes are left off, and ``next_after`` is the last change
+        returned, so the next read resumes after it.
+
+        Args:
+            after: The last sequence number the device applied, ``0`` for none.
+            conversation_ids: The conversations to read the changes of, with the
+                changes to "my devices" beside them, or ``None`` for every change.
+                At most 1000 ids; read once, before the first ``await``.
+            limit: How many changes at most; defaults to
+                :data:`~ai_assistant.core.types.DEFAULT_PAGE_SIZE`.
+
+        Returns:
+            The changes, in sequence order, and the cursor to ask from next.
+
+        Raises:
+            ValueError: If ``after`` or ``limit`` is outside ``[0, 2**63)``, or
+                ``conversation_ids`` is a ``str``, holds a blank id or more than 1000.
+            ConversationStoreError: If the changes could not be read.
         """
         ...
 
