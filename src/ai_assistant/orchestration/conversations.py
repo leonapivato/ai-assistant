@@ -64,7 +64,7 @@ from ai_assistant.core.types import (
     EpisodicMemory,
     MemoryKind,
     MessageAddedChange,
-    MessageAuthor,
+    NewMessage,
     ProcessingStatus,
     TranscriptMessage,
     TranscriptPage,
@@ -275,6 +275,39 @@ _WIDEST_AT: Final = datetime(9999, 12, 31, 23, 59, 59, 999999, tzinfo=UTC)
 _WIDEST_NUMBER: Final = 2**63 - 1
 
 
+def _widest_records(
+    conversation_id: str, message: NewMessage
+) -> tuple[TranscriptPage, ChatChanges]:
+    """The one-entry transcript page and change page ``message``'s record could cost.
+
+    Measured at the widest position, sequence number and instant it could be recorded
+    with, and a reply reference as wide as the one it names.
+    """
+    recorded = TranscriptMessage(
+        conversation_id=conversation_id,
+        position=_WIDEST_NUMBER,
+        written_at=_WIDEST_AT,
+        author=message.author,
+        text=message.text,
+        # As wide as the reply the message names, and below the probe's own position,
+        # which a recorded message's reference always is.
+        replies_to=None
+        if message.replies_to is None
+        else min(message.replies_to, _WIDEST_NUMBER - 1),
+        options=message.options,
+        cut_off=message.cut_off,
+        device_id=message.device_id,
+        message_id=message.message_id,
+    )
+    return (
+        TranscriptPage(conversation_id=conversation_id, entries=(recorded,), as_of=_WIDEST_NUMBER),
+        ChatChanges(
+            changes=(MessageAddedChange(seq=_WIDEST_NUMBER, message=recorded),),
+            next_after=_WIDEST_NUMBER,
+        ),
+    )
+
+
 def check_message_fits(conversation_id: str, message: UserMessage, *, max_bytes: int) -> None:
     """Refuse a message whose own record could not be read back within the limit.
 
@@ -289,32 +322,68 @@ def check_message_fits(conversation_id: str, message: UserMessage, *, max_bytes:
     Raises:
         OversizedValueError: If either one-entry page would exceed ``max_bytes``.
     """
-    recorded = TranscriptMessage(
-        conversation_id=conversation_id,
-        position=_WIDEST_NUMBER,
-        written_at=_WIDEST_AT,
-        author=MessageAuthor.USER,
-        text=message.text,
-        # As wide as the reply the message names, and below the probe's own position,
-        # which a recorded message's reference always is.
-        replies_to=None
-        if message.replies_to is None
-        else min(message.replies_to, _WIDEST_NUMBER - 1),
-        device_id=message.device_id,
-        message_id=message.message_id,
-    )
+    page, changes = _widest_records(conversation_id, message.as_new_message())
     check_payload(
-        TranscriptPage(conversation_id=conversation_id, entries=(recorded,), as_of=_WIDEST_NUMBER),
+        page,
         max_bytes=max_bytes,
         subject="the transcript page holding the message write_message() was given",
     )
     check_payload(
-        ChatChanges(
-            changes=(MessageAddedChange(seq=_WIDEST_NUMBER, message=recorded),),
-            next_after=_WIDEST_NUMBER,
-        ),
+        changes,
         max_bytes=max_bytes,
         subject="the change recording the message write_message() was given",
+    )
+
+
+def _fits(conversation_id: str, message: NewMessage, *, max_bytes: int) -> bool:
+    """Whether both one-entry pages holding ``message``'s record fit ``max_bytes``."""
+    return all(
+        len(canonical_payload(one)) <= max_bytes
+        for one in _widest_records(conversation_id, message)
+    )
+
+
+def fitted_message(conversation_id: str, message: NewMessage, *, max_bytes: int) -> NewMessage:
+    """``message`` cut short until its own record can be read back within the limit.
+
+    The writer's size bound, enforced at the actuator (ADR-0293 §7:3): the assistant's
+    message is held to the transcript's bound by its type, and to what one read can
+    return by this, for :func:`check_message_fits`' reason — a recorded message no read
+    could return would stop every device's cursor at it. A message that is cut is
+    marked cut off, so it is never read as a complete answer (§5:2, §6:16). The
+    longest prefix that fits is found by bisection over its length, each probe one
+    encoding of at most the message itself.
+
+    Raises:
+        OversizedValueError: If not even one character of the text fits, which only a
+            limit too small for any message's frame can bring about.
+    """
+    if _fits(conversation_id, message, max_bytes=max_bytes):
+        return message
+    low, high = 0, len(message.text)
+    while high - low > 1:
+        middle = (low + high) // 2
+        candidate = message.text[:middle]
+        cut = (
+            message.model_copy(update={"text": candidate, "cut_off": True})
+            if candidate.strip()
+            else None
+        )
+        if cut is not None and _fits(conversation_id, cut, max_bytes=max_bytes):
+            low = middle
+        else:
+            high = middle
+    if low == 0 or not message.text[:low].strip():
+        page, changes = _widest_records(conversation_id, message)
+        check_payload(page, max_bytes=max_bytes, subject="the assistant's message")
+        check_payload(changes, max_bytes=max_bytes, subject="the assistant's message")
+        raise AssertionError("an oversized message was unexpectedly admitted")
+    return NewMessage(
+        author=message.author,
+        text=message.text[:low],
+        replies_to=message.replies_to,
+        options=message.options,
+        cut_off=True,
     )
 
 
@@ -553,6 +622,16 @@ class ConversationLifecycle:
             retention=retention,
             now=now,
         )
+
+    @property
+    def chat_space(self) -> ConversationStore:
+        """The hosted medium the chat's reader reads and its writer writes (ADR-0293 §6).
+
+        The same store every act in the medium relays to, so the reader's bookkeeping,
+        the transcript it brings in and the messages the writer adds are the ones the
+        devices read.
+        """
+        return self._conversations
 
     # --- resolving the conversation a turn runs under (§2) -------------------
 
@@ -1076,4 +1155,5 @@ __all__ = [
     "episodes_on_place",
     "fit_changes",
     "fit_transcript",
+    "fitted_message",
 ]

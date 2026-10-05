@@ -23,7 +23,9 @@ says so.
 **Two windows, two label sequences** (§3). The **channel window** is what the channel
 supplied — ``ChannelContext.history`` then ``reply_to`` — or, on the conversation
 channel, the conversation's tail as ``ConversationLifecycle.history`` already read it
-for the pass. Its items are labelled ``H1``, ``H2``… The **episode window** is what the
+for the pass, or — for an input the chat's reader brought in — the conversation's
+recent transcript, each message keeping its author (ADR-0293 §6:4, §6:5). Its items are
+labelled ``H1``, ``H2``… The **episode window** is what the
 selector returns (§4), labelled ``P1``, ``P2``… in the selector's order. The input
 carries no label: a reading grounded in the input alone is ``stated``. No label
 survives the call and none is persisted — each resolves, here, into an
@@ -76,9 +78,11 @@ from ai_assistant.core.types import (
     UNDERSTANDING_REFERENT_EXCERPT_CHARS,
     ActivationUnderstanding,
     BeliefBand,
+    DeletedMessage,
     EpisodicMemory,
     InputOrigin,
     Message,
+    MessageAuthor,
     ProposedActivationUnderstanding,
     RecallOutcome,
     Role,
@@ -105,6 +109,7 @@ if TYPE_CHECKING:
         ChannelIdentity,
         EpisodeProjection,
         MemoryRecord,
+        TranscriptMessage,
     )
     from ai_assistant.orchestration.disclosure import TurnSupply
 
@@ -114,6 +119,7 @@ __all__ = [
     "EpisodeSelector",
     "RecentEpisodes",
     "SuppliedWindow",
+    "TranscriptWindow",
     "UnderstandingStage",
 ]
 
@@ -234,7 +240,36 @@ class ConversationWindow:
     records: tuple[MemoryRecord, ...]
 
 
-type ChannelWindow = SuppliedWindow | ConversationWindow
+@dataclass(frozen=True, slots=True)
+class TranscriptWindow:
+    """The chat's window: its recent transcript, brought in with the input (ADR-0293 §6:4).
+
+    What the chat's reader brought in beside the messages it took in as the input,
+    replacing the tail read from episodes for that input (ADR-0293's partial
+    supersession of ADR-0276 §3:1-§3:2). Each message keeps its author, so the window
+    informs and never authorizes (§6:5). A message is not a stored record: it passes as
+    the medium holds it, as a supplied item does, with no identifier the episode
+    window or recall could share.
+
+    Attributes:
+        conversation: The conversation channel, rendered as each item's source.
+        messages: The conversation's recent messages, ascending, without the input's
+            own and without a deleted message's marker.
+        input_positions: The positions of the messages taken in as the input, so an
+            item written after the earliest of them is marked as such: the transcript
+            shows what was written and when (§6).
+        replied_to: Each earlier message an input message replies to that
+            ``messages`` does not already show, ascending — a deleted one as its
+            marker (§4:5, §5:8).
+    """
+
+    conversation: ChannelIdentity
+    messages: tuple[TranscriptMessage, ...]
+    input_positions: tuple[int, ...] = ()
+    replied_to: tuple[TranscriptMessage | DeletedMessage, ...] = ()
+
+
+type ChannelWindow = SuppliedWindow | ConversationWindow | TranscriptWindow
 
 #: ADR-0276 §4's **episode selector**: one orchestration-local function the
 #: composition root wires into the windows stage (ADR-0282 §3), so its *method* changes by wiring a
@@ -765,6 +800,8 @@ def _channel_items(window: ChannelWindow, audience: TurnSupply) -> list[_Channel
         if window.context.reply_to is not None:
             supplied.append((window.context.reply_to, "the item this input replies to"))
         return [_supplied_item(item, role) for item, role in supplied]
+    if isinstance(window, TranscriptWindow):
+        return _transcript_items(window)
     source = _channel_text(window.conversation)
     return [
         _tail_item(record, source) for record in admitted_to_understanding(audience, window.records)
@@ -787,6 +824,61 @@ def _supplied_item(item: ChannelContextItem, role: str) -> _ChannelItem:
 
 
 _TAIL_ITEM: Final = "an earlier exchange of this conversation, as the assistant recorded it"
+
+_TRANSCRIPT_ITEM: Final = "a recent message of this conversation"
+_REPLIED_TO_ITEM: Final = "an earlier message the input replies to"
+
+#: Who wrote a message, as the window renders it: the medium's own record of its
+#: author, never a reading of its text (ADR-0293 §6:5, ADR-0276 §3:6).
+_AUTHOR_TEXT: Final = {
+    MessageAuthor.USER: "the user",
+    MessageAuthor.ASSISTANT: "the assistant",
+}
+
+
+def _transcript_items(window: TranscriptWindow) -> list[_ChannelItem]:
+    """The chat's window, its recent messages then those the input replies to (§6:4).
+
+    Each item keeps its author and its position, and an item written after the
+    earliest message of the input says so, so the activation can tell that a message
+    was written before the reply it follows (ADR-0293 §6).
+    """
+    source = _channel_text(window.conversation)
+    first = min(window.input_positions, default=None)
+    items = [_message_item(one, source, _TRANSCRIPT_ITEM, first) for one in window.messages]
+    items.extend(_message_item(one, source, _REPLIED_TO_ITEM, first) for one in window.replied_to)
+    return items
+
+
+def _message_item(
+    message: TranscriptMessage | DeletedMessage, source: str, role: str, first: int | None
+) -> _ChannelItem:
+    """One message of the transcript, quoted as the medium holds it (ADR-0293 §5:2)."""
+    body: dict[str, object] = {"item": role, "position": message.position}
+    excerpt = ""
+    if isinstance(message, DeletedMessage):
+        body["deleted"] = True
+    else:
+        body["author"] = _AUTHOR_TEXT[message.author]
+        body["written_at"] = message.written_at.isoformat()
+        body["text"] = message.text
+        excerpt = _excerpt(message.text)
+        if message.replies_to is not None:
+            body["replies_to"] = message.replies_to
+        if message.cut_off:
+            body["cut_off"] = True
+    if first is not None and message.position > first:
+        body["written_after_the_input_began"] = True
+    return _ChannelItem(
+        identifier=None,
+        body=body,
+        referent=UnderstandingReferent(
+            kind="channel_item",
+            id=f"message:{message.position}",
+            source=source,
+            excerpt=excerpt,
+        ),
+    )
 
 
 def _tail_item(record: MemoryRecord, source: str) -> _ChannelItem:

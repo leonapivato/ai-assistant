@@ -462,6 +462,7 @@ def _wire(  # noqa: PLR0913 — one knob per state the shared suite needs a subj
     max_outstanding_confirmations: int = _DEFAULT_MAX_OUTSTANDING,
     notification_outbox: FakeNotificationOutbox | None = None,
     stories: StoryStore | None = None,
+    chat_reader: bool = True,
 ) -> Engine:
     """Build one engine over in-memory fakes, wired as the composition root would.
 
@@ -505,6 +506,12 @@ def _wire(  # noqa: PLR0913 — one knob per state the shared suite needs a subj
     ``NotificationWriter`` seam — so a subject with an entry waiting has to be built
     holding one. Left ``None`` for every other case, which is the deployment the suite
     had before ADR-0206 and is why none of them is affected by it.
+
+    ``chat_reader`` is ADR-0293 §6's reader, switched off for the chat-space suite alone:
+    that suite holds the medium to the surface's contract on every implementation, and
+    the canonical fake and the wire client answer no message, so on this subject a
+    written message is recorded and waits, as it does there. The reader is held to its
+    own decision in ``test_chat_reader.py``.
 
     ``max_outstanding_confirmations`` is the ceiling ADR-0198 §4 reuses as the bound on
     the retained settled records. A knob for :attr:`AssistantEngineContract.tiny_engine`'s
@@ -679,6 +686,7 @@ def _wire(  # noqa: PLR0913 — one knob per state the shared suite needs a subj
         max_payload_bytes=max_payload_bytes,
         max_outstanding_confirmations=max_outstanding_confirmations,
         stories=stories,
+        chat_reader=chat_reader,
     )
 
 
@@ -689,7 +697,7 @@ class TestEngineContract(AssistantEngineContract):
     async def chat_surface(self) -> AsyncIterator[ChatSurfaceSubject]:
         """The production engine over an injected memory store, at the chat bound."""
         memory = FakeMemoryStore(now=lambda: CHAT_SURFACE_AT)
-        built = _wire(memory=memory, max_payload_bytes=CHAT_LIMIT)
+        built = _wire(memory=memory, max_payload_bytes=CHAT_LIMIT, chat_reader=False)
         await built.start()
         try:
             yield ChatSurfaceSubject(engine=built, memory=memory)
