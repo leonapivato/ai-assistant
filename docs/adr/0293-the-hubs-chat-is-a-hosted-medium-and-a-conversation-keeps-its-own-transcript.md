@@ -1,6 +1,6 @@
 # 293. The hub's chat is a hosted medium, and a conversation keeps its own transcript
 
-- Status: Proposed
+- Status: Accepted
 - Date: 2026-10-04
 - Scope: [#2578](https://github.com/leonapivato/ai-assistant/issues/2578), the channel redesign: the conversation channel, the first channel ADR-0292's model is applied to.
 - Authorization: the owner accepted proposal #2680 on 2026-10-04, at `f21aeb7b`, after walking it through section by section the same day, and the dispatcher assigned 0293. This ADR is that proposal converted under `docs/proposals/README.md` → "When it is decided".
