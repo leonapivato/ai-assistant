@@ -61,6 +61,7 @@ from __future__ import annotations
 import sqlite3
 from collections import Counter
 from collections.abc import Callable
+from contextlib import contextmanager
 from dataclasses import dataclass
 from datetime import UTC, datetime
 from enum import StrEnum
@@ -74,7 +75,7 @@ from ai_assistant.service.overlay import MAX_OVERLAY_IDENTITY_BYTES
 from ai_assistant.wire.credential import mint_credential, verifier_for, verifies
 
 if TYPE_CHECKING:
-    from collections.abc import Sequence
+    from collections.abc import Iterator, Sequence
     from pathlib import Path
 
 _log = structlog.get_logger(__name__)
@@ -868,6 +869,10 @@ class DeviceRegistry:
         self._roles = store.device_roles()
         self._registered, self._withdrawn = store.registration_pairs()
         self._per_gateway = Counter(gateway for _, gateway in self._registered)
+        # Devices an owner's revocation is removing from "my devices" and their
+        # conversations right now (:meth:`withheld`). In memory only: a revocation in
+        # flight when the hub stops has revoked nothing yet, so nothing outlives it.
+        self._withheld: Counter[str] = Counter()
         if hub_identity is not None and hub_identity in self._live:
             # A record written before ADR-0298 §3:4 refused it can hold a live
             # enrolment of the hub's own overlay identity. Nothing here revokes it on
@@ -1344,6 +1349,82 @@ class DeviceRegistry:
             The registrations and the total.
         """
         return self._store.recent_registrations(limit=limit)
+
+    @contextmanager
+    def withheld(self, device: str) -> Iterator[None]:
+        """Refuse a device everything while its revocation empties its memberships.
+
+        ADR-0298 §4:10's revocation removes the device from "my devices" and every
+        conversation's devices — on the conversation store, which is a suspension
+        away — and then revokes it here. For that removal to be the last word, the
+        device must not be able to put itself back meanwhile, and nobody may name it
+        in a set: so while this block runs the roster refuses its every request and
+        knows it as no device (:class:`~ai_assistant.service.roster.HubRoster`).
+        Removing first is what leaves no state to finish: a removal that fails has
+        revoked nothing, and a revocation whose record step fails has only taken the
+        memberships of a device that is still admitted.
+
+        Args:
+            device: The device being revoked.
+
+        Yields:
+            Nothing; the device is withheld for the block's duration.
+        """
+        self._withheld[device] += 1
+        try:
+            yield
+        finally:
+            self._withheld[device] -= 1
+            if not self._withheld[device]:
+                del self._withheld[device]
+
+    def is_withheld(self, device: str) -> bool:
+        """Whether an owner's revocation of the device is in flight (:meth:`withheld`).
+
+        Args:
+            device: The device's id.
+
+        Returns:
+            Whether its requests are refused while its memberships are removed.
+        """
+        return device in self._withheld
+
+    def check_revocable(self, device: str, *, gateway: str | None) -> None:
+        """Refuse, before anything is changed anywhere, a revocation the record refuses.
+
+        The record's own acts refuse these too; this is for the owner's act that
+        removes the device from its memberships *before* the record moves, so it must
+        not empty the hub's own machine's sets first and be refused after.
+
+        Args:
+            device: The device.
+            gateway: The registration's gateway, or ``None`` for the whole device.
+
+        Raises:
+            RosterActError: For ``hub`` (§3:4), and for the hub's own overlay identity
+                as a registration — a whole-device revocation of a legacy enrolment of
+                it is the owner's way to end that enrolment (#2726).
+        """
+        if gateway is None:
+            if device == HUB_DEVICE:
+                self._refuse_the_hub(device, act="revoked")
+            return
+        self._refuse_the_hub(device, act="registered or revoked")
+
+    def admitted_apart_from(self, device: str, *, gateway: str) -> bool:
+        """Whether a device stays admitted once one registration of it is revoked.
+
+        Args:
+            device: The device.
+            gateway: The gateway whose registration of it would be revoked.
+
+        Returns:
+            Whether a live enrolment or a live registration under another gateway
+            still admits it.
+        """
+        return device in self._live or any(
+            pair[0] == device and pair[1] != gateway for pair in self._registered
+        )
 
     def _reserved(self) -> frozenset[str]:
         """The names no gateway may give and no act may enrol (ADR-0298 §3:3, §3:4)."""

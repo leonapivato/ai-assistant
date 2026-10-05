@@ -10,6 +10,7 @@ from __future__ import annotations
 
 import asyncio
 import contextlib
+import sqlite3
 import stat
 from datetime import UTC, datetime, timedelta
 from typing import TYPE_CHECKING
@@ -18,7 +19,7 @@ import pytest
 
 from ai_assistant.core.config import Settings
 from ai_assistant.core.device_context import acting_for
-from ai_assistant.core.errors import DeviceRefusal, DeviceRefusedError
+from ai_assistant.core.errors import AssistantError, DeviceRefusal, DeviceRefusedError
 from ai_assistant.core.types import DeviceRole
 from ai_assistant.service.enrolment import ENROLMENTS_FILENAME, DeviceRegistry, EnrolmentStore
 from ai_assistant.service.roster import HubRoster
@@ -325,3 +326,25 @@ async def test_a_revoked_browser_device_is_refused_on_the_local_socket(tmp_path:
             await client.beliefs()
 
     assert refused.value.reason is DeviceRefusal.NOT_ACCEPTED
+
+
+async def test_a_registration_the_hub_cannot_record_is_answered_and_the_connection_kept(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """A storage fault on a first naming reaches the gateway as a declared failure, and
+    the connection, which serves every other browser on that gateway, stays open for
+    the next request."""
+
+    def _unwritable(*args: object, **kwargs: object) -> int:
+        msg = "attempt to write a readonly database"
+        raise sqlite3.OperationalError(msg)
+
+    monkeypatch.setattr(EnrolmentStore, "register", _unwritable)
+    async with _enforcing(tmp_path) as (listener, registry):
+        client = HubEngineClient(listener.path, read_timeout=_PATIENT)
+        with acting_for("nPHONE22CNTRL"), pytest.raises(AssistantError) as failed:
+            await client.beliefs()
+        assert await client.beliefs() == ()
+        assert registry.registrations()[1] == 0
+
+    assert type(failed.value) is AssistantError

@@ -404,7 +404,8 @@ def _render(reply: Any, act: str) -> int:
         print("the hub keeps only a verifier it cannot be recovered from.")
         return EXIT_OK
     if act == REVOKE:
-        return _render_revocation(reply)
+        _render_revocation(reply)
+        return EXIT_OK
     held = ", ".join(reply.get("roles", [])) or "none"
     if act == RESTORE:
         if reply.get("restored"):
@@ -422,24 +423,8 @@ def _render(reply: Any, act: str) -> int:
     return EXIT_OK
 
 
-def _render_revocation(reply: dict[str, Any]) -> int:
-    """Print what a revocation did, of a whole device or of one registration.
-
-    Returns:
-        The process exit code: restartable where the record's act took effect and
-        the device's removal from "my devices" and its conversations did not finish,
-        because running the same revocation again finishes it.
-    """
-    _render_revoked(reply)
-    unfinished = reply.get("unfinished")
-    if unfinished:
-        print(f"device: the device is revoked, but {unfinished}", file=sys.stderr)
-        return EXIT_RESTART
-    return EXIT_OK
-
-
-def _render_revoked(reply: dict[str, Any]) -> None:
-    """Print what the record's half of a revocation did."""
+def _render_revocation(reply: dict[str, Any]) -> None:
+    """Print what a revocation did, of a whole device or of one registration."""
     if "revoked" in reply:
         if reply["revoked"]:
             print("Revoked. That gateway's naming of it is refused until you restore it.")

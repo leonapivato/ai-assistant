@@ -39,12 +39,11 @@ entry point, on the hub's own machine and owner-only, and no door off it.
 
 **Revoking a device removes it from "my devices" and from every conversation's
 devices** (ADR-0298 §4:10, ADR-0296 §3:6), each removal a change the other devices
-see. The record's act comes first and is synchronous — the commit, the live view's
-transition and the close of the device's connections are one step (ADR-0124 §8) —
-so the device is refused from that instant; the removal from the sets follows, on
-the conversation store through the engine, and is safe to repeat. Where it fails,
-the reply says the device is revoked and that running the same revocation again
-finishes it.
+see. The removal comes first, on the conversation store through the engine, with
+the device withheld — refused every request and named in no set — and the record's
+act follows in the same block, synchronous as ever: the commit, the live view's
+transition and the close of the device's connections are one step (ADR-0124 §8).
+A removal that fails revokes nothing and says so, so the owner runs the act again.
 
 **The credential crosses this socket exactly once and is never stored.** ADR-0124
 §6 mints it, discloses it "to the owner once at enrolment and never again", and
@@ -381,6 +380,16 @@ class AdminListener:
         it), applied to the sets: a phone still listed at a second gateway keeps its
         place in the conversations it reads.
 
+        **The memberships go first, with the device withheld** (:meth:`~ai_assistant.
+        service.enrolment.DeviceRegistry.withheld`), and the record's act follows in
+        the same block. While the removal awaits the store the device is refused
+        every request and named in no set, so it cannot put itself back; and no state
+        is left to finish: a removal that fails has revoked nothing — the owner is
+        told, and runs the act again — and a crash between the two has only emptied
+        the sets of a device that is still admitted. Removing after the record would
+        leave the opposite residue, a revoked device still an end of its
+        conversations, which a later naming by another gateway would re-admit into.
+
         Args:
             identity: The device.
             request: The decoded request, which may name a gateway.
@@ -390,60 +399,45 @@ class AdminListener:
 
         Raises:
             _MalformedError: If a gateway member is present and malformed.
-            RosterActError: For ``hub``, which is never revoked (§3:4).
+            RosterActError: For ``hub``, which is never revoked (§3:4), checked before
+                anything is removed.
         """
-        if request.get("gateway") is None:
-            revocation = self._registry.revoke_device(identity, now=self._now())
-            reply: dict[str, Any] = {
-                "ok": True,
-                "enrolment": revocation.enrolment,
-                "registrations": revocation.registrations,
-                "roles": sorted(role.value for role in revocation.roles),
-            }
-            return await self._removed_from_sets(identity, reply)
-        gateway = _name(request.get("gateway"), what="the gateway's device")
-        revoked = self._registry.revoke_registration(identity, gateway=gateway, now=self._now())
-        reply = {"ok": True, "revoked": revoked, "memberships": False}
-        if self._registry.is_known(identity):
-            return reply
-        return await self._removed_from_sets(identity, reply)
-
-    async def _removed_from_sets(self, identity: str, reply: dict[str, Any]) -> dict[str, Any]:
-        """Remove a revoked device from every set, adding what that did to the reply.
-
-        The record's act has already taken effect, so a failure here is reported as
-        what it is — a revocation whose second half did not finish, in ``unfinished``
-        — rather than as a refused act: the device is refused from now on either way,
-        and removing is safe to repeat, so the same revocation run again finishes it.
-
-        Args:
-            identity: The revoked device.
-            reply: The record's half of the reply.
-
-        Returns:
-            The reply, with ``memberships`` saying whether any set named the device,
-            and ``unfinished`` saying why not where the removal failed.
-        """
-        try:
-            removed = await self._remove_device(identity)
-        except (AssistantError, RuntimeError, ValueError) as exc:
-            _log.warning(
-                "hub_admin_device_memberships_unremoved",
-                device=identity,
-                reason=str(exc),
-                error_class=type(exc).__name__,
-            )
-            return {
-                **reply,
-                "memberships": False,
-                "unfinished": (
-                    f"removing it from your devices and its conversations did not finish "
-                    f"({type(exc).__name__}: {exc}); run the same revoke again to finish it"
-                ),
-            }
-        if removed:
-            _log.info("hub_admin_device_memberships_removed", device=identity)
-        return {**reply, "memberships": removed}
+        held = request.get("gateway")
+        gateway = None if held is None else _name(held, what="the gateway's device")
+        self._registry.check_revocable(identity, gateway=gateway)
+        empties = gateway is None or not self._registry.admitted_apart_from(
+            identity, gateway=gateway
+        )
+        with self._registry.withheld(identity):
+            removed = False
+            if empties:
+                try:
+                    removed = await self._remove_device(identity)
+                except (AssistantError, RuntimeError, ValueError) as exc:
+                    _log.warning(
+                        "hub_admin_device_memberships_unremoved",
+                        device=identity,
+                        reason=str(exc),
+                        error_class=type(exc).__name__,
+                    )
+                    return _failed(
+                        f"nothing was revoked: removing {identity} from your devices and its "
+                        f"conversations failed ({type(exc).__name__}: {exc}); run the same "
+                        f"revoke again"
+                    )
+                if removed:
+                    _log.info("hub_admin_device_memberships_removed", device=identity)
+            if gateway is None:
+                revocation = self._registry.revoke_device(identity, now=self._now())
+                return {
+                    "ok": True,
+                    "enrolment": revocation.enrolment,
+                    "registrations": revocation.registrations,
+                    "roles": sorted(role.value for role in revocation.roles),
+                    "memberships": removed,
+                }
+            revoked = self._registry.revoke_registration(identity, gateway=gateway, now=self._now())
+            return {"ok": True, "revoked": revoked, "memberships": removed}
 
     def _listing(self) -> dict[str, Any]:
         """The newest enrolments, devices and registrations, and this hub's identity.
