@@ -8872,25 +8872,10 @@ const chat = {
   devices: null,
   pending: [],
   replyTo: null,
-  // Whether an edit of "my devices", or of the conversation's devices, is unsettled. One
-  // edit of a set at a time: each sends the whole set, so two built from the same set
-  // would each undo the other. **An edit settles when the stream has caught up past it**,
-  // not when its own answer lands: a read of the changes sent before the answer can still
-  // bring an older set back on screen, and a set an edit is then built from has to be
-  // the one the hub holds. So a landed edit holds its set's controls until a read sent
-  // after its answer has been applied (`confirmMine`, `confirmDevices`: the count of
-  // reads sent when the answer landed, or `null`); a failed one releases them at once.
-  editingMine: false,
-  editingConversation: false,
-  reads: 0,
-  confirmMine: null,
-  confirmDevices: null,
   // **The change stream is the authority on every set of devices** (ADR-0293 §5:10):
-  // a change is applied always, in sequence order, and is never skipped. Anything else
-  // that sets a subject — a snapshot read, or an edit's own answer — is applied only
-  // where nothing has set that subject since its request went out (`settle`), so it can
-  // put no older state over what the stream already said; and whatever it put up is
-  // superseded by the stream's next change, which is complete. `seen` counts each
+  // a change is applied always, in sequence order, and is never skipped. A snapshot
+  // read is applied only where nothing has set that subject since its request went out
+  // (`settle`), so it can put no older state over what the stream already said. `seen` counts each
   // subject's settings: "my devices", the open conversation's devices, and its state.
   seen: { mine: 0, devices: 0, state: 0 },
   // Whether the reads that open the chat all answered. Where one did not, following
@@ -8958,10 +8943,6 @@ function openChat() {
 function closeChat() {
   chat.open = false;
   chat.era += 1;
-  chat.editingMine = false;
-  chat.editingConversation = false;
-  chat.confirmMine = null;
-  chat.confirmDevices = null;
   stopFollowing(null, false);
   chat.cursor = null;
   chat.selected = null;
@@ -9187,8 +9168,6 @@ async function readChanges(tick) {
   }
   const era = sessionEra;
   const after = chat.cursor;
-  chat.reads += 1;
-  const sentAs = chat.reads;
   let body;
   try {
     body = await relay(half, "/chat/changes", { after: after }, "chat");
@@ -9222,7 +9201,6 @@ async function readChanges(tick) {
   }
   applyChanges(body.changes);
   chat.cursor = body.next_after;
-  settleEdits(sentAs);
   // The state is read with the changes, on every read while a conversation is open: it
   // changes without a change to the transcript — an activation started elsewhere, or a
   // restart (§8:3) — so it is followed as the transcript is (§8:1, "pushed when it
@@ -9295,22 +9273,6 @@ function applyChanges(changes) {
     void listChat(false);
   }
   return touched;
-}
-
-// A read sent after an edit's answer has been applied, so that edit is settled and the
-// set's controls are built again from what the stream says.
-function settleEdits(sentAs) {
-  if (chat.confirmMine !== null && sentAs > chat.confirmMine) {
-    chat.confirmMine = null;
-    chat.editingMine = false;
-    renderMyDevices();
-    renderConversationDevices();
-  }
-  if (chat.confirmDevices !== null && sentAs > chat.confirmDevices) {
-    chat.confirmDevices = null;
-    chat.editingConversation = false;
-    renderConversationDevices();
-  }
 }
 
 // ADR-0182 §7's two events, and nothing else, start following again of the page's own
@@ -9453,12 +9415,9 @@ async function selectChat(id) {
   chat.oldest = null;
   chat.state = null;
   chat.devices = null;
-  // Nothing read for the conversation left behind may set this one's, and an edit of its
-  // devices still settling is not this one's to hold.
+  // Nothing read for the conversation left behind may set this one's.
   chat.seen.devices += 1;
   chat.seen.state += 1;
-  chat.editingConversation = false;
-  chat.confirmDevices = null;
   chat.unread.delete(id);
   setReplyTo(null);
   sayChat(null);
@@ -9670,6 +9629,11 @@ function renderTranscript(toEnd) {
   positions.forEach((position) => list.appendChild(renderChatMessage(chat.entries.get(position))));
   waiting.forEach((one) => list.appendChild(renderPending(one)));
   el("chat-older").hidden = chat.oldest === null || chat.oldest <= 1;
+  // The reply being written names its message as the transcript now has it: a message
+  // deleted meanwhile is named as deleted, and its text is not left on screen (§5:12).
+  if (chat.replyTo !== null) {
+    setReplyTo(chat.replyTo);
+  }
   if (toEnd === true || atEnd) {
     list.scrollTop = list.scrollHeight;
   }
@@ -9743,9 +9707,19 @@ function renderPending(one) {
       void deliverChat(one);
     });
   }
-  if (one.status === "not-an-end" && typeof chat.thisDevice === "string" && chat.devices !== null) {
-    chatButton(acts, "Add this device to the conversation and send again", () => {
-      void addThisDeviceAndSend(one);
+  // Changing a conversation's devices is the command line's for now; once this device
+  // is one of its ends, sending again is the same message (§4:2).
+  if (one.status === "not-an-end") {
+    if (typeof chat.thisDevice === "string") {
+      line(
+        item,
+        "To write here, add this device to the conversation at the command line: " +
+          `assistant conversation-devices ${one.conversation} --add ${chat.thisDevice}`,
+        "hint"
+      );
+    }
+    chatButton(acts, "Send again", () => {
+      void deliverChat(one);
     });
   }
   if (one.status === "no-such-reply") {
@@ -9878,14 +9852,6 @@ async function deliverChat(one) {
   }
 }
 
-async function addThisDeviceAndSend(one) {
-  const devices = (chat.devices || []).filter((held) => held.device_id !== chat.thisDevice);
-  devices.push({ device_id: chat.thisDevice, access: "read_write" });
-  if (await setConversationDevices(devices)) {
-    await deliverChat(one);
-  }
-}
-
 // --- deleting and forgetting --------------------------------------------------
 
 async function deleteChatMessage(id, position) {
@@ -9993,7 +9959,11 @@ async function forgetChat() {
   }
 }
 
-// --- devices ------------------------------------------------------------------
+// --- devices -----------------------------------------------------------------
+//
+// Shown and not changed here: which devices see the chat, "my devices" and the open
+// conversation's (ADR-0293 §3). Changing either is the command line's for now —
+// `assistant my-devices` and `assistant conversation-devices` — and a later lane's here.
 
 function deviceName(device) {
   return device.device_id === chat.thisDevice
@@ -10001,40 +9971,11 @@ function deviceName(device) {
     : device.device_id;
 }
 
-// One device of a set, with its access and a way to take it out. `write` sends the whole
-// set the owner now wants (§3), since the surface replaces a set rather than editing it.
-function renderDevice(list, device, set, write, busy) {
+function renderDevice(list, device) {
   const item = document.createElement("li");
   item.className = "chat-device";
-  const row = document.createElement("p");
-  row.className = "choice";
-  const name = document.createElement("span");
-  name.className = "chat-device-name";
-  name.textContent = deviceName(device);
-  row.appendChild(name);
-  const access = document.createElement("select");
-  access.setAttribute("aria-label", `What ${device.device_id} may do`);
-  CHAT_ACCESS.forEach((one) => {
-    const option = document.createElement("option");
-    option.value = one.value;
-    option.textContent = one.label;
-    access.appendChild(option);
-  });
-  access.value = device.access;
-  access.disabled = busy;
-  access.addEventListener("change", () => {
-    void write(
-      set.map((one) =>
-        one.device_id === device.device_id ? { device_id: one.device_id, access: access.value } : one
-      )
-    );
-  });
-  row.appendChild(access);
-  const remove = chatButton(row, "Remove", () => {
-    void write(set.filter((one) => one.device_id !== device.device_id));
-  });
-  remove.disabled = busy;
-  item.appendChild(row);
+  const known = CHAT_ACCESS.find((one) => one.value === device.access);
+  line(item, `${deviceName(device)} — ${known ? known.label.toLowerCase() : device.access}`);
   list.appendChild(item);
 }
 
@@ -10045,8 +9986,8 @@ function renderMyDevices() {
   const held = chat.myDevices.some((one) => one.device_id === chat.thisDevice);
   if (chat.thisDevice === null) {
     said.textContent =
-      "This gateway cannot name this browser's device, so it cannot add itself or " +
-      "write a message from here.";
+      "This gateway cannot name this browser's device, so it cannot write a message " +
+      "from here.";
   } else if (chat.thisDevice === undefined) {
     said.textContent = "";
   } else if (held) {
@@ -10054,8 +9995,8 @@ function renderMyDevices() {
   } else {
     said.textContent =
       `This browser is device ${chat.thisDevice}, which is not one of your devices. ` +
-      "Adding a device says its screen is private: every conversation started from then " +
-      "on is shown on it.";
+      "Adding a device says its screen is private, and every conversation started from " +
+      `then on is shown on it: assistant my-devices --add ${chat.thisDevice}`;
   }
   if (chat.myDevices.length === 0) {
     const none = document.createElement("li");
@@ -10063,141 +10004,22 @@ function renderMyDevices() {
     none.textContent = "None yet, so a new conversation is shown on no device.";
     list.appendChild(none);
   }
-  chat.myDevices.forEach((device) =>
-    renderDevice(list, device, chat.myDevices, setMyDevices, chat.editingMine)
-  );
-  el("chat-add-device").hidden = typeof chat.thisDevice !== "string" || held;
-  el("chat-add-device").disabled = chat.editingMine;
-}
-
-function addThisDevice() {
-  const devices = chat.myDevices.filter((one) => one.device_id !== chat.thisDevice);
-  devices.push({ device_id: chat.thisDevice, access: "read_write" });
-  void setMyDevices(devices);
-}
-
-async function setMyDevices(devices) {
-  if (chat.editingMine) {
-    return;
-  }
-  const half = headerHalf();
-  if (half === null) {
-    showBootstrap();
-    return;
-  }
-  const era = sessionEra;
-  const before = chat.seen.mine;
-  chat.editingMine = true;
-  renderMyDevices();
-  try {
-    const body = await relay(half, "/chat/devices/set", { devices: devices }, "chat");
-    if (!sameSession(half, era)) {
-      return;
-    }
-    if (body === null) {
-      return;
-    }
-    // Only where nothing has set the set since the edit went out; the stream's change
-    // for this edit follows either way, and settles it (`settleEdits`).
-    if (settle("mine", before)) {
-      chat.myDevices = devices;
-    }
-    chat.confirmMine = chat.reads;
-  } catch (_) {
-    if (!sameSession(half, era)) {
-      return;
-    }
-    fault(GATEWAY_GONE, "chat");
-  } finally {
-    // An edit that did not land releases its set at once; one that did waits to settle.
-    if (chat.confirmMine === null) {
-      chat.editingMine = false;
-    }
-    renderMyDevices();
-    renderConversationDevices();
-  }
+  chat.myDevices.forEach((device) => renderDevice(list, device));
 }
 
 function renderConversationDevices() {
   const list = el("chat-conversation-devices");
-  const offers = el("chat-device-offers");
   clearNode(list);
-  clearNode(offers);
   if (chat.devices === null) {
     return;
   }
   if (chat.devices.length === 0) {
     const none = document.createElement("li");
     none.className = "hint";
-    none.textContent = "No device: nothing can write in this conversation until you add one.";
+    none.textContent = "No device: nothing can write in this conversation until one is added.";
     list.appendChild(none);
   }
-  chat.devices.forEach((device) =>
-    renderDevice(list, device, chat.devices, setConversationDevices, chat.editingConversation)
-  );
-  const held = new Set(chat.devices.map((one) => one.device_id));
-  const offered = chat.myDevices.map((one) => one.device_id);
-  if (typeof chat.thisDevice === "string" && !offered.includes(chat.thisDevice)) {
-    offered.unshift(chat.thisDevice);
-  }
-  offered
-    .filter((id) => !held.has(id))
-    .forEach((id) => {
-      const label = id === chat.thisDevice ? "Add this device" : `Add ${id}`;
-      const offer = chatButton(offers, label, () => {
-        void setConversationDevices(chat.devices.concat([{ device_id: id, access: "read_write" }]));
-      });
-      offer.disabled = chat.editingConversation;
-    });
-}
-
-// Answers whether the set was written, so a send waiting on it knows to go ahead.
-async function setConversationDevices(devices) {
-  if (chat.editingConversation) {
-    return false;
-  }
-  const id = chat.selected;
-  const half = headerHalf();
-  if (half === null) {
-    showBootstrap();
-    return false;
-  }
-  const era = sessionEra;
-  const before = chat.seen.devices;
-  chat.editingConversation = true;
-  renderConversationDevices();
-  try {
-    const body = await relay(
-      half,
-      "/chat/conversation/devices/set",
-      { conversation_id: id, devices: devices },
-      "chat"
-    );
-    if (!sameSession(half, era)) {
-      return false;
-    }
-    if (body === null) {
-      return false;
-    }
-    if (chat.selected === id && settle("devices", before)) {
-      chat.devices = devices;
-    }
-    if (chat.selected === id) {
-      chat.confirmDevices = chat.reads;
-    }
-    return true;
-  } catch (_) {
-    if (!sameSession(half, era)) {
-      return false;
-    }
-    fault(GATEWAY_GONE, "chat");
-    return false;
-  } finally {
-    if (chat.confirmDevices === null) {
-      chat.editingConversation = false;
-    }
-    renderConversationDevices();
-  }
+  chat.devices.forEach((device) => renderDevice(list, device));
 }
 
 // --- the grant surface (ADR-0177 §6, §7; ADR-0139) ---------------------------
@@ -14287,7 +14109,6 @@ el("fault-dismiss").addEventListener("click", () => fault(null));
 el("conversations-button").addEventListener("click", listConversations);
 el("chat-button").addEventListener("click", openChat);
 el("chat-follow-again").addEventListener("click", followAgain);
-el("chat-add-device").addEventListener("click", addThisDevice);
 el("chat-start").addEventListener("click", startChat);
 el("chat-more").addEventListener("click", () => listChat(true));
 el("chat-older").addEventListener("click", () => {

@@ -517,10 +517,6 @@ code {
   margin: 0.2rem 0;
 }
 
-.chat-device-name {
-  flex: 1 1 12rem;
-  font-weight: 600;
-}
 
 .chat-thread {
   border-top: 1px solid var(--line);
@@ -565,11 +561,10 @@ code {
 }
 
 /*
- * A message's own controls and a device's are outlined rather than filled: they sit on
- * every row, and the acts on offer for the conversation are the filled ones.
+ * A message's own controls are outlined rather than filled: they sit on every row, and
+ * the acts on offer for the conversation are the filled ones.
  */
-.chat-acts button,
-.chat-device button {
+.chat-acts button {
   margin-top: 0.2rem;
   background: transparent;
   color: var(--ink);
