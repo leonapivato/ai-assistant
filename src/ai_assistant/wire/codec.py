@@ -60,12 +60,15 @@ if TYPE_CHECKING:
     from ai_assistant.core.types import SecretValue
 
 #: The bytes ADR-0085 §8b reserves for the frame envelope, so a payload at the
-#: contract limit still fits inside ``hub_max_frame_bytes``. §8b computes today's
-#: worst case at 110 bytes — the member names, the punctuation, an 11-byte
-#: ``kind``, a 36-byte correlation id and a 21-byte method name — and fixes the
-#: reserve at 512 anyway: "a later protocol version may add a member to the
-#: envelope (ADR-0084 §3 permits it), and a reserve derived from today's exact
-#: worst case would silently become wrong the day it does".
+#: contract limit still fits inside ``hub_max_frame_bytes``. §8b computed its worst
+#: case at 110 bytes and fixed the reserve at 512 anyway: "a later protocol version
+#: may add a member to the envelope (ADR-0084 §3 permits it), and a reserve derived
+#: from today's exact worst case would silently become wrong the day it does".
+#: ADR-0298 is that day: a request's ``acting_for`` raises the worst case to 261
+#: bytes — the longest ``kind`` (11), the longest method name (28), the correlation
+#: id (36), the name (128) and 58 bytes of punctuation and member names — inside the
+#: unchanged reserve. ``tests/wire/test_envelope.py`` measures it against the
+#: surface as it stands, so a longer method name is caught there.
 ENVELOPE_RESERVE_BYTES: Final[int] = 512
 
 #: ADR-0085 §8d's bound on **either** connect-exchange payload, request and reply

@@ -35,6 +35,7 @@ from ai_assistant.wire.errors import (
     ProtocolError,
     UndecodableFrameError,
 )
+from ai_assistant.wire.overlay import MAX_OVERLAY_IDENTITY_BYTES
 
 #: The protocol version, exchanged once in the connect handshake and nowhere else
 #: (ADR-0084 §3). It becomes connection state; it is not repeated on subsequent
@@ -2432,7 +2433,10 @@ from ai_assistant.wire.errors import (
 #:     set, answering ``ActivationStop``; adds ``ActivationStoppedError`` to the error
 #:     mapping and ``TurnOutcome.stopped``; and adds ``stopped`` to ``ControllerRule`` and
 #:     to ``ProcessingReason`` on the wire-carried episode record.
-PROTOCOL_VERSION: Final[int] = 77
+#: 78: ADR-0298 §1:4 adds the ``request`` frame's ``acting_for`` member, which a peer at
+#:     77 refuses as a member no protocol version declares, and §6:3 adds
+#:     ``DeviceRefusedError`` to the error mapping, with its ``reason`` among the details.
+PROTOCOL_VERSION: Final[int] = 78
 
 #: ADR-0085 §8a: "The correlation id is a UUID string and is at most 36 bytes.
 #: Bounding it is what makes the reserve a constant rather than an aspiration; a
@@ -2460,6 +2464,12 @@ _KIND: Final = "kind"
 _ID: Final = "id"
 _METHOD: Final = "method"
 _PAYLOAD: Final = "payload"
+_ACTING_FOR: Final = "acting_for"
+
+#: The characters the codec escapes (ADR-0087), which ADR-0298 §1:3 bars from
+#: ``acting_for`` so that the member's encoded size is its UTF-8 size and §8b's reserve
+#: arithmetic holds: the quotation mark, the backslash and U+0000 to U+001F.
+_ESCAPED: Final[frozenset[str]] = frozenset({'"', "\\", *(chr(code) for code in range(0x20))})
 
 #: Connect request members (ADR-0084 §2).
 CONNECT_VERSION: Final = "version"
@@ -2564,12 +2574,16 @@ class Envelope:
         payload: The request arguments, the result value, the handshake body, or
             the error body.
         method: The ``AssistantEngine`` method name, on a request and nowhere else.
+        acting_for: The browser device a gateway relays the request for (ADR-0298
+            §1:1), on a request only and absent where the request is the connecting
+            device's own (§1:2).
     """
 
     kind: FrameKind
     id: str
     payload: Any
     method: str | None = None
+    acting_for: str | None = None
 
 
 def _no_duplicate_members(pairs: list[tuple[str, Any]]) -> dict[str, Any]:
@@ -2697,7 +2711,58 @@ def encode_envelope(envelope: Envelope) -> bytes:
     }
     if envelope.method is not None:
         members[_METHOD] = envelope.method
+    if envelope.acting_for is not None:
+        members[_ACTING_FOR] = envelope.acting_for
     return canonical_payload(members)
+
+
+def checked_acting_for(name: object) -> str:
+    """Hold one ``acting_for`` value to ADR-0298 §1:3, returning it unchanged.
+
+    Text that is non-blank, equal to itself stripped of surrounding space, at most
+    :data:`~ai_assistant.wire.overlay.MAX_OVERLAY_IDENTITY_BYTES` bytes encoded as
+    UTF-8, and holding no character the codec escapes. The last condition makes the
+    member's encoded size its UTF-8 size, which is what keeps ADR-0085 §8b's reserve
+    arithmetic true with the member in it (261 bytes of the 512).
+
+    **Read by both halves**: the hub refuses a frame breaking any condition as
+    undecodable (:func:`decode_envelope`), and the client refuses the value before
+    it writes any frame, so a gateway never learns of a bad name from a closed
+    connection.
+
+    Args:
+        name: The value, as decoded or as a gateway set it.
+
+    Returns:
+        ``name``, unchanged.
+
+    Raises:
+        ValueError: If any of §1:3's conditions does not hold.
+    """
+    if not isinstance(name, str):
+        msg = f"acting_for must be text, got {type(name).__name__}"
+        raise ValueError(msg)
+    if not name.strip():
+        msg = "acting_for must not be blank"
+        raise ValueError(msg)
+    if name != name.strip():
+        msg = "acting_for must not carry surrounding space"
+        raise ValueError(msg)
+    if any(character in _ESCAPED for character in name):
+        msg = "acting_for must hold no character the codec escapes"
+        raise ValueError(msg)
+    try:
+        size = len(name.encode("utf-8"))
+    except UnicodeEncodeError as exc:
+        msg = "acting_for has no UTF-8 encoding"
+        raise ValueError(msg) from exc
+    if size > MAX_OVERLAY_IDENTITY_BYTES:
+        msg = (
+            f"acting_for is {size} bytes, over the {MAX_OVERLAY_IDENTITY_BYTES} an overlay "
+            f"identity may occupy"
+        )
+        raise ValueError(msg)
+    return name
 
 
 def decode_envelope(data: bytes) -> Envelope:
@@ -2708,7 +2773,8 @@ def decode_envelope(data: bytes) -> Envelope:
     two halves ship together — so a member nobody declared is a bug on the writing
     side, not a later version to accommodate. Accepting it silently would leave the
     one thing the envelope is for, telling frames apart, decided by a field nobody
-    reviewed.
+    reviewed. ADR-0298 partially supersedes that clause for one addition, a request's
+    ``acting_for``, which is read here under its own rules (§1:2, §1:3).
 
     Args:
         data: The frame's bytes, without the length prefix.
@@ -2725,7 +2791,7 @@ def decode_envelope(data: bytes) -> Envelope:
         msg = f"a frame's envelope must be a JSON object, got {type(decoded).__name__}"
         raise UndecodableFrameError(msg)
 
-    unknown = set(decoded) - {_KIND, _ID, _METHOD, _PAYLOAD}
+    unknown = set(decoded) - {_KIND, _ID, _METHOD, _PAYLOAD, _ACTING_FOR}
     if unknown:
         msg = f"a frame carries members no protocol version declares: {sorted(unknown)}"
         raise UndecodableFrameError(msg)
@@ -2764,7 +2830,35 @@ def decode_envelope(data: bytes) -> Envelope:
         msg = f"a {kind.value} frame {obligation} name a method"
         raise UndecodableFrameError(msg)
 
-    return Envelope(kind=kind, id=correlation, payload=decoded[_PAYLOAD], method=method)
+    return Envelope(
+        kind=kind,
+        id=correlation,
+        payload=decoded[_PAYLOAD],
+        method=method,
+        acting_for=_decoded_acting_for(decoded, kind=kind),
+    )
+
+
+def _decoded_acting_for(decoded: dict[str, Any], *, kind: FrameKind) -> str | None:
+    """Read a frame's ``acting_for`` member, or ``None`` where it carries none.
+
+    ADR-0298 §1:2 puts the member on a ``request`` frame only, and §1:3 makes a
+    frame breaking any of its conditions undecodable, taking ADR-0084 §3's close.
+
+    Raises:
+        UndecodableFrameError: If a frame other than a request carries the member,
+            or its value breaks §1:3.
+    """
+    if _ACTING_FOR not in decoded:
+        return None
+    if kind is not FrameKind.REQUEST:
+        msg = f"a {kind.value} frame carries acting_for, which only a request may carry"
+        raise UndecodableFrameError(msg)
+    try:
+        return checked_acting_for(decoded[_ACTING_FOR])
+    except ValueError as exc:
+        msg = f"a request's acting_for is refused: {exc}"
+        raise UndecodableFrameError(msg) from exc
 
 
 def connect_payload(*, client: str, credential: str | None = None) -> dict[str, Any]:
