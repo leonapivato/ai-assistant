@@ -16,11 +16,19 @@ from rich.console import Console
 from typer.testing import CliRunner
 
 from ai_assistant.core.config import Settings
+from ai_assistant.core.errors import DeviceRefusal, DeviceRefusedError
+from ai_assistant.core.streams import closing_stream
 from ai_assistant.core.types import (
     ActivationEnding,
     ChatDevice,
+    ChatStreamChunk,
+    ChatStreamEnd,
     ConversationState,
+    CurrentState,
     DeviceAccess,
+    DeviceChange,
+    DeviceRole,
+    MessageAddedChange,
     MessageAuthor,
     MessageReceipt,
     NewMessage,
@@ -31,7 +39,7 @@ from ai_assistant.testing import FakeAssistantEngine
 from ai_assistant.wire import OverlayIdentityUnavailableError, TransportError
 
 if TYPE_CHECKING:
-    from collections.abc import Awaitable, Callable, Sequence
+    from collections.abc import AsyncIterator, Awaitable, Callable, Sequence
     from pathlib import Path
 
     from ai_assistant.core.types import ConversationDigest, Identifier, TranscriptPage
@@ -105,13 +113,80 @@ def _calls(engine: FakeAssistantEngine, name: str) -> list[dict[str, object]]:
     return [arguments for called, arguments in engine.calls if called == name]
 
 
+class _OverTheWire(FakeAssistantEngine):
+    """The fake's change stream as the wire relays it: the device's roles, then the engine's.
+
+    The hub's session layer writes the roles first, as the stream opens (ADR-0298
+    §7:9-§7:10), so a chat reads the conversation then. ``lose`` scripts each opening
+    in turn: how many of the engine's chunks it relays before the connection is lost,
+    ``0`` at once after the roles, ``None`` never; ``on_loss`` runs just before each
+    loss. ``closed`` counts the openings closed.
+    """
+
+    def __init__(self, *, lose: Sequence[int | None] = ()) -> None:
+        super().__init__()
+        self.lose = list(lose)
+        self.on_loss: Callable[[], Awaitable[None]] | None = None
+        self.relayed = asyncio.Event()
+        self.closed = 0
+
+    def follow_chat(self, *, after: int) -> AsyncIterator[ChatStreamChunk | ChatStreamEnd]:
+        inner = super().follow_chat(after=after)
+        return self._relayed(inner, self.lose.pop(0) if self.lose else None)
+
+    async def _relayed(
+        self, inner: AsyncIterator[ChatStreamChunk | ChatStreamEnd], lose_after: int | None
+    ) -> AsyncIterator[ChatStreamChunk | ChatStreamEnd]:
+        try:
+            yield ChatStreamChunk(roles=(DeviceRole.COMMANDS,))
+            self.relayed.set()
+            if lose_after == 0:
+                await self._lost()
+            relayed = 0
+            async with closing_stream(inner) as chunks:
+                async for chunk in chunks:
+                    yield chunk
+                    relayed += 1
+                    if relayed == lose_after:
+                        await self._lost()
+        finally:
+            self.closed += 1
+
+    async def _lost(self) -> None:
+        if self.on_loss is not None:
+            await self.on_loss()
+        msg = "the connection closed"
+        raise TransportError(msg)
+
+
+class _Scripted(FakeAssistantEngine):
+    """A fake whose change stream is the chunks given, once ``chunks`` is set."""
+
+    def __init__(self) -> None:
+        super().__init__()
+        self.chunks: Sequence[ChatStreamChunk | ChatStreamEnd] = ()
+
+    def follow_chat(self, *, after: int) -> AsyncIterator[ChatStreamChunk | ChatStreamEnd]:
+        del after
+        return self._following()
+
+    async def _following(self) -> AsyncIterator[ChatStreamChunk | ChatStreamEnd]:
+        for chunk in self.chunks:
+            await asyncio.sleep(0)
+            yield chunk
+
+
+def _state(conversation_id: str, state: ConversationState) -> ChatStreamChunk:
+    return ChatStreamChunk(state=CurrentState(conversation_id=conversation_id, state=state))
+
+
 async def _chat(
     engine: FakeAssistantEngine,
     conversation_id: str | None,
     read_line: Callable[[], Awaitable[str | None]],
     *,
     confirm: bool = True,
-    poll_seconds: float = 60.0,
+    retry_seconds: float = 60.0,
 ) -> int:
     return await cli._drive_chat(
         engine,
@@ -119,7 +194,7 @@ async def _chat(
         device_id="hub",
         read_line=read_line,
         confirm=lambda: confirm,
-        poll_seconds=poll_seconds,
+        retry_seconds=retry_seconds,
     )
 
 
@@ -164,9 +239,7 @@ async def test_chat_asks_nothing_where_this_device_already_writes(output: String
     def _refuse() -> bool:
         raise AssertionError
 
-    code = await cli._drive_chat(
-        engine, None, device_id="hub", read_line=_lines(), confirm=_refuse, poll_seconds=60
-    )
+    code = await cli._drive_chat(engine, None, device_id="hub", read_line=_lines(), confirm=_refuse)
 
     assert code == 0
     assert len(_calls(engine, "start_conversation")) == 1
@@ -484,7 +557,7 @@ async def test_the_assistants_message_is_shown_as_it_arrives(output: StringIO) -
         await _until(output, "Pinecrest is free.")
         return None
 
-    code = await _chat(engine, conversation, _typed, poll_seconds=0.01)
+    code = await _chat(engine, conversation, _typed)
 
     assert code == 0
     rendered = _flat(output.getvalue())
@@ -508,7 +581,7 @@ async def test_a_message_from_another_device_and_a_deletion_are_shown(output: St
         await _until(output, "Message #1 was deleted.")
         return None
 
-    await _chat(engine, conversation, _typed, poll_seconds=0.01)
+    await _chat(engine, conversation, _typed)
 
     assert "#1 You (from phone)" in _flat(output.getvalue())
 
@@ -523,7 +596,7 @@ async def test_a_conversation_deleted_elsewhere_ends_the_chat(output: StringIO) 
         await engine.delete_conversation(conversation)
 
     deleting = asyncio.create_task(_delete_soon())
-    code = await _chat(engine, conversation, _never(), poll_seconds=0.01)
+    code = await _chat(engine, conversation, _never())
     await deleting
 
     assert code == 0
@@ -544,11 +617,208 @@ async def test_a_device_no_longer_shown_the_conversation_ends_the_chat(
         )
 
     narrowing = asyncio.create_task(_narrow_soon())
-    code = await _chat(engine, conversation, _never(), poll_seconds=0.01)
+    code = await _chat(engine, conversation, _never())
     await narrowing
 
     assert code == 0
     assert "This device is no longer shown this conversation." in output.getvalue()
+
+
+async def test_the_chat_follows_the_change_stream_from_its_snapshot(output: StringIO) -> None:
+    """ADR-0296 §6:1, §4:12: the chat opens the stream at the snapshot's cursor and never polls."""
+    engine = _OverTheWire()
+    phone = ChatDevice(device_id="phone", access=DeviceAccess.READ_WRITE)
+    conversation = await _started(engine, HUB, phone)
+    as_of = (await engine.chat_changes(after=0)).next_after
+    engine.calls.clear()
+
+    async def _typed() -> str | None:
+        await engine.relayed.wait()
+        await engine.write_message(
+            conversation,
+            message=UserMessage(device_id="phone", message_id="m-1", text="from the phone"),
+        )
+        await _until(output, "from the phone")
+        return None
+
+    assert await _chat(engine, conversation, _typed) == cli._EXIT_OK
+
+    assert _calls(engine, "follow_chat") == [{"after": as_of}]
+    assert _calls(engine, "chat_changes") == []
+
+
+async def test_a_lost_stream_is_opened_again_from_the_last_change_applied(
+    output: StringIO,
+) -> None:
+    """ADR-0296 §4:4: the cursor is the acknowledgement, so nothing is shown twice or missed."""
+    engine = _OverTheWire(lose=[1])
+    phone = ChatDevice(device_id="phone", access=DeviceAccess.READ_WRITE)
+    conversation = await _started(engine, HUB, phone)
+
+    async def _typed() -> str | None:
+        await engine.write_message(
+            conversation, message=UserMessage(device_id="phone", message_id="m-1", text="first")
+        )
+        await _until(output, "Following the conversation again.")
+        await engine.write_message(
+            conversation, message=UserMessage(device_id="phone", message_id="m-2", text="second")
+        )
+        await _until(output, "second")
+        return None
+
+    assert await _chat(engine, conversation, _typed, retry_seconds=0.01) == cli._EXIT_OK
+
+    changes = (await engine.chat_changes(after=0)).changes
+    first = next(
+        one.seq
+        for one in changes
+        if isinstance(one, MessageAddedChange) and one.message.message_id == "m-1"
+    )
+    opened_at = [call["after"] for call in _calls(engine, "follow_chat")]
+    assert opened_at[1:] == [first]
+    rendered = _flat(output.getvalue())
+    assert rendered.count("#1 You (from phone)") == 1
+    assert rendered.index("Lost the hub") < rendered.index("Following the conversation again.")
+
+
+class _ShutsDown(_OverTheWire):
+    """A hub whose first stream ends because it is shutting down, naming the cursor."""
+
+    def __init__(self, end_at: int) -> None:
+        super().__init__()
+        self.end_at = end_at
+        self.ended = False
+
+    def follow_chat(self, *, after: int) -> AsyncIterator[ChatStreamChunk | ChatStreamEnd]:
+        if self.ended:
+            return super().follow_chat(after=after)
+        self.ended = True
+        self.calls.append(("follow_chat", {"after": after}))
+        return self._ending()
+
+    async def _ending(self) -> AsyncIterator[ChatStreamChunk | ChatStreamEnd]:
+        yield ChatStreamChunk(roles=(DeviceRole.COMMANDS,))
+        yield ChatStreamEnd(next_after=self.end_at)
+
+
+async def test_a_hub_shutting_down_is_followed_again_from_the_cursor_it_names(
+    output: StringIO,
+) -> None:
+    engine = _ShutsDown(end_at=0)
+    conversation = await _started(engine, HUB)
+    engine.end_at = (await engine.chat_changes(after=0)).next_after + 7
+
+    async def _typed() -> str | None:
+        await _until(output, "Following the conversation again.")
+        return None
+
+    assert await _chat(engine, conversation, _typed, retry_seconds=0.01) == cli._EXIT_OK
+
+    opened_at = [call["after"] for call in _calls(engine, "follow_chat")]
+    assert opened_at[1:] == [engine.end_at]
+
+
+class _Refuses(FakeAssistantEngine):
+    """A hub that refuses this device the change stream, for ``reason``."""
+
+    def __init__(self, reason: DeviceRefusal) -> None:
+        super().__init__()
+        self.reason = reason
+
+    def follow_chat(self, *, after: int) -> AsyncIterator[ChatStreamChunk | ChatStreamEnd]:
+        del after
+        return self._refused()
+
+    async def _refused(self) -> AsyncIterator[ChatStreamChunk | ChatStreamEnd]:
+        # Refused from the first iteration, not the call (ADR-0298 §5's role check).
+        for chunk in await self._refusal():
+            yield chunk
+
+    async def _refusal(self) -> tuple[ChatStreamChunk, ...]:
+        msg = "device 'hub' is refused"
+        raise DeviceRefusedError(msg, reason=self.reason)
+
+
+async def test_holding_no_role_ends_the_chat(output: StringIO) -> None:
+    """ADR-0298 §7:17: a device refused for holding no role drops what it holds, and says so."""
+    engine = _Refuses(DeviceRefusal.NO_ROLE)
+    conversation = await _started(engine, HUB)
+
+    code = await _chat(engine, conversation, _never())
+
+    assert code == cli._EXIT_ERROR
+    assert "This device holds no role on the hub now" in _flat(output.getvalue())
+
+
+async def test_another_refusal_is_the_chats_error(output: StringIO) -> None:
+    engine = _Refuses(DeviceRefusal.NOT_ALLOWED)
+    conversation = await _started(engine, HUB)
+
+    code = await _chat(engine, conversation, _never())
+
+    assert code == cli._EXIT_ERROR
+    rendered = _flat(output.getvalue())
+    assert "Error: device 'hub' is refused" in rendered
+    assert "holds no role" not in rendered
+
+
+@pytest.mark.parametrize("last", ["/quit", None])
+async def test_leaving_closes_the_stream(output: StringIO, last: str | None) -> None:
+    """``/quit`` and the end of input leave at once, and the stream is closed behind them."""
+    engine = _OverTheWire()
+    conversation = await _started(engine, HUB)
+
+    async def _typed() -> str | None:
+        await engine.relayed.wait()
+        return last
+
+    assert await _chat(engine, conversation, _typed) == cli._EXIT_OK
+
+    assert engine.closed == 1
+
+
+async def test_a_change_elsewhere_moves_the_cursor_and_shows_nothing(output: StringIO) -> None:
+    """The hub's own machine is sent every conversation's changes; only this one is shown."""
+    engine = FakeAssistantEngine()
+    conversation = await _started(engine, HUB)
+    other = (await engine.start_conversation()).id
+    await engine.write_message(
+        other, message=UserMessage(device_id="hub", message_id="m-1", text="elsewhere")
+    )
+    (change,) = (await engine.chat_changes(after=0, conversation_ids=(other,))).changes[-1:]
+    view = cli._ChatView(conversation, device_id="hub", cursor=0)
+
+    assert await cli._apply_change(engine, view, DeviceChange(change=change))
+
+    assert view.cursor == change.seq
+    assert "elsewhere" not in output.getvalue()
+
+
+async def test_a_snapshot_shows_only_what_was_not_shown(output: StringIO) -> None:
+    """ADR-0298 §7:6: a snapshot with a change shows what is new, and a marker for what went."""
+    engine = FakeAssistantEngine(chat_reader=False)
+    conversation = await _started(engine, HUB)
+    for word in ("alpha", "bravo", "charlie"):
+        await engine.write_message(
+            conversation, message=UserMessage(device_id="hub", message_id=word, text=word)
+        )
+    view = cli._ChatView(conversation, device_id="hub", cursor=0)
+    shown = await engine.transcript(conversation, before=3)
+    assert shown is not None
+    view.entries.update({one.position: one for one in shown.entries})
+    await engine.delete_message(conversation, position=2)
+    await engine.set_conversation_devices(conversation, devices=(HUB, PHONE))
+    page = await engine.transcript(conversation)
+    assert page is not None
+    (change,) = (await engine.chat_changes(after=0)).changes[-1:]
+
+    assert await cli._apply_change(engine, view, DeviceChange(change=change, snapshot=page.entries))
+
+    rendered = _flat(output.getvalue())
+    assert "alpha" not in rendered
+    assert "Message #2 was deleted." in rendered
+    assert "charlie" in rendered
+    assert view.cursor == change.seq
 
 
 class _NarrowsBeforeTheSnapshot(FakeAssistantEngine):
@@ -585,17 +855,18 @@ async def test_reading_taken_away_before_the_snapshot_shows_nothing(output: Stri
     assert _calls(engine, "write_message") == []
 
 
-async def test_a_fresh_chat_space_is_not_shown_to_a_device_that_cannot_read(
+async def test_a_device_that_cannot_read_when_the_stream_opens_is_shown_nothing(
     output: StringIO,
 ) -> None:
-    engine = FakeAssistantEngine()
+    """The conversation is read as the stream opens, so a cursor past the change still tells."""
+    engine = _OverTheWire()
     conversation = await _started(engine, HUB)
     await engine.set_conversation_devices(
         conversation, devices=(ChatDevice(device_id="hub", access=DeviceAccess.WRITE),)
     )
     view = cli._ChatView(conversation, device_id="hub", cursor=10_000)
 
-    assert await cli._poll_chat(engine, view) is False
+    assert await cli._follow_chat(engine, view, retry_seconds=60) == cli._EXIT_OK
     assert "no longer shown this conversation" in output.getvalue()
 
 
@@ -624,7 +895,7 @@ async def test_a_send_still_waiting_does_not_hold_off_the_end(output: StringIO) 
         await FakeAssistantEngine.delete_conversation(engine, conversation)
 
     deleting = asyncio.create_task(_delete_while_sending())
-    code = await _chat(engine, conversation, _lines("hello?"), poll_seconds=0.01)
+    code = await _chat(engine, conversation, _lines("hello?"))
     await deleting
 
     assert code == 0
@@ -633,16 +904,21 @@ async def test_a_send_still_waiting_does_not_hold_off_the_end(output: StringIO) 
     assert "may or may not have been received" in rendered
 
 
-async def test_a_chat_space_started_afresh_is_shown_again(output: StringIO) -> None:
-    """A cursor past the newest change means a fresh store: resynchronise from a snapshot."""
-    engine = FakeAssistantEngine()
+async def test_a_hub_back_without_the_conversation_ends_the_chat(output: StringIO) -> None:
+    """A hub that comes back holding no such conversation is said to, as any gone one is."""
+    engine = _OverTheWire(lose=[0])
     conversation = await _started(engine, HUB)
-    view = cli._ChatView(conversation, device_id="hub", cursor=10_000)
 
-    assert await cli._poll_chat(engine, view) is True
+    async def _gone() -> None:
+        await engine.delete_conversation(conversation)
 
-    assert "started afresh" in output.getvalue()
-    assert view.cursor < 10_000
+    engine.on_loss = _gone
+    code = await _chat(engine, conversation, _never(), retry_seconds=0.01)
+
+    assert code == cli._EXIT_OK
+    rendered = _flat(output.getvalue())
+    assert "Lost the hub" in rendered
+    assert f"No conversation has the id {conversation}" in rendered
 
 
 class _Working(FakeAssistantEngine):
@@ -660,21 +936,31 @@ class _Working(FakeAssistantEngine):
 
 
 async def test_working_and_how_it_ended_are_shown_as_they_change(output: StringIO) -> None:
-    """§8:2, §8:3: working…, then how it ended — each change shown once."""
-    idle = ConversationState()
+    """§8:2, §8:3: working…, then how it ended — each change shown once, as pushed."""
     working = ConversationState(working=True, activation_id="a-1")
     done = ConversationState(last_ended=ActivationEnding.DONE)
-    engine = _Working([idle, working, working, done, done])
+    engine = _Scripted()
     conversation = await _started(engine, HUB)
+    other = (await engine.start_conversation()).id
     view = cli._ChatView(conversation, device_id="hub", cursor=0)
+    engine.chunks = (
+        ChatStreamChunk(roles=(DeviceRole.COMMANDS,)),
+        _state(conversation, working),
+        ChatStreamChunk(heartbeat=True),
+        _state(conversation, working),
+        _state(other, ConversationState(last_ended=ActivationEnding.STOPPED)),
+        _state(conversation, done),
+        _state(conversation, done),
+    )
 
-    for _ in range(5):
-        await cli._poll_chat(engine, view)
+    ended = await cli._follow_stream(engine, view, opened=lambda: None)
 
+    assert ended is None
     rendered = output.getvalue()
     assert rendered.count("The assistant is working") == 1
     assert rendered.count("The assistant is done.") == 1
     assert rendered.index("working") < rendered.index("is done")
+    assert "stopped" not in rendered
 
 
 def test_working_names_the_activation_a_stop_would_name(output: StringIO) -> None:
@@ -804,9 +1090,11 @@ async def test_a_reply_arriving_to_a_deleted_message_says_so(output: StringIO) -
         conversation,
         message=UserMessage(device_id="phone", message_id="m-2", text="fixed", replies_to=1),
     )
-    view.cursor = (await engine.chat_changes(after=0)).next_after - 1
+    page = await engine.chat_changes(after=0)
 
-    await cli._poll_chat(engine, view)
+    assert await cli._apply_change(engine, view, DeviceChange(change=page.changes[-1]))
+
+    assert view.cursor == page.changes[-1].seq
 
     assert "replying to #1, a deleted message" in _flat(output.getvalue())
 
