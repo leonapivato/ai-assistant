@@ -125,15 +125,21 @@ Without this, a background task copies the context it was created in, and the
 assistant's own work would be checked as the phone that wrote the message.
 
 > **Normative.** Where the requesting device is not `hub`, the engine binds
-> `UserMessage.device_id` to it: a message naming another device is refused (§6), and
-> one naming none is recorded as the requesting device's.
+> `UserMessage.device_id` to it: a message naming another device is refused (§6).
 
 > **Normative.** Where the requesting device is `hub`, a message keeps the device it
-> names, and one naming none is recorded as `hub`'s.
+> names.
 
-The local socket is the user at the machine, and until the cutover (§9) every request
-is `hub`'s, so this keeps every message's attribution, and with it ADR-0293 §4:2's
-repeat identity, exactly as the peer gives it until the hub can name the real device.
+> **Normative.** A peer writing a message names in `UserMessage.device_id` the id its
+> device has under §§3–4 — its overlay identity, or `hub` for the hub's own machine and
+> a browser on a gateway's loopback listener there — before the cutover (§9) as after
+> it.
+
+`UserMessage.device_id` is required on the conversation's surface as lane B builds it.
+The local socket is the user at the machine, and until the cutover every request is
+`hub`'s, so a message is recorded under the id its peer gives; because that is already
+the id the hub will bind after the cutover, a repeat sent across it is the same
+message (ADR-0293 §4:2).
 
 ADR-0293 §4:1 makes a message id unique per device and ADR-0292 §5:1 states an author
 by the hub, never by content; the conversation's surface as lane B builds it takes the
@@ -295,7 +301,8 @@ hub's own machine, and ADR-0177 keeps a credential to a loopback origin.
 ### 6. The refusal
 
 > **Normative.** A request refused under this ADR fails with `DeviceRefusedError`, a new
-> `AssistantError` subclass in `core/errors.py`, before it has changed anything.
+> `AssistantError` subclass in `core/errors.py`, before its operation has changed
+> anything; a registration §4 makes on that request, and its record, stand.
 
 > **Normative.** `DeviceRefusedError` carries, as a public attribute, one of three
 > reasons: the device named is not accepted under that gateway (a revoked registration,
