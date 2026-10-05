@@ -86,6 +86,7 @@ if TYPE_CHECKING:
     from ai_assistant.core.types import (
         ChatDevice,
         Conversation,
+        DeviceConversation,
         MemoryRecord,
         MessageReceipt,
         ParkedBinding,
@@ -876,6 +877,22 @@ class ConversationLifecycle:
     ) -> bool:
         """Replace one conversation's devices (ADR-0293 §3:3)."""
         return await self._conversations.set_conversation_devices(conversation_id, devices)
+
+    async def conversation_devices(self, conversation_id: str) -> tuple[ChatDevice, ...] | None:
+        """Read one conversation's devices, or ``None`` where it is not held (§3:3)."""
+        return await self._conversations.conversation_devices(conversation_id)
+
+    # --- one device's view (ADR-0296 §4, ADR-0298 §5) ------------------------
+
+    async def device_conversations(
+        self, device_id: str, *, limit: int, offset: int = 0
+    ) -> list[DeviceConversation]:
+        """List the conversations ``device_id`` reads, as ``recent`` orders them."""
+        return await self._conversations.device_conversations(device_id, limit=limit, offset=offset)
+
+    async def device_changes(self, device_id: str, *, after: int, limit: int) -> ChatChanges:
+        """Read the changes after a cursor that ``device_id`` may see (ADR-0296 §4:5)."""
+        return await self._conversations.device_changes(device_id, after=after, limit=limit)
 
     async def write(self, conversation_id: str, message: UserMessage) -> MessageReceipt:
         """Record the user's message and answer for it (ADR-0293 §4).

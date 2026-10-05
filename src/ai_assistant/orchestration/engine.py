@@ -78,6 +78,7 @@ import structlog
 
 from ai_assistant.core.channel_validation import snapshot
 from ai_assistant.core.clock import ClockReadingError, checked_clock
+from ai_assistant.core.device_context import current_requesting_device
 from ai_assistant.core.episode_encoding import check_detail, check_list
 from ai_assistant.core.errors import (
     ActivationStoppedError,
@@ -280,6 +281,7 @@ from ai_assistant.orchestration.conversations import (
     fit_changes,
     fit_transcript,
 )
+from ai_assistant.orchestration.device_checks import DeviceChecks, device_page
 from ai_assistant.orchestration.disclosure import (
     BoundedAudienceSupply,
     TurnSupply,
@@ -410,6 +412,7 @@ if TYPE_CHECKING:
         RecipientGrant,
         RecipientGrantOutcome,
         RecordedInvocation,
+        RequestingDevice,
         RoutedListing,
         SecretValue,
         SourceGrant,
@@ -3717,6 +3720,9 @@ class Engine:
         # instant and the purge's horizon are read through one seam (ADR-0026 §7).
         self._operation_traces = OperationTraces(sink=trace_sink, now=self._clock)
         self._conversations = conversations
+        #: ADR-0298 §5's membership rows, read over the same chat space the gated
+        #: operations act on; each passes the hub's own machine without a read.
+        self._device_checks = DeviceChecks(conversations)
         #: Every activation this engine is running, from before its admission to the
         #: end of its finalization: what a conversation's current state reads its
         #: "working…" from (ADR-0293 §8:2), whether or not its episode survives.
@@ -4496,6 +4502,11 @@ class Engine:
         )
         if event and self._informational_events is None:
             raise ConfigurationError("informational event processing is not wired")
+        device = current_requesting_device()
+        if not device.is_hub:
+            await self._uninterruptibly(
+                self._device_checks.receiving(device, accepted.target, projection.method)
+            )
         deadline = asyncio.get_running_loop().time() + timeout.total_seconds()
         state = admit_channel(
             accepted,
@@ -4629,7 +4640,8 @@ class Engine:
         selected = (
             None if isinstance(accepted.target, NewConversation) else accepted.target.instance_id
         )
-        return self._streamed(
+        device = current_requesting_device()
+        stream = self._streamed(
             accepted.payload.text,
             admitted_input=accepted,
             admitted_reply=capability,
@@ -4639,6 +4651,28 @@ class Engine:
             context=accepted.context,
             projection=projection,
         )
+        if device.is_hub:
+            return stream
+        target = accepted.target
+        return self._device_checked_stream(
+            lambda: self._device_checks.receiving(device, target, projection.method), stream
+        )
+
+    async def _device_checked_stream(
+        self,
+        check: Callable[[], Awaitable[None]],
+        stream: AsyncIterator[ReplyChunk | ChannelResult],
+    ) -> AsyncIterator[ReplyChunk | ChannelResult]:
+        """Run ADR-0298 §5's check before the stream's turn starts, then relay it.
+
+        The turn is not started until the check passes, so a refused stream has
+        changed nothing (§6:1); the stream is closed on every exit, a refusal
+        included.
+        """
+        async with closing_stream(stream) as values:
+            await self._uninterruptibly(check())
+            async for value in values:
+                yield value
 
     async def _legacy_stream(
         self,
@@ -7207,9 +7241,17 @@ class Engine:
         check_arguments(
             "answer", max_bytes=self._max_payload_bytes, question_id=named, accept=accept
         )
+        device = current_requesting_device()
         return await self._tracked(
-            self._questions.answer(named, accept=accept), "answer", checked=True
+            self._answered(device, named, accept=accept), "answer", checked=True
         )
+
+    async def _answered(
+        self, device: RequestingDevice, question_id: str, *, accept: bool
+    ) -> AnswerOutcome:
+        """ADR-0298 §5 "A legacy turn", naming no conversation, then the answer."""
+        await self._device_checks.turn(device, None, "answer")
+        return await self._questions.answer(question_id, accept=accept)
 
     async def forget_question(self, question_id: Identifier) -> bool:
         """Destroy one deferred question (ADR-0078 §8, §9; ADR-0007).
@@ -7661,18 +7703,30 @@ class Engine:
         """
         self._reject_if_closing()
         self._check_page("recent_conversations", limit=limit, offset=offset)
+        device = current_requesting_device()
         return await self._tracked(
-            self._recent_conversations(limit=limit, offset=offset),
+            self._recent_conversations(device, limit=limit, offset=offset),
             "recent_conversations",
             checked=True,
         )
 
     async def _recent_conversations(
-        self, *, limit: int, offset: int
+        self, device: RequestingDevice, *, limit: int, offset: int
     ) -> tuple[ConversationSummary, ...]:
-        """Relay the listing to the stage and project each record."""
-        listed = await self._conversations.recent(limit=limit, offset=offset)
-        return tuple(conversation_summary(one) for one in listed)
+        """Relay the listing to the stage and project each record.
+
+        ADR-0298 §5 "Reading many": a device other than the hub's own machine must
+        hold a role, and is listed only the conversations it reads, in the same
+        order and pages (``ConversationStore.device_conversations``).
+        """
+        if device.is_hub:
+            listed = await self._conversations.recent(limit=limit, offset=offset)
+            return tuple(conversation_summary(one) for one in listed)
+        await self._device_checks.reading_many(device, "recent_conversations")
+        reads = await self._conversations.device_conversations(
+            device.device_id, limit=limit, offset=offset
+        )
+        return tuple(conversation_summary(one.conversation) for one in reads)
 
     async def conversation(self, conversation_id: Identifier) -> ConversationDigest | None:
         """Read the count and span a deletion is about to destroy (ADR-0074 §8).
@@ -7704,9 +7758,17 @@ class Engine:
             (reading := self._chat_reader.working(named)) is not None and reading not in running
         ):
             running.append(reading)
+        device = current_requesting_device()
         return await self._tracked(
-            self._conversations.digest(named, running=running), "conversation", checked=True
+            self._digest(device, named, running=running), "conversation", checked=True
         )
+
+    async def _digest(
+        self, device: RequestingDevice, conversation_id: str, *, running: Sequence[str | None]
+    ) -> ConversationDigest | None:
+        """ADR-0298 §5 "Reading one", then the digest."""
+        await self._device_checks.reading(device, conversation_id, "conversation")
+        return await self._conversations.digest(conversation_id, running=running)
 
     async def forget_conversation(self, conversation_id: Identifier) -> bool:
         """Forget the episodes on a conversation's place, and leave it (ADR-0293 §2:4).
@@ -7749,9 +7811,12 @@ class Engine:
             ConversationStoreError: If the conversation could not be started.
         """
         self._reject_if_closing()
-        return await self._tracked(self._started(), "start_conversation", checked=True)
+        device = current_requesting_device()
+        return await self._tracked(self._started(device), "start_conversation", checked=True)
 
-    async def _started(self) -> ConversationSummary:
+    async def _started(self, device: RequestingDevice) -> ConversationSummary:
+        """ADR-0298 §5 "Starting", then the conversation."""
+        await self._device_checks.starting(device)
         return conversation_summary(await self._conversations.start())
 
     async def my_devices(self) -> tuple[ChatDevice, ...]:
@@ -7827,16 +7892,27 @@ class Engine:
             "write_message", max_bytes=self._max_payload_bytes, conversation_id=named, message=sent
         )
         check_message_fits(named, sent, max_bytes=self._max_payload_bytes)
-        return await self._tracked(self._written(named, sent), "write_message", checked=True)
+        device = current_requesting_device()
+        return await self._tracked(
+            self._written(device, named, sent), "write_message", checked=True
+        )
 
-    async def _written(self, conversation_id: str, message: UserMessage) -> MessageReceipt:
+    async def _written(
+        self, device: RequestingDevice, conversation_id: str, message: UserMessage
+    ) -> MessageReceipt:
         """Record the message, then tell the chat's reader it is there (ADR-0293 §6:1).
 
         The act answers *received* once the conversation has recorded the message and
         starts nothing itself: the reader, told after the record, takes it in — at once,
         or once the activation running from this conversation ends (§6:2, §6:3). A
         repeat is told too, since the message it repeats may still be waiting.
+
+        First, ADR-0298 §2:7 and §5 "Writing": a device other than the hub's own
+        machine writes only under its own id, and only as an end for writing. The
+        activation the reader starts does not run as this device: the reader's read
+        is started in a context of its own (:meth:`_spawn_read`, §2:6).
         """
+        await self._device_checks.writing_message(device, conversation_id, message)
         receipt = await self._conversations.write(conversation_id, message)
         if receipt.position is not None and self._chat_reader is not None:
             self._chat_reader.notice(conversation_id)
@@ -7857,9 +7933,17 @@ class Engine:
         check_arguments(
             "delete_message", max_bytes=self._max_payload_bytes, conversation_id=named, position=at
         )
+        device = current_requesting_device()
         return await self._tracked(
-            self._conversations.delete_message(named, at), "delete_message", checked=True
+            self._deleted_message(device, named, at), "delete_message", checked=True
         )
+
+    async def _deleted_message(
+        self, device: RequestingDevice, conversation_id: str, position: int
+    ) -> bool:
+        """ADR-0298 §5 "Writing", then the deletion."""
+        await self._device_checks.writing(device, conversation_id, "delete_message")
+        return await self._conversations.delete_message(conversation_id, position)
 
     async def delete_conversation(self, conversation_id: Identifier) -> bool:
         """Delete a conversation and its transcript, forgetting nothing (ADR-0293 §2:3).
@@ -7874,9 +7958,15 @@ class Engine:
         check_arguments(
             "delete_conversation", max_bytes=self._max_payload_bytes, conversation_id=named
         )
+        device = current_requesting_device()
         return await self._tracked(
-            self._conversations.delete(named), "delete_conversation", checked=True
+            self._deleted_conversation(device, named), "delete_conversation", checked=True
         )
+
+    async def _deleted_conversation(self, device: RequestingDevice, conversation_id: str) -> bool:
+        """ADR-0298 §5 "Writing", then the deletion."""
+        await self._device_checks.writing(device, conversation_id, "delete_conversation")
+        return await self._conversations.delete(conversation_id)
 
     async def transcript(
         self,
@@ -7905,13 +7995,18 @@ class Engine:
             before=below,
             limit=limit,
         )
+        device = current_requesting_device()
         return await self._tracked(
-            self._transcript(named, before=below, limit=limit), "transcript", checked=True
+            self._transcript(device, named, before=below, limit=limit),
+            "transcript",
+            checked=True,
         )
 
     async def _transcript(
-        self, conversation_id: str, *, before: int | None, limit: int
+        self, device: RequestingDevice, conversation_id: str, *, before: int | None, limit: int
     ) -> TranscriptPage | None:
+        """ADR-0298 §5 "Reading one", then the page, fitted."""
+        await self._device_checks.reading(device, conversation_id, "transcript")
         page = await self._conversations.transcript(conversation_id, before=before, limit=limit)
         return fit_transcript(page, max_bytes=self._max_payload_bytes)
 
@@ -7942,18 +8037,40 @@ class Engine:
             conversation_ids=named,
             limit=limit,
         )
+        device = current_requesting_device()
         return await self._tracked(
-            self._chat_changes(after=cursor, conversation_ids=named, limit=limit),
+            self._chat_changes(device, after=cursor, conversation_ids=named, limit=limit),
             "chat_changes",
             checked=True,
         )
 
     async def _chat_changes(
-        self, *, after: int, conversation_ids: tuple[str, ...] | None, limit: int
+        self,
+        device: RequestingDevice,
+        *,
+        after: int,
+        conversation_ids: tuple[str, ...] | None,
+        limit: int,
     ) -> ChatChanges:
-        page = await self._conversations.changes(
-            after=after, conversation_ids=conversation_ids, limit=limit
-        )
+        """The page for the hub's own machine, or the device's own (ADR-0298 §5).
+
+        "Reading many": a device other than the hub's own machine must hold a role,
+        and reads ``ConversationStore.device_changes`` — the changes it may see, by
+        its membership as each change was recorded — restricted to the conversations
+        it named as :meth:`ConversationStore.changes` restricts them.
+        """
+        if device.is_hub:
+            page = await self._conversations.changes(
+                after=after, conversation_ids=conversation_ids, limit=limit
+            )
+        else:
+            await self._device_checks.reading_many(device, "chat_changes")
+            page = device_page(
+                await self._conversations.device_changes(
+                    device.device_id, after=after, limit=limit
+                ),
+                conversation_ids,
+            )
         return fit_changes(page, max_bytes=self._max_payload_bytes)
 
     async def pending_confirmations(self) -> tuple[Confirmation, ...]:
@@ -8275,12 +8392,29 @@ class Engine:
         # *not* shielded either: ADR-0206 §6 makes a cancellation delivered while a
         # synthesis is outstanding neither a withholding nor a degradation, so it
         # propagates and sets no ``spoken_rendering`` at all.
+        device = current_requesting_device()
         return await self._tracked(
-            self._poll(outbox, named, wanted, budget),
+            self._polled(device, outbox, named, wanted, budget),
             "next_notification",
             checked=True,
             shielded=False,
         )
+
+    async def _polled(
+        self,
+        device: RequestingDevice,
+        outbox: DeliveryOutbox,
+        acknowledging: Identifier | None,
+        plays: tuple[SpokenAudioFormat, ...],
+        budget: timedelta,
+    ) -> NotificationDelivery | None:
+        """ADR-0298 §5 "Notification poll", before the acknowledgement, then the poll.
+
+        A refused poll acknowledges nothing, leases nothing and mints nothing (§6:1,
+        ADR-0131 §4).
+        """
+        await self._device_checks.polling(device)
+        return await self._poll(outbox, acknowledging, plays, budget)
 
     @staticmethod
     def _check_plays(plays: tuple[SpokenAudioFormat, ...]) -> tuple[SpokenAudioFormat, ...]:
@@ -9727,6 +9861,12 @@ class Engine:
         In a context of its own, so neither the correlation scope nor the activation
         of the call that noticed the message is inherited by the read; tracked like
         every other task here, so :meth:`aclose` drains it (ADR-0042 §2).
+
+        **Nor the requesting device** (ADR-0298 §2:6): the activation a message starts
+        outlives the ``write_message`` that started it, so it runs with the requesting
+        device unset — the hub's own machine — and the assistant's own work is never
+        checked as the device that wrote the message. The fresh context is what unsets
+        it, so :mod:`ai_assistant.core.device_context` needs no unsetter.
         """
         task = asyncio.get_running_loop().create_task(read, context=contextvars.Context())
         self._inflight.add(task)
