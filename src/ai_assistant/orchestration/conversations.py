@@ -65,6 +65,7 @@ from ai_assistant.core.types import (
     MemoryKind,
     MessageAddedChange,
     NewMessage,
+    ProcessingReason,
     ProcessingStatus,
     TranscriptMessage,
     TranscriptPage,
@@ -167,6 +168,9 @@ def activation_ending(episode: EpisodicMemory) -> ActivationEnding | None:
     record = episode.processing_record
     if record is None or record.status is None:
         return None
+    if record.reason is ProcessingReason.STOPPED:
+        # ADR-0295 §3:4: a stop is told apart from every other interruption.
+        return ActivationEnding.STOPPED
     return _ENDINGS[record.status]
 
 

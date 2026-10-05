@@ -1891,6 +1891,27 @@ class ClaimStopped(PlanningError):  # noqa: N818 — ADR-0297 §2 names the clas
     """
 
 
+class ActivationStoppedError(AssistantError):
+    """The pass a turn call was awaiting was stopped by the user (ADR-0297 §4).
+
+    Raised **in place of** what the pass would otherwise have returned or raised: a
+    turn's outcome is assembled by the composing stage the stop keeps from running,
+    and what the stopped activation finished the user reads in the conversation's
+    current state (ADR-0295 §3:5). A cancellation of the caller's own task still
+    propagates as itself.
+
+    **Never raised by** ``resume``: a resume whose control activation was stopped
+    records the user's answer before it acts, so it returns its outcome with
+    ``TurnOutcome.stopped`` set (ADR-0297 §4, ADR-0235 §6:10) — save where it ended
+    on a raise and has no outcome to return, which a stop then reports in this
+    class's place.
+
+    It carries a message and **no structured state**. It crosses the wire
+    (ADR-0297 §6:3), reconstructed by name on the far side like every other
+    ``AssistantError``.
+    """
+
+
 class ActiveExecutionError(PlanningError):
     """A destructive store operation was refused because work is in flight.
 

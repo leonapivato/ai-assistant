@@ -45,6 +45,7 @@ from ai_assistant.core.channel_validation import snapshot
 from ai_assistant.core.clock import ClockReadingError, checked_clock
 from ai_assistant.core.episode_encoding import check_detail, check_list
 from ai_assistant.core.errors import (
+    ActivationStoppedError,
     AuditError,
     ChannelProcessingTimeoutError,
     GrantError,
@@ -63,6 +64,7 @@ from ai_assistant.core.errors import (
 from ai_assistant.core.types import (
     DEFAULT_PAGE_SIZE,
     ActionPlan,
+    ActivationStop,
     AnswerKind,
     AnswerOutcome,
     AttemptOutcome,
@@ -1406,6 +1408,7 @@ class FakeAssistantEngine:
         finally:
             self._ended(activation)
         self._commit_episode(activation, report)
+        failure = _stopped_failure(activation, failure)
         if failure is not None:
             raise failure
         if activation.output_failure is not None:
@@ -1578,6 +1581,7 @@ class FakeAssistantEngine:
         # Before the first chunk is yielded: the episode has landed, and a consumer
         # that abandons the stream must leave it inside its conversation's deletion.
         self._commit_episode(activation, report)
+        failure = _stopped_failure(activation, failure)
         if failure is not None:
             raise failure
         if activation.output_failure is not None:
@@ -2800,6 +2804,33 @@ class FakeAssistantEngine:
         pretending to have recovered it.
         """
         return _turn(str(confirmation.parameters.get("query", "the parked lookup")))
+
+    async def stop_activation(self, activation_id: Identifier, /) -> ActivationStop:
+        """Stop one running activation, as the engine does (ADR-0297 §3, §5).
+
+        The fake holds its running channel activations in process, as the engine
+        does, and a stop sets the mark of one whose end entry is not appended, in one
+        synchronous step with that test; the pass then ends with the stop's end entry
+        and a turn call awaiting it raises ``ActivationStoppedError``. **It holds no
+        plan store**, so no stop record is written: no claim this fake makes could be
+        refused on one. A control activation (``resume``) is not among the running
+        ones here, and is answered by its episode as one that ended. Where none runs,
+        an episode at ``activation:<activation_id>`` says it ran and ended, and no
+        episode there says nothing ran that this fake knows of; neither writes
+        anything.
+        """
+        named = identifier(activation_id, name="activation_id")
+        check_arguments("stop_activation", max_bytes=self._max_payload_bytes, activation_id=named)
+        self.calls.append(("stop_activation", {"activation_id": named}))
+        for running in self._running_activations:
+            if running.activation_id == named:
+                answer = ActivationStop.STOPPED if running.stop() else ActivationStop.ALREADY_ENDED
+                return self._checked(answer, "stop_activation")
+        episode = await self.episode_memory.get(f"activation:{named}")
+        return self._checked(
+            ActivationStop.NO_SUCH_ACTIVATION if episode is None else ActivationStop.ALREADY_ENDED,
+            "stop_activation",
+        )
 
     async def cancel_read(self, token: ContinuationToken, /) -> ReadCancellation:
         """Withdraw a parked read's question, or interrupt the read it dispatched.
@@ -5301,6 +5332,21 @@ class FakeAssistantEngine:
         page_argument(offset, name="offset")
         check_arguments(method, max_bytes=self._max_payload_bytes, limit=limit, offset=offset)
         self.calls.append((method, {"limit": limit, "offset": offset}))
+
+
+def _stopped_failure(
+    activation: FakeActivation, failure: BaseException | None
+) -> BaseException | None:
+    """What a turn call awaiting ``activation`` is answered with (ADR-0297 §4).
+
+    ``ActivationStoppedError`` in place of what a stopped pass would otherwise return
+    or raise; a cancellation still propagates as itself.
+    """
+    if not activation.stopped or isinstance(failure, asyncio.CancelledError):
+        return failure
+    stopped = ActivationStoppedError("the activation was stopped before it finished (ADR-0297 §4)")
+    stopped.__cause__ = failure
+    return stopped
 
 
 def _turn_episode(activation: FakeActivation, report: EpisodeCaptureReport) -> str | None:
