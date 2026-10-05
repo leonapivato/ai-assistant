@@ -1641,6 +1641,8 @@ async def test_a_file_written_before_the_chat_space_opens_with_empty_transcripts
     [
         ("UPDATE messages SET cut_off = 7", "transcript"),
         ("UPDATE messages SET options = 'not json'", "transcript"),
+        ("""UPDATE messages SET options = '"yes"'""", "transcript"),
+        ("UPDATE messages SET options = '{}'", "transcript"),
         ("UPDATE messages SET author = 'stranger'", "transcript"),
         ("UPDATE messages SET written_at = 1.5", "export"),
         ("UPDATE chat_changes SET kind = 'mystery'", "changes"),
@@ -1648,6 +1650,8 @@ async def test_a_file_written_before_the_chat_space_opens_with_empty_transcripts
             "UPDATE chat_changes SET devices = '[{\"device_id\": 3}]' WHERE devices IS NOT NULL",
             "changes",
         ),
+        ("UPDATE chat_changes SET devices = '{}' WHERE devices IS NOT NULL", "changes"),
+        ("""UPDATE chat_changes SET devices = '"phone"' WHERE devices IS NOT NULL""", "changes"),
         ("UPDATE conversation_devices SET access = 'everything'", "devices"),
         ("UPDATE taken_in SET activation_id = ' '", "taken_in"),
     ],
