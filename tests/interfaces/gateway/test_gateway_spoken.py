@@ -1,9 +1,9 @@
 """The browser's spoken turn, end to end (ADR-0200 §10).
 
-One route, `POST /ask/spoken`, mapped onto `converse_spoken` beside `/ask` and
-`/ask/stream`. What §13's rows ask of this fence is here: the three browser-owned
-members and no fourth, the gateway's own deadline, the ordinary size refusal, and a
-recording that never travels inside its own refusal (§9).
+One route, `POST /ask/spoken`, mapped onto `converse_spoken` beside `/ask` (and once
+beside `/ask/stream`, which ADR-0293 §11 retired). What §13's rows ask of this fence is
+here: the three browser-owned members and no fourth, the gateway's own deadline, the
+ordinary size refusal, and a recording that never travels inside its own refusal (§9).
 
 **Driven through a real socket** for ``test_gateway.py``'s reason: what is under test
 is a request a browser makes and a body it renders, and the router, the door and the
@@ -223,7 +223,7 @@ class _Untranscribable(FakeAssistantEngine):
 
 def test_the_spoken_path_names_the_operation_the_adr_admits() -> None:
     """§10: one route, "mapped onto ``converse_spoken`` in ``_ASSISTANT_PATHS`` beside
-    ``/ask`` and ``/ask/stream``".
+    ``/ask`` and ``/ask/stream``" — the second of which ADR-0293 §11 retired.
 
     Checked against the router rather than against a list in this file, so a path added
     without an operation, or an operation without a path, fails at the join instead of
@@ -231,7 +231,7 @@ def test_the_spoken_path_names_the_operation_the_adr_admits() -> None:
     """
     assert _ASSISTANT_PATHS[("POST", _SPOKEN)] == "converse_spoken"
     assert _ASSISTANT_PATHS[("POST", "/ask")] == "converse"
-    assert _ASSISTANT_PATHS[("POST", "/ask/stream")] == "converse_streaming"
+    assert ("POST", "/ask/stream") not in _ASSISTANT_PATHS
 
 
 def test_the_spoken_turn_is_answered_whole_and_is_not_a_streamed_shape() -> None:
@@ -582,7 +582,9 @@ async def test_the_turn_inside_a_spoken_answer_is_the_view_the_other_entries_ren
     engine.turn_outcome = outcome
     async with _harness(engine) as one:
         _, spoken = await one.whole("POST", _SPOKEN, _body())
-        _, typed = await one.whole("POST", "/ask", {"utterance": "what is on today"})
+        _, typed = await one.whole(
+            "POST", "/ask", {"utterance": "what is on today", "reference": {"goal_id": "goal-1"}}
+        )
 
         assert spoken["turn"]["outcome"] == _outcome_view(outcome)
         assert spoken["turn"]["outcome"] == typed["outcome"]

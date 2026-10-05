@@ -271,7 +271,9 @@ def _routed(
 async def _view(one: Harness, outcome: TurnOutcome) -> dict[str, Any]:
     """Drive a turn that routed and return the routed view the page receives."""
     one.engine.turn_outcome = outcome
-    status, body = await one.whole("POST", "/ask", {"utterance": "forget that"})
+    status, body = await one.whole(
+        "POST", "/ask", {"utterance": "forget that", "reference": {"goal_id": "goal-1"}}
+    )
     assert status == 200, body
     view: dict[str, Any] = body["outcome"]["routed"]
     return view
@@ -291,7 +293,9 @@ async def test_the_routed_account_crosses_whole_and_beside_the_reply() -> None:
     """
     async with _harness(FakeAssistantEngine()) as one:
         one.engine.turn_outcome = _routed(RoutableOperation.FORGET, RouteOutcome.PERFORMED)
-        status, body = await one.whole("POST", "/ask", {"utterance": "forget that"})
+        status, body = await one.whole(
+            "POST", "/ask", {"utterance": "forget that", "reference": {"goal_id": "goal-1"}}
+        )
 
         assert status == 200, body
         assert body["outcome"]["reply"] == "Here is what I did."
@@ -310,7 +314,9 @@ async def test_a_pass_that_routed_nothing_carries_a_null_account() -> None:
     fact"), so an ordinary turn crosses with ``routed`` ``null`` rather than with an
     empty account the page would have to tell apart from a real one."""
     async with _harness(FakeAssistantEngine()) as one:
-        status, body = await one.whole("POST", "/ask", {"utterance": "hello"})
+        status, body = await one.whole(
+            "POST", "/ask", {"utterance": "hello", "reference": {"goal_id": "goal-1"}}
+        )
 
         assert status == 200, body
         assert body["outcome"]["routed"] is None
@@ -773,7 +779,9 @@ async def test_the_routed_card_is_answered_through_the_resume_the_page_already_h
     resumed outcome carries ``REFUSED`` and the response is a ``200``, not a fault.
     """
     async with _harness(_parked(RoutableOperation.FORGET, (_belief(),))) as one:
-        await one.whole("POST", "/ask", {"utterance": "forget that"})
+        await one.whole(
+            "POST", "/ask", {"utterance": "forget that", "reference": {"goal_id": "goal-1"}}
+        )
 
         status, body = await one.whole(
             "POST", "/confirmation/resume", {"token": "h-1", "approved": False}
@@ -793,7 +801,9 @@ async def test_a_routed_park_is_not_offered_by_the_recovery_listing() -> None:
     cannot answer after a restart, which is the opposite of what §7 decided.
     """
     async with _harness(_parked(RoutableOperation.FORGET, (_belief(),))) as one:
-        await one.whole("POST", "/ask", {"utterance": "forget that"})
+        await one.whole(
+            "POST", "/ask", {"utterance": "forget that", "reference": {"goal_id": "goal-1"}}
+        )
 
         status, body = await one.whole("POST", "/confirmations", {})
 

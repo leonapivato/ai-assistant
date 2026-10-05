@@ -16,7 +16,6 @@ from ai_assistant.core.types import (
     DataTier,
     NotificationCandidate,
     NotificationDelivery,
-    ReplyChunk,
     SpokenAudio,
     SpokenAudioFormat,
     SpokenRendering,
@@ -79,8 +78,6 @@ def _withheld() -> NotificationDelivery:
 @pytest.mark.parametrize(
     "value",
     [
-        pytest.param(streams.chunk(ReplyChunk(text="hello")), id="chunk"),
-        pytest.param(streams.outcome({"reply": "hi"}), id="outcome"),
         pytest.param(streams.notification(_delivery()), id="notification"),
         pytest.param(streams.alive(), id="alive"),
         pytest.param(streams.fault("hub-unreachable"), id="fault"),
@@ -97,8 +94,6 @@ def test_every_value_carries_exactly_one_kind_and_it_is_a_known_one(
 @pytest.mark.parametrize(
     "value",
     [
-        pytest.param(streams.chunk(ReplyChunk(text="hello")), id="chunk"),
-        pytest.param(streams.outcome({"reply": "hi"}), id="outcome"),
         pytest.param(streams.notification(_delivery()), id="notification"),
         pytest.param(streams.alive(), id="alive"),
         pytest.param(streams.fault("hub-unreachable"), id="fault"),
@@ -120,10 +115,14 @@ def test_the_keep_alive_carries_nothing_but_its_own_kind() -> None:
     assert streams.alive() == {"kind": "alive"}
 
 
-def test_exactly_two_kinds_end_a_stream() -> None:
+def test_exactly_one_kind_ends_a_stream() -> None:
     """§2 partitions the endings a reader must tell apart, and the partition is
-    stated once so the page and the gateway cannot hold two of them."""
-    assert set(streams.TERMINAL_KINDS) == {streams.ValueKind.OUTCOME, streams.ValueKind.FAULT}
+    stated once so the page and the gateway cannot hold two of them.
+
+    One kind since ADR-0293 §11 retired the streamed turn and with it the ``outcome``
+    value: the delivery stream ends only in a fault it can name.
+    """
+    assert set(streams.TERMINAL_KINDS) == {streams.ValueKind.FAULT}
 
 
 def test_the_media_type_is_not_the_one_an_event_source_reads() -> None:
@@ -188,15 +187,13 @@ def test_a_value_is_one_line_and_a_newline_inside_it_does_not_break_the_frame() 
     """The property that makes the line the frame: a JSON encoding writes a line feed
     in a model's answer as an escape, so a reader needs no length prefix of its own.
 
-    A composed answer with paragraph breaks in it is the ordinary case, not an
-    adversarial one — ``.reply { white-space: pre-wrap }`` exists because answers
-    arrive with the breaks they were written with.
+    A detail with paragraph breaks in it is an ordinary value, not an adversarial one.
     """
-    framed = streams.encode(streams.chunk(ReplyChunk(text="first\n\nsecond")))
+    framed = streams.encode(streams.fault("rejected", detail="first\n\nsecond"))
 
     assert framed.count(b"\n") == 1
     assert framed.endswith(b"\n")
-    assert json.loads(framed)["text"] == "first\n\nsecond"
+    assert json.loads(framed)["detail"] == "first\n\nsecond"
 
 
 # --- §5: the token never leaves the gateway ----------------------------------
@@ -244,16 +241,6 @@ def test_a_notification_value_carries_no_evidence_the_page_could_present_as_a_ru
 
 
 # --- the outcome value carries the turn whole --------------------------------
-
-
-def test_the_outcome_value_carries_the_view_whole_and_adds_nothing() -> None:
-    """§3: "The terminal value carries the ``TurnOutcome`` whole, so all four of
-    ADR-0173 §6's shapes are readable at the browser from the two members alone"."""
-    view = {"reply": "half an answer", "reply_degraded": True, "steps": []}
-
-    value = streams.outcome(view)
-
-    assert value["outcome"] == view
 
 
 def test_a_fault_value_carries_its_detail_only_where_there_is_one() -> None:

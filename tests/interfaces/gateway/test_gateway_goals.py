@@ -14,8 +14,8 @@ is derived, defaulted or composed on the way (ADR-0177 §1, golden rule 3).
 **Answering a clarification is not a fourth path**, and that is §11's construction
 rather than an economy here: "answering is a turn and not an operation of its own, and
 that is the whole reason ``converse`` gains a keyword rather than the surface gaining a
-fifth verb". So the reference rides ``/ask`` and ``/ask/stream``, and the cases below
-drive it there.
+fifth verb". So the reference rides ``/ask``, and the cases below drive it there —
+and since ADR-0293 §11, ``/ask`` carries nothing else.
 """
 
 from __future__ import annotations
@@ -24,7 +24,7 @@ from datetime import UTC, datetime
 from typing import TYPE_CHECKING, Final
 
 import pytest
-from test_gateway_streams import Harness, _harness, _values
+from test_gateway_streams import Harness, _harness
 
 from ai_assistant.core.types import (
     Clarification,
@@ -277,16 +277,26 @@ async def test_a_goal_is_taken_up_from_the_listing_the_browser_was_shown(
     assert harness.engine.calls[-1][1]["reference"] == TurnReference(goal_id=GOAL_ID)
 
 
-async def test_a_turn_naming_no_reference_carries_none(harness: Harness) -> None:
-    """Absent is the absence and never a default, which is ``_optional_string``'s posture.
+@pytest.mark.parametrize("reference", [None, "absent"])
+async def test_a_turn_naming_no_reference_is_refused_before_the_engine(
+    harness: Harness, reference: str | None
+) -> None:
+    """ADR-0293 §11: the ordinary turn is the chat's, so ``/ask`` carries a reference.
 
-    A turn carrying no reference is the ordinary turn, and ``converse``'s keyword
-    defaults to ``None`` for exactly that reason.
+    What is left of the route is the turn the chat cannot yet carry — answering a
+    clarification, or taking a goal up from another conversation (ADR-0250 §11, §13).
+    A body with no reference, absent or ``null``, is refused as malformed and reaches no
+    engine, rather than running as the conversation ADR-0293 retired.
     """
-    status, _ = await harness.whole("POST", "/ask", {"utterance": "what is on today"})
+    body: dict[str, object] = {"utterance": "what is on today"}
+    if reference is None:
+        body["reference"] = None
 
-    assert status == 200
-    assert harness.engine.calls[-1][1]["reference"] is None
+    status, answered = await harness.whole("POST", "/ask", body)
+
+    assert status == 400
+    assert answered == {"fault": "malformed-request"}
+    assert harness.engine.calls == []
 
 
 @pytest.mark.parametrize(
@@ -330,26 +340,3 @@ async def test_a_reference_naming_other_than_one_record_is_refused(
 
     assert status == 400
     assert harness.engine.calls == []
-
-
-async def test_the_streamed_entry_carries_the_reference_too(harness: Harness) -> None:
-    """ADR-0173: ``converse_streaming`` takes "exactly ``converse``'s arguments".
-
-    So the keyword needs no record of its own and the two entries carry it alike. A
-    browser that could answer a clarification only by switching off streaming would be
-    one where the gateway had chosen between the entries, which ADR-0175 §3 forbids.
-    """
-    reader, _, status = await harness.send(
-        "POST",
-        "/ask/stream",
-        {"utterance": "the one at Melides", "reference": {"question_id": QUESTION_ID}},
-    )
-    assert status == 200
-    # Read the stream to its terminal value rather than to the socket closing: the
-    # gateway keeps a connection alive after a stream ends, so reading to EOF would
-    # wait out the idle timeout for a fact the last value already carries.
-    values = [value async for value in _values(reader)]
-    assert values[-1]["kind"] == "outcome"
-
-    streamed = [call for call in harness.engine.calls if call[0] == "converse_streaming"]
-    assert streamed[-1][1]["reference"] == TurnReference(question_id=QUESTION_ID)
