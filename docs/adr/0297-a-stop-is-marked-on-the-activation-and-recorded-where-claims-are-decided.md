@@ -1,6 +1,6 @@
 # 297. A stop is marked on the activation and recorded where claims are decided
 
-- Status: Proposed
+- Status: Accepted
 - Date: 2026-10-05
 - Scope: [#2578](https://github.com/leonapivato/ai-assistant/issues/2578), the channel redesign: how a stop bites, which ships with the conversation channel (ADR-0293 §11:8, ADR-0295 §6).
 - Dependency: ADR-0295, ratified.
