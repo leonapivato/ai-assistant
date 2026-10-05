@@ -8,17 +8,14 @@ import pytest
 from pydantic import BaseModel
 
 from ai_assistant.core.errors import ChannelProcessingError, ChannelProcessingTimeoutError
-from ai_assistant.core.types import ChannelResult, ReplyChunk, SpokenAudio
+from ai_assistant.core.types import SpokenAudio
 from ai_assistant.wire.errors import UndecodableFrameError, error_payload, raise_from_payload
 from ai_assistant.wire.server import _decode_arguments
-from ai_assistant.wire.surface import _reaches_audio, audio_bearing, chunk_adapter, terminal_adapter
+from ai_assistant.wire.surface import _reaches_audio, audio_bearing
 
 
-def test_nested_audio_and_reflected_terminal_are_discovered() -> None:
+def test_nested_audio_is_discovered() -> None:
     assert audio_bearing("receive") == {"input"}
-    assert audio_bearing("receive_streaming") == {"input"}
-    assert chunk_adapter("receive_streaming")._type is ReplyChunk
-    assert terminal_adapter("receive_streaming")._type is ChannelResult
 
 
 class RecursiveValue(BaseModel):
@@ -35,11 +32,10 @@ def test_audio_detection_follows_typing_aliases_and_handles_cycles() -> None:
     assert _reaches_audio(AudioAlias)
 
 
-@pytest.mark.parametrize("method", ["receive", "receive_streaming"])
-def test_nested_audio_refusal_has_no_rejected_value_or_exception_chain(method: str) -> None:
+def test_nested_audio_refusal_has_no_rejected_value_or_exception_chain() -> None:
     with pytest.raises(UndecodableFrameError) as caught:
         _decode_arguments(
-            method,
+            "receive",
             {
                 "input": {
                     "target": {"kind": "new_conversation"},
@@ -75,6 +71,29 @@ def test_raw_unsupported_combination_is_refused_before_dispatch_without_payload(
         )
     assert "PRIVATE" not in str(caught.value)
     assert caught.value.__context__ is None
+
+
+@pytest.mark.parametrize("reply", [{"kind": "whole_text"}, {"kind": "streaming_text"}])
+@pytest.mark.parametrize(
+    "target",
+    [
+        {"kind": "new_conversation"},
+        {"kind": "channel", "channel_type": "conversation", "instance_id": "c"},
+    ],
+)
+def test_a_text_conversational_frame_is_refused_before_dispatch(
+    reply: dict[str, str], target: dict[str, str]
+) -> None:
+    """ADR-0293 §11: the hub refuses the text conversational combination at decode."""
+    with pytest.raises(UndecodableFrameError):
+        _decode_arguments(
+            "receive",
+            {
+                "input": {"target": target, "payload": {"modality": "text", "text": "hello"}},
+                "reply": reply,
+                "timeout": "PT10S",
+            },
+        )
 
 
 @pytest.mark.parametrize("kind", [ChannelProcessingError, ChannelProcessingTimeoutError])

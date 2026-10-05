@@ -83,7 +83,7 @@ if TYPE_CHECKING:
     )
     from ai_assistant.orchestration.loop import RespondedTurn
 
-#: ADR-0228 §4's figure for ``converse`` and ``converse_streaming``, read off the
+#: ADR-0228 §4's figure for ``converse``, read off the
 #: member that declares it rather than restated — so a case that reads as "exactly at
 #: the budget" cannot drift from the figure the loop actually enforces.
 _BUDGET: Final[timedelta] = _PLANNING_BUDGETS[ConversationalOperation.CONVERSE]
@@ -1323,18 +1323,16 @@ def test_the_budget_is_read_off_the_operation_and_never_supplied_by_a_caller() -
     property off what it is handed rather than taking a value a caller could
     contradict.
 
-    **Keyed on the operation and never on the audience** (§4). ``converse`` and
-    ``converse_streaming`` are both bounded-audience and declare the same figure;
-    ``converse_spoken`` declares none. Audience decides what may be *said* (ADR-0199
-    §1, ADR-0226 §5) and never how long a user waits.
+    **Keyed on the operation and never on the audience** (§4). ``converse`` is
+    bounded-audience and declares the figure; ``converse_spoken`` declares none.
+    Audience decides what may be *said* (ADR-0199 §1, ADR-0226 §5) and never how long
+    a user waits.
     """
     assert {member.value for member in ConversationalOperation} == {
         "converse",
-        "converse_streaming",
         "converse_spoken",
     }
     assert ConversationalOperation.CONVERSE.planning_budget == timedelta(seconds=20)
-    assert ConversationalOperation.CONVERSE_STREAMING.planning_budget == timedelta(seconds=20)
     assert ConversationalOperation.CONVERSE_SPOKEN.planning_budget is None
 
     signature = inspect.signature(LearningLoop.respond)
@@ -1362,10 +1360,7 @@ def test_an_operation_nobody_priced_declares_no_budget() -> None:
     §1 and nothing else would stop it.
     """
     priced = set(_PLANNING_BUDGETS)
-    assert priced == {
-        ConversationalOperation.CONVERSE,
-        ConversationalOperation.CONVERSE_STREAMING,
-    }
+    assert priced == {ConversationalOperation.CONVERSE}
     for member in ConversationalOperation:
         if member in priced:
             assert member.planning_budget == _PLANNING_BUDGET

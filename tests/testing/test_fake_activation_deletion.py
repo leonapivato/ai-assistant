@@ -12,8 +12,10 @@ from ai_assistant.core.errors import MemoryStoreError, UnknownConversationError
 from ai_assistant.core.types import (
     ChannelInput,
     NewConversation,
-    TextChannelPayload,
-    WholeTextReply,
+    SpeechChannelPayload,
+    SpokenAudio,
+    SpokenAudioFormat,
+    SpokenReply,
 )
 from ai_assistant.testing import FakeAssistantEngine
 
@@ -28,12 +30,15 @@ _BUDGET = timedelta(seconds=10)
 async def _receive(
     engine: FakeAssistantEngine, channel: ChannelIdentity | None = None
 ) -> ChannelResult:
+    # Spoken: ADR-0293 §11 takes the text conversational combination off ``receive``.
     return await engine.receive(
         ChannelInput(
             target=NewConversation() if channel is None else channel,
-            payload=TextChannelPayload(text="hello"),
+            payload=SpeechChannelPayload(
+                audio=SpokenAudio(content="YXVkaW8=", media_type=SpokenAudioFormat.MP4)
+            ),
         ),
-        reply=WholeTextReply(),
+        reply=SpokenReply(plays=(SpokenAudioFormat.MP4,)),
         timeout=_BUDGET,
     )
 

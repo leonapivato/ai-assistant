@@ -67,15 +67,9 @@ from ai_assistant.core.types import (
     GoalAssociation,
     GoalBrief,
     Idempotency,
-    IngestSummary,
-    LearnDecision,
-    LearnOutcome,
-    MemoryDecision,
     MemoryDecisionKind,
-    MemoryIngestResult,
     MemoryKind,
     MemorySource,
-    MemoryUpdateProposal,
     OriginUnrecordedBinding,
     PlannerOutput,
     PlanStep,
@@ -83,7 +77,6 @@ from ai_assistant.core.types import (
     Provenance,
     ProvisioningState,
     QuestionState,
-    QueueOutcome,
     ReadAskOutcome,
     Reversibility,
     RiskLevel,
@@ -118,11 +111,9 @@ from ai_assistant.orchestration import (
     SearchServicer,
     StepExecutor,
     StepRunner,
-    WriteOutcome,
     belief_from_record,
     belief_summary_from_record,
     canonical_payload,
-    learn_outcome,
     presented_confidence,
 )
 from ai_assistant.orchestration import engine as engine_module
@@ -814,15 +805,15 @@ class Harness:
         )
         self.ids = iter(f"d-{n}" for n in range(1, 100))
         self.handles = iter(f"tok-{n}" for n in range(1, 100))
-        # Kept on the harness so a learn test can read what reached the loop.
+        # Kept on the harness so a test can read what reached the loop.
         self.feedback = feedback if feedback is not None else FakeFeedbackProcessor()
         self.policy_for_writer = FakeMemoryPolicy()
 
         writer = FakeMemoryWriter(store=self.memory, policy=self.policy_for_writer, now=lambda: AT)
         # **One** write stage over that writer and one deferral queue, shared by every
         # producer's stage, as the composition root wires it (ADR-0078 §3). Both are
-        # kept on the harness: a learn test reads back what was parked, and the
-        # question surface answers it.
+        # kept on the harness: a test reads back what was parked, and the question
+        # surface answers it.
         self.deferrals = FakeDeferralStore(now=lambda: AT, queue_limit=queue_limit)
         self.writes = MemoryWriteStage(writer=writer, deferrals=self.deferrals)
         self.questions = QuestionStage(
@@ -843,7 +834,7 @@ class Harness:
         # from the store's ``ORDER BY`` rather than from a Python list, and a fake
         # cannot exhibit a wrong one.
         self.reads: SourceReadTrail = FakeSourceReadTrail() if reads is None else reads
-        loop = LearningLoop(
+        self.loop = loop = LearningLoop(
             # A knob because ADR-0204 §8's sixth case needs a *placed* facet in the
             # turn's supply — the calendar — to show that a facet ADR-0199 §3 places
             # leaves the stamp `False`, and the default context carries none at all.
@@ -3548,7 +3539,7 @@ async def test_aclose_sweeps_remaining_closers_when_one_is_cancelled() -> None:
     assert closed == ["a", "b"]  # b released despite a's cancellation
 
 
-# --- learn: the correction leg (ADR-0042 §3) -----------------------------
+# --- feedback, as the loop folds it (ADR-0022) ------------------------------
 
 
 def feedback(
@@ -3566,147 +3557,6 @@ def feedback(
         subject=subject,
         created_at=AT,
     )
-
-
-async def test_learn_delegates_to_the_loop_and_summarises_the_result() -> None:
-    """``learn`` hands the event to the loop and returns an orchestration summary (§3)."""
-    harness = Harness()
-    event = feedback()
-
-    outcome = await harness.engine.learn(event)
-
-    assert isinstance(outcome, LearnOutcome)
-    # The event reached the loop's feedback processor unchanged.
-    assert harness.feedback.events == [event]  # type: ignore[attr-defined]
-    # The default fake policy accepts, storing one new record.
-    assert len(outcome.results) == 1
-    summary = outcome.results[0]
-    assert isinstance(summary, IngestSummary)
-    assert summary.decision is LearnDecision.STORED
-    assert summary.stored is True
-    assert summary.record_id is not None
-    assert outcome.stored == 1
-
-
-async def test_learn_summary_carries_the_policy_reason() -> None:
-    """The summary surfaces the policy's own justification, per result (§1)."""
-    harness = Harness()
-    outcome = await harness.engine.learn(feedback())
-    # FakeMemoryPolicy stamps a reason on every decision; the summary carries it
-    # verbatim, the transparency a confirmation's reason gives (ADR-0042 §4).
-    assert harness.policy_for_writer.call_count == 1
-    assert outcome.results[0].reason == "fake: configured decision"
-
-
-async def test_learn_with_no_proposals_returns_an_empty_summary() -> None:
-    """Feedback that proposes no update yields an empty, non-error outcome (§3)."""
-    harness = Harness(feedback=FakeFeedbackProcessor([]))
-    outcome = await harness.engine.learn(feedback())
-    assert outcome.results == ()
-    assert outcome.stored == 0
-
-
-@pytest.mark.parametrize(
-    ("kind", "expected"),
-    [
-        (MemoryDecisionKind.ACCEPT, LearnDecision.STORED),
-        (MemoryDecisionKind.REJECT, LearnDecision.REJECTED),
-        (MemoryDecisionKind.REINFORCE, LearnDecision.REINFORCED),
-        (MemoryDecisionKind.SUPERSEDE, LearnDecision.SUPERSEDED),
-        (MemoryDecisionKind.ASK_USER, LearnDecision.DEFERRED),
-        (MemoryDecisionKind.STORE_TEMPORARY, LearnDecision.STORED_TEMPORARILY),
-    ],
-)
-def test_from_results_maps_every_decision_kind(
-    kind: MemoryDecisionKind, expected: LearnDecision
-) -> None:
-    """Every ``core`` ruling has a faithful orchestration echo (§1, exhaustive)."""
-    decision = _decision(kind)
-    stored = None if kind in {MemoryDecisionKind.REJECT, MemoryDecisionKind.ASK_USER} else "rec-1"
-    outcome = learn_outcome(
-        (_write_outcome(MemoryIngestResult(decision=decision, record_id=stored)),)
-    )
-    summary = outcome.results[0]
-    assert summary.decision is expected
-    assert summary.record_id == stored
-    assert summary.stored is (stored is not None)
-    assert summary.reason == decision.reason
-
-
-def test_from_results_preserves_order_across_multiple_results() -> None:
-    """One summary per result, in the order the loop applied them (§1)."""
-    results = (
-        _write_outcome(
-            MemoryIngestResult(decision=_decision(MemoryDecisionKind.ACCEPT), record_id="rec-1")
-        ),
-        _write_outcome(
-            MemoryIngestResult(decision=_decision(MemoryDecisionKind.REJECT), record_id=None)
-        ),
-    )
-    outcome = learn_outcome(results)
-    assert [s.decision for s in outcome.results] == [LearnDecision.STORED, LearnDecision.REJECTED]
-    assert outcome.stored == 1
-
-
-def _write_outcome(result: MemoryIngestResult) -> WriteOutcome:
-    """A write outcome carrying ``result`` and no admission.
-
-    ``admission=None`` is what a ruling that raised no question produces — and, for
-    an ``ASK_USER``, what secret-tier data produces, which is the case these mapping
-    tests happen to drive (ADR-0078 §1). The admission's *own* translation is pinned
-    separately, on ``QueuedQuestion.from_admission``.
-    """
-    return WriteOutcome(result=result)
-
-
-def _decision(kind: MemoryDecisionKind) -> MemoryDecision:
-    """A valid ``MemoryDecision`` of ``kind`` (target/ttl supplied where required)."""
-    if kind in {MemoryDecisionKind.REINFORCE, MemoryDecisionKind.SUPERSEDE}:
-        return MemoryDecision(kind=kind, reason=f"{kind.value} reason", target_id="target-1")
-    if kind is MemoryDecisionKind.STORE_TEMPORARY:
-        return MemoryDecision(kind=kind, reason="temporary", ttl=timedelta(hours=1))
-    return MemoryDecision(kind=kind, reason=f"{kind.value} reason")
-
-
-async def test_learn_is_refused_once_shutdown_has_begun() -> None:
-    """After aclose, learn accepts no new work (§2 stops accepting)."""
-    harness = Harness()
-    await harness.engine.aclose()
-    with pytest.raises(RuntimeError, match="shutting down"):
-        await harness.engine.learn(feedback())
-
-
-async def test_learn_is_drained_before_shutdown_closes_resources() -> None:
-    """The write path touches the store, so aclose waits for it before closing (§2)."""
-    entered = asyncio.Event()
-    release = asyncio.Event()
-    closed = asyncio.Event()
-    closed_while_inflight = False
-
-    class GatedFeedbackProcessor(FakeFeedbackProcessor):
-        async def process(self, event: FeedbackEvent) -> Sequence[MemoryUpdateProposal]:
-            entered.set()
-            await release.wait()
-            return await super().process(event)
-
-    async def close() -> None:
-        nonlocal closed_while_inflight
-        closed_while_inflight = not release.is_set()
-        closed.set()
-
-    harness = Harness(feedback=GatedFeedbackProcessor(), closers=(close,))
-    call = asyncio.ensure_future(harness.engine.learn(feedback()))
-    await entered.wait()
-
-    closing = asyncio.ensure_future(harness.engine.aclose())
-    await asyncio.sleep(0)  # let aclose reach its drain
-    assert not closed.is_set()  # the resource is not closed while the write is in flight
-
-    release.set()
-    await call
-    await closing
-    assert closed.is_set()
-    assert closed_while_inflight is False
 
 
 # --- the belief inspection surface (ADR-0073 §4, §5, §7) ----------------
@@ -5114,29 +4964,22 @@ async def test_beliefs_propagates_rather_than_returning_a_page_it_could_not_reso
 # --- the deferred-question surface, through the façade (ADR-0078 §8, §9) ----
 
 
-async def test_learn_parks_a_deferred_question_the_facade_can_list_and_answer() -> None:
-    """The façade's whole leg 4 reach, in one pass (ADR-0078 §8 reaches 1 and 2).
+async def test_a_parked_deferred_question_is_listed_and_answered_through_the_facade() -> None:
+    """The façade's question reach, in one pass (ADR-0078 §8 reach 2).
 
-    ``learn`` says the question was parked **and carries its id**, which is the reach
-    that closes issue #423's own scenario; ``questions`` lists it for the case where no
-    ``learn`` was in flight to render anything; and ``answer`` commits it. Nothing here
-    reaches a store: the façade is the only surface `interfaces` has (ADR-0042 §1).
+    The loop parks the question, as any producer that rules ``ASK_USER`` does;
+    ``questions`` lists it and ``answer`` commits it. The façade is the only surface
+    `interfaces` has (ADR-0042 §1), and ``learn`` no longer reaches it (ADR-0293 §11).
     """
     harness = Harness()
     harness.policy_for_writer.kind = MemoryDecisionKind.ASK_USER
 
-    learned = await harness.engine.learn(feedback())
-
-    [summary] = learned.results
-    assert summary.decision is LearnDecision.DEFERRED
-    assert summary.record_id is None
-    assert summary.queued is not None
-    assert summary.queued.outcome is QueueOutcome.QUEUED
-    assert summary.queued.question_id is not None
-    assert summary.queued.question_state is QuestionState.OPEN
+    [written] = await harness.loop.learn(feedback())
+    assert written.admission is not None
+    assert written.admission.deferral is not None
 
     [question] = await harness.engine.questions()
-    assert question.id == summary.queued.question_id
+    assert question.id == written.admission.deferral.id
     assert question.state is QuestionState.OPEN
     assert await harness.engine.interrupted_questions() == (), "the two reads are disjoint"
 
@@ -5149,58 +4992,17 @@ async def test_learn_parks_a_deferred_question_the_facade_can_list_and_answer() 
     assert await harness.engine.questions() == (), "and it is no longer waiting"
 
 
-async def test_learn_against_a_full_queue_tells_the_user_rather_than_going_silent() -> None:
-    """§7's refused branch, end to end through the façade (§10 item 3).
-
-    "The refusal is **reported, not swallowed**" — and nothing raises, so this is the
-    branch an implementation is most likely to leave as a no-op. A cap of one makes it
-    observable without depending on the configured default.
-    """
-    harness = Harness(queue_limit=1)
-    harness.policy_for_writer.kind = MemoryDecisionKind.ASK_USER
-    first = await harness.engine.learn(feedback(content="the office is in Boston"))
-    assert first.results[0].queued is not None
-    assert first.results[0].queued.outcome is QueueOutcome.QUEUED
-
-    second = await harness.engine.learn(feedback(content="the office moved to Lisbon"))
-
-    [summary] = second.results
-    assert summary.queued is not None
-    assert summary.queued.outcome is QueueOutcome.QUEUE_FULL
-    assert summary.queued.question_id is None, "there is no question to name"
-    assert len(await harness.engine.questions()) == 1
-
-
-async def test_a_secret_tier_learn_queues_nothing_and_says_it_is_not_answerable() -> None:
-    """§1's residue at the façade (§10 item 3's third half, §10 item 9).
-
-    "Without the third it routes every ``ASK_USER`` through the queued-question line
-    and tells the user to go answer something that was never queued — and every other
-    listed test still passes, because they all drive the arms that *are* closed."
-    """
-    harness = Harness(feedback=FakeFeedbackProcessor([_secret_proposal()]))
-
-    learned = await harness.engine.learn(feedback())
-
-    [summary] = learned.results
-    assert summary.decision is LearnDecision.DEFERRED
-    assert summary.queued is not None
-    assert summary.queued.outcome is QueueOutcome.NOT_QUEUABLE
-    assert summary.queued.question_id is None
-    assert await harness.engine.questions() == (), "nothing was queued"
-
-
 async def test_forget_question_relays_the_disposal_and_reports_an_unknown_id() -> None:
     """§9's first recovery step, relayed unconditionally (ADR-0007)."""
     harness = Harness()
     harness.policy_for_writer.kind = MemoryDecisionKind.ASK_USER
-    learned = await harness.engine.learn(feedback())
-    queued = learned.results[0].queued
-    assert queued is not None
-    assert queued.question_id is not None
+    [written] = await harness.loop.learn(feedback())
+    assert written.admission is not None
+    assert written.admission.deferral is not None
+    question_id = written.admission.deferral.id
 
-    assert await harness.engine.forget_question(queued.question_id) is True
-    assert await harness.engine.forget_question(queued.question_id) is False
+    assert await harness.engine.forget_question(question_id) is True
+    assert await harness.engine.forget_question(question_id) is False
     assert await harness.engine.questions() == ()
 
 
@@ -5217,22 +5019,6 @@ async def test_the_question_surface_is_refused_while_the_engine_is_shutting_down
     ):
         with pytest.raises(RuntimeError, match="shutting down"):
             await call
-
-
-def _secret_proposal() -> MemoryUpdateProposal:
-    """A ``DataTier.SECRET`` proposal — the one ``ASK_USER`` nothing may queue."""
-    return MemoryUpdateProposal(
-        proposed=SemanticMemory(
-            id="secret-1",
-            content="the api key is hunter2",
-            fact="the api key is hunter2",
-            provenance=Provenance(
-                source=MemorySource.USER_ASSERTED, confidence=1.0, last_updated=AT
-            ),
-        ),
-        rationale="the user pasted a credential",
-        sensitivity=DataTier.SECRET,
-    )
 
 
 # --- ADR-0119 §8: one OPERATION trace per call, at one wiring point -----

@@ -66,8 +66,6 @@ from ai_assistant.core.types import (
     Evidence,
     EvidenceDigest,
     ExecutionState,
-    FeedbackEvent,
-    FeedbackKind,
     Goal,
     GoalAssociation,
     GoalBrief,
@@ -78,6 +76,8 @@ from ai_assistant.core.types import (
     Idempotency,
     MemoryKind,
     MemorySource,
+    MemoryWrite,
+    MemoryWriteMode,
     Message,
     NotificationCandidate,
     NotificationCondition,
@@ -96,6 +96,7 @@ from ai_assistant.core.types import (
     Retirement,
     Reversibility,
     RiskLevel,
+    SemanticMemory,
     SpanCoverage,
     StepExecution,
     StepFailure,
@@ -383,6 +384,7 @@ def _engine(
     policy: FakeActionPolicy | None = None,
     closers: Sequence[Callable[[], Awaitable[None]]] = (),
     composing: ComposingStage | None = None,
+    memory: FakeMemoryStore | None = None,
 ) -> Engine:
     """A real ``Engine`` over canonical fakes, driving a one-step plan."""
     plans = FakePlanStore(now=lambda: AT)
@@ -392,7 +394,7 @@ def _engine(
     invoker = FakeToolInvoker(
         [(definition, _succeeds) for definition in tools], ledger=trail, gate=trail
     )
-    memory = FakeMemoryStore(now=lambda: AT)
+    memory = FakeMemoryStore(now=lambda: AT) if memory is None else memory
     writer = FakeMemoryWriter(store=memory, policy=FakeMemoryPolicy(), now=lambda: AT)
     deferrals = FakeDeferralStore(now=lambda: AT)
     writes = MemoryWriteStage(writer=writer, deferrals=deferrals)
@@ -3529,17 +3531,34 @@ def test_forget_prompt_shows_the_belief_and_scopes_the_consent(output: StringIO)
     assert "when you answer" in rendered  # consent is to the id, not to these bytes
 
 
+async def _holding(content: str) -> FakeMemoryStore:
+    """A store holding one belief the user stated, as the engine reads beliefs from.
+
+    Written into the store, because no call on the engine writes a belief since
+    ADR-0293 §11 retired ``learn``.
+    """
+    memory = FakeMemoryStore(now=lambda: AT)
+    await memory.write_atomic(
+        [
+            MemoryWrite(
+                record=SemanticMemory(
+                    id="rec-held",
+                    content=content,
+                    fact=content,
+                    provenance=Provenance(
+                        source=MemorySource.USER_ASSERTED, confidence=1.0, last_updated=AT
+                    ),
+                ),
+                mode=MemoryWriteMode.INSERT_IF_ABSENT,
+            )
+        ]
+    )
+    return memory
+
+
 async def test_drive_beliefs_lists_what_the_engine_holds(output: StringIO) -> None:
     """Against a real engine over fakes, a stored belief is listed with its band."""
-    engine = _engine()
-    await engine.learn(
-        FeedbackEvent(
-            kind=FeedbackKind.CORRECTION,
-            memory_kind=MemoryKind.SEMANTIC,
-            content="the office is in Boston",
-            created_at=AT,
-        )
-    )
+    engine = _engine(memory=await _holding("the office is in Boston"))
     code = await cli._drive_beliefs(engine, bands=None, kinds=None, limit=50, offset=0)
     assert code == 0
     rendered = output.getvalue()
@@ -3630,15 +3649,7 @@ async def test_drive_forget_reports_a_belief_that_vanished_before_the_delete(
 
 async def test_drive_forget_end_to_end_against_a_real_engine(output: StringIO) -> None:
     """A belief the engine holds is shown, agreed to, and gone from the listing (§5)."""
-    engine = _engine()
-    await engine.learn(
-        FeedbackEvent(
-            kind=FeedbackKind.CORRECTION,
-            memory_kind=MemoryKind.SEMANTIC,
-            content="the office is in Boston",
-            created_at=AT,
-        )
-    )
+    engine = _engine(memory=await _holding("the office is in Boston"))
     page = await engine.beliefs()
     assert len(page) == 1
 

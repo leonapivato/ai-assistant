@@ -48,6 +48,7 @@ from ai_assistant.core.types import (
 )
 from ai_assistant.interfaces import cli
 from ai_assistant.models import PydanticAIProvider
+from ai_assistant.orchestration.channels import ChannelProjection
 from ai_assistant.service import backup, restore
 from ai_assistant.service.transport import Listener
 from ai_assistant.testing import (
@@ -187,17 +188,21 @@ async def test_hub_context_arrives_intact_and_separately_from_stored_history(
         ),
         reply_to=ChannelContextItem(text="Earlier text", item_id="local-2"),
     )
+    # Spoken, because ADR-0293 §11 takes the text conversational combination off
+    # ``receive``: speech is the conversational input that still carries context here.
     result = await running_channels.client.receive(
         ChannelInput(
             target=NewConversation(),
-            payload=TextChannelPayload(text="  Exact text  "),
+            payload=SpeechChannelPayload(
+                audio=SpokenAudio(content="YXVkaW8=", media_type=SpokenAudioFormat.MP4)
+            ),
             context=context,
         ),
-        reply=WholeTextReply(),
+        reply=SpokenReply(plays=(SpokenAudioFormat.MP4,)),
         timeout=_BUDGET,
     )
     assert running_channels.resolved[0].context == context
-    assert running_channels.resolved[0].text == "  Exact text  "
+    assert running_channels.resolved[0].text == "  spoken words  "
     assert running_channels.resolved[0].channel == result.channel
     assert result.channel is not None
     digest = await running_channels.client.conversation(result.channel.instance_id)
@@ -304,6 +309,23 @@ async def _reopened_records(settings: Settings, expected: dict[str, str]) -> Non
         await engine.aclose()
 
 
+async def _typed(engine: Engine, supplied: ChannelInput) -> ChannelResult:
+    """A typed turn, through the admission ``converse`` runs it by, with its receipt.
+
+    ADR-0293 §11 takes the text conversational combination off ``receive``, and
+    ``converse`` — which keeps it, for the turn carrying a reference — returns the bare
+    outcome and takes no supplied context. These cases are about the records such a turn
+    leaves, context included, so they drive the same admission in process.
+    """
+    return await engine._receive(
+        supplied,
+        reply=WholeTextReply(),
+        timeout=_BUDGET,
+        projection=ChannelProjection("converse"),
+        typed_turn=True,
+    )
+
+
 def _assert_captured_result(result: ChannelResult, encoded: str, context: ChannelContext) -> None:
     episode = EpisodicMemory.model_validate_json(encoded)
     processing = episode.processing_record
@@ -339,14 +361,13 @@ async def test_text_voice_event_records_survive_hub_restart_and_encrypted_backup
     running = running_channels
     client = running.client
     context = ChannelContext(history=(ChannelContextItem(text="quoted café", source="untrusted"),))
-    text = await client.receive(
+    text = await _typed(
+        running.engine,
         ChannelInput(
             target=NewConversation(),
             payload=TextChannelPayload(text="  exact text\n"),
             context=context,
         ),
-        reply=WholeTextReply(),
-        timeout=_BUDGET,
     )
     assert text.channel is not None
     voice = await client.receive(
@@ -440,12 +461,10 @@ async def test_composed_concurrent_activations_keep_records_isolated_when_finish
         payload=TextChannelPayload(text="fast"),
         context=ChannelContext(reply_to=ChannelContextItem(text="fast context")),
     )
-    task = asyncio.create_task(
-        running.client.receive(slow_input, reply=WholeTextReply(), timeout=_BUDGET)
-    )
+    task = asyncio.create_task(_typed(running.engine, slow_input))
     await entered.wait()
     try:
-        fast = await running.client.receive(fast_input, reply=WholeTextReply(), timeout=_BUDGET)
+        fast = await _typed(running.engine, fast_input)
         assert not task.done()
     finally:
         release.set()

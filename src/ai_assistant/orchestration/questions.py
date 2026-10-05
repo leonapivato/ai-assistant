@@ -92,10 +92,8 @@ def _utcnow() -> datetime:
 def question_state(state: DeferralState) -> QuestionState:
     """Map a ``core`` deferral state to its surface echo (ADR-0042 §1).
 
-    Total by construction, in the shape
-    :func:`~ai_assistant.orchestration.engine.learn_decision` already uses: a new
-    ``DeferralState`` fails type-checking here until it is given an echo, rather
-    than silently losing its rendering.
+    Total by construction: a new ``DeferralState`` fails type-checking here until
+    it is given an echo, rather than silently losing its rendering.
     """
     match state:
         case DeferralState.PENDING:
@@ -394,8 +392,8 @@ class QuestionStage:
     async def _record(self, claim: DeferralClaim, result: MemoryIngestResult) -> AnswerOutcome:
         """Move the claim to the terminal state the ingest produced (ADR-0078 §2).
 
-        The mapping is **total**, in the shape ``learn_decision`` already uses for
-        the same class of exhaustiveness. ``REJECT`` is the arm an earlier revision
+        The mapping is **total**, so a new ruling fails type-checking here until it is
+        given a terminal state. ``REJECT`` is the arm an earlier revision
         of ADR-0078 omitted, and it is reachable: ``MemoryWriter`` takes an injected
         policy, and a conforming policy that is not ``DefaultMemoryPolicy`` may rule
         ``REJECT`` on a confirmed proposal, so without it such an answer would have

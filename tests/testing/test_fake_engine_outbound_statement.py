@@ -71,16 +71,6 @@ def _belief() -> Belief:
     )
 
 
-async def _streamed(engine: FakeAssistantEngine) -> TurnOutcome:
-    """The terminal outcome of one streamed turn, past its chunks."""
-    last: TurnOutcome | None = None
-    async for piece in engine.converse_streaming("hello", timeout=PATIENT):
-        if isinstance(piece, TurnOutcome):
-            last = piece
-    assert last is not None
-    return last
-
-
 # --- §7's first half: a pass that composed a reply carries the statement ---
 
 
@@ -95,16 +85,6 @@ async def test_a_plain_turn_carries_a_statement_and_not_none() -> None:
     engine = FakeAssistantEngine()
 
     outcome = await engine.converse("hello", timeout=PATIENT)
-
-    assert outcome.reply is not None
-    assert outcome.outbound_statement == OutboundStatement(reach=OutboundReach.NOT_REACHED)
-
-
-async def test_a_streamed_turn_carries_it_on_the_terminal_outcome() -> None:
-    """The streaming twin, which a client reads the member off exactly as it reads ``reply``."""
-    engine = FakeAssistantEngine()
-
-    outcome = await _streamed(engine)
 
     assert outcome.reply is not None
     assert outcome.outbound_statement == OutboundStatement(reach=OutboundReach.NOT_REACHED)
@@ -311,9 +291,9 @@ async def test_a_scripted_statement_is_copied_rather_than_shared() -> None:
     assert scripted.reach is OutboundReach.INDETERMINATE
 
 
-@pytest.mark.parametrize("call", ["converse", "streaming", "spoken"])
+@pytest.mark.parametrize("call", ["converse", "spoken"])
 async def test_a_scripted_reply_is_given_the_member_it_did_not_carry(call: str) -> None:
-    """#2381, one lever further along, on each of the three calls that take it.
+    """#2381, one lever further along, on each of the calls that take it.
 
     ``turn_outcome`` is what every consumer drives a surface from, so an outcome
     scripted through it reaching a renderer with prose and no statement is the same
@@ -332,8 +312,6 @@ async def test_a_scripted_reply_is_given_the_member_it_did_not_carry(call: str) 
 
     if call == "converse":
         outcome = await engine.converse("hello", timeout=PATIENT)
-    elif call == "streaming":
-        outcome = await _streamed(engine)
     else:
         spoken = await engine.converse_spoken(
             RECORDING, plays=(SpokenAudioFormat.WEBM_OPUS,), timeout=PATIENT

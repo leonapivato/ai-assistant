@@ -115,6 +115,12 @@ COUNT_KEYS: Final = (*DECISION_KEYS, *RETRIEVAL_COUNT_KEYS)
 #: exactly as a trace under any seam on neither set — unclassified, counted and
 #: named in the report, and in no population — so neither name is restated in this
 #: package, and no reader here special-cases it.
+#:
+#: **``learn`` stays on this set and on :data:`DIRECT_SEAMS` although ADR-0293 §11
+#: retired the operation**, a reply in the conversation being its replacement. No
+#: operation emits it again, and no decision has reclassified the traces a store
+#: already holds under it, as ADR-0285 §7 did for the observation seams, so those
+#: traces keep counting where they always did.
 USER_SEAMS: Final = frozenset({"converse", "resume", "learn", "answer"})
 
 #: ADR-0120 §3's **machine** set: the operations that write on their own

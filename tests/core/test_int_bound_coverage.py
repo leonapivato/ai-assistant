@@ -330,7 +330,7 @@ def test_the_scan_actually_finds_the_core_int_carriers() -> None:
     file.
     """
     names = {model.__name__ for model in _core_models()}
-    assert {"Belief", "BeliefSummary", "Provenance", "LearnOutcome", "Settings"} <= names
+    assert {"Belief", "BeliefSummary", "Provenance", "TurnOutcome", "Settings"} <= names
 
 
 @pytest.mark.parametrize("model", _core_models(), ids=lambda model: model.__name__)

@@ -196,7 +196,6 @@ if TYPE_CHECKING:
         HeldNotification,
         Identifier,
         IntendedActionMinting,
-        LearnOutcome,
         MemoryDecision,
         MemoryIngestResult,
         MemoryKind,
@@ -229,7 +228,6 @@ if TYPE_CHECKING:
         RecipientGrant,
         RecordChunk,
         RecordedInvocation,
-        ReplyChunk,
         RoutedOperationRecord,
         SearchOutcome,
         SearchSupply,
@@ -258,7 +256,6 @@ if TYPE_CHECKING:
         StoryPage,
         StoryView,
         StoryViewPage,
-        StreamingTextReply,
         TimeWindow,
         ToolCall,
         ToolCost,
@@ -279,7 +276,6 @@ if TYPE_CHECKING:
         UtcInstant,
         VisibleIdentifier,
         WalkPosition,
-        WholeTextReply,
     )
 
 
@@ -13913,12 +13909,12 @@ class AssistantEngine(Protocol):
 
        **On a method that returns an iterator the clause is restated rather than
        relaxed** (ADR-0173 §11): the limit is enforced **on each value before it is
-       yielded** — on every ``ReplyChunk`` and on the terminal ``TurnOutcome``
-       alike — in place of "on results before return", which such a method has no
-       single point to satisfy. What moves is *when* the check runs, not what it
-       admits, and ADR-0173 §3's ceiling is the same rule read forward: because no
-       chunk is yielded whose text the terminal outcome cannot repeat, a stream
-       cannot publish text the limit would have refused.
+       yielded** — on every chunk and on the terminal value alike — in place of
+       "on results before return", which such a method has no single point to
+       satisfy. What moves is *when* the check runs, not what it admits, and
+       ADR-0173 §3's ceiling is the same rule read forward for a reply stream:
+       because no chunk is yielded whose text the terminal value cannot repeat, a
+       stream cannot publish text the limit would have refused.
 
        **On a mutating call the result is measured after the work has committed**,
        because no measurement of a result can precede producing it — and a wire
@@ -13943,21 +13939,23 @@ class AssistantEngine(Protocol):
     (ADR-0065), of which clause 3 above is the surface's own restatement.
     """
 
-    # --- the turn calls (ADR-0042 §3, ADR-0173 §4) ------------------------
+    # --- the turn calls (ADR-0042 §3, ADR-0293 §11) -----------------------
 
     async def receive(
         self,
         input: ChannelInput,  # noqa: A002 — ADR-0274 §4 names the public parameter
         *,
-        reply: WholeTextReply | SpokenReply | None,
+        reply: SpokenReply | None,
         timeout: timedelta,  # noqa: ASYNC109 — operation budget (ADR-0274 §4)
     ) -> ChannelResult:
         """Process a channel input and return its result (ADR-0274 §§3-8).
 
         Snapshot nested input before admitting work. The supported combinations
-        are conversation/text/whole reply, conversation/speech/spoken reply, and
-        informational_event/text/no reply. Other combinations raise ValueError
-        before collaborator I/O. Conversation policy and errors remain those of
+        are conversation/speech/spoken reply and informational_event/text/no
+        reply. The text conversational combination is not one: ADR-0293 §11
+        replaces it with the acts in the medium, a typed message being written
+        into a conversation rather than received here. Other combinations raise
+        ValueError before collaborator I/O. Conversation policy and errors remain those of
         the corresponding legacy operation; supplied local context reaches
         processing separately from stored history and acquires no authority.
 
@@ -13966,22 +13964,6 @@ class AssistantEngine(Protocol):
         ChannelProcessingTimeoutError reports expiry. Cancellation propagates
         after cleanup. A result returns only on this call; errors are never
         success receipts. Public wrapper fields count against the payload limit.
-        """
-        ...
-
-    def receive_streaming(
-        self,
-        input: ChannelInput,  # noqa: A002 — ADR-0274 §4 names the public parameter
-        *,
-        reply: StreamingTextReply,
-        timeout: timedelta,
-    ) -> AsyncIterator[ReplyChunk | ChannelResult]:
-        """Stream a conversational text input (ADR-0274 §§4-6, §8).
-
-        Snapshot and refuse invalid combinations locally before iteration. Yield
-        chunks followed by exactly one successful terminal ChannelResult, with
-        the reply-room ceiling measured against that wrapper. Closing the
-        iterator preserves converse_streaming's completion/capture policy.
         """
         ...
 
@@ -14039,104 +14021,6 @@ class AssistantEngine(Protocol):
         """
         ...
 
-    def converse_streaming(
-        self,
-        utterance: EncodableText,
-        *,
-        timeout: timedelta,
-        conversation_id: Identifier | None = None,
-        reference: TurnReference | None = None,
-    ) -> AsyncIterator[ReplyChunk | TurnOutcome]:
-        """Run one turn as :meth:`converse` does, streaming the answer as it composes.
-
-        **A second entry on this surface, not a change to the first** (ADR-0173 §4).
-        It takes exactly :meth:`converse`'s arguments in exactly its shape and is
-        subject to every clause that method declares, including its refusals and
-        each of its declared failures. ``converse`` is unchanged — same name, same
-        signature, same clauses, same one result — and a caller that wants no stream
-        calls it and observes nothing this method adds. That duplication is what
-        ADR-0042 §5 bought: the streaming entry "composes with — rather than
-        replaces — the request/response entry".
-
-        **It yields zero or more** :class:`~ai_assistant.core.types.ReplyChunk`
-        **values, then exactly one**
-        :class:`~ai_assistant.core.types.TurnOutcome`, **and then stops.** The
-        outcome is always the last value yielded and is always present unless the
-        call raises. The union maps one-to-one onto the frames a transport writes: a
-        chunk value is a chunk frame, the outcome is the terminal result frame, and
-        an ``AssistantError`` is the terminal error frame — and **a reader resolves
-        the union by frame kind, never by inspecting a payload**, so the kind stays
-        the single discriminator (ADR-0173 §§2, 4).
-
-        **The terminal outcome is the answer** (ADR-0173 §3). Where the exchange
-        streamed chunks, :attr:`~ai_assistant.core.types.TurnOutcome.reply` is the
-        text those chunks conveyed, joined in the order they were yielded; where the
-        two disagree the ``reply`` is the answer, and no implementation treats an
-        accumulated chunk sequence as the record of what the assistant said. A
-        caller may therefore ignore chunks entirely and still be correct.
-
-        **Two outcomes exist here that** ``converse`` **cannot produce**, both from
-        ADR-0173 §6's surface commit point — the first ``ReplyChunk`` yielded, which
-        this contract owns rather than a transport, so an in-process caller and one
-        across a wire observe the same outcome for the same turn. A failure or a
-        ceiling stop *before* that point degrades exactly as ADR-0170 §8 rules, with
-        ``reply`` ``None`` and ``reply_degraded`` ``True``. One *after* it produces
-        the fourth shape: ``reply`` set to the text actually yielded, with
-        ``reply_degraded`` ``True``.
-
-        **The streamed answer is bounded by the same result-payload ceiling
-        ADR-0170 §8 names and gains no setting of its own** (ADR-0173 §3). No chunk
-        is yielded whose text the terminal outcome is not already able to carry, so
-        a chunk-reading and a chunk-ignoring caller can never hold different
-        answers for one turn; where the accumulating answer would breach the
-        ceiling the implementation stops before the breach and terminates under the
-        partition above. Where the outcome's **non-reply** content alone breaches
-        it, that is ADR-0085 §8c's oversized result and raises
-        :class:`~ai_assistant.core.errors.OversizedValueError` exactly as it does on
-        ``converse``.
-
-        **Closing is the caller's obligation**, as it is on
-        :meth:`StreamingCompleter.stream` and for the same reason: a caller that
-        stops reading part-way closes the iterator, through
-        :func:`contextlib.aclosing` or an ``aclose()`` of its own. Abandoning it
-        does not abandon the turn — ADR-0173 §9 runs a turn whose client went away
-        to its ordinary completion, including its capture, and discards the
-        undelivered values — but it does leave the iterator unfinished.
-
-        **Conversation resume is carried identically** (ADR-0173 §8): the same
-        ``conversation_id`` argument, the same ``UnknownConversationError``, and the
-        conversation's recent turns reaching the composing stage by ADR-0074 §5's
-        existing route. This method adds no history parameter and no second read.
-
-        Args:
-            utterance: What the user said, exactly as :meth:`converse` takes it.
-            timeout: The budget for the whole turn.
-            conversation_id: The conversation to continue, or ``None`` to run in a
-                fresh one. The id the terminal outcome carries back is what a client
-                keeps.
-            reference: Exactly :meth:`converse`'s, which this method takes by
-                ADR-0173's own clause — it takes "exactly ``converse``'s arguments in
-                exactly its" order — rather than by an amendment to it (ADR-0250 §11).
-
-        Returns:
-            An async iterator over the answer's chunks followed by the turn's
-            outcome. Iterating it is what starts the turn; an implementation is free
-            to raise the local refusals below from the call instead, so a caller
-            drives the iterator rather than inspecting the return.
-
-        Raises:
-            ValueError: If ``conversation_id`` is present and blank, or the
-                utterance has no UTF-8 encoding — refused locally, before any I/O.
-            UnknownConversationError: If ``conversation_id`` names no conversation
-                this engine can operate on.
-            PlanningError: If the request could not be turned into an executable
-                plan, or a step transition was refused.
-            ContextError: If the situational context could not be assembled.
-            AuditError: If a permission decision could not be recorded.
-            ToolBindingError: If the selected tool could not be bound.
-        """
-        ...
-
     async def converse_spoken(
         self,
         utterance: SpokenAudio,
@@ -14155,11 +14039,9 @@ class AssistantEngine(Protocol):
         declared unbounded audience, and the refusal of any value by which a caller
         could assert an audience are all as they were.
 
-        **A third entry on this surface, not a change to either of the first two.**
-        ``converse`` and ``converse_streaming`` are untouched — same names, same
-        signatures, same clauses, same results — exactly as ADR-0173 §4 kept
-        ``converse`` untouched when it added the streamed entry. A caller that wants
-        no speech calls one of them and observes nothing this method adds.
+        **An entry of its own on this surface, not a change to** :meth:`converse`,
+        which is untouched — same name, same signature, same clauses, same result. A
+        caller that wants no speech calls it and observes nothing this method adds.
 
         **The whole composition is here, and no adapter performs any part of it**
         (ADR-0200 §2). Transcription, the turn, ADR-0199's disclosure ruling and
@@ -14800,27 +14682,6 @@ class AssistantEngine(Protocol):
 
         Raises:
             RuntimeError: If the engine is shutting down.
-        """
-        ...
-
-    # --- the two accumulation legs ----------------------------------------
-
-    async def learn(self, event: FeedbackEvent) -> LearnOutcome:
-        """Fold one piece of feedback into memory, and say what it did.
-
-        The *dictated* half of accumulation. Every proposal the feedback produces
-        goes through the ratified write path, and the summary carries one entry per
-        proposal — including, for a deferral, where the question it raised went.
-
-        Args:
-            event: What the user said about what the assistant got right or wrong.
-
-        Returns:
-            One summary per proposal, in the order they were applied. Empty when
-            the feedback proposed no update at all.
-
-        Raises:
-            MemoryStoreError: If reading or writing memory failed.
         """
         ...
 

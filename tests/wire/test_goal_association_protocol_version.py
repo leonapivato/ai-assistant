@@ -115,8 +115,8 @@ def test_each_ground_is_true_of_the_types_and_the_surface_themselves() -> None:
     for member in _OUTCOME_MEMBERS:
         assert member in dumped, "emitted on every outcome, not only a populated one"
 
-    for method in ("converse", "converse_streaming"):
-        assert "reference" in surface.parameters(method)
+    # ``converse_streaming`` carried it too until ADR-0293 §11 retired it.
+    assert "reference" in surface.parameters("converse")
     assert set(_OPERATIONS) <= surface.METHODS
 
 

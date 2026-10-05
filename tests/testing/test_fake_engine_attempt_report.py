@@ -250,26 +250,6 @@ async def test_the_report_rides_beside_the_reply_and_never_in_place_of_it() -> N
     assert outcome.attempt_report == VERIFIED
 
 
-async def test_a_streamed_turn_carries_it_on_the_terminal_outcome() -> None:
-    """The streaming twin, which a client reads the member off exactly as it reads ``reply``.
-
-    ADR-0262 §11 gives L5 **both** surfaces at once, and the browser reads a streamed
-    turn's terminal outcome — so a double carrying the member on ``converse`` and not
-    here would leave one of the two surfaces untestable, which is the parity failure §11
-    names.
-    """
-    engine = FakeAssistantEngine()
-    engine.attempt_report = VERIFIED
-
-    outcome: TurnOutcome | None = None
-    async for piece in engine.converse_streaming("book it", timeout=PATIENT):
-        if isinstance(piece, TurnOutcome):
-            outcome = piece
-
-    assert outcome is not None
-    assert outcome.attempt_report == VERIFIED
-
-
 async def test_a_spoken_turn_carries_it_although_no_statement_is_spoken() -> None:
     """§6's statement is rendered by a surface, and ``spoken`` is not one.
 

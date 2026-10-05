@@ -68,7 +68,7 @@ from datetime import UTC, datetime, timedelta
 from decimal import Decimal
 from enum import Enum
 from itertools import count
-from typing import TYPE_CHECKING, ClassVar, Final, get_type_hints
+from typing import TYPE_CHECKING, ClassVar, Final, Protocol, get_type_hints
 
 import pytest
 from channel_receiver_contract import ChannelReceiverContract
@@ -97,7 +97,6 @@ from ai_assistant.core.errors import (
     UnusableIdentityError,
 )
 from ai_assistant.core.protocols import AssistantEngine
-from ai_assistant.core.streams import closing_stream
 from ai_assistant.core.types import (
     ACCOUNT_IDENTITY_MAX_BYTES,
     DEFAULT_PAGE_SIZE,
@@ -117,8 +116,6 @@ from ai_assistant.core.types import (
     Disposition,
     EgressBinding,
     ExecutionState,
-    FeedbackEvent,
-    FeedbackKind,
     Goal,
     GoalBrief,
     GoalInterpretation,
@@ -133,12 +130,12 @@ from ai_assistant.core.types import (
     PermissionDecision,
     PermissionOutcome,
     PermissionRuling,
+    Placement,
     PlacementReach,
     PlacementSetter,
     Provenance,
     ProvisioningState,
     RecordedInvocation,
-    ReplyChunk,
     Reversibility,
     RiskLevel,
     RoutableOperation,
@@ -172,10 +169,10 @@ from ai_assistant.testing import (
 )
 
 if TYPE_CHECKING:
-    from collections.abc import AsyncIterator, Callable, Iterable, Sequence
+    from collections.abc import Awaitable, Callable, Iterable, Sequence
 
     from ai_assistant.core.types import SecretValue
-    from ai_assistant.testing import FakeConnectionProvisioner
+    from ai_assistant.testing import FakeAssistantEngine, FakeConnectionProvisioner
     from ai_assistant.testing.permissions import MintsIdentifiers
 
 #: A credential over :data:`_TINY_LIMIT` and comfortably under
@@ -418,35 +415,63 @@ def _credential(plaintext: str = "hunter2-correct-horse") -> SecretValue:
     return secret_value(SecretStr(plaintext))
 
 
-async def _drain(stream: AsyncIterator[ReplyChunk | TurnOutcome]) -> list[ReplyChunk | TurnOutcome]:
-    """Read one streamed turn to its end, closing it however it ends (ADR-0173 §4)."""
-    async with closing_stream(stream) as values:
-        return [value async for value in values]
+class BeliefHolder(Protocol):
+    """How a binding puts one belief behind its subject, as the owner's own word."""
+
+    def __call__(self, content: str, *, guarded: bool = False) -> Awaitable[str]:
+        """Hold one belief whose content is ``content``, and return its record id.
+
+        ``guarded`` holds it as ADR-0217 §7's write-time act left it: reach ``OWNER``,
+        setter ``OWNER_ACT``, stamped. Defaulted ``False``, which leaves the record with
+        §6's default placement.
+        """
+        ...
 
 
-async def _outcome_of(stream: AsyncIterator[ReplyChunk | TurnOutcome]) -> TurnOutcome:
-    """The terminal outcome of one streamed turn, which §4 makes always the last."""
-    terminal = (await _drain(stream))[-1]
-    assert isinstance(terminal, TurnOutcome)
-    return terminal
+#: The instant a held belief's write-time guard is stamped with (:func:`held_placement`).
+HELD_AT: Final = datetime(2026, 1, 1, 12, 0, 0, tzinfo=UTC)
 
 
-def _feedback(content: str, *, guarded: bool = False) -> FeedbackEvent:
-    """One piece of feedback, as an adapter hands it over.
+def held_placement(*, guarded: bool) -> Placement | None:
+    """The placement a held belief carries: §7's write-time act where ``guarded``.
 
-    ``guarded`` is ADR-0217 §7's write-time act, and it is the one route by which a
-    case below reaches a placement the owner set **through the surface**: every record
-    the event produces is then written with reach ``OWNER`` and setter ``OWNER_ACT``.
-    Defaulted ``False``, which "is not an act of any kind", so every other case in this
-    suite drives the same event it always did.
+    ``None`` leaves the record with ADR-0217 §6's default, which "is not an act of any
+    kind".
     """
-    return FeedbackEvent(
-        kind=FeedbackKind.CORRECTION,
-        memory_kind=MemoryKind.SEMANTIC,
-        content=content,
-        created_at=datetime(2026, 1, 1, 12, 0, 0, tzinfo=UTC),
-        guarded=guarded,
-    )
+    if not guarded:
+        return None
+    return Placement(reach=PlacementReach.OWNER, set_by=PlacementSetter.OWNER_ACT, set_at=HELD_AT)
+
+
+def fake_belief_holder(fake: FakeAssistantEngine) -> BeliefHolder:
+    """Hold beliefs in a canonical fake — the subject itself, or the hub behind a client."""
+    ids = count(1)
+
+    async def hold(content: str, *, guarded: bool = False) -> str:
+        return fake.hold(
+            f"rec-held-{next(ids)}", content=content, placement=held_placement(guarded=guarded)
+        ).id
+
+    return hold
+
+
+@dataclass(frozen=True, slots=True)
+class BeliefSubject:
+    """An engine, and its binding's way of holding a belief behind it.
+
+    **A subject rather than a bare engine, because nothing on this surface writes a
+    belief.** ``learn`` was that route until ADR-0293 §11 retired it, a reply in a
+    conversation being its replacement, so a case that reads or acts on a belief is
+    handed the binding's own way of putting one there — exactly as a routed park or a
+    derived placement is handed over.
+
+    Attributes:
+        engine: The subject under test.
+        hold: Holds one belief behind ``engine`` and returns its record id.
+    """
+
+    engine: AssistantEngine
+    hold: BeliefHolder
 
 
 @dataclass(frozen=True, slots=True)
@@ -1428,6 +1453,21 @@ class AssistantEngineContract(
 
     @pytest.fixture
     @abstractmethod
+    def beliefs(self) -> BeliefSubject:
+        """:attr:`engine`'s implementation, holding no belief, and how to hold one.
+
+        A fixture because no call on this surface writes a belief (:class:`BeliefSubject`).
+        Each held belief is ``ASSERTED`` — the owner's own word — and readable through
+        ``belief`` and ``beliefs`` at once.
+        """
+
+    @pytest.fixture
+    @abstractmethod
+    def tiny_beliefs(self) -> BeliefSubject:
+        """:attr:`beliefs`' subject at :data:`_TINY_LIMIT`, for :attr:`tiny_engine`'s reason."""
+
+    @pytest.fixture
+    @abstractmethod
     def granting_engine(self) -> AssistantEngine:
         """A subject holding **exactly one** grantable source, named :data:`_SOURCE`.
 
@@ -2147,7 +2187,7 @@ class AssistantEngineContract(
             await engine.answer("  ", accept=True)
 
     async def test_an_identifier_is_stripped_before_it_is_used(
-        self, engine: AssistantEngine
+        self, beliefs: BeliefSubject
     ) -> None:
         """§3c's load-bearing half: the *normalisation*, not only the refusal.
 
@@ -2158,10 +2198,8 @@ class AssistantEngineContract(
         would find the record; an in-process engine handed the raw ``str`` would
         look up ``" rec-1 "`` and answer ``None``.
         """
-        outcome = await engine.learn(_feedback("the office is in Boston"))
-        record_id = outcome.results[0].record_id
-        assert record_id is not None
-        assert await engine.belief(f"  {record_id}  ") is not None
+        record_id = await beliefs.hold("the office is in Boston")
+        assert await beliefs.engine.belief(f"  {record_id}  ") is not None
 
     @pytest.mark.parametrize("bad", [-1, 2**63])
     @pytest.mark.parametrize("argument", ["limit", "offset"])
@@ -2202,7 +2240,7 @@ class AssistantEngineContract(
     # --- clause 3: the filters are materialised (§3d) ----------------------
 
     async def test_the_filters_are_materialised_before_the_first_await(
-        self, engine: AssistantEngine
+        self, beliefs: BeliefSubject
     ) -> None:
         """A caller that mutates the sequence mid-call cannot change its page (§3d).
 
@@ -2220,12 +2258,12 @@ class AssistantEngineContract(
         is shared with ``test_fake_engine``'s discrimination case, which runs it
         against a deliberately lazy subject and watches this assertion fail.
         """
-        await engine.learn(_feedback("the office is in Boston"))
-        page, control = await page_after_mutating_the_filter(engine)
+        await beliefs.hold("the office is in Boston")
+        page, control = await page_after_mutating_the_filter(beliefs.engine)
         assert page == control
 
     async def test_an_empty_filter_selects_nothing_and_none_selects_everything(
-        self, engine: AssistantEngine
+        self, beliefs: BeliefSubject
     ) -> None:
         """ADR-0073 §2: ``None`` and empty are different answers, not one.
 
@@ -2233,10 +2271,10 @@ class AssistantEngineContract(
         JSON array would turn "every band" into "no band" — a silently empty page
         for a call that asked for everything.
         """
-        await engine.learn(_feedback("the office is in Boston"))
-        assert await engine.beliefs(bands=[]) == ()
-        assert await engine.beliefs(kinds=[]) == ()
-        assert await engine.beliefs(bands=None, kinds=None) != ()
+        await beliefs.hold("the office is in Boston")
+        assert await beliefs.engine.beliefs(bands=[]) == ()
+        assert await beliefs.engine.beliefs(kinds=[]) == ()
+        assert await beliefs.engine.beliefs(bands=None, kinds=None) != ()
 
     # --- clause 5: the size limit, in both directions (§8c) ----------------
 
@@ -2248,7 +2286,7 @@ class AssistantEngineContract(
         assert caught.value.size > _TINY_LIMIT
         assert caught.value.field == "utterance"
 
-    async def test_an_oversized_result_is_refused(self, tiny_engine: AssistantEngine) -> None:
+    async def test_an_oversized_result_is_refused(self, tiny_beliefs: BeliefSubject) -> None:
         """The *coming back* direction, which is the one ADR-0084 §4 insisted on.
 
         Without it a client is silently **more** capable than the engine it stands
@@ -2256,8 +2294,8 @@ class AssistantEngineContract(
         hand a caller a value the wire client provably cannot deliver.
 
         **The argument object here is twelve bytes**, so nothing but the result can
-        trip the limit: the page is built from beliefs each stored through a
-        ``learn`` the bound comfortably admits, and then a listing whose whole
+        trip the limit: the page is built from beliefs each of which the bound
+        comfortably admits, and then a listing whose whole
         request payload is ``{"offset":0}`` grows past it. An implementation that
         measured only its arguments passes every other case in this class and fails
         this one, which is the whole reason it is written this way round.
@@ -2267,22 +2305,22 @@ class AssistantEngineContract(
         defensive, and this is where it is reached.
         """
         for index in range(6):
-            await tiny_engine.learn(_feedback(f"the office is in Boston, building {index}"))
+            await tiny_beliefs.hold(f"the office is in Boston, building {index}")
         with pytest.raises(OversizedValueError) as caught:
-            await tiny_engine.beliefs()
+            await tiny_beliefs.engine.beliefs()
         assert caught.value.limit == _TINY_LIMIT
         assert caught.value.size > _TINY_LIMIT
         assert caught.value.field is None
 
-    async def test_a_result_that_fits_is_returned(self, tiny_engine: AssistantEngine) -> None:
+    async def test_a_result_that_fits_is_returned(self, tiny_beliefs: BeliefSubject) -> None:
         """The discriminating half of the case above.
 
         One stored belief lists comfortably inside the bound, so the refusal above
         is about the page's size and not about ``beliefs()`` being refused
         unconditionally.
         """
-        await tiny_engine.learn(_feedback("the office is in Boston"))
-        assert len(await tiny_engine.beliefs()) == 1
+        await tiny_beliefs.hold("the office is in Boston")
+        assert len(await tiny_beliefs.engine.beliefs()) == 1
 
     async def test_a_payload_inside_the_limit_is_admitted(
         self, tiny_engine: AssistantEngine
@@ -2308,7 +2346,7 @@ class AssistantEngineContract(
     # --- §4a: the listing cannot ship the corpus ---------------------------
 
     async def test_the_listing_returns_summaries_and_carries_no_citation(
-        self, engine: AssistantEngine
+        self, beliefs: BeliefSubject
     ) -> None:
         """ADR-0077 §6's split, made structural (§4a).
 
@@ -2319,15 +2357,15 @@ class AssistantEngineContract(
         :class:`~ai_assistant.core.types.BeliefSummary` has nowhere to put a
         citation's content, so a conforming listing cannot over-deliver.
         """
-        await engine.learn(_feedback("the office is in Boston"))
-        page = await engine.beliefs()
+        await beliefs.hold("the office is in Boston")
+        page = await beliefs.engine.beliefs()
         assert page
         for summary in page:
             assert isinstance(summary, BeliefSummary)
             assert not hasattr(summary, "evidence")
 
     async def test_the_same_three_names_read_alike_on_both_belief_types(
-        self, engine: AssistantEngine
+        self, beliefs: BeliefSubject
     ) -> None:
         """§4a's table: only the *category* of two of them changes, never the answer.
 
@@ -2336,11 +2374,9 @@ class AssistantEngineContract(
         value on the wire a client can compute exactly, so one implementation could
         send it and another omit it, and the same call would measure two sizes.
         """
-        outcome = await engine.learn(_feedback("the office is in Boston"))
-        record_id = outcome.results[0].record_id
-        assert record_id is not None
-        summary = next(one for one in await engine.beliefs() if one.id == record_id)
-        detail = await engine.belief(record_id)
+        record_id = await beliefs.hold("the office is in Boston")
+        summary = next(one for one in await beliefs.engine.beliefs() if one.id == record_id)
+        detail = await beliefs.engine.belief(record_id)
         assert detail is not None
         assert summary.evidence_count == detail.evidence_count
         assert summary.lost_evidence == detail.lost_evidence
@@ -2525,116 +2561,6 @@ class AssistantEngineContract(
             await tiny_engine.converse_spoken(
                 oversized, plays=(SpokenAudioFormat.MP4,), timeout=_PATIENT
             )
-
-    # --- ADR-0173 §4: the streaming turn call --------------------------------
-
-    async def test_a_streamed_turn_ends_on_exactly_one_outcome(
-        self, engine: AssistantEngine
-    ) -> None:
-        """§4: "zero or more chunks, then **exactly one** ``TurnOutcome``".
-
-        Asserted of every implementation because the terminal value is what §3 makes
-        authoritative: a stand-in that yielded two outcomes, or none, would leave a
-        client either choosing between answers or holding none — and both are states
-        the union's one-to-one map onto the frames is supposed to make unreachable.
-        """
-        produced = await _drain(engine.converse_streaming("hello", timeout=_PATIENT))
-        assert produced, "a streamed turn yields at least its outcome"
-        assert isinstance(produced[-1], TurnOutcome)
-        assert all(isinstance(value, ReplyChunk) for value in produced[:-1])
-
-    async def test_the_terminal_reply_is_the_join_of_the_chunks(
-        self, engine: AssistantEngine
-    ) -> None:
-        """§3: where the exchange streamed chunks, ``reply`` is what they conveyed.
-
-        "Joined in the order they were written" — so a chunk-reading client and a
-        chunk-ignoring one hold the same answer, which is the whole reason §3 makes
-        the terminal frame authoritative rather than the sequence. An implementation
-        whose chunks say something the outcome does not repeat fails here.
-        """
-        produced = await _drain(engine.converse_streaming("hello", timeout=_PATIENT))
-        outcome = produced[-1]
-        assert isinstance(outcome, TurnOutcome)
-        joined = "".join(value.text for value in produced[:-1] if isinstance(value, ReplyChunk))
-        assert joined == (outcome.reply or "")
-
-    async def test_a_streamed_turn_reports_the_conversation_it_ran_under(
-        self, engine: AssistantEngine
-    ) -> None:
-        """§8: resume is carried identically — the same argument, the same id back.
-
-        The milestone's own exit test is a *resumed* streamed turn, and ADR-0173 §8
-        adds no history parameter and no second read to reach it: a second stream
-        under the id the first returned continues that conversation.
-        """
-        first = await _outcome_of(engine.converse_streaming("hello", timeout=_PATIENT))
-        assert first.conversation_id is not None
-        second = await _outcome_of(
-            engine.converse_streaming(
-                "and again", timeout=_PATIENT, conversation_id=first.conversation_id
-            )
-        )
-        assert second.conversation_id == first.conversation_id
-
-    async def test_a_streamed_turn_refuses_an_unknown_conversation(
-        self, engine: AssistantEngine
-    ) -> None:
-        """§4: "subject to every clause ``converse`` declares", refusals included.
-
-        ADR-0074 §1's refusal is the one a streaming twin is most likely to lose,
-        because it sits behind an iterator a lazy implementation never starts. So it
-        is asserted by *driving* the iterator, which is what the Protocol tells a
-        caller to do.
-        """
-        with pytest.raises(UnknownConversationError):
-            await _outcome_of(
-                engine.converse_streaming("hello", timeout=_PATIENT, conversation_id="no-such-id")
-            )
-
-    async def test_a_streamed_turn_refuses_a_blank_conversation_id_locally(
-        self, engine: AssistantEngine
-    ) -> None:
-        """ADR-0085 §9 on the streaming entry: refused **before any I/O**.
-
-        A refusal an implementation deferred into the iteration would still raise,
-        so this asserts the stronger thing the clause actually says: the call itself
-        raises, before anything is driven.
-        """
-        with pytest.raises(ValueError, match="conversation_id"):
-            engine.converse_streaming("hello", timeout=_PATIENT, conversation_id="   ")
-
-    async def test_a_streamed_turn_measures_its_arguments_like_the_whole_one(
-        self, tiny_engine: AssistantEngine
-    ) -> None:
-        """Clause 5 on the streaming entry, in the argument direction.
-
-        ADR-0173 §11 restates ADR-0085 §8c for a method with no single result, and
-        the *argument* half is unchanged — so an utterance the whole call refuses is
-        one the streaming call refuses too, and by the same class.
-
-        **Driven rather than merely called**, unlike the blank-identifier case
-        above, and the difference is ADR-0084 §3's rather than this suite's: the
-        limit a client enforces is "the number it was told", which arrives in the
-        handshake. A wire implementation cannot measure before it has connected, so
-        requiring the refusal *from the call* would require it to be more eager than
-        the contract is. A blank identifier needs no such knowledge, which is why
-        ADR-0085 §9 puts that one before any I/O and not this one.
-        """
-        with pytest.raises(OversizedValueError):
-            await _drain(tiny_engine.converse_streaming("x" * (_TINY_LIMIT + 1), timeout=_PATIENT))
-
-    async def test_a_streamed_turn_is_closable_part_way(self, engine: AssistantEngine) -> None:
-        """§4: a caller that stops reading closes, and closing must be supported.
-
-        The clause obliges the *caller* to close, which is only meaningful if every
-        implementation's iterator can be closed — and a client across a transport is
-        where that is easiest to get wrong, since closing has a connection to hang
-        up rather than a generator to finish.
-        """
-        stream = engine.converse_streaming("hello", timeout=_PATIENT)
-        async with closing_stream(stream) as values:
-            assert await anext(values) is not None
 
     # --- ADR-0078 §8: only an open question is answerable --------------------
 
@@ -3298,7 +3224,7 @@ class AssistantEngineContract(
             await getattr(tiny_engine, method)("z" * (_TINY_LIMIT * 4))
 
     async def test_a_guard_places_a_record_for_the_owner_and_stamps_the_act(
-        self, engine: AssistantEngine
+        self, beliefs: BeliefSubject
     ) -> None:
         """§7's narrowing act on a record carrying §6's default.
 
@@ -3310,11 +3236,9 @@ class AssistantEngineContract(
         rather than caught here — so what this pins is that the act ran at all and
         recorded who made it.
         """
-        outcome = await engine.learn(_feedback("the office is in Boston"))
-        record_id = outcome.results[0].record_id
-        assert record_id is not None
+        record_id = await beliefs.hold("the office is in Boston")
 
-        placed = await engine.guard(record_id)
+        placed = await beliefs.engine.guard(record_id)
 
         assert placed is not None
         assert placed.reach is PlacementReach.OWNER
@@ -3322,7 +3246,7 @@ class AssistantEngineContract(
         assert placed.set_at is not None
 
     async def test_an_unguard_on_the_default_placement_records_the_owner_s_act(
-        self, engine: AssistantEngine
+        self, beliefs: BeliefSubject
     ) -> None:
         """§7's writing rule in the direction that looks like a no-op and is not.
 
@@ -3340,20 +3264,18 @@ class AssistantEngineContract(
         duplication — §3's finality defeated without anything ever writing to the
         owner's record.
         """
-        outcome = await engine.learn(_feedback("the office is in Boston"))
-        record_id = outcome.results[0].record_id
-        assert record_id is not None
+        record_id = await beliefs.hold("the office is in Boston")
 
-        released = await engine.unguard(record_id)
+        released = await beliefs.engine.unguard(record_id)
 
         assert released is not None
         assert released.reach is PlacementReach.ANYONE
         assert released.set_by is PlacementSetter.OWNER_ACT
         assert released.set_at is not None
-        assert await engine.unguard(record_id) == released
+        assert await beliefs.engine.unguard(record_id) == released
 
     async def test_a_second_guard_returns_the_first_s_value_and_moves_no_instant(
-        self, engine: AssistantEngine
+        self, beliefs: BeliefSubject
     ) -> None:
         """§7's idempotence "in the strict sense that the second call returns exactly
         what the first returned".
@@ -3363,42 +3285,38 @@ class AssistantEngineContract(
         the right reach and the right setter every time, and the only observable
         difference is a stamp that moved. So the two values are compared whole.
         """
-        outcome = await engine.learn(_feedback("the office is in Boston"))
-        record_id = outcome.results[0].record_id
-        assert record_id is not None
+        record_id = await beliefs.hold("the office is in Boston")
 
-        first = await engine.guard(record_id)
-        second = await engine.guard(record_id)
+        first = await beliefs.engine.guard(record_id)
+        second = await beliefs.engine.guard(record_id)
 
         assert first is not None
         assert first == second
 
     async def test_an_unguard_lifts_the_owner_s_own_write_time_guard(
-        self, engine: AssistantEngine
+        self, beliefs: BeliefSubject
     ) -> None:
         """§7's two acts composing: the write-time flag, then the act after the fact.
 
-        The only placement this suite can reach through the surface in **both**
-        directions, because ``guarded=True`` is the one setter a client drives
-        (§7's write-time act) and ``unguard`` is the one that widens it. §3 is explicit
-        that an act "may widen one whose setter is ``PROPOSED`` or ``OWNER_ACT``", so a
-        record the owner guarded when they taught it is one the owner can release.
+        The record is held as §7's write-time act left it — ``learn``'s ``guarded``
+        was that act's route until ADR-0293 §11 retired it — and ``unguard`` is the act
+        that widens it. §3 is explicit that an act "may widen one whose setter is
+        ``PROPOSED`` or ``OWNER_ACT``", so a record the owner guarded when they taught
+        it is one the owner can release.
         """
-        outcome = await engine.learn(_feedback("the office is in Boston", guarded=True))
-        record_id = outcome.results[0].record_id
-        assert record_id is not None
+        record_id = await beliefs.hold("the office is in Boston", guarded=True)
 
-        standing = await engine.guard(record_id)
+        standing = await beliefs.engine.guard(record_id)
         assert standing is not None
         assert standing.reach is PlacementReach.OWNER
         assert standing.set_by is PlacementSetter.OWNER_ACT
 
-        lifted = await engine.unguard(record_id)
+        lifted = await beliefs.engine.unguard(record_id)
 
         assert lifted is not None
         assert lifted.reach is PlacementReach.ANYONE
         assert lifted.set_by is PlacementSetter.OWNER_ACT
-        assert await engine.unguard(record_id) == lifted
+        assert await beliefs.engine.unguard(record_id) == lifted
 
     async def test_an_unguard_on_a_derived_placement_returns_it_unchanged_rather_than_raising(
         self, derived_placement: DerivedPlacementSubject
@@ -6019,10 +5937,10 @@ class AssistantEngineContract(
     ) -> None:
         """§9: ``search_not_serviced`` is ``None`` on every turn that searched nothing.
 
-        Every such ``converse``, ``converse_streaming`` and ``resume``, and ADR-0198 §1's
-        restatement. Where the member is absent a surface says nothing about a lookup at
-        all, which is §6's byte-identity guarantee at the surface: the absence is the
-        contract rather than an implementation's convenience.
+        Every such ``converse`` and ``resume``, and ADR-0198 §1's restatement. Where
+        the member is absent a surface says nothing about a lookup at all, which is §6's
+        byte-identity guarantee at the surface: the absence is the contract rather than
+        an implementation's convenience.
         """
         outcome = await engine.converse("hello", timeout=_PATIENT)
 

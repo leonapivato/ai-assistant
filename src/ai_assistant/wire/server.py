@@ -1207,8 +1207,8 @@ async def _dispatch_stream(  # noqa: PLR0913 — the engine, the request, the wr
     expelled" — which reaches harder here, because a stream writes many times over
     exactly that span.
 
-    **Closing the engine's iterator is this function's obligation**
-    (``AssistantEngine.converse_streaming``). Every early exit — an expelled device,
+    **Closing the engine's iterator is this function's obligation** (ADR-0173 §5),
+    as every streaming method's contract states it. Every early exit — an expelled device,
     an overlapping request, a peer that hung up mid-write — leaves the turn running
     to its own completion (ADR-0173 §9) but must not leave the iterator unfinished.
 
@@ -1305,12 +1305,10 @@ def _decode_arguments(method: str, payload: object) -> dict[str, Any]:
         msg = f"a request to {method}() names arguments it does not declare: {unknown}"
         raise UndecodableFrameError(msg)
     arguments = {name: _decoded_argument(method, name, value) for name, value in payload.items()}
-    if method in {"receive", "receive_streaming"}:
+    if method == "receive":
         refused = False
         try:
-            validate_combination(
-                arguments["input"], arguments["reply"], streaming=method == "receive_streaming"
-            )
+            validate_combination(arguments["input"], arguments["reply"])
         except ValueError, KeyError:
             refused = True
         if refused:

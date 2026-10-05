@@ -2924,7 +2924,13 @@ class WholeTextReply(BaseModel):
 
 
 class StreamingTextReply(BaseModel):
-    """Stream textual chunks and the final result on the originating request."""
+    """Stream textual chunks and the final result on the originating request.
+
+    **A recorded value and no longer an offered one.** ADR-0293 §11 retired
+    ``receive_streaming`` and ``converse_streaming``, which offered it, so no entry
+    point admits it; it stays a member of :data:`ReplyCapability` because a
+    :class:`RecordedChannelTrigger` an episode already holds may carry it.
+    """
 
     model_config = ConfigDict(frozen=True, extra="forbid")
     kind: Literal["streaming_text"] = "streaming_text"
@@ -6306,18 +6312,19 @@ class FeedbackEvent(BaseModel):
     ADR-0100's authority (issue #688).
 
     **This is the only route by which a non-owner subject enters the store**
-    (ADR-0100 §4): a user states one, or nothing does. It ships *with* the route —
+    (ADR-0100 §4): a user states one, or nothing does. It shipped *with* the route —
     ``assistant learn --about-person`` — because a field with no route would leave
     every third-party belief constructing ``about_person=None``, which §3 reads as
     the owner's, making a false record of the exact case the field was added for.
+    ADR-0293 §11 retired ``learn`` from the engine surface, a reply in the
+    conversation being its replacement, so no surface constructs this event.
 
     **``guarded`` is the owner's explicit placement act at write** (ADR-0217 §7),
     and it is on this event rather than encoded by an adapter because deciding a
     record's placement is not adapter work: golden rule 3 keeps business logic out
     of `interfaces/`, and an adapter translating a flag into a :class:`Placement`
     would be deciding disclosure in the thinnest layer in the system. The adapter
-    sets a field; `learning` reads it. It rides ``AssistantEngine.learn``
-    unchanged — that signature does not move — and the
+    sets a field; `learning` reads it. The
     :class:`~ai_assistant.core.protocols.FeedbackProcessor` that builds the record
     honours it. It is a **narrowing only**, and ``False`` is not an act of any
     kind: it leaves the record with ADR-0217 §6's default, which is ADR-0199 §3's
@@ -26202,9 +26209,10 @@ class TurnResult(BaseModel):
 class ReplyChunk(BaseModel):
     """One instalment of a streamed answer (ADR-0173 §2).
 
-    The payload of a ``chunk`` frame, and the value
-    ``AssistantEngine.converse_streaming`` yields before its terminal
-    :class:`TurnOutcome`. A chunk is a *rendering of the answer in flight*, never
+    The payload of a reply stream's ``chunk`` frame, yielded before its terminal
+    value. ADR-0293 §11 retired ``AssistantEngine.converse_streaming``, the method
+    that streamed one, and ADR-0296 §4 keeps a reply stream's chunk this type. A
+    chunk is a *rendering of the answer in flight*, never
     the answer itself: ADR-0173 §3 keeps :attr:`TurnOutcome.reply` authoritative,
     and where a chunk sequence and the terminal ``reply`` disagree the terminal
     ``reply`` is the answer.
@@ -26239,68 +26247,6 @@ class ReplyChunk(BaseModel):
     )
 
 
-class LearnDecision(StrEnum):
-    """How memory folded one piece of feedback — the surface's echo of a ruling.
-
-    One member per :class:`MemoryDecisionKind`, named for the effect on memory
-    rather than the relation the policy names, so a client can render what became
-    of the feedback without holding the policy's own vocabulary.
-    """
-
-    STORED = "stored"
-    """A new memory was written (``ACCEPT``)."""
-
-    REJECTED = "rejected"
-    """The proposal was refused; nothing was written (``REJECT``)."""
-
-    REINFORCED = "reinforced"
-    """An existing memory was strengthened by folding the proposal into it
-    (``REINFORCE``)."""
-
-    SUPERSEDED = "superseded"
-    """A prior belief was retired and the correction written in its place
-    (``SUPERSEDE``)."""
-
-    DEFERRED = "deferred"
-    """The policy wants a human answer before acting; nothing was written yet
-    (``ASK_USER``)."""
-
-    STORED_TEMPORARILY = "stored_temporarily"
-    """A memory was written with a retention window (``STORE_TEMPORARY``)."""
-
-
-class QueueOutcome(StrEnum):
-    """What became of the question a deferred ruling raised (ADR-0078 §7, §10 item 9).
-
-    The surface's echo of :class:`DeferralAdmissionOutcome`, plus the one arm
-    ADR-0078 deliberately does **not** close. A closed set with a name because the
-    surface must say a *different sentence* for each — a single "not stored, go
-    answer it" line covering all four would tell a user to answer a question that
-    was never queued.
-    """
-
-    QUEUED = "queued"
-    """The question was parked, and ``question_id`` names it."""
-
-    ALREADY_ASKED = "already_asked"
-    """An existing question the key still speaks for stands in the way, and
-    ``question_id`` and ``question_state`` say **which and in what state** — a
-    declined one to forget, an interrupted answer to dispose of, or one still
-    waiting (ADR-0078 §7)."""
-
-    QUEUE_FULL = "queue_full"
-    """The answerable queue was at its cap, so nothing was queued and there is no
-    question to read. The refusal is **reported, not swallowed**: the cap refuses
-    the *new* question rather than evicting an old one, which is safe only because
-    the producer still holds what it proposed and can re-propose."""
-
-    NOT_QUEUABLE = "not_queuable"
-    """Secret-tier data, which is never queued at all (ADR-0078 §1). ADR-0004 §3
-    puts Tier 0 content in the OS keyring and forbids it a committed file, and a
-    durable queue is a file — so today's deferral is precisely what keeps such
-    content out of storage."""
-
-
 class QuestionState(StrEnum):
     """Where a deferred question stands, as a surface says it (ADR-0078 §8).
 
@@ -26329,129 +26275,6 @@ class QuestionState(StrEnum):
 
     REDEFERRED = "redeferred"
     """The answer was used and raised a further question the record names."""
-
-
-class QueuedQuestion(BaseModel):
-    """Where a deferred proposal's question went (ADR-0078 §7, §8 reach 1).
-
-    Carried on :class:`IngestSummary` so ``learn`` can point the user at the
-    question in the moment they submitted the correction.
-
-    Attributes:
-        outcome: Which of the four things happened.
-        question_id: The question parked, or the existing one standing in the way.
-            ``None`` for ``QUEUE_FULL`` and ``NOT_QUEUABLE``, where there is no
-            question to name.
-        question_state: The state of the question :attr:`question_id` names, for
-            the same reason :class:`SuccessorLink` carries one: "you declined this"
-            and "an answer to this may be committing right now" are different
-            sentences, and naming a question without its state would render one as
-            the other.
-    """
-
-    model_config = ConfigDict(extra="forbid", frozen=True)
-
-    outcome: QueueOutcome = Field(description="Which of the four things happened.")
-    question_id: Identifier | None = Field(
-        default=None, description="The question parked, or the one standing in the way."
-    )
-    question_state: QuestionState | None = Field(
-        default=None, description="The state of the question ``question_id`` names."
-    )
-
-    @model_validator(mode="after")
-    def _unqueued_names_no_question(self) -> QueuedQuestion:
-        """An outcome that queued nothing names nothing (ADR-0078 §7, ADR-0085 §4b).
-
-        **Stated in one direction only, deliberately.** The converse — that a
-        ``QUEUED`` or ``ALREADY_ASKED`` outcome always names a question — is
-        *nearly* true and is not asserted, because the projection keeps a defensive
-        branch for an admission whose deferral is absent, which
-        :class:`DeferralAdmission`'s own validator is supposed to make unreachable.
-        Asserting an invariant that a defensive branch can violate would turn a
-        store-conformance fault into an unconstructable DTO.
-        """
-        if self.outcome in (QueueOutcome.QUEUE_FULL, QueueOutcome.NOT_QUEUABLE) and (
-            self.question_id is not None or self.question_state is not None
-        ):
-            msg = (
-                f"a {self.outcome.name} outcome queued nothing, so it names no question: "
-                "question_id and question_state must both be None"
-            )
-            raise ValueError(msg)
-        return self
-
-
-class IngestSummary(BaseModel):
-    """What became of one proposal folded from a piece of feedback.
-
-    Attributes:
-        decision: How memory folded the proposal.
-        record_id: The id of the record left live by the write, or ``None`` when
-            nothing was stored (a rejection, or a deferral). Carried as opaque data
-            an adapter may echo, never interpret.
-        reason: The policy's own human-readable justification for the ruling,
-            surfaced for transparency.
-        queued: Where the question a ``DEFERRED`` ruling raised went, and ``None``
-            on every other ruling. Present on **every** deferral, including the
-            secret-tier one nothing queues, because the distinguishing fact has to
-            reach the adapter for it to say anything honest (ADR-0078 §10 item 9).
-    """
-
-    model_config = ConfigDict(extra="forbid", frozen=True)
-
-    decision: LearnDecision = Field(description="How memory folded the proposal.")
-    record_id: Identifier | None = Field(
-        description="The record left live by the write, or ``None`` where nothing was stored."
-    )
-    reason: EncodableText = Field(description="The policy's own justification for the ruling.")
-    queued: QueuedQuestion | None = Field(
-        default=None, description="Where a deferred ruling's question went."
-    )
-
-    @model_validator(mode="after")
-    def _queued_iff_deferred(self) -> IngestSummary:
-        """A queued question accompanies a deferral and nothing else (ADR-0085 §4b).
-
-        ADR-0078 §10 item 9 obliges every deferral to say where its question went,
-        including the secret-tier one nothing queues. A ruling that wrote or
-        refused raised no question at all, so carrying one would name a question
-        the user cannot act on.
-        """
-        deferred = self.decision is LearnDecision.DEFERRED
-        if deferred and self.queued is None:
-            msg = "a DEFERRED ruling must say where its question went"
-            raise ValueError(msg)
-        if not deferred and self.queued is not None:
-            msg = f"a {self.decision.name} ruling raised no question, so it queues none"
-            raise ValueError(msg)
-        return self
-
-    @property
-    def stored(self) -> bool:
-        """Whether the write left a record live in memory."""
-        return self.record_id is not None
-
-
-class LearnOutcome(BaseModel):
-    """What one piece of feedback did to memory (ADR-0042 §1, §3).
-
-    Attributes:
-        results: One :class:`IngestSummary` per proposal the feedback produced, in
-            the order they were applied — empty when the feedback proposed no
-            update at all.
-    """
-
-    model_config = ConfigDict(extra="forbid", frozen=True)
-
-    results: tuple[IngestSummary, ...] = Field(
-        description="One summary per proposal, in the order they were applied."
-    )
-
-    @property
-    def stored(self) -> int:
-        """How many proposals left a record live in memory."""
-        return sum(1 for summary in self.results if summary.stored)
 
 
 class Evidence(BaseModel):
@@ -27270,18 +27093,18 @@ class RoutableOperation(StrEnum):
     mode** for §3's second clause: a single operation taking a placement would take
     "a second varying argument", which is outside this vocabulary.
 
-    **``beliefs`` and ``learn`` are deliberately absent**, and so are ``grant`` and
-    ``answer``. "What do you know about me?" is milestone 17's ruled exit test and is
-    answered today by the composing stage from the memories the turn retrieved, so
-    routing it would replace a ruled behaviour with a worse one; ``learn`` takes a
-    whole ``FeedbackEvent``; and ``grant`` and ``answer`` each take a second varying
+    **``beliefs`` is deliberately absent**, and so are ``grant`` and ``answer``.
+    "What do you know about me?" is milestone 17's ruled exit test and is answered
+    today by the composing stage from the memories the turn retrieved, so routing it
+    would replace a ruled behaviour with a worse one; and ``grant`` and ``answer``
+    each take a second varying
     argument no query resolves, which a router supplying it would be **deciding**
     rather than routing to (ADR-0197 §11).
 
     **No routable operation takes a** :data:`SecretValue`, and ``connect_account``,
     ``reprovision_account`` and ``disconnect_account`` are outside the vocabulary
-    **permanently** rather than pending a widening. No member is ``converse``,
-    ``converse_streaming`` or ``resume``.
+    **permanently** rather than pending a widening. No member is ``converse`` or
+    ``resume``.
     """
 
     QUESTIONS = "questions"
@@ -28818,8 +28641,8 @@ class TurnOutcome(BaseModel):
             of its own, and no component recomputes it downstream.
 
             **``None`` on every outcome of a turn that serviced no search or serviced
-            every search it asked for** — every such ``converse``,
-            ``converse_streaming`` and ``resume``, and ADR-0198 §1's
+            every search it asked for** — every such ``converse`` and
+            ``resume``, and ADR-0198 §1's
             **restatement**, which drives nothing and searches nothing. That adds a
             value to ADR-0198 §2's enumeration without changing any value it fixes.
 
@@ -29222,7 +29045,7 @@ class TurnOutcome(BaseModel):
     def _at_most_one_read_fact(self) -> TurnOutcome:
         """ADR-0244 §9: the two read members are mutually exclusive.
 
-        A ``converse`` or ``converse_streaming`` outcome may carry
+        A ``converse`` outcome may carry
         :attr:`read_confirmation` and never :attr:`read_answer`; a ``resume``
         answering a parked read carries the second and never the first; ADR-0198 §1's
         restatement and ADR-0197 §7's routed park carry neither.

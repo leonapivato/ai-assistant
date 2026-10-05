@@ -38,6 +38,7 @@ from ai_assistant.core.types import (
     WholeTextReply,
 )
 from ai_assistant.models import PydanticAIProvider
+from ai_assistant.orchestration.channels import ChannelProjection
 from ai_assistant.orchestration.conversations import conversation_channel
 from ai_assistant.testing import (
     FakeGoalAssociator,
@@ -130,10 +131,14 @@ async def _say(engine: Engine, text: str, conversation_id: str | None = None) ->
         if conversation_id is None
         else ChannelIdentity(channel_type="conversation", instance_id=conversation_id)
     )
-    return await engine.receive(
+    # ADR-0293 §11 takes the text conversational combination off ``receive``; this
+    # drives the admission ``converse`` still runs it through, and reads its receipt.
+    return await engine._receive(
         ChannelInput(target=target, payload=TextChannelPayload(text=text)),
         reply=WholeTextReply(),
         timeout=_BUDGET,
+        projection=ChannelProjection("converse"),
+        typed_turn=True,
     )
 
 

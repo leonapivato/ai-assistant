@@ -680,8 +680,8 @@ class ConversationalOperation(StrEnum):
     **Keyed on the operation and never on the channel's audience** (§4). ADR-0199 §1's
     audience decides whether a request is serviced at all (ADR-0226 §5); it does not
     decide how long a turn may spend planning, and no lane derives one from the other
-    — ``converse``, ``converse_streaming`` and a future worn-earpiece operation would
-    all be bounded-audience and would tolerate very different waits. ADR-0199 §1's own
+    — ``converse`` and a future worn-earpiece operation would both be
+    bounded-audience and would tolerate very different waits. ADR-0199 §1's own
     argument against overloading a property ("Audience rather than modality, because
     'voice' is not one trust level") is a warning here rather than a licence.
 
@@ -693,9 +693,6 @@ class ConversationalOperation(StrEnum):
 
     Attributes:
         CONVERSE: The whole-answer operation. Declares **PT20S**.
-        CONVERSE_STREAMING: Its streaming twin, which differs in where the composed
-            answer goes and not in how long a user waits for it (ADR-0173 §4). The
-            same figure, stated once below rather than twice.
         CONVERSE_SPOKEN: The spoken operation, which declares **none** and therefore
             does not iterate, whatever its audience. That is the guard §4 builds while
             the case is still hypothetical: ADR-0226 §5's channel scoping keeps voice
@@ -705,7 +702,6 @@ class ConversationalOperation(StrEnum):
     """
 
     CONVERSE = "converse"
-    CONVERSE_STREAMING = "converse_streaming"
     CONVERSE_SPOKEN = "converse_spoken"
 
     @property
@@ -742,10 +738,7 @@ class ConversationalOperation(StrEnum):
         return _PLANNING_BUDGETS.get(self)
 
 
-#: ADR-0228 §4's figure for the two operations that declare one. Stated once rather
-#: than per member, because §4 keys the budget on the operation and ``converse`` and
-#: ``converse_streaming`` differ in where the answer goes rather than in how long a
-#: user waits for it — two copies would be two places for one ruled figure to drift.
+#: ADR-0228 §4's figure for the operation that declares one.
 _PLANNING_BUDGET: Final = timedelta(seconds=20)
 
 #: Which operations declare a planning budget, and what it is (ADR-0228 §4).
@@ -759,7 +752,6 @@ _PLANNING_BUDGET: Final = timedelta(seconds=20)
 _PLANNING_BUDGETS: Final[Mapping[ConversationalOperation, timedelta]] = MappingProxyType(
     {
         ConversationalOperation.CONVERSE: _PLANNING_BUDGET,
-        ConversationalOperation.CONVERSE_STREAMING: _PLANNING_BUDGET,
     }
 )
 
@@ -779,7 +771,6 @@ _PLANNING_BUDGETS: Final[Mapping[ConversationalOperation, timedelta]] = MappingP
 _ATTEMPT_KINDS: Final[Mapping[ConversationalOperation, AttemptKind]] = MappingProxyType(
     {
         ConversationalOperation.CONVERSE: AttemptKind.CONVERSATIONAL,
-        ConversationalOperation.CONVERSE_STREAMING: AttemptKind.CONVERSATIONAL,
         ConversationalOperation.CONVERSE_SPOKEN: AttemptKind.SPOKEN,
     }
 )
@@ -2214,11 +2205,11 @@ class LearningLoop:
                 retrieved. It is given the assembled context, all three groups of
                 ``memories``, and the ids this turn's relevance reads returned
                 (ADR-0210 §1). ``converse_spoken`` supplies ADR-0199 §3's
-                subtraction here (ADR-0203 §1); ``converse`` and
-                ``converse_streaming``, whose channel audience is bounded, supply
-                the filter that evaluates the same predicate and removes nothing
-                (ADR-0204 §2, §4). ``None`` remains valid and plans over
-                everything: this method is the seam, not the policy.
+                subtraction here (ADR-0203 §1); ``converse``, whose channel
+                audience is bounded, supplies the filter that evaluates the same
+                predicate and removes nothing (ADR-0204 §2, §4). ``None`` remains
+                valid and plans over everything: this method is the seam, not the
+                policy.
             audit: ADR-0226 §9's record for this turn, filled in as the stages
                 run and emitted by :meth:`respond` on every exit.
             footing: This turn's footing, or ``None``. Everything this method does with
@@ -2341,7 +2332,7 @@ class LearningLoop:
         # for the earlier attempt.
         #
         # **ADR-0251 §5: the kind is stamped once, here, from the *opening* turn's
-        # operation** — `CONVERSE` and `CONVERSE_STREAMING` stamp `CONVERSATIONAL`,
+        # operation** — `CONVERSE` stamps `CONVERSATIONAL`,
         # `CONVERSE_SPOKEN` stamps `SPOKEN`, and a turn that named no operation stamps
         # `None`. A continued attempt keeps the kind it was opened with, which is why
         # the stamp is inside the `else` and not applied to `continuing_attempt`: an

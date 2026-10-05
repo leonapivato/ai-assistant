@@ -12,7 +12,6 @@ from ai_assistant.core.errors import ChannelProcessingTimeoutError, UnknownConve
 
 if TYPE_CHECKING:
     from ai_assistant.core.protocols import AssistantEngine
-from ai_assistant.core.streams import closing_stream
 from ai_assistant.core.types import (
     ActivationEnding,
     ActivationStop,
@@ -32,7 +31,6 @@ from ai_assistant.core.types import (
     RecordedChannelTrigger,
     RecordedSpeechInput,
     RecordedTextInput,
-    ReplyChunk,
     SpeechChannelPayload,
     SpokenAudio,
     SpokenAudioFormat,
@@ -40,13 +38,34 @@ from ai_assistant.core.types import (
     SpokenReply,
     StreamingTextReply,
     TextChannelPayload,
-    TextChannelResult,
     UnderstandingOmission,
     UnderstandingProducer,
     WholeTextReply,
 )
 
 _BUDGET = timedelta(seconds=10)
+
+
+#: A recording the fake and the engine's scripted transcriber both hear words in.
+_RECORDING = SpokenAudio(content="YXVkaW8=", media_type=SpokenAudioFormat.MP4)
+_PLAYS = SpokenReply(plays=(SpokenAudioFormat.MP4,))
+
+
+def speech_input(
+    target: ChannelIdentity | NewConversation | None = None,
+    *,
+    context: ChannelContext | None = None,
+) -> ChannelInput:
+    """A spoken input to a conversation, the one conversational combination ``receive`` keeps.
+
+    ADR-0293 §11 takes the text conversational combination off the surface, so a clause
+    about how ``receive`` admits and records a conversation's input is held over speech.
+    """
+    return ChannelInput(
+        target=NewConversation() if target is None else target,
+        payload=SpeechChannelPayload(audio=_RECORDING),
+        context=ChannelContext() if context is None else context,
+    )
 
 
 def event_input() -> ChannelInput:
@@ -110,27 +129,16 @@ async def read_episode(engine: AssistantEngine, address: str) -> EpisodicMemory:
 class ChannelReceiverContract:
     """Channel obligations shared by every AssistantEngine implementation."""
 
-    async def test_channel_text_continues_and_preserves_identity(
+    async def test_channel_speech_continues_and_preserves_identity(
         self, engine: AssistantEngine
     ) -> None:
-        first = await engine.receive(
-            ChannelInput(target=NewConversation(), payload=TextChannelPayload(text="Hello")),
-            reply=WholeTextReply(),
-            timeout=_BUDGET,
-        )
+        first = await engine.receive(speech_input(), reply=_PLAYS, timeout=_BUDGET)
         assert first.channel is not None
-        assert isinstance(first.result, TextChannelResult)
-        assert first.channel.instance_id == first.result.outcome.conversation_id
-        second = await engine.receive(
-            ChannelInput(target=first.channel, payload=TextChannelPayload(text="Continue")),
-            reply=WholeTextReply(),
-            timeout=_BUDGET,
-        )
-        third = await engine.receive(
-            ChannelInput(target=NewConversation(), payload=TextChannelPayload(text="Another")),
-            reply=WholeTextReply(),
-            timeout=_BUDGET,
-        )
+        assert isinstance(first.result, SpokenChannelResult)
+        assert first.result.outcome.outcome is not None
+        assert first.channel.instance_id == first.result.outcome.outcome.conversation_id
+        second = await engine.receive(speech_input(first.channel), reply=_PLAYS, timeout=_BUDGET)
+        third = await engine.receive(speech_input(), reply=_PLAYS, timeout=_BUDGET)
         assert second.channel == first.channel
         assert third.channel != first.channel
         episodes = [await captured_episode(engine, result) for result in (first, second, third)]
@@ -152,11 +160,7 @@ class ChannelReceiverContract:
         self, engine: AssistantEngine
     ) -> None:
         """ADR-0297 §5:4: its episode stands at its address, and nothing is written."""
-        result = await engine.receive(
-            ChannelInput(target=NewConversation(), payload=TextChannelPayload(text="Hello")),
-            reply=WholeTextReply(),
-            timeout=_BUDGET,
-        )
+        result = await engine.receive(speech_input(), reply=_PLAYS, timeout=_BUDGET)
         before = await captured_episode(engine, result)
         assert result.capture.activation_id is not None
 
@@ -193,19 +197,19 @@ class ChannelReceiverContract:
         engine: AssistantEngine,
     ) -> None:
         result = await engine.receive(
-            ChannelInput(
-                target=NewConversation(),
-                payload=TextChannelPayload(text="Hello"),
+            speech_input(
                 context=ChannelContext(
                     history=(ChannelContextItem(text="Source history", source="untrusted"),),
                     reply_to=ChannelContextItem(item_id="not-a-stored-turn", text="Quoted text"),
                 ),
             ),
-            reply=WholeTextReply(),
+            reply=_PLAYS,
             timeout=_BUDGET,
         )
-        assert isinstance(result.result, TextChannelResult)
-        assert result.result.outcome.reference is None
+        assert isinstance(result.result, SpokenChannelResult)
+        spoken = result.result.outcome.outcome
+        assert spoken is not None
+        assert spoken.reference is None
         episode = await captured_episode(engine, result)
         processing = episode.processing_record
         assert processing is not None
@@ -218,43 +222,14 @@ class ChannelReceiverContract:
         )
         assert processing.trigger.channel == result.channel
         assert processing.links.predecessor_episode_id is None
-        assert episode.outcome == result.result.outcome.reply
+        assert episode.outcome == spoken.reply
         assert processing.trigger.origin is InputOrigin.USER
-
-    async def test_channel_stream_ends_in_its_authoritative_wrapper(
-        self, engine: AssistantEngine
-    ) -> None:
-        stream = engine.receive_streaming(
-            ChannelInput(target=NewConversation(), payload=TextChannelPayload(text="Hello")),
-            reply=StreamingTextReply(),
-            timeout=_BUDGET,
-        )
-        async with closing_stream(stream) as values:
-            result = [value async for value in values]
-        terminal = result[-1]
-        assert isinstance(terminal, ChannelResult)
-        assert isinstance(terminal.result, TextChannelResult)
-        assert all(isinstance(value, ReplyChunk) for value in result[:-1])
-        joined = "".join(value.text for value in result if isinstance(value, ReplyChunk))
-        assert joined == (terminal.result.outcome.reply or "")
-        episode = await captured_episode(engine, terminal)
-        assert episode.outcome == terminal.result.outcome.reply
-        assert len((await engine.episodes()).items) == 1
 
     async def test_channel_speech_and_text_share_identity(self, engine: AssistantEngine) -> None:
         text = await engine.converse("Hello", timeout=_BUDGET)
         assert text.conversation_id is not None
         identity = ChannelIdentity(channel_type="conversation", instance_id=text.conversation_id)
-        result = await engine.receive(
-            ChannelInput(
-                target=identity,
-                payload=SpeechChannelPayload(
-                    audio=SpokenAudio(content="YXVkaW8=", media_type=SpokenAudioFormat.MP4),
-                ),
-            ),
-            reply=SpokenReply(plays=(SpokenAudioFormat.MP4,)),
-            timeout=_BUDGET,
-        )
+        result = await engine.receive(speech_input(identity), reply=_PLAYS, timeout=_BUDGET)
         assert result.channel == identity
         assert isinstance(result.result, SpokenChannelResult)
         assert result.result.outcome.heard is not None
@@ -325,44 +300,61 @@ class ChannelReceiverContract:
             await engine.receive(supplied, reply=None, timeout=_BUDGET)
         assert (await engine.episodes()).items == ()
 
+    @pytest.mark.parametrize("reply", [WholeTextReply(), StreamingTextReply()])
+    @pytest.mark.parametrize("fresh", [True, False])
+    async def test_channel_text_conversation_is_refused_and_starts_nothing(
+        self, engine: AssistantEngine, reply: WholeTextReply | StreamingTextReply, fresh: bool
+    ) -> None:
+        """ADR-0293 §11: the text conversational combination is off the surface.
+
+        A typed message is written into a conversation as an act in the medium, so
+        ``receive`` refuses one before any work — whichever reply it offers, and whether
+        it names a conversation or asks for a new one — and nothing is recorded.
+        """
+        held = await engine.converse("Hello", timeout=_BUDGET)
+        assert held.conversation_id is not None
+        before = await engine.episodes()
+        target = (
+            NewConversation()
+            if fresh
+            else ChannelIdentity(channel_type="conversation", instance_id=held.conversation_id)
+        )
+        supplied = ChannelInput(target=target, payload=TextChannelPayload(text="Hello"))
+        with pytest.raises(ValueError, match="unsupported channel"):
+            await engine.receive(supplied, reply=reply, timeout=_BUDGET)  # type: ignore[arg-type]  # the refused combination, on purpose
+        assert await engine.episodes() == before
+
     async def test_channel_unknown_conversation_is_not_allocated(
         self, engine: AssistantEngine
     ) -> None:
         with pytest.raises(UnknownConversationError):
             await engine.receive(
-                ChannelInput(
-                    target=ChannelIdentity(channel_type="conversation", instance_id="absent"),
-                    payload=TextChannelPayload(text="Hello"),
-                ),
-                reply=WholeTextReply(),
+                speech_input(ChannelIdentity(channel_type="conversation", instance_id="absent")),
+                reply=_PLAYS,
                 timeout=_BUDGET,
             )
 
     async def test_channel_exact_input_and_whole_conversation_deletion(
         self, engine: AssistantEngine
     ) -> None:
-        supplied = ChannelInput(
-            target=NewConversation(), payload=TextChannelPayload(text="  café\nexact input ")
-        )
-        first = await engine.receive(supplied, reply=WholeTextReply(), timeout=_BUDGET)
-        assert first.channel is not None
-        second = await engine.receive(
-            supplied.model_copy(update={"target": first.channel}),
-            reply=WholeTextReply(),
-            timeout=_BUDGET,
+        first = await engine.converse("  café\nexact input ", timeout=_BUDGET)
+        assert first.conversation_id is not None
+        await engine.converse(
+            "  café\nexact input ", timeout=_BUDGET, conversation_id=first.conversation_id
         )
         event = await engine.receive(event_input(), reply=None, timeout=_BUDGET)
-        episode = await captured_episode(engine, first)
+        channel = ChannelIdentity(channel_type="conversation", instance_id=first.conversation_id)
+        typed = (await engine.episodes(channel=channel)).items
+        assert len(typed) == 2
+        episode = await read_episode(engine, typed[-1].position.episode_id)
         assert episode.processing_record is not None
         trigger = episode.processing_record.trigger
         assert isinstance(trigger, RecordedChannelTrigger)
         assert isinstance(trigger.payload, RecordedTextInput)
         assert trigger.payload.text == "  café\nexact input "
-        assert await engine.forget_conversation(first.channel.instance_id)
-        assert first.capture.episode_id is not None
-        assert second.capture.episode_id is not None
-        assert await engine.episode_chunk(first.capture.episode_id) is None
-        assert await engine.episode_chunk(second.capture.episode_id) is None
+        assert await engine.forget_conversation(first.conversation_id)
+        for row in typed:
+            assert await engine.episode_chunk(row.position.episode_id) is None
         assert event.capture.episode_id is not None
         assert await engine.episode_chunk(event.capture.episode_id) is not None
 
@@ -370,12 +362,6 @@ class ChannelReceiverContract:
         text = await engine.converse("legacy", timeout=_BUDGET)
         assert text.conversation_id is not None
         assert not text.capture_degraded
-        stream = engine.converse_streaming(
-            "stream", conversation_id=text.conversation_id, timeout=_BUDGET
-        )
-        async with closing_stream(stream) as values:
-            streamed = [value async for value in values]
-        assert streamed
         spoken = await engine.converse_spoken(
             SpokenAudio(content="YXVkaW8=", media_type=SpokenAudioFormat.MP4),
             plays=(SpokenAudioFormat.MP4,),
@@ -386,5 +372,5 @@ class ChannelReceiverContract:
         page = await engine.episodes(
             channel=ChannelIdentity(channel_type="conversation", instance_id=text.conversation_id)
         )
-        assert len(page.items) == 3
-        assert len({row.activation_id for row in page.items}) == 3
+        assert len(page.items) == 2
+        assert len({row.activation_id for row in page.items}) == 2

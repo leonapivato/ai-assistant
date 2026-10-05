@@ -34,7 +34,6 @@ from __future__ import annotations
 import asyncio
 import contextlib
 import hashlib
-import re
 from base64 import b64encode
 from dataclasses import dataclass
 from datetime import UTC, datetime, timedelta
@@ -110,9 +109,6 @@ from ai_assistant.core.types import (
     GrantScope,
     Ground,
     InformationalEventResult,
-    IngestSummary,
-    LearnDecision,
-    LearnOutcome,
     MemoryKind,
     MemorySource,
     NewConversation,
@@ -140,7 +136,6 @@ from ai_assistant.core.types import (
     RecordedInvocation,
     RecordedResumeTrigger,
     RecordedSpeechInput,
-    ReplyChunk,
     Retirement,
     RoutableOperation,
     RoutedOperation,
@@ -165,7 +160,6 @@ from ai_assistant.core.types import (
     StoryMember,
     StoryMemberKind,
     StoryOutcome,
-    StreamingTextReply,
     TextChannelPayload,
     TextChannelResult,
     TimeOfDay,
@@ -261,7 +255,7 @@ from ai_assistant.testing.recipient_grants import FakeRecipientGrantStore
 from ai_assistant.testing.stories import FakeStoryStore
 
 if TYPE_CHECKING:
-    from collections.abc import AsyncIterator, Callable, Coroutine, Sequence
+    from collections.abc import Callable, Coroutine, Sequence
 
     from ai_assistant.core.protocols import AuditTrail, SourceReadTrail, SpendLedger
     from ai_assistant.core.types import (
@@ -271,12 +265,12 @@ if TYPE_CHECKING:
         ConnectionAct,
         DurableIdentifier,
         EncodableText,
-        FeedbackEvent,
         HeldNotification,
         Identifier,
         MessageReceipt,
         NonBlankEncodableText,
         NotificationPreferences,
+        ReplyCapability,
         RoutedListing,
         SecretValue,
         SourceReadRecord,
@@ -342,11 +336,6 @@ _READ_OUTCOMES_THAT_RULE: Final = frozenset(
 #: real one: it keeps the ordering deterministic and keeps the fake free of a wall
 #: clock.
 _TICK = timedelta(seconds=1)
-
-#: Where :func:`_pieces_of` cuts a composed answer: immediately before each word
-#: that follows whitespace. Zero-width, so the pieces concatenate back to the answer
-#: byte for byte — which is the property ADR-0173 §3 makes load-bearing.
-_BEFORE_A_WORD: Final = re.compile(r"(?<=\s)(?=\S)")
 
 #: The confidence a stored belief is held at here. Below 1.0 so a
 #: ``DERIVED``-banded record would still validate, and unadjusted because nothing
@@ -1285,24 +1274,16 @@ class FakeAssistantEngine:
         self,
         input: ChannelInput,  # noqa: A002 — contract spelling
         *,
-        reply: WholeTextReply | SpokenReply | None,
+        reply: SpokenReply | None,
         timeout: timedelta,  # noqa: ASYNC109 — contract budget
     ) -> ChannelResult:
-        """Receive a channel input with the fake's scripted collaborators."""
+        """Receive a channel input with the fake's scripted collaborators.
+
+        The text conversational combination is refused, as the concrete engine
+        refuses it (ADR-0293 §11).
+        """
         return await self._receive(
             input, reply=reply, timeout=timeout, projection=ChannelProjection("receive")
-        )
-
-    def receive_streaming(
-        self,
-        input: ChannelInput,  # noqa: A002 — contract spelling
-        *,
-        reply: StreamingTextReply,
-        timeout: timedelta,
-    ) -> AsyncIterator[ReplyChunk | ChannelResult]:
-        """Stream a validated channel input."""
-        return self._receive_streaming(
-            input, reply=reply, timeout=timeout, projection=ChannelProjection("receive_streaming")
         )
 
     async def converse(
@@ -1323,52 +1304,10 @@ class FakeAssistantEngine:
             reply=WholeTextReply(),
             timeout=timeout,
             projection=ChannelProjection("converse"),
+            typed_turn=True,
         )
         assert isinstance(result.result, TextChannelResult)  # noqa: S101 — validated result
         return result.result.outcome
-
-    def converse_streaming(
-        self,
-        utterance: EncodableText,
-        *,
-        timeout: timedelta,
-        conversation_id: Identifier | None = None,
-        reference: TurnReference | None = None,
-    ) -> AsyncIterator[ReplyChunk | TurnOutcome]:
-        """Adapt a legacy stream through shared channel admission."""
-        selected = (
-            None if conversation_id is None else identifier(conversation_id, name="conversation_id")
-        )
-        check_arguments(
-            "converse_streaming",
-            max_bytes=self._max_payload_bytes,
-            utterance=utterance,
-            timeout=timeout,
-            conversation_id=selected,
-            reference=reference,
-        )
-        stream = self._receive_streaming(
-            ChannelInput(
-                target=conversation_target(selected),
-                payload=TextChannelPayload(text=utterance),
-                conversation=ConversationInputOptions(reference=reference),
-            ),
-            reply=StreamingTextReply(),
-            timeout=timeout,
-            projection=ChannelProjection("converse_streaming"),
-        )
-        return self._legacy_channel_stream(stream)
-
-    async def _legacy_channel_stream(
-        self,
-        stream: AsyncIterator[ReplyChunk | ChannelResult],
-    ) -> AsyncIterator[ReplyChunk | TurnOutcome]:
-        async for value in stream:
-            if isinstance(value, ReplyChunk):
-                yield value
-            else:
-                assert isinstance(value.result, TextChannelResult)  # noqa: S101 — validated result
-                yield value.result.outcome
 
     async def converse_spoken(
         self,
@@ -1407,9 +1346,10 @@ class FakeAssistantEngine:
         projection: ChannelProjection,
         reply: WholeTextReply | SpokenReply | None,
         timeout: timedelta,  # noqa: ASYNC109 — contract budget
+        typed_turn: bool = False,
     ) -> ChannelResult:
         """Process the channel using the fake's existing scripted outcomes."""
-        supplied, capability = snapshot(input, reply, streaming=False)
+        supplied, capability = snapshot(input, reply, typed_turn=typed_turn)
         if projection.method == "receive":
             check_payload(
                 {"input": supplied, "reply": capability, "timeout": timeout},
@@ -1455,7 +1395,7 @@ class FakeAssistantEngine:
     def _validate_legacy_channel(
         self,
         supplied: ChannelInput,
-        capability: WholeTextReply | StreamingTextReply | SpokenReply | None,
+        capability: ReplyCapability | None,
         timeout: timedelta,
         method: str,
     ) -> None:
@@ -1496,7 +1436,7 @@ class FakeAssistantEngine:
     async def _dispatch_channel(
         self,
         supplied: ChannelInput,
-        capability: WholeTextReply | StreamingTextReply | SpokenReply | None,
+        capability: ReplyCapability | None,
         timeout: timedelta,  # noqa: ASYNC109 — caller processing budget
         projection: ChannelProjection,
         activation: FakeActivation,
@@ -1546,118 +1486,6 @@ class FakeAssistantEngine:
         )
         self._checked(projection.text(outcome), projection.method)
         return text_result(outcome)
-
-    def _receive_streaming(
-        self,
-        input: ChannelInput,  # noqa: A002 — ADR-0274 names the public parameter
-        *,
-        projection: ChannelProjection,
-        reply: StreamingTextReply,
-        timeout: timedelta,
-    ) -> AsyncIterator[ReplyChunk | ChannelResult]:
-        """Snapshot at the call and stream a result bound to that snapshot."""
-        supplied, capability = snapshot(input, reply, streaming=True)
-        if projection.method == "receive_streaming":
-            check_arguments(
-                "receive_streaming",
-                input=supplied,
-                reply=capability,
-                timeout=timeout,
-                max_bytes=self._max_payload_bytes,
-            )
-        return self._channel_stream(supplied, projection=projection)
-
-    async def _channel_stream(
-        self,
-        supplied: ChannelInput,
-        *,
-        projection: ChannelProjection,
-    ) -> AsyncIterator[ReplyChunk | ChannelResult]:
-        assert isinstance(supplied.payload, TextChannelPayload)  # noqa: S101 — validated combination
-        selected = (
-            None if isinstance(supplied.target, NewConversation) else supplied.target.instance_id
-        )
-        options = supplied.conversation or ConversationInputOptions()
-        activation = FakeActivation.channel(supplied, StreamingTextReply(), _AT)
-        activation.identify(self.activation_id_factory)
-        self._running_activations.append(activation)
-        projection = ChannelProjection(projection.method, activation.report)
-        result: ChannelResult | None = None
-        failure: BaseException | None = None
-        values: list[ReplyChunk | TurnOutcome] = []
-        try:
-            values = [
-                value
-                async for value in self._streamed(
-                    supplied.payload.text,
-                    conversation_id=selected,
-                    reference=options.reference,
-                    measure=False,
-                    activation=activation,
-                )
-            ]
-            outcome = values[-1]
-            assert isinstance(outcome, TurnOutcome)  # noqa: S101 — stream terminal
-            outcome, values = self._fit_channel_stream(outcome, values, projection)
-            activation.observe(outcome)
-            result = text_result(outcome)
-        except BaseException as exc:
-            failure = exc
-        try:
-            report = await activation.finish(
-                memory=self.episode_memory,
-                conversations=self.conversations_held,
-                allocate=lambda conversation: self._allocate_episode(conversation, activation),
-                max_bytes=self._max_payload_bytes,
-                failure=failure,
-                check_output=lambda: self._check_channel_result(result, projection),
-            )
-        finally:
-            self._ended(activation)
-        # Before the first chunk is yielded: the episode has landed, and a consumer
-        # that abandons the stream must leave it inside its conversation's deletion.
-        self._commit_episode(activation, report)
-        failure = _stopped_failure(activation, failure)
-        if failure is not None:
-            raise failure
-        if activation.output_failure is not None:
-            raise activation.output_failure
-        assert result is not None  # noqa: S101 — successful stream
-        for value in values[:-1]:
-            assert isinstance(value, ReplyChunk)  # noqa: S101 — stream prefix
-            yield value
-        yield captured_result(result, report, episode_id=_turn_episode(activation, report))
-
-    def _fit_channel_stream(
-        self,
-        outcome: TurnOutcome,
-        values: list[ReplyChunk | TurnOutcome],
-        projection: ChannelProjection,
-    ) -> tuple[TurnOutcome, list[ReplyChunk | TurnOutcome]]:
-        """Stop before the first chunk whose wrapped terminal would not fit."""
-        try:
-            self._checked(projection.text(outcome), projection.method)
-        except OversizedValueError:
-            pass
-        else:
-            return outcome, values
-        fitted = outcome.model_copy(update={"reply": None, "reply_degraded": True})
-        self._checked(projection.text(fitted), projection.method)
-        kept: list[ReplyChunk | TurnOutcome] = []
-        prefix = ""
-        for value in values[:-1]:
-            assert isinstance(value, ReplyChunk)  # noqa: S101 — existing stream invariant
-            candidate = outcome.model_copy(
-                update={"reply": prefix + value.text, "reply_degraded": True}
-            )
-            try:
-                self._checked(projection.text(candidate), projection.method)
-            except OversizedValueError:
-                break
-            kept.append(value)
-            prefix += value.text
-            fitted = candidate
-        return fitted, [*kept, fitted]
 
     async def _legacy_converse(
         self,
@@ -1719,92 +1547,6 @@ class FakeAssistantEngine:
         if activation is not None:
             activation.observe(outcome)
         return self._checked(outcome, "converse")
-
-    def _legacy_converse_streaming(
-        self,
-        utterance: EncodableText,
-        *,
-        timeout: timedelta,  # the caller's budget, as the Protocol declares it
-        conversation_id: Identifier | None = None,
-        reference: TurnReference | None = None,
-    ) -> AsyncIterator[ReplyChunk | TurnOutcome]:
-        """Run one turn, publishing its answer as chunks first (ADR-0173 §4).
-
-        **The chunks are derived from the outcome rather than scripted beside it**,
-        which is what keeps the fake honest about the one property ADR-0173 §3 makes
-        load-bearing: ``reply`` is the join of what was yielded, so a client tested
-        against this double can never pass over a disagreement the real engine
-        cannot produce. Script :attr:`turn_outcome` and the split follows.
-
-        The local refusals are raised **from the call**, as the concrete engine
-        raises them and as ``StreamingCompleter.stream`` raises its own, so a caller
-        that never iterates still sees them. Everything else — an unknown
-        conversation included — arrives from the iteration.
-        """
-        selected = (
-            None if conversation_id is None else identifier(conversation_id, name="conversation_id")
-        )
-        check_arguments(
-            "converse_streaming",
-            max_bytes=self._max_payload_bytes,
-            utterance=utterance,
-            timeout=timeout,
-            conversation_id=selected,
-            reference=reference,
-        )
-        return self._streamed(utterance, conversation_id=selected, reference=reference)
-
-    async def _streamed(
-        self,
-        utterance: EncodableText,
-        *,
-        conversation_id: str | None,
-        reference: TurnReference | None = None,
-        measure: bool = True,
-        activation: FakeActivation | None = None,
-    ) -> AsyncIterator[ReplyChunk | TurnOutcome]:
-        """Yield the outcome's own reply in pieces, then the outcome.
-
-        ``reference`` is recorded and read by nothing, exactly as :meth:`converse`
-        records it: ADR-0250 §19's M1 resolves no reference. It is carried **here**
-        rather than dropped at the call because this fake is what a wire client, the
-        gateway and the CLI are tested against, and a consumer that dropped or replaced
-        the reference on the streaming path would otherwise be undetectable — the
-        double would certify a client the real engine would see differently.
-        """
-        self.calls.append(
-            (
-                "converse_streaming",
-                {
-                    "utterance": utterance,
-                    "conversation_id": conversation_id,
-                    "reference": reference,
-                },
-            )
-        )
-        held = self._resolve(conversation_id)
-        if activation is not None:
-            activation.resolved(held)
-            activation.understand()
-        outcome = self.turn_outcome or TurnOutcome(
-            turn=_turn(utterance),
-            conversation_id=held,
-            reply=f"This fake engine composed no real answer to {utterance.strip()!r}.",
-        )
-        # ADR-0264 §7's member, on the scripted outcome and the synthesised one alike:
-        # this pass composed a reply, so it carries a statement and never ``None`` —
-        # which §7 reserves for a pass that "neither established a contact nor composed
-        # a reply" (#2381).
-        if outcome.conversation_id is None:
-            outcome = outcome.model_copy(update={"conversation_id": held})
-        outcome = self._stating(outcome)
-        if activation is not None:
-            activation.observe(outcome)
-        checked = self._checked(outcome, "converse_streaming") if measure else outcome
-        for piece in _pieces_of(checked.reply):
-            chunk = ReplyChunk(text=piece)
-            yield self._checked(chunk, "converse_streaming") if measure else chunk
-        yield checked
 
     async def _legacy_converse_spoken(  # noqa: PLR0913 — legacy speech inputs plus per-call observation
         self,
@@ -2983,23 +2725,6 @@ class FakeAssistantEngine:
         check_arguments("abandon_goal", max_bytes=self._max_payload_bytes, goal_id=named)
         self.calls.append(("abandon_goal", {"goal_id": named}))
         return self.abandonment
-
-    async def learn(self, event: FeedbackEvent) -> LearnOutcome:
-        """Fold one piece of feedback into memory, storing exactly one belief."""
-        check_arguments("learn", max_bytes=self._max_payload_bytes, event=event)
-        self.calls.append(("learn", {"event": event}))
-        record_id = f"rec-{len(self.beliefs_held) + 1}"
-        self.hold(record_id, content=event.content)
-        outcome = LearnOutcome(
-            results=(
-                IngestSummary(
-                    decision=LearnDecision.STORED,
-                    record_id=record_id,
-                    reason="the fake engine stores what it is told",
-                ),
-            )
-        )
-        return self._checked(outcome, "learn")
 
     # --- the inspection surface -------------------------------------------
 
@@ -5697,38 +5422,6 @@ def _summary_of(belief: Belief) -> BeliefSummary:
         attestation=belief.attestation,
         rests_on_recorded_external_content=belief.rests_on_recorded_external_content,
     )
-
-
-def _pieces_of(reply: str | None) -> tuple[str, ...]:
-    """Split one composed answer into the chunks a stream of it would carry.
-
-    **The join is the whole point** (ADR-0173 §3): the pieces concatenate back to
-    ``reply`` exactly, so a chunk-reading client and a chunk-ignoring one hold the
-    same answer. The split is *before* each word that follows whitespace, so every
-    piece carries the separator that preceded it — which is also the shape ADR-0173
-    §5's coalescing rule produces, rather than the tidy word-sized deltas §14 warns
-    a fake will otherwise hide the interesting cases behind.
-
-    An answer that owes no chunks — a park, a recovered resume, a composition that
-    failed before publishing — yields none at all, which is the zero-chunk exchange
-    ADR-0173 §4 admits.
-
-    Args:
-        reply: The composed answer, or ``None`` where the pass produced none.
-
-    Returns:
-        The pieces, in order, each carrying a non-whitespace character.
-    """
-    if reply is None:
-        return ()
-    pieces = _BEFORE_A_WORD.split(reply)
-    # A leading run of whitespace is a piece with nothing in it, which
-    # ``NonBlankEncodableText`` will not carry — so it is joined to the word after
-    # it rather than dropped, which is ADR-0173 §5's own rule about a blank delta.
-    while len(pieces) > 1 and not pieces[0].strip():
-        pieces[1] = pieces[0] + pieces[1]
-        del pieces[0]
-    return () if not pieces[0].strip() else tuple(pieces)
 
 
 def _refuse_unusable_report(

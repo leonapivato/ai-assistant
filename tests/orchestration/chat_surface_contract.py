@@ -56,11 +56,13 @@ from ai_assistant.core.types import (
     RecordedChannelTrigger,
     RecordedTextInput,
     SendOutcome,
-    TextChannelPayload,
+    SpeechChannelPayload,
+    SpokenAudio,
+    SpokenAudioFormat,
+    SpokenReply,
     TranscriptMessage,
     UnderstandingOmission,
     UserMessage,
-    WholeTextReply,
 )
 from ai_assistant.testing.activation import ended_pass
 
@@ -85,6 +87,12 @@ _WATCH = ChatDevice(device_id="watch", access=DeviceAccess.READ)
 #: Long enough that a few of them overflow :data:`CHAT_LIMIT`, short enough that one
 #: fits with room to spare.
 _LONG = "x" * 900
+
+#: A spoken turn on a conversation, which is how these cases hold an activation running:
+#: ADR-0293 §11 takes the typed one off ``receive``, and a message written into the
+#: conversation starts the reader's activation rather than the caller's.
+_RECORDING = SpokenAudio(content="YXVkaW8=", media_type=SpokenAudioFormat.MP4)
+_PLAYS = SpokenReply(plays=(SpokenAudioFormat.MP4,))
 
 
 @dataclass(frozen=True)
@@ -450,9 +458,9 @@ class ChatSurfaceContract:
             engine.receive(
                 ChannelInput(
                     target=ChannelIdentity(channel_type="conversation", instance_id=conversation),
-                    payload=TextChannelPayload(text="hello"),
+                    payload=SpeechChannelPayload(audio=_RECORDING),
                 ),
-                reply=WholeTextReply(),
+                reply=_PLAYS,
                 timeout=timedelta(seconds=30),
             )
         )
@@ -496,9 +504,9 @@ class ChatSurfaceContract:
             engine.receive(
                 ChannelInput(
                     target=ChannelIdentity(channel_type="conversation", instance_id=conversation),
-                    payload=TextChannelPayload(text="hello"),
+                    payload=SpeechChannelPayload(audio=_RECORDING),
                 ),
-                reply=WholeTextReply(),
+                reply=_PLAYS,
                 timeout=timedelta(seconds=30),
             )
         )
