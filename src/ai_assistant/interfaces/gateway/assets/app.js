@@ -8877,30 +8877,26 @@ const chat = {
   // each undo the other.
   editingMine: false,
   editingConversation: false,
-  // **One rule for every answer that sets something on screen**: it is applied only
-  // where nothing newer about the same subject has been applied since its request went
-  // out. Every request that can set a subject takes a stamp from `observed` as it goes
-  // out (`stamp`), and each subject keeps the stamp of the answer it was last set from
-  // (`newer`). So a late edit answer, a late state read and a late page of changes each
-  // lose to whatever was asked after them, whichever arrives first.
-  observed: 0,
-  at: { mine: 0, devices: 0, state: 0 },
+  // **The change stream is the authority on every set of devices** (ADR-0293 §5:10):
+  // a change is applied always, in sequence order, and is never skipped. Anything else
+  // that sets a subject — a snapshot read, or an edit's own answer — is applied only
+  // where nothing has set that subject since its request went out (`settle`), so it can
+  // put no older state over what the stream already said; and whatever it put up is
+  // superseded by the stream's next change, which is complete. `seen` counts each
+  // subject's settings: "my devices", the open conversation's devices, and its state.
+  seen: { mine: 0, devices: 0, state: 0 },
   // Whether the reads that open the chat all answered. Where one did not, following
   // again opens the chat again, since nothing re-reads it of its own motion.
   loaded: false,
 };
 
-function stamp() {
-  chat.observed += 1;
-  return chat.observed;
-}
-
-// Whether an answer asked at `asked` may set `subject`, and the subject marked as set.
-function newer(subject, asked) {
-  if (asked <= chat.at[subject]) {
+// Whether an answer whose request went out when `subject` had been set `before` times
+// may set it now; and if so, the subject counted as set again.
+function settle(subject, before) {
+  if (chat.seen[subject] !== before) {
     return false;
   }
-  chat.at[subject] = asked;
+  chat.seen[subject] += 1;
   return true;
 }
 
@@ -9046,7 +9042,7 @@ async function readMyDevices() {
     return false;
   }
   const era = sessionEra;
-  const asked = stamp();
+  const before = chat.seen.mine;
   try {
     const body = await relay(half, "/chat/devices", {}, "chat");
     if (!sameSession(half, era)) {
@@ -9056,7 +9052,7 @@ async function readMyDevices() {
       return false;
     }
     chat.thisDevice = body.this_device;
-    if (newer("mine", asked)) {
+    if (settle("mine", before)) {
       chat.myDevices = body.devices;
     }
     renderMyDevices();
@@ -9078,7 +9074,9 @@ function sayFollowing(text) {
 }
 
 function startFollowing(said) {
-  if (!chat.open || chat.following || chat.cursor === null) {
+  // A chat whose opening reads did not all answer is opened again by the owner's press
+  // and by nothing else, so its control stays where it is (`followAgain`).
+  if (!chat.open || chat.following || chat.cursor === null || !chat.loaded) {
     return;
   }
   // A page that is hidden by the time it would start waits to be seen again, and says
@@ -9177,7 +9175,6 @@ async function readChanges(tick) {
   }
   const era = sessionEra;
   const after = chat.cursor;
-  const asked = stamp();
   let body;
   try {
     body = await relay(half, "/chat/changes", { after: after }, "chat");
@@ -9209,7 +9206,7 @@ async function readChanges(tick) {
     void loadChat();
     return null;
   }
-  applyChanges(body.changes, asked);
+  applyChanges(body.changes);
   chat.cursor = body.next_after;
   // The state is read with the changes, on every read while a conversation is open: it
   // changes without a change to the transcript — an activation started elsewhere, or a
@@ -9235,8 +9232,7 @@ async function readChanges(tick) {
 // Apply changes in sequence order (ADR-0293 §5:10). Each is safe to apply twice, since a
 // snapshot read after the cursor may already hold it. Answers whether the conversation
 // on screen changed.
-// A set of devices in a change is applied only where nothing asked later has set it.
-function applyChanges(changes, asked) {
+function applyChanges(changes) {
   let touched = false;
   let relist = false;
   changes.forEach((change) => {
@@ -9264,17 +9260,16 @@ function applyChanges(changes, asked) {
         chatGone(`Conversation ${change.conversation_id} was deleted.`);
       }
     } else if (change.kind === "devices_changed") {
+      // Always applied: the stream is the authority (`seen`'s comment).
       if (change.conversation_id === null) {
-        if (newer("mine", asked) || chat.at.mine === asked) {
-          chat.myDevices = change.devices;
-          renderMyDevices();
-          renderConversationDevices();
-        }
+        chat.seen.mine += 1;
+        chat.myDevices = change.devices;
+        renderMyDevices();
+        renderConversationDevices();
       } else if (change.conversation_id === chat.selected) {
-        if (newer("devices", asked) || chat.at.devices === asked) {
-          chat.devices = change.devices;
-          renderConversationDevices();
-        }
+        chat.seen.devices += 1;
+        chat.devices = change.devices;
+        renderConversationDevices();
       }
     }
   });
@@ -9427,8 +9422,9 @@ async function selectChat(id) {
   chat.oldest = null;
   chat.state = null;
   chat.devices = null;
-  chat.at.devices = 0;
-  chat.at.state = 0;
+  // Nothing read for the conversation left behind may set this one's.
+  chat.seen.devices += 1;
+  chat.seen.state += 1;
   chat.unread.delete(id);
   setReplyTo(null);
   sayChat(null);
@@ -9541,7 +9537,8 @@ async function readChatDigest(id, mine) {
     return false;
   }
   const era = sessionEra;
-  const asked = stamp();
+  const stateBefore = chat.seen.state;
+  const devicesBefore = chat.seen.devices;
   try {
     const body = await relay(half, "/conversation", { conversation_id: id }, "chat");
     if (!sameSession(half, era)) {
@@ -9555,10 +9552,10 @@ async function readChatDigest(id, mine) {
       return false;
     }
     chat.digestDue = false;
-    if (newer("state", asked)) {
+    if (settle("state", stateBefore)) {
       chat.state = body.conversation.state;
     }
-    if (newer("devices", asked)) {
+    if (settle("devices", devicesBefore)) {
       chat.devices = body.conversation.devices;
     }
     renderChatState();
@@ -10055,7 +10052,7 @@ async function setMyDevices(devices) {
     return;
   }
   const era = sessionEra;
-  const asked = stamp();
+  const before = chat.seen.mine;
   chat.editingMine = true;
   renderMyDevices();
   try {
@@ -10066,8 +10063,9 @@ async function setMyDevices(devices) {
     if (body === null) {
       return;
     }
-    // Only where nothing asked after the edit has set the set already.
-    if (newer("mine", asked)) {
+    // Only where nothing has set the set since the edit went out; the stream's change
+    // for this edit follows either way.
+    if (settle("mine", before)) {
       chat.myDevices = devices;
     }
   } catch (_) {
@@ -10128,7 +10126,7 @@ async function setConversationDevices(devices) {
     return false;
   }
   const era = sessionEra;
-  const asked = stamp();
+  const before = chat.seen.devices;
   chat.editingConversation = true;
   renderConversationDevices();
   try {
@@ -10144,7 +10142,7 @@ async function setConversationDevices(devices) {
     if (body === null) {
       return false;
     }
-    if (chat.selected === id && newer("devices", asked)) {
+    if (chat.selected === id && settle("devices", before)) {
       chat.devices = devices;
     }
     return true;
