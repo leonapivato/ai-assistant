@@ -71,8 +71,12 @@ currently holds.
 A device is a machine: a hub device is enrolled here and reaches the hub over
 its remote listener; a browser device is a machine a gateway lists, registered
 the first time that gateway names it. A gateway on the hub's own machine is
-named '{HUB_DEVICE}'. Each device does nothing until it is given a role:
-'{Role.COMMANDS.value}' (commands and queries) or '{Role.SPOKES.value}' (host of spokes).
+named '{HUB_DEVICE}'. The roles are '{Role.COMMANDS.value}' (commands and queries)
+and '{Role.SPOKES.value}' (host of spokes).
+
+Roles are recorded now and not yet enforced: until the hub's enforcement is
+switched on, every admitted device reaches what it reaches today, whatever roles
+it holds. From then on, a device does nothing until it is given a role.
 
 An enrolment prints its credential once. The hub keeps only a verifier, so a
 credential that is lost cannot be recovered — enrol the device again, which mints
