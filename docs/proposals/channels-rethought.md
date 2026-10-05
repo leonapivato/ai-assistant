@@ -34,7 +34,7 @@ Wiki pages, read at wiki revision
 | --- | --- | --- |
 | ADR-0290 | A channel is the medium, held by the hub, needed exactly where something crosses the hub's edge; kinds are activating or service; inside actions, own-record reads and hub operations are direct. | Supersede in full. The edge becomes the assistant's (§1); a channel becomes a group of spokes (§2); the sorts become per input (§6). What survives is restated (§12). |
 | ADR-0291 | A channel's record is its own; what it keeps is its kind's choice; forgetting never reaches it; deleting from it is the user's command; it is the user's data. | Supersede in full. Channels keep nothing; a **hosted medium** keeps its own content, and ADR-0291's rules move onto it (§3). |
-| ADR-0283 §1 | Episodes are numbered and indexed by channel (type and instance); ADR-0291 limited §1:2's order to a channel's episodes. | Amend: episodes are indexed by channel and place, and record the spokes the input came through (§10). |
+| ADR-0283 §1, §§3–4, §8 | Episodes are numbered and indexed by channel (type and instance); ADR-0291 limited §1:2's order to a channel's episodes. A conversation's history and deletion read its channel's episodes. | Amend: episodes are indexed by channel and place, and record the spokes the input came through; history and deletion reads become place-scoped (§10). |
 | ADR-0274 | The caller names the channel and the reply rides the request; informational events from any admitted caller. | Retire, when the conversation channel's ADR and per-source channels replace them (§13). |
 | ADR-0094 | A spoke is an *attachment* across the process boundary; "client", "sensor" and "actuator" are profile names; the edge dials out, releases before sending, detects but does not distil; the hub decides the band. | Kept. Every obligation binds a device's spokes unchanged. The profile names line up: a party's end of a medium is a client, and the assistant's sensors and actuators on a device are spokes on a channel. In-hub sensors and actuators are attachments that are not spokes in ADR-0094's sense (open, below). |
 | ADR-0199 §1 | Audience is the output channel's; undeclared is unbounded; never derived from admission. | Kept, and placed: audience is read from the channel or the place, declared by the user, and narrowed but never widened by a spoke (§9). |
@@ -116,7 +116,7 @@ A device can be three things at once, each assigned by the user:
 | --- | --- | --- |
 | The user's **end of places** in a hosted medium | The phone in conversations 7 and 9 | Choosing the device for each conversation |
 | **Host of spokes** | The kitchen speaker; the phone's microphone, if allowed | Placing each spoke facing a channel's thing |
-| **Source of commands and queries** | The phone and laptop | Pairing; a newly paired device has no role until given one |
+| **Source of commands and queries** | The phone and laptop | The user, after pairing. Pairing admits a device and gives it no role |
 
 What a device sends travels one of three routes, told apart by the structured kind of
 the message and never by its content:
@@ -164,10 +164,13 @@ the speaker is unknown; an email's sender is claimed; a reminder's author is who
 it, at the time they set it.
 
 > Input carries the user's authority only when its author is established as the user,
-> writing now. Everything else informs and cannot authorize.
+> and the user sent it as an instruction. Everything else informs and cannot authorize.
+
+A reminder was written for later, so it is not one; a message that waited before being
+taken in still is.
 
 - A reminder the user set informs the activation it starts and authorizes nothing: the
-  user wrote it then, not now.
+  user wrote it for later, not as an instruction to act on when it comes due.
 - Content never claims authorship, and a channel's identity grants nothing.
 - A spoke's evidence (a face unlock, a voice match) counts toward establishing the user
   only where the kind allows it and the user set it up, such as by enrolling a voice.
@@ -180,25 +183,27 @@ Whether input starts an activation is decided per input, not per kind:
 - A **push** is input nobody asked for: a message, new mail, a reminder coming due. On
   its channel it starts an activation, subject to the kind's filter.
 - A **pull** is the assistant asking and the far side answering within that request: a
-  forecast, a mailbox search, earlier messages in a conversation. The answer returns to
+  forecast, a calendar lookup, earlier messages in a conversation. The answer returns to
   the activation that asked.
 - A **doorbell** says something is waiting without saying what. It is a push, and the
   activation it starts pulls the content (ADR-0094 §1:3).
 
 A kind declares whether it can be pulled and whether it pushes. Email does both, so does
-a calendar, so does the conversation; search only answers pulls; a timer only pushes.
+a calendar, so does the conversation; search is pulled, and only its late answers push;
+a timer only pushes.
 
-- **A pull's answer returns only while the asker waits.** One arriving after the asker
-  ended, or a second time, is a push, and starts an activation of its own.
+- **A pull's answer returns only while the asker waits.** A different answer arriving
+  after the asker ended is a push, and starts an activation of its own. A repeat of the
+  same answer is a duplicate.
 - **A person's reply is never a pull's answer.** A question to the user is output; the
   user's answer is a push that carries their authority.
 - **The assistant's own writing never starts an activation**, and a kind declares which
-  events in its medium are input: for the conversation, a new message by a party other
-  than the assistant. Starting or deleting a conversation is not input.
+  events in its medium are input: for the conversation, a new message, or feedback on an
+  entry, by a party other than the assistant. Starting or deleting a conversation is not input.
 - **One input starts one activation.** Duplicates are merged by the channel, speech is
   cut at the edge, and inputs waiting together are taken in as one (§11).
-- **A kind may filter pushes by rule, never by a model**, such as mail from known
-  contacts activating and the rest staying in the mailbox. Nothing filtered is lost.
+- **A kind may filter pushes by rule, never by a model**, such as reminders activating
+  only during working hours. Nothing filtered is lost.
 
 A sensor may check its medium periodically to notice what changed; what it notices is a
 push. That is how an in-hub sensor watches a calendar file.
@@ -228,13 +233,16 @@ Its **requirements** are of three sorts, each enforced in one place:
 | Requirement | About | Enforced |
 | --- | --- | --- |
 | **The medium's rules** | What a party may do in a hosted medium | By the hub as host, when a party acts |
-| **The channel's rules** | What the assistant may send on the channel: audience, text only, quiet hours | By the hub at the actuator, before anything leaves |
+| **The channel's rules** | What the assistant may send on the channel: text only, quiet hours | By the hub at the actuator, before anything leaves |
 | **A spoke's limits** | What its hardware can do: streamed pieces, screen size | Reported by the spoke; facts, never permission |
 
 ### 9. Audience
 
 > The audience of an output is everyone who can perceive any surface that renders it,
 > and the widest of them decides what may be said (ADR-0199).
+
+What may be said for that audience is ADR-0199's: withheld at supply, before composing,
+never cut out afterwards.
 
 - **On the assistant's spokes, it is read from the channel.** Every spoke on a channel
   faces the same thing, so they share an audience: the kitchen speaker's is whoever is in
@@ -246,7 +254,8 @@ Its **requirements** are of three sorts, each enforced in one place:
 - **The user declares every bounded audience**, by choosing a conversation's devices or
   by setting a channel up as private ("these are my earbuds"). Undeclared is unbounded.
 - **A spoke can only narrow.** Its rendering may make output more private, never less: a
-  notification on a lock screen shows no content unless the user chose previews.
+  notification on a lock screen shows no content unless the user chose previews, and
+  choosing previews is the user's declaration that the lock screen is private enough.
 
 ### 10. Window and history
 
@@ -257,17 +266,21 @@ Its **requirements** are of three sorts, each enforced in one place:
 | Channel and place | Window |
 | --- | --- |
 | Conversation 7 | Its recent messages, from the hosted medium |
-| An email thread | The earlier mail in the thread, pulled from the mail server |
 | The kitchen | Recent episodes in the kitchen |
 
+A networked mailbox, where a thread's history could be pulled, is a future kind needing
+its own ADR; today's email source is ADR-0140's local file of envelopes.
+
 The window belongs to the place. Its entries keep their authors, so it informs and never
-authorizes: only the new input, written now, can. An activation still running on the
+authorizes: only the new input, sent as an instruction, can. An activation still running on the
 place is visible beside the window, not in it. A kind declares how much its window
 holds.
 
 **Episodes are indexed by channel and place**, and record the spokes the input came
 through. A channel's history is its episodes across its places; a place's history is its
-own. For the conversation this is a rename of today's (`conversation`, id).
+own. Reads, deleting and forgetting are scoped to a place unless they say channel-wide.
+For the conversation, today's (`conversation`, id) maps onto (the chat, the
+conversation).
 
 ### 11. Activations side by side
 
@@ -282,7 +295,7 @@ already has it:
 - **Still owed**: a lock and recheck on what is acted on
   ([#2586](https://github.com/leonapivato/ai-assistant/issues/2586)), waiting once before
   an action for the user's inputs not yet understood, and a stopped activation never
-  writing.
+  writing new output into a place.
 - **Until that is built**, a conversation runs one activation at a time: a message sent
   while one runs lands in the medium and waits, never refused, and everything waiting is
   taken in as one input when it ends. Changing to the end state changes only when the
@@ -332,7 +345,7 @@ push, on the reader's channel.
 | --- | --- |
 | The user types "book the campsite" | An act in the medium; the chat's sensor takes it in; a push, author the user, established, now; an activation starts with the conversation's recent messages as its window. |
 | Then "for Saturday", while that runs | Lands in the conversation. In the end state it starts its own activation, which understanding judges to add to the booking, so it takes over; until then it waits and is taken in when the first ends. |
-| "Did the campground confirm?" | A pull on the email channel; the answer returns to the asking activation. |
+| "What's on Friday?" | A pull on the calendar channel; the answer returns to the asking activation. |
 | The booking service answers after a timeout | The asker has ended, so it is a push and starts an activation of its own. |
 | The assistant asks "Saturday or Sunday?" | Output into the conversation. The user's "Sunday" is a push carrying their authority. |
 | A reminder set on Monday comes due | A push from the timer; author the user, written Monday; it informs and authorizes nothing. |
@@ -381,6 +394,17 @@ the calendar and mailbox already hold their history, and a copy in memory goes s
   delivery poll. The device session's.
 - **Each kind's push filter**, decided with the kind.
 - **More than one person in a medium**, where each message carries its own author.
+- **What may take over running work.** The concurrency milestone's; the Concurrent
+  activations direction's limits stand meanwhile.
+- **Binding an answer to its question.** The conversation channel's and authorizing's.
+- **Processing bookkeeping**: which inputs were taken in, and by which activation.
+  "Channels keep nothing" means no record of what was carried, not no bookkeeping. The
+  conversation channel's.
+- **Existing permissions**: the source grants and notification preferences, mapped by
+  each retirement's ADR.
+- **Correcting a running action before takeover exists.** The conversation milestone's
+  sequencing.
+- **Who can start a conversation.** The device session's.
 
 ## What follows
 
