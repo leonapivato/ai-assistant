@@ -87,10 +87,10 @@
   addition alone: a first row, *a stop ended the pass* (its end entry is
   `ControllerRule.STOPPED`), classified `interrupted / stopped` ahead of every other row,
   the cancellation row included. §5:6's *"The original outward exception and cancellation
-  semantics remain intact"*, for a stopped pass alone: a caller awaiting it receives
-  `ActivationStoppedError` in place of what the pass would otherwise return or raise, and
-  a cancellation of the caller's own task still propagates as itself (ADR-0297 §4). Every
-  other clause stands. These replacements take effect on ratification of ADR-0297. This
+  semantics remain intact"*, for a stopped pass alone: a turn call awaiting it raises
+  `ActivationStoppedError` in place of what the pass would otherwise return or raise, a
+  stopped resume returns its outcome with no reply, and a cancellation of the caller's own
+  task still propagates as itself (ADR-0297 §4). Every other clause stands. These replacements take effect on ratification of ADR-0297. This
   reciprocal header record accompanies the numbered draft under ADR-0070 and ADR-0082;
   prior supersessions and the ratified body below are preserved.
 

@@ -7,7 +7,7 @@
 - Authorization: the dispatcher, under the owner's ruling of 2026-10-04 that how each phase honours a stop is the phases' design (ADR-0295 §2) and the owner's standing direction that mechanism design is the lanes'. The dispatcher assigned 0297. That authorizes drafting and numbering, not ratification or implementation.
 - **Partially supersedes** [ADR-0255](0255-the-driver-walks-a-plan-in-dependency-order-claims-each-step-under-its-attempt-and-stops-rather-than-acting-under-an-unfinished-one.md) — **one scope.** **§11:1's *"Nothing else"* closure over `StepTransition`, in the addition alone**: `StepTransition` gains `activation_id` (§2 below). Every other clause stands, §3's conjuncts, validator, threading and refusal classes included.
 - **Partially supersedes** [ADR-0280](0280-an-activation-controller-runs-the-stages-by-rules-and-records-every-choice-with-the-episode.md) — **two scopes, each for a pass whose stop has been taken in.** **§3:3's step**: the controller reads the stop before it evaluates the rules and once a stage's result is in hand, and leaves the loop on it (§4 below). **§5:2's fixed default**: a stage that failed or timed out after the stop was taken in ends the pass with the stop's end entry, and its error is not re-raised (§4 below). Every other clause stands, and both clauses stand entire for every pass no stop reaches.
-- **Partially supersedes** [ADR-0275](0275-an-episode-records-one-activation-after-processing-ends.md) — **three scopes.** **§4:1's `ProcessingReason` values, in the addition alone**: `stopped`. **§5:3's table, in the addition alone**: a first row, *a stop ended the pass*, classified `interrupted / stopped`. **§5:6's *"original outward exception … remain[s] intact"*, for a stopped pass alone**: a caller awaiting it receives `ActivationStoppedError` (§4 below). Every other clause stands.
+- **Partially supersedes** [ADR-0275](0275-an-episode-records-one-activation-after-processing-ends.md) — **three scopes.** **§4:1's `ProcessingReason` values, in the addition alone**: `stopped`. **§5:3's table, in the addition alone**: a first row, *a stop ended the pass*, classified `interrupted / stopped`. **§5:6's *"original outward exception … remain[s] intact"*, for a stopped pass alone**: a turn call awaiting it raises `ActivationStoppedError`, and a stopped resume returns its outcome with no reply (§4 below). Every other clause stands.
 
 ## Context
 
@@ -148,11 +148,12 @@ stop changes no goal state, so the read would establish nothing, and the class s
 exactly as ADR-0261 scoped it.
 
 > **Normative.** `ClaimStopped` carries a message and no structured state, and it
-> propagates from the claim site as ADR-0261 §7:2 has every exception but `ClaimRefused`
-> propagate; no lane catches it to compose a report.
+> propagates out of the walk as ADR-0261 §7:2 has every exception but `ClaimRefused`
+> propagate; no lane composes a reply about it.
 
-What the pass then does is the controller's (§4), which ends it as stopped whatever the
-stage that met the refusal did.
+What the pass then does is §4's: the controller ends a channel activation as stopped
+whatever the stage that met the refusal did, and a resume ends as stopped and returns the
+outcome §4 gives it.
 
 > **Normative.** The ordering between a stop and a claim is the store's: where the stop
 > record lands first, the claim is refused, nothing is invoked, and the step stays at its
@@ -275,9 +276,13 @@ mark leaves no disposal, so it is not a member of ADR-0255 §2's stop list and a
 `Disposition` member, as ADR-0261 §7:1 rules for a refused claim.
 
 > **Normative.** A stop cancels no task and adds no deadline: a stage running when the
-> mark is set runs to its own end under the deadlines it already runs under, which gate
-> starting work and never cancel what is running (ADR-0255 §9), so it may outlast the
-> pass's budget as ADR-0228 §4 already allows.
+> mark is set runs to its own end under exactly the deadlines and timeout enforcement it
+> runs under today, and a stop neither shortens nor lengthens any of them.
+
+A stage whose budget is enforced by cancelling its own call — recall's (ADR-0281 §5), the
+understanding stage's — still ends `timed_out` at that budget; work whose deadline only
+gates starting and never cancels what is running (ADR-0255 §9) still runs to its own
+completion, and may outlast the pass's budget as ADR-0228 §4 already allows.
 
 > **Normative.** Work already entered when the mark is set writes everything it owes as
 > it would had no stop been given — an effect's own disposal and its completion record,
@@ -302,15 +307,26 @@ and what the user does next decides both.
 > **Normative.** The adapter of ADR-0293 §10 writes nothing for a pass whose end entry is
 > `ControllerRule.STOPPED` — no reply, even one already composed, and no *couldn't finish*.
 
-> **Normative.** An `AssistantEngine` call awaiting a stopped pass — a turn call, or a
-> `resume` whose control activation was stopped — raises `ActivationStoppedError`, a new
-> `AssistantError` subclass in `core/errors.py` carrying a message and no structured
+> **Normative.** A turn call awaiting a stopped pass raises `ActivationStoppedError`, a
+> new `AssistantError` subclass in `core/errors.py` carrying a message and no structured
 > state, in place of what the pass would otherwise return or raise; a cancellation of the
 > caller's own task still propagates as itself.
 
-Under ADR-0293 §11:2 a conversation's text input no longer arrives on a turn call, so this
-reaches the calls that remain — a spoken turn's, an informational event's, a resume's —
-and any caller still on a legacy route.
+A turn's outcome is assembled by the composing stage the stop keeps from running, and a
+turn call already returns no outcome where a stage's failure ends it (ADR-0275 §5:3's
+failure rows); what the stopped activation finished, the user reads in the current state
+(ADR-0295 §3:5). Under ADR-0293 §11:2 a conversation's text input no longer arrives on a
+turn call, so this reaches the turn calls that remain — a spoken turn's, an informational
+event's — and any caller still on a legacy route.
+
+> **Normative.** A `resume` whose control activation is stopped returns its `TurnOutcome`
+> with `reply` `None` and every other field as the resume established it — the step's
+> outcome and the recipient-grant outcome among them — in place of a composed reply; a
+> cancellation of the caller's own task still propagates as itself.
+
+A resume records the user's answer before it acts (ADR-0255 §3:23), and what the answer
+established is owed to the caller who gave it — the recipient-grant outcome under ADR-0235
+§6 among it — so a stop takes away only the reply it would have composed.
 
 ### 5. The engine surface
 
@@ -405,7 +421,7 @@ be stopped; that is the residual of §2's no-id case, stated rather than hidden.
 | ADR-0280 §5:2's fixed default, for a stopped pass | §4 (the stop's end entry, no re-raise) |
 | ADR-0275 §4:1's `ProcessingReason` values, in the addition | §4 (`stopped`) |
 | ADR-0275 §5:3's table, in the addition | §4 (`interrupted / stopped`, first) |
-| ADR-0275 §5:6's outward exception, for a stopped pass | §4 (`ActivationStoppedError`) |
+| ADR-0275 §5:6's outward exception, for a stopped pass | §4 (`ActivationStoppedError`; a stopped resume's reply-less outcome) |
 
 Not superseded, each read and found to stand: ADR-0261 §4:1's *"This decision adds no
 claim condition"* and §1:1's *"no new `AssistantEngine` member"* are stated over that
