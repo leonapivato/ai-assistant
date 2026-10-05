@@ -450,14 +450,21 @@ async def test_following_again_reads_the_state_whose_read_failed(
         await expect(drive.page.locator("#chat-follow")).to_contain_text("You came back")
         assert await drive.page.evaluate("() => chat.following && chat.stream !== null")
 
-        async def working(conversation_id: str) -> Any:
-            digest = await held(conversation_id)
-            assert digest is not None
-            return digest.model_copy(update={"state": ConversationState(working=True)})
+        # Read again, though nothing changed. What it shows is not this read's alone:
+        # the stream sends the state as it opens too (#2740), and the stream wins.
+        again: list[str] = []
 
-        drive.engine.conversation = working  # type: ignore[method-assign]
+        async def counted(conversation_id: str) -> Any:
+            again.append(conversation_id)
+            return await held(conversation_id)
+
+        drive.engine.conversation = counted  # type: ignore[method-assign]
         await drive.page.evaluate(_HIDE_AND_SHOW)
-        await expect(drive.page.locator("#chat-state")).to_contain_text("working on this")
+        for _ in range(100):
+            if again:
+                break
+            await drive.page.wait_for_timeout(50)
+        assert again == reads
 
 
 async def test_a_new_session_follows_though_the_old_ones_stream_was_still_out(
