@@ -2807,7 +2807,7 @@ def _stopped_resumption(  # noqa: PLR0913 — one keyword per member a resume ma
 
 
 def _kept_resolution(
-    parked: _Parked, observed: DriveObservation
+    parked: _Parked, observed: DriveObservation, *, collected: bool
 ) -> StepDisposition | _WithheldResumption | None:
     """What a stopped resume keeps of a resolution that raised after its answer.
 
@@ -2825,8 +2825,20 @@ def _kept_resolution(
     guards what is acted on — a resolution whose read-back failed executed nothing, and
     is kept as the resolution that acted on nothing — and never decides whether the
     answer was given.
+
+    **Save where the outcome could not say what became of a standing request.** Where
+    the call collected an establishing act (``collected``) and the runner never
+    published its pair — the answer was appended and its read-back failed — no
+    carrier ADR-0235 §4 admits is true: the pair is the trail's own read-back copies
+    (``EstablishingAnswer``), so no grant may be transcribed from the unread answer,
+    and none of the five ``RecipientGrantNotEstablished`` members names this end. A
+    returned outcome would then be silent about a request the user made, which §6
+    forbids, so the raise propagates as it does for an unstopped resume and the user
+    is told the resume failed rather than that nothing was asked.
     """
     if not (observed.answered and _marked()):
+        return None
+    if collected and observed.establishing is None:
         return None
     if observed.executed is not None:
         return replace(observed.executed, establishing=observed.establishing)
@@ -15495,7 +15507,11 @@ class Engine:
                 # ADR-0297 §4: past the recorded answer, a stopped resume returns what it
                 # established. The stage's failure stays recorded — ``drive`` failed, the
                 # stop's end entry after it — and nothing is retried.
-                kept = _kept_resolution(parked, observed)
+                kept = _kept_resolution(
+                    parked,
+                    observed,
+                    collected=approved and remember_recipients_until is not None,
+                )
                 if kept is None:
                     raise
                 driven, runner_returned = kept, False
