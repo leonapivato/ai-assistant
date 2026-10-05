@@ -558,6 +558,13 @@ class DriveObservation:
     #: execute.
     executed: StepDisposition | None = None
 
+    #: The executor's step claim landed (:attr:`CallableReach.claimed`), published on
+    #: every exit of the drive, the exceptional one included. Until it is ``True`` nothing
+    #: was invoked and the step is at its entry status, so a drive that raised with this
+    #: ``False`` acted on nothing; once it is ``True`` a drive that raised before
+    #: :attr:`executed` was published cannot say what it did (ADR-0297 §4).
+    claimed: bool = False
+
 
 @dataclass(frozen=True, slots=True)
 class StepDisposition:
@@ -2637,6 +2644,7 @@ class StepRunner:
             # the disposition below carries.
             if outbound is not None:
                 outbound.reach = _egress_reach(request, reach)
+                outbound.claimed = reach.claimed
         if drive.refused is not None:
             # ADR-0259 §2's two refusals, reported as the stage's own disposition. Each
             # commits nothing, so the state handed back is the one this stage was given

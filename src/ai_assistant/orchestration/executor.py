@@ -314,9 +314,16 @@ class CallableReach:
             first attempt reached. ``False`` where every attempt exited in one of
             ADR-0192 §1's three windows, which is the executor establishing that the
             call provably never reached the callable.
+        claimed: Whether a ``→ RUNNING`` claim of this drive has **landed** — set once
+            the first claim's ``commit_transition`` has returned, and sticky. Until
+            then nothing can have been invoked (ADR-0034 §1: the claim precedes the
+            call) and the step is at its entry status, which is the one fact that lets
+            a caller whose drive raised say the drive acted on nothing (ADR-0297 §4).
+            It says nothing about the callable; :attr:`reached` does.
     """
 
     reached: bool = False
+    claimed: bool = False
 
 
 @dataclass(frozen=True, slots=True)
@@ -561,7 +568,14 @@ class StepExecutor:
         if settled is not None:
             return settled
 
+        # One observer for the whole drive, so a retry cannot unmake what an earlier
+        # attempt reached (:class:`CallableReach`).
+        observed = reach if reach is not None else CallableReach()
         state = await self._claim(state, step_id, authorised, attempt_id, activation_id)
+        # Published the moment the claim has landed and before anything can be invoked:
+        # past here the step has left its entry status, so a caller whose drive then
+        # raises can no longer say the drive acted on nothing (ADR-0297 §4).
+        observed.claimed = True
         # Read *after* the claim, because ADR-0029 §5 measures from "the first
         # attempt of this call" — a slow `commit_transition` is not part of the
         # window, and counting it could consume one before the tool was reached.
@@ -580,9 +594,6 @@ class StepExecutor:
                 msg = f"step {step_id!r} was closed unstarted; its task was cancelled"
                 raise asyncio.CancelledError(msg) from None
             raise
-        # One observer for the whole drive, so a retry cannot unmake what an earlier
-        # attempt reached (:class:`CallableReach`).
-        observed = reach if reach is not None else CallableReach()
         while True:
             state, result = await self._run_once(
                 state, step_id, authorised, trusted, timeout, observed
