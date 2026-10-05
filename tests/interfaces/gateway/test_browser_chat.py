@@ -103,12 +103,13 @@ async def test_a_message_is_received_and_the_reply_arrives_by_following(
         await expect(drive.page.locator("#chat-state")).to_be_hidden(timeout=_FOLLOWED)
 
 
-async def test_a_send_from_a_device_that_is_not_an_end_offers_to_add_it(
+async def test_a_send_from_a_device_that_is_not_an_end_says_how_to_add_it(
     gateway_browser: Browser, tmp_path: Path
 ) -> None:
-    """§7:2: only a conversation's devices write in it; the page says so and offers the fix.
+    """§7:2: only a conversation's devices write in it; the page says so and how to fix it.
 
-    The resend carries the same message id, so the conversation records it once (§4:2).
+    Changing the conversation's devices is the command line's here; once it is done, the
+    resend carries the same message id, so the conversation records it once (§4:2).
     """
     async with driving(gateway_browser, tmp_path) as drive:
         conversation = await _open(drive, devices=())
@@ -116,14 +117,19 @@ async def test_a_send_from_a_device_that_is_not_an_end_offers_to_add_it(
 
         pending = drive.page.locator("#chat-transcript li.pending")
         await expect(pending).to_contain_text("not one of this conversation's devices")
-        await pending.locator("button", has_text="Add this device").click()
+        await expect(pending).to_contain_text(
+            f"assistant conversation-devices {conversation} --add hub"
+        )
+        await drive.engine.set_conversation_devices(
+            conversation, devices=[ChatDevice(device_id="hub", access=DeviceAccess.READ_WRITE)]
+        )
+        await pending.locator("button", has_text="Send again").click()
 
         await expect(pending).to_have_count(0, timeout=_FOLLOWED)
         await expect(drive.page.locator("#chat-transcript li.from-user")).to_contain_text("Hello?")
         writes = [one for name, one in drive.engine.calls if name == "write_message"]
         assert len(writes) == 2
         assert writes[0]["message"] == writes[1]["message"]
-        assert (await drive.engine.conversation(conversation)) is not None
 
 
 async def test_a_follow_read_that_fails_stops_and_waits_for_the_owner(
@@ -438,36 +444,6 @@ async def test_a_new_session_follows_though_the_old_ones_read_was_still_out(
         )
 
 
-async def test_one_edit_of_a_device_set_is_out_at_a_time(
-    gateway_browser: Browser, tmp_path: Path
-) -> None:
-    """Two removals built from one set would undo each other, so the second waits."""
-    async with driving(gateway_browser, tmp_path) as drive:
-        await drive.engine.set_my_devices(
-            [
-                ChatDevice(device_id="hub", access=DeviceAccess.READ_WRITE),
-                ChatDevice(device_id="nTABLET", access=DeviceAccess.READ),
-                ChatDevice(device_id="nPHONE", access=DeviceAccess.READ),
-            ]
-        )
-        await drive.page.click("#chat-button")
-        devices = drive.page.locator("#chat-my-devices li")
-        await expect(devices).to_have_count(3)
-        await drive.page.evaluate(_HOLDING, "/chat/devices/set")
-
-        await devices.filter(has_text="nTABLET").locator("button", has_text="Remove").click()
-        await drive.page.wait_for_function("() => window.__held.reached")
-        await expect(
-            devices.filter(has_text="nPHONE").locator("button", has_text="Remove")
-        ).to_be_disabled()
-
-        await drive.page.evaluate("window.__held.release()")
-        await expect(devices).to_have_count(2)
-        await devices.filter(has_text="nPHONE").locator("button", has_text="Remove").click()
-        await expect(devices).to_have_count(1)
-        assert [one.device_id for one in await drive.engine.my_devices()] == ["hub"]
-
-
 async def test_a_state_change_with_no_transcript_change_reaches_an_idle_page(
     gateway_browser: Browser, tmp_path: Path
 ) -> None:
@@ -493,38 +469,6 @@ async def test_a_state_change_with_no_transcript_change_reaches_an_idle_page(
             "working on this", timeout=_IDLE_FOLLOWED
         )
         assert reads
-
-
-async def test_an_edits_late_answer_does_not_undo_a_newer_set(
-    gateway_browser: Browser, tmp_path: Path
-) -> None:
-    """A set the following applied after an edit went out outranks the edit's answer."""
-    async with driving(gateway_browser, tmp_path) as drive:
-        await drive.engine.set_my_devices(
-            [
-                ChatDevice(device_id="hub", access=DeviceAccess.READ_WRITE),
-                ChatDevice(device_id="nTABLET", access=DeviceAccess.READ),
-                ChatDevice(device_id="nPHONE", access=DeviceAccess.READ),
-            ]
-        )
-        await drive.page.click("#chat-button")
-        devices = drive.page.locator("#chat-my-devices li")
-        await expect(devices).to_have_count(3)
-        await drive.page.evaluate(_HOLDING, "/chat/devices/set")
-        await devices.filter(has_text="nTABLET").locator("button", has_text="Remove").click()
-        await drive.page.wait_for_function("() => window.__held.reached")
-
-        # Another device leaves only this one, after the edit went out.
-        await drive.engine.set_my_devices(
-            [ChatDevice(device_id="hub", access=DeviceAccess.READ_WRITE)]
-        )
-        await drive.page.wait_for_function(
-            "() => chat.myDevices.length === 1", timeout=_IDLE_FOLLOWED
-        )
-        await drive.page.evaluate("window.__held.release()")
-
-        await drive.page.wait_for_function("() => !chat.editingMine")
-        await expect(devices).to_have_count(1)
 
 
 async def test_a_transcript_that_could_not_be_read_is_offered_again(
@@ -606,32 +550,6 @@ async def test_a_send_whose_refusal_could_not_be_read_is_not_known(
             await drive.page.unroute("**/chat/message/write", unreadable)
 
 
-async def test_a_late_state_read_does_not_restore_a_device_an_edit_removed(
-    gateway_browser: Browser, tmp_path: Path
-) -> None:
-    """An answer asked before an edit loses to the edit, whichever arrives first."""
-    async with driving(gateway_browser, tmp_path) as drive:
-        conversation = await _open(drive)
-        await drive.engine.set_conversation_devices(
-            conversation,
-            devices=[
-                ChatDevice(device_id="hub", access=DeviceAccess.READ_WRITE),
-                ChatDevice(device_id="nTABLET", access=DeviceAccess.READ),
-            ],
-        )
-        ends = drive.page.locator("#chat-conversation-devices li")
-        await expect(ends).to_have_count(2, timeout=_IDLE_FOLLOWED)
-
-        await drive.page.evaluate(_HOLDING, "/conversation")
-        await drive.page.wait_for_function("() => window.__held.reached", timeout=_IDLE_FOLLOWED)
-        await ends.filter(has_text="nTABLET").locator("button", has_text="Remove").click()
-        await expect(ends).to_have_count(1)
-        await drive.page.evaluate("window.__held.release()")
-
-        await drive.page.wait_for_function("() => !window.__held.open")
-        await expect(ends).to_have_count(1)
-
-
 async def test_a_devices_read_that_fails_on_opening_is_read_again_on_the_owners_press(
     gateway_browser: Browser, tmp_path: Path
 ) -> None:
@@ -648,7 +566,7 @@ async def test_a_devices_read_that_fails_on_opening_is_read_again_on_the_owners_
 
         drive.engine.my_devices = held  # type: ignore[method-assign]
         await drive.page.click("#chat-follow-again")
-        await expect(drive.page.locator("#chat-add-device")).to_be_visible()
+        await expect(drive.page.locator("#chat-this-device")).to_contain_text("device hub")
         await expect(drive.page.locator("#chat-follow")).to_contain_text("Following this chat")
 
 
@@ -657,8 +575,8 @@ async def test_a_read_the_gateway_answered_late_applies_every_change_it_carries(
 ) -> None:
     """§5:10: the change stream is the authority, so no change it carries is skipped.
 
-    The read leaves the page before an edit and reaches the gateway after the edit and
-    another device's change, so it carries both; the page applies both, in order.
+    The read leaves the page before two changes to "my devices" and reaches the gateway
+    after both, so it carries both; the page applies both, in order.
     """
     async with driving(gateway_browser, tmp_path) as drive:
         await drive.engine.set_my_devices(
@@ -685,8 +603,12 @@ async def test_a_read_the_gateway_answered_late_applies_every_change_it_carries(
         await drive.page.route("**/chat/changes", hold)
         try:
             route = await asyncio.wait_for(held, timeout=_IDLE_FOLLOWED / 1000)
-            await devices.filter(has_text="nTABLET").locator("button", has_text="Remove").click()
-            await expect(devices).to_have_count(2)
+            await drive.engine.set_my_devices(
+                [
+                    ChatDevice(device_id="hub", access=DeviceAccess.READ_WRITE),
+                    ChatDevice(device_id="nPHONE", access=DeviceAccess.READ),
+                ]
+            )
             await drive.engine.set_my_devices(
                 [ChatDevice(device_id="hub", access=DeviceAccess.READ_WRITE)]
             )
@@ -718,36 +640,22 @@ async def test_an_event_does_not_resume_a_chat_whose_opening_read_failed(
         assert await drive.page.evaluate("() => !chat.following")
 
 
-async def test_a_landed_edit_holds_its_set_until_the_stream_has_caught_up_past_it(
+async def test_a_reply_being_written_to_a_message_deleted_meanwhile_names_it_as_deleted(
     gateway_browser: Browser, tmp_path: Path
 ) -> None:
-    """A read sent before an edit landed may bring an older set back; nothing is built on it.
-
-    The set's controls stay held until a read sent after the edit's answer is applied, so
-    the next edit is built from the set the hub holds, and the hub ends with what the
-    owner chose.
-    """
+    """§5:12: the composer's reference follows the transcript, so no deleted text stays."""
     async with driving(gateway_browser, tmp_path) as drive:
-        await drive.engine.set_my_devices(
-            [
-                ChatDevice(device_id="hub", access=DeviceAccess.READ_WRITE),
-                ChatDevice(device_id="nTABLET", access=DeviceAccess.READ),
-                ChatDevice(device_id="nPHONE", access=DeviceAccess.READ),
-            ]
+        conversation = await _open(drive)
+        await drive.engine.chat.append_message(
+            conversation, NewMessage(author=MessageAuthor.ASSISTANT, text="Secret plan.")
         )
-        await drive.page.click("#chat-button")
-        devices = drive.page.locator("#chat-my-devices li")
-        await expect(devices).to_have_count(3)
+        message = drive.page.locator("#chat-transcript li.from-assistant")
+        await expect(message).to_contain_text("Secret plan.", timeout=_IDLE_FOLLOWED)
+        await message.locator("button", has_text="Reply").click()
+        replying = drive.page.locator("#chat-replying")
+        await expect(replying).to_contain_text("Secret plan.")
 
-        await devices.filter(has_text="nTABLET").locator("button", has_text="Remove").click()
-        await expect(devices).to_have_count(2)
-        phone = devices.filter(has_text="nPHONE").locator("button", has_text="Remove")
-        await drive.page.evaluate(_HOLDING, "/chat/changes")
-        await drive.page.wait_for_function("() => window.__held.reached", timeout=_IDLE_FOLLOWED)
-        await expect(phone).to_be_disabled()
-
-        await drive.page.evaluate("window.__held.release()")
-        await expect(phone).to_be_enabled()
-        await phone.click()
-        await expect(devices).to_have_count(1)
-        assert [one.device_id for one in await drive.engine.my_devices()] == ["hub"]
+        await drive.engine.delete_message(conversation, position=1)
+        await expect(replying).to_have_text(
+            "In reply to a message that was deleted.", timeout=_IDLE_FOLLOWED
+        )

@@ -208,11 +208,10 @@
         <h3>Your devices</h3>
         <!--
           "My devices" (ADR-0293 §3:1): every new conversation is shown on each of
-          them. This browser is told which device it is, so it can add itself.
+          them. Shown here and changed at the command line (`assistant my-devices`).
         -->
         <p class="hint" id="chat-this-device"></p>
         <ul id="chat-my-devices" class="chat-devices"></ul>
-        <button type="button" id="chat-add-device" hidden>Add this device</button>
 
         <h3>Conversations</h3>
         <p class="choice">
@@ -243,12 +242,10 @@
 
           <h4>Who sees this conversation</h4>
           <!--
-            A conversation's devices (ADR-0293 §3:3), changed away from "my devices"
-            for this conversation alone. Choosing a device is the statement that its
-            screen is private (§3:4).
+            A conversation's devices (ADR-0293 §3:3). Shown here and changed at the
+            command line (`assistant conversation-devices`).
           -->
           <ul id="chat-conversation-devices" class="chat-devices"></ul>
-          <p class="choice" id="chat-device-offers"></p>
 
           <h4>Delete or forget</h4>
           <!--
