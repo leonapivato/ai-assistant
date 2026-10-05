@@ -443,9 +443,9 @@ class FakeConversationStore:
         #: The change stream (§5:10), in sequence order, and its counter.
         self._changes: list[ChatChange] = []
         self._seq = 0
-        #: Per deletion's sequence number, the ends its conversation had when it was
-        #: deleted: what the store keeps beside the deletion, read by
-        #: :meth:`device_changes` alone (ADR-0296 §4:5).
+        #: Per deletion's sequence number, every device that read its conversation at
+        #: any point of its recorded history: what the store keeps beside the deletion,
+        #: read by :meth:`device_changes` alone (ADR-0296 §4:5, §4:8).
         self._deleted_ends: dict[int, tuple[ChatDevice, ...]] = {}
         #: The reader's bookkeeping (§6:6): per conversation, position to activation.
         self._taken: dict[str, dict[int, str]] = {}
@@ -565,6 +565,26 @@ class FakeConversationStore:
         """Remove every change of one conversation from the stream."""
         self._changes = [one for one in self._changes if one.conversation_id != conversation_id]
 
+    def _readers_of(self, conversation_id: str) -> tuple[ChatDevice, ...]:
+        """Every device that read the conversation at any point of its recorded history.
+
+        What its deletion keeps (ADR-0296 §4:8): the deletion clears every change of
+        the conversation, a device's removal among them, so a device removed before
+        it is told by the deletion instead. Each with its latest reading access.
+        """
+        readers: dict[str, ChatDevice] = {}
+        sets = [
+            one.devices
+            for one in self._changes
+            if isinstance(one, (ConversationStartedChange, DevicesChangedChange))
+            and one.conversation_id == conversation_id
+        ]
+        for devices in (*sets, self._devices.get(conversation_id, ())):
+            for one in devices:
+                if one.access.reads:
+                    readers[one.device_id] = one
+        return tuple(readers[one] for one in sorted(readers))
+
     def _record_deletion(self, conversation_id: str, ends: tuple[ChatDevice, ...]) -> None:
         """Record a conversation's deletion, keeping the ends it had (ADR-0296 §4:5)."""
         seq = self._next_seq()
@@ -577,9 +597,9 @@ class FakeConversationStore:
         """Whether ``change`` reaches ``device``, ``devices`` holding the sets before it.
 
         The class docstring's rule on the Protocol: a change that sets a set reaches
-        every device in it before or after; a deletion, the ends that read the
-        conversation when it was deleted; every other change, the ends that read its
-        conversation as its devices stood when it was recorded.
+        every device in it before or after; a deletion, every device that read the
+        conversation at any point of its recorded history; every other change, the
+        ends that read its conversation as its devices stood when it was recorded.
         """
         if isinstance(change, (ConversationStartedChange, DevicesChangedChange)):
             before = devices.get(change.conversation_id, ())
@@ -847,8 +867,8 @@ class FakeConversationStore:
             )
             # ADR-0293 §2:3: the conversation's transcript goes with it, and its
             # devices learn of it from the one change left in the stream, which
-            # keeps who they were (ADR-0296 §4:5).
-            ends = self._devices.get(conversation_id, ())
+            # keeps every device that read it (ADR-0296 §4:5, §4:8).
+            ends = self._readers_of(conversation_id)
             self._clear_chat_of(conversation_id)
             self._drop_changes_of(conversation_id)
             self._record_deletion(conversation_id, ends)
@@ -882,7 +902,7 @@ class FakeConversationStore:
             if not eligible:
                 return False
             self._deliveries.pop(conversation_id, None)  # ADR-0283 §6:7
-            ends = self._devices.get(conversation_id, ())
+            ends = self._readers_of(conversation_id)
             self._clear_chat_of(conversation_id)
             del self._conversations[conversation_id]
             if not stamped:
