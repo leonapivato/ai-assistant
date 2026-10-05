@@ -101,6 +101,8 @@ class _Stopping(FakePlanStore):
         #: resume runs after its step was driven raises.
         self.unreadable_after_claim = False
         self.landed = False
+        #: The claim's write faults — not a refusal — once the stop is given.
+        self.fault_claim = False
 
     async def get_plan(self, plan_id: str) -> ActionPlan | None:
         if self.unreadable_after_claim and self.landed:
@@ -116,6 +118,9 @@ class _Stopping(FakePlanStore):
         if claiming and self.before and transition.activation_id is not None:
             self.before = False
             self.answers.append(await self.engine.stop_activation(transition.activation_id))
+            if self.fault_claim:
+                msg = "the store cannot be written"
+                raise PlanningError(msg)
         landed = await super().commit_transition(transition)
         if claiming:
             self.landed = True
@@ -667,3 +672,94 @@ def test_only_a_turn_call_is_answered_with_the_stop_and_a_resume_keeps_its_raise
     assert isinstance(_stopped_failure(channel, None), ActivationStoppedError)
     assert _stopped_failure(control, raised) is raised
     assert _stopped_failure(control, None) is None
+
+
+async def test_a_stopped_resume_whose_claim_write_faults_returns_with_the_park_standing() -> None:
+    """ADR-0297 §4 past the recorded answer, inside the resolution: the claim's write
+    faults after the stop, so nothing executed — the resume returns stopped, no step, the
+    grant it established, and the drive's failure recorded before the stop's end entry.
+    """
+    plans = _Stopping()
+    harness, tool_handler = _resuming(plans)
+    parked = await harness.engine.converse("send it to the address in the invite", timeout=PATIENT)
+    assert parked.step is not None
+    assert parked.step.confirmation is not None
+    plans.before = True
+    plans.fault_claim = True
+
+    resumed = await harness.engine.resume(
+        parked.step.confirmation.token,
+        approved=True,
+        timeout=PATIENT,
+        remember_recipients_until=_UNTIL,
+    )
+
+    assert plans.answers == [ActivationStop.STOPPED]
+    assert tool_handler.calls == 0
+    assert resumed.stopped is True
+    assert resumed.reply is None
+    assert resumed.step is None
+    assert resumed.recipient_grant is not None
+    assert resumed.recipient_grant.established is not None
+    assert await _step_status(plans) is StepStatus.AWAITING_APPROVAL
+    (episode,) = [
+        one
+        for one in await _episodes(harness.memory)
+        if one.processing_record is not None
+        and one.processing_record.activation_id == plans.named[-1]
+    ]
+    _stopped(episode)
+    assert _ends(episode) == [
+        (ControllerStage.DRIVE, ControllerRule.PARK_ANSWERED, StageOutcome.FAILED),
+        (ControllerStage.END, ControllerRule.STOPPED, StageOutcome.DONE),
+    ]
+
+
+async def test_a_stopped_resume_whose_bookkeeping_faults_after_executing_keeps_the_step() -> None:
+    """The step executed and its disposition was assembled; the bookkeeping after it — the
+    quote mint — then raised. The resume returns the executed step, stopped, its grant
+    established, and the write that faulted is not retried.
+    """
+    plans = _Stopping()
+    harness, tool_handler = _resuming(plans)
+    parked = await harness.engine.converse("send it to the address in the invite", timeout=PATIENT)
+    assert parked.step is not None
+    assert parked.step.confirmation is not None
+    plans.after = True
+    mints: list[object] = []
+
+    async def faulting(*args: object) -> None:
+        mints.append(args)
+        msg = "the quote cannot be recorded"
+        raise PlanningError(msg)
+
+    harness.engine._runner._mint_quote = faulting  # type: ignore[method-assign,assignment]
+
+    resumed = await harness.engine.resume(
+        parked.step.confirmation.token,
+        approved=True,
+        timeout=PATIENT,
+        remember_recipients_until=_UNTIL,
+    )
+
+    assert plans.answers == [ActivationStop.STOPPED]
+    assert tool_handler.calls == 1
+    assert len(mints) == 1
+    assert resumed.stopped is True
+    assert resumed.reply is None
+    assert resumed.step is not None
+    assert resumed.step.disposition is Disposition.EXECUTED
+    assert resumed.recipient_grant is not None
+    assert resumed.recipient_grant.established is not None
+    assert await _step_status(plans) is StepStatus.SUCCEEDED
+    (episode,) = [
+        one
+        for one in await _episodes(harness.memory)
+        if one.processing_record is not None
+        and one.processing_record.activation_id == plans.named[-1]
+    ]
+    _stopped(episode)
+    assert _ends(episode) == [
+        (ControllerStage.DRIVE, ControllerRule.PARK_ANSWERED, StageOutcome.FAILED),
+        (ControllerStage.END, ControllerRule.STOPPED, StageOutcome.DONE),
+    ]
