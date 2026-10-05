@@ -730,6 +730,10 @@ class Harness:
         now: Clock | None = None,
         id_factory: Callable[[], str] | None = None,
         epoch_factory: Callable[[], str] | None = None,
+        # ADR-0293 §6's reader. On by default, as in every deployment: a message written
+        # into a conversation is taken in and answered. A case holding the medium alone
+        # switches it off.
+        chat_reader: bool = True,
     ) -> None:
         # ADR-0197's knobs. The recorder lives on the *stage* (§9), so a case that wants
         # to read the rows builds its own ``RoutingStage(model=…, recorder=…)`` and keeps
@@ -1048,6 +1052,7 @@ class Harness:
             # the call: ADR-0207's park cases pin that the spoken path acquired no
             # edge to it, which a subject holding no outbox at all cannot show.
             notification_outbox=notification_outbox,
+            chat_reader=chat_reader,
         )
 
 

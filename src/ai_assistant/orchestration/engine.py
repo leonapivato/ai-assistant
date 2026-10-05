@@ -63,8 +63,9 @@ from __future__ import annotations
 
 import asyncio
 import contextlib
+import contextvars
 import uuid
-from collections.abc import Awaitable, Callable, Mapping, Sequence
+from collections.abc import Awaitable, Callable, Coroutine, Mapping, Sequence
 from dataclasses import dataclass, field, replace
 from datetime import UTC, datetime, timedelta
 from enum import StrEnum
@@ -247,6 +248,14 @@ from ai_assistant.orchestration.channels import (
     spoken_result,
     text_result,
 )
+from ai_assistant.orchestration.chat import (
+    CHAT_TURN_BUDGET,
+    ChatInput,
+    ChatReader,
+    ChatWriter,
+    chat_effects,
+    chat_reply,
+)
 from ai_assistant.orchestration.composing import ComposedReply
 from ai_assistant.orchestration.controller import (
     DEFAULT_STAGE_RECORD_LIMIT,
@@ -339,6 +348,7 @@ from ai_assistant.orchestration.understanding import (
     ChannelWindow,
     ConversationWindow,
     SuppliedWindow,
+    TranscriptWindow,
     fetch_held,
 )
 from ai_assistant.orchestration.verification import Comparison, compare
@@ -515,6 +525,14 @@ _ROUTE_ID_ATTEMPTS: Final = 8
 _UNDERSTANDING_EXPIRED: Final = "the pass's deadline expired during understanding"
 _RECALL_EXPIRED: Final = "the pass's deadline expired during recall"
 _WINDOWS_EXPIRED: Final = "the pass's deadline expired while assembling the windows"
+
+
+def _unchecked(_result: object) -> None:
+    """No output check: the reader's activation returns to no caller (ADR-0293 §10).
+
+    What it produced is written into the conversation by the chat's writer, which holds
+    the message to its own bound (:func:`~ai_assistant.orchestration.conversations.fitted_message`).
+    """
 
 
 def _note_failure[T](turn: asyncio.Task[T]) -> None:
@@ -2349,6 +2367,9 @@ class _TurnPass(_ActivationPass):
     reference: TurnReference | None
     routing_wired: bool
     reconciliation_wired: bool
+    #: The chat's window, where the chat's reader brought this input in with one
+    #: (ADR-0293 §6:4); ``None`` on every other turn, whose window is the tail.
+    transcript: TranscriptWindow | None = None
     input: ResolvedChannelInput | None = None
     route: Literal["declined", "taken"] | None = None
     history: AssembledHistory | None = None
@@ -2870,6 +2891,8 @@ class Engine:
         max_outstanding_confirmations: int = _DEFAULT_MAX_OUTSTANDING,
         max_payload_bytes: int = DEFAULT_MAX_PAYLOAD_BYTES,
         drain_timeout: timedelta | None = None,
+        chat_reader: bool = True,
+        chat_turn_budget: timedelta = CHAT_TURN_BUDGET,
     ) -> None:
         """Wire the façade from injected collaborators.
 
@@ -3416,6 +3439,15 @@ class Engine:
                 that never asked for a budget; production gets the budget by going
                 through the composition root, which is where deployment values
                 belong.
+            chat_reader: Whether the chat's reader takes in the messages written
+                into conversations (ADR-0293 §6). ``True``, the default, is every
+                deployment's: a written message starts an activation and its reply
+                is written back. ``False`` leaves the medium without its reader, so a
+                written message is recorded and waits — for a suite that holds the
+                medium alone to the surface's contract.
+            chat_turn_budget: The budget each activation the reader starts is given
+                (:data:`~ai_assistant.orchestration.chat.CHAT_TURN_BUDGET`); the
+                reader has no caller to hand it one (ADR-0029 §4).
 
         Raises:
             TypeError: If ``max_outstanding_confirmations``,
@@ -3701,6 +3733,23 @@ class Engine:
         self._closing = False
         self._shutdown: asyncio.Task[None] | None = None
         self._drain_phase = DrainPhase.NOT_RUN
+        # ADR-0293 §6, §10: the chat's spokes in the hub, over the chat space the acts
+        # in the medium relay to.
+        self._chat_turn_budget = chat_turn_budget
+        self._chat_writer = ChatWriter(
+            conversations=conversations.chat_space, max_payload_bytes=max_payload_bytes
+        )
+        self._chat_reader = (
+            ChatReader(
+                conversations=conversations.chat_space,
+                activate=self._read_in,
+                spawn=self._spawn_read,
+                closing=lambda: self._closing,
+                mint=self._chat_activation_id,
+            )
+            if chat_reader
+            else None
+        )
 
     @property
     def drain_phase(self) -> DrainPhase:
@@ -3798,6 +3847,11 @@ class Engine:
         await self._close_open_episodes_once()
         await self._conversations.sweep_deletions()
         await self._conversations.reclaim()
+        # ADR-0293 §6:9: after a restart, the messages never taken in are taken in as
+        # usual — once the dead process's open episodes are closed, so a message an
+        # interrupted activation took in stays taken in. A restart writes nothing (§9:2).
+        if self._chat_reader is not None:
+            await self._chat_reader.notice_awaiting()
         if self._notification_outbox is not None:
             await self._recover_leases_once()
             await self._notification_outbox.reconcile()
@@ -7354,6 +7408,12 @@ class Engine:
             for one in self._running
             if one.state is not None and one.state.conversation_id == named
         ]
+        # ADR-0293 §8:2: an activation the reader started shows "working…" until the
+        # message answering it is written, which is after its own run has ended.
+        if self._chat_reader is not None and (
+            (reading := self._chat_reader.working(named)) is not None and reading not in running
+        ):
+            running.append(reading)
         return await self._tracked(
             self._conversations.digest(named, running=running), "conversation", checked=True
         )
@@ -7477,9 +7537,20 @@ class Engine:
             "write_message", max_bytes=self._max_payload_bytes, conversation_id=named, message=sent
         )
         check_message_fits(named, sent, max_bytes=self._max_payload_bytes)
-        return await self._tracked(
-            self._conversations.write(named, sent), "write_message", checked=True
-        )
+        return await self._tracked(self._written(named, sent), "write_message", checked=True)
+
+    async def _written(self, conversation_id: str, message: UserMessage) -> MessageReceipt:
+        """Record the message, then tell the chat's reader it is there (ADR-0293 §6:1).
+
+        The act answers *received* once the conversation has recorded the message and
+        starts nothing itself: the reader, told after the record, takes it in — at once,
+        or once the activation running from this conversation ends (§6:2, §6:3). A
+        repeat is told too, since the message it repeats may still be waiting.
+        """
+        receipt = await self._conversations.write(conversation_id, message)
+        if receipt.position is not None and self._chat_reader is not None:
+            self._chat_reader.notice(conversation_id)
+        return receipt
 
     async def delete_message(self, conversation_id: Identifier, *, position: int) -> bool:
         """Delete one message, leaving its marker (ADR-0293 §5:8, §5:12).
@@ -9360,7 +9431,122 @@ class Engine:
         task.add_done_callback(self._capture_safety.discard)
         self._register_capture(task)
 
+    def _spawn_read(self, read: Coroutine[None, None, None]) -> None:
+        """Start one of the chat reader's reads as work this engine tracks (ADR-0293 §6).
+
+        In a context of its own, so neither the correlation scope nor the activation
+        of the call that noticed the message is inherited by the read; tracked like
+        every other task here, so :meth:`aclose` drains it (ADR-0042 §2).
+        """
+        task = asyncio.get_running_loop().create_task(read, context=contextvars.Context())
+        self._inflight.add(task)
+        task.add_done_callback(self._inflight.discard)
+
+    def _chat_activation_id(self) -> str:
+        """Mint the id a reader's input is marked taken in by, and admitted with (§6:6).
+
+        The engine's own activation id factory. One whose reading is not canonical
+        UUID4 text would leave the activation's capture degraded with no id (ADR-0275
+        §2), and a message the reader marks must name the activation that took it in,
+        so a fresh UUID4 stands in, logged as the degradation it is.
+        """
+        try:
+            minted = self._activation_id_factory()
+            parsed = uuid.UUID(minted)
+            if parsed.version == 4 and str(parsed) == minted:  # noqa: PLR2004 — mandated UUID version
+                return minted
+        except Exception:
+            _log.warning("activation_capture_degraded", stage="chat_reader", reason="identifier")
+            return _uuid()
+        _log.warning("activation_capture_degraded", stage="chat_reader", reason="identifier")
+        return _uuid()
+
+    async def _read_in(self, taken: ChatInput) -> None:
+        """Run the activation the chat's reader took an input in for, then write (§6, §10).
+
+        The input is admitted as a typed message on the conversation channel, with the
+        id its messages were marked taken in by, and runs as a typed turn of a bounded
+        audience — the conversation's own devices — with the reader's window as its
+        channel window (§6:4). What it ends with is written into the conversation it
+        came from by the adapter: the reply, or *couldn't finish* listing what did
+        happen (§10:1, §10:2).
+
+        **A shutdown that cancels it writes nothing** (§9:2): the cancellation is
+        re-raised before the adapter is reached, the activation's episode is closed
+        interrupted, and the conversation's state reads *interrupted* (§8:3).
+
+        Raises:
+            CancelledError: If the activation, or this read, was cancelled.
+        """
+        accepted = ChannelInput(
+            target=ChannelIdentity(channel_type="conversation", instance_id=taken.conversation_id),
+            payload=TextChannelPayload(text=taken.text),
+        )
+        state = admit_channel(
+            accepted,
+            WholeTextReply(),
+            clock=self._now,
+            id_factory=lambda: taken.activation_id,
+            stage_limit=self._stage_record_limit,
+        )
+        deadline = asyncio.get_running_loop().time() + self._chat_turn_budget.total_seconds()
+        task = self._admitted_task(
+            ActivationScope(state),
+            lambda: self._chat_turn(taken),
+            seam="chat_reader",
+            check_output=_unchecked,
+            deadline=deadline,
+        )
+        outcome: TurnOutcome | None = None
+        try:
+            outcome, _report = await task
+        except asyncio.CancelledError:
+            raise
+        except Exception:
+            _log.warning("chat_activation_failed", stage="chat_reader", exc_info=True)
+        driven = state.working.driven if isinstance(state.working, _TurnPass) else None
+        reply = chat_reply(
+            outcome,
+            effects=chat_effects(outcome, step=None if driven is None else driven.step),
+        )
+        try:
+            await self._chat_writer.send(taken.conversation_id, reply)
+        except ConversationStoreError:
+            _log.warning("chat_message_unwritten", stage="chat_writer", exc_info=True)
+
+    async def _chat_turn(self, taken: ChatInput) -> TurnOutcome:
+        """The reader's input as one typed turn, composed whole, over its window."""
+        return await self._begin_channel_turn(
+            taken.text,
+            timeout=self._chat_turn_budget,
+            conversation_id=taken.conversation_id,
+            compose=self._composed_whole,
+            compose_routed=self._composed_routed_whole,
+            # The conversation's own devices, which the user chose (ADR-0293 §7:4): a
+            # bounded audience, as a typed turn on `converse` is (ADR-0204 §2).
+            supply=BoundedAudienceSupply(
+                speakable_attested_sources=self._speakable_attested_sources
+            ),
+            operation=ConversationalOperation.CONVERSE,
+            transcript=taken.window,
+        )
+
     def _activation_task[T](
+        self,
+        scope: ActivationScope,
+        work: Callable[[], Awaitable[T]],
+        *,
+        seam: str,
+        check_output: Callable[[T], None],
+        deadline: float | None = None,
+    ) -> asyncio.Task[tuple[T, EpisodeCaptureReport | None]]:
+        """Refuse a closing engine, then admit the activation (:meth:`_admitted_task`)."""
+        self._reject_if_closing()
+        return self._admitted_task(
+            scope, work, seam=seam, check_output=check_output, deadline=deadline
+        )
+
+    def _admitted_task[T](
         self,
         scope: ActivationScope,
         work: Callable[[], Awaitable[T]],
@@ -9387,8 +9573,14 @@ class Engine:
         what is left of its whole-call budget (:func:`_left`) — then meets the expiry
         itself and is classified as its kind classifies it, and the freeze's read
         settles whether the cut-off insert landed (ADR-0286 §3:4).
+
+        Called directly, without :meth:`_activation_task`'s refusal of a closing engine,
+        by the chat's reader alone: messages it has already marked taken in by this
+        activation are admitted even where a shutdown began while they were being
+        marked, so they are never marked by an activation that did not run (ADR-0293
+        §6:9). The read that admits it is itself tracked and awaits it, so the drain
+        still reaches it.
         """
-        self._reject_if_closing()
         admitted = asyncio.Event()
 
         async def run() -> tuple[T, EpisodeCaptureReport | None]:
@@ -11899,6 +12091,7 @@ class Engine:
         spoken: _SpokenCapture | None = None,
         reference: TurnReference | None = None,
         context: ChannelContext = _EMPTY_CHANNEL_CONTEXT,
+        transcript: TranscriptWindow | None = None,
     ) -> TurnOutcome:
         """Assemble the turn's working set, then run it through the controller (ADR-0280)."""
         remaining = None if self._reconciliation is None else self._reconciliation.opened(timeout)
@@ -11919,6 +12112,7 @@ class Engine:
                 operation=operation,
                 spoken=spoken,
                 reference=reference,
+                transcript=transcript,
                 routing_wired=self._routing is not None,
                 understanding_wired=self._understanding is not None,
                 recall_wired=self._recall is not None,
@@ -11963,10 +12157,15 @@ class Engine:
         assert self._windows is not None  # noqa: S101 — the engine refuses understanding without it
         try:
             async with asyncio.timeout_at(working.deadline):
-                if isinstance(working, _TurnPass):
+                if isinstance(working, _TurnPass) and working.transcript is not None:
+                    # ADR-0293 §6:4: the reader's window, the conversation's recent
+                    # transcript, in place of the tail read from episodes.
+                    channel: ChannelWindow = working.transcript
+                    episodes = True
+                elif isinstance(working, _TurnPass):
                     input = _resolved_turn(working)  # noqa: A001 — the resolved channel input
                     history = await self._turn_history(working)
-                    channel: ChannelWindow = ConversationWindow(input.channel, history.records)
+                    channel = ConversationWindow(input.channel, history.records)
                     episodes = working.operation is not ConversationalOperation.CONVERSE_SPOKEN
                 else:
                     assert isinstance(working, _EventPass)  # noqa: S101 — the two pass kinds
