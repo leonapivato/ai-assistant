@@ -1,6 +1,6 @@
 # 283. A channel's history is its episodes, and the turn index is retired
 
-- Status: Partially superseded by ADR-0284 (§3:1's and §3:2's eligibility axis; §4:1's eligibility; §7:5's flag; §11:1's skip) and ADR-0285 (§6:1's and §6:8's `record_observed` member; §6:6; §11:1–§11:3) and ADR-0286 (§1:3's never-changed channel; §7:1's sequence; §7:3's and §7:4's treatment of the episode after a capture failure) and ADR-0287 (§7:2's and §8:1's archive discards; §9:1–§9:2) and ADR-0291 (§1:2 as a general rule about a channel)
+- Status: Partially superseded by ADR-0284 (§3:1's and §3:2's eligibility axis; §4:1's eligibility; §7:5's flag; §11:1's skip) and ADR-0285 (§6:1's and §6:8's `record_observed` member; §6:6; §11:1–§11:3) and ADR-0286 (§1:3's never-changed channel; §7:1's sequence; §7:3's and §7:4's treatment of the episode after a capture failure) and ADR-0287 (§7:2's and §8:1's archive discards; §9:1–§9:2) and ADR-0291 (§1:2 as a general rule about a channel) and ADR-0292 (§1's index and §1:2's order, read as channel and place)
 - Date: 2026-10-01
 - Scope: [M36](https://github.com/leonapivato/ai-assistant/milestone/2), reopened 2026-09-30 for [#2613](https://github.com/leonapivato/ai-assistant/issues/2613); the first of three steps, the channel.
 - Dependency: ADR-0275, ADR-0276, ADR-0280, ADR-0281 and ADR-0282, all implemented at `5d872812`.
@@ -45,6 +45,21 @@
   replacement takes effect on ratification of ADR-0291. This reciprocal header record
   accompanies the numbered draft under ADR-0070 and ADR-0082; prior supersessions and
   the ratified body below are preserved.
+- Partially superseded: 2026-10-04 by ADR-0292 — one scope. §1's index, in what an
+  episode is indexed by, and §1:2's order, read as channel and place: an episode is
+  indexed by its channel and its place and records the spokes its input came through,
+  and the `ChannelIdentity` that §1:3 indexes and §1:2 orders is a channel together
+  with a place, a conversation's (`conversation`, id) being (the chat, that
+  conversation) (ADR-0292 §10). Under that mapping §1:3's columns, §3's reads and §8's
+  deletion and reclaim read exactly what they read today, scoped to the place. The
+  scope ADR-0291 recorded on §1:2 lapses with ADR-0291, which ADR-0292 supersedes
+  whole: no channel keeps a record (ADR-0292 §3), so §1:2 orders every place's episodes
+  and every channel's across its places, and a hosted medium's content is ordered as
+  its kind declares. §4:1's history read and §8:1's deletion stay in force under
+  ADR-0292's opening clause until the conversation channel's ADR replaces them for the
+  chat. Every other clause stands. This replacement takes effect on ratification of
+  ADR-0292. This reciprocal header record accompanies the numbered draft under ADR-0070
+  and ADR-0082; prior supersessions and the ratified body below are preserved.
 - **Partially supersedes** [ADR-0074](0074-conversation-is-an-entity-and-every-turn-is-an-episode.md) — **eight scopes.** **§2**, in its rule that a turn's existence *is* its index entry and that `last_turn_at` is set by the append: a turn is an episode on the conversation's channel, and `last_turn_at` is set by `record_turn` (§6 below). **§3's id derivation**, *"A captured episode's id is derived from the turn, not minted"* and the append that allocates, derives and writes: every episode's id is `activation:<activation_id>` (§2 below). **§3's durability**, *"A turn is recorded when its index entry lands"*: a turn is recorded when its episode lands. **§3's resume association**, through the store resolving a binding to its turn: the binding is resolved through the episode that parked it (§5 below). **§5's history read**, *"Turns are read through the index and fetched by id"*: history is the channel's episodes in number order (§4 below). **§7's reclaim**, *"no live turns"*: no live episode on the conversation's channel (§8 below). **§8's index-first protocol**: the index entry written first, step 2's *"deletes every episode the index names"*, step 3's drop of the index, and the rule that a refused append needs no compensation — deletion enumerates the conversation's channel, and the writer's `record_turn` is the verification (§7, §8 below). **§9's turn index and §10–§11's ordinal and membership**: `ConversationTurn`, the ordinal and its invariants, `append`, `turns`, `turns_after`, `turn_of_episode`, `turn_of_binding`, `episodes_to_purge`, the turns in `export`, the binding uniqueness §9.1 asks of `append`, and the rule that membership's one home is the index — membership is the episode's channel. The tombstone, the grace, the per-conversation exclusion over the mutations that remain, and every other clause stand.
 - **Partially supersedes** [ADR-0076](0076-stamped-conversations-are-enumerable.md) — **two scopes.** **§1's and §4's naming of `turns`, the two reverse lookups and `episodes_to_purge`**: they are removed (§6 below). **§2's sweep, in its *`episodes_to_purge`* part alone**: the sweep pages the conversation's channel (§8 below). `stamped_conversation_ids` and every other clause stand.
 - **Partially supersedes** [ADR-0077](0077-the-observer-proposes-beliefs-from-episodes.md) — **two scopes.** **§1's batch read through `ConversationStore.turns`** and **§8's premise that the index entry is durable and the episode best-effort**: the observer reads the conversation's episodes by number (§11 below). Every other clause stands.

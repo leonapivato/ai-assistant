@@ -1,6 +1,6 @@
 # 290. A channel is needed exactly where something crosses the hub's edge, and the hub reads and changes its own records directly
 
-- Status: Partially superseded by ADR-0291 (§1:3's window)
+- Status: Superseded by ADR-0292; partially superseded before it by ADR-0291 (§1:3's window)
 - Date: 2026-10-04
 - Scope: [#2578](https://github.com/leonapivato/ai-assistant/issues/2578), the channel redesign: the first of its four decisions, the rule the other three apply.
 - Authorization: the owner accepted proposal #2678 on 2026-10-04, including its later revision that a model call is processing, not output, and the dispatcher assigned 0290. This ADR is that proposal converted under `docs/proposals/README.md` → "When it is decided".
@@ -11,6 +11,14 @@
   other clause stands. This replacement takes effect on ratification of ADR-0291. This
   reciprocal header record accompanies the numbered draft under ADR-0070 and ADR-0082;
   the ratified body below is preserved.
+- Superseded: 2026-10-04 by ADR-0292 — whole. The edge becomes the assistant's rather
+  than the hub's, a channel becomes the group of spokes facing one thing rather than
+  the medium, and the activating and service sorts give way to push and pull per input
+  (ADR-0292 §1, §2, §6). What survives of this ADR is restated in ADR-0292 §5 and §12.
+  The supersession takes effect on ratification of ADR-0292. This reciprocal header
+  record accompanies the numbered draft under ADR-0070 and ADR-0082; the earlier
+  partial supersession stays on the status line as history, and the ratified body below
+  is preserved.
 
 ## Context
 

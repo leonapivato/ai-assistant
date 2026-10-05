@@ -1,11 +1,18 @@
 # 291. A channel's record is its own, separate from memory, and what it keeps is its kind's choice
 
-- Status: Accepted
+- Status: Superseded by ADR-0292
 - Date: 2026-10-04
 - Scope: [#2578](https://github.com/leonapivato/ai-assistant/issues/2578), the channel redesign: what any channel may keep, between ADR-0290 (what a channel is and where one is needed) and the text chat channel ([#2680](https://github.com/leonapivato/ai-assistant/pull/2680)), which applies this decision to one kind.
 - Authorization: the owner accepted proposal #2681 on 2026-10-04, at `440f15a0`, and the dispatcher assigned 0291. This ADR is that proposal converted under `docs/proposals/README.md` → "When it is decided".
 - **Partially supersedes** [ADR-0290](0290-a-channel-is-needed-exactly-where-something-crosses-the-hubs-edge.md) — **one scope.** **§1:3, in its *a window of what it recently carried* part alone**: a channel has a window only where its kind offers one, and the window is read from the channel's record (§3 below). A channel's kind, the identity the hub states and what its kind declares stand, and so does every other clause.
 - **Partially supersedes** [ADR-0283](0283-a-channels-history-is-its-episodes-and-the-turn-index-is-retired.md) — **one scope.** **§1:2, as a general rule about a channel**, *"A channel's order is its episodes' numbers, ascending. No reader orders a channel's history by timestamp or by id."*: it orders a channel's episodes, and binds no channel's own record, whose order is its kind's choice (§3 below). §1's numbering and channel index of episodes, ordering a channel's episodes by number, and the conversation-specific §4, §6 and §8 stand, and so does every other clause.
+- Superseded: 2026-10-04 by ADR-0292 — whole. A channel keeps no record of what it
+  carried; a hosted medium keeps its own content, and this ADR's rules for a channel's
+  record move onto that content (ADR-0292 §3). The supersession takes effect on
+  ratification of ADR-0292. This reciprocal header record accompanies the numbered draft
+  under ADR-0070 and ADR-0082; the partial supersessions this ADR made of ADR-0290 and
+  ADR-0283 end with it, as ADR-0292's records on those ADRs state, and the ratified
+  body below is preserved.
 
 ## Context
 
