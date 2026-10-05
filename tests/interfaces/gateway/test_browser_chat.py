@@ -32,7 +32,7 @@ if TYPE_CHECKING:
     from pathlib import Path
 
     from browser_drive import Drive
-    from playwright.async_api import Browser, Dialog
+    from playwright.async_api import Browser, Dialog, Route
 
 pytestmark = [
     pytest.mark.integration,
@@ -474,9 +474,16 @@ async def test_a_state_change_with_no_transcript_change_reaches_an_idle_page(
     """§8:1: the state is followed while a conversation is open, sent from here or not."""
     async with driving(gateway_browser, tmp_path) as drive:
         await _open(drive)
+        # The opening read of the state has landed, idle, before the state changes: what
+        # shows the change is a later read made by the following.
+        await drive.page.wait_for_function(
+            "() => chat.state !== null && !chat.state.working && chat.following"
+        )
         held = drive.engine.conversation
+        reads: list[str] = []
 
         async def working(conversation_id: str) -> Any:
+            reads.append(conversation_id)
             digest = await held(conversation_id)
             assert digest is not None
             return digest.model_copy(update={"state": ConversationState(working=True)})
@@ -485,6 +492,7 @@ async def test_a_state_change_with_no_transcript_change_reaches_an_idle_page(
         await expect(drive.page.locator("#chat-state")).to_contain_text(
             "working on this", timeout=_IDLE_FOLLOWED
         )
+        assert reads
 
 
 async def test_an_edits_late_answer_does_not_undo_a_newer_set(
@@ -576,3 +584,69 @@ async def test_a_chat_opened_on_a_hidden_page_waits_to_be_seen(
             }"""
         )
         await expect(follow).to_contain_text("You came back")
+
+
+async def test_a_send_whose_refusal_could_not_be_read_is_not_known(
+    gateway_browser: Browser, tmp_path: Path
+) -> None:
+    """ADR-0177 §7: an answer the page could not read leaves the outcome not known."""
+    async with driving(gateway_browser, tmp_path) as drive:
+        await _open(drive)
+
+        async def unreadable(route: Route) -> None:
+            await route.fulfill(status=502, body="<html>proxy</html>")
+
+        await drive.page.route("**/chat/message/write", unreadable)
+        try:
+            await _send(drive, "Did it?")
+            pending = drive.page.locator("#chat-transcript li.pending")
+            await expect(pending).to_contain_text("not known whether this arrived")
+            await expect(pending.locator("button", has_text="Send again")).to_be_visible()
+        finally:
+            await drive.page.unroute("**/chat/message/write", unreadable)
+
+
+async def test_a_late_state_read_does_not_restore_a_device_an_edit_removed(
+    gateway_browser: Browser, tmp_path: Path
+) -> None:
+    """An answer asked before an edit loses to the edit, whichever arrives first."""
+    async with driving(gateway_browser, tmp_path) as drive:
+        conversation = await _open(drive)
+        await drive.engine.set_conversation_devices(
+            conversation,
+            devices=[
+                ChatDevice(device_id="hub", access=DeviceAccess.READ_WRITE),
+                ChatDevice(device_id="nTABLET", access=DeviceAccess.READ),
+            ],
+        )
+        ends = drive.page.locator("#chat-conversation-devices li")
+        await expect(ends).to_have_count(2, timeout=_IDLE_FOLLOWED)
+
+        await drive.page.evaluate(_HOLDING, "/conversation")
+        await drive.page.wait_for_function("() => window.__held.reached", timeout=_IDLE_FOLLOWED)
+        await ends.filter(has_text="nTABLET").locator("button", has_text="Remove").click()
+        await expect(ends).to_have_count(1)
+        await drive.page.evaluate("window.__held.release()")
+
+        await drive.page.wait_for_function("() => !window.__held.open")
+        await expect(ends).to_have_count(1)
+
+
+async def test_a_devices_read_that_fails_on_opening_is_read_again_on_the_owners_press(
+    gateway_browser: Browser, tmp_path: Path
+) -> None:
+    """Following again opens the chat again where an opening read failed."""
+    async with driving(gateway_browser, tmp_path) as drive:
+        held = drive.engine.my_devices
+
+        async def failing() -> Any:
+            raise ConversationStoreError("the set is unreadable")
+
+        drive.engine.my_devices = failing  # type: ignore[method-assign]
+        await drive.page.click("#chat-button")
+        await expect(drive.page.locator("#chat-follow")).to_contain_text("Stopped following")
+
+        drive.engine.my_devices = held  # type: ignore[method-assign]
+        await drive.page.click("#chat-follow-again")
+        await expect(drive.page.locator("#chat-add-device")).to_be_visible()
+        await expect(drive.page.locator("#chat-follow")).to_contain_text("Following this chat")

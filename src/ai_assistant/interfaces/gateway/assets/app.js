@@ -8877,11 +8877,32 @@ const chat = {
   // each undo the other.
   editingMine: false,
   editingConversation: false,
-  // How many times each set has been observed changed — by the following or by a
-  // read — so an edit's answer does not put back a set older than one already seen.
-  mineSeen: 0,
-  conversationSeen: 0,
+  // **One rule for every answer that sets something on screen**: it is applied only
+  // where nothing newer about the same subject has been applied since its request went
+  // out. Every request that can set a subject takes a stamp from `observed` as it goes
+  // out (`stamp`), and each subject keeps the stamp of the answer it was last set from
+  // (`newer`). So a late edit answer, a late state read and a late page of changes each
+  // lose to whatever was asked after them, whichever arrives first.
+  observed: 0,
+  at: { mine: 0, devices: 0, state: 0 },
+  // Whether the reads that open the chat all answered. Where one did not, following
+  // again opens the chat again, since nothing re-reads it of its own motion.
+  loaded: false,
 };
+
+function stamp() {
+  chat.observed += 1;
+  return chat.observed;
+}
+
+// Whether an answer asked at `asked` may set `subject`, and the subject marked as set.
+function newer(subject, asked) {
+  if (asked <= chat.at[subject]) {
+    return false;
+  }
+  chat.at[subject] = asked;
+  return true;
+}
 
 function chatWasOpen() {
   try {
@@ -8948,22 +8969,27 @@ function closeChat() {
 async function loadChat() {
   chat.era += 1;
   const mine = chat.era;
+  chat.loaded = false;
   stopFollowing(CHAT_CATCHING_UP, false);
   fault(null, "chat");
-  if (!(await readChatCursor())) {
-    if (mine === chat.era && chat.open) {
+  // Each opening read either answers or stops the chat where it is, with the control
+  // that opens it again: nothing here is read again of the page's own motion.
+  const opened =
+    (await readChatCursor()) &&
+    mine === chat.era &&
+    (await readMyDevices()) &&
+    mine === chat.era &&
+    (await listChat(false));
+  if (mine !== chat.era) {
+    return;
+  }
+  if (!opened) {
+    if (chat.open) {
       stopFollowing(CHAT_STOPPED_REFUSED, true);
     }
     return;
   }
-  if (mine !== chat.era) {
-    return;
-  }
-  await readMyDevices();
-  await listChat(false);
-  if (mine !== chat.era) {
-    return;
-  }
+  chat.loaded = true;
   if (chat.selected !== null && !(await selectChat(chat.selected))) {
     return;
   }
@@ -9012,30 +9038,36 @@ async function readChatCursor() {
   return true;
 }
 
+// Answers whether "my devices" and this browser's own device were read.
 async function readMyDevices() {
   const half = headerHalf();
   if (half === null) {
     showBootstrap();
-    return;
+    return false;
   }
   const era = sessionEra;
+  const asked = stamp();
   try {
     const body = await relay(half, "/chat/devices", {}, "chat");
     if (!sameSession(half, era)) {
-      return;
+      return false;
     }
     if (body === null) {
-      return;
+      return false;
     }
-    chat.myDevices = body.devices;
     chat.thisDevice = body.this_device;
+    if (newer("mine", asked)) {
+      chat.myDevices = body.devices;
+    }
     renderMyDevices();
     renderConversationDevices();
+    return true;
   } catch (_) {
     if (!sameSession(half, era)) {
-      return;
+      return false;
     }
     fault(GATEWAY_GONE, "chat");
+    return false;
   }
 }
 
@@ -9101,9 +9133,10 @@ function followingQuickly() {
   return Date.now() < chat.quickUntil || (chat.state !== null && chat.state.working);
 }
 
-// The owner pressing "Follow changes again", or a cursor the chat space no longer has.
+// The owner pressing "Follow changes again": the chat opened again where an opening read
+// failed or the chat space was started afresh, and following started again otherwise.
 function followAgain() {
-  if (chat.cursor === null) {
+  if (chat.cursor === null || !chat.loaded) {
     void loadChat();
     return;
   }
@@ -9144,6 +9177,7 @@ async function readChanges(tick) {
   }
   const era = sessionEra;
   const after = chat.cursor;
+  const asked = stamp();
   let body;
   try {
     body = await relay(half, "/chat/changes", { after: after }, "chat");
@@ -9175,7 +9209,7 @@ async function readChanges(tick) {
     void loadChat();
     return null;
   }
-  applyChanges(body.changes);
+  applyChanges(body.changes, asked);
   chat.cursor = body.next_after;
   // The state is read with the changes, on every read while a conversation is open: it
   // changes without a change to the transcript — an activation started elsewhere, or a
@@ -9201,7 +9235,8 @@ async function readChanges(tick) {
 // Apply changes in sequence order (ADR-0293 §5:10). Each is safe to apply twice, since a
 // snapshot read after the cursor may already hold it. Answers whether the conversation
 // on screen changed.
-function applyChanges(changes) {
+// A set of devices in a change is applied only where nothing asked later has set it.
+function applyChanges(changes, asked) {
   let touched = false;
   let relist = false;
   changes.forEach((change) => {
@@ -9230,14 +9265,16 @@ function applyChanges(changes) {
       }
     } else if (change.kind === "devices_changed") {
       if (change.conversation_id === null) {
-        chat.mineSeen += 1;
-        chat.myDevices = change.devices;
-        renderMyDevices();
-        renderConversationDevices();
+        if (newer("mine", asked) || chat.at.mine === asked) {
+          chat.myDevices = change.devices;
+          renderMyDevices();
+          renderConversationDevices();
+        }
       } else if (change.conversation_id === chat.selected) {
-        chat.conversationSeen += 1;
-        chat.devices = change.devices;
-        renderConversationDevices();
+        if (newer("devices", asked) || chat.at.devices === asked) {
+          chat.devices = change.devices;
+          renderConversationDevices();
+        }
       }
     }
   });
@@ -9271,34 +9308,41 @@ function chatOnline() {
 
 // --- the conversations --------------------------------------------------------
 
+// Answers whether the listing was read; a read a newer one replaced is not a failure.
 async function listChat(more) {
   chat.listed += 1;
   const mine = chat.listed;
   const half = headerHalf();
   if (half === null) {
     showBootstrap();
-    return;
+    return false;
   }
   const era = sessionEra;
   const offset = more ? chat.listing.length : 0;
   try {
     const body = await relay(half, "/conversations", { offset: offset }, "chat");
     if (!sameSession(half, era)) {
-      return;
+      return false;
     }
-    if (body === null || mine !== chat.listed) {
-      return;
+    if (mine !== chat.listed) {
+      return true;
+    }
+    if (body === null) {
+      return false;
     }
     chat.listing = more ? chat.listing.concat(body.conversations) : body.conversations;
     el("chat-more").hidden = body.conversations.length < CHAT_PAGE;
     renderChatListing();
+    return true;
   } catch (_) {
     if (!sameSession(half, era)) {
-      return;
+      return false;
     }
     if (mine === chat.listed) {
       fault(GATEWAY_GONE, "chat");
+      return false;
     }
+    return true;
   }
 }
 
@@ -9383,6 +9427,8 @@ async function selectChat(id) {
   chat.oldest = null;
   chat.state = null;
   chat.devices = null;
+  chat.at.devices = 0;
+  chat.at.state = 0;
   chat.unread.delete(id);
   setReplyTo(null);
   sayChat(null);
@@ -9495,6 +9541,7 @@ async function readChatDigest(id, mine) {
     return false;
   }
   const era = sessionEra;
+  const asked = stamp();
   try {
     const body = await relay(half, "/conversation", { conversation_id: id }, "chat");
     if (!sameSession(half, era)) {
@@ -9508,9 +9555,12 @@ async function readChatDigest(id, mine) {
       return false;
     }
     chat.digestDue = false;
-    chat.state = body.conversation.state;
-    chat.conversationSeen += 1;
-    chat.devices = body.conversation.devices;
+    if (newer("state", asked)) {
+      chat.state = body.conversation.state;
+    }
+    if (newer("devices", asked)) {
+      chat.devices = body.conversation.devices;
+    }
     renderChatState();
     renderConversationDevices();
     return true;
@@ -9759,11 +9809,16 @@ async function deliverChat(one) {
       return;
     }
     if (body === null) {
-      const gone = refusal !== null && refusal.fault === "no-such-conversation";
-      one.status = gone ? "gone" : "refused";
-      if (refusal !== null && refusal.fault === "hub-unreachable") {
-        // The hub may have recorded it before the connection failed.
+      // A refusal is known not to have recorded the message only where it names its
+      // condition and that condition is not the hub having gone mid-request; an answer
+      // this page could not read is *not known* (ADR-0177 §7), and keeps the resend.
+      const named = refusal !== null && typeof refusal.fault === "string";
+      if (!named || UNKNOWN_FAULTS.has(refusal.fault)) {
         one.status = "unknown";
+      } else if (refusal.fault === "no-such-conversation") {
+        one.status = "gone";
+      } else {
+        one.status = "refused";
       }
       renderTranscript();
       return;
@@ -10000,7 +10055,7 @@ async function setMyDevices(devices) {
     return;
   }
   const era = sessionEra;
-  const seen = chat.mineSeen;
+  const asked = stamp();
   chat.editingMine = true;
   renderMyDevices();
   try {
@@ -10011,9 +10066,8 @@ async function setMyDevices(devices) {
     if (body === null) {
       return;
     }
-    // Only where nothing newer has been seen since the edit went out: a set the
-    // following applied meanwhile is later than this answer, whatever it says.
-    if (chat.mineSeen === seen) {
+    // Only where nothing asked after the edit has set the set already.
+    if (newer("mine", asked)) {
       chat.myDevices = devices;
     }
   } catch (_) {
@@ -10074,7 +10128,7 @@ async function setConversationDevices(devices) {
     return false;
   }
   const era = sessionEra;
-  const seen = chat.conversationSeen;
+  const asked = stamp();
   chat.editingConversation = true;
   renderConversationDevices();
   try {
@@ -10090,7 +10144,7 @@ async function setConversationDevices(devices) {
     if (body === null) {
       return false;
     }
-    if (chat.selected === id && chat.conversationSeen === seen) {
+    if (chat.selected === id && newer("devices", asked)) {
       chat.devices = devices;
     }
     return true;
