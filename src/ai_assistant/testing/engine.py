@@ -32,6 +32,7 @@ argument, so a test changes one thing without restating the rest.
 from __future__ import annotations
 
 import asyncio
+import contextlib
 import hashlib
 import re
 from base64 import b64encode
@@ -48,6 +49,7 @@ from ai_assistant.core.errors import (
     ActivationStoppedError,
     AuditError,
     ChannelProcessingTimeoutError,
+    ConversationStoreError,
     GrantError,
     InvalidGrantError,
     InvalidRecipientGrantError,
@@ -3954,7 +3956,10 @@ class FakeAssistantEngine:
             if not marked:
                 msg = "the reader's input was not taken in"
                 raise RuntimeError(msg)
-            outcome = self._chat_outcome(taken.narrowed(marked), activation)
+            # ADR-0297 §4: a stop marked while the input was being taken in starts
+            # nothing after it — no understanding, no reply — and the pass ends.
+            if not activation.stopped:
+                outcome = self._chat_outcome(taken.narrowed(marked), activation)
         except BaseException as exc:
             failure = exc
         try:
@@ -3974,7 +3979,10 @@ class FakeAssistantEngine:
         if not marked or activation.stopped:
             return bool(marked)
         reply = chat_reply(None if failure is not None else outcome, effects=chat_effects(outcome))
-        await self._chat_writer.send(conversation_id, reply)
+        # A reply the store would not take is lost, as the engine loses it: the
+        # activation still took its input in, so the reader goes on to what waited.
+        with contextlib.suppress(ConversationStoreError):
+            await self._chat_writer.send(conversation_id, reply)
         return True
 
     def _chat_outcome(self, taken: ChatInput, activation: FakeActivation) -> TurnOutcome:

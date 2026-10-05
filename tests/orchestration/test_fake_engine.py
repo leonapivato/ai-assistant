@@ -17,7 +17,7 @@ from __future__ import annotations
 import asyncio
 from datetime import UTC, datetime, timedelta
 from decimal import Decimal
-from typing import TYPE_CHECKING
+from typing import TYPE_CHECKING, Any
 
 import pytest
 from assistant_engine_contract import (
@@ -73,6 +73,7 @@ from episode_inspection_contract import (
 from story_surface_contract import STORY_LIMIT, STORY_SURFACE_AT, StorySurfaceSubject
 
 from ai_assistant.core.errors import (
+    ConversationStoreError,
     DuplicateDecisionError,
     OversizedValueError,
     UngrantableActError,
@@ -110,6 +111,8 @@ from ai_assistant.core.types import (
     MemoryKind,
     MemoryWrite,
     MessageAuthor,
+    MessageReceipt,
+    NewMessage,
     PermissionDecision,
     PermissionOutcome,
     PermissionRuling,
@@ -2024,3 +2027,48 @@ async def test_a_fake_told_not_to_answer_leaves_the_message_waiting(by: str) -> 
     digest = await engine.conversation(conversation)
     assert digest is not None
     assert digest.state == ConversationState()
+
+
+async def test_a_reply_the_store_refuses_does_not_strand_what_waited() -> None:
+    """As the engine: a reply the store refuses is lost, and the reader goes on to what waited.
+
+    The first activation is held at its marking while a second message is written;
+    its reply's write is then refused once. The second message is still taken in and
+    answered, rather than left waiting for a notice that never comes.
+    """
+    engine = FakeAssistantEngine()
+    entered, release = asyncio.Event(), asyncio.Event()
+    take_in, append = engine.chat.take_in, engine.chat.append_message
+
+    async def held(*args: Any, **kwargs: Any) -> tuple[int, ...]:
+        if not entered.is_set():
+            entered.set()
+            await release.wait()
+        return await take_in(*args, **kwargs)
+
+    refused: list[NewMessage] = []
+
+    async def refusing(conversation_id: str, message: NewMessage) -> MessageReceipt:
+        if message.author is MessageAuthor.ASSISTANT and not refused:
+            refused.append(message)
+            msg = "the store is unavailable"
+            raise ConversationStoreError(msg)
+        return await append(conversation_id, message)
+
+    engine.chat.take_in = held  # type: ignore[method-assign]
+    engine.chat.append_message = refusing  # type: ignore[method-assign]
+    conversation = await _chat_with_one_message(engine)
+    async with asyncio.timeout(10):
+        await entered.wait()
+    await engine.write_message(
+        conversation, message=UserMessage(device_id="phone", message_id="m-2", text="again")
+    )
+    release.set()
+    await _settled(engine)
+
+    assert len(refused) == 1
+    page = await engine.transcript(conversation)
+    assert page is not None
+    authors = [one.author for one in page.entries if isinstance(one, TranscriptMessage)]
+    assert authors == [MessageAuthor.USER, MessageAuthor.USER, MessageAuthor.ASSISTANT]
+    assert await engine.chat.untaken_messages(conversation) == ()
