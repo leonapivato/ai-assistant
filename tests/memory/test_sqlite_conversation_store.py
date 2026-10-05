@@ -1670,6 +1670,9 @@ async def test_a_file_written_before_the_chat_space_opens_with_empty_transcripts
         ),
         ("UPDATE conversations SET started_at = 'then'", "device_conversations"),
         ("UPDATE conversation_devices SET access = 'everything'", "device_conversations"),
+        ("UPDATE chat_changes SET devices = NULL WHERE devices IS NOT NULL", "device_changes"),
+        ("UPDATE chat_changes SET devices = NULL WHERE devices IS NOT NULL", "device_catch_up"),
+        ("UPDATE chat_changes SET devices = NULL WHERE devices IS NOT NULL", "stamp_deleted"),
     ],
 )
 async def test_a_corrupt_chat_row_is_a_store_fault_on_the_read(
@@ -1692,6 +1695,10 @@ async def test_a_corrupt_chat_row_is_a_store_fault_on_the_read(
             "taken_in": lambda: store.taken_in(conversation, positions=[1]),
             "device_changes": lambda: store.device_changes("phone", after=0),
             "device_conversations": lambda: store.device_conversations("phone"),
+            # Past every row that sets a set, so only the set a change was recorded
+            # under is read, never a set's own.
+            "device_catch_up": lambda: store.device_changes("phone", after=2),
+            "stamp_deleted": lambda: store.stamp_deleted(conversation),
         }
         with pytest.raises(ConversationStoreError):
             await reads[read]()

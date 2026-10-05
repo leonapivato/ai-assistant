@@ -294,17 +294,20 @@ _WRITING_ONLY: Final = json.dumps(sorted(one.value for one in DeviceAccess if no
 #: changes after a cursor, each with the message an addition names and with the set of
 #: devices it was recorded under — the latest row before it that set the same
 #: conversation's devices, or "my devices" where ``conversation_id`` is ``NULL``
-#: (``IS`` matches the two ``NULL``s). A started conversation has none before it. The
-#: filter itself is :func:`_reaches`, in Python, so every set it consults is decoded
-#: and checked as :meth:`SqliteConversationStore.changes` checks the sets it returns: a
-#: corrupt set is a store fault, never a reason to withhold a change in silence. Written
-#: out as one literal, for the reason the module gives for its column lists (ruff
-#: ``S608``). Its parameters are the cursor and the batch bound.
+#: (``IS`` matches the two ``NULL``s). A started conversation has none before it, read
+#: as ``NULL``; a row that is there with no set is read as an empty blob, which no set
+#: decodes from, so it is a store fault rather than an empty set. The filter itself is
+#: :func:`_reaches`, in Python, so every set it consults is decoded and checked as
+#: :meth:`SqliteConversationStore.changes` checks the sets it returns: a corrupt set is
+#: a store fault, never a reason to withhold a change in silence. Written out as one
+#: literal, for the reason the module gives for its column lists (ruff ``S608``). Its
+#: parameters are the cursor and the batch bound.
 _DEVICE_CHANGES_SQL: Final = (
     "SELECT c.seq, c.kind, c.conversation_id, c.position, c.devices, "
     "m.conversation_id, m.position, m.author, m.written_at, m.text, m.replies_to, "
     "m.options, m.cut_off, m.device_id, m.message_id, m.deleted, "
-    "(SELECT p.devices FROM chat_changes p WHERE p.conversation_id IS c.conversation_id "
+    "(SELECT COALESCE(p.devices, X'') FROM chat_changes p "
+    "WHERE p.conversation_id IS c.conversation_id "
     "AND p.kind IN ('conversation_started', 'devices_changed') AND p.seq < c.seq "
     "ORDER BY p.seq DESC LIMIT 1) "
     "FROM chat_changes c LEFT JOIN messages m ON c.kind = 'message_added' "
@@ -945,8 +948,15 @@ def _readers_from(conversation_id: object, value: object) -> tuple[ChatDevice, .
     return tuple(decoded)
 
 
-def _set_of(conversation_id: object, value: object) -> tuple[ChatDevice, ...]:
-    """A stored set of devices, ``NULL`` read as no set: none before the first."""
+def _set_before(conversation_id: object, value: object) -> tuple[ChatDevice, ...]:
+    """The set a change was recorded under, ``NULL`` read as none: no row before it.
+
+    A row that is there and holds no set reaches here as an empty blob (see
+    :data:`_DEVICE_CHANGES_SQL`), which :func:`_devices_from` refuses.
+
+    Raises:
+        ConversationStoreError: If the stored set does not decode.
+    """
     return () if value is None else _devices_from(conversation_id, value)
 
 
@@ -972,13 +982,13 @@ def _reaches(device: str, row: Sequence[Any]) -> bool:
     kind, conversation_id, own, before = row[1], row[2], row[4], row[-1]
     if kind in {"conversation_started", "devices_changed"}:
         return (
-            _named(device, _set_of(conversation_id, own)) is not None
-            or _named(device, _set_of(conversation_id, before)) is not None
+            _named(device, _devices_from(conversation_id, own)) is not None
+            or _named(device, _set_before(conversation_id, before)) is not None
         )
     if kind == "conversation_deleted":
         ends = () if own is None else _readers_from(conversation_id, own)
     elif kind in {"message_added", "message_deleted"}:
-        ends = _set_of(conversation_id, before)
+        ends = _set_before(conversation_id, before)
     else:
         msg = f"a stored change carries an unknown kind: {describe_untrusted(kind)}"
         raise ConversationStoreError(msg)
@@ -1367,7 +1377,7 @@ class SqliteConversationStore:
         )
         readers: dict[str, ChatDevice] = {}
         for (value,) in rows:
-            for one in _set_of(conversation_id, value):
+            for one in _devices_from(conversation_id, value):
                 if one.access.reads:
                     readers[one.device_id] = one
         for one in cls._devices_of(conn, conversation_id):
