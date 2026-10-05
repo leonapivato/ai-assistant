@@ -839,3 +839,70 @@ async def test_a_read_reply_target_deleted_later_is_named_as_deleted(
         await drive.page.click("#chat-older")
         await expect(reply).to_contain_text("In reply to a message that was deleted.")
         await expect(reply).not_to_contain_text("“The secret.”")
+
+
+async def test_a_lookups_marker_removes_a_loaded_message_whatever_the_next_lookup_does(
+    gateway_browser: Browser, tmp_path: Path
+) -> None:
+    """§5:12: a marker a lookup brings removes the message from the loaded transcript too,
+    and is on screen before the next lookup is awaited — so a next lookup that fails does
+    not leave the deleted text up.
+
+    Two reply targets lie outside the opening snapshot. The first lookup is held while
+    an older page loads the target's text; the target is then deleted elsewhere, with
+    following stopped so only the lookup can bring the marker; and the second lookup
+    fails.
+    """
+    async with driving(gateway_browser, tmp_path) as drive:
+        await drive.engine.set_my_devices(
+            [ChatDevice(device_id="hub", access=DeviceAccess.READ_WRITE)]
+        )
+        started = await drive.engine.start_conversation()
+        for text in ("Secret A.", "Secret B."):
+            await drive.engine.chat.append_message(
+                started.id, NewMessage(author=MessageAuthor.ASSISTANT, text=text)
+            )
+        for index in range(3, 60):
+            await drive.engine.chat.append_message(
+                started.id, NewMessage(author=MessageAuthor.ASSISTANT, text=f"Filler {index}.")
+            )
+        for target in (1, 2):
+            await drive.engine.chat.append_message(
+                started.id,
+                NewMessage(
+                    author=MessageAuthor.ASSISTANT, text=f"About {target}.", replies_to=target
+                ),
+            )
+        held = drive.engine.transcript
+        gate = asyncio.Event()
+        lookups: list[int | None] = []
+
+        async def gated(conversation_id: str, **keywords: Any) -> Any:
+            if keywords.get("limit") != 1:
+                return await held(conversation_id, **keywords)
+            lookups.append(keywords.get("before"))
+            if len(lookups) == 1:
+                await gate.wait()
+                return await held(conversation_id, **keywords)
+            raise ConversationStoreError("the transcript is unreadable")
+
+        drive.engine.transcript = gated  # type: ignore[method-assign]
+        await drive.page.click("#chat-button")
+        await drive.page.locator("#chat-conversations button", has_text="Open").click()
+        await drive.page.wait_for_function("() => chat.resolving !== null")
+        assert lookups == [2]
+
+        await drive.page.evaluate("() => stopFollowing(null, true)")
+        await drive.page.click("#chat-older")
+        transcript = drive.page.locator("#chat-transcript")
+        await expect(transcript).to_contain_text("Secret A.")
+
+        await drive.engine.delete_message(started.id, position=1)
+        gate.set()
+        await drive.page.wait_for_function("() => chat.resolving === null")
+
+        assert lookups == [2, 3]
+        await expect(transcript).not_to_contain_text("Secret A.")
+        await expect(
+            drive.page.locator("#chat-transcript li", has_text="About 1.")
+        ).to_contain_text("In reply to a message that was deleted.")
