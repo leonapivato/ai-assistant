@@ -100,9 +100,9 @@
   supersessions and the ratified body below are preserved.
 - Partially superseded: 2026-10-05 by ADR-0299 — one scope. §3:4's *"Both turn entries
   reach the browser"*: `converse_streaming` has left the promoted surface (ADR-0293
-  §11:2), so the browser reaches one turn entry, `converse`, and no streamed turn entry
-  (ADR-0299 §3). The rest of §3:4, §3:1–§3:3 and §3:5 stand, and every other clause
-  stands. This replacement takes effect on ratification of ADR-0299. This reciprocal
+  §11:2), so of the two entries this clause names the browser reaches `converse` alone
+  (ADR-0299 §3). The spoken entry ADR-0200 added is not one of the two and is untouched.
+  The rest of §3:4, §3:1–§3:3 and §3:5 stand, and every other clause stands. This replacement takes effect on ratification of ADR-0299. This reciprocal
   header record accompanies the numbered draft under ADR-0070 and ADR-0082; prior
   supersessions and the ratified body below are preserved.
 
