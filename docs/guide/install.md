@@ -125,7 +125,7 @@ need one.
 | --- | --- |
 | `ai-assistant-hub` | The resident process. Start it and leave it running. |
 | `assistant` | The command-line client, and the `gateway` subcommand. |
-| `ai-assistant-device` | Enrol, revoke and list the devices a hub admits — see [`remote-hub.md`](remote-hub.md). |
+| `ai-assistant-device` | Enrol and revoke the devices a hub admits, give them roles, and list them with the machines each gateway has named — see [`remote-hub.md`](remote-hub.md). |
 | `ai-assistant-backup` / `ai-assistant-restore` | Take and restore a backup of the data directory. |
 | `ai-assistant-purge` | Delete an installation and everything in it. |
 | `ai-assistant-reembed` | Re-embed stored memory after the embedding model changes. |

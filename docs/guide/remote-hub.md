@@ -28,6 +28,11 @@ is at the overlay identity you enrolled, and it presents the credential that
 enrolment minted. Being on the overlay is not enough — networks acquire members,
 and the hub admits on a decision you made *at the hub*.
 
+Admission only lets a device in. **What it may then do is its roles**, which you
+also give at the hub, and a device holds none until you do: the hub checks every
+request against them and refuses one the device's roles do not allow. Step 3
+gives them.
+
 ## 1. Turn on the hub's remote listener
 
 On the hub's machine, add two settings to its `.env`:
@@ -55,11 +60,12 @@ hub_listening      socket=/home/you/.ai-assistant/hub.sock ...
 The address is redacted in the record on purpose; you configured it, so you
 know it.
 
-`hub_admin_bound` is the line that matters for the next step. The hub binds that
-socket **only when the remote listener is on**, because enrolling devices is
-only meaningful when there is a door for them to arrive at — so
-`ai-assistant-device` does not work on a hub that has not been through this
-step, and says so rather than reporting the hub as not running.
+`hub_admin_bound` is the control socket `ai-assistant-device` talks to. Every
+hub binds it, with or without a remote listener, because roles are given there
+too — a browser served by a gateway on the hub's own machine needs one whether or
+not anything ever dials in. What needs the remote listener is **enrolling**: a hub
+without one has no overlay identity to show beside a credential and no door for
+the device to arrive at, so `enrol` refuses there, in a sentence.
 
 ## 2. Enrol the client, at the hub
 
@@ -87,7 +93,7 @@ the hub keeps only a verifier it cannot be recovered from.
 **The two identities above are equal only because that run had one machine
 playing both roles.** On two machines `Device:` is the identity you passed in
 and `Hub:` is a different value — the hub's own, the same one `hub_remote_bound`
-printed in step 1. Read the labels, not the strings: what step 3 needs is the
+printed in step 1. Read the labels, not the strings: what step 4 needs is the
 `Hub:` line, and passing the `Device:` line there enrols the client at a hub
 that is not the one it will dial.
 
@@ -95,7 +101,50 @@ Two values come out and the client needs **both**. If you lose the credential
 it cannot be recovered — run `enrol` again for the same device, which mints a
 new one and leaves the old verifying against nothing.
 
-## 3. Store both values on the client
+## 3. Give the client a role and add it to your devices, at the hub
+
+An enrolled device is admitted, but it can do nothing yet. Still on the hub's
+machine, give it the role it needs:
+
+```bash
+ai-assistant-device assign <the client machine's overlay identity> commands
+```
+
+```text
+Roles: commands
+```
+
+There are two roles:
+
+- **`commands`**: commands and queries. This covers reading what the hub holds,
+  granting and revoking, stopping work, and choosing which devices a conversation
+  is shown on. A machine you type `assistant` commands on needs this role.
+- **`spokes`**: host of spokes. Nothing uses it yet. It exists so that the first
+  spoke that runs on another machine has a role to be given.
+
+**Talking to the assistant is not a role.** Asking, and reading or writing a
+conversation, need the machine to be one of **your devices**, or one of that
+conversation's devices. Add it on the hub's machine:
+
+```bash
+assistant my-devices --add <the client machine's overlay identity>
+```
+
+The command shows what adding it means and asks before it changes anything.
+Every conversation started from then on is shown on that machine, and adding a
+machine says its screen is private. `--access read` or `--access write` limits
+what it may do in a conversation; the default is both. A conversation that
+already exists keeps its own devices. To add the machine to one of those, use
+`assistant conversation-devices <conversation id> --add <identity>`.
+
+These are acts on the hub's own machine because its local socket holds every
+role. A remote machine with the `commands` role may change your devices too, but
+only the hub's machine can give a role.
+
+Taking a role back is `ai-assistant-device withdraw <identity> <role>`. It takes
+effect on the device's next request.
+
+## 4. Store both values on the client
 
 On the client machine:
 
@@ -117,7 +166,7 @@ Both values go into the client machine's OS keyring and nowhere else. They are
 stored together, because holding one without the other is an incomplete
 enrolment the client refuses to connect on.
 
-## 4. Point the client at the hub
+## 5. Point the client at the hub
 
 In the client's `.env`:
 
@@ -127,7 +176,7 @@ ASSISTANT_REMOTE_HUB_PORT=50084
 ```
 
 The ports must match. The address is where to dial; the enrolled identity from
-step 3 is what the answer has to be, and the client checks the second before it
+step 4 is what the answer has to be, and the client checks the second before it
 sends anything.
 
 Setting `ASSISTANT_REMOTE_HUB_ADDRESS` is what selects the remote transport. A
@@ -144,7 +193,7 @@ response with no external capability.
 No action was needed.
 ```
 
-## Managing enrolments
+## Managing devices
 
 At the hub, with it running:
 
@@ -154,17 +203,112 @@ ai-assistant-device list
 
 ```text
 Hub: n33u2icoEW11CNTRL
-  n33u2icoEW11CNTRL  enrolled 2026-08-22T23:03:37.207312+00:00  live
+Devices:
+  nLAPTOP1CNTRL  hub_device  commands
+  nPHONE22CNTRL  browser_device  no role
+Enrolments:
+  nLAPTOP1CNTRL  enrolled 2026-10-05T12:00:00+00:00  live
+Registrations:
+  nPHONE22CNTRL  under hub  registered 2026-10-05T12:04:10+00:00  live
 ```
 
-`ai-assistant-device revoke <identity>` stops the hub admitting that device and
-closes the connections it currently holds — which is why this tool needs the hub
-running, where the offline tools need it stopped.
+The listing has three sections:
+
+- **Devices** shows each machine, its kind and its roles. A *hub device* is a
+  machine you enrolled. A *browser device* is a machine a gateway named.
+- **Enrolments** shows every enrolment the hub has made, revoked ones included.
+- **Registrations** shows every machine each gateway has named, and which
+  gateway named it. `hub` is a gateway on the hub's own machine.
+
+A gateway registers a machine the first time it names that machine. Nothing is
+enrolled for it. A gateway names the browsers it serves only once it relays each
+request for the browser it came from. Until then, a gateway's browsers act as the
+gateway's own device: `hub` for a gateway on the hub's machine, and the enrolled
+machine for a gateway elsewhere. A browser device starts with no role, like an
+enrolled one. Its first request is refused, and it then appears in the listing
+so that you can give it a role.
+
+The acts:
+
+- **`ai-assistant-device revoke <identity>`** revokes the whole device, in one
+  act:
+  - its enrolment, if it has one, closing the connections it holds;
+  - every registration of it under any gateway;
+  - its roles;
+  - its place in your devices and in every conversation's devices. Each removal
+    is a change the other devices see.
+
+  What it already received, it keeps: revocation is prospective. This is why
+  the tool needs the hub running, where the offline tools need it stopped.
+- **`ai-assistant-device revoke <identity> --gateway <gateway>`** revokes one
+  registration. That gateway's naming of the machine is then refused, and
+  naming it again does not register it again. The machine leaves your devices
+  and its conversations only if nothing else still admits it.
+- **`ai-assistant-device restore <identity> --gateway <gateway>`** is the only
+  way to bring back a registration you revoked. A device that nothing else
+  admitted comes back with no role.
+- **`ai-assistant-device assign <identity> <role>`** and **`withdraw`** give and
+  take one role (step 3).
 
 `assistant device unenrol`, run on the *client*, removes that machine's copy of
 both values. The two acts are independent and you usually want both: revoking at
 the hub cannot reach a keyring on another machine, and unenrolling on the client
 does not stop the hub admitting it.
+
+## Upgrading to a hub that checks roles
+
+A hub from before role checks served every admitted device the whole surface. A
+hub that checks roles gives no device a role it was not given, so **at the
+upgrade every enrolled device and every registered browser holds no role**. From
+the moment the new hub starts until you finish the steps below, remote command
+lines, remote gateways and their browsers are refused. The hub's own machine
+keeps working throughout: its local socket holds every role, and so does a
+browser on a gateway there that names no browser device.
+
+Do these on the hub's own machine, with the new hub running:
+
+1. **Revoke any enrolment of the hub's own identity.** An older hub accepted
+   one, and the new hub logs `device_hub_identity_enrolled` at every start while
+   it is live. The hub's own machine reaches it only through its local socket,
+   so every request on such a connection is now refused. Run
+   `ai-assistant-device list`, compare the `Hub:` line with the enrolments, and
+   if the hub's own identity is listed `live`:
+
+   ```bash
+   ai-assistant-device revoke <the Hub: value>
+   ```
+
+2. **Give each remote command line its role.** For each machine you run
+   `assistant` on, other than the hub's own:
+
+   ```bash
+   ai-assistant-device assign <its overlay identity> commands
+   ```
+
+3. **Give each remote gateway's device its role.** A gateway on another machine
+   needs `commands` on its enrolled identity for the requests it makes as
+   itself.
+4. **Give each browser device its role.** Open the page once from each browser a
+   gateway names. The first request is refused, and the browser is now
+   registered. Find it under *Registrations*, check that the gateway named there
+   is one you expected, and run `assign <its id> commands`.
+5. **Add your devices.** Add each machine you want conversations on, enrolled or
+   browser, with `assistant my-devices --add <id>` (step 3). A conversation
+   started before the upgrade keeps the devices it was started with. Use
+   `assistant conversation-devices` to add a machine to one of those.
+
+Two things to know while you do this:
+
+- **The older feedback route, `learn`, is not checked.** Where the hub still
+  offers it, any admitted device can call it, as every admitted device could
+  before the upgrade.
+- **A request refused for a role says which.** `DeviceRefusedError` carries one
+  of three reasons:
+  - `not_accepted`: the device's registration was revoked, it named the hub's
+    own machine, or its gateway already holds as many registrations as the hub
+    accepts.
+  - `no_role`: the device holds no role at all.
+  - `not_allowed`: its roles do not allow that request.
 
 ## What this page is not
 
@@ -194,11 +338,11 @@ variables win, always.
 
 **`device: no hub is listening at …/admin.sock`.** It talks to the hub's admin
 socket in the data directory, so it must run on the hub's machine, in a
-directory whose `.env` names that data directory, with the hub running. If the
-hub *is* running you get the other message instead — *“a hub is running here …
-but it bound no control socket … because it has no remote listener
-configured”* — which means the hub has not been through step 1: that socket is
-bound only when the remote listener is configured on.
+directory whose `.env` names that data directory, with the hub running.
+
+**The client connects and every request is refused.** The device is admitted
+but holds no role for what it asked, or it is not one of your devices. Give it
+the role and add it, as in step 3. The refusal's reason says which is missing.
 
 **The client is enrolled but nothing works after a machine rename.** The
 identity is the overlay's stable node identifier, not a name or an address, so
