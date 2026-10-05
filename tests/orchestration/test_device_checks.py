@@ -509,3 +509,31 @@ async def test_a_writing_end_is_found_wherever_the_listing_puts_it() -> None:
     assert await _as(PEN, engine.recent_conversations) == ()
     assert await engine.delete_conversation(oldest)
     await _refused(PEN, engine.recent_conversations, DeviceRefusal.NO_ROLE)
+
+
+class _MovingStore(FakeConversationStore):
+    """Grants a device one conversation and deletes another while a check reads one."""
+
+    def __init__(self) -> None:
+        super().__init__()
+        self.trap: tuple[str, str, ChatDevice] | None = None
+
+    async def conversation_devices(self, conversation_id: str) -> tuple[ChatDevice, ...] | None:
+        if self.trap is not None and self.trap[0] == conversation_id:
+            deleted, granted, device = self.trap
+            self.trap = None
+            await self.set_conversation_devices(granted, [device])
+            await self.stamp_deleted(deleted)
+        return await super().conversation_devices(conversation_id)
+
+
+async def test_a_candidate_deleted_mid_check_sends_the_replay_on() -> None:
+    """ADR-0296 §2: a role held throughout is never read as none, whatever lands."""
+    store = _MovingStore()
+    engine = Harness(planner=NoStepPlanner(), chat_reader=False, conversation_store=store).engine
+    held = await _conversation(engine, _PEN)
+    granted = await _conversation(engine, _PHONE)
+    await engine.set_my_devices([])
+    store.trap = (held, granted, _PEN)
+    assert await _as(PEN, engine.recent_conversations) == ()
+    assert store.trap is None, "the check read the candidate it was trapped on"

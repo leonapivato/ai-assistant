@@ -256,9 +256,9 @@ class DeviceChecks:
         by activity is not: ``device_changes`` reaches a device with every change that
         sets a set it is in before or after (ADR-0298 §7:4), so replaying them gives
         the device's membership of each conversation as of the cursor. A conversation
-        still holding the device there is then read as it stands now: one deleted
-        since holds no ends, and one whose devices changed since sends the replay on
-        from the cursor, until no candidate has moved.
+        still holding the device there is then read as it stands now, and one deleted
+        or whose devices changed since sends the replay on from the cursor, until a
+        candidate holds the device or none has moved.
         """
         member: dict[str, bool] = {}
         after = 0
@@ -268,7 +268,10 @@ class DeviceChecks:
             for conversation_id in [one for one, held in member.items() if held]:
                 devices = await self._conversations.conversation_devices(conversation_id)
                 if devices is None:
+                    # Deleted since the cursor: that is a change too, and others may
+                    # have landed beside it, so the replay goes on before deciding.
                     member[conversation_id] = False
+                    moved = True
                 elif _access(devices, device_id) is not None:
                     return True
                 else:
