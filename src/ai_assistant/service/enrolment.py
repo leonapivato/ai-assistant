@@ -69,6 +69,7 @@ from typing import TYPE_CHECKING, Final
 import structlog
 
 from ai_assistant.core.errors import AssistantError
+from ai_assistant.core.types import HUB_DEVICE_ID, DeviceRole
 from ai_assistant.service.overlay import MAX_OVERLAY_IDENTITY_BYTES
 from ai_assistant.wire.credential import mint_credential, verifier_for, verifies
 
@@ -115,7 +116,7 @@ class Verdict:
 #: The id of the hub's own machine, in every configuration and whether or not the
 #: hub has an overlay identity (ADR-0298 §3:1). It is never enrolled, registered or
 #: revoked, and it holds every role by rule rather than by a row (§3:2, §3:4).
-HUB_DEVICE: Final = "hub"
+HUB_DEVICE: Final = HUB_DEVICE_ID
 
 
 class DeviceKind(StrEnum):
@@ -132,31 +133,13 @@ class DeviceKind(StrEnum):
     BROWSER = "browser_device"
 
 
-class Role(StrEnum):
-    """The roles the roster holds (ADR-0298 §4:1), each assigned by the owner.
-
-    **Two, not three.** ADR-0296 §2's third role, the user's end of conversations, is
-    membership of "my devices" and of conversations, which the conversation store
-    keeps; the roster never holds it.
-
-    **Service-local until ``core`` carries the enum.** ADR-0298 §10:1 puts "the roles
-    the roster holds as one enum" in ``core/types.py``, where the requesting device
-    the wire server builds will carry them; that lane holds ``core`` while this one
-    builds the roster, and nothing here crosses a subsystem boundary yet. The values
-    are the record's stored text, so the change that binds the roster to the wire
-    maps them, or replaces this class with ``core``'s, without migrating a row.
-    """
-
-    #: Source of commands and queries: commands, queries, changing "my devices" and
-    #: a conversation's devices (ADR-0296 §2).
-    COMMANDS = "commands"
-    #: Host of spokes: the assistant's sensors and actuators, placed on channels.
-    #: Assignable now, and no device-hosted spoke exists yet (ADR-0296 §3:4).
-    SPOKES = "spokes"
-
-
 #: Every role, which the hub's own machine holds by rule (ADR-0298 §3:2).
-EVERY_ROLE: Final[frozenset[Role]] = frozenset(Role)
+#:
+#: The roles are ``core``'s :class:`~ai_assistant.core.types.DeviceRole` (§10:1), the
+#: enum the requesting device the wire server builds carries, so a role read here
+#: reaches the checks without a mapping. Its values are the record's stored text, so
+#: the roster's rows read back as that enum unchanged.
+EVERY_ROLE: Final[frozenset[DeviceRole]] = frozenset(DeviceRole)
 
 #: How many live registrations one gateway may hold (ADR-0298 §4:7: "a figure the
 #: implementing change names"). A gateway names only what its owner listed there,
@@ -378,7 +361,7 @@ class RosterDevice:
 
     device_id: str
     kind: DeviceKind
-    roles: frozenset[Role]
+    roles: frozenset[DeviceRole]
     first_known_at: datetime
 
 
@@ -394,7 +377,7 @@ class DeviceRevocation:
 
     enrolment: bool
     registrations: int
-    roles: frozenset[Role]
+    roles: frozenset[DeviceRole]
 
 
 class EnrolmentStore:
@@ -609,15 +592,15 @@ class EnrolmentStore:
         rows = self._conn.execute("SELECT device_id, kind FROM devices").fetchall()
         return {row["device_id"]: DeviceKind(row["kind"]) for row in rows}
 
-    def device_roles(self) -> dict[str, frozenset[Role]]:
+    def device_roles(self) -> dict[str, frozenset[DeviceRole]]:
         """Every role the roster holds, complete and unbounded.
 
         Returns:
             Each device holding at least one role, mapped to its roles.
         """
-        held: dict[str, set[Role]] = {}
+        held: dict[str, set[DeviceRole]] = {}
         for row in self._conn.execute("SELECT device_id, role FROM device_roles"):
-            held.setdefault(row["device_id"], set()).add(Role(row["role"]))
+            held.setdefault(row["device_id"], set()).add(DeviceRole(row["role"]))
         return {device: frozenset(roles) for device, roles in held.items()}
 
     def registration_pairs(self) -> tuple[set[tuple[str, str]], set[tuple[str, str]]]:
@@ -738,7 +721,7 @@ class EnrolmentStore:
                 (stamp, device),
             ).rowcount
             roles = frozenset(
-                Role(row["role"])
+                DeviceRole(row["role"])
                 for row in self._conn.execute(
                     "SELECT role FROM device_roles WHERE device_id = ?", (device,)
                 )
@@ -746,7 +729,7 @@ class EnrolmentStore:
             self._conn.execute("DELETE FROM device_roles WHERE device_id = ?", (device,))
         return DeviceRevocation(enrolment=bool(enrolment), registrations=registrations, roles=roles)
 
-    def assign_role(self, device: str, role: Role) -> bool:
+    def assign_role(self, device: str, role: DeviceRole) -> bool:
         """Give a device one role.
 
         Args:
@@ -765,7 +748,7 @@ class EnrolmentStore:
             ).rowcount
         return bool(changed)
 
-    def withdraw_role(self, device: str, role: Role) -> bool:
+    def withdraw_role(self, device: str, role: DeviceRole) -> bool:
         """Take one role from a device.
 
         Args:
@@ -1117,7 +1100,7 @@ class DeviceRegistry:
         )
         return NamingVerdict(registered=True)
 
-    def roles_of(self, device: str) -> frozenset[Role]:
+    def roles_of(self, device: str) -> frozenset[DeviceRole]:
         """The roles a device holds, as the checks read them at dispatch.
 
         Args:
@@ -1158,7 +1141,7 @@ class DeviceRegistry:
         """
         return self._kinds.get(device)
 
-    def assign(self, device: str, role: Role) -> bool:
+    def assign(self, device: str, role: DeviceRole) -> bool:
         """Give a device one role, as the owner's act at the hub (ADR-0298 §4:12).
 
         Args:
@@ -1189,7 +1172,7 @@ class DeviceRegistry:
             _log.info("device_role_assigned", device=device, role=role.value)
         return changed
 
-    def withdraw(self, device: str, role: Role) -> bool:
+    def withdraw(self, device: str, role: DeviceRole) -> bool:
         """Take one role from a device.
 
         Args:

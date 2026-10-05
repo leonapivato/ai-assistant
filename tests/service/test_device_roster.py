@@ -20,6 +20,7 @@ from typing import TYPE_CHECKING, Final
 import pytest
 import structlog
 
+from ai_assistant.core.types import DeviceRole
 from ai_assistant.service.enrolment import (
     ENROLMENTS_FILENAME,
     EVERY_ROLE,
@@ -29,7 +30,6 @@ from ai_assistant.service.enrolment import (
     DeviceRegistry,
     EnrolmentStore,
     NamingRefusal,
-    Role,
     RosterActError,
 )
 
@@ -135,25 +135,25 @@ def test_a_machine_already_a_device_keeps_its_kind_and_roles_when_named(
     another machine's gateway "is that one device, with the roles the user gave the
     laptop"."""
     registry.enrol(_WATCH, now=_MOMENT)
-    registry.assign(_WATCH, Role.COMMANDS)
+    registry.assign(_WATCH, DeviceRole.COMMANDS)
 
     verdict = registry.accept_naming(_GATEWAY, _WATCH, now=_LATER)
 
     assert verdict.registered
     assert registry.kind_of(_WATCH) is DeviceKind.HUB
-    assert registry.roles_of(_WATCH) == frozenset({Role.COMMANDS})
+    assert registry.roles_of(_WATCH) == frozenset({DeviceRole.COMMANDS})
 
 
 def test_a_browser_device_later_enrolled_is_one_hub_device(registry: DeviceRegistry) -> None:
     """A machine is one device however it is admitted (ADR-0296 §1:4): enrolling a
     registered browser device makes it a hub device, keeping its roles."""
     registry.accept_naming(_GATEWAY, _PHONE, now=_MOMENT)
-    registry.assign(_PHONE, Role.COMMANDS)
+    registry.assign(_PHONE, DeviceRole.COMMANDS)
 
     registry.enrol(_PHONE, now=_LATER)
 
     assert registry.kind_of(_PHONE) is DeviceKind.HUB
-    assert registry.roles_of(_PHONE) == frozenset({Role.COMMANDS})
+    assert registry.roles_of(_PHONE) == frozenset({DeviceRole.COMMANDS})
     (device,) = [one for one in registry.roster()[0] if one.device_id == _PHONE]
     assert device.kind is DeviceKind.HUB
 
@@ -207,8 +207,8 @@ def test_the_hubs_own_machine_is_never_enrolled(registry: DeviceRegistry, name: 
         lambda registry: registry.revoke_device(HUB_DEVICE, now=_MOMENT),
         lambda registry: registry.revoke_registration(HUB_DEVICE, gateway=_GATEWAY, now=_MOMENT),
         lambda registry: registry.restore_registration(HUB_DEVICE, gateway=_GATEWAY, now=_MOMENT),
-        lambda registry: registry.assign(HUB_DEVICE, Role.COMMANDS),
-        lambda registry: registry.withdraw(HUB_DEVICE, Role.COMMANDS),
+        lambda registry: registry.assign(HUB_DEVICE, DeviceRole.COMMANDS),
+        lambda registry: registry.withdraw(HUB_DEVICE, DeviceRole.COMMANDS),
     ],
 )
 def test_no_roster_act_reaches_the_hubs_own_machine(
@@ -260,7 +260,7 @@ def test_restoring_is_the_only_way_back_and_the_device_comes_back_with_no_role(
     after revocation, by re-enrolment or by a restored registration, holds no role
     until the user gives it one". The revocation is kept, beside a new live row."""
     registry.accept_naming(_GATEWAY, _PHONE, now=_MOMENT)
-    registry.assign(_PHONE, Role.COMMANDS)
+    registry.assign(_PHONE, DeviceRole.COMMANDS)
     registry.revoke_registration(_PHONE, gateway=_GATEWAY, now=_LATER)
 
     assert registry.restore_registration(_PHONE, gateway=_GATEWAY, now=_LATER)
@@ -294,14 +294,14 @@ def test_a_revoked_registration_under_one_gateway_leaves_another_live(
     record on ADR-0296 §1:5): one registration, not the machine."""
     registry.accept_naming(_GATEWAY, _PHONE, now=_MOMENT)
     registry.accept_naming(_OTHER_GATEWAY, _PHONE, now=_MOMENT)
-    registry.assign(_PHONE, Role.COMMANDS)
+    registry.assign(_PHONE, DeviceRole.COMMANDS)
 
     registry.revoke_registration(_PHONE, gateway=_GATEWAY, now=_LATER)
 
     assert registry.accept_naming(_GATEWAY, _PHONE, now=_LATER).refusal is NamingRefusal.REVOKED
     assert registry.accept_naming(_OTHER_GATEWAY, _PHONE, now=_LATER).accepted
     # Still admitted under the other gateway, so it keeps its roles.
-    assert registry.roles_of(_PHONE) == frozenset({Role.COMMANDS})
+    assert registry.roles_of(_PHONE) == frozenset({DeviceRole.COMMANDS})
 
 
 def test_revoking_a_device_revokes_everything_that_admits_it_and_clears_its_roles(
@@ -315,8 +315,8 @@ def test_revoking_a_device_revokes_everything_that_admits_it_and_clears_its_role
     registry.enrol(_PHONE, now=_MOMENT)
     registry.accept_naming(_GATEWAY, _PHONE, now=_MOMENT)
     registry.accept_naming(_OTHER_GATEWAY, _PHONE, now=_MOMENT)
-    registry.assign(_PHONE, Role.COMMANDS)
-    registry.assign(_PHONE, Role.SPOKES)
+    registry.assign(_PHONE, DeviceRole.COMMANDS)
+    registry.assign(_PHONE, DeviceRole.SPOKES)
 
     revocation = registry.revoke_device(_PHONE, now=_LATER)
 
@@ -335,7 +335,7 @@ def test_revoking_a_device_revokes_everything_that_admits_it_and_clears_its_role
 def test_a_device_re_enrolled_after_revocation_holds_no_role(registry: DeviceRegistry) -> None:
     """ADR-0298 §4:11, the re-enrolment half."""
     registry.enrol(_PHONE, now=_MOMENT)
-    registry.assign(_PHONE, Role.COMMANDS)
+    registry.assign(_PHONE, DeviceRole.COMMANDS)
     registry.revoke_device(_PHONE, now=_LATER)
 
     registry.enrol(_PHONE, now=_LATER)
@@ -348,11 +348,11 @@ def test_rotating_an_enrolment_keeps_the_devices_roles(registry: DeviceRegistry)
     "no intermediate state … has … none"), so nothing re-admits it and its roles
     stand."""
     registry.enrol(_PHONE, now=_MOMENT)
-    registry.assign(_PHONE, Role.COMMANDS)
+    registry.assign(_PHONE, DeviceRole.COMMANDS)
 
     assert registry.enrol(_PHONE, now=_LATER).rotated
 
-    assert registry.roles_of(_PHONE) == frozenset({Role.COMMANDS})
+    assert registry.roles_of(_PHONE) == frozenset({DeviceRole.COMMANDS})
 
 
 def test_revoking_the_last_admission_clears_roles_and_revoking_one_of_two_does_not(
@@ -364,11 +364,11 @@ def test_revoking_the_last_admission_clears_roles_and_revoking_one_of_two_does_n
     reads and the two must not disagree."""
     registry.enrol(_PHONE, now=_MOMENT)
     registry.accept_naming(_GATEWAY, _PHONE, now=_MOMENT)
-    registry.assign(_PHONE, Role.COMMANDS)
+    registry.assign(_PHONE, DeviceRole.COMMANDS)
 
     registry.revoke(_PHONE, now=_LATER)  # the enrolment alone; the registration admits it
-    assert registry.roles_of(_PHONE) == frozenset({Role.COMMANDS})
-    assert store.device_roles() == {_PHONE: frozenset({Role.COMMANDS})}
+    assert registry.roles_of(_PHONE) == frozenset({DeviceRole.COMMANDS})
+    assert store.device_roles() == {_PHONE: frozenset({DeviceRole.COMMANDS})}
 
     registry.revoke_registration(_PHONE, gateway=_GATEWAY, now=_LATER)
     assert registry.roles_of(_PHONE) == frozenset()
@@ -460,20 +460,20 @@ def test_roles_are_given_and_taken_one_at_a_time(registry: DeviceRegistry) -> No
     own machine"; each act reports whether it changed anything."""
     registry.accept_naming(_GATEWAY, _PHONE, now=_MOMENT)
 
-    assert registry.assign(_PHONE, Role.COMMANDS)
-    assert not registry.assign(_PHONE, Role.COMMANDS)
-    assert registry.assign(_PHONE, Role.SPOKES)
+    assert registry.assign(_PHONE, DeviceRole.COMMANDS)
+    assert not registry.assign(_PHONE, DeviceRole.COMMANDS)
+    assert registry.assign(_PHONE, DeviceRole.SPOKES)
     assert registry.roles_of(_PHONE) == EVERY_ROLE
-    assert registry.withdraw(_PHONE, Role.SPOKES)
-    assert not registry.withdraw(_PHONE, Role.SPOKES)
-    assert registry.roles_of(_PHONE) == frozenset({Role.COMMANDS})
+    assert registry.withdraw(_PHONE, DeviceRole.SPOKES)
+    assert not registry.withdraw(_PHONE, DeviceRole.SPOKES)
+    assert registry.roles_of(_PHONE) == frozenset({DeviceRole.COMMANDS})
 
 
 def test_a_machine_nothing_admits_is_given_no_role(registry: DeviceRegistry) -> None:
     """A role is never inferred (ADR-0296 §2:5), and neither is a device: a machine
     never enrolled nor named is no device yet, so it cannot be pre-authorised."""
     with pytest.raises(RosterActError, match="not a device this hub admits"):
-        registry.assign(_PHONE, Role.COMMANDS)
+        registry.assign(_PHONE, DeviceRole.COMMANDS)
     assert registry.roles_of(_PHONE) == frozenset()
     assert registry.roster() == ([], 0)
 
@@ -487,14 +487,14 @@ def test_the_roster_survives_a_restart(tmp_path: Path) -> None:
     live = DeviceRegistry(first, hub_identity=_HUB)
     live.accept_naming(_GATEWAY, _PHONE, now=_MOMENT)
     live.accept_naming(_GATEWAY, _WATCH, now=_MOMENT)
-    live.assign(_PHONE, Role.COMMANDS)
+    live.assign(_PHONE, DeviceRole.COMMANDS)
     live.revoke_registration(_WATCH, gateway=_GATEWAY, now=_LATER)
     first.close()
 
     second = EnrolmentStore(tmp_path / ENROLMENTS_FILENAME)
     try:
         reopened = DeviceRegistry(second, hub_identity=_HUB)
-        assert reopened.roles_of(_PHONE) == frozenset({Role.COMMANDS})
+        assert reopened.roles_of(_PHONE) == frozenset({DeviceRole.COMMANDS})
         assert reopened.kind_of(_PHONE) is DeviceKind.BROWSER
         assert reopened.accept_naming(_GATEWAY, _PHONE, now=_LATER).accepted
         assert reopened.accept_naming(_GATEWAY, _WATCH, now=_LATER).refusal is (
@@ -635,7 +635,7 @@ def test_the_schema_holds_exactly_the_values_the_enums_name(store: EnrolmentStor
     """The record's CHECK constraints and the enums are two statements of one set;
     a value one names and the other refuses fails here rather than at a write."""
     store.register(_PHONE, gateway=_GATEWAY, now=_MOMENT)
-    for role in Role:
+    for role in DeviceRole:
         store.assign_role(_PHONE, role)
     assert store.device_roles() == {_PHONE: EVERY_ROLE}
     store.enrol(_WATCH, verifier="v", now=_MOMENT)

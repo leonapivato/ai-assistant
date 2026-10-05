@@ -19,6 +19,7 @@ from typing import TYPE_CHECKING, Any, Final
 
 import pytest
 
+from ai_assistant.core.types import DeviceRole
 from ai_assistant.service import device
 from ai_assistant.service.admin import ADMIN_FRAME_BYTES, ADMIN_TIMEOUT, AdminListener
 from ai_assistant.service.device import _perform, _render
@@ -27,7 +28,6 @@ from ai_assistant.service.enrolment import (
     LISTING_LIMIT,
     DeviceRegistry,
     EnrolmentStore,
-    Role,
 )
 from ai_assistant.service.exits import EXIT_DEPLOYMENT, EXIT_OK, EXIT_RESTART
 from ai_assistant.service.overlay import MAX_OVERLAY_IDENTITY_BYTES
@@ -837,7 +837,7 @@ async def test_a_full_listing_of_the_longest_identities_still_fits_one_frame(
         browser = f"{index:04d}".ljust(MAX_OVERLAY_IDENTITY_BYTES, "b")
         store.enrol(enrolled, verifier=verifier, now=_MOMENT)
         store.register(browser, gateway=gateway, now=_MOMENT)
-        for role in Role:
+        for role in DeviceRole:
             store.assign_role(enrolled, role)
         store.revoke_registration(browser, gateway=gateway, now=_MOMENT)
     registry = DeviceRegistry(store, hub_identity=_HUB_ID)
@@ -935,7 +935,7 @@ async def test_the_listing_shows_the_roster_and_every_registration(tmp_path: Pat
     revoked registration as well as the live one — and each device's kind and roles."""
     async with _admin(tmp_path) as (listener, registry):
         registry.accept_naming("hub", _PHONE, now=_MOMENT)
-        registry.assign(_PHONE, Role.COMMANDS)
+        registry.assign(_PHONE, DeviceRole.COMMANDS)
         registry.accept_naming("hub", _DEVICE, now=_MOMENT)
         registry.revoke_registration(_DEVICE, gateway="hub", now=_MOMENT)
         listed = await _act(listener, {"act": "list"})
@@ -1019,7 +1019,7 @@ async def test_a_restore_reports_the_roles_the_device_actually_holds(tmp_path: P
     async with _admin(tmp_path) as (listener, registry):
         registry.accept_naming("hub", _PHONE, now=_MOMENT)
         registry.accept_naming(_DEVICE, _PHONE, now=_MOMENT)
-        registry.assign(_PHONE, Role.COMMANDS)
+        registry.assign(_PHONE, DeviceRole.COMMANDS)
         await _act(listener, {"act": "revoke", "identity": _PHONE, "gateway": "hub"})
         restored = await _act(listener, {"act": "restore", "identity": _PHONE, "gateway": "hub"})
     assert restored == {"ok": True, "restored": True, "roles": ["commands"]}

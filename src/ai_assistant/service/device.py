@@ -38,6 +38,7 @@ from typing import TYPE_CHECKING, Any
 
 from ai_assistant.core.config import load_settings
 from ai_assistant.core.errors import ConfigurationError
+from ai_assistant.core.types import DeviceRole
 from ai_assistant.service.admin import (
     ADMIN_FRAME_BYTES,
     ADMIN_TIMEOUT,
@@ -48,7 +49,7 @@ from ai_assistant.service.admin import (
     REVOKE,
     WITHDRAW,
 )
-from ai_assistant.service.enrolment import HUB_DEVICE, Role
+from ai_assistant.service.enrolment import HUB_DEVICE
 from ai_assistant.service.exits import EXIT_DEPLOYMENT, EXIT_OK, EXIT_RESTART
 from ai_assistant.wire.address import admin_socket_path, socket_path
 from ai_assistant.wire.errors import ProtocolError, TransportError
@@ -71,8 +72,8 @@ currently holds.
 A device is a machine: a hub device is enrolled here and reaches the hub over
 its remote listener; a browser device is a machine a gateway lists, registered
 the first time that gateway names it. A gateway on the hub's own machine is
-named '{HUB_DEVICE}'. The roles are '{Role.COMMANDS.value}' (commands and queries)
-and '{Role.SPOKES.value}' (host of spokes).
+named '{HUB_DEVICE}'. The roles are '{DeviceRole.COMMANDS.value}' (commands and queries)
+and '{DeviceRole.SPOKES.value}' (host of spokes).
 
 Roles are recorded now and not yet enforced: until the hub's enforcement is
 switched on, every admitted device reaches what it reaches today, whatever roles
@@ -111,7 +112,7 @@ def _parse_args(argv: Sequence[str] | None) -> argparse.Namespace:
     restore = acts.add_parser(RESTORE, help="restore a registration that was revoked")
     restore.add_argument("identity", help="the device's overlay identity")
     restore.add_argument("--gateway", required=True, help="the gateway's device")
-    roles = [role.value for role in Role]
+    roles = [role.value for role in DeviceRole]
     for act, verb in ((ASSIGN, "give a device"), (WITHDRAW, "take from a device")):
         one = acts.add_parser(act, help=f"{verb} one role")
         one.add_argument("identity", help="the device's overlay identity")

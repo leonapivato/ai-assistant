@@ -57,7 +57,8 @@ from typing import TYPE_CHECKING, Any, Final
 import structlog
 
 from ai_assistant.core.clock import checked_clock
-from ai_assistant.service.enrolment import Role, RosterActError
+from ai_assistant.core.types import DeviceRole
+from ai_assistant.service.enrolment import RosterActError
 from ai_assistant.service.overlay import MAX_OVERLAY_IDENTITY_BYTES
 from ai_assistant.wire.address import SOCKET_MODE, admin_socket_path, check_admin_socket_path
 from ai_assistant.wire.errors import TransportError
@@ -455,7 +456,7 @@ def _name(value: object, *, what: str) -> str:
     return name
 
 
-def _role(value: object) -> Role:
+def _role(value: object) -> DeviceRole:
     """Read one role from a request.
 
     Args:
@@ -467,10 +468,10 @@ def _role(value: object) -> Role:
     Raises:
         _MalformedError: If it names no role the roster holds.
     """
-    for role in Role:
+    for role in DeviceRole:
         if value == role.value:
             return role
-    named = ", ".join(role.value for role in Role)
+    named = ", ".join(role.value for role in DeviceRole)
     msg = f"a role is one of {named}, not {value!r}"
     raise _MalformedError(msg)
 
