@@ -284,7 +284,7 @@ from ai_assistant.orchestration.conversations import (
     fit_changes,
     fit_transcript,
 )
-from ai_assistant.orchestration.device_checks import DeviceChecks, device_page
+from ai_assistant.orchestration.device_checks import DeviceChecks, device_changes
 from ai_assistant.orchestration.disclosure import (
     BoundedAudienceSupply,
     TurnSupply,
@@ -4673,6 +4673,9 @@ class Engine:
         included.
         """
         async with closing_stream(stream) as values:
+            # Iterated later than it was made: a shutdown begun since closes the
+            # stores the check reads, so it is refused before anything runs.
+            self._reject_if_closing()
             await self._uninterruptibly(check())
             async for value in values:
                 yield value
@@ -8069,11 +8072,12 @@ class Engine:
             )
         else:
             await self._device_checks.reading_many(device, "chat_changes")
-            page = device_page(
-                await self._conversations.device_changes(
-                    device.device_id, after=after, limit=limit
-                ),
-                conversation_ids,
+            page = await device_changes(
+                self._conversations,
+                device.device_id,
+                after=after,
+                conversation_ids=conversation_ids,
+                limit=limit,
             )
         return fit_changes(page, max_bytes=self._max_payload_bytes)
 

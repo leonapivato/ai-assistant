@@ -28,11 +28,9 @@ from ai_assistant.core.types import (
     ChannelInput,
     ChatChanges,
     ChatDevice,
-    ConversationStartedChange,
     DataTier,
     DeviceAccess,
     DeviceRole,
-    DevicesChangedChange,
     MessageAuthor,
     NewConversation,
     NotificationCandidate,
@@ -45,7 +43,7 @@ from ai_assistant.core.types import (
 )
 from ai_assistant.orchestration.composing import ComposingStage
 from ai_assistant.orchestration.conversations import ConversationLifecycle
-from ai_assistant.orchestration.device_checks import DeviceChecks, device_page
+from ai_assistant.orchestration.device_checks import DeviceChecks
 from ai_assistant.testing import (
     FakeConversationStore,
     FakeFeedbackProcessor,
@@ -272,20 +270,25 @@ async def test_a_device_reads_only_the_changes_it_may_see() -> None:
     await _refused(STRANGER, lambda: engine.chat_changes(after=0), DeviceRefusal.NO_ROLE)
 
 
-def test_a_device_page_is_restricted_as_the_store_restricts_one() -> None:
-    """The named conversations' changes and "my devices"' changes, with the cursor."""
-    page = ChatChanges(
-        changes=(
-            DevicesChangedChange(seq=1, devices=(_PHONE,)),
-            ConversationStartedChange(seq=2, conversation_id="a"),
-            ConversationStartedChange(seq=3, conversation_id="b"),
-        ),
-        next_after=9,
+async def test_a_restricted_page_reaches_past_other_conversations_changes() -> None:
+    """The restriction comes before the page is cut, so a short page means caught up."""
+    engine = _harness().engine
+    busy = await _conversation(engine, _PHONE)
+    quiet = (await engine.start_conversation()).id
+    cursor = (await engine.chat_changes(after=0)).next_after
+    for n in range(7):
+        await engine.write_message(busy, message=_said(_PHONE, f"b-{n}", "chatter"))
+    await engine.write_message(quiet, message=_said(_PHONE, "q-1", "the one asked about"))
+    page = await _as(
+        PHONE, lambda: engine.chat_changes(after=cursor, conversation_ids=[quiet], limit=3)
     )
-    assert device_page(page, None) is page
-    kept = device_page(page, ["b"])
-    assert [one.seq for one in kept.changes] == [1, 3]
-    assert kept.next_after == 9
+    assert [one.conversation_id for one in page.changes] == [quiet]
+    assert page.next_after == (await engine.chat_changes(after=0)).next_after
+    full = await _as(
+        PHONE, lambda: engine.chat_changes(after=cursor, conversation_ids=[busy], limit=3)
+    )
+    assert len(full.changes) == 3
+    assert full.next_after == full.changes[-1].seq
 
 
 # --- the legacy turn (§5 "A legacy turn") -----------------------------------------
@@ -595,3 +598,33 @@ async def test_an_unsettled_role_is_never_reported_as_no_role() -> None:
     engine = Harness(planner=NoStepPlanner(), chat_reader=False, conversation_store=store).engine
     await _refused(STRANGER, engine.recent_conversations, DeviceRefusal.NOT_ALLOWED)
     await _refused(STRANGER, engine.start_conversation, DeviceRefusal.NOT_ALLOWED)
+
+
+class _CountingStore(FakeConversationStore):
+    """Counts the reads of "my devices"."""
+
+    def __init__(self) -> None:
+        super().__init__()
+        self.reads = 0
+
+    async def my_devices(self) -> tuple[ChatDevice, ...]:
+        self.reads += 1
+        return await super().my_devices()
+
+
+async def test_a_stream_iterated_after_shutdown_reads_nothing() -> None:
+    """ADR-0042 §2: a stream made before ``aclose`` and iterated after is refused."""
+    store = _CountingStore()
+    engine = Harness(planner=NoStepPlanner(), chat_reader=False, conversation_store=store).engine
+    await engine.set_my_devices([_WATCH])
+    with serving_device(WATCH):
+        stream = engine.receive_streaming(
+            ChannelInput(target=NewConversation(), payload=TextChannelPayload(text="hi")),
+            reply=StreamingTextReply(),
+            timeout=_TIMEOUT,
+        )
+    await engine.aclose()
+    reads = store.reads
+    with pytest.raises(RuntimeError):
+        await anext(stream)
+    assert store.reads == reads
