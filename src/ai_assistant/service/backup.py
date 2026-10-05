@@ -8,12 +8,13 @@ means the entry point has to *be* in ``service/``; and ``service`` may import
 mechanisms."
 
 **What it copies is a directory, not a set of stores** (§1). Every regular file
-under ``Settings.data_dir``, at any depth, byte for byte, except the three §3
-excludes. It opens no store and carries no list of stores, and that is the point
-rather than a simplification: "the count in the most authoritative document about
-the data directory is already wrong by two, and nothing detected it. A backup that
-carried its own list of stores would have been wrong by two in the same way, and
-the symptom would have arrived at a restore."
+under ``Settings.data_dir``, at any depth, byte for byte, except the four §3
+excludes (ADR-0299 §1 added the control socket). It opens no store and carries no
+list of stores, and that is the point rather than a simplification: "the count in
+the most authoritative document about the data directory is already wrong by two,
+and nothing detected it. A backup that carried its own list of stores would have
+been wrong by two in the same way, and the symptom would have arrived at a
+restore."
 
 **What it refuses is most of the decision.** A contended lock; an entry that is
 not a regular file, a directory or an excluded name; a SQLite sidecar anywhere in
@@ -58,7 +59,7 @@ from ai_assistant.service.artifact import SQLITE_MAGIC, Manifest, ManifestEntry
 from ai_assistant.service.exits import EXIT_DEPLOYMENT, EXIT_OK, EXIT_RESTART, classify
 from ai_assistant.service.lock import LOCK_FILENAME, InstanceLock
 from ai_assistant.service.refusal import RefusalError
-from ai_assistant.wire.address import socket_path
+from ai_assistant.wire.address import admin_socket_path, socket_path
 
 if TYPE_CHECKING:
     from collections.abc import Generator, Iterator, Sequence
@@ -107,7 +108,7 @@ file (ADR-0123).
 
 Run it with the hub stopped: it takes the same instance lock, so it cannot run
 beside one. It copies every regular file in the data directory except the trace
-store, the instance lock and the socket, encrypts the whole thing to a passphrase
+store, the instance lock and the two sockets, encrypts the whole thing to a passphrase
 you hold, and then proves the artifact by restoring it into a scratch directory
 before it publishes it.
 
@@ -435,9 +436,10 @@ def _excluded_paths(settings: Settings) -> frozenset[str]:
     is the composition root's own statement of where that file is, and reading it
     constructs nothing but a path holder.
 
-    The instance lock's name comes from :mod:`ai_assistant.service.lock` and the
-    socket's from :mod:`ai_assistant.wire.address`, because those modules define
-    them — restating either at the composition root would rebuild the stale-name
+    The instance lock's name comes from :mod:`ai_assistant.service.lock` and both
+    sockets' — ``hub.sock`` and, since ADR-0299 §1, the control socket
+    ``admin.sock`` — from :mod:`ai_assistant.wire.address`, because those modules
+    define them — restating either at the composition root would rebuild the stale-name
     seam §3 rejects, and ``lint-imports`` would not even allow it.
 
     **If you are adding a file to the data directory, read this.** ADR-0123 §3
@@ -454,7 +456,7 @@ def _excluded_paths(settings: Settings) -> frozenset[str]:
     the reminder is here rather than only there.
     """
     data_dir = settings.data_dir
-    names = {LOCK_FILENAME, socket_path(data_dir).name}
+    names = {LOCK_FILENAME, socket_path(data_dir).name, admin_socket_path(data_dir).name}
     trace_store = build_measure_reader(settings).store
     if trace_store.is_relative_to(data_dir):
         names.add(trace_store.relative_to(data_dir).as_posix())
