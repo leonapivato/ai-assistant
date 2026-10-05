@@ -70,26 +70,25 @@ def refusal_detail(reason: DeviceRefusal, *, device: str | None, gateway: str | 
     named = _UNNAMED_DEVICE if device is None else device
     if reason is DeviceRefusal.NO_ROLE:
         return (
-            f"The device this browser is ({named}) holds no role. On the hub's machine, "
+            f"This browser is device {named}, which holds no role. On the hub's machine, "
             f"'ai-assistant-device assign {named} commands' lets it ask and manage, and "
-            f"adding it to my devices there lets it take part in conversations."
+            f"'assistant my-devices --add {named}' lets it take part in conversations."
         )
     if reason is DeviceRefusal.NOT_ALLOWED:
         return (
-            f"The device this browser is ({named}) has a role, but not one that allows "
-            f"this. Asking and managing need the commands role, which "
-            f"'ai-assistant-device assign {named} commands' gives on the hub's machine; "
-            f"a conversation is read and written only by its own devices, and starting "
-            f"one needs this device in my devices."
+            f"This browser is device {named}, whose roles do not allow this. Asking and "
+            f"managing need the commands role, which 'ai-assistant-device assign {named} "
+            f"commands' gives on the hub's machine; a conversation is read and written "
+            f"only by its own devices, and starting one needs this device in my devices."
         )
     via = _UNNAMED_GATEWAY if gateway is None else gateway
     return (
-        f"The hub refuses the device this browser is ({named}) from this gateway when "
-        f"the owner revoked it here, when it is the hub's own machine (open the "
-        f"gateway's loopback address on that machine instead), or when this gateway has "
-        f"named as many devices as the hub allows. 'ai-assistant-device list' on the "
-        f"hub's machine shows which; 'ai-assistant-device restore {named} --gateway "
-        f"{via}' there restores a revoked one."
+        f"This browser is device {named}. The hub refuses it from this gateway when the "
+        f"owner revoked it here, when it is the hub's own machine (open the gateway's "
+        f"loopback address on that machine instead), or when this gateway has named as "
+        f"many devices as the hub allows. On the hub's machine, 'ai-assistant-device "
+        f"list' shows which, and 'ai-assistant-device restore {named} --gateway {via}' "
+        f"restores a revoked one."
     )
 
 
