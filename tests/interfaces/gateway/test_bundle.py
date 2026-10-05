@@ -1720,7 +1720,15 @@ def test_the_page_offers_one_turn_entry_and_only_with_a_reference() -> None:
     assert script.count("askWhole(") == 2
     assert asking.index("if (reference === null) {") < asking.index("askWhole(")
     assert "asked.reference = waiting.reference.value;" in asking
-    assert 'el("ask-form").hidden = reference === null;' in _functions(script)["showReference"]
+    assert "showAskForm();" in _functions(script)["showReference"]
+    # Shown while a reference is attached **or a turn it sent is still out**, so giving a
+    # reference up mid-wait cannot hide the form's own `Stop waiting` (round 1, `major`),
+    # and re-read when the wait ends.
+    assert (
+        'el("ask-form").hidden = reference === null && awaited === null;'
+        in _functions(script)["showAskForm"]
+    )
+    assert "showAskForm();" in _functions(script)["releaseAsk"]
     assert '<form id="ask-form" hidden>' in document
 
 

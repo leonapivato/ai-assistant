@@ -444,15 +444,22 @@ function setReference(value, note) {
 }
 
 // Put the hint and the control into one state, which is the only place either moves.
-//
-// **The form goes with it**: it sends only a turn carrying a reference (ADR-0293 §11),
-// so it is on screen exactly while one is attached.
 function showReference(note, offered) {
   const hint = el("referencing");
   hint.textContent = note;
   hint.hidden = note === "";
   el("clear-reference").hidden = !offered;
-  el("ask-form").hidden = reference === null;
+  showAskForm();
+}
+
+// The form sends only a turn carrying a reference (ADR-0293 §11), so it is on screen
+// while one is attached — **and while a turn it sent is still out**, whatever is
+// attached by then (adversarial review, round 1, `major`). Its `Stop waiting` lives
+// inside it, so a reference given up while an earlier turn's request was pending would
+// otherwise hide the one control that ends that wait. `releaseAsk` re-reads this when
+// the wait ends, which is what puts the form away once nothing holds it open.
+function showAskForm() {
+  el("ask-form").hidden = reference === null && awaited === null;
 }
 
 // Say that the attached reference has gone out, where it is still the attached one.
@@ -5816,6 +5823,7 @@ function releaseAsk() {
   awaited = null;
   askWaiting(false);
   el("ask-button").disabled = false;
+  showAskForm();
 }
 
 // The owner's act, and the only thing on this page that ends a turn's wait early.
