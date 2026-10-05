@@ -332,7 +332,7 @@ async def test_a_loopback_browsers_stream_names_nothing(overrides: dict[str, Any
 async def test_a_device_without_a_role_is_refused_as_the_stream_ends() -> None:
     """The role check is the stream's first step (ADR-0298 §5), so its refusal arrives
     after the head as the terminal fault, in the same name and sentence a refused
-    request carries — the condition the page drops what it holds on (§7:13)."""
+    request carries — the condition the page drops what it holds on (§7:17)."""
     engine = _Scripted()
     engine.script.put_nowait(
         DeviceRefusedError("reading many needs a role", reason=DeviceRefusal.NO_ROLE)

@@ -9360,7 +9360,7 @@ def test_the_chat_follows_the_stream_and_reopens_it_only_on_an_event() -> None:
 
 
 def test_a_device_drops_what_it_held_on_removal_and_on_holding_no_role() -> None:
-    """ADR-0296 §4:8 and ADR-0298 §7:13, as the page's code states them.
+    """ADR-0296 §4:8 and ADR-0298 §7:17, as the page's code states them.
 
     A change that leaves this device no reader of a conversation drops that
     conversation; a refusal for holding no role — of the stream, or of the changes read
