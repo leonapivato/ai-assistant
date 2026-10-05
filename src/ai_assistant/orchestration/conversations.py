@@ -378,22 +378,42 @@ def check_devices_fit(
     )
 
 
+def _fitting_count(sizes: Sequence[int], *, base: int, max_bytes: int) -> int:
+    """How many of ``sizes``, taken from the front, fit beside ``base`` bytes.
+
+    A page's encoding is its frame with no entry, plus each entry's own encoding,
+    plus a comma between two: canonical JSON is additive over an array's members, so
+    each entry is encoded once and the page is never re-encoded per candidate.
+    """
+    total = base
+    for count, size in enumerate(sizes):
+        total += size + (1 if count else 0)
+        if total > max_bytes:
+            return count
+    return len(sizes)
+
+
 def fit_transcript(page: TranscriptPage | None, *, max_bytes: int) -> TranscriptPage | None:
     """The page shortened from its oldest end until it fits the payload limit.
 
     A snapshot keeps its most recent entries, and the first position left is where
     the next ``before`` reads from, so nothing is lost (ADR-0293 §5:13). Where not
-    even one entry fits, the original page earns the ordinary size error.
+    even one entry fits, the original page earns the ordinary size error. Each entry
+    is encoded once (:func:`_fitting_count`), and the page chosen is measured once
+    more, so the work is linear in the page.
 
     Raises:
         OversizedValueError: If no non-empty page fits.
     """
     if page is None or len(canonical_payload(page)) <= max_bytes:
         return page
-    for start in range(1, len(page.entries)):
-        fitted = page.model_copy(update={"entries": page.entries[start:]})
-        if len(canonical_payload(fitted)) <= max_bytes:
-            return fitted
+    newest_first = [len(canonical_payload(one)) for one in reversed(page.entries)]
+    base = len(canonical_payload(page.model_copy(update={"entries": ()})))
+    count = _fitting_count(newest_first, base=base, max_bytes=max_bytes)
+    if count:
+        fitted = page.model_copy(update={"entries": page.entries[len(page.entries) - count :]})
+        check_payload(fitted, max_bytes=max_bytes, subject="the result of transcript()")
+        return fitted
     check_payload(page, max_bytes=max_bytes, subject="the result of transcript()")
     raise AssertionError("an oversized transcript page was unexpectedly admitted")
 
@@ -403,18 +423,23 @@ def fit_changes(page: ChatChanges, *, max_bytes: int) -> ChatChanges:
 
     ``next_after`` becomes the last change returned, so the next read resumes after
     it and nothing is lost (ADR-0293 §5:11). Where not even one change fits, the
-    original page earns the ordinary size error.
+    original page earns the ordinary size error. The frame is measured at the page's
+    own ``next_after``, which no kept change's sequence number exceeds, so the count
+    chosen is never too large; each change is encoded once.
 
     Raises:
         OversizedValueError: If no non-empty page fits.
     """
     if len(canonical_payload(page)) <= max_bytes:
         return page
-    for count in range(len(page.changes) - 1, 0, -1):
+    sizes = [len(canonical_payload(one)) for one in page.changes]
+    base = len(canonical_payload(ChatChanges(next_after=page.next_after)))
+    count = _fitting_count(sizes, base=base, max_bytes=max_bytes)
+    if count:
         kept = page.changes[:count]
         fitted = ChatChanges(changes=kept, next_after=kept[-1].seq)
-        if len(canonical_payload(fitted)) <= max_bytes:
-            return fitted
+        check_payload(fitted, max_bytes=max_bytes, subject="the result of chat_changes()")
+        return fitted
     check_payload(page, max_bytes=max_bytes, subject="the result of chat_changes()")
     raise AssertionError("an oversized changes page was unexpectedly admitted")
 
@@ -800,6 +825,7 @@ class ConversationLifecycle:
         Raises:
             MemoryStoreError: If the store cannot be read or an episode deleted.
         """
+        self.activation_writer.forgetting_conversation(conversation_id)
         forgot = False
         for episode_id in await episodes_on_place(self._memory, conversation_id):
             self.activation_writer.forgetting(episode_id)

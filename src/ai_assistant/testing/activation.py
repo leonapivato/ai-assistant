@@ -106,6 +106,9 @@ class FakeActivation:
     no_words: bool = False
     links: ActivationLinks = field(default_factory=ActivationLinks)
     output_failure: OversizedValueError | None = None
+    #: Its conversation was forgotten while it ran (ADR-0293 §2:6): its capture writes
+    #: nothing, and an episode already on its way is deleted once it lands.
+    forgotten: bool = False
     understood: bool = False
 
     @classmethod
@@ -382,7 +385,15 @@ class FakeActivation:
             return UnderstandingOmission.ROUTED
         return None if self.understood else UnderstandingOmission.NOT_REACHED
 
-    async def finish(  # noqa: PLR0913 — bounded capture stages and truthful early-loss returns
+    def was_forgotten(self) -> bool:
+        """Whether its conversation was forgotten while it ran (ADR-0293 §2:6).
+
+        A method rather than a read of :attr:`forgotten`, because the flag is set from
+        outside across an ``await`` and a narrowed read would not see it change.
+        """
+        return self.forgotten
+
+    async def finish(  # noqa: C901, PLR0911, PLR0913 — bounded capture stages, truthful early-loss returns, and the forgetting checks either side of the write
         self,
         *,
         memory: MemoryStore,
@@ -393,6 +404,12 @@ class FakeActivation:
         check_output: Callable[[], object],
     ) -> EpisodeCaptureReport:
         """Insert once and report only confirmed live capture; never retry processing."""
+
+        def forgotten() -> EpisodeCaptureReport:
+            self.episode_id = None
+            return EpisodeCaptureReport(
+                activation_id=self.activation_id, episode_id=None, state="degraded"
+            )
 
         def degraded() -> EpisodeCaptureReport:
             return EpisodeCaptureReport(
@@ -424,9 +441,16 @@ class FakeActivation:
             record = self.record(address, failure)
             if len(canonical_json(record)) > 8 * max_bytes + 65536:
                 return degraded()
+            if self.was_forgotten():
+                return forgotten()
             await memory.write_atomic(
                 [MemoryWrite(record=record, mode=MemoryWriteMode.INSERT_IF_ABSENT)]
             )
+            if self.was_forgotten():
+                # Forgotten while the write was on its way: as ADR-0286 §8:2's next
+                # write after the mark, the episode is deleted rather than kept.
+                await memory.delete(address)
+                return forgotten()
             if self.conversation_id is not None and self.conversation_id not in conversations:
                 # Kept, as the engine keeps it where ``record_turn`` answers ``None``
                 # (ADR-0293 §2:7); the conversation never recorded the turn, so the

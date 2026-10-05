@@ -128,6 +128,21 @@ class ActivationWriter:
         for progress in self._in_flight.get(address, ()):
             progress.forgotten = True
 
+    def forgetting_conversation(self, conversation_id: str) -> None:
+        """Tell every capture in flight from ``conversation_id`` that it is forgotten.
+
+        ``forget_conversation`` calls this **before** it walks the conversation's place
+        (ADR-0293 §2:6): a capture whose admission write is still on its way — which
+        no read of the store can find yet — is forgotten at its next write exactly as
+        :meth:`forgetting` forgets one by its address (ADR-0286 §8:2). Only the
+        captures in flight now are marked; an activation admitted after the call is
+        the user talking on, and its episode is written as usual.
+        """
+        for held in self._in_flight.values():
+            for progress in held:
+                if progress.conversation_id == conversation_id:
+                    progress.forgotten = True
+
     def holds(self, address: str) -> bool:
         """Whether a capture of this process is in flight at ``address`` (ADR-0286 §7:2)."""
         return address in self._in_flight
@@ -156,7 +171,9 @@ class ActivationWriter:
         except Exception:
             capture_loss("admission", "clock")
             return
-        progress = EpisodeProgress(address=address, captured_at=captured_at)
+        progress = EpisodeProgress(
+            address=address, captured_at=captured_at, conversation_id=state.conversation_id
+        )
         state.capture = progress
         self._in_flight.setdefault(address, []).append(progress)
         try:
@@ -200,6 +217,7 @@ class ActivationWriter:
         progress = state.capture
         if progress is None or progress.ended or progress.frozen:
             return
+        progress.conversation_id = state.conversation_id
         try:
             revision = self._open(state, progress, payload_limit)
         except Exception:
