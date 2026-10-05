@@ -228,6 +228,15 @@
             Informational — the box below stays open while it works (§8:2).
           -->
           <p class="hint" id="chat-state" aria-live="polite"></p>
+          <!--
+            The stop control (ADR-0295 §1:2, ADR-0297 §5:7): offered while the state
+            shows "working…" with an id, naming that activation and no other, and gone
+            once it ends. What the stop answered is said beside it (§5:4-§5:6).
+          -->
+          <p class="choice" id="chat-stop-row" hidden>
+            <button type="button" id="chat-stop">Stop</button>
+          </p>
+          <p class="hint" id="chat-stop-said" aria-live="polite" hidden></p>
           <!-- Offered where the transcript could not be read; nothing reads it again unasked. -->
           <button type="button" id="chat-reread" hidden>Read this conversation again</button>
           <button type="button" id="chat-older" hidden>Show earlier messages</button>

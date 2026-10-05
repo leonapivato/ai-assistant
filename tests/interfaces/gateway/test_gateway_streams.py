@@ -1348,8 +1348,11 @@ def test_the_surface_resolves_onto_what_it_serves_and_the_gateways_own_poll() ->
     ``withdraw_clarification`` and ``abandon_goal``"**, which §15 places on this surface
     by name. **ADR-0296's ``- Status:`` line records "§1:1's enumeration, which gains
     the acts in the medium and the change stream"**, ADR-0293 §11:2's acts and the read
-    of the changes after a cursor that stands for the stream until it is built. Every
-    other clause of §1 binds each of them exactly as it binds the thirty.
+    of the changes after a cursor that stands for the stream until it is built.
+    **ADR-0297 §6:4 rules that "the command line and the gateway's stop control land
+    last"**, which places ``stop_activation`` here by the governing decision's own text,
+    as ADR-0244 §13 placed ``cancel_read``; the header record it owes ADR-0177 is issue
+    #2714. Every other clause of §1 binds each of them exactly as it binds the thirty.
 
     **The count is not written down here, and that is ADR-0177's own instruction rather
     than an omission.** Its third dated note retires the figure — "do not read that as
@@ -1416,6 +1419,8 @@ def test_the_surface_resolves_onto_what_it_serves_and_the_gateways_own_poll() ->
         "delete_conversation",
         "transcript",
         "chat_changes",
+        # ADR-0297 §6:4: the gateway's stop control beside "working…" (#2714).
+        "stop_activation",
         "delivery-stream",
     }
 
