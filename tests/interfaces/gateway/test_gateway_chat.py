@@ -216,6 +216,7 @@ async def test_sending_again_is_the_same_message(harness: Harness) -> None:
 
 async def test_a_reply_names_the_position_it_replies_to(harness: Harness) -> None:
     """§4:5: a message may name one earlier message; one never held is the hub's answer."""
+    harness.engine.chat_reader = False  # the positions are the case's own
     conversation = await _started(harness)
     await harness.whole(
         "POST",
@@ -443,6 +444,7 @@ async def test_a_remote_browser_writes_as_the_device_the_overlay_named() -> None
 
 async def test_the_transcript_carries_messages_and_markers(harness: Harness) -> None:
     """§5:2's properties for a message, and §5:12's marker — position, deleted, no text."""
+    harness.engine.chat_reader = False  # the reply is the case's own
     conversation = await _started(harness)
     for index, text in enumerate(("Book it.", "Which one?"), start=1):
         await harness.whole(
@@ -502,6 +504,7 @@ async def test_the_transcript_of_a_conversation_that_is_gone_is_its_own_conditio
 
 async def test_the_changes_after_a_cursor_are_every_kind_in_order(harness: Harness) -> None:
     """§5:10, §5:11: every change gets a sequence number, and one request catches up."""
+    harness.engine.chat_reader = False  # the changes are the case's own
     await harness.whole(
         "POST", "/chat/devices/set", {"devices": [{"device_id": _HUB, "access": "read_write"}]}
     )

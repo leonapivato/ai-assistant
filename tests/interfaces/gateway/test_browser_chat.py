@@ -71,6 +71,7 @@ async def test_a_message_is_received_and_the_reply_arrives_by_following(
 ) -> None:
     """§4:4's *received*, then §6's reply reaching the page as a change, with §8's state."""
     async with driving(gateway_browser, tmp_path) as drive:
+        drive.engine.chat_reader = False  # the reply is the case's own
         conversation = await _open(drive)
         await _send(drive, "Book the usual campsite.")
 
@@ -191,6 +192,7 @@ async def test_a_deleted_message_leaves_its_reply_naming_a_deleted_message(
 ) -> None:
     """§5:8: deleting deletes that message alone, and a reply to it says what it named."""
     async with driving(gateway_browser, tmp_path) as drive:
+        drive.engine.chat_reader = False  # the reply is the case's own
         conversation = await _open(drive)
         await _send(drive, "Ericeira.")
         await expect(drive.page.locator("#chat-transcript li.from-user")).to_contain_text(

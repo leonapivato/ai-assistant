@@ -48,7 +48,12 @@ from pathlib import Path as _Path
 from typing import TYPE_CHECKING, ClassVar
 
 import pytest
-from chat_surface_contract import CHAT_LIMIT, CHAT_SURFACE_AT, ChatSurfaceSubject
+from chat_surface_contract import (
+    CHAT_LIMIT,
+    CHAT_SURFACE_AT,
+    ChatReaderSubject,
+    ChatSurfaceSubject,
+)
 from episode_inspection_contract import (
     INSPECTION_AT,
     INSPECTION_LIMIT,
@@ -271,7 +276,20 @@ class TestHubEngineClientContract(AssistantEngineContract):
 
     @pytest.fixture
     async def chat_surface(self, tmp_path: Path) -> AsyncIterator[ChatSurfaceSubject]:
-        """The chat space over an authenticated local socket."""
+        """The chat space over an authenticated local socket, on a hub not answering."""
+        memory = FakeMemoryStore(now=lambda: CHAT_SURFACE_AT)
+        backing = FakeAssistantEngine(max_payload_bytes=CHAT_LIMIT, chat_reader=False)
+        backing.episode_memory = memory
+        async with serving(
+            backing,
+            tmp_path / "hub.sock",
+            max_frame_bytes=CHAT_LIMIT + ENVELOPE_RESERVE_BYTES,
+        ) as client:
+            yield ChatSurfaceSubject(engine=client, memory=memory)
+
+    @pytest.fixture
+    async def chat_reader_surface(self, tmp_path: Path) -> AsyncIterator[ChatReaderSubject]:
+        """The chat space over an authenticated local socket, on a hub that answers."""
         memory = FakeMemoryStore(now=lambda: CHAT_SURFACE_AT)
         backing = FakeAssistantEngine(max_payload_bytes=CHAT_LIMIT)
         backing.episode_memory = memory
@@ -280,7 +298,7 @@ class TestHubEngineClientContract(AssistantEngineContract):
             tmp_path / "hub.sock",
             max_frame_bytes=CHAT_LIMIT + ENVELOPE_RESERVE_BYTES,
         ) as client:
-            yield ChatSurfaceSubject(engine=client, memory=memory)
+            yield ChatReaderSubject(engine=client, memory=memory, chat=backing.chat)
 
     @pytest.fixture
     async def story_surface(self, tmp_path: Path) -> AsyncIterator[StorySurfaceSubject]:
