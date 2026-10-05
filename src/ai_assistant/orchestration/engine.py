@@ -2780,10 +2780,8 @@ def _stopped_resumption(  # noqa: PLR0913 — one keyword per member a resume ma
     composing stage, the capture — is not there, so the exchange is reported
     unrecorded.
 
-    **What the resolution never handed back is not here either.** A raise inside the
-    resolution itself — between the recorded answer and the runner's disposition —
-    leaves the engine holding no step outcome to return, and propagates exactly as it
-    does for every resume (:func:`_kept_if_stopped` wraps only the work after it).
+    A raise inside the resolution itself, past its recorded answer, is kept by
+    :func:`_kept_resolution` instead, before any of this.
     """
     state = active_state()
     return TurnOutcome(
@@ -2806,6 +2804,25 @@ def _stopped_resumption(  # noqa: PLR0913 — one keyword per member a resume ma
         search_not_serviced=search_not_serviced,
         stopped=True,
     )
+
+
+def _kept_resolution(
+    parked: _Parked, observed: DriveObservation, *, recorded: bool
+) -> StepDisposition | _WithheldResumption | None:
+    """What a stopped resume keeps of a resolution that raised after its answer.
+
+    ``None`` — the raise propagates — where the resume was not stopped or no answer was
+    recorded (ADR-0235 §6:10: a resume raises only where none was). Otherwise the
+    disposition the runner had already assembled for an executed step before its later
+    bookkeeping raised, carried by value with the establishing pair it published, or —
+    where the step never executed — the resolution that acted on nothing, whose step
+    the park still holds. No disposition the runner did not assemble is invented.
+    """
+    if not (recorded and _marked()):
+        return None
+    if observed.executed is not None:
+        return replace(observed.executed, establishing=observed.establishing)
+    return _WithheldResumption(parked=parked, withheld=None, outbound=observed)
 
 
 def _marked() -> bool:
@@ -15252,7 +15269,7 @@ class Engine:
             establishing, expires_at=remember_recipients_until
         )
 
-    async def _resolve_park(
+    async def _resolve_park(  # noqa: C901 — the one critical section, with ADR-0261 §7's and ADR-0297 §4's kept exits from the drive
         self,
         token: ContinuationToken,
         *,
@@ -15353,6 +15370,9 @@ class Engine:
             # available and is taken; act 3's is not (:meth:`_engage_after_the_act`).
             await self._engage_execution(parked.execution_id, parked.step_id)
             allowed_by: str | None = None
+            # Whether the resolving answer is on the trail: the boundary past which a
+            # stopped resume returns rather than raises (ADR-0297 §4, ADR-0235 §6:10).
+            recorded = False
             resumed = state
 
             async def ruled(decision: PermissionDecision) -> None:
@@ -15370,8 +15390,9 @@ class Engine:
                 store refuses does not also lose what the step was allowed by: the
                 finishing commit records it instead (:meth:`_finished_attempt`).
                 """
-                nonlocal allowed_by
+                nonlocal allowed_by, recorded
                 allowed_by = decision.id
+                recorded = True
                 await self._authorized_attempt(resumed, decision.id)
 
             # ADR-0297 §2:2: the resumed claim names the control activation that
@@ -15454,16 +15475,25 @@ class Engine:
             # step reached — none where the claim was withheld. The activation is
             # admitted at the resolution point, inside the drive, which is why the
             # record is read once the drive ends.
-            driven = await run_recorded(
-                self._resume_record,
-                ControllerStage.DRIVE,
-                ControllerRule.PARK_ANSWERED,
-                clock=self._clock,
-                body=drive,
-                verdict=_resumed_drive_verdict,
-                appended=self._episode_appended,
-                stopped=_marked,
-            )
+            try:
+                driven = await run_recorded(
+                    self._resume_record,
+                    ControllerStage.DRIVE,
+                    ControllerRule.PARK_ANSWERED,
+                    clock=self._clock,
+                    body=drive,
+                    verdict=_resumed_drive_verdict,
+                    appended=self._episode_appended,
+                    stopped=_marked,
+                )
+            except Exception:
+                # ADR-0297 §4: past the recorded answer, a stopped resume returns what it
+                # established. The stage's failure stays recorded — ``drive`` failed, the
+                # stop's end entry after it — and nothing is retried.
+                kept = _kept_resolution(parked, observed, recorded=recorded)
+                if kept is None:
+                    raise
+                driven = kept
             if isinstance(driven, _WithheldResumption):
                 return driven
             disposition = driven

@@ -542,6 +542,14 @@ class DriveObservation:
     #: establishing act, and on a ``resume`` supplying no ``remember_recipients_until``.
     establishing: EstablishingAnswer | None = None
 
+    #: The executed step's disposition, published as soon as it is assembled and before
+    #: the bookkeeping that follows it (ADR-0267 §4's quote mint), which can raise. A
+    #: resume whose control activation was stopped returns its outcome wherever its
+    #: answer was recorded (ADR-0297 §4), so a raise after the step executed must not
+    #: lose what the step reached. ``None`` until then, and on every drive that did not
+    #: execute.
+    executed: StepDisposition | None = None
+
 
 @dataclass(frozen=True, slots=True)
 class StepDisposition:
@@ -2626,6 +2634,8 @@ class StepRunner:
             outbound=_egress_reach(request, reach),
             satisfied=planned.step.id if drive.satisfied else None,
         )
+        if outbound is not None:
+            outbound.executed = disposition
         await self._mint_quote(quoting, drive.state)
         return disposition
 
