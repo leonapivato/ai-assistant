@@ -58,7 +58,12 @@ from ai_assistant.testing import (
 if TYPE_CHECKING:
     from collections.abc import Awaitable, Callable, Sequence
 
-    from ai_assistant.core.types import FeedbackEvent, MemoryUpdateProposal, Message
+    from ai_assistant.core.types import (
+        DeviceConversation,
+        FeedbackEvent,
+        MemoryUpdateProposal,
+        Message,
+    )
     from ai_assistant.orchestration.engine import Engine
 
 _PHONE: Final = ChatDevice(device_id="phone", access=DeviceAccess.READ_WRITE)
@@ -512,28 +517,81 @@ async def test_a_writing_end_is_found_wherever_the_listing_puts_it() -> None:
 
 
 class _MovingStore(FakeConversationStore):
-    """Grants a device one conversation and deletes another while a check reads one."""
+    """Runs one act on the store while a check reads one conversation's devices."""
 
     def __init__(self) -> None:
         super().__init__()
-        self.trap: tuple[str, str, ChatDevice] | None = None
+        self.hook: tuple[str, Callable[[], Awaitable[None]]] | None = None
 
     async def conversation_devices(self, conversation_id: str) -> tuple[ChatDevice, ...] | None:
-        if self.trap is not None and self.trap[0] == conversation_id:
-            deleted, granted, device = self.trap
-            self.trap = None
-            await self.set_conversation_devices(granted, [device])
-            await self.stamp_deleted(deleted)
+        if self.hook is not None and self.hook[0] == conversation_id:
+            _, act = self.hook
+            self.hook = None
+            await act()
         return await super().conversation_devices(conversation_id)
 
 
-async def test_a_candidate_deleted_mid_check_sends_the_replay_on() -> None:
+async def test_a_candidate_deleted_mid_check_is_retried() -> None:
     """ADR-0296 §2: a role held throughout is never read as none, whatever lands."""
     store = _MovingStore()
     engine = Harness(planner=NoStepPlanner(), chat_reader=False, conversation_store=store).engine
     held = await _conversation(engine, _PEN)
     granted = await _conversation(engine, _PHONE)
     await engine.set_my_devices([])
-    store.trap = (held, granted, _PEN)
+
+    async def moved() -> None:
+        await store.set_conversation_devices(granted, [_PEN])
+        await store.stamp_deleted(held)
+
+    store.hook = (held, moved)
     assert await _as(PEN, engine.recent_conversations) == ()
-    assert store.trap is None, "the check read the candidate it was trapped on"
+    assert store.hook is None, "the check read the candidate it was trapped on"
+
+
+async def test_a_grant_of_my_devices_mid_check_is_not_read_as_no_role() -> None:
+    """The bracket: a move to "my devices" between the reads retries, and finds it."""
+    store = _MovingStore()
+    engine = Harness(planner=NoStepPlanner(), chat_reader=False, conversation_store=store).engine
+    held = await _conversation(engine, _PEN)
+    await engine.set_my_devices([])
+
+    async def moved() -> None:
+        await store.set_my_devices([_PEN])
+        await store.stamp_deleted(held)
+
+    store.hook = (held, moved)
+    page = await _as(PEN, lambda: engine.chat_changes(after=0))
+    assert isinstance(page, ChatChanges)
+    assert store.hook is None, "the check read the candidate it was trapped on"
+
+
+class _ChurningStore(FakeConversationStore):
+    """Records an unrelated change during each of a check's first ``churn`` reads."""
+
+    def __init__(self, churn: int) -> None:
+        super().__init__()
+        self.churn = churn
+
+    async def device_conversations(
+        self, device_id: str, *, limit: int = 50, offset: int = 0
+    ) -> list[DeviceConversation]:
+        if self.churn > 0:
+            self.churn -= 1
+            await self.start()
+        return await super().device_conversations(device_id, limit=limit, offset=offset)
+
+
+async def test_no_role_is_decided_only_over_one_state() -> None:
+    """A number that moved between the reads is retried; a settled one is NO_ROLE."""
+    store = _ChurningStore(churn=1)
+    engine = Harness(planner=NoStepPlanner(), chat_reader=False, conversation_store=store).engine
+    await _refused(STRANGER, engine.recent_conversations, DeviceRefusal.NO_ROLE)
+    assert store.churn == 0
+
+
+async def test_an_unsettled_role_is_never_reported_as_no_role() -> None:
+    """Where the number moves on every bracket, the refusal is not ``NO_ROLE``."""
+    store = _ChurningStore(churn=1000)
+    engine = Harness(planner=NoStepPlanner(), chat_reader=False, conversation_store=store).engine
+    await _refused(STRANGER, engine.recent_conversations, DeviceRefusal.NOT_ALLOWED)
+    await _refused(STRANGER, engine.start_conversation, DeviceRefusal.NOT_ALLOWED)
