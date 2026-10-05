@@ -21,7 +21,7 @@ import pytest
 from browser_drive import DESKTOP, PHONE, driving
 from playwright.async_api import expect
 
-from ai_assistant.core.errors import ConversationStoreError, DeviceRefusal
+from ai_assistant.core.errors import ConversationStoreError, DeviceRefusal, DeviceRefusedError
 from ai_assistant.core.types import (
     ChatDevice,
     ChatStreamChunk,
@@ -425,7 +425,8 @@ async def test_following_again_reads_the_state_whose_read_failed(
     gateway_browser: Browser, tmp_path: Path
 ) -> None:
     """The state read made as following starts again is not retried when it fails, and
-    the owner's recovery reads it again even when no change has come since."""
+    does not stop the stream; following starting again reads it again even when no
+    change has come since."""
     async with driving(gateway_browser, tmp_path) as drive:
         await _open(drive)
         held = drive.engine.conversation
@@ -439,12 +440,15 @@ async def test_following_again_reads_the_state_whose_read_failed(
         # Following starts again on the page being seen again, and reads the state once,
         # since it may have changed while nothing here followed; that read fails.
         await drive.page.evaluate(_HIDE_AND_SHOW)
-        await expect(drive.page.locator("#chat-follow")).to_contain_text(
-            "Stopped following", timeout=_IDLE_FOLLOWED
+        await expect(drive.page.locator("#chat .fault")).to_contain_text(
+            "declined", timeout=_IDLE_FOLLOWED
         )
-        # ADR-0182 §7: it is not read again of the page's own motion.
+        # ADR-0182 §7: it is not read again of the page's own motion; and the stream it
+        # was read beside goes on.
         await drive.page.wait_for_timeout(3_000)
         assert len(reads) == 1
+        await expect(drive.page.locator("#chat-follow")).to_contain_text("You came back")
+        assert await drive.page.evaluate("() => chat.following && chat.stream !== null")
 
         async def working(conversation_id: str) -> Any:
             digest = await held(conversation_id)
@@ -452,7 +456,7 @@ async def test_following_again_reads_the_state_whose_read_failed(
             return digest.model_copy(update={"state": ConversationState(working=True)})
 
         drive.engine.conversation = working  # type: ignore[method-assign]
-        await drive.page.click("#chat-follow-again")
+        await drive.page.evaluate(_HIDE_AND_SHOW)
         await expect(drive.page.locator("#chat-state")).to_contain_text("working on this")
 
 
@@ -1018,6 +1022,90 @@ async def test_a_device_refused_for_holding_no_role_drops_every_conversation(
         opened = len(_follows(drive))
         await drive.page.wait_for_timeout(2_000)
         assert len(_follows(drive)) == opened
+
+
+async def test_a_listing_read_before_a_removal_does_not_bring_the_conversation_back(
+    gateway_browser: Browser, tmp_path: Path
+) -> None:
+    """ADR-0296 §4:8: a listing answered before the change that removed this device still
+    names the conversation; landing after the drop, it does not list it again."""
+    async with driving(gateway_browser, tmp_path, device=_LAPTOP) as drive:
+        conversation = await _open(drive, devices=(_LAPTOP,))
+        await drive.page.evaluate(_HOLDING, "/conversations")
+        await drive.engine.start_conversation()  # the stream says so, and the page relists
+        await drive.page.wait_for_function("() => window.__held.reached", timeout=_FOLLOWED)
+
+        await drive.engine.set_conversation_devices(conversation, devices=[])
+        await expect(drive.page.locator("#chat-said")).to_contain_text(
+            "no longer reads", timeout=_FOLLOWED
+        )
+        await drive.page.evaluate("window.__held.release()")
+        await drive.page.wait_for_function("() => !window.__held.open")
+
+        listing = drive.page.locator("#chat-conversations")
+        await expect(listing.locator("li")).to_have_count(1)
+        await expect(listing).not_to_contain_text(f"Conversation {conversation}")
+
+
+async def test_a_listing_read_before_a_no_role_refusal_lists_nothing_when_it_lands(
+    gateway_browser: Browser, tmp_path: Path
+) -> None:
+    """ADR-0298 §7:17 drops every conversation, including what a listing still out says."""
+    async with driving(gateway_browser, tmp_path, device=_LAPTOP) as drive:
+        await _open(drive, devices=(_LAPTOP,))
+        await drive.page.evaluate(_HOLDING, "/conversations")
+        await drive.engine.start_conversation()
+        await drive.page.wait_for_function("() => window.__held.reached", timeout=_FOLLOWED)
+
+        drive.engine.refuse_following = DeviceRefusal.NO_ROLE
+        await drive.page.evaluate(_HIDE_AND_SHOW)
+        await expect(drive.page.locator("#chat-said")).to_contain_text(
+            "holding no role", timeout=_FOLLOWED
+        )
+        await drive.page.evaluate("window.__held.release()")
+        await drive.page.wait_for_function("() => !window.__held.open")
+
+        await expect(drive.page.locator("#chat-conversations")).to_contain_text(
+            "No conversations yet."
+        )
+
+
+async def test_a_state_read_refused_for_a_removal_leaves_the_stream_to_say_so(
+    gateway_browser: Browser, tmp_path: Path
+) -> None:
+    """A device removed from the conversation on screen while the page was hidden is
+    refused that conversation's state when it comes back; the refusal stops nothing, and
+    the stream then delivers the removal, which drops the conversation (ADR-0296 §4:8)."""
+    async with driving(gateway_browser, tmp_path, device=_LAPTOP) as drive:
+        conversation = await _open(drive, devices=(_LAPTOP,))
+
+        async def refused(conversation_id: str) -> Any:
+            msg = "reading one conversation needs this device among its readers"
+            raise DeviceRefusedError(msg, reason=DeviceRefusal.NOT_ALLOWED)
+
+        await drive.page.evaluate(
+            """() => {
+              Object.defineProperty(document, "visibilityState", {
+                configurable: true, get: () => "hidden" });
+              document.dispatchEvent(new Event("visibilitychange"));
+            }"""
+        )
+        await drive.engine.set_conversation_devices(conversation, devices=[])
+        drive.engine.conversation = refused  # type: ignore[method-assign]
+        await drive.page.evaluate(
+            """() => {
+              Object.defineProperty(document, "visibilityState", {
+                configurable: true, get: () => "visible" });
+              document.dispatchEvent(new Event("visibilitychange"));
+            }"""
+        )
+
+        await expect(drive.page.locator("#chat-said")).to_contain_text(
+            f"This device no longer reads conversation {conversation}", timeout=_FOLLOWED
+        )
+        await expect(drive.page.locator("#chat-thread")).to_be_hidden()
+        await expect(drive.page.locator("#chat-follow")).to_contain_text("You came back")
+        assert await drive.page.evaluate("() => chat.following")
 
 
 async def test_a_roles_chunk_with_no_roles_drops_nothing(
