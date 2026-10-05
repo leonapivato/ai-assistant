@@ -1,6 +1,6 @@
 # 296. A device has one session, and a browser is a device of its own
 
-- Status: Proposed
+- Status: Accepted
 - Date: 2026-10-04
 - Scope: [#2578](https://github.com/leonapivato/ai-assistant/issues/2578), the channel redesign: the device session, how a device is known to the hub, what it may do, and how ADR-0292's routes and ADR-0293's change stream reach it.
 - Authorization: the owner accepted proposal #2687 on 2026-10-04, at `099c83da`, which records the rulings of the owner's walkthrough the same day, and the dispatcher assigned 0296. This ADR is that proposal converted under `docs/proposals/README.md` → "When it is decided".
