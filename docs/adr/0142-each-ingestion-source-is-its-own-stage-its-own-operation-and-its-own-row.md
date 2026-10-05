@@ -1,7 +1,12 @@
 # 142. Each ingestion source is its own stage, its own operation and its own row
 
-- Status: Accepted
+- Status: Superseded by ADR-0294
 - Date: 2026-08-12
+- Superseded: 2026-10-04 by ADR-0294 — whole. ADR-0294 retires readers' scheduled
+  ingestion, and every clause here rules how an ingestion source is armed, staged,
+  operated and reported. This replacement takes effect on ratification of ADR-0294.
+  This reciprocal header record accompanies the numbered draft under ADR-0070 and
+  ADR-0082; prior supersessions and the ratified body below are preserved.
 
 ## Context
 

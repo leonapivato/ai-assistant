@@ -1,6 +1,6 @@
 # 120. A measure is a rate over one window of the trace stream, read offline while the hub is stopped
 
-- Status: Partially superseded by ADR-0128 (§7's #824 shortfall watch) and ADR-0218 (§3's second normative clause, in the machine seam set's membership) and ADR-0285 (§3:2's `observe` and `observe_due` members; §6:3–§6:5)
+- Status: Partially superseded by ADR-0128 (§7's #824 shortfall watch) and ADR-0218 (§3's second normative clause, in the machine seam set's membership) and ADR-0285 (§3:2's `observe` and `observe_due` members; §6:3–§6:5) and ADR-0294 (§3:2's `ingest` member)
 - Date: 2026-08-09
 - Partially superseded: 2026-08-29 by ADR-0218 — **§3's machine seam set gains a
   member: a scheduled observation run writes on its own initiative and carries its
@@ -200,6 +200,13 @@
   clause stands. These replacements take effect on ratification of ADR-0285. This
   reciprocal header record accompanies the numbered draft under ADR-0070 and ADR-0082;
   prior supersessions and the ratified body below are preserved.
+- Partially superseded: 2026-10-04 by ADR-0294 — one scope. §3:2's `ingest` member
+  of the machine set, which the code spells `ingest_calendar` and `ingest_email`:
+  the operations are removed (ADR-0294 §5), and a trace already stored under either
+  is read as unclassified. Every other member and clause stands. This replacement
+  takes effect on ratification of ADR-0294. This reciprocal header record
+  accompanies the numbered draft under ADR-0070 and ADR-0082; prior supersessions
+  and the ratified body below are preserved.
 
 ## Context
 

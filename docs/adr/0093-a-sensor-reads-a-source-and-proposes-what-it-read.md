@@ -1,6 +1,6 @@
 # 93. A sensor reads a source and proposes what it read; the clock bounds the read, so nothing needs a cursor
 
-- Status: Partially superseded by ADR-0095 (the contract's name and the package its concretes live in) and ADR-0110 (§4's second sentence: an entry absent from a reading that declares the coverage it exhausted) and ADR-0190 (§7's non-configurable-identity clause: a source configured after the first of its type carries a minted discriminator, and the declared name is no longer every source's identity)
+- Status: Partially superseded by ADR-0095 (the contract's name and the package its concretes live in) and ADR-0110 (§4's second sentence: an entry absent from a reading that declares the coverage it exhausted) and ADR-0190 (§7's non-configurable-identity clause: a source configured after the first of its type carries a minted discriminator, and the declared name is no longer every source's identity) and ADR-0294 (§3's memory consumer and ingestion's cadence; §6; §7's and §7a's interval field; §8's ingestion posture; §9's scheduled-ingestion clause; §10's ingestion items)
 - Date: 2026-08-02
 - Partially superseded: 2026-08-02 by ADR-0095 — **two decisions are replaced and
   nothing else is.** The contract below named `Sensor` is named `Reader`;
@@ -192,6 +192,18 @@
   bound: a parser's internals, and the store's cumulative growth. This is ADR-0070
   §1's appended dated note; no ratified text below is rewritten and the `Status`
   line is unchanged. Refs #641, #1427.
+- Partially superseded: 2026-10-04 by ADR-0294 — six scopes, all of them the
+  scheduled ingestion that ADR-0294 retires. §3's memory as a reading's second
+  consumer and ingestion's cadence; §6 entire; §7's and §7a's interval field
+  (`calendar_sensor_interval`, spelled `calendar_reader_interval` in the code) and
+  the states it makes with the path; §8's ingestion-side posture; §9's
+  scheduled-ingestion clause; and §10's later-lane items for the ingestion stage,
+  the `Engine` operation and the scheduler job. The reader, its reading, its bound,
+  its configuration discipline and the facet path stand, as do §1, §2, §4, §5, §7b,
+  §11 and every other part of §3 and §7–§10. This replacement takes effect on
+  ratification of ADR-0294. This reciprocal header record accompanies the numbered
+  draft under ADR-0070 and ADR-0082; prior supersessions and the ratified body below
+  are preserved.
 
 ## Context
 

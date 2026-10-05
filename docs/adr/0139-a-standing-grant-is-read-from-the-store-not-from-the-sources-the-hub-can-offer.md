@@ -1,6 +1,6 @@
 # 139. A standing grant is read from the store, not from the sources the hub can offer
 
-- Status: Accepted
+- Status: Partially superseded by ADR-0294 (§3:2, in the members offered for a new grant)
 - Date: 2026-08-12
 - **Note (2026-08-12): ratified.** `Proposed` → `Accepted`, after **both**
   required reviews came back green on **one** tree, `cfae4e00c6c3`: adversarial
@@ -56,6 +56,14 @@
   and legs 9 and 10 verified grants against a live hub (#919, #978). The roadmap
   paragraph is corrected in a separate lane of batch #1009; this ADR reads the
   code rather than either document, and cites the roadmap only for its exit test.
+- Partially superseded: 2026-10-04 by ADR-0294 — one scope. §3:2, in which members a
+  surface offering the uses for a new grant carries: every member a new grant may
+  name, `FACET` and `NOTIFY`, and not `INGEST`, which the hub refuses for a new
+  grant (ADR-0294 §4). §3:3's rendering of an existing grant, `INGEST` included, and
+  every other clause stand. This replacement takes effect on ratification of
+  ADR-0294. This reciprocal header record accompanies the numbered draft under
+  ADR-0070 and ADR-0082; prior supersessions and the ratified body below are
+  preserved.
 
 ## Context
 
