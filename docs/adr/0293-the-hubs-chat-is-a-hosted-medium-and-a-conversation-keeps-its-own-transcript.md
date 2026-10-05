@@ -1,9 +1,16 @@
 # 293. The hub's chat is a hosted medium, and a conversation keeps its own transcript
 
-- Status: Accepted
+- Status: Partially superseded by ADR-0295 (§8:3's list of endings, in the addition alone; §9:1 and §10:2, for a stopped activation)
 - Date: 2026-10-04
 - Scope: [#2578](https://github.com/leonapivato/ai-assistant/issues/2578), the channel redesign: the conversation channel, the first channel ADR-0292's model is applied to.
 - Authorization: the owner accepted proposal #2680 on 2026-10-04, at `f21aeb7b`, after walking it through section by section the same day, and the dispatcher assigned 0293. This ADR is that proposal converted under `docs/proposals/README.md` → "When it is decided".
+- Partially superseded: 2026-10-04 by ADR-0295 — two scopes. §8:3's list of endings, in
+  the addition alone: the current state also shows *stopped*, with each effect the stopped
+  activation sent that finished (ADR-0295 §3). §9:1 and §10:2, for a stopped activation:
+  it writes no *couldn't finish* message, as §6:17 already has it write nothing new
+  (ADR-0295 §3). Every other clause stands. These replacements take effect on
+  ratification of ADR-0295. This reciprocal header record accompanies the numbered draft
+  under ADR-0070 and ADR-0082; the ratified body below is preserved.
 - **Partially supersedes** [ADR-0274](0274-channel-input-and-reply-contract.md) — **one scope.** **§2–§6, in so far as they govern a typed text input to the conversation and its reply**: such an input is a message written into a conversation as an act in the medium (§4 below); it names no channel, supplies no history and no replied-to item, and its reply is not returned on the request but written into a conversation by the chat's writer (§6 below). A replied-to entry survives as a message's reference into the transcript (§4 below). The spoken combination, informational events and every other clause stand. These mechanisms keep working until the first build replaces them (§11 below, ADR-0292 §13:1).
 - **Partially supersedes** [ADR-0276](0276-an-activation-is-understood-before-it-is-associated-and-the-understanding-is-retained-with-its-episode.md) — **one scope.** **§3:1's and §3:2's conversation-channel window, for every input but the quarantined spoken path's**: the conversation's window is its recent transcript, brought in by the chat's reader with the new input, its size declared by the kind (§6, §7 below); §3:2's *no per-channel history table* does not reach the transcript, which is the hosted medium's content (ADR-0292 §3:3). The quarantined spoken path keeps both clauses as they stand. Every other clause stands.
 - **Partially supersedes** [ADR-0283](0283-a-channels-history-is-its-episodes-and-the-turn-index-is-retired.md) — **four scopes.** **§4:1, for every read but the quarantined spoken path's**: a conversation's history is its transcript (§5 below). **§8:1, in what deleting a conversation removes**: its transcript, and none of the episodes on its place; deleting those episodes is forgetting the conversation, a command that leaves the conversation and its transcript (§2 below). **§8:2's condition**: reclaim also spares a conversation that holds a message, since a transcript is kept until the user deletes it (§5 below). **§7:2's and §7:4's deletion of the episode where the conversation is stamped or absent**: the writer keeps the episode, because deleting a conversation forgets nothing (§2 below); §7:2's verification call and every other clause stand.
