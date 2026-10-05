@@ -21,9 +21,8 @@ adapter may and may not do with it is ADR-0042 §6: it renders the content,
 collects the human's yes/no, and relays an **opaque** :class:`ContinuationToken`;
 it never authors a permission outcome, and it never inspects the token.
 
-Beside them sit the two non-turn legs, each its own result DTO: :meth:`Engine.learn`
-folds one piece of feedback into memory (:class:`LearnOutcome`), and the
-**inspection surface** — :meth:`Engine.beliefs`, :meth:`Engine.belief` and
+Beside them sits the **inspection surface** — :meth:`Engine.beliefs`,
+:meth:`Engine.belief` and
 :meth:`Engine.forget` — lets a person read what the assistant believes about them
 and destroy any of it (:class:`Belief`; ADR-0073 §7). Inspection is where
 :func:`~ai_assistant.core.types.band_of` is applied, **once**: classifying a record
@@ -62,7 +61,6 @@ composition root's, a separate package (ADR-0042 §2).
 from __future__ import annotations
 
 import asyncio
-import contextlib
 import contextvars
 import uuid
 from collections.abc import Awaitable, Callable, Coroutine, Mapping, Sequence
@@ -72,7 +70,7 @@ from enum import StrEnum
 from functools import partial
 from itertools import count
 from types import MappingProxyType
-from typing import TYPE_CHECKING, Any, Final, Literal, TypeVar, assert_never, cast
+from typing import TYPE_CHECKING, Any, Final, Literal, TypeVar, cast
 
 import structlog
 
@@ -108,7 +106,6 @@ from ai_assistant.core.errors import (
     UngrantableActError,
     UnknownContinuationError,
 )
-from ai_assistant.core.streams import closing_stream
 from ai_assistant.core.types import (
     DEFAULT_PAGE_SIZE,
     MAX_ASSOCIATION_CANDIDATES,
@@ -139,7 +136,6 @@ from ai_assistant.core.types import (
     ConversationInputOptions,
     ConversationSummary,
     CoverageUnrecordedBinding,
-    DeferralAdmissionOutcome,
     Disposition,
     DriveWithheld,
     EngagementDisposition,
@@ -159,11 +155,7 @@ from ai_assistant.core.types import (
     GoalRevision,
     GoalStatus,
     GoalSummary,
-    IngestSummary,
     IntendedActionMinting,
-    LearnDecision,
-    LearnOutcome,
-    MemoryDecisionKind,
     MemoryKind,
     MemoryWrite,
     MemoryWriteMode,
@@ -181,8 +173,6 @@ from ai_assistant.core.types import (
     PlacementReach,
     PlacementSetter,
     ProcessingStatus,
-    QueuedQuestion,
-    QueueOutcome,
     ReadAnswerOutcome,
     ReadCancellation,
     ReadKind,
@@ -190,7 +180,6 @@ from ai_assistant.core.types import (
     RecordedResumeTrigger,
     ReferenceOutcome,
     ReplyCapability,
-    ReplyChunk,
     RoutableOperation,
     RouteApproval,
     RoutedOperation,
@@ -213,7 +202,6 @@ from ai_assistant.core.types import (
     StoryMember,
     StoryMemberKind,
     StoryOutcome,
-    StreamingTextReply,
     TextChannelPayload,
     TextChannelResult,
     TraceOutcome,
@@ -315,12 +303,9 @@ from ai_assistant.orchestration.notifications import hand_off
 from ai_assistant.orchestration.origin import SelectionOrigin
 from ai_assistant.orchestration.payloads import (
     DEFAULT_MAX_PAYLOAD_BYTES,
-    JSON_STRING_QUOTE_BYTES,
-    canonical_payload,
     check_arguments,
     check_payload,
     check_provisioning_call,
-    encoded_text_bytes,
     grant_scope,
     identifier,
     non_blank_text,
@@ -328,7 +313,6 @@ from ai_assistant.orchestration.payloads import (
     positive_page_argument,
     utc_instant,
 )
-from ai_assistant.orchestration.questions import question_state
 from ai_assistant.orchestration.reads import StructuredFacts, outbound_statement
 from ai_assistant.orchestration.recall import Recalled
 from ai_assistant.orchestration.reconciling import Reconciled, ReconciliationStage, TurnRemainder
@@ -363,7 +347,7 @@ from ai_assistant.orchestration.understanding import (
 from ai_assistant.orchestration.verification import Comparison, compare
 
 if TYPE_CHECKING:
-    from collections.abc import AsyncIterator, Sequence
+    from collections.abc import Sequence
 
     from ai_assistant.core.clock import Clock
     from ai_assistant.core.protocols import (
@@ -393,12 +377,10 @@ if TYPE_CHECKING:
         ConnectionAct,
         Conversation,
         ConversationDigest,
-        DeferralAdmission,
         DestinationTrustRecord,
         DurableIdentifier,
         EncodableText,
         ExecutionState,
-        FeedbackEvent,
         FrozenJsonMapping,
         GrantableSource,
         GrantScope,
@@ -467,16 +449,8 @@ if TYPE_CHECKING:
         WindowsStage,
     )
     from ai_assistant.orchestration.upcoming import UpcomingEventStage
-    from ai_assistant.orchestration.writes import WriteOutcome
 
 _log = structlog.get_logger(__name__)
-
-#: The one-character reply :meth:`Engine._reply_room` measures a probe outcome with.
-#: Its own encoding is subtracted straight back out, so the character is arbitrary
-#: — what it has to be is *something*, since
-#: :data:`~ai_assistant.core.types.NonBlankEncodableText` has no spelling for the
-#: empty answer and a ``None`` reply would encode as ``null`` rather than a string.
-_ROOM_PROBE: Final[str] = "x"
 
 #: ``Settings.routed_confirmation_ttl``'s own default, restated where the invariant
 #: is used so an engine built in a test that reads no setting still has a bounded
@@ -1049,112 +1023,6 @@ def _consolidated(report: ConsolidationReport) -> Observation:
     )
 
 
-def queued_question(admission: DeferralAdmission) -> QueuedQuestion:
-    """Translate a ``core`` admission into the surface's own echo (ADR-0078 §7).
-
-    A **module function rather than a classmethod**, like every other projection in
-    this package (ADR-0085 §6a): the promoted models carry their fields, not their
-    constructors. The rule is stated over *every* projection helper rather than
-    over the ones that would break the build, because a rule with exceptions is one
-    the next reader has to re-derive — and because a projection from a ``core``
-    record into a ``core`` DTO belongs to the layer that *decides* the projection.
-
-    It branches on the ``outcome`` and **never on an id comparison**, which is the
-    shape ADR-0078 §2 rejects: comparing the returned id to the one the coordinator
-    minted fails the moment a caller retries with the same id, and the surface would
-    announce a newly parked question over a suppressed one.
-    """
-    match admission.outcome:
-        case DeferralAdmissionOutcome.ADMITTED:
-            outcome = QueueOutcome.QUEUED
-        case DeferralAdmissionOutcome.SUPPRESSED:
-            outcome = QueueOutcome.ALREADY_ASKED
-        case DeferralAdmissionOutcome.REFUSED:
-            # No deferral to read at all — reaching for one here is the
-            # dereference the three-shape validator exists to prevent.
-            return QueuedQuestion(outcome=QueueOutcome.QUEUE_FULL)
-        case _:  # pragma: no cover — exhaustive over the enum
-            assert_never(admission.outcome)
-    deferral = admission.deferral
-    if deferral is None:  # pragma: no cover — the validator pins the shapes
-        return QueuedQuestion(outcome=outcome)
-    return QueuedQuestion(
-        outcome=outcome,
-        question_id=deferral.id,
-        question_state=question_state(deferral.state),
-    )
-
-
-def learn_outcome(outcomes: tuple[WriteOutcome, ...]) -> LearnOutcome:
-    """Translate the write stage's outcomes into the surface's summary.
-
-    The one place a ``core``
-    :class:`~ai_assistant.core.types.MemoryIngestResult` or
-    :class:`~ai_assistant.core.types.DeferralAdmission` is read on the learn path;
-    everything a client sees downstream is a promoted type (ADR-0042 §1).
-
-    **It cannot be a classmethod on the promoted model, and this is the helper that
-    proves the rule** (ADR-0085 §6a): it names
-    :class:`~ai_assistant.orchestration.writes.WriteOutcome`, which lives in
-    `orchestration`. Carried onto :class:`~ai_assistant.core.types.LearnOutcome` it
-    would put ``core -> orchestration`` in the import graph — the precise
-    ``lint-imports`` failure the closure is promoted to avoid, reintroduced by a
-    classmethod nobody counted as a field.
-    """
-    return LearnOutcome(
-        results=tuple(
-            IngestSummary(
-                decision=learn_decision(outcome.result.decision.kind),
-                record_id=outcome.result.record_id,
-                reason=outcome.result.decision.reason,
-                queued=_queued(outcome),
-            )
-            for outcome in outcomes
-        )
-    )
-
-
-def _queued(outcome: WriteOutcome) -> QueuedQuestion | None:
-    """Where one write outcome's deferred question went, or ``None`` (ADR-0078 §10.9).
-
-    Three cases, and the third is the one that must not collapse into the others:
-
-    * not a deferral at all — no question was raised, so there is nothing to say;
-    * a deferral the stage offered to the queue — the admission says what happened;
-    * a deferral the stage never offered, because it is secret-tier (ADR-0078 §1).
-      The stage returns no admission for it, and reading that absence as "nothing to
-      say" would route every ``ASK_USER`` through the queued-question line and tell
-      the user to go answer something that was never queued.
-    """
-    if outcome.result.decision.kind is not MemoryDecisionKind.ASK_USER:
-        return None
-    if outcome.admission is None:
-        return QueuedQuestion(outcome=QueueOutcome.NOT_QUEUABLE)
-    return queued_question(outcome.admission)
-
-
-def learn_decision(kind: MemoryDecisionKind) -> LearnDecision:
-    """Map a ``core`` memory ruling to its surface-level echo (ADR-0042 §1).
-
-    Total by construction: every :class:`~ai_assistant.core.types.MemoryDecisionKind`
-    is handled, so a new ruling added to ``core`` fails type-checking here until it
-    is given an echo, rather than silently losing its rendering.
-    """
-    match kind:
-        case MemoryDecisionKind.ACCEPT:
-            return LearnDecision.STORED
-        case MemoryDecisionKind.REJECT:
-            return LearnDecision.REJECTED
-        case MemoryDecisionKind.REINFORCE:
-            return LearnDecision.REINFORCED
-        case MemoryDecisionKind.SUPERSEDE:
-            return LearnDecision.SUPERSEDED
-        case MemoryDecisionKind.ASK_USER:
-            return LearnDecision.DEFERRED
-        case MemoryDecisionKind.STORE_TEMPORARY:
-            return LearnDecision.STORED_TEMPORARILY
-
-
 #: The floor a belief's **presented** confidence falls to as its support is lost
 #: (ADR-0077 §6). A documented positive constant, and the *exact* value is this
 #: lane's: what §6 ratifies is that the adjustment is a pure function of the stored
@@ -1448,14 +1316,8 @@ def conversation_summary(conversation: Conversation) -> ConversationSummary:
 class _GoalPass:
     """What a pass's composer is told about this turn's goal (ADR-0250 §5, §10, §14).
 
-    **Two jobs and one value, because the streaming path needs both at one call.**
-    :attr:`facts` is what reaches the composing stage's prompt; the three members
-    beside it are what the outcome will carry, and the **streaming** composer measures
-    its ceiling against a probe outcome (:meth:`Engine._reply_room`) that has to be the
-    shape the terminal frame will actually hold. A probe missing these members would
-    reserve room for a smaller outcome than the one it reserves for, and the stream
-    would publish text the frame then refuses — which is exactly what ADR-0173 §3's
-    ceiling exists to make impossible.
+    **Two jobs and one value.** :attr:`facts` is what reaches the composing stage's
+    prompt; the three members beside it are what the outcome will carry.
 
     Attributes:
         facts: ADR-0250 §10's and §14's two facts, for the prompt.
@@ -1808,18 +1670,15 @@ def _reference_outcome(disposition: GoalQuestionDisposition) -> ReferenceOutcome
 
 
 #: How a routed pass composes its answer: the whole routed account, and the
-#: conversation the room is measured against.
+#: conversation it runs under.
 #:
-#: **The account rather than its two enum values**, and the difference is the streaming
-#: ceiling. ADR-0197 §6 constrains what the *composing stage* is handed — two closed
-#: vocabularies and nothing else — and the stage's own signature is where that is
-#: enforced; what the engine needs one level up is the outcome it is about to **build**,
-#: because ADR-0173 §3 measures the reply's room against exactly that value and a probe
-#: omitting the listing would over-state it. Nothing here reaches a prompt. Two shapes satisfy it —
-#: :meth:`Engine._composed_routed_whole` and a closure over
-#: :meth:`Engine._compose_routed_streaming` — and it is a parameter rather than a flag
-#: for :meth:`Engine._run_turn`'s own reason: a second copy of the routing driver would
-#: be two places for the reservation's release and the capture point to drift apart.
+#: **The account rather than its two enum values.** ADR-0197 §6 constrains what the
+#: *composing stage* is handed — two closed vocabularies and nothing else — and the
+#: stage's own signature is where that is enforced. Nothing here reaches a prompt.
+#: Shapes such as :meth:`Engine._composed_routed_whole` satisfy it, and it is a
+#: parameter rather than a flag for :meth:`Engine._run_turn`'s own reason: a second
+#: copy of the routing driver would be two places for the reservation's release and
+#: the capture point to drift apart.
 #: ADR-0264 §7's value for a pass that composed a reply and reached nothing at all.
 #:
 #: **One literal rather than a call per site**, because every producer of it is a pass
@@ -1861,8 +1720,7 @@ def _fragment_for(outbound: OutboundStatement | None) -> OutboundStatement:
     Called past each composer's own decline, so reaching it with ``None`` means those two
     points have disagreed: a pass that is about to compose was assembled as one that would
     not. That is a **defect in this engine** and not a composition failure, so it raises
-    rather than joining ADR-0170 §8's closed degradation set — the same ground on which
-    :meth:`Engine._compose_streaming` raises for a stage that ended without reporting.
+    rather than joining ADR-0170 §8's closed degradation set.
     Composing anyway is the one outcome this decision cannot accept: an unrouted reply
     written under no instruction is #2268's shape and #2365's alike.
 
@@ -2190,8 +2048,8 @@ class _SpokenCapture:
 
     **Its presence is what §4's "on this operation and no other" means
     mechanically.** ``_run_turn`` is given one only by ``converse_spoken``, and the
-    capture point writes ``delivery`` from it; ``converse``, ``converse_streaming``
-    and ``resume`` hand none and their rows carry none. Nothing in the capture path
+    capture point writes ``delivery`` from it; ``converse`` and ``resume`` hand none
+    and their rows carry none. Nothing in the capture path
     asks which operation it is running under, because it is told.
 
     Attributes:
@@ -3045,7 +2903,6 @@ def _query_of(route: RoutedRoute) -> str:
 
 
 _EMPTY_CHANNEL_CONTEXT = ChannelContext()
-_LEGACY_STREAM_PROJECTION = ChannelProjection("converse_streaming")
 _LEGACY_SPOKEN_PROJECTION = ChannelProjection("converse_spoken")
 
 
@@ -4461,24 +4318,17 @@ class Engine:
         self,
         input: ChannelInput,  # noqa: A002 — channel contract parameter
         *,
-        reply: WholeTextReply | SpokenReply | None,
+        reply: SpokenReply | None,
         timeout: timedelta,  # noqa: ASYNC109 — caller's operation budget
     ) -> ChannelResult:
-        """Receive one channel input under its declared policy (ADR-0274 §4)."""
+        """Receive one channel input under its declared policy (ADR-0274 §4).
+
+        The text conversational combination is refused here (ADR-0293 §11): a typed
+        message is written into a conversation, and :meth:`converse` is the one
+        entry that still runs a typed turn.
+        """
         return await self._receive(
             input, reply=reply, timeout=timeout, projection=ChannelProjection("receive")
-        )
-
-    def receive_streaming(
-        self,
-        input: ChannelInput,  # noqa: A002 — channel contract parameter
-        *,
-        reply: StreamingTextReply,
-        timeout: timedelta,
-    ) -> AsyncIterator[ReplyChunk | ChannelResult]:
-        """Receive text and stream on this iterator alone (ADR-0274 §6)."""
-        return self._receive_streaming(
-            input, reply=reply, timeout=timeout, projection=ChannelProjection("receive_streaming")
         )
 
     async def _receive(
@@ -4488,9 +4338,10 @@ class Engine:
         reply: WholeTextReply | SpokenReply | None,
         timeout: timedelta,  # noqa: ASYNC109 — operation budget
         projection: ChannelProjection,
+        typed_turn: bool = False,
     ) -> ChannelResult:
         self._reject_if_closing()
-        accepted, capability = snapshot(input, reply, streaming=False)
+        accepted, capability = snapshot(input, reply, typed_turn=typed_turn)
         if projection.method == "receive":
             check_payload(
                 {"input": accepted, "reply": capability, "timeout": timeout},
@@ -4620,87 +4471,6 @@ class Engine:
         self._checked(projection.text(outcome), projection.method)
         return text_result(outcome)
 
-    def _receive_streaming(
-        self,
-        input: ChannelInput,  # noqa: A002 — channel contract parameter
-        *,
-        reply: StreamingTextReply,
-        timeout: timedelta,
-        projection: ChannelProjection,
-    ) -> AsyncIterator[ReplyChunk | ChannelResult]:
-        self._reject_if_closing()
-        accepted, capability = snapshot(input, reply, streaming=True)
-        if projection.method == "receive_streaming":
-            check_arguments(
-                "receive_streaming",
-                max_bytes=self._max_payload_bytes,
-                input=accepted,
-                reply=capability,
-                timeout=timeout,
-            )
-        assert isinstance(accepted.payload, TextChannelPayload)  # noqa: S101 — narrowed by validated channel dispatch
-        options = accepted.conversation or ConversationInputOptions()
-        selected = (
-            None if isinstance(accepted.target, NewConversation) else accepted.target.instance_id
-        )
-        device = current_requesting_device()
-        stream = self._streamed(
-            accepted.payload.text,
-            admitted_input=accepted,
-            admitted_reply=capability,
-            timeout=timeout,
-            conversation_id=selected,
-            reference=options.reference,
-            context=accepted.context,
-            projection=projection,
-        )
-        if device.is_hub:
-            return stream
-        target = accepted.target
-        return self._device_checked_stream(
-            lambda: self._device_checks.receiving(device, target, projection.method), stream
-        )
-
-    async def _device_checked_stream(
-        self,
-        check: Callable[[], Awaitable[None]],
-        stream: AsyncIterator[ReplyChunk | ChannelResult],
-    ) -> AsyncIterator[ReplyChunk | ChannelResult]:
-        """Run ADR-0298 §5's check before the stream's turn starts, then relay it.
-
-        The turn is not started until the check passes, so a refused stream has
-        changed nothing (§6:1); the stream is closed on every exit, a refusal
-        included.
-        """
-        async with closing_stream(stream) as values:
-            # Iterated later than it was made: a shutdown begun since closes the
-            # stores the check reads, so it is refused before anything runs.
-            self._reject_if_closing()
-            await self._uninterruptibly(check())
-            async for value in values:
-                yield value
-
-    async def _legacy_stream(
-        self,
-        stream: AsyncIterator[ReplyChunk | ChannelResult],
-    ) -> AsyncIterator[ReplyChunk | TurnOutcome]:
-        async with closing_stream(stream) as values:
-            async for value in values:
-                if isinstance(value, ReplyChunk):
-                    yield value
-                else:
-                    assert isinstance(value.result, TextChannelResult)  # noqa: S101 — narrowed by validated channel dispatch
-                    yield value.result.outcome
-
-    async def _channel_stream_result(
-        self,
-        work: Awaitable[TurnOutcome],
-        projection: ChannelProjection,
-    ) -> ChannelResult:
-        outcome = await work
-        self._checked(projection.text(outcome), projection.method)
-        return text_result(outcome)
-
     async def converse(
         self,
         utterance: EncodableText,
@@ -4794,188 +4564,10 @@ class Engine:
             reply=WholeTextReply(),
             timeout=timeout,
             projection=ChannelProjection("converse"),
+            typed_turn=True,
         )
         assert isinstance(result.result, TextChannelResult)  # noqa: S101 — narrowed by validated channel dispatch
         return result.result.outcome
-
-    def converse_streaming(
-        self,
-        utterance: EncodableText,
-        *,
-        timeout: timedelta,
-        conversation_id: Identifier | None = None,
-        reference: TurnReference | None = None,
-    ) -> AsyncIterator[ReplyChunk | TurnOutcome]:
-        """Run one turn as :meth:`converse` does, streaming the answer (ADR-0173 §4).
-
-        Every clause :meth:`converse` declares binds here: the same arguments in the
-        same shape, the same conversation resolution, the same refusals and the same
-        failures. What differs is that the composed answer is yielded as it arrives,
-        as zero or more :class:`~ai_assistant.core.types.ReplyChunk` values followed
-        by exactly one :class:`~ai_assistant.core.types.TurnOutcome`.
-
-        **The local refusals are raised from the call, not from the iteration**, as
-        they are on :meth:`converse` and as ``StreamingCompleter.stream`` raises its
-        own: a caller that never iterates still learns that its utterance had no
-        encoding or its conversation id was blank, and ADR-0085 §9's "refused
-        locally, before any I/O" stays true of a method whose I/O has not started.
-
-        **A client that goes away does not abandon the turn** (ADR-0173 §9). The
-        turn runs inside a tracked task of its own, so abandoning or closing this
-        iterator leaves it running to its ordinary completion — including its
-        capture — and the undelivered chunks and outcome are simply discarded. A
-        turn may already have approved and executed a non-idempotent tool before a
-        single word was composed; abandoning it would leave that effect committed
-        and the exchange uncaptured, whose natural retry can perform it twice.
-
-        Args:
-            utterance: What the user said, passed through untouched.
-            timeout: The per-attempt budget, as :meth:`converse`.
-            conversation_id: The conversation to continue, or ``None``.
-            reference: Exactly :meth:`converse`'s, which this method takes by
-                ADR-0173's own clause rather than by an amendment to it — and which
-                ADR-0250 §19's M1 likewise accepts without resolving.
-
-        Returns:
-            An async iterator over the answer's chunks and then the turn's outcome.
-            Close it if you stop reading part-way (:func:`contextlib.aclosing`).
-
-        Raises:
-            RuntimeError: If the engine is shutting down.
-            ValueError: If ``conversation_id`` is blank or the utterance has no
-                UTF-8 encoding.
-            OversizedValueError: If the arguments exceed the contract limit.
-        """
-        self._reject_if_closing()
-        selected = (
-            None if conversation_id is None else identifier(conversation_id, name="conversation_id")
-        )
-        check_arguments(
-            "converse_streaming",
-            max_bytes=self._max_payload_bytes,
-            utterance=utterance,
-            timeout=timeout,
-            conversation_id=selected,
-            reference=reference,
-        )
-        stream = self._receive_streaming(
-            ChannelInput(
-                target=conversation_target(selected),
-                payload=TextChannelPayload(text=utterance),
-                conversation=ConversationInputOptions(reference=reference),
-            ),
-            reply=StreamingTextReply(),
-            timeout=timeout,
-            projection=ChannelProjection("converse_streaming"),
-        )
-        return self._legacy_stream(stream)
-
-    async def _streamed(  # noqa: PLR0913 — operation data and per-call context/projection
-        self,
-        utterance: str,
-        *,
-        admitted_input: ChannelInput,
-        admitted_reply: ReplyCapability | None,
-        timeout: timedelta,  # noqa: ASYNC109 — threaded through to the seam (ADR-0029 §4)
-        conversation_id: str | None,
-        reference: TurnReference | None = None,
-        context: ChannelContext = _EMPTY_CHANNEL_CONTEXT,
-        projection: ChannelProjection = _LEGACY_STREAM_PROJECTION,
-    ) -> AsyncIterator[ReplyChunk | ChannelResult]:
-        """Drive the turn in a tracked task and relay what it publishes.
-
-        **The turn runs beside this generator rather than inside it**, and that
-        split is what ADR-0173 §9 costs. An async generator's cleanup runs while it
-        is being *closed*, so a turn driven inside one would have to finish its
-        capture during ``GeneratorExit`` — which cannot await — or be abandoned
-        mid-flight, which §9 forbids. Running it as an ordinary task lets a client
-        walk away while the turn completes, and puts it in ``_inflight`` so
-        :meth:`aclose` still drains it (ADR-0042 §2).
-
-        **The queue is unbounded, and it is bounded all the same.** ADR-0173 §3
-        caps the published answer at the room the terminal frame has, and nothing
-        else is ever put here — so the queue holds at most one more copy of a
-        payload the outcome already carries. A bounded queue would be the wrong
-        trade: a client that stopped reading would block the producer forever, and
-        the turn §9 promises to finish would never finish.
-        """
-        chunks: asyncio.Queue[ReplyChunk] = asyncio.Queue()
-        state = admit_channel(
-            admitted_input,
-            admitted_reply,
-            clock=self._now,
-            id_factory=self._activation_id_factory,
-            stage_limit=self._stage_record_limit,
-        )
-        projection = replace(projection, capture_report=state.reserved_report)
-        deadline = asyncio.get_running_loop().time() + timeout.total_seconds()
-        turn = self._activation_task(
-            ActivationScope(state),
-            lambda: self._channel_stream_result(
-                self._converse_streaming(
-                    utterance,
-                    timeout=timeout,
-                    conversation_id=conversation_id,
-                    chunks=chunks,
-                    reference=reference,
-                    context=context,
-                    projection=projection,
-                ),
-                projection,
-            ),
-            seam=projection.method,
-            check_output=lambda result: check_payload(
-                projection.terminal(result),
-                max_bytes=self._max_payload_bytes,
-                subject=f"the result of {projection.method}()",
-            ),
-            deadline=deadline,
-        )
-        # A turn nobody reads still fails legibly rather than as asyncio's
-        # "Task exception was never retrieved" on the next collection: §9 makes an
-        # abandoned stream ordinary, so its failure has to be *observed* somewhere
-        # even when no caller is left to be told.
-        turn.add_done_callback(_note_failure)
-        # **A settled getter is buffered output, and the loop treats it as such.**
-        # It holds the *oldest* chunk — it took the head of the queue — so it is
-        # drained before the queue itself, and the loop ends only when all three
-        # are empty: the getter, the queue, and the turn. The obvious shape, which
-        # exits on ``turn.done() and chunks.empty()``, is correct only if a settled
-        # getter can never coexist with a queue this loop is still draining; that
-        # happens to hold today, because ``put_nowait`` schedules a parked getter's
-        # wake before anything that could resume this coroutine — but it is an
-        # argument about ready-queue order, and a chunk the terminal ``reply``
-        # repeats and nobody was yielded is too sharp an edge to leave resting on
-        # one (ADR-0173 §3).
-        waiting: asyncio.Task[ReplyChunk] | None = None
-        try:
-            while True:
-                if waiting is not None and waiting.done():
-                    yield waiting.result()
-                    waiting = None
-                    continue
-                if not chunks.empty():
-                    yield chunks.get_nowait()
-                    continue
-                if turn.done():
-                    break
-                if waiting is None:
-                    waiting = asyncio.ensure_future(chunks.get())
-                await asyncio.wait({waiting, turn}, return_when=asyncio.FIRST_COMPLETED)
-        finally:
-            # Cancelling a parked ``Queue.get`` cannot lose an item: ``put_nowait``
-            # appends before it wakes a getter, so anything already queued is still
-            # there for the drain above. The turn itself is deliberately **not**
-            # cancelled — §9 again.
-            if waiting is not None and not waiting.done():
-                waiting.cancel()
-                with contextlib.suppress(asyncio.CancelledError):
-                    await waiting
-        # ``result()`` re-raises whatever the turn raised, which is the terminal
-        # error frame's value one layer down (ADR-0173 §1).
-        result, report = turn.result()
-        assert report is not None  # noqa: S101 — channel admission always creates state
-        yield captured_result(result, report, episode_id=state.recorded_episode_id)
 
     async def converse_spoken(
         self,
@@ -6501,40 +6093,6 @@ class Engine:
             disposition=GoalQuestionDisposition.WITHDRAWN,
             at=self._clock(),
         )
-
-    async def learn(self, event: FeedbackEvent) -> LearnOutcome:
-        """Fold one piece of feedback back into memory (ADR-0042 §3; the correction leg).
-
-        The adapter hands the engine the correction or stated preference the user
-        gave, and receives an ``orchestration``-level summary of what memory did
-        with it. Delegates to the
-        :class:`~ai_assistant.orchestration.loop.LearningLoop`, whose ``learn``
-        processes the event into proposals and ingests each through the injected
-        ``MemoryWriter`` (ADR-0028 §4) — conflict resolution, the policy's ruling
-        and the write all happen behind that seam.
-
-        Tracked like :meth:`converse`/:meth:`resume`: the write path touches the
-        connection-owning memory store, so shutdown must drain it before closing
-        that connection (ADR-0042 §2).
-
-        Args:
-            event: The correction or stated preference the user gave.
-
-        Returns:
-            A :class:`LearnOutcome` summarising, per proposal, how memory folded it
-            — translated from the loop's raw ingest results so no ``core`` type
-            reaches the adapter (ADR-0042 §1).
-
-        Raises:
-            RuntimeError: If the engine is shutting down (:meth:`aclose` has been
-                entered), so no new work is accepted.
-            MemoryStoreError: If the writer failed to read conflicts or write a
-                record, as the loop raises.
-        """
-        self._reject_if_closing()
-        check_arguments("learn", max_bytes=self._max_payload_bytes, event=event)
-        device = current_requesting_device()
-        return await self._tracked(self._learn(event, device), "learn", checked=True)
 
     async def episodes(
         self,
@@ -10236,11 +9794,8 @@ class Engine:
     ) -> asyncio.Task[_T]:
         """Register one operation's work as a task shutdown will drain.
 
-        The half of :meth:`_tracked` that does not await, extracted because
-        :meth:`_streamed` needs the task itself: a streaming turn runs *beside* the
-        iterator relaying it, so that abandoning the iterator leaves the turn
-        running to completion (ADR-0173 §9) and still inside the drain ADR-0042 §2
-        obliges.
+        The half of :meth:`_tracked` that does not await, for a caller that needs
+        the task itself, still inside the drain ADR-0042 §2 obliges.
 
         Args:
             work: The operation's own work, already wrapped in whatever measurement
@@ -10545,102 +10100,6 @@ class Engine:
             reference=reference,
         )
 
-    async def _converse_streaming(  # noqa: PLR0913 — operation data and per-call context/projection
-        self,
-        utterance: str,
-        *,
-        timeout: timedelta,  # noqa: ASYNC109 — threaded through to the seam (ADR-0029 §4)
-        conversation_id: str | None,
-        chunks: asyncio.Queue[ReplyChunk],
-        reference: TurnReference | None = None,
-        context: ChannelContext = _EMPTY_CHANNEL_CONTEXT,
-        projection: ChannelProjection = _LEGACY_STREAM_PROJECTION,
-    ) -> TurnOutcome:
-        """Run one whole turn, publishing its answer as it composes (ADR-0173 §4).
-
-        **The same turn, and deliberately the same code.** Everything before the
-        composing stage — resolving the conversation, reading its tail, planning,
-        the confirmation ceiling, driving the step, and the capture afterwards — is
-        :meth:`_run_turn`'s, unchanged. ADR-0173 adds a stage to nothing and moves
-        no other stage; what it changes is which seam the composing stage spends the
-        turn's one model call at (§7) and where the answer goes on its way to the
-        outcome.
-
-        Args:
-            utterance: What the user said.
-            timeout: The per-attempt budget.
-            conversation_id: The conversation to continue, or ``None``.
-            context: Supplied channel-local context, separate from stored history.
-            projection: Public terminal shape used to reserve reply room.
-            chunks: Where each composed :class:`~ai_assistant.core.types.ReplyChunk`
-                is put as it is produced. The relaying iterator owns reading it, and
-                a reader that has gone away does not stop this turn (ADR-0173 §9).
-            reference: What this turn says it is answering (ADR-0250 §11), inherited
-                from :meth:`converse` by ADR-0173's "taking exactly ``converse``'s
-                arguments in exactly its" order.
-
-        Returns:
-            The turn's outcome, whose ``reply`` is the join of whatever was put on
-            ``chunks`` (ADR-0173 §3).
-        """
-
-        async def compose(  # noqa: PLR0913 — :data:`_Composer`'s six, and each is a distinct fact about the pass
-            turn: TurnResult | None,
-            step: StepOutcome | None,
-            conversation: str,
-            deliveries: Mapping[str, SpokenDelivery],
-            hop_reached: Sequence[str],
-            stopped_while_asking: bool,
-            structured: StructuredFacts,
-            search_not_serviced: SearchNotServiced | None,
-            outbound: OutboundStatement | None,
-            goal: _GoalPass,
-        ) -> ComposedReply | None:
-            return await self._compose_streaming(
-                turn,
-                step,
-                conversation,
-                chunks,
-                deliveries,
-                hop_reached,
-                stopped_while_asking,
-                structured,
-                search_not_serviced,
-                outbound,
-                goal,
-                projection=projection,
-            )
-
-        async def compose_routed(
-            routed: RoutedOperation, conversation: str
-        ) -> ComposedReply | None:
-            return await self._compose_routed_streaming(
-                routed, conversation, chunks, projection=projection
-            )
-
-        return await self._begin_channel_turn(
-            utterance,
-            timeout=timeout,
-            conversation_id=conversation_id,
-            context=context,
-            compose=compose,
-            compose_routed=compose_routed,
-            # A bounded audience, exactly as :meth:`_converse`'s: this operation
-            # differs from it in where the composed answer goes and in nothing this
-            # evaluation reads (ADR-0173 §4, ADR-0204 §2).
-            supply=BoundedAudienceSupply(
-                speakable_attested_sources=self._speakable_attested_sources
-            ),
-            # ADR-0228 §4: its own member, which happens to price itself the same as
-            # `converse` — these two differ in where the answer goes rather than in
-            # how long a user waits for it, and §4 keys the budget on the operation.
-            operation=ConversationalOperation.CONVERSE_STREAMING,
-            # ADR-0250 §11, by ADR-0173's "taking exactly `converse`'s arguments in
-            # exactly its order" — which is why that keyword is inherited rather than
-            # recorded as a second decision.
-            reference=reference,
-        )
-
     async def _composed_whole(  # noqa: PLR0913 — :data:`_Composer`'s six, and each is a distinct fact about the pass
         self,
         turn: TurnResult | None,
@@ -10654,13 +10113,12 @@ class Engine:
         outbound: OutboundStatement | None,
         goal: _GoalPass,
     ) -> ComposedReply | None:
-        """Compose atomically, ignoring the conversation the streaming twin needs.
+        """Compose atomically, ignoring the conversation it is handed.
 
-        ``conversation`` is what :meth:`_compose_streaming` measures its ceiling
-        against; the whole-answer path has no ceiling of its own — ADR-0170 §8 makes
-        an over-ceiling answer a refusal, because nothing has been published — so it
-        is accepted and dropped rather than making :meth:`_run_turn` carry two
-        composer shapes.
+        The whole-answer path has no ceiling of its own — ADR-0170 §8 makes an
+        over-ceiling answer a refusal, because nothing has been published — so
+        ``conversation`` is accepted and dropped rather than making :meth:`_run_turn`
+        carry two composer shapes.
 
         **The tail's delivery facts reach this stage too, and that is deliberate**
         (ADR-0205 §5). A turn on ``converse`` whose tail carries one is a real case —
@@ -12893,13 +12351,12 @@ class Engine:
         effects, over the working set in ``working``. What follows is what each stage
         does, as it did when this method ran them as one fixed sequence.
 
-        ``compose`` is how this pass's answer is produced — atomically for
-        :meth:`converse`, as a stream for :meth:`converse_streaming` — and
-        ``compose_routed`` is its twin for a pass that took a route, which composes from
-        ADR-0197 §6's two enum values instead of from a turn. Both are parameters rather
-        than a flag because the streaming and whole paths differ in nothing else: a second
-        copy of this method would be two places for the confirmation ceiling, the
-        reservation's release and the capture point to drift apart.
+        ``compose`` is how this pass's answer is produced, and ``compose_routed`` is its
+        twin for a pass that took a route, which composes from ADR-0197 §6's two enum
+        values instead of from a turn. Both are parameters rather than a flag because the
+        operations that run a turn differ in nothing else: a second copy of this method
+        would be two places for the confirmation ceiling, the reservation's release and
+        the capture point to drift apart.
 
         **What this pass persists of a turn's understanding** (ADR-0249 §11, §12). The
         loop builds the goal record, the revisions the turn recorded and the attempt it
@@ -14331,12 +13788,12 @@ class Engine:
     async def _composed_routed_whole(
         self, routed: RoutedOperation, conversation: str
     ) -> ComposedReply | None:
-        """Compose a routed answer atomically, ignoring the room its streaming twin needs.
+        """Compose a routed answer atomically, ignoring the conversation it is handed.
 
-        ``conversation`` is what :meth:`_compose_routed_streaming` measures its ceiling
-        against; the whole-answer path has no ceiling of its own — ADR-0170 §8 makes an
-        over-ceiling answer a refusal, because nothing has been published — so it is
-        accepted and dropped, exactly as :meth:`_composed_whole` does.
+        The whole-answer path has no ceiling of its own — ADR-0170 §8 makes an
+        over-ceiling answer a refusal, because nothing has been published — so
+        ``conversation`` is accepted and dropped, exactly as :meth:`_composed_whole`
+        does.
 
         **Only the two enum values reach the stage** (ADR-0197 §6): the listing this
         method is handed is what the *outcome* will carry, and it goes no further than
@@ -14383,96 +13840,6 @@ class Engine:
             operation=routed.operation, outcome=routed.outcome, unbounded_audience=True
         )
         return _produced(composed)
-
-    async def _compose_routed_streaming(
-        self,
-        routed: RoutedOperation,
-        conversation: str,
-        chunks: asyncio.Queue[ReplyChunk],
-        projection: ChannelProjection = _LEGACY_STREAM_PROJECTION,
-    ) -> ComposedReply | None:
-        """Stream a routed answer onto ``chunks`` (ADR-0173, ADR-0197 §10).
-
-        The routed twin of :meth:`_compose_streaming`, measuring its ceiling against the
-        outcome this pass will actually build — which carries ``routed`` and no ``turn``,
-        so the room is genuinely different from a step-driving turn's.
-
-        **The stage is still handed two enum values and nothing else** (ADR-0197 §6). The
-        whole account arrives here because ADR-0173 §3's ceiling is measured against the
-        terminal outcome, listing included; it reaches the room calculation and stops.
-
-        Raises:
-            RuntimeError: If the stage ended without reporting, which is a defect in it
-                rather than a composition failure (ADR-0170 §8).
-        """
-        composed: ComposedReply | None = None
-        stream = self._composing.compose_routed_streaming(
-            operation=routed.operation,
-            outcome=routed.outcome,
-            room=self._routed_reply_room(
-                routed, conversation_id=conversation, projection=projection
-            ),
-        )
-        async with closing_stream(stream) as composing:
-            async for produced in composing:
-                if isinstance(produced, ReplyChunk):
-                    check_payload(
-                        produced,
-                        max_bytes=self._max_payload_bytes,
-                        subject="a chunk of the reply to converse_streaming()",
-                    )
-                    if (state := active_state()) is not None:
-                        state.published(produced.text)
-                    chunks.put_nowait(produced)
-                else:
-                    composed = _produced(produced)
-        if composed is None:  # pragma: no cover — the stage always reports last
-            msg = "the composing stage ended without reporting what it composed"
-            raise RuntimeError(msg)
-        return composed
-
-    def _routed_reply_room(
-        self,
-        routed: RoutedOperation,
-        *,
-        conversation_id: str,
-        projection: ChannelProjection = _LEGACY_STREAM_PROJECTION,
-    ) -> int:
-        """How many escaped bytes a routed outcome has left for its reply (ADR-0173 §3).
-
-        :meth:`_reply_room`'s routed twin, measured rather than reused because the two
-        outcomes differ in what they carry: this one has no ``turn`` at all and a
-        ``routed`` member whose listing may be a page of the user's own records.
-
-        **The probe carries the whole routed account, listing included**, and that is
-        load-bearing rather than tidiness. ADR-0173 §3's reserve is computable only
-        because the outcome's non-reply content is *settled* before composition begins,
-        and on a routed pass it is: the operation has already run. A probe that omitted
-        the listing would subtract less than the terminal frame will and so report **more**
-        room than there is — the one direction that publishes a chunk the terminal frame
-        then refuses, which is what §3's arithmetic exists to prevent.
-
-        Both booleans are probed at their longer spelling, ``false`` being five bytes
-        against ``true``'s four, for :meth:`_reply_room`'s reason exactly: capture has not
-        run and the answer has not finished, and taking the longer one can only
-        under-state the room.
-        """
-        probe = TurnOutcome(
-            turn=None,
-            conversation_id=conversation_id,
-            capture_degraded=False,
-            reply=_ROOM_PROBE,
-            reply_degraded=False,
-            routed=routed,
-            # ADR-0264 §7: a routed pass that is not a park carries `NOT_REACHED`, and
-            # a routed park owes no answer and reaches no stream — so the probe for a
-            # composing routed pass measures the member it will carry. Omitting it
-            # would over-state the room by exactly the bytes the terminal frame spends
-            # on it.
-            outbound_statement=_reached_nothing(),
-        )
-        fixed = len(canonical_payload(projection.text(probe))) - encoded_text_bytes(_ROOM_PROBE)
-        return self._max_payload_bytes - fixed - JSON_STRING_QUOTE_BYTES
 
     def _routed_surface(self) -> _RoutedSurface:
         """The engine's own operations, as ADR-0197 §2's third clause reaches them.
@@ -14602,234 +13969,6 @@ class Engine:
         # ADR-0250 §5's announcement, placed in the reply here and at the streaming
         # twin, which are the two seams every composed answer passes through.
         return _produced(_announced(composed, carried.engagement))
-
-    async def _compose_streaming(  # noqa: PLR0913 — the turn, the step, the conversation, the chunk queue, the delivery facts, the hop's reach, ADR-0228 §10's stop fact and ADR-0240 §8's three; each is a distinct input, as on :meth:`_compose`
-        self,
-        turn: TurnResult | None,
-        step: StepOutcome | None,
-        conversation_id: str,
-        chunks: asyncio.Queue[ReplyChunk],
-        deliveries: Mapping[str, SpokenDelivery],
-        hop_reached: Sequence[str] = (),
-        stopped_while_asking: bool = False,
-        structured: StructuredFacts | None = None,
-        search_not_serviced: SearchNotServiced | None = None,
-        outbound: OutboundStatement | None = None,
-        goal: _GoalPass | None = None,
-        projection: ChannelProjection = _LEGACY_STREAM_PROJECTION,
-    ) -> ComposedReply | None:
-        """Stream this pass's answer onto ``chunks``, and report what it composed.
-
-        The streaming twin of :meth:`_compose`, and it declines on **exactly** the
-        same two shapes for exactly the same reasons — a park, and a pass with no
-        turn — so a streaming call and a whole one owe an answer on precisely the
-        same passes and a client cannot tell the two apart by which shapes fall
-        silent. Zero chunks then, and the terminal outcome alone (ADR-0173 §4).
-
-        **Every chunk is measured before it is published** (ADR-0173 §11's restating
-        of ADR-0085 §8c): the limit is enforced on each value before the frame
-        carrying it is written, in place of "on results before return", which a
-        method returning an iterator has no single point to satisfy.
-
-        **The stage's iterator is closed rather than merely exhausted.** The ceiling
-        makes stopping part-way ordinary rather than exotic — the stage breaks out
-        of its own read the moment the next chunk would breach — and
-        :func:`contextlib.aclosing` is what releases the provider exchange
-        underneath it (ADR-0060, ``StreamingCompleter``'s own clause).
-
-        Returns:
-            What the stage composed, or ``None`` where no answer was owed.
-
-        Raises:
-            RuntimeError: If the stage ended without reporting, which is a defect in
-                it rather than a composition failure — and ADR-0170 §8's closed
-                degradation set is why it is raised rather than reported as one.
-        """
-        if turn is None or (step is not None and step.confirmation is not None):
-            return None
-        statement = _fragment_for(outbound)
-        undriven = (
-            () if step is None else tuple(one for one in turn.plan.steps if one.id != step.step_id)
-        )
-        carried = goal or _GoalPass()
-        room = self._reply_room(
-            turn=turn,
-            step=step,
-            conversation_id=conversation_id,
-            goal=goal,
-            outbound=outbound,
-            projection=projection,
-        )
-        # ADR-0250 §5's sentence is part of the terminal ``reply``, so it is part of
-        # what ADR-0173 §3's ceiling bounds: the room the stage is given is the room
-        # left **after** it. Escaping is additive over concatenation, which is what
-        # makes the subtraction exact rather than an estimate (:meth:`_reply_room`),
-        # and the **body** cost is what is subtracted — ``room`` is already net of
-        # the reply string's two quotes, so charging ``encoded_text_bytes``' pair a
-        # second time would refuse a reply the ceiling admits.
-        #
-        # **The subtraction is unconditional, and a room too small for the sentence
-        # is the pre-commit degradation rather than a silent drop.** §5 owes the
-        # sentence on every turn that resumed, reopened or moved a word; turning an
-        # owed announcement into an ordinary unannounced answer is the failure #2332
-        # records, not a graceful fallback. A negative room fits no chunk at all, so
-        # the stage publishes none and reports ADR-0173 §3's third case — "having
-        # yielded none … it terminates with §6's pre-commit shape".
-        pending = _announcement_lead(carried.engagement)
-        if pending is not None:
-            room -= encoded_text_bytes(pending) - JSON_STRING_QUOTE_BYTES
-        lead = pending
-        composed: ComposedReply | None = None
-        stream = self._composing.compose_streaming(
-            turn=turn,
-            step=step,
-            undriven=undriven,
-            room=room,
-            deliveries=deliveries,
-            hop_reached=hop_reached,
-            stopped_while_asking=stopped_while_asking,
-            structured=structured,
-            search_not_serviced=search_not_serviced,
-            outbound=statement,
-            goal=carried.facts,
-            uncertain_effect=carried.uncertain_effect,
-        )
-        async with closing_stream(stream) as composing:
-            async for produced in composing:
-                if isinstance(produced, ReplyChunk):
-                    # **Published as its own chunk, and only once the answer has
-                    # actually begun.** Its own chunk because every frame is measured
-                    # on its own (ADR-0173 §11), so folding it into the stage's first
-                    # one could breach a frame the stage had already fitted; and only
-                    # beside a chunk because §5's sentence "is a statement in a reply
-                    # the turn was composing anyway" — a pass that published nothing
-                    # has no reply to carry it, and publishing one would leave a
-                    # terminal ``reply`` the chunks do not join to (ADR-0173 §3).
-                    if pending is not None:
-                        opening = ReplyChunk(text=pending)
-                        check_payload(
-                            opening,
-                            max_bytes=self._max_payload_bytes,
-                            subject="a chunk of the reply to converse_streaming()",
-                        )
-                        if (state := active_state()) is not None:
-                            state.published(opening.text)
-                        chunks.put_nowait(opening)
-                        pending = None
-                    check_payload(
-                        produced,
-                        max_bytes=self._max_payload_bytes,
-                        subject="a chunk of the reply to converse_streaming()",
-                    )
-                    if (state := active_state()) is not None:
-                        state.published(produced.text)
-                    chunks.put_nowait(produced)
-                else:
-                    composed = _produced(produced)
-        if composed is None:  # pragma: no cover — the stage always reports last
-            msg = "the composing stage ended without reporting what it composed"
-            raise RuntimeError(msg)
-        # "Where the exchange streamed chunks, ``reply`` is the text those chunks
-        # conveyed, joined in the order they were written" (ADR-0173 §3) — so the
-        # terminal text gains the lead exactly where the lead was published.
-        if lead is None or pending is not None or composed.text is None:
-            return _produced(composed)
-        return _produced(
-            ComposedReply(
-                text=lead + composed.text, degraded=composed.degraded, timed_out=composed.timed_out
-            )
-        )
-
-    def _reply_room(  # noqa: PLR0913 — operation data and per-call context/projection
-        self,
-        *,
-        turn: TurnResult,
-        step: StepOutcome | None,
-        conversation_id: str,
-        goal: _GoalPass | None = None,
-        outbound: OutboundStatement | None = None,
-        projection: ChannelProjection = _LEGACY_STREAM_PROJECTION,
-    ) -> int:
-        """How many escaped bytes the terminal outcome has left for its reply (§3).
-
-        **The reserve is computable, which is what makes ADR-0173 §3's clause an
-        obligation rather than a wish.** A ``TurnOutcome``'s non-reply content is
-        fixed before composition begins — its ``turn``, ``step``, ``plan`` and
-        ``memories`` are all settled by the time this stage is reached (ADR-0170 §2)
-        — and the two members capture supplies are an ``Identifier`` this method is
-        handed and a ``bool``. So the room is measured here rather than guessed at
-        as a fraction of the frame size.
-
-        **Measured by encoding the outcome that will be built, less the probe reply
-        it stands in for.** What is left is everything but the reply's own
-        characters, so a reply whose escaped body fits in the difference produces a
-        payload inside the limit — exactly, because ADR-0087 §2's encoding escapes a
-        string character by character and is therefore additive over concatenation.
-
-        **Both booleans are probed at their longer spelling**, ``false`` being five
-        bytes against ``true``'s four. Capture has not run yet and the answer has not
-        finished, so neither is known; taking the longer one can only under-state the
-        room, which stops a stream a byte or two early and can never publish text the
-        terminal frame would then refuse.
-
-        Args:
-            projection: Public terminal shape used to reserve reply room.
-            turn: The turn the outcome will carry.
-            step: The step it will carry, or ``None``.
-            conversation_id: The conversation it will name — the one
-                ``ConversationLifecycle.capture`` reports back for this turn.
-            goal: ADR-0250 §5's members the outcome will carry, and ADR-0262 §6's two
-                values, or ``None`` where it will carry none. **They are measured and
-                not omitted**: each adds bytes
-                to the terminal frame, and a probe that left them out would reserve
-                room for an outcome smaller than the one it is reserving for — which is
-                the one thing ADR-0173 §3's ceiling exists to prevent.
-            outbound: ADR-0264 §7's member the outcome will carry, on the same terms
-                and for the same reason.
-
-        Returns:
-            The escaped byte budget for the reply. Zero or negative means no chunk
-            fits at all, which the stage reports as the pre-commit degradation and
-            which leaves an answerless outcome to be measured on its own way out
-            (ADR-0173 §3's third case, ``OversizedValueError`` as on ``converse``).
-        """
-        carried = goal or _GoalPass()
-        probe = TurnOutcome(
-            turn=turn,
-            step=step,
-            conversation_id=conversation_id,
-            capture_degraded=False,
-            reply=_ROOM_PROBE,
-            reply_degraded=False,
-            goal_engagement=carried.engagement,
-            clarification=carried.clarification,
-            reference=carried.reference,
-            # ADR-0264 §7's member, **measured and not omitted**, for the reason the
-            # four above it are: it adds bytes to the terminal frame, and a probe that
-            # left it out would reserve room for an outcome smaller than the one it is
-            # reserving for — the one thing ADR-0173 §3's ceiling exists to prevent.
-            # The value is this pass's own, assembled before composing begins, so the
-            # probe carries what the outcome will carry rather than an estimate of it.
-            outbound_statement=outbound,
-            # ADR-0262 §6's member, **measured and not omitted**, for that same reason
-            # and with the same value: §1 puts the comparison wholly before this stage,
-            # so by the time a stream is measured the member's content is already fixed
-            # and the probe carries it rather than an estimate.
-            #
-            # **Where the attempt then does not end the outcome carries ``None``**, which
-            # is *smaller* — so the probe over-states the fixed cost and under-states the
-            # room, which "can only … stop a stream a byte or two early and can never
-            # publish text the terminal frame would then refuse". The opposite direction
-            # is the one ADR-0173 §3's ceiling exists to prevent, and omitting the member
-            # is exactly that direction.
-            attempt_report=(
-                None
-                if carried.facts.outcome is None
-                else AttemptReport(outcome=carried.facts.outcome, continues=carried.facts.continues)
-            ),
-        )
-        fixed = len(canonical_payload(projection.text(probe))) - encoded_text_bytes(_ROOM_PROBE)
-        return self._max_payload_bytes - fixed - JSON_STRING_QUOTE_BYTES
 
     def _check_plan_is_for_goal(self, turn: TurnResult) -> None:
         """Refuse a plan that was not built for this turn's goal (ADR-0037 §2 in spirit).
@@ -16065,8 +15204,8 @@ class Engine:
         §4). It is present exactly on a turn of ``converse_spoken``, which writes
         ``UNKNOWN`` unconditionally — the park, the ``reply`` of ``None`` and the
         degraded synthesis included, because at capture the hub has produced an answer
-        and knows nothing about what reached anyone. ``converse``,
-        ``converse_streaming`` and ``resume`` hand none and their rows carry none, and
+        and knows nothing about what reached anyone. ``converse`` and ``resume`` hand
+        none and their rows carry none, and
         an absent value is never read as delivered and never read as heard (§3). The
         episode id the index allocated is written back onto it here, which is the one
         place that knows it.
@@ -16131,8 +15270,8 @@ class Engine:
             # ``TurnOutcome`` is built, so folding the already-computed value in here is
             # what keeps the reply's fragment and the surface's statement the same
             # member. ``None`` on every pass that serviced no search and on every pass
-            # that serviced every search it asked for — every such ``converse``,
-            # ``converse_streaming`` and ``resume``, and ADR-0198 §1's restatement,
+            # that serviced every search it asked for — every such ``converse`` and
+            # ``resume``, and ADR-0198 §1's restatement,
             # which drives nothing and searches nothing.
             search_not_serviced=search_not_serviced,
             # ADR-0260 §10's field, on the identical terms: **the member the servicing
@@ -16208,17 +15347,6 @@ class Engine:
         if state is not None:
             state.observe_result(result)
         return result
-
-    async def _learn(self, event: FeedbackEvent, device: RequestingDevice) -> LearnOutcome:
-        """Delegate to the loop and translate its write outcomes (ADR-0042 §1).
-
-        First ADR-0298 §5 "A legacy turn": feedback names no conversation, so a
-        device other than the hub's own machine must be in "my devices" for writing
-        and for reading.
-        """
-        await self._device_checks.turn(device, None, "learn")
-        outcomes = await self._loop.learn(event)
-        return learn_outcome(outcomes)
 
     async def _beliefs(
         self,
@@ -16759,8 +15887,5 @@ __all__ = [
     "belief_from_record",
     "belief_summary_from_record",
     "conversation_summary",
-    "learn_decision",
-    "learn_outcome",
     "presented_confidence",
-    "queued_question",
 ]

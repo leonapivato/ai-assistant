@@ -714,9 +714,9 @@ class ComposingStage:
                 this stage from **the operation the engine is executing** and from
                 nothing else — not from an argument a caller supplied, not from a
                 session, a transport or a device — which is the narrowest form
-                ADR-0199 §8's second clause admits. ``False`` for ``converse`` and
-                ``converse_streaming``, whose callers read what they get; ``True``
-                for ``converse_spoken``, whose answer goes to a loudspeaker.
+                ADR-0199 §8's second clause admits. ``False`` for ``converse``,
+                whose callers read what they get; ``True`` for ``converse_spoken``,
+                whose answer goes to a loudspeaker.
             withheld: Whether ADR-0199 §3 held anything back from ``turn`` before it
                 reached this stage (ADR-0199 §5). It is the **fact** and nothing
                 else: this stage is never told what was withheld, is never given it,
@@ -948,9 +948,9 @@ class ComposingStage:
     ) -> AsyncIterator[ReplyChunk | ComposedReply]:
         """Stream :meth:`compose_routed`'s answer (ADR-0173, ADR-0197 §10).
 
-        ``converse_streaming`` routes identically to ``converse``, so a routed reply
-        streams as any other reply does and ``routed`` rides the terminal
-        ``TurnOutcome``. Every clause of :meth:`compose_streaming` binds here unchanged
+        A streamed turn routes identically to a whole one, so a routed reply streams
+        as any other reply does and ``routed`` rides the terminal ``TurnOutcome``.
+        Every clause of :meth:`compose_streaming` binds here unchanged
         — one ``stream()`` call and no ``complete()`` call, coalescing that preserves
         the answer's text, and ``room`` bounding what is held as well as what is emitted
         — and every clause of :meth:`compose_routed` binds too: the prompt is assembled

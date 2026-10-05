@@ -178,10 +178,7 @@ from ai_assistant.orchestration.engine import (
     belief_from_record,
     belief_summary_from_record,
     conversation_summary,
-    learn_decision,
-    learn_outcome,
     presented_confidence,
-    queued_question,
 )
 from ai_assistant.orchestration.executor import StepExecutor
 from ai_assistant.orchestration.grants import GrantOperations, HeldSource
@@ -241,9 +238,6 @@ __all__ = [
     "canonical_payload",
     "conversation_summary",
     "hand_off",
-    "learn_decision",
-    "learn_outcome",
     "presented_confidence",
     "question_state",
-    "queued_question",
 ]

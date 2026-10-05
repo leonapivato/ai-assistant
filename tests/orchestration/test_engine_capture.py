@@ -73,11 +73,9 @@ from ai_assistant.core.types import (
     RouteOutcome,
     SpokenAudio,
     SpokenAudioFormat,
-    TurnOutcome,
 )
 from ai_assistant.orchestration import composing
 from ai_assistant.orchestration.composing import ComposingStage
-from ai_assistant.orchestration.payloads import canonical_payload
 from ai_assistant.planning import ModelBackedPlanner
 from ai_assistant.testing import (
     FakeConversationStore,
@@ -85,19 +83,17 @@ from ai_assistant.testing import (
     FakeModelProvider,
     FakeSpeechTranscriber,
     FakeStreamingCompleter,
-    StreamAttempt,
 )
 from ai_assistant.testing.activation import ended_pass
 
 if TYPE_CHECKING:
-    from collections.abc import AsyncIterator, Sequence
+    from collections.abc import Sequence
     from datetime import datetime
 
     from ai_assistant.core.types import (
         Conversation,
         MemoryRecord,
         MemoryWrite,
-        ReplyChunk,
         SpokenDelivery,
     )
 
@@ -143,14 +139,6 @@ def _replying(reply: str) -> ComposingStage:
     return ComposingStage(model=FakeModelProvider(reply), streaming=FakeStreamingCompleter())
 
 
-def _streaming(*deltas: str, fails: bool = False) -> ComposingStage:
-    """A composing stage whose streaming seam yields ``deltas``, then maybe fails."""
-    return ComposingStage(
-        model=FakeModelProvider(),
-        streaming=FakeStreamingCompleter(script=(StreamAttempt(deltas=deltas, fails=fails),)),
-    )
-
-
 def _verdicts(
     episode: EpisodicMemory,
 ) -> tuple[tuple[Disposition, ...], tuple[RouteOutcome, ...]]:
@@ -165,16 +153,6 @@ def _verdicts(
         tuple(entry.step_disposition for entry in record.stages if entry.step_disposition),
         tuple(entry.route_outcome for entry in record.stages if entry.route_outcome),
     )
-
-
-async def _drain(stream: AsyncIterator[ReplyChunk | TurnOutcome]) -> TurnOutcome:
-    """Read one streamed turn whole and return its terminal outcome."""
-    outcome: TurnOutcome | None = None
-    async for value in stream:
-        if isinstance(value, TurnOutcome):
-            outcome = value
-    assert outcome is not None, "ADR-0173 §4: the outcome is always the last value"
-    return outcome
 
 
 # --- §11 test 1: the reply round-trips whole ---------------------------------
@@ -290,24 +268,6 @@ async def test_a_classified_composition_failure_captures_no_reply() -> None:
     assert _verdicts(episode) == ((), ())
 
 
-async def test_a_stream_that_published_nothing_captures_no_reply() -> None:
-    """§11 test 2, path five: the stream stopped before its first chunk.
-
-    ADR-0173 §6's pre-commit degradation. Nothing was published, so this is not a
-    truncation and there is no text to store — which is exactly why §1's cut-stream
-    clause and this one are two clauses and not one.
-    """
-    harness = Harness(composing=_streaming(fails=True), planner=NoStepPlanner())
-
-    outcome = await _drain(harness.engine.converse_streaming("hello", timeout=PATIENT))
-
-    assert outcome.reply is None
-    assert outcome.reply_degraded is True
-    (episode,) = await _captured(harness)
-    assert episode.outcome is None
-    assert _verdicts(episode) == ((), ())
-
-
 async def test_a_no_reply_record_renders_its_phrase_and_nothing_else_at_each_site() -> None:
     """Issue #1873: the population this flip is the first to write.
 
@@ -399,54 +359,6 @@ async def test_a_no_reply_record_renders_its_phrase_and_nothing_else_at_each_sit
 # --- §11 test 3: a cut stream stores what it published -----------------------
 
 
-async def test_a_stream_cut_by_a_mid_stream_failure_stores_what_it_published() -> None:
-    """§11 test 3, first shape: a ``ModelError`` after at least one chunk.
-
-    §1: "on the ceiling stop (ADR-0173 §3) and on a mid-stream ``ModelError`` alike,
-    ``ComposedReply.text`` is the text the stage emitted, and no continuation of it was
-    ever composed", so what is stored is the whole of what the assistant said rather
-    than a prefix of something longer. Discarding it would make the episode of a cut
-    turn read as an exchange in which the assistant said nothing, which is false of
-    every one of them.
-    """
-    harness = Harness(composing=_streaming("You prefer", fails=True), planner=NoStepPlanner())
-
-    outcome = await _drain(harness.engine.converse_streaming("hello", timeout=PATIENT))
-
-    assert outcome.reply == "You prefer"
-    assert outcome.reply_degraded is True
-    (episode,) = await _captured(harness)
-    assert episode.outcome == "You prefer"
-    assert "outcome" in episode.model_fields_set
-    assert not hasattr(episode, "reply_cut_short"), (
-        "§1: no field is added recording that a stored reply was cut short — whether "
-        "the pass completed is the TurnOutcome's to report, and it reports it"
-    )
-
-
-async def test_a_stream_stopped_at_the_ceiling_stores_what_it_published() -> None:
-    """§11 test 3, second shape: ADR-0173 §3's ceiling stop.
-
-    The limit is **measured** off a whole-answer pass rather than asserted, exactly as
-    ``test_engine_streaming`` measures it, so the boundary is the engine's own figure
-    and not this module's arithmetic about it.
-    """
-    whole = Harness(composing=_streaming("You prefer", " ", "hiking."), planner=NoStepPlanner())
-    unbounded = await _drain(whole.engine.converse_streaming("hello", timeout=PATIENT))
-    assert unbounded.reply == "You prefer hiking."
-    exact = len(canonical_payload(unbounded))
-
-    harness = Harness(composing=_streaming("You prefer", " ", "hiking."), planner=NoStepPlanner())
-    harness.engine._max_payload_bytes = exact - 1
-
-    outcome = await _drain(harness.engine.converse_streaming("hello", timeout=PATIENT))
-
-    assert outcome.reply == "You prefer"
-    assert outcome.reply_degraded is True
-    (episode,) = await _captured(harness)
-    assert episode.outcome == "You prefer", "the published text, not a prefix of a longer answer"
-
-
 # --- §11 test 12: a routed pass -----------------------------------------------
 
 
@@ -480,23 +392,18 @@ async def test_a_routed_passs_episode_carries_a_routed_member_and_its_reply() ->
 # --- §11 tests 10 and 11: the modality ----------------------------------------
 
 
-async def test_a_typed_turn_and_a_streamed_turn_each_capture_text() -> None:
-    """§11 test 10's second half: ``converse`` and ``converse_streaming`` carry ``TEXT``.
+async def test_a_typed_turn_captures_text() -> None:
+    """§11 test 10's second half: ``converse`` carries ``TEXT``.
 
     §5: ``TEXT`` "is the default and says it did not [reach this system as speech]:
-    true of a typed turn". Both entries are asserted because the value of the clause is
-    that they agree — a lane that threaded the modality through one composer and not
-    the other would pass on one of them.
+    true of a typed turn". ``converse_streaming`` was the other typed entry until
+    ADR-0293 §11 retired it.
     """
     typed = Harness(composing=_replying("Noted."), planner=NoStepPlanner())
     await typed.engine.converse("I went hiking", timeout=PATIENT)
 
-    streamed = Harness(composing=_streaming("Noted."), planner=NoStepPlanner())
-    await _drain(streamed.engine.converse_streaming("I went hiking", timeout=PATIENT))
-
-    for harness in (typed, streamed):
-        (episode,) = await _captured(harness)
-        assert episode.capture == Capture(modality=Modality.TEXT)
+    (episode,) = await _captured(typed)
+    assert episode.capture == Capture(modality=Modality.TEXT)
 
 
 async def test_a_spoken_turns_episode_carries_speech_and_the_spoken_reply() -> None:

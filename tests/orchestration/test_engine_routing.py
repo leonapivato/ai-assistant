@@ -46,7 +46,6 @@ from ai_assistant.core.types import (
     MemoryWriteMode,
     Message,
     Provenance,
-    ReplyChunk,
     RoutableOperation,
     RouteApproval,
     RouteOutcome,
@@ -64,7 +63,6 @@ from ai_assistant.testing import (
     FakeStreamingCompleter,
     source_read_record,
 )
-from ai_assistant.testing.streaming import StreamAttempt
 
 if TYPE_CHECKING:
     from collections.abc import Callable, Sequence
@@ -1572,40 +1570,6 @@ async def test_a_routed_park_reaches_the_composing_stage_not_at_all() -> None:
     assert parked.reply is None
     assert parked.reply_degraded is False
     assert composer.call_count == 0
-
-
-async def test_converse_streaming_routes_identically_and_carries_routed_on_the_terminal() -> None:
-    """§10: "``converse_streaming`` routes identically to ``converse``".
-
-    "A routed reply streams as any other reply does (ADR-0173), and ``routed`` rides the
-    terminal ``TurnOutcome``." The chunk sequence is asserted beside it, because a pass that
-    routed and then yielded nothing would satisfy the member check while giving the user a
-    silent stream.
-    """
-    harness = _routed_harness(
-        router=_names(RoutableOperation.RECENT_READS),
-        reads=_hostile_reads(),
-        composing=ComposingStage(
-            model=FakeModelProvider(),
-            streaming=FakeStreamingCompleter(
-                script=(StreamAttempt(deltas=("I looked", " at the trail.")),)
-            ),
-        ),
-    )
-
-    produced = [
-        value
-        async for value in harness.engine.converse_streaming(
-            "what have you read lately", timeout=PATIENT
-        )
-    ]
-
-    chunks = [value for value in produced if isinstance(value, ReplyChunk)]
-    (terminal,) = [value for value in produced if isinstance(value, TurnOutcome)]
-    assert chunks
-    assert terminal.routed is not None
-    assert terminal.routed.outcome is RouteOutcome.PERFORMED
-    assert terminal.reply == "".join(chunk.text for chunk in chunks)
 
 
 # --- ADR-0201: the lookup names beliefs, not the record of the ask -----------

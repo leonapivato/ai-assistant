@@ -1,8 +1,8 @@
 """The cross-field invariants that promote with the fields (ADR-0085 §4b).
 
 **A field list is not the whole of a DTO's contract, and dropping an invariant
-while promoting one is the quiet way to lose it.** Five of the promoted types
-carry a cross-field rule — four state one in the text they carried in
+while promoting one is the quiet way to lose it.** Several of the promoted types
+carry a cross-field rule — most state one in the text they carried in
 `orchestration`, and ``BeliefSummary`` acquires one with its counts (§4a) — and
 each becomes a model validator here, which is precisely the "what it adds is
 validation" ADR-0084 §4 names as the reason for moving to pydantic at all.
@@ -36,14 +36,9 @@ from ai_assistant.core.types import (
     GoalBrief,
     GoalInterpretation,
     Ground,
-    IngestSummary,
-    LearnDecision,
     MemoryKind,
     MemorySource,
     Provenance,
-    QuestionState,
-    QueuedQuestion,
-    QueueOutcome,
     ReplyChunk,
     StepOutcome,
     TimeOfDay,
@@ -128,61 +123,6 @@ class TestStepOutcome:
         """It is the key that addresses ``state.steps``; a blank one addresses nothing."""
         with pytest.raises(ValidationError):
             StepOutcome(disposition=Disposition.EXECUTED, state=_state(), step_id="   ")
-
-
-class TestIngestSummary:
-    """ADR-0078 §10 item 9: a deferral says where its question went."""
-
-    def test_a_deferral_must_say_where_its_question_went(self) -> None:
-        """Including the secret-tier one nothing queues — that is the point of the rule."""
-        with pytest.raises(ValidationError, match="DEFERRED"):
-            IngestSummary(decision=LearnDecision.DEFERRED, record_id=None, reason="ask the user")
-
-    def test_a_ruling_that_raised_no_question_queues_none(self) -> None:
-        """A ``STORED`` outcome carrying a question would name one nobody can act on."""
-        with pytest.raises(ValidationError, match="STORED"):
-            IngestSummary(
-                decision=LearnDecision.STORED,
-                record_id="rec-1",
-                reason="written",
-                queued=QueuedQuestion(outcome=QueueOutcome.QUEUED, question_id="q-1"),
-            )
-
-    def test_the_two_admissible_shapes_construct(self) -> None:
-        """A deferral with its question, and a write without one."""
-        deferred = IngestSummary(
-            decision=LearnDecision.DEFERRED,
-            record_id=None,
-            reason="ask the user",
-            queued=QueuedQuestion(outcome=QueueOutcome.NOT_QUEUABLE),
-        )
-        assert deferred.stored is False
-        stored = IngestSummary(decision=LearnDecision.STORED, record_id="rec-1", reason="written")
-        assert stored.stored is True
-
-
-class TestQueuedQuestion:
-    """ADR-0078 §7, stated in one direction only and deliberately so."""
-
-    @pytest.mark.parametrize("outcome", [QueueOutcome.QUEUE_FULL, QueueOutcome.NOT_QUEUABLE])
-    def test_an_outcome_that_queued_nothing_names_nothing(self, outcome: QueueOutcome) -> None:
-        """There is no question to read, so naming one would point at nothing."""
-        with pytest.raises(ValidationError, match=outcome.name):
-            QueuedQuestion(outcome=outcome, question_id="q-1")
-        with pytest.raises(ValidationError, match=outcome.name):
-            QueuedQuestion(outcome=outcome, question_state=QuestionState.OPEN)
-
-    def test_the_converse_is_deliberately_not_asserted(self) -> None:
-        """§4b: a ``QUEUED`` outcome naming no question still constructs.
-
-        The converse is *nearly* true and is not asserted, because the projection
-        keeps a defensive branch for an admission whose deferral is absent, which
-        :class:`~ai_assistant.core.types.DeferralAdmission`'s own validator is
-        supposed to make unreachable. Asserting it would turn a store-conformance
-        fault into an unconstructable DTO — which is §4's ``confidence`` reasoning
-        applied to a different field.
-        """
-        assert QueuedQuestion(outcome=QueueOutcome.QUEUED).question_id is None
 
 
 class TestAnswerOutcome:

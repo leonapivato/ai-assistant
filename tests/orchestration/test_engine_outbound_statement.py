@@ -66,7 +66,6 @@ from ai_assistant.core.types import (
     RouteOutcome,
     SearchNotServiced,
 )
-from ai_assistant.core.types import TurnOutcome as TurnOutcomeType
 from ai_assistant.orchestration.composing import ComposingStage
 from ai_assistant.orchestration.reads import SearchServicer
 from ai_assistant.permissions.policy import ThresholdActionPolicy
@@ -80,7 +79,6 @@ from ai_assistant.testing import (
     FakeSpeechTranscriber,
     FakeStreamingCompleter,
     FakeWebSearcher,
-    StreamAttempt,
 )
 
 if TYPE_CHECKING:
@@ -218,17 +216,6 @@ def _whole_conversation(messages: Sequence[Any]) -> str:
     assert ADR-0197 §6's closure read the whole conversation rather than half of it.
     """
     return "\n".join(one.content for one in messages)
-
-
-def _streamed_prompt(streaming: FakeStreamingCompleter) -> str:
-    """The system message the **streaming** composer assembled, from the fake's record.
-
-    :func:`_system_prompt`'s twin over the other seam. ``compose_streaming`` reaches the
-    ``StreamingCompleter`` and never the ``ModelProvider``, so a streamed pass records
-    nothing on the provider and an assertion about its instruction has to be read here.
-    """
-    assert streaming.calls, "the streaming composer was reached"
-    return next(one.content for one in streaming.last_messages if one.role is Role.SYSTEM)
 
 
 def _statement(outcome: TurnOutcome) -> Any:
@@ -505,47 +492,6 @@ async def test_a_routed_park_carries_no_statement_at_all() -> None:
     )
 
 
-async def test_the_streaming_routed_pass_carries_it_on_the_terminal_outcome() -> None:
-    """§13 item 11's streaming half: "whole-reply, streaming **and spoken**".
-
-    "which are separate composers from the conversational one and the path an
-    implementation updating only the latter would leave behind". The terminal
-    ``TurnOutcome`` a streamed routed pass produces carries ``NOT_REACHED`` exactly as
-    the whole-reply one does, and the streaming routed composer is given neither of §6's
-    two additions — ADR-0197 §6's "exactly two" inputs, unnarrowed.
-    """
-    streaming = FakeStreamingCompleter(
-        script=(StreamAttempt(deltas=("I looked", " at the trail.")),)
-    )
-    harness = _routed_harness(
-        router=_names(RoutableOperation.RECENT_READS),
-        composing=ComposingStage(model=FakeModelProvider(), streaming=streaming),
-        memory=FakeMemoryStore(now=lambda: AT),
-    )
-
-    produced = [
-        value
-        async for value in harness.engine.converse_streaming(
-            "what have you read lately", timeout=PATIENT
-        )
-    ]
-
-    (terminal,) = [value for value in produced if isinstance(value, TurnOutcomeType)]
-    assert terminal.routed is not None
-    assert terminal.routed.outcome is RouteOutcome.PERFORMED
-    statement = _statement(terminal)
-    assert statement.reach is OutboundReach.NOT_REACHED
-    assert statement.destinations == ()
-    assert statement.records == 0
-    assert _NOT_REACHED_FRAGMENT not in _streamed_prompt(streaming), (
-        "ADR-0197 §6's two inputs, unnarrowed"
-    )
-    assert _PLAN_SCOPE_LEAD not in _whole_conversation(streaming.last_messages), (
-        "a routed pass renders no plan block — asserted over the **user** turn too, "
-        "which is where that line rides"
-    )
-
-
 # --- §13 item 8 through the engine: the drive's fact, forwarded ---------------
 
 
@@ -777,38 +723,6 @@ async def test_the_routed_spoken_pass_carries_the_member_and_renders_none() -> N
 
 
 # --- §13 item 11's unrouted halves: the two composers the routed arms leave behind ---
-
-
-async def test_the_unrouted_streaming_pass_is_told_what_it_reached_and_carries_it() -> None:
-    """§13 item 11's streaming half on the pass that actually composes.
-
-    Item 11 names three composers — "whole-reply, streaming **and spoken**" — "which are
-    separate composers from the conversational one and the path an implementation
-    updating only the latter would leave behind". The **routed** arms above assert the
-    carried member, but ADR-0197 §6 gives the routed composers "exactly two" inputs and
-    no fragment, so neither of them exercises §6's forwarding at all: the argument that
-    carries it exists only on the unrouted path.
-
-    So this is the arm that discriminates. A lane that dropped ``outbound`` from
-    :meth:`Engine._compose_streaming`'s call leaves a streamed answer to a turn that
-    searched composed under no instruction — #2268's shape, on the streaming surface —
-    while every routed arm and every whole-reply arm above still passes.
-    """
-    streaming = FakeStreamingCompleter(script=(StreamAttempt(deltas=("I looked", " it up.")),))
-    wired = _Wired(model=FakeModelProvider("unreached on this path"), streaming=streaming)
-
-    produced = [value async for value in wired.engine.converse_streaming(_ASKED, timeout=PATIENT)]
-
-    (terminal,) = [value for value in produced if isinstance(value, TurnOutcomeType)]
-    assert wired.searcher.searched, "the streamed turn really did reach the provider"
-    assert terminal.routed is None, "an ordinary turn, so §6's fragment is owed"
-    statement = _statement(terminal)
-    assert statement.reach is OutboundReach.REACHED
-    assert statement.destinations == (OutboundDestination.SEARCH_PROVIDER,)
-    assert statement.records >= 1
-    assert _REACHED_FRAGMENT in _streamed_prompt(streaming), (
-        "the streaming composer was told the fact too (ADR-0264 §6)"
-    )
 
 
 async def test_the_unrouted_spoken_pass_is_told_what_it_did_and_carries_it() -> None:
@@ -1050,7 +964,7 @@ async def test_no_unrouted_pass_composes_without_the_fragment_it_is_owed(
     composer's own ADR-0170 §4 decline are computed at **different points**, so their
     agreement is an invariant across a seam and not one expression.
 
-    This drives all three unrouted composers with the assembly forced to ``None`` and
+    This drives both unrouted composers with the assembly forced to ``None`` and
     asserts each **refuses** rather than composing. Composing anyway is the one outcome
     this decision cannot accept: an unrouted reply written under no instruction is #2268's
     shape and #2365's alike, and it would be produced silently. A ``RuntimeError`` and not
@@ -1065,13 +979,6 @@ async def test_no_unrouted_pass_composes_without_the_fragment_it_is_owed(
     whole = _Wired(model=FakeModelProvider("an answer"))
     with pytest.raises(RuntimeError, match="ADR-0264 §6"):
         await whole.engine.converse(_ASKED, timeout=PATIENT)
-
-    streamed = _Wired(
-        model=FakeModelProvider("an answer"),
-        streaming=FakeStreamingCompleter(script=(StreamAttempt(deltas=("an", " answer")),)),
-    )
-    with pytest.raises(RuntimeError, match="ADR-0264 §6"):
-        [value async for value in streamed.engine.converse_streaming(_ASKED, timeout=PATIENT)]
 
     spoken = _Wired(model=FakeModelProvider("an answer"))
     with pytest.raises(RuntimeError, match="ADR-0264 §6"):

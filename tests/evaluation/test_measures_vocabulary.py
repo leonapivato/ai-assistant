@@ -27,6 +27,12 @@ from ai_assistant.orchestration.engine import Engine
 #: The two seams ADR-0285 §2 removed from the engine and §7 from the sets.
 _RETIRED_OBSERVATION_SEAMS = frozenset({"observe", "observe_due"})
 
+#: ``learn``, which ADR-0293 §11 retires from the engine and which stays on both of
+#: ADR-0120 §3's sets: no decision has reclassified the traces a store already holds
+#: under it, as ADR-0285 §7 reclassified the observation seams', so they keep counting
+#: where they always did. No operation emits it again.
+_RETIRED_BUT_CLASSIFIED = frozenset({"learn"})
+
 
 class TestMetricKeys:
     """Each key this package reads is the key ``memory/traces.py`` writes."""
@@ -65,9 +71,16 @@ class TestSeamSets:
     """§3's two allowlists, and the subset relation the direct set stands in."""
 
     def test_every_named_seam_is_a_public_engine_operation(self) -> None:
-        """``Engine._tracked`` labels each trace with the public method's own name."""
-        for seam in vocabulary.USER_SEAMS | vocabulary.MACHINE_SEAMS:
+        """``Engine._tracked`` labels each trace with the public method's own name.
+
+        Less the retired seam that keeps its classification, which is named so that it
+        is asserted retired rather than passed over.
+        """
+        for seam in (vocabulary.USER_SEAMS | vocabulary.MACHINE_SEAMS) - _RETIRED_BUT_CLASSIFIED:
             assert hasattr(Engine, seam), seam
+        for seam in _RETIRED_BUT_CLASSIFIED:
+            assert not hasattr(Engine, seam), seam
+            assert seam in vocabulary.USER_SEAMS, seam
 
     def test_the_two_sets_are_disjoint(self) -> None:
         """A seam on both lists would put one write in two causes."""

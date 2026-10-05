@@ -16,7 +16,7 @@ against a wrong association"* has to be tested as.
 
 from __future__ import annotations
 
-from typing import TYPE_CHECKING, Final
+from typing import Final
 
 from test_engine import PATIENT, Harness, NoStepPlanner
 from test_engine_goal_association import _Asking, _associating, _goal, _seed
@@ -27,22 +27,14 @@ from ai_assistant.core.types import (
     Ground,
     ProposedElement,
     ProposedUnderstanding,
-    ReplyChunk,
-    TurnOutcome,
     TurnReference,
 )
 from ai_assistant.orchestration.composing import ComposingStage
 from ai_assistant.orchestration.goals import announcement_of
 from ai_assistant.orchestration.payloads import (
     DEFAULT_MAX_PAYLOAD_BYTES,
-    JSON_STRING_QUOTE_BYTES,
-    canonical_payload,
-    encoded_text_bytes,
 )
 from ai_assistant.testing import FakeModelProvider, FakeStreamingCompleter, StreamAttempt
-
-if TYPE_CHECKING:
-    from collections.abc import AsyncIterator
 
 #: What the canonical fake model answers with, so a case can say exactly how much of
 #: the reply is the model's and how much is §5's.
@@ -145,26 +137,6 @@ async def _continuing(
         engaged_in=conversation,
     )
     return harness, conversation, goal.id
-
-
-async def _drain(stream: AsyncIterator[ReplyChunk | TurnOutcome]) -> tuple[list[str], TurnOutcome]:
-    """Read one streamed turn whole, returning its chunk texts and its outcome.
-
-    Args:
-        stream: What ``converse_streaming`` returned.
-
-    Returns:
-        The chunk texts in the order they were written, and the terminal outcome.
-    """
-    chunks: list[str] = []
-    outcome: TurnOutcome | None = None
-    async for value in stream:
-        if isinstance(value, TurnOutcome):
-            outcome = value
-        else:
-            chunks.append(value.text)
-    assert outcome is not None, "ADR-0173 §4: the outcome is always the last value"
-    return chunks, outcome
 
 
 # --------------------------------------------------------------------------- #
@@ -435,65 +407,6 @@ async def test_a_resumption_that_also_revised_states_both_facts_in_one_sentence(
 
 
 # --------------------------------------------------------------------------- #
-# The streamed turn: ADR-0173 §3's join property holds over the sentence       #
-# --------------------------------------------------------------------------- #
-
-
-async def test_a_streamed_turn_publishes_the_sentence_first_and_still_joins() -> None:
-    """ADR-0173 §3 beside ADR-0250 §5: the sentence is a chunk, and the reply joins.
-
-    *"Where the exchange streamed chunks, ``reply`` is the text those chunks conveyed,
-    joined in the order they were written."* A sentence prepended only to the terminal
-    ``reply`` would break that for every streaming client; one published as its own
-    opening chunk keeps it, and keeps each frame measured on its own (§11).
-    """
-    harness, conversation, _ = await _continuing(
-        _Asking(_constraints("under fifty pounds")),
-        streaming=StreamAttempt(deltas=("You prefer", " ", "hiking.")),
-    )
-
-    chunks, outcome = await _drain(
-        harness.engine.converse_streaming(
-            "and under fifty pounds", timeout=PATIENT, conversation_id=conversation
-        )
-    )
-
-    announcement = f'{_REVISED}: "book a campsite", adding "under fifty pounds".'
-    assert chunks[0] == f"{announcement}\n\n", "its own chunk, published first"
-    assert outcome.reply == "".join(chunks), "ADR-0173 §3: the reply is the join"
-    assert outcome.reply == f"{announcement}\n\nYou prefer hiking."
-    assert outcome.reply_degraded is False
-
-
-async def test_a_stream_that_published_nothing_carries_no_announcement() -> None:
-    """§5 places the sentence *"in a reply the turn was composing anyway"*.
-
-    A composition that failed before its first chunk is ADR-0173 §6's pre-commit
-    shape — ``reply`` ``None``, ``reply_degraded`` ``True``. Publishing the sentence
-    there would leave a terminal ``reply`` the chunks do not join to, and would turn
-    ADR-0170 §4's *"composing it produced none"* shape into an answer. The engagement
-    still crosses the wire on its own member, so nothing about what the turn did is
-    lost.
-    """
-    harness, conversation, _ = await _continuing(
-        _Asking(_constraints("under fifty pounds")),
-        streaming=StreamAttempt(deltas=(), fails=True),
-    )
-
-    chunks, outcome = await _drain(
-        harness.engine.converse_streaming(
-            "and under fifty pounds", timeout=PATIENT, conversation_id=conversation
-        )
-    )
-
-    assert chunks == []
-    assert outcome.reply is None
-    assert outcome.reply_degraded is True
-    assert outcome.goal_engagement is not None
-    assert outcome.goal_engagement.added == ("under fifty pounds",)
-
-
-# --------------------------------------------------------------------------- #
 # §16: every word but the statements is this module's                          #
 # --------------------------------------------------------------------------- #
 
@@ -522,94 +435,3 @@ async def test_the_sentence_reaches_no_prompt_the_model_was_given() -> None:
     assert sent, "the turn did call the model"
     assert not any(_REVISED in content for content in sent)
     assert not any(announcement in content for content in sent)
-
-
-# --------------------------------------------------------------------------- #
-# ADR-0173 §3's ceiling, measured: the sentence is reserved for, never dropped #
-# --------------------------------------------------------------------------- #
-
-
-async def _streamed(limit: int) -> tuple[list[str], TurnOutcome]:
-    """One streamed, announced turn driven at ``limit`` payload bytes.
-
-    Args:
-        limit: The ceiling ADR-0173 §3 bounds the answer by.
-
-    Returns:
-        Its chunk texts and its terminal outcome.
-    """
-    harness, conversation, _ = await _continuing(
-        _Asking(_constraints("under fifty pounds")),
-        streaming=StreamAttempt(deltas=("You prefer", " ", "hiking.")),
-        max_payload_bytes=limit,
-    )
-    return await _drain(
-        harness.engine.converse_streaming(
-            "and under fifty pounds", timeout=PATIENT, conversation_id=conversation
-        )
-    )
-
-
-async def test_an_announced_reply_that_exactly_fits_the_ceiling_is_not_degraded() -> None:
-    """ADR-0173 §3's ceiling is inclusive, and the sentence is charged its body alone.
-
-    ``_reply_room`` answers in **escaped body** bytes — it has already subtracted the
-    reply string's two quotes — so charging ``encoded_text_bytes``' pair a second time
-    for the announcement would take two bytes off every announced turn's room and
-    refuse a reply the ceiling admits. Measured rather than asserted against a figure,
-    which is §3's own *"the implementing lane measures it rather than guessing"*: the
-    turn is composed once at an ample limit, and a fresh harness is then run at exactly
-    the payload that turn produced.
-    """
-    ample, outcome = await _streamed(DEFAULT_MAX_PAYLOAD_BYTES)
-    exact = len(canonical_payload(outcome))
-
-    chunks, fitted = await _streamed(exact)
-
-    assert chunks == ample, "the same chunks, at a ceiling of exactly their payload"
-    assert fitted.reply == outcome.reply
-    assert fitted.reply_degraded is False
-
-
-async def test_one_byte_short_trims_the_answer_and_keeps_the_sentence() -> None:
-    """§3's fourth shape, with the announcement already published.
-
-    *"having yielded at least one ``ReplyChunk`` it terminates with §6's fourth shape,
-    ``reply`` the text actually yielded and ``reply_degraded`` ``True``"*. What the
-    room reserved for the sentence buys is that the sentence is not what gets trimmed:
-    the user is still told what the assistant now understands, and the answer is what
-    ran out of room.
-    """
-    ample, outcome = await _streamed(DEFAULT_MAX_PAYLOAD_BYTES)
-    exact = len(canonical_payload(outcome))
-
-    chunks, short = await _streamed(exact - 1)
-
-    assert chunks[0] == ample[0], "the sentence, published first and published whole"
-    assert short.reply is not None
-    assert short.reply == "".join(chunks), "ADR-0173 §3: still the join"
-    assert short.reply != outcome.reply, "and the answer is what ran out of room"
-    assert short.reply_degraded is True
-
-
-async def test_a_room_too_small_for_the_sentence_publishes_nothing_at_all() -> None:
-    """An owed announcement is never turned into an ordinary unannounced answer.
-
-    §5 owes the sentence on every turn that resumed, reopened or moved a word, so a
-    ceiling that cannot hold it is not a licence to stream the model's answer without
-    it — that is exactly the silent shape #2332 records. ADR-0173 §3's third case
-    governs instead: *"having yielded none — because the room left could not hold even
-    the first chunk — it terminates with §6's pre-commit shape, ``reply`` ``None`` and
-    ``reply_degraded`` ``True``"*.
-    """
-    ample, outcome = await _streamed(DEFAULT_MAX_PAYLOAD_BYTES)
-    exact = len(canonical_payload(outcome))
-    answer = encoded_text_bytes("".join(ample[1:])) - JSON_STRING_QUOTE_BYTES
-
-    chunks, starved = await _streamed(exact - answer - 1)
-
-    assert chunks == [], "not one chunk, and so not an unannounced answer either"
-    assert starved.reply is None
-    assert starved.reply_degraded is True
-    assert starved.goal_engagement is not None
-    assert starved.goal_engagement.added == ("under fifty pounds",)

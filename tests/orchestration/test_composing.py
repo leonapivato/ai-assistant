@@ -2032,8 +2032,9 @@ def test_the_error_the_degradation_set_names_is_the_ratified_one() -> None:
 # --- ADR-0173: the streaming twin ------------------------------------------
 #
 # §5's coalescing rule, §3's ceiling in all four of its inputs, and §6's two
-# degradations. The stage's own half; the engine's use of it — the room it
-# computes and the four outcome shapes — is in ``test_engine_streaming.py``.
+# degradations: the stage's own half. The engine's use of it left with
+# ``converse_streaming`` (ADR-0293 §11); the stage stays as the streaming model
+# seam's consumer, which ADR-0293 keeps.
 
 #: Room enough for any answer these cases compose, so a test that is not about the
 #: ceiling cannot trip over it.

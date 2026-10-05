@@ -44,10 +44,8 @@ from ai_assistant.core.types import (
     SpokenAudio,
     SpokenAudioFormat,
     SpokenReply,
-    TextChannelPayload,
     UnderstandingOmission,
     UnderstandingProducer,
-    WholeTextReply,
 )
 from ai_assistant.orchestration.composing import ComposingStage
 from ai_assistant.orchestration.informational_events import InformationalEventStage
@@ -65,7 +63,6 @@ if TYPE_CHECKING:
     from collections.abc import Callable, Sequence
 
     from ai_assistant.core.types import (
-        ChannelResult,
         EpisodeProcessingRecord,
         GoalBrief,
         Message,
@@ -115,10 +112,6 @@ def _harness(understanding_model: FakeModelProvider, **knobs: Any) -> Harness:
     )
 
 
-def _text(text: str = _UTTERANCE) -> ChannelInput:
-    return ChannelInput(target=NewConversation(), payload=TextChannelPayload(text=text))
-
-
 def _speech() -> ChannelInput:
     return ChannelInput(
         target=NewConversation(),
@@ -166,8 +159,8 @@ async def test_a_turn_records_version_one_understood_before_it_was_planned() -> 
     order = _Order()
     model = order.model("understand", STATED_PROPOSAL)
     harness = _harness(model, planner=_OrderedPlanner(order))
-    result = await harness.engine.receive(_text(), reply=WholeTextReply(), timeout=_BUDGET)
-    assert result.capture.state == "recorded"
+    result = await harness.engine.converse(_UTTERANCE, timeout=_BUDGET)
+    assert not result.capture_degraded
     assert order.seen == ["understand", "plan"]
     assert _sent(model)["input"]["text"] == _UTTERANCE
     record = await _record(harness)
@@ -185,7 +178,7 @@ async def test_a_taken_route_records_routed_and_never_enters_the_stage() -> None
         json.dumps({"operation": RoutableOperation.FORGET.value, "query": "x"})
     )
     harness = _harness(model, routing=RoutingStage(model=router, recorder=FakeRoutingRecorder()))
-    await harness.engine.receive(_text("forget that"), reply=WholeTextReply(), timeout=_BUDGET)
+    await harness.engine.converse("forget that", timeout=_BUDGET)
     assert model.calls == []
     record = await _record(harness)
     assert record.understanding == ()
@@ -196,7 +189,7 @@ async def test_a_declined_route_reaches_the_stage() -> None:
     model = FakeModelProvider(STATED_PROPOSAL)
     router = FakeModelProvider(json.dumps({"operation": "none"}))
     harness = _harness(model, routing=RoutingStage(model=router, recorder=FakeRoutingRecorder()))
-    await harness.engine.receive(_text(), reply=WholeTextReply(), timeout=_BUDGET)
+    await harness.engine.converse(_UTTERANCE, timeout=_BUDGET)
     assert len(model.calls) == 1
     assert (await _record(harness)).understanding_omitted is None
 
@@ -207,7 +200,7 @@ async def test_an_understanding_error_fails_the_pass_before_association() -> Non
     model = order.model("understand", "not json")
     harness = _harness(model, planner=_OrderedPlanner(order))
     with pytest.raises(UnderstandingError):
-        await harness.engine.receive(_text(), reply=WholeTextReply(), timeout=_BUDGET)
+        await harness.engine.converse(_UTTERANCE, timeout=_BUDGET)
     assert order.seen == ["understand", "understand"]
     assert harness.associator.call_count == 0
     record = await _record(harness)
@@ -231,7 +224,7 @@ async def test_a_model_error_takes_the_row_its_class_already_takes(
 ) -> None:
     harness = _harness(_Raising(error))
     with pytest.raises(type(error)):
-        await harness.engine.receive(_text(), reply=WholeTextReply(), timeout=_BUDGET)
+        await harness.engine.converse(_UTTERANCE, timeout=_BUDGET)
     record = await _record(harness)
     assert record.reason is reason
     assert record.understanding_omitted is UnderstandingOmission.FAILED
@@ -254,9 +247,7 @@ async def test_a_deadline_expiring_inside_the_stage_is_a_classified_timeout() ->
     """§5: the stage runs inside the pass's existing deadline; §6: `failed / timeout`."""
     harness = _harness(_Stalled(STATED_PROPOSAL))
     with pytest.raises(ModelTimeoutError):
-        await harness.engine.receive(
-            _text(), reply=WholeTextReply(), timeout=timedelta(milliseconds=50)
-        )
+        await harness.engine.converse(_UTTERANCE, timeout=timedelta(milliseconds=50))
     assert harness.associator.call_count == 0
     record = await _record(harness)
     assert (record.status, record.reason) == (ProcessingStatus.FAILED, ProcessingReason.TIMEOUT)
@@ -278,9 +269,7 @@ class _Blocking(FakeModelProvider):
 async def test_a_stage_that_crosses_the_deadline_without_yielding_is_still_timed_out() -> None:
     harness = _harness(_Blocking(STATED_PROPOSAL))
     with pytest.raises(ModelTimeoutError):
-        await harness.engine.receive(
-            _text(), reply=WholeTextReply(), timeout=timedelta(milliseconds=50)
-        )
+        await harness.engine.converse(_UTTERANCE, timeout=timedelta(milliseconds=50))
     assert harness.associator.call_count == 0
     record = await _record(harness)
     assert record.reason is ProcessingReason.TIMEOUT
@@ -292,9 +281,7 @@ async def test_a_late_unparseable_output_is_the_timeout_and_earns_no_repair() ->
     model = _Blocking("not json")
     harness = _harness(model)
     with pytest.raises(ModelTimeoutError):
-        await harness.engine.receive(
-            _text(), reply=WholeTextReply(), timeout=timedelta(milliseconds=50)
-        )
+        await harness.engine.converse(_UTTERANCE, timeout=timedelta(milliseconds=50))
     assert len(model.calls) == 1
     record = await _record(harness)
     assert record.reason is ProcessingReason.TIMEOUT
@@ -307,9 +294,7 @@ async def test_a_deadline_that_expired_ahead_of_the_stage_is_not_reached() -> No
     router = _Stalled(json.dumps({"operation": "none"}), seconds=0.1)
     harness = _harness(model, routing=RoutingStage(model=router, recorder=FakeRoutingRecorder()))
     with pytest.raises(ModelTimeoutError):
-        await harness.engine.receive(
-            _text(), reply=WholeTextReply(), timeout=timedelta(milliseconds=20)
-        )
+        await harness.engine.converse(_UTTERANCE, timeout=timedelta(milliseconds=20))
     assert model.calls == []
     record = await _record(harness)
     assert record.reason is ProcessingReason.TIMEOUT
@@ -323,9 +308,7 @@ async def test_a_spoken_turn_is_understood_from_its_transcript_with_no_episode_w
     """§4, ADR-0250 §15: `converse_spoken` takes no episode window."""
     model = FakeModelProvider(STATED_PROPOSAL)
     harness = _harness(model)
-    await harness.engine.receive(
-        _text("an earlier typed turn"), reply=WholeTextReply(), timeout=_BUDGET
-    )
+    await harness.engine.converse("an earlier typed turn", timeout=_BUDGET)
     await harness.engine.receive(_speech(), reply=_SPOKEN, timeout=_BUDGET)
     sent = _sent(model)
     assert sent["input"]["text"] == DEFAULT_TRANSCRIPT
@@ -430,7 +413,7 @@ async def test_an_event_captured_on_one_channel_is_in_a_conversations_episode_wi
         model, informational_events=InformationalEventStage(FakeModelProvider("Eco mode."))
     )
     await harness.engine.receive(event_input(), reply=None, timeout=_BUDGET)
-    await harness.engine.receive(_text(), reply=WholeTextReply(), timeout=_BUDGET)
+    await harness.engine.converse(_UTTERANCE, timeout=_BUDGET)
     (episode,) = _sent(model)["episode_window"]
     assert episode["label"] == "P1"
     assert episode["input"] == "The thermostat entered eco mode at 18:00."
@@ -442,14 +425,10 @@ async def test_a_second_turn_sees_the_first_under_h_and_not_again_under_p() -> N
     """§3's same-exchange rule, end to end: the tail's episode is not in the P window."""
     model = FakeModelProvider(STATED_PROPOSAL)
     harness = _harness(model)
-    first: ChannelResult = await harness.engine.receive(
-        _text("Find a campsite."), reply=WholeTextReply(), timeout=_BUDGET
-    )
-    assert first.channel is not None
-    await harness.engine.receive(
-        ChannelInput(target=first.channel, payload=TextChannelPayload(text=_UTTERANCE)),
-        reply=WholeTextReply(),
-        timeout=_BUDGET,
+    first = await harness.engine.converse("Find a campsite.", timeout=_BUDGET)
+    assert first.conversation_id is not None
+    await harness.engine.converse(
+        _UTTERANCE, timeout=_BUDGET, conversation_id=first.conversation_id
     )
     sent = _sent(model)
     (item,) = sent["channel_window"]
@@ -469,7 +448,7 @@ def test_a_stage_wired_without_a_version_bound_of_two_is_refused(limit: int | No
 
 async def test_an_engine_with_no_stage_records_not_reached() -> None:
     harness = Harness(planner=NoStepPlanner())
-    await harness.engine.receive(_text(), reply=WholeTextReply(), timeout=_BUDGET)
+    await harness.engine.converse(_UTTERANCE, timeout=_BUDGET)
     record = await _record(harness)
     assert record.understanding == ()
     assert record.understanding_omitted is UnderstandingOmission.NOT_REACHED

@@ -34,7 +34,6 @@ from ai_assistant.core.errors import (
     DeviceRefusal,
     DeviceRefusedError,
 )
-from ai_assistant.core.streams import closing_stream
 from ai_assistant.core.types import (
     HUB_DEVICE_ID,
     HUB_REQUESTING_DEVICE,
@@ -57,11 +56,7 @@ if TYPE_CHECKING:
     from collections.abc import AsyncIterator
 
     from ai_assistant.core.types import (
-        EncodableText,
         Identifier,
-        ReplyChunk,
-        TurnOutcome,
-        TurnReference,
     )
 
 _PATIENT: Final = timedelta(seconds=5)
@@ -109,28 +104,6 @@ class _Recording(FakeAssistantEngine):
         """Record the requesting device, then forget as the fake does."""
         self.seen.append(current_requesting_device())
         return await super().forget(record_id)
-
-    def converse_streaming(
-        self,
-        utterance: EncodableText,
-        *,
-        timeout: timedelta,
-        conversation_id: Identifier | None = None,
-        reference: TurnReference | None = None,
-    ) -> AsyncIterator[ReplyChunk | TurnOutcome]:
-        """Record the device at the start and at every value, so the whole stream is seen."""
-        stream = super().converse_streaming(
-            utterance, timeout=timeout, conversation_id=conversation_id, reference=reference
-        )
-
-        async def recorded() -> AsyncIterator[ReplyChunk | TurnOutcome]:
-            self.seen.append(current_requesting_device())
-            async with closing_stream(stream) as values:
-                async for value in values:
-                    self.seen.append(current_requesting_device())
-                    yield value
-
-        return recorded()
 
 
 @contextlib.asynccontextmanager
@@ -190,23 +163,6 @@ async def test_the_client_writes_the_outbound_name_and_the_engine_runs_as_its_de
     assert engine.seen == [_PHONE, HUB_REQUESTING_DEVICE]
 
 
-async def test_a_streamed_request_runs_as_its_device_for_the_whole_stream(
-    tmp_path: Path,
-) -> None:
-    """§2:2: for a streamed request the value lasts the whole stream."""
-    engine = _Recording()
-    roster = _Roster(devices={"phone": _PHONE})
-    async with _client(engine, roster, tmp_path) as client:
-        with acting_for("phone"):
-            async with closing_stream(
-                client.converse_streaming("hello", timeout=_PATIENT)
-            ) as stream:
-                values = [value async for value in stream]
-    assert values
-    assert len(engine.seen) > len(values)
-    assert set(engine.seen) == {_PHONE}
-
-
 async def test_a_name_breaking_its_conditions_is_refused_before_any_io(tmp_path: Path) -> None:
     """§1:3, on the client's side: refused locally, as ADR-0085 §9 refuses an argument."""
     engine = _Recording()
@@ -233,17 +189,6 @@ async def test_a_refused_request_is_answered_and_the_engine_is_never_called(
             await client.forget("rec-1")
     assert refused.value.reason is DeviceRefusal.NOT_ALLOWED
     assert unnamed.value.reason is DeviceRefusal.NOT_ACCEPTED
-    assert engine.seen == []
-
-
-async def test_a_refused_stream_ends_in_its_one_error_frame(tmp_path: Path) -> None:
-    """§6:1 for a stream: the refusal is the terminal frame and the engine never ran."""
-    engine = _Recording()
-    roster = _Roster(devices={})
-    async with _client(engine, roster, tmp_path) as client:
-        with acting_for("revoked"), pytest.raises(DeviceRefusedError) as refused:
-            await _drain(client.converse_streaming("hello", timeout=_PATIENT))
-    assert refused.value.reason is DeviceRefusal.NOT_ACCEPTED
     assert engine.seen == []
 
 
@@ -403,13 +348,6 @@ def test_only_the_wire_server_sets_the_requesting_device() -> None:
 
 
 # --- helpers -----------------------------------------------------------------
-
-
-async def _drain(stream: AsyncIterator[object]) -> None:
-    """Read a stream to its end, closing it on the way out."""
-    async with closing_stream(stream) as values:
-        async for _ in values:
-            pass
 
 
 @dataclass

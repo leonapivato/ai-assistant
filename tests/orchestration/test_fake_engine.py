@@ -39,6 +39,7 @@ from assistant_engine_contract import (
     SPEND_ZERO_CEILING,
     UNSPEAKABLE_NOTIFICATION,
     AssistantEngineContract,
+    BeliefSubject,
     ConnectionSubject,
     DecisionSubject,
     DerivedPlacementSubject,
@@ -49,6 +50,7 @@ from assistant_engine_contract import (
     SingleSlotParkSubject,
     SpendSubject,
     backwards_clock,
+    fake_belief_holder,
     near_ceiling_limit,
     overfull_invocation_rows,
     page_after_mutating_the_filter,
@@ -88,8 +90,6 @@ from ai_assistant.core.types import (
     BeliefBand,
     BeliefSummary,
     BoundAccount,
-    ChannelIdentity,
-    ChannelInput,
     ChatDevice,
     ContinuationToken,
     Conversation,
@@ -125,15 +125,12 @@ from ai_assistant.core.types import (
     RiskLevel,
     RoutableOperation,
     SpanCoverage,
-    TextChannelPayload,
     ToolCost,
     ToolDefinition,
     TranscriptMessage,
     TurnOutcome,
-    TurnReference,
     UserMessage,
     UtcInstant,
-    WholeTextReply,
 )
 from ai_assistant.orchestration.chat import COULDNT_FINISH
 from ai_assistant.testing import (
@@ -154,10 +151,10 @@ _REPORTED = Attestation(
 )
 
 if TYPE_CHECKING:
-    from collections.abc import AsyncIterator, Sequence
+    from collections.abc import Sequence
 
     from ai_assistant.core.protocols import AssistantEngine
-    from ai_assistant.core.types import Belief, Identifier, ReplyChunk
+    from ai_assistant.core.types import Belief, Identifier
 
 
 def _binding() -> EgressBinding:
@@ -281,6 +278,18 @@ class TestFakeAssistantEngineContract(AssistantEngineContract):
     def tiny_engine(self) -> AssistantEngine:
         """The same implementation, with the limit small enough to reach."""
         return FakeAssistantEngine(max_payload_bytes=_TINY_LIMIT)
+
+    @pytest.fixture
+    def beliefs(self) -> BeliefSubject:
+        """One fake engine, holding beliefs through its own ``hold``."""
+        built = FakeAssistantEngine()
+        return BeliefSubject(engine=built, hold=fake_belief_holder(built))
+
+    @pytest.fixture
+    def tiny_beliefs(self) -> BeliefSubject:
+        """:meth:`beliefs`' subject at the limit small enough to reach."""
+        built = FakeAssistantEngine(max_payload_bytes=_TINY_LIMIT)
+        return BeliefSubject(engine=built, hold=fake_belief_holder(built))
 
     @pytest.fixture
     async def speaking_engine(self) -> AssistantEngine:
@@ -1659,43 +1668,6 @@ async def test_the_goal_listing_refuses_an_oversized_result() -> None:
         await engine.goals()
 
 
-async def _drain_stream(stream: AsyncIterator[ReplyChunk | TurnOutcome]) -> None:
-    """Read one streamed turn whole, so the call it recorded is complete.
-
-    ``tests/orchestration/test_engine_capture.py``'s own helper, narrowed to what this
-    case needs: nothing here reads the values, only what the fake logged on the way.
-    """
-    async for _ in stream:
-        pass
-
-
-async def test_a_streamed_turn_carries_the_reference_it_was_given() -> None:
-    """ADR-0250 §11 over ADR-0173 §4's entry, asserted at the double every client uses.
-
-    ``converse_streaming`` "takes exactly ``converse``'s arguments in exactly its"
-    order, so it takes the reference by that clause. M1 **resolves** nothing — §19 is
-    explicit — but a fake that dropped the value before recording the call would make a
-    client that dropped or replaced it undetectable, and this fake is what the wire
-    client, the gateway and the CLI are all tested against.
-
-    Asserted against the non-streaming entry, so what it pins is that the two agree
-    rather than that either records something in particular.
-    """
-    reference = TurnReference(question_id="q1")
-    engine = FakeAssistantEngine()
-
-    await _drain_stream(engine.converse_streaming("make it Sunday", timeout=_BUDGET))
-    await _drain_stream(
-        engine.converse_streaming("make it Sunday", timeout=_BUDGET, reference=reference)
-    )
-    await engine.converse("make it Sunday", timeout=_BUDGET, reference=reference)
-
-    streamed = [arguments for name, arguments in engine.calls if name == "converse_streaming"]
-    assert [one["reference"] for one in streamed] == [None, reference]
-    spoken_for = next(arguments for name, arguments in engine.calls if name == "converse")
-    assert spoken_for["reference"] == reference, "and the two entries record it alike"
-
-
 async def test_two_first_reads_of_a_held_conversation_join_the_chat_space_once() -> None:
     """A held conversation joins the chat space once, however many first reads race."""
     engine = FakeAssistantEngine()
@@ -1766,14 +1738,7 @@ async def test_a_forgotten_capture_whose_write_commits_then_cancels_leaves_no_ep
 
     memory.write_atomic = commit_then_cancel  # type: ignore[method-assign]
     turn = asyncio.create_task(
-        engine.receive(
-            ChannelInput(
-                target=ChannelIdentity(channel_type="conversation", instance_id=conversation),
-                payload=TextChannelPayload(text="hello"),
-            ),
-            reply=WholeTextReply(),
-            timeout=timedelta(seconds=5),
-        )
+        engine.converse("hello", timeout=timedelta(seconds=5), conversation_id=conversation)
     )
     await entered.wait()
     await engine.forget_conversation(conversation)
@@ -1783,13 +1748,6 @@ async def test_a_forgotten_capture_whose_write_commits_then_cancels_leaves_no_ep
 
     assert landed, "the write committed before it was cancelled"
     assert await memory.get(landed[0]) is None
-
-
-def _hello(conversation: str) -> ChannelInput:
-    return ChannelInput(
-        target=ChannelIdentity(channel_type="conversation", instance_id=conversation),
-        payload=TextChannelPayload(text="hello"),
-    )
 
 
 async def test_a_cancelled_insert_never_withdraws_another_conversations_episode() -> None:
@@ -1802,7 +1760,7 @@ async def test_a_cancelled_insert_never_withdraws_another_conversations_episode(
     engine = FakeAssistantEngine()
     engine.activation_id_factory = lambda: "00000000-0000-4000-8000-0000000000cc"
     first = (await engine.start_conversation()).id
-    await engine.receive(_hello(first), reply=WholeTextReply(), timeout=timedelta(seconds=5))
+    await engine.converse("hello", timeout=timedelta(seconds=5), conversation_id=first)
     address = "activation:00000000-0000-4000-8000-0000000000cc"
     assert await engine.episode_memory.get(address) is not None
     second = (await engine.start_conversation()).id
@@ -1816,7 +1774,7 @@ async def test_a_cancelled_insert_never_withdraws_another_conversations_episode(
 
     memory.write_atomic = cancelled_before_the_check  # type: ignore[method-assign]
     turn = asyncio.create_task(
-        engine.receive(_hello(second), reply=WholeTextReply(), timeout=timedelta(seconds=5))
+        engine.converse("hello", timeout=timedelta(seconds=5), conversation_id=second)
     )
     await entered.wait()
     await engine.forget_conversation(second)
@@ -1855,7 +1813,7 @@ async def test_a_forgotten_captures_cleanup_outlasts_its_callers_cancellation() 
 
     memory.write_atomic = held_write  # type: ignore[method-assign]
     turn = asyncio.create_task(
-        engine.receive(_hello(conversation), reply=WholeTextReply(), timeout=timedelta(seconds=5))
+        engine.converse("hello", timeout=timedelta(seconds=5), conversation_id=conversation)
     )
     await writing.wait()
     await engine.forget_conversation(conversation)
@@ -1903,7 +1861,7 @@ async def test_a_cancellation_landing_as_the_cleanup_finishes_still_cancels_the_
 
     memory.write_atomic = held_write  # type: ignore[method-assign]
     turn = asyncio.create_task(
-        engine.receive(_hello(conversation), reply=WholeTextReply(), timeout=timedelta(seconds=5))
+        engine.converse("hello", timeout=timedelta(seconds=5), conversation_id=conversation)
     )
     await writing.wait()
     await engine.forget_conversation(conversation)

@@ -24,7 +24,6 @@ from ai_assistant.core.types import (
     ProcessingStatus,
     RecordedChannelTrigger,
     RecordedSpeechInput,
-    ReplyChunk,
     RoutableOperation,
     RoutedOperation,
     RouteOutcome,
@@ -36,13 +35,9 @@ from ai_assistant.core.types import (
     StepExecution,
     StepOutcome,
     StepStatus,
-    StreamingTextReply,
-    TextChannelPayload,
-    TextChannelResult,
     TimeOfDay,
     TurnOutcome,
     TurnResult,
-    WholeTextReply,
 )
 from ai_assistant.testing import FakeAssistantEngine, FakeMemoryStore
 
@@ -54,6 +49,9 @@ if TYPE_CHECKING:
 _BUDGET = timedelta(seconds=10)
 _AT = datetime(2026, 3, 1, 9, 0, tzinfo=UTC)
 _AUDIO = SpokenAudio(content="YXVkaW8=", media_type=SpokenAudioFormat.MP4)
+#: Every conversational ``receive`` here is spoken: ADR-0293 §11 takes the text
+#: conversational combination off the surface.
+_PLAYS = SpokenReply(plays=(SpokenAudioFormat.MP4,))
 
 
 @pytest.mark.parametrize("target", ["new", "existing", "missing"])
@@ -115,13 +113,15 @@ async def test_capture_failure_retains_reply_and_reports_only_confirmed_addresse
     else:
         engine.episode_memory = RefusingMemory()
     result = await engine.receive(
-        ChannelInput(target=NewConversation(), payload=TextChannelPayload(text="hello")),
-        reply=WholeTextReply(),
+        ChannelInput(target=NewConversation(), payload=SpeechChannelPayload(audio=_AUDIO)),
+        reply=_PLAYS,
         timeout=_BUDGET,
     )
-    assert isinstance(result.result, TextChannelResult)
-    assert result.result.outcome.reply
-    assert result.result.outcome.capture_degraded
+    assert isinstance(result.result, SpokenChannelResult)
+    spoken = result.result.outcome.outcome
+    assert spoken is not None
+    assert spoken.reply
+    assert spoken.capture_degraded
     assert result.capture.state == "degraded"
     assert await engine.episode_memory.export() == []
     if fault == "id":
@@ -162,8 +162,8 @@ async def test_a_colliding_activation_id_moves_no_episode_to_the_second_conversa
 
     async def new_conversation() -> tuple[str, str]:
         result = await engine.receive(
-            ChannelInput(target=NewConversation(), payload=TextChannelPayload(text="hello")),
-            reply=WholeTextReply(),
+            ChannelInput(target=NewConversation(), payload=SpeechChannelPayload(audio=_AUDIO)),
+            reply=_PLAYS,
             timeout=_BUDGET,
         )
         assert result.channel is not None
@@ -204,9 +204,10 @@ async def test_a_conversation_colliding_with_a_standalone_episode_cannot_claim_i
     assert spoken.capture.state == "recorded"
     assert await engine.episode_memory.get(address) is not None
 
+    engine.spoken_transcript = "hello"
     texted = await engine.receive(
-        ChannelInput(target=NewConversation(), payload=TextChannelPayload(text="hello")),
-        reply=WholeTextReply(),
+        ChannelInput(target=NewConversation(), payload=SpeechChannelPayload(audio=_AUDIO)),
+        reply=_PLAYS,
         timeout=_BUDGET,
     )
 
@@ -218,36 +219,6 @@ async def test_a_conversation_colliding_with_a_standalone_episode_cannot_claim_i
     assert digest.recorded_turns == 0
     assert await engine.forget_conversation(conversation) is False, "its place holds nothing"
     assert await engine.episode_memory.get(address) is not None
-
-
-@pytest.mark.parametrize("abandon", [True, False])
-async def test_a_streamed_episode_is_in_its_conversation_from_the_first_chunk(
-    abandon: bool,
-) -> None:
-    """ADR-0283 §7, §8: a consumer that stops early, or a deletion between chunks,
-    still leaves the landed episode inside its conversation's deletion."""
-    engine = FakeAssistantEngine()
-    engine.hold_conversation("room")
-    stream = engine.receive_streaming(
-        ChannelInput(
-            target=ChannelIdentity(channel_type="conversation", instance_id="room"),
-            payload=TextChannelPayload(text="hello there"),
-        ),
-        reply=StreamingTextReply(),
-        timeout=_BUDGET,
-    )
-    first = await anext(stream)
-    assert isinstance(first, ReplyChunk)
-    held = [record.id for record in await engine.episode_memory.export()]
-    assert len(held) == 1
-    if abandon:
-        await stream.aclose()  # type: ignore[attr-defined]  # the contract's own clause
-        assert await engine.forget_conversation("room") is True
-    else:
-        assert await engine.forget_conversation("room") is True
-        rest = [value async for value in stream]
-        assert rest
-    assert await engine.episode_memory.get(held[0]) is None
 
 
 def _driven(disposition: Disposition) -> StepOutcome:

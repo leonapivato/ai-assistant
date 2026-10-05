@@ -46,6 +46,8 @@ from assistant_engine_contract import (
     SPEND_ZERO_CEILING,
     UNSPEAKABLE_NOTIFICATION,
     AssistantEngineContract,
+    BeliefHolder,
+    BeliefSubject,
     ConnectionSubject,
     DecisionSubject,
     DerivedPlacementSubject,
@@ -56,6 +58,7 @@ from assistant_engine_contract import (
     SingleSlotParkSubject,
     SpendSubject,
     backwards_clock,
+    held_placement,
     near_ceiling_limit,
     overfull_invocation_rows,
     seeded_invocation_trail,
@@ -448,6 +451,39 @@ def _authorized_goal() -> Goal:
     )
 
 
+def _store_belief_holder(memory: FakeMemoryStore) -> BeliefHolder:
+    """Hold beliefs in the store the engine reads, as the owner's own word.
+
+    Written **into the store** for :meth:`TestEngineContract.derived_placement`'s
+    reason: no call on this engine writes a belief since ADR-0293 §11 retired ``learn``.
+    """
+    ids = count(1)
+
+    async def hold(content: str, *, guarded: bool = False) -> str:
+        record_id = f"rec-held-{next(ids)}"
+        placement = held_placement(guarded=guarded)
+        await memory.write_atomic(
+            [
+                MemoryWrite(
+                    record=SemanticMemory(
+                        id=record_id,
+                        content=content,
+                        fact=content,
+                        validity=Validity(),
+                        provenance=Provenance(
+                            source=MemorySource.USER_ASSERTED, confidence=1.0, last_updated=AT
+                        ),
+                        placement=Placement() if placement is None else placement,
+                    ),
+                    mode=MemoryWriteMode.INSERT_IF_ABSENT,
+                )
+            ]
+        )
+        return record_id
+
+    return hold
+
+
 def _wire(  # noqa: PLR0913 — one knob per state the shared suite needs a subject in
     *,
     max_payload_bytes: int = DEFAULT_MAX_PAYLOAD_BYTES,
@@ -776,6 +812,28 @@ class TestEngineContract(AssistantEngineContract):
         await built.start()
         try:
             yield built
+        finally:
+            await built.aclose()
+
+    @pytest.fixture
+    async def beliefs(self) -> AsyncIterator[BeliefSubject]:
+        """One wired engine over a store the beliefs are held in."""
+        memory = FakeMemoryStore(now=lambda: AT)
+        built = _wire(memory=memory)
+        await built.start()
+        try:
+            yield BeliefSubject(engine=built, hold=_store_belief_holder(memory))
+        finally:
+            await built.aclose()
+
+    @pytest.fixture
+    async def tiny_beliefs(self) -> AsyncIterator[BeliefSubject]:
+        """:meth:`beliefs`' subject at the limit small enough to reach."""
+        memory = FakeMemoryStore(now=lambda: AT)
+        built = _wire(memory=memory, max_payload_bytes=_TINY_LIMIT)
+        await built.start()
+        try:
+            yield BeliefSubject(engine=built, hold=_store_belief_holder(memory))
         finally:
             await built.aclose()
 

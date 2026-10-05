@@ -21,7 +21,9 @@ from ai_assistant.core.types import (
     SpokenChannelResult,
     SpokenReply,
     SpokenTurn,
+    StreamingTextReply,
     TextChannelPayload,
+    WholeTextReply,
 )
 
 
@@ -70,7 +72,7 @@ def test_invalid_nested_audio_snapshot_exposes_no_value_or_exception_chain() -> 
         conversation=None,
     )
     with pytest.raises(ValueError, match="invalid channel") as caught:
-        snapshot(supplied, SpokenReply(plays=(SpokenAudioFormat.MP4,)), streaming=False)
+        snapshot(supplied, SpokenReply(plays=(SpokenAudioFormat.MP4,)))
     assert "PRIVATE" not in str(caught.value)
     assert caught.value.__context__ is None
     assert caught.value.__cause__ is None
@@ -83,4 +85,27 @@ def test_invalid_reply_cannot_become_an_event_with_no_reply() -> None:
     )
     malformed = SpokenReply.model_construct(plays=())
     with pytest.raises(ValueError, match="invalid channel"):
-        snapshot(supplied, malformed, streaming=False)
+        snapshot(supplied, malformed)
+
+
+@pytest.mark.parametrize(
+    "target", [NewConversation(), ChannelIdentity(channel_type="conversation", instance_id="one")]
+)
+def test_the_text_conversational_combination_is_refused_off_converses_own_input(
+    target: NewConversation | ChannelIdentity,
+) -> None:
+    """ADR-0293 §11: ``receive`` refuses a typed turn; ``converse`` alone admits one."""
+    supplied = ChannelInput(target=target, payload=TextChannelPayload(text="hello"))
+    with pytest.raises(ValueError, match="unsupported channel"):
+        snapshot(supplied, WholeTextReply())
+    accepted, reply = snapshot(supplied, WholeTextReply(), typed_turn=True)
+    assert accepted == supplied
+    assert reply == WholeTextReply()
+
+
+@pytest.mark.parametrize("typed_turn", [False, True])
+def test_a_streaming_reply_is_admitted_by_no_entry(typed_turn: bool) -> None:
+    """ADR-0293 §11 retired both entries that offered it; a recorded trigger may still hold one."""
+    supplied = ChannelInput(target=NewConversation(), payload=TextChannelPayload(text="hello"))
+    with pytest.raises(ValueError, match="unsupported channel"):
+        snapshot(supplied, StreamingTextReply(), typed_turn=typed_turn)

@@ -105,8 +105,9 @@ _NAMESPACE: Final = {
 #: ADR-0087's canonical projection is deliberately not extended to it. No response
 #: on this surface carries a credential value or any value derived from one.
 #:
-#: The thirty-eighth is ADR-0173 §2's ``ReplyChunk``, which ``converse_streaming``
-#: yields before its terminal ``TurnOutcome``. §2 declares it member by member — one
+#: The thirty-eighth was ADR-0173 §2's ``ReplyChunk``, which ``converse_streaming``
+#: yielded before its terminal ``TurnOutcome``; ADR-0293 §11 retired that method, so
+#: no method reaches it and it is no longer named here. §2 declares it member by member — one
 #: member, ``text``, and a stated refusal of the two a reader expects, a sequence
 #: number and a final-frame flag — so the walk terminates in ``core`` immediately.
 #: It is reached through the *union inside* an ``AsyncIterator``, which is the first
@@ -171,10 +172,10 @@ _NAMESPACE: Final = {
 #: The last four are ADR-0197 §8's — ``RoutedOperation``, which ``TurnOutcome.routed``
 #: names, and the three values it carries: ``RoutableOperation``, ``RouteOutcome`` and
 #: the ``OperationConfirmation`` a routed park is answered through. The walk reaches
-#: them through ``converse``, ``converse_streaming`` and ``resume`` alike, and
-#: terminates immediately: ``ContinuationToken`` is already here, and
-#: ``RoutedListing``'s seven arms are ``Belief``, ``Question``, ``PermissionDecision``,
-#: ``RecordedInvocation``, ``SourceGrant``, ``SourceReadRecord`` and ``SpendTotal`` —
+#: them through ``converse`` and ``resume`` alike, and terminates immediately:
+#: ``ContinuationToken`` is already here, and ``RoutedListing``'s seven arms are
+#: ``Belief``, ``Question``, ``PermissionDecision``, ``RecordedInvocation``,
+#: ``SourceGrant``, ``SourceReadRecord`` and ``SpendTotal`` —
 #: every one of them already inside this closure, which is exactly what ADR-0197 §8
 #: means by "it mints no payload type of its own".
 #:
@@ -233,7 +234,7 @@ _NAMESPACE: Final = {
 #: The last nine are ADR-0250's. Four are reached through ``TurnOutcome``'s four new
 #: members (§5) — ``GoalEngagement`` with the ``EngagementDisposition`` it names,
 #: ``Clarification``, ``ReferenceOutcome`` and ``GoalDisambiguation``. One is reached
-#: through ``converse``'s and ``converse_streaming``'s ``reference`` keyword (§11),
+#: through ``converse``'s ``reference`` keyword (§11),
 #: ``TurnReference``, which is the first type this roster gains through an *argument*
 #: since ``SpokenAudio``. And the last three are the three operations §§12 and 15
 #: promote: ``GoalSummary``, which ``goals`` returns and which nests the
@@ -324,11 +325,6 @@ PROMOTED: Final[frozenset[str]] = frozenset(
         "Confirmation",
         "StepOutcome",
         "TurnOutcome",
-        "LearnDecision",
-        "QueueOutcome",
-        "QueuedQuestion",
-        "IngestSummary",
-        "LearnOutcome",
         "Evidence",
         "BeliefSummary",
         "Belief",
@@ -355,7 +351,6 @@ PROMOTED: Final[frozenset[str]] = frozenset(
         "ProvisioningState",
         "ConnectedAccount",
         "ConnectionAct",
-        "ReplyChunk",
         "Warrant",
         "OutboundStatement",
         "OutboundReach",
@@ -790,8 +785,14 @@ def test_the_surface_carries_the_methods_the_adrs_fixed() -> None:
     decides — so the count rises to seventy-eight. The gateway's stop control beside
     "working…" lands last, in its own lane (ADR-0297 §6:4), so ADR-0177 §1's
     enumeration does not move here.
+
+    **ADR-0293 §11 removes three**, ``converse_streaming``, ``receive_streaming`` and
+    ``learn`` — the streamed turn and the text conversational combination giving way
+    to the acts in the medium, and ``learn`` to a reply — so the count falls to
+    seventy-five. ``converse`` stays for the turn that carries a reference until
+    question messages do (the owner's cut (a), 2026-10-05).
     """
-    assert len(_method_names()) == 78
+    assert len(_method_names()) == 75
 
 
 def test_a_streaming_method_declares_its_union_chunk_first_terminal_last() -> None:
@@ -806,22 +807,20 @@ def test_a_streaming_method_declares_its_union_chunk_first_terminal_last() -> No
     nothing but a client's validation failure to say so.
 
     So it is pinned here, beside the Protocol, rather than left to be discovered.
-    The set is read off the surface, so a second streaming method is covered the day
-    it lands.
+    The set is read off the surface, so a streaming method is covered the day it
+    lands. **The set is empty**: ADR-0293 §11 retired ``converse_streaming`` and
+    ``receive_streaming``, the two that streamed, and ADR-0296 §4's change stream is
+    the next; the lane that adds it names it here and pins its chunk-first order,
+    whose chunk ADR-0296 §4 makes something other than ``ReplyChunk``.
     """
     from ai_assistant.wire.surface import STREAMING_METHODS  # noqa: PLC0415 — asserted about
 
-    assert {"converse_streaming", "receive_streaming"} == STREAMING_METHODS
+    assert frozenset() == STREAMING_METHODS
     for name in sorted(STREAMING_METHODS):
         annotation = get_type_hints(getattr(AssistantEngine, name), globalns=_NAMESPACE)["return"]
         assert get_origin(annotation) is AsyncIterator
         members = get_args(get_args(annotation)[0])
         assert len(members) == 2, f"{name}() yields {len(members)} types; §4's union has two"
-        chunk, terminal = members
-        assert chunk is core_types.ReplyChunk
-        assert terminal is (
-            core_types.ChannelResult if name == "receive_streaming" else core_types.TurnOutcome
-        )
 
 
 def test_the_promoted_surface_and_the_protocol_version_are_both_pinned() -> None:
@@ -1473,6 +1472,13 @@ def test_the_promoted_surface_and_the_protocol_version_are_both_pinned() -> None
     which a client at 77 cannot reconstruct. **The method set does not move and stays
     at 78.**
 
+    **79 is ADR-0293 §11, under the first limb.** ``AssistantEngine`` loses
+    ``converse_streaming``, ``receive_streaming`` and ``learn``, so the method set falls
+    to **75**: a client at 78 may call an operation a hub at 79 no longer answers.
+    ``receive`` refuses the text conversational combination a hub at 78 accepted, and
+    ``LearnOutcome``, ``IngestSummary``, ``LearnDecision``, ``QueuedQuestion`` and
+    ``QueueOutcome`` leave the surface with ``learn``.
+
     **ADR-0124 §9 decides no mechanical check and creates none**, saying one is
     owed and leaving its shape open. This is not that check — it is a *pin*, and
     a deliberately crude one: it fails when either number moves, which is the
@@ -1481,7 +1487,7 @@ def test_the_promoted_surface_and_the_protocol_version_are_both_pinned() -> None
     """
     from ai_assistant.wire.envelope import PROTOCOL_VERSION  # noqa: PLC0415 — asserted about
 
-    assert (len(_method_names()), PROTOCOL_VERSION) == (78, 78), (
+    assert (len(_method_names()), PROTOCOL_VERSION) == (75, 79), (
         "the promoted method set and the protocol version are pinned together "
         "(ADR-0124 §9); move either and this pin makes you name the limb you are "
         "under — the method set, or a wire-carried core type"
@@ -1489,14 +1495,13 @@ def test_the_promoted_surface_and_the_protocol_version_are_both_pinned() -> None
 
 
 #: ADR-0085 §6b's derived predicates, less the five ADR-0285 §2 removed with the two
-#: observation types. **The list is normative there** — "a
+#: observation types and the two ADR-0293 §11 removed with ``learn``'s summaries.
+#: **The list is normative there** — "a
 #: triad implementation that carried a subset would leave the CLI reading an
 #: attribute that is not there" — so it is spelled out rather than derived, which
 #: is the one place in this module an enumeration is the right shape.
 DERIVED_PREDICATES: Final[frozenset[tuple[str, str]]] = frozenset(
     {
-        ("IngestSummary", "stored"),
-        ("LearnOutcome", "stored"),
         ("Evidence", "lost"),
         ("Belief", "evidence_count"),
         ("Belief", "lost_evidence"),

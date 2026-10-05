@@ -26,6 +26,7 @@ from ai_assistant.core.types import (
     TextChannelResult,
     WholeTextReply,
 )
+from ai_assistant.orchestration.channels import ChannelProjection
 from ai_assistant.orchestration.composing import ComposingStage
 from ai_assistant.orchestration.informational_events import InformationalEventStage
 from ai_assistant.testing import FakeModelProvider, FakeStreamingCompleter
@@ -49,7 +50,16 @@ async def test_text_receipt_names_the_only_record_with_exact_input_context_and_r
     supplied = ChannelInput(
         target=NewConversation(), payload=TextChannelPayload(text=text), context=context
     )
-    result = await harness.engine.receive(supplied, reply=WholeTextReply(), timeout=_BUDGET)
+    # ADR-0293 §11 takes the text conversational combination off ``receive``. ``converse``
+    # still runs a typed turn through this admission and returns the bare outcome, so the
+    # receipt it is admitted with is read here, where the record is the subject.
+    result = await harness.engine._receive(
+        supplied,
+        reply=WholeTextReply(),
+        timeout=_BUDGET,
+        projection=ChannelProjection("converse"),
+        typed_turn=True,
+    )
     assert isinstance(result.result, TextChannelResult)
     assert result.capture.state == "recorded"
     assert not result.result.outcome.capture_degraded

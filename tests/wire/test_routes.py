@@ -59,9 +59,9 @@ _EVENT_INPUT: Final = _input(ChannelIdentity(channel_type="informational_event",
 def test_every_method_on_the_surface_is_in_exactly_the_rows_the_table_allows() -> None:
     """§5:4: a test fails while any member of ``METHODS`` is in no row, or in more.
 
-    Two methods are the table's own exception (§5:1): ``receive`` and
-    ``receive_streaming`` sit in exactly two rows, the legacy turn and spoke traffic,
-    and the input's target decides which.
+    One method is the table's own exception (§5:1): ``receive`` sits in exactly two
+    rows, the legacy turn and spoke traffic, and the input's target decides which.
+    ``receive_streaming`` was the other until ADR-0293 §11 retired it.
     """
     held = Counter(name for methods in ROWS.values() for name in methods)
     unplaced = sorted(METHODS - set(held))

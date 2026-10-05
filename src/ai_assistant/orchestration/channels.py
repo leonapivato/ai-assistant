@@ -46,12 +46,15 @@ class ChannelProjection:
         """Reserve this call's final receipt at the address fixed at admission (ADR-0283 §2)."""
         return UNCAPTURED if self.capture_report is None else self.capture_report()
 
-    def text(self, outcome: TurnOutcome) -> TurnOutcome | ChannelResult:
-        """Project text, reserving the longer successful capture spelling."""
+    def text(self, outcome: TurnOutcome) -> TurnOutcome:
+        """Project text, reserving the longer successful capture spelling.
+
+        A typed turn's public result is the bare outcome: ``converse`` is the one entry
+        that runs one, ``receive`` refusing the text conversational combination
+        (ADR-0293 §11).
+        """
         if self.capture_report is not None:
             outcome = outcome.model_copy(update={"capture_degraded": False})
-        if self.method in {"receive", "receive_streaming"}:
-            return text_result(outcome, capture=self.report())
         return outcome
 
     def spoken(self, outcome: SpokenTurn) -> SpokenTurn | ChannelResult:

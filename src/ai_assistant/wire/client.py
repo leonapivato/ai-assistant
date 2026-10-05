@@ -133,14 +133,12 @@ if TYPE_CHECKING:
         DestinationTrustRecord,
         DurableIdentifier,
         EncodableText,
-        FeedbackEvent,
         GoalAbandonment,
         GoalSummary,
         GrantableSource,
         GrantScope,
         HeldNotification,
         Identifier,
-        LearnOutcome,
         MemoryKind,
         MessageReceipt,
         NonBlankEncodableText,
@@ -152,7 +150,6 @@ if TYPE_CHECKING:
         ReadCancellation,
         RecipientGrant,
         RecordedInvocation,
-        ReplyChunk,
         SecretValue,
         SourceGrant,
         SourceReadRecord,
@@ -168,13 +165,11 @@ if TYPE_CHECKING:
         StoryOutcome,
         StoryPage,
         StoryView,
-        StreamingTextReply,
         TranscriptPage,
         TurnOutcome,
         TurnReference,
         UserMessage,
         UtcInstant,
-        WholeTextReply,
     )
 
 #: The free-form name the connect frame carries, for the hub's logs (ADR-0084 §2).
@@ -293,30 +288,21 @@ class HubClient:
         self,
         input: ChannelInput,  # noqa: A002 — ADR-0274 §4 names the public parameter
         *,
-        reply: WholeTextReply | SpokenReply | None,
+        reply: SpokenReply | None,
         timeout: timedelta,  # noqa: ASYNC109 — relayed operation budget
     ) -> ChannelResult:
-        """Process a channel input on the authenticated hub (ADR-0274 §9)."""
-        supplied, capability = snapshot(input, reply, streaming=False)
+        """Process a channel input on the authenticated hub (ADR-0274 §9).
+
+        The text conversational combination is refused here, before any I/O, as the
+        engine refuses it (ADR-0293 §11).
+        """
+        supplied, capability = snapshot(input, reply)
         return await self._call(  # type: ignore[no-any-return]  # reflected result adapter
             "receive",
             input=supplied,
             reply=capability,
             timeout=timeout,
         )
-
-    def receive_streaming(
-        self,
-        input: ChannelInput,  # noqa: A002 — ADR-0274 §4 names the public parameter
-        *,
-        reply: StreamingTextReply,
-        timeout: timedelta,
-    ) -> AsyncIterator[ReplyChunk | ChannelResult]:
-        """Stream chunks and the channel wrapper on their originating call."""
-        supplied, capability = snapshot(input, reply, streaming=True)
-        payload = arguments_object(input=supplied, reply=capability, timeout=timeout)
-        payload = project(payload)
-        return self._stream_call("receive_streaming", payload)
 
     async def converse(
         self,
@@ -349,51 +335,6 @@ class HubClient:
             conversation_id=selected,
             reference=reference,
         )
-
-    def converse_streaming(
-        self,
-        utterance: EncodableText,
-        *,
-        timeout: timedelta,  # the caller's budget, relayed to the hub (ADR-0029 §4)
-        conversation_id: Identifier | None = None,
-        reference: TurnReference | None = None,
-    ) -> AsyncIterator[ReplyChunk | TurnOutcome]:
-        """Run one turn on the hub, reading its answer as it is composed (ADR-0173 §4).
-
-        **This is where the client stops being a one-frame-per-request transport.**
-        :meth:`_call` writes one frame and reads exactly one; this reads until the
-        terminal frame, which ADR-0173 §11 names as the honest cost of spending the
-        correlation id's reserved second job.
-
-        Args:
-            utterance: What the user said.
-            timeout: The budget for the whole turn.
-            conversation_id: The conversation to continue, or ``None``.
-            reference: Exactly :meth:`converse`'s (ADR-0250 §11).
-
-        Returns:
-            An async iterator over the answer's chunks and then the turn's outcome.
-            Close it if you stop reading part-way (:func:`contextlib.aclosing`) —
-            the connection is hung up by its own cleanup, which a generator nobody
-            closes does not run.
-
-        Raises:
-            ValueError: If ``conversation_id`` is blank, or a value has no wire
-                form — refused here, before any I/O, exactly as :meth:`_call`
-                refuses it (ADR-0085 §9).
-        """
-        selected = (
-            None if conversation_id is None else identifier(conversation_id, name="conversation_id")
-        )
-        payload = arguments_object(
-            utterance=utterance, timeout=timeout, conversation_id=selected, reference=reference
-        )
-        # Projected **before** the generator is even built, for :meth:`_call`'s own
-        # reason: a value with no wire form must be refused the same way whether or
-        # not a hub happens to be up, and a refusal raised from the first iteration
-        # step instead would be one a caller that never iterates never sees.
-        project(payload)
-        return self._stream_call("converse_streaming", payload)
 
     async def converse_spoken(
         self,
@@ -684,17 +625,6 @@ class HubClient:
         """
         named = identifier(goal_id, name="goal_id")
         return await self._call("abandon_goal", goal_id=named)  # type: ignore[no-any-return]
-
-    async def learn(self, event: FeedbackEvent) -> LearnOutcome:
-        """Hand one piece of feedback to memory.
-
-        Args:
-            event: The feedback.
-
-        Returns:
-            What memory did with it.
-        """
-        return await self._call("learn", event=event)  # type: ignore[no-any-return]
 
     async def episodes(
         self,

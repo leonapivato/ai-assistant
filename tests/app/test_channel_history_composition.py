@@ -58,6 +58,7 @@ from ai_assistant.core.types import (
     WholeTextReply,
 )
 from ai_assistant.models import PydanticAIProvider
+from ai_assistant.orchestration.channels import ChannelProjection
 from ai_assistant.orchestration.conversations import HISTORY_REPLAY_BOUND, conversation_channel
 from ai_assistant.testing import (
     FakeGoalAssociator,
@@ -137,10 +138,16 @@ class Composed:
             if conversation_id is None
             else ChannelIdentity(channel_type="conversation", instance_id=conversation_id)
         )
-        return await self.engine.receive(
+        # ADR-0293 §11 takes the text conversational combination off ``receive``, and
+        # ``converse`` — which still runs it, for the turn carrying a reference — returns
+        # the bare outcome. These cases are about how that turn's episode is captured,
+        # so they drive the same admission ``converse`` does and read its receipt.
+        return await self.engine._receive(
             ChannelInput(target=target, payload=TextChannelPayload(text=text)),
             reply=WholeTextReply(),
             timeout=_BUDGET,
+            projection=ChannelProjection("converse"),
+            typed_turn=True,
         )
 
     async def fail(self, conversation_id: str) -> str:

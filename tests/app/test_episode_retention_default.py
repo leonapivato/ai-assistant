@@ -35,6 +35,7 @@ from ai_assistant.core.types import (
     WholeTextReply,
 )
 from ai_assistant.models import PydanticAIProvider
+from ai_assistant.orchestration.channels import ChannelProjection
 from ai_assistant.testing import (
     FakeGoalAssociator,
     FakeModelProvider,
@@ -116,10 +117,14 @@ def composed(
 
 async def _captured_episode(engine: Engine) -> EpisodicMemory:
     """One text activation on a new conversation, and the episode it recorded."""
-    result = await engine.receive(
+    # ADR-0293 §11 takes the text conversational combination off ``receive``; this
+    # drives the admission ``converse`` still runs it through, and reads its receipt.
+    result = await engine._receive(
         ChannelInput(target=NewConversation(), payload=TextChannelPayload(text="hello")),
         reply=WholeTextReply(),
         timeout=_BUDGET,
+        projection=ChannelProjection("converse"),
+        typed_turn=True,
     )
     assert result.capture.state == "recorded"
     address = result.capture.episode_id

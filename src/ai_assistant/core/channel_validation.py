@@ -4,6 +4,13 @@ No dispatch, collaborators, configuration, or authority lives here. Both local
 and wire entry points apply the same closed set of representable combinations,
 and read the same declaration of where each channel type's input comes from
 (ADR-0284 §2:2).
+
+**The text conversational combination is no longer on the surface** (ADR-0293 §11):
+a typed message is written into a conversation as an act in the medium, and
+``receive`` refuses it. The one input that still carries it is the one
+``converse`` builds for itself, kept for the turn that carries a reference until
+question messages do (the owner's cut (a), 2026-10-05), and that caller alone
+says so with ``typed_turn``.
 """
 
 from __future__ import annotations
@@ -22,7 +29,6 @@ from ai_assistant.core.types import (
     SpeechChannelPayload,
     SpokenDeliveryState,
     SpokenReply,
-    StreamingTextReply,
     TextChannelPayload,
     WholeTextReply,
 )
@@ -46,13 +52,27 @@ _INPUT_ORIGINS: Final[Mapping[str, InputOrigin]] = MappingProxyType(
 
 
 def snapshot(
-    supplied: ChannelInput, reply: ReplyCapability | None, *, streaming: bool
+    supplied: ChannelInput, reply: ReplyCapability | None, *, typed_turn: bool = False
 ) -> tuple[ChannelInput, ReplyCapability | None]:
     """Copy and validate nested caller data before processing can suspend.
 
     Invalid nested recordings leave no rejected input or exception chain in the
     refusal (ADR-0200 §9). Revalidation starts from dictionaries so even nested
     frozen models containing caller-mutated values are checked and detached.
+
+    Args:
+        supplied: The channel input as the caller handed it.
+        reply: The reply capability the caller offered, or ``None``.
+        typed_turn: ``True`` only for the input ``converse`` builds for its own
+            turn, the one entry that still admits the text conversational
+            combination (see :func:`validate_combination`).
+
+    Returns:
+        The detached input and reply capability.
+
+    Raises:
+        ValueError: If either value is malformed, or the combination is not one
+            this entry admits.
     """
     accepted: ChannelInput | None = None
     accepted_reply: ReplyCapability | None = None
@@ -67,35 +87,43 @@ def snapshot(
     if accepted is None:
         msg = "invalid channel input or reply declaration"
         raise ValueError(msg) from None
-    validate_combination(accepted, accepted_reply, streaming=streaming)
+    validate_combination(accepted, accepted_reply, typed_turn=typed_turn)
     return accepted, accepted_reply
 
 
 def validate_combination(
-    supplied: ChannelInput, reply: ReplyCapability | None, *, streaming: bool
+    supplied: ChannelInput, reply: ReplyCapability | None, *, typed_turn: bool = False
 ) -> None:
-    """Refuse every combination outside ADR-0274 §4's complete dispatch table."""
+    """Refuse every combination outside the dispatch table this entry admits.
+
+    ADR-0274 §4's table, less the text conversational combination ADR-0293 §11
+    takes off the surface: an informational event is text with no reply, and a
+    conversation's input is speech with a spoken reply. ``typed_turn`` admits the
+    text conversational combination with a whole text reply as well, for
+    ``converse``'s own input alone; no streaming combination remains.
+
+    Args:
+        supplied: The detached channel input.
+        reply: The detached reply capability, or ``None``.
+        typed_turn: Whether this is ``converse``'s own input.
+
+    Raises:
+        ValueError: If the combination is not in the table.
+    """
     target = supplied.target
     kind = "conversation" if isinstance(target, NewConversation) else target.channel_type
     options = supplied.conversation
     valid = False
     if kind == "informational_event":
         valid = (
-            not streaming
-            and isinstance(supplied.payload, TextChannelPayload)
-            and reply is None
-            and options is None
+            isinstance(supplied.payload, TextChannelPayload) and reply is None and options is None
         )
     elif kind == "conversation":
         options = options or ConversationInputOptions()
         if isinstance(supplied.payload, TextChannelPayload):
-            valid = options.delivery is None and (
-                isinstance(reply, StreamingTextReply)
-                if streaming
-                else isinstance(reply, WholeTextReply)
-            )
+            valid = typed_turn and options.delivery is None and isinstance(reply, WholeTextReply)
         elif isinstance(supplied.payload, SpeechChannelPayload):
-            valid = not streaming and isinstance(reply, SpokenReply) and options.reference is None
+            valid = isinstance(reply, SpokenReply) and options.reference is None
             if options.delivery is not None:
                 valid = (
                     valid

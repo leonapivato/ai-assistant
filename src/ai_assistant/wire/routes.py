@@ -1,11 +1,11 @@
 """ADR-0298 §5's route table, and the half of it the wire server checks.
 
-**Every method on the promoted surface is in exactly one row**, except ``receive``
-and ``receive_streaming``, which the kind of the input's target places in one of two
-(ADR-0298 §5:1). :data:`ROWS` is the table as the ADR states it, and
-``tests/wire/test_routes.py`` fails while any member of
-:data:`~ai_assistant.wire.surface.METHODS` is in no row, or in more rows than the
-table allows it (§5:4), and while a row names a method the surface no longer has.
+**Every method on the promoted surface is in exactly one row**, except ``receive``,
+which the kind of the input's target places in one of two (ADR-0298 §5:1).
+:data:`ROWS` is the table as the ADR states it, and ``tests/wire/test_routes.py``
+fails while any member of :data:`~ai_assistant.wire.surface.METHODS` is in no row,
+or in more rows than the table allows it (§5:4), and while a row names a method the
+surface no longer has.
 
 **Enumerated rather than derived**, as :data:`~ai_assistant.wire.server.
 CONNECTION_METHODS` is and for its reason: which row a method sits in is ADR-0298
@@ -70,14 +70,15 @@ class Route(StrEnum):
     NOTIFICATION_POLL = "notification_poll"
 
 
-#: The two methods whose row the input's target decides (ADR-0298 §5:1, §5:2).
-TARGETED: Final[frozenset[str]] = frozenset({"receive", "receive_streaming"})
+#: The method whose row the input's target decides (ADR-0298 §5:1, §5:2).
+#: ``receive_streaming`` was the other until ADR-0293 §11 took it off the surface.
+TARGETED: Final[frozenset[str]] = frozenset({"receive"})
 
-#: ADR-0298 §5's table, row by row, with ``receive`` and ``receive_streaming`` in both
-#: rows their target may place them in. ``converse_streaming``, ``learn`` and the text
-#: ``receive`` combination are classified as the surface has them; the change that
-#: removes one from the surface removes its name here, which the closure test asks of
-#: it.
+#: ADR-0298 §5's table, row by row, with ``receive`` in both rows its target may place
+#: it in. ``converse_streaming``, ``learn`` and ``receive_streaming`` left the surface
+#: under ADR-0293 §11, and their names left this table with them, which the closure
+#: test asks of a removal. ``receive`` keeps the legacy-turn row for a spoken input to
+#: a conversation, the text combination being refused before any row is read.
 ROWS: Final[Mapping[Route, frozenset[str]]] = {
     Route.COMMAND: frozenset(
         {
@@ -148,9 +149,7 @@ ROWS: Final[Mapping[Route, frozenset[str]]] = {
     Route.WRITING: frozenset({"write_message", "delete_message", "delete_conversation"}),
     Route.READING_ONE: frozenset({"transcript", "conversation"}),
     Route.READING_MANY: frozenset({"recent_conversations", "chat_changes"}),
-    Route.LEGACY_TURN: frozenset(
-        {"converse", "converse_streaming", "converse_spoken", "answer", "learn", *TARGETED}
-    ),
+    Route.LEGACY_TURN: frozenset({"converse", "converse_spoken", "answer", *TARGETED}),
     Route.SPOKE_TRAFFIC: TARGETED,
     Route.NOTIFICATION_POLL: frozenset({"next_notification"}),
 }
@@ -170,10 +169,10 @@ _ROLE_NEEDED: Final[Mapping[Route, DeviceRole]] = {
 
 
 def route_of(method: str, arguments: Mapping[str, Any]) -> Route | None:
-    """The row a request is in, by its method and, for two methods, its target.
+    """The row a request is in, by its method and, for ``receive``, its target.
 
     ADR-0298 §5:2: a request's kind is its envelope ``method``, and for ``receive``
-    and ``receive_streaming`` also the input's target — its ``kind``, and a channel's
+    also the input's target — its ``kind``, and a channel's
     ``channel_type`` — as validated; no row is chosen by any other part of a request.
 
     Args:

@@ -18,26 +18,22 @@ from datetime import UTC, datetime, timedelta
 from typing import TYPE_CHECKING, Final
 
 import pytest
-from test_engine import Harness, NoStepPlanner, feedback
+from test_engine import Harness, NoStepPlanner
 
 from ai_assistant.core.device_context import current_requesting_device, serving_device
 from ai_assistant.core.errors import DeviceRefusal, DeviceRefusedError
 from ai_assistant.core.types import (
     HUB_REQUESTING_DEVICE,
     ChannelIdentity,
-    ChannelInput,
     ChatChanges,
     ChatDevice,
     DataTier,
     DeviceAccess,
     DeviceRole,
     MessageAuthor,
-    NewConversation,
     NotificationCandidate,
     RequestingDevice,
     SendOutcome,
-    StreamingTextReply,
-    TextChannelPayload,
     TranscriptMessage,
     UserMessage,
 )
@@ -46,7 +42,6 @@ from ai_assistant.orchestration.conversations import ConversationLifecycle
 from ai_assistant.orchestration.device_checks import DeviceChecks
 from ai_assistant.testing import (
     FakeConversationStore,
-    FakeFeedbackProcessor,
     FakeMemoryStore,
     FakeModelProvider,
     FakeNotificationOutbox,
@@ -58,8 +53,6 @@ if TYPE_CHECKING:
 
     from ai_assistant.core.types import (
         DeviceConversation,
-        FeedbackEvent,
-        MemoryUpdateProposal,
         Message,
     )
     from ai_assistant.orchestration.engine import Engine
@@ -315,31 +308,6 @@ async def test_a_legacy_turn_needs_both_ends() -> None:
     await _refused(STRANGER, lambda: engine.answer("q-1", accept=True), DeviceRefusal.NO_ROLE)
 
 
-async def test_a_refused_stream_starts_no_turn() -> None:
-    """§5, §6:1: the streamed turns are checked before the turn starts."""
-    engine = _harness().engine
-    await engine.set_my_devices([_WATCH])
-    before = await engine.recent_conversations()
-
-    async def drained(stream: object) -> None:
-        async for _ in stream:  # type: ignore[attr-defined]  # an async iterator either way
-            pass
-
-    with serving_device(WATCH):
-        received = engine.receive_streaming(
-            ChannelInput(target=NewConversation(), payload=TextChannelPayload(text="hi")),
-            reply=StreamingTextReply(),
-            timeout=_TIMEOUT,
-        )
-        with pytest.raises(DeviceRefusedError) as raised:
-            await drained(received)
-        assert raised.value.reason is DeviceRefusal.NOT_ALLOWED
-        conversed = engine.converse_streaming("hi", timeout=_TIMEOUT)
-        with pytest.raises(DeviceRefusedError):
-            await drained(conversed)
-    assert await engine.recent_conversations() == before
-
-
 async def test_only_a_conversation_target_is_a_legacy_turn() -> None:
     """§5:2: any other target is spoke traffic, the wire server's alone to check."""
     checks = DeviceChecks(
@@ -427,18 +395,6 @@ async def test_the_activation_a_message_starts_does_not_run_as_its_device() -> N
     assert all(one == HUB_REQUESTING_DEVICE for one in witness.seen)
 
 
-async def test_feedback_is_a_legacy_turn_naming_no_conversation() -> None:
-    """§5: ``learn`` needs "my devices" for both, and a refused one writes nothing."""
-    harness = _harness()
-    engine = harness.engine
-    await engine.set_my_devices([_PHONE, _WATCH])
-    await _refused(STRANGER, lambda: engine.learn(feedback()), DeviceRefusal.NO_ROLE)
-    await _refused(WATCH, lambda: engine.learn(feedback()), DeviceRefusal.NOT_ALLOWED)
-    assert await harness.memory.export() == []
-    await _as(PHONE, lambda: engine.learn(feedback()))
-    assert await harness.memory.export() != []
-
-
 async def test_a_writing_end_outside_my_devices_holds_a_role() -> None:
     """ADR-0296 §2: a write-only end holds the user's end, so it is never ``NO_ROLE``."""
     engine = _harness().engine
@@ -467,30 +423,37 @@ async def test_a_turn_does_not_run_as_the_device_that_asked_for_it() -> None:
     assert all(one == HUB_REQUESTING_DEVICE for one in witness.seen)
 
 
-class _GatedWitness(FakeFeedbackProcessor):
-    """A feedback processor that waits on a gate and records the requesting device."""
+class _GatedWitness(FakeModelProvider):
+    """A composing model that waits on a gate and records the requesting device."""
 
     def __init__(self) -> None:
-        super().__init__()
+        super().__init__("Hello there.")
         self.entered = asyncio.Event()
         self.release = asyncio.Event()
         self.seen: list[RequestingDevice] = []
 
-    async def process(self, event: FeedbackEvent) -> Sequence[MemoryUpdateProposal]:
+    async def complete(self, messages: Sequence[Message], *, model: str | None = None) -> Message:
         self.entered.set()
         await self.release.wait()
         self.seen.append(current_requesting_device())
-        return await super().process(event)
+        return await super().complete(messages, model=model)
 
 
 async def test_work_a_cancelled_request_leaves_running_does_not_run_as_its_device() -> None:
-    """§2:6: a shielded operation runs on past its caller, with the device unset."""
+    """§2:6: a shielded operation runs on past its caller, with the device unset.
+
+    A turn is shielded from its caller's cancellation, so it is the operation held here;
+    ``learn`` was until ADR-0293 §11 retired it.
+    """
     witness = _GatedWitness()
-    harness = Harness(planner=NoStepPlanner(), chat_reader=False, feedback=witness)
-    engine = harness.engine
+    engine = Harness(
+        planner=NoStepPlanner(),
+        composing=ComposingStage(model=witness, streaming=FakeStreamingCompleter()),
+        chat_reader=False,
+    ).engine
     await engine.set_my_devices([_PHONE])
     with serving_device(PHONE):
-        call = asyncio.ensure_future(engine.learn(feedback()))
+        call = asyncio.ensure_future(engine.converse("hello", timeout=_TIMEOUT))
     await witness.entered.wait()
     call.cancel()
     with pytest.raises(asyncio.CancelledError):
@@ -598,33 +561,3 @@ async def test_an_unsettled_role_is_never_reported_as_no_role() -> None:
     engine = Harness(planner=NoStepPlanner(), chat_reader=False, conversation_store=store).engine
     await _refused(STRANGER, engine.recent_conversations, DeviceRefusal.NOT_ALLOWED)
     await _refused(STRANGER, engine.start_conversation, DeviceRefusal.NOT_ALLOWED)
-
-
-class _CountingStore(FakeConversationStore):
-    """Counts the reads of "my devices"."""
-
-    def __init__(self) -> None:
-        super().__init__()
-        self.reads = 0
-
-    async def my_devices(self) -> tuple[ChatDevice, ...]:
-        self.reads += 1
-        return await super().my_devices()
-
-
-async def test_a_stream_iterated_after_shutdown_reads_nothing() -> None:
-    """ADR-0042 §2: a stream made before ``aclose`` and iterated after is refused."""
-    store = _CountingStore()
-    engine = Harness(planner=NoStepPlanner(), chat_reader=False, conversation_store=store).engine
-    await engine.set_my_devices([_WATCH])
-    with serving_device(WATCH):
-        stream = engine.receive_streaming(
-            ChannelInput(target=NewConversation(), payload=TextChannelPayload(text="hi")),
-            reply=StreamingTextReply(),
-            timeout=_TIMEOUT,
-        )
-    await engine.aclose()
-    reads = store.reads
-    with pytest.raises(RuntimeError):
-        await anext(stream)
-    assert store.reads == reads

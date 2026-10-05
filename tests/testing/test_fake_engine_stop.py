@@ -21,6 +21,10 @@ from ai_assistant.core.types import (
     NewConversation,
     ProcessingReason,
     ProcessingStatus,
+    SpeechChannelPayload,
+    SpokenAudio,
+    SpokenAudioFormat,
+    SpokenReply,
     TextChannelPayload,
     WholeTextReply,
 )
@@ -100,8 +104,13 @@ def test_a_turn_call_awaiting_a_stopped_fake_pass_raises_the_stop(
 async def test_an_unmarked_pass_is_answered_as_it_ended() -> None:
     engine = FakeAssistantEngine()
     result = await engine.receive(
-        ChannelInput(target=NewConversation(), payload=TextChannelPayload(text="hi")),
-        reply=WholeTextReply(),
+        ChannelInput(
+            target=NewConversation(),
+            payload=SpeechChannelPayload(
+                audio=SpokenAudio(content="YXVkaW8=", media_type=SpokenAudioFormat.MP4)
+            ),
+        ),
+        reply=SpokenReply(plays=(SpokenAudioFormat.MP4,)),
         timeout=_BUDGET,
     )
     assert result.capture.state == "recorded"

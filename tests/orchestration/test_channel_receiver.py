@@ -30,17 +30,13 @@ from ai_assistant.core.types import (
     Modality,
     NewConversation,
     ProcessingStatus,
-    ReplyChunk,
     Role,
     SpeechChannelPayload,
     SpokenAudio,
     SpokenAudioFormat,
     SpokenChannelResult,
     SpokenReply,
-    StreamingTextReply,
     TextChannelPayload,
-    TextChannelResult,
-    WholeTextReply,
 )
 from ai_assistant.orchestration import informational_events
 from ai_assistant.orchestration.channels import ResolvedChannelInput
@@ -53,6 +49,10 @@ if TYPE_CHECKING:
 
 
 _BUDGET = timedelta(seconds=10)
+_SPEECH = SpeechChannelPayload(
+    audio=SpokenAudio(content="YXVkaW8=", media_type=SpokenAudioFormat.MP4)
+)
+_PLAYS = SpokenReply(plays=(SpokenAudioFormat.MP4,))
 
 
 class ControlledModel(FakeModelProvider):
@@ -205,34 +205,30 @@ async def test_context_snapshot_reaches_production_separately_for_overlapping_ca
         await release.wait()
 
     monkeypatch.setattr(harness.engine, "_begin_conversation_stage", processing)
+    # Spoken: ADR-0293 §11 takes the text conversational combination off ``receive``,
+    # and speech is the conversational input that still carries supplied context.
     context = ChannelContext(history=(ChannelContextItem(text="first", item_id="one"),))
-    supplied = ChannelInput(
-        target=identity, payload=TextChannelPayload(text="  exact text  "), context=context
-    )
-    first = asyncio.create_task(
-        harness.engine.receive(supplied, reply=WholeTextReply(), timeout=_BUDGET)
-    )
+    supplied = ChannelInput(target=identity, payload=_SPEECH, context=context)
+    first = asyncio.create_task(harness.engine.receive(supplied, reply=_PLAYS, timeout=_BUDGET))
     second = asyncio.create_task(
         harness.engine.receive(
             ChannelInput(
                 target=identity,
-                payload=TextChannelPayload(text="second"),
+                payload=_SPEECH,
                 context=ChannelContext(reply_to=ChannelContextItem(item_id="two")),
             ),
-            reply=WholeTextReply(),
+            reply=_PLAYS,
             timeout=_BUDGET,
         )
     )
     await both.wait()
     object.__setattr__(context.history[0], "text", "MUTATED")
-    object.__setattr__(supplied.payload, "text", "MUTATED")
     release.set()
     results = await asyncio.gather(first, second)
     assert all(result.channel == identity for result in results)
-    assert arrived[0].text == "  exact text  "
     assert arrived[0].context.history[0].text == "first"
     assert arrived[1].context.reply_to == ChannelContextItem(item_id="two")
-    assert arrived[0].modality is Modality.TEXT
+    assert arrived[0].modality is Modality.SPEECH
 
 
 @pytest.mark.parametrize(
@@ -268,68 +264,13 @@ async def test_new_context_counts_towards_payload_limit_without_truncation() -> 
         await harness.engine.receive(
             ChannelInput(
                 target=NewConversation(),
-                payload=TextChannelPayload(text="Hello"),
+                payload=_SPEECH,
                 context=ChannelContext(history=(ChannelContextItem(text="x" * 1024),)),
             ),
-            reply=WholeTextReply(),
+            reply=_PLAYS,
             timeout=_BUDGET,
         )
     assert await harness.conversation_store.recent() == []
-
-
-async def test_stream_terminal_projection_counts_the_new_wrapper() -> None:
-    harness = Harness()
-    stream = harness.engine.receive_streaming(
-        ChannelInput(target=NewConversation(), payload=TextChannelPayload(text="Hello")),
-        reply=StreamingTextReply(),
-        timeout=_BUDGET,
-    )
-    values = [value async for value in stream]
-    terminal = values[-1]
-    assert isinstance(terminal, ChannelResult)
-    assert isinstance(terminal.result, TextChannelResult)
-    assert len(canonical_payload(terminal)) > len(canonical_payload(terminal.result.outcome))
-    assert all(isinstance(value, ReplyChunk) for value in values[:-1])
-
-
-@pytest.mark.parametrize("shortfall", [0, 1])
-async def test_new_stream_reserves_actual_wrapper_room_before_emitting(shortfall: int) -> None:
-    from test_engine import NoStepPlanner  # noqa: PLC0415 — existing deterministic turn fixture
-    from test_engine_streaming import _harness  # noqa: PLC0415 — existing streaming fixture
-
-    supplied = ChannelInput(target=NewConversation(), payload=TextChannelPayload(text="hello"))
-    wide = _harness(planner=NoStepPlanner())
-    initial = [
-        value
-        async for value in wide.engine.receive_streaming(
-            supplied,
-            reply=StreamingTextReply(),
-            timeout=_BUDGET,
-        )
-    ]
-    baseline = initial[-1]
-    assert isinstance(baseline, ChannelResult)
-    assert isinstance(baseline.result, TextChannelResult)
-    # The reserved capture report names the activation address the writer will
-    # record (ADR-0283 §2), so the reservation is exactly the final report.
-    exact = len(canonical_payload(baseline))
-    tight = _harness(planner=NoStepPlanner(), max_payload_bytes=exact - shortfall)
-    values = [
-        value
-        async for value in tight.engine.receive_streaming(
-            supplied,
-            reply=StreamingTextReply(),
-            timeout=_BUDGET,
-        )
-    ]
-    terminal = values[-1]
-    assert isinstance(terminal, ChannelResult)
-    assert isinstance(terminal.result, TextChannelResult)
-    assert len(canonical_payload(terminal)) <= exact - shortfall
-    chunks = "".join(value.text for value in values if isinstance(value, ReplyChunk))
-    assert terminal.result.outcome.reply == chunks
-    assert terminal.result.outcome.reply_degraded is bool(shortfall)
-    assert chunks == ("You prefer" if shortfall else "You prefer hiking.")
 
 
 async def test_new_spoken_wrapper_degrades_audio_before_refusing_result() -> None:

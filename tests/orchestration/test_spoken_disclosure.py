@@ -76,7 +76,6 @@ from ai_assistant.core.types import (
     SpokenAudio,
     SpokenAudioFormat,
     TimeOfDay,
-    TurnOutcome,
 )
 from ai_assistant.orchestration import LearningLoop, MemoryWriteStage, RoutingStage
 from ai_assistant.orchestration.composing import ComposingStage
@@ -100,7 +99,6 @@ from ai_assistant.testing import (
     FakeSpeechTranscriber,
     FakeStreamingCompleter,
     FakeToolRegistry,
-    StreamAttempt,
 )
 
 if TYPE_CHECKING:
@@ -1267,53 +1265,6 @@ async def test_a_guarded_record_reaches_no_spoken_reply() -> None:
         "and the turn ran over the subtracted supply — there is no wider turn anywhere "
         "in the process (ADR-0203 §1)"
     )
-
-
-async def test_a_streamed_turn_supplied_a_withheld_record_stamps_its_episode() -> None:
-    """§8 case 1's third caller: ``converse_streaming`` (#1728).
-
-    ADR-0204 §8's fifteen cases name ``converse`` and ``converse_spoken`` and no
-    third operation, but :meth:`Engine._run_turn` has three callers and the streamed
-    one mints its own
-    :class:`~ai_assistant.orchestration.disclosure.BoundedAudienceSupply`. What held
-    that in place was the type checker alone — ``supply`` is a required keyword
-    argument, so removing it is a ``mypy`` error rather than a silent change — and
-    what was unpinned is the weaker mutation: a streamed caller passing a
-    differently configured supply, or a later lane restoring a ``None`` default on
-    that parameter.
-
-    The claim is ADR-0204 §4's, on the operation ADR-0173 §4 adds: the turn is
-    supplied everything it retrieved, and its capture records that content ADR-0199
-    §3 withholds stood in its warrant. ADR-0210 §1's last clause leaves this channel
-    exactly here.
-    """
-    stage = ComposingStage(
-        model=FakeModelProvider(_ANSWER),
-        streaming=FakeStreamingCompleter(script=(StreamAttempt(deltas=(_ANSWER,)),)),
-    )
-    harness = Harness(composing=stage, planner=_EchoingPlanner())
-    await _seed(
-        harness,
-        _belief("rec-1", _SPEAKABLE_CONTENT),
-        _belief("rec-2", _WITHHELD_CONTENT, about_person="Alice"),
-    )
-
-    chunks: list[str] = []
-    outcome: TurnOutcome | None = None
-    async for value in harness.engine.converse_streaming(_ASKED, timeout=PATIENT):
-        if isinstance(value, TurnOutcome):
-            outcome = value
-        else:
-            chunks.append(value.text)
-
-    assert outcome is not None, "ADR-0173 §4: the outcome is always the last value"
-    assert outcome.turn is not None
-    assert "rec-2" in _ids(outcome.turn.memories), (
-        "§4: a bounded channel's supply is not narrowed, on this operation either"
-    )
-    captured = _episodes(await harness.memory.export())
-    assert len(captured) == 1
-    assert captured[0].placement == _derived_at(captured[0])
 
 
 async def test_a_typed_turn_supplied_nothing_withheld_does_not_stamp_its_episode() -> None:

@@ -30,7 +30,6 @@ from ai_assistant.core.types import (
     EgressSpan,
     ExecutionState,
     RecordedInvocation,
-    ReplyChunk,
     SpanCoverage,
     StepOutcome,
     ToolCost,
@@ -56,33 +55,14 @@ _AT = datetime(2026, 8, 22, 9, 0, tzinfo=UTC)
 def test_the_streaming_set_is_read_off_the_protocol() -> None:
     """Derived rather than listed, which is what makes it total by construction.
 
-    A second streaming method is one this module already knows about; a table here
-    would be a second vocabulary to keep in step with the first, which is the
-    objection the module opens with.
+    A streaming method is one this module already knows about; a table here would be
+    a second vocabulary to keep in step with the first, which is the objection the
+    module opens with. The set is empty since ADR-0293 §11 retired
+    ``converse_streaming`` and ``receive_streaming``, and a method that streams again
+    — ADR-0296 §4's change stream — joins it by its annotation alone.
     """
     assert STREAMING_METHODS <= METHODS
-    assert "converse_streaming" in STREAMING_METHODS
-    assert "converse" not in STREAMING_METHODS
-
-
-def test_a_streaming_method_takes_exactly_the_arguments_the_whole_one_takes() -> None:
-    """§4: "exactly ``converse``'s arguments in exactly its shape".
-
-    A wire-visible fact rather than a Python nicety: ``_decode_arguments`` refuses an
-    argument a method does not declare, so a surface whose twin diverged by one name
-    would fail on the first call rather than at the handshake.
-    """
-    assert parameters("converse_streaming") == parameters("converse")
-
-
-def test_a_streaming_method_has_one_adapter_per_member_of_its_union() -> None:
-    """§4's rule, both halves, selected by the frame kind rather than the payload."""
-    assert chunk_adapter("converse_streaming").validate_python({"text": "half an"}) == ReplyChunk(
-        text="half an"
-    )
-    assert chunk_type("converse_streaming") is ReplyChunk
-    outcome = terminal_adapter("converse_streaming").validate_python({"turn": None})
-    assert isinstance(outcome, TurnOutcome)
+    assert frozenset() == STREAMING_METHODS
 
 
 def test_no_method_is_adapted_by_both_rules() -> None:
@@ -92,8 +72,6 @@ def test_no_method_is_adapted_by_both_rules() -> None:
     validate, so returning one would be worse than refusing: the failure would
     surface as a decode error inside a call rather than as a build-time mistake.
     """
-    with pytest.raises(KeyError):
-        return_adapter("converse_streaming")
     for name in ("converse", "resume"):
         with pytest.raises(KeyError):
             chunk_adapter(name)

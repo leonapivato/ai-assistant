@@ -2436,7 +2436,12 @@ from ai_assistant.wire.overlay import MAX_OVERLAY_IDENTITY_BYTES
 #: 78: ADR-0298 §1:4 adds the ``request`` frame's ``acting_for`` member, which a peer at
 #:     77 refuses as a member no protocol version declares, and §6:3 adds
 #:     ``DeviceRefusedError`` to the error mapping, with its ``reason`` among the details.
-PROTOCOL_VERSION: Final[int] = 78
+#: 79: ADR-0293 §11 removes ``converse_streaming``, ``learn`` and ``receive_streaming``
+#:     from the promoted ``AssistantEngine`` method set, and ``LearnOutcome``,
+#:     ``IngestSummary``, ``LearnDecision``, ``QueuedQuestion`` and ``QueueOutcome``
+#:     with them; ``receive`` refuses the text conversational combination, which a hub
+#:     at 78 accepted, and its ``reply`` is declared ``SpokenReply | None``.
+PROTOCOL_VERSION: Final[int] = 79
 
 #: ADR-0085 §8a: "The correlation id is a UUID string and is at most 36 bytes.
 #: Bounding it is what makes the reserve a constant rather than an aspiration; a

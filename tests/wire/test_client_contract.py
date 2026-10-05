@@ -84,6 +84,7 @@ from assistant_engine_contract import (
     SPEND_ZERO_CEILING,
     UNSPEAKABLE_NOTIFICATION,
     AssistantEngineContract,
+    BeliefSubject,
     ConnectionSubject,
     DecisionSubject,
     DerivedPlacementSubject,
@@ -94,6 +95,7 @@ from assistant_engine_contract import (
     SingleSlotParkSubject,
     SpendSubject,
     backwards_clock,
+    fake_belief_holder,
     near_ceiling_limit,
     overfull_invocation_rows,
     seeded_invocation_trail,
@@ -346,6 +348,20 @@ class TestHubEngineClientContract(AssistantEngineContract):
         backing = FakeAssistantEngine(max_payload_bytes=_TINY_LIMIT)
         async with serving(backing, tmp_path / "hub.sock", max_frame_bytes=_TINY_FRAME) as client:
             yield client
+
+    @pytest.fixture
+    async def beliefs(self, tmp_path: Path) -> AsyncIterator[BeliefSubject]:
+        """A client of a hub whose engine holds the beliefs, read back over the wire."""
+        backing = FakeAssistantEngine()
+        async with serving(backing, tmp_path / "hub.sock") as client:
+            yield BeliefSubject(engine=client, hold=fake_belief_holder(backing))
+
+    @pytest.fixture
+    async def tiny_beliefs(self, tmp_path: Path) -> AsyncIterator[BeliefSubject]:
+        """:meth:`beliefs`' subject on :meth:`tiny_engine`'s hub, for its reason."""
+        backing = FakeAssistantEngine(max_payload_bytes=_TINY_LIMIT)
+        async with serving(backing, tmp_path / "hub.sock", max_frame_bytes=_TINY_FRAME) as client:
+            yield BeliefSubject(engine=client, hold=fake_belief_holder(backing))
 
     @pytest.fixture
     async def speaking_engine(self, tmp_path: Path) -> AsyncIterator[AssistantEngine]:
