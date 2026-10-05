@@ -1841,7 +1841,7 @@ class SqliteConversationStore:
                     return MessageReceipt(
                         conversation_id=conversation_id,
                         outcome=SendOutcome.REPEATED,
-                        position=sent[0][0],
+                        position=_check_stored_position(sent[0][0]),
                     )
                 ends = {
                     one.device_id

@@ -1705,3 +1705,65 @@ async def test_a_deleted_message_keeps_no_text_in_the_file(tmp_path: Path) -> No
         raw.close()
     assert rows == [(None, None, None, None)]
     assert ("message_added",) not in changes
+
+
+@pytest.mark.integration
+async def test_a_repeated_send_over_a_corrupt_position_is_a_store_fault(tmp_path: Path) -> None:
+    """The repeat path reads a stored position too, and a corrupt one is this seam's error."""
+    store = SqliteConversationStore(path=tmp_path / "conversations.db", now=_fixed_now)
+    try:
+        await store.set_my_devices([_PHONE])
+        conversation = (await store.start()).id
+        await store.append_message(conversation, _said("hello", "m-1"))
+        store._conn.execute("UPDATE messages SET position = 0")
+        with pytest.raises(ConversationStoreError):
+            await store.append_message(conversation, _said("hello", "m-1"))
+    finally:
+        store.close()
+
+
+@pytest.mark.integration
+@pytest.mark.parametrize("act", ["append", "delete"])
+async def test_a_change_that_cannot_be_recorded_leaves_the_transcript_as_it_was(
+    tmp_path: Path, act: str
+) -> None:
+    """ADR-0293 §5:10: a change and its sequence number are one fact with the act.
+
+    A trigger refuses every insert into the change stream, so the act's last write
+    fails; the act must then have written nothing — no message, no marker, no
+    repeat-recognition row — and, once the stream accepts writes again, the same
+    act succeeds as if the failed one had never happened.
+    """
+    store = SqliteConversationStore(path=tmp_path / "conversations.db", now=_fixed_now)
+    try:
+        await store.set_my_devices([_PHONE])
+        conversation = (await store.start()).id
+        if act == "delete":
+            await store.append_message(conversation, _said("hello", "m-1"))
+        before_page = await store.transcript(conversation)
+        before_changes = await store.changes(after=0)
+        store._conn.execute(
+            "CREATE TRIGGER refuse_changes BEFORE INSERT ON chat_changes "
+            "BEGIN SELECT RAISE(ABORT, 'refused'); END"
+        )
+
+        failing = (
+            store.append_message(conversation, _said("hello", "m-1"))
+            if act == "append"
+            else store.delete_message(conversation, 1)
+        )
+        with pytest.raises(ConversationStoreError):
+            await failing
+
+        assert await store.transcript(conversation) == before_page
+        assert await store.changes(after=0) == before_changes
+        store._conn.execute("DROP TRIGGER refuse_changes")
+        if act == "append":
+            receipt = await store.append_message(conversation, _said("hello", "m-1"))
+            assert (receipt.outcome, receipt.position) == (SendOutcome.RECORDED, 1)
+        else:
+            assert await store.delete_message(conversation, 1) is True
+        (recorded,) = (await store.changes(after=before_changes.next_after)).changes
+        assert recorded.conversation_id == conversation
+    finally:
+        store.close()
