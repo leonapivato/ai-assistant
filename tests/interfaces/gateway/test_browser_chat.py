@@ -466,3 +466,113 @@ async def test_one_edit_of_a_device_set_is_out_at_a_time(
         await devices.filter(has_text="nPHONE").locator("button", has_text="Remove").click()
         await expect(devices).to_have_count(1)
         assert [one.device_id for one in await drive.engine.my_devices()] == ["hub"]
+
+
+async def test_a_state_change_with_no_transcript_change_reaches_an_idle_page(
+    gateway_browser: Browser, tmp_path: Path
+) -> None:
+    """§8:1: the state is followed while a conversation is open, sent from here or not."""
+    async with driving(gateway_browser, tmp_path) as drive:
+        await _open(drive)
+        held = drive.engine.conversation
+
+        async def working(conversation_id: str) -> Any:
+            digest = await held(conversation_id)
+            assert digest is not None
+            return digest.model_copy(update={"state": ConversationState(working=True)})
+
+        drive.engine.conversation = working  # type: ignore[method-assign]
+        await expect(drive.page.locator("#chat-state")).to_contain_text(
+            "working on this", timeout=_IDLE_FOLLOWED
+        )
+
+
+async def test_an_edits_late_answer_does_not_undo_a_newer_set(
+    gateway_browser: Browser, tmp_path: Path
+) -> None:
+    """A set the following applied after an edit went out outranks the edit's answer."""
+    async with driving(gateway_browser, tmp_path) as drive:
+        await drive.engine.set_my_devices(
+            [
+                ChatDevice(device_id="hub", access=DeviceAccess.READ_WRITE),
+                ChatDevice(device_id="nTABLET", access=DeviceAccess.READ),
+                ChatDevice(device_id="nPHONE", access=DeviceAccess.READ),
+            ]
+        )
+        await drive.page.click("#chat-button")
+        devices = drive.page.locator("#chat-my-devices li")
+        await expect(devices).to_have_count(3)
+        await drive.page.evaluate(_HOLDING, "/chat/devices/set")
+        await devices.filter(has_text="nTABLET").locator("button", has_text="Remove").click()
+        await drive.page.wait_for_function("() => window.__held.reached")
+
+        # Another device leaves only this one, after the edit went out.
+        await drive.engine.set_my_devices(
+            [ChatDevice(device_id="hub", access=DeviceAccess.READ_WRITE)]
+        )
+        await drive.page.wait_for_function(
+            "() => chat.myDevices.length === 1", timeout=_IDLE_FOLLOWED
+        )
+        await drive.page.evaluate("window.__held.release()")
+
+        await drive.page.wait_for_function("() => !chat.editingMine")
+        await expect(devices).to_have_count(1)
+
+
+async def test_a_transcript_that_could_not_be_read_is_offered_again(
+    gateway_browser: Browser, tmp_path: Path
+) -> None:
+    """Nothing reads the transcript again of its own motion; the owner is handed it."""
+    async with driving(gateway_browser, tmp_path) as drive:
+        await drive.engine.set_my_devices(
+            [ChatDevice(device_id="hub", access=DeviceAccess.READ_WRITE)]
+        )
+        started = await drive.engine.start_conversation()
+        await drive.engine.chat.append_message(
+            started.id, NewMessage(author=MessageAuthor.ASSISTANT, text="Already here.")
+        )
+        held = drive.engine.transcript
+
+        async def failing(*arguments: Any, **keywords: Any) -> Any:
+            raise ConversationStoreError("the transcript is unreadable")
+
+        drive.engine.transcript = failing  # type: ignore[method-assign]
+        await drive.page.click("#chat-button")
+        await drive.page.locator("#chat-conversations button", has_text="Open").click()
+        again = drive.page.locator("#chat-reread")
+        await expect(again).to_be_visible()
+
+        drive.engine.transcript = held  # type: ignore[method-assign]
+        await again.click()
+        await expect(drive.page.locator("#chat-transcript")).to_contain_text("Already here.")
+        await expect(again).to_be_hidden()
+
+
+async def test_a_chat_opened_on_a_hidden_page_waits_to_be_seen(
+    gateway_browser: Browser, tmp_path: Path
+) -> None:
+    """Following starts only on a visible page; coming back starts it, and says so."""
+    async with driving(gateway_browser, tmp_path) as drive:
+        await drive.page.evaluate(_HOLDING, "/chat/devices")
+        await drive.page.click("#chat-button")
+        await drive.page.wait_for_function("() => window.__held.reached")
+        await drive.page.evaluate(
+            """() => {
+              Object.defineProperty(document, "visibilityState", {
+                configurable: true, get: () => "hidden" });
+              document.dispatchEvent(new Event("visibilitychange"));
+            }"""
+        )
+        await drive.page.evaluate("window.__held.release()")
+        follow = drive.page.locator("#chat-follow")
+        await expect(follow).to_contain_text("Paused while this page is hidden")
+        assert await drive.page.evaluate("() => !chat.following && chat.timer === null")
+
+        await drive.page.evaluate(
+            """() => {
+              Object.defineProperty(document, "visibilityState", {
+                configurable: true, get: () => "visible" });
+              document.dispatchEvent(new Event("visibilitychange"));
+            }"""
+        )
+        await expect(follow).to_contain_text("You came back")

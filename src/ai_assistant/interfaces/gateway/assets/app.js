@@ -8877,6 +8877,10 @@ const chat = {
   // each undo the other.
   editingMine: false,
   editingConversation: false,
+  // How many times each set has been observed changed — by the following or by a
+  // read — so an edit's answer does not put back a set older than one already seen.
+  mineSeen: 0,
+  conversationSeen: 0,
 };
 
 function chatWasOpen() {
@@ -9045,6 +9049,13 @@ function startFollowing(said) {
   if (!chat.open || chat.following || chat.cursor === null) {
     return;
   }
+  // A page that is hidden by the time it would start waits to be seen again, and says
+  // so; coming back is one of ADR-0182 §7's two events, and starts it.
+  if (document.visibilityState !== "visible") {
+    sayFollowing(CHAT_PAUSED);
+    el("chat-follow-again").hidden = true;
+    return;
+  }
   chat.following = true;
   chat.ticks += 1;
   // What the conversation's state was is not known across a stop or a pause, and a read
@@ -9164,11 +9175,14 @@ async function readChanges(tick) {
     void loadChat();
     return null;
   }
-  const touched = applyChanges(body.changes);
+  applyChanges(body.changes);
   chat.cursor = body.next_after;
-  // The state is read with the changes, and a failure of that read stops the following
-  // exactly as a failure of the changes does: nothing is tried again of its own motion.
-  if (chat.selected !== null && (touched || chat.digestDue || followingQuickly())) {
+  // The state is read with the changes, on every read while a conversation is open: it
+  // changes without a change to the transcript — an activation started elsewhere, or a
+  // restart (§8:3) — so it is followed as the transcript is (§8:1, "pushed when it
+  // changes"). A failure of that read stops the following exactly as a failure of the
+  // changes does: nothing is tried again of its own motion.
+  if (chat.selected !== null) {
     const read = await readChatDigest(chat.selected, chat.chosen);
     if (tick !== chat.ticks) {
       return null;
@@ -9216,10 +9230,12 @@ function applyChanges(changes) {
       }
     } else if (change.kind === "devices_changed") {
       if (change.conversation_id === null) {
+        chat.mineSeen += 1;
         chat.myDevices = change.devices;
         renderMyDevices();
         renderConversationDevices();
       } else if (change.conversation_id === chat.selected) {
+        chat.conversationSeen += 1;
         chat.devices = change.devices;
         renderConversationDevices();
       }
@@ -9377,7 +9393,11 @@ async function selectChat(id) {
   renderTranscript();
   renderChatState();
   renderConversationDevices();
-  await readTranscript(id, mine, null);
+  el("chat-reread").hidden = true;
+  if (!(await readTranscript(id, mine, null)) && mine === chat.chosen) {
+    // Nothing reads the transcript again of its own motion; the owner can.
+    el("chat-reread").hidden = false;
+  }
   // The state is read with the conversation; a failure of that read stops the following,
   // which would otherwise read it again of its own motion (ADR-0182 §7).
   if (mine === chat.chosen && chat.selected === id && !(await readChatDigest(id, mine))) {
@@ -9408,11 +9428,12 @@ function sayChat(text) {
   slot.hidden = text === null;
 }
 
+// Answers `false` where the page could not be read for the conversation still on screen.
 async function readTranscript(id, mine, before) {
   const half = headerHalf();
   if (half === null) {
     showBootstrap();
-    return;
+    return false;
   }
   const era = sessionEra;
   let refusal = null;
@@ -9422,16 +9443,17 @@ async function readTranscript(id, mine, before) {
       refusal = said;
     });
     if (!sameSession(half, era)) {
-      return;
+      return true;
     }
     if (mine !== chat.chosen) {
-      return;
+      return true;
     }
     if (body === null) {
       if (refusal !== null && refusal.fault === "no-such-conversation") {
         chatGone(`Conversation ${id} no longer exists.`);
+        return true;
       }
-      return;
+      return false;
     }
     const entries = body.transcript.entries;
     // A marker is authoritative whichever arrived first: a page read before a deletion
@@ -9451,13 +9473,16 @@ async function readTranscript(id, mine, before) {
       chat.oldest = 1;
     }
     renderTranscript(before === null);
+    return true;
   } catch (_) {
     if (!sameSession(half, era)) {
-      return;
+      return true;
     }
     if (mine === chat.chosen) {
       fault(GATEWAY_GONE, "chat");
+      return false;
     }
+    return true;
   }
 }
 
@@ -9484,6 +9509,7 @@ async function readChatDigest(id, mine) {
     }
     chat.digestDue = false;
     chat.state = body.conversation.state;
+    chat.conversationSeen += 1;
     chat.devices = body.conversation.devices;
     renderChatState();
     renderConversationDevices();
@@ -9974,6 +10000,7 @@ async function setMyDevices(devices) {
     return;
   }
   const era = sessionEra;
+  const seen = chat.mineSeen;
   chat.editingMine = true;
   renderMyDevices();
   try {
@@ -9984,7 +10011,11 @@ async function setMyDevices(devices) {
     if (body === null) {
       return;
     }
-    chat.myDevices = devices;
+    // Only where nothing newer has been seen since the edit went out: a set the
+    // following applied meanwhile is later than this answer, whatever it says.
+    if (chat.mineSeen === seen) {
+      chat.myDevices = devices;
+    }
   } catch (_) {
     if (!sameSession(half, era)) {
       return;
@@ -10043,6 +10074,7 @@ async function setConversationDevices(devices) {
     return false;
   }
   const era = sessionEra;
+  const seen = chat.conversationSeen;
   chat.editingConversation = true;
   renderConversationDevices();
   try {
@@ -10058,7 +10090,7 @@ async function setConversationDevices(devices) {
     if (body === null) {
       return false;
     }
-    if (chat.selected === id) {
+    if (chat.selected === id && chat.conversationSeen === seen) {
       chat.devices = devices;
     }
     return true;
@@ -14170,6 +14202,12 @@ el("chat-older").addEventListener("click", () => {
   }
 });
 el("chat-form").addEventListener("submit", sendChat);
+el("chat-reread").addEventListener("click", () => {
+  if (chat.selected !== null) {
+    fault(null, "chat");
+    void selectChat(chat.selected);
+  }
+});
 // Control-Enter (Command-Enter) sends; Enter alone is a new line in the message.
 el("chat-text").addEventListener("keydown", (event) => {
   if (event.key === "Enter" && (event.ctrlKey || event.metaKey)) {
