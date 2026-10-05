@@ -14,6 +14,7 @@ from ai_assistant.core.errors import (
     ModelError,
     ModelTimeoutError,
     OversizedValueError,
+    PlanningError,
     TranscriptionFailedError,
     UnderstandingError,
 )
@@ -48,6 +49,7 @@ from ai_assistant.orchestration.activation_state import (
     active_state,
     admit_channel,
     admit_resume,
+    canonical_activation_id,
     terminal_status,
 )
 
@@ -395,3 +397,110 @@ def test_the_reason_survives_the_event_paths_outward_mapping() -> None:
     assert other.processing(_AT, ModelError("x")).understanding_omitted is (
         UnderstandingOmission.FAILED
     )
+
+
+# --- ADR-0297 §3, §4: the stop mark ---------------------------------------------------
+
+
+def test_a_stop_marks_an_activation_whose_end_entry_is_not_appended() -> None:
+    """§3:3: the test and the set, one synchronous step; a repeat finds it set."""
+    state = _admitted()
+    before = state.stopped
+    first = state.stop()
+    marked = state.stopped
+    again = state.stop()
+    assert (before, first, marked, again, state.stopped) == (False, True, True, True, True)
+
+
+def test_a_stop_finds_an_activation_the_controller_ended_and_marks_nothing() -> None:
+    """§3:2-§3:3: the end entry appended first decides, so the mark is not set."""
+    state = _admitted()
+    state.stages.end(ControllerRule.NOTHING_DUE, _AT)
+    assert state.stop() is False
+    assert not state.stopped
+
+
+def test_a_stop_after_the_finalization_reading_marks_nothing() -> None:
+    """§3:2: a pass ended at finalization has ended, whether or not an entry was appended."""
+    state = _admitted()
+    first = state.processing(_AT, None)
+    assert state.stop() is False
+    assert not state.stopped
+    # And a second reading builds the same record: nothing moved.
+    assert state.processing(_AT, None) == first
+
+
+def test_a_marked_stopped_pass_ended_by_the_stops_entry_is_ended_for_a_later_stop() -> None:
+    """§3:7's retry is for an activation still running; once ended, it is answered ended."""
+    state = _admitted()
+    assert state.stop()
+    state.stages.end(ControllerRule.STOPPED, _AT)
+    assert state.stop() is False
+    assert state.stopped
+
+
+@pytest.mark.parametrize(
+    "failure",
+    [
+        None,
+        asyncio.CancelledError(),
+        ModelTimeoutError("late"),
+        OversizedValueError("too big", limit=1, size=2),
+        ChannelProcessingError("failed"),
+    ],
+)
+def test_a_marked_pass_is_interrupted_stopped_ahead_of_every_other_row(
+    failure: BaseException | None,
+) -> None:
+    """§4:12: ``interrupted / stopped``, ahead of every row, the cancellation row included."""
+    state = _admitted()
+    state.stop()
+    assert terminal_status(state, failure) == (
+        ProcessingStatus.INTERRUPTED,
+        ProcessingReason.STOPPED,
+    )
+
+
+@pytest.mark.parametrize("failure", [None, asyncio.CancelledError(), ChannelProcessingError("x")])
+def test_a_marked_pass_that_never_entered_the_controller_ends_with_the_stops_entry(
+    failure: BaseException | None,
+) -> None:
+    """§4:5: appended at finalization, where ADR-0280 §5:4 appends ``interrupted``."""
+    state = _admitted()
+    state.stop()
+    record = state.processing(_AT, failure)
+    assert [(entry.stage, entry.due) for entry in record.stages] == [
+        (ControllerStage.END, ControllerRule.STOPPED)
+    ]
+    assert (record.status, record.reason) == (
+        ProcessingStatus.INTERRUPTED,
+        ProcessingReason.STOPPED,
+    )
+
+
+@pytest.mark.parametrize("failure", [None, ModelTimeoutError("late"), PlanningError("x")])
+def test_a_marked_resume_ends_with_the_stops_entry(failure: BaseException | None) -> None:
+    """§4:6: a resume, which the controller does not run, ends with the stop's entry."""
+    state = admit_resume(
+        approved=True, remember_recipients_until=None, clock=lambda: _AT, id_factory=lambda: _ID
+    )
+    state.stop()
+    record = state.processing(_AT, failure)
+    assert [(entry.stage, entry.due) for entry in record.stages] == [
+        (ControllerStage.END, ControllerRule.STOPPED)
+    ]
+    assert record.reason is ProcessingReason.STOPPED
+
+
+@pytest.mark.parametrize(
+    ("minted", "canonical"),
+    [
+        (_ID, True),
+        (_ID.upper(), False),
+        ("not-a-uuid", False),
+        ("00000000-0000-1000-8000-000000000000", False),
+        (None, False),
+    ],
+)
+def test_an_activation_id_is_canonical_uuid4_text(minted: object, *, canonical: bool) -> None:
+    assert canonical_activation_id(minted) is canonical

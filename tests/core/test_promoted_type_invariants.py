@@ -483,6 +483,36 @@ class TestTurnOutcomeReply:
             TurnOutcome(turn=None, reply="You prefer hi", reply_degraded=True)
 
 
+class TestTurnOutcomeStopped:
+    """ADR-0297 §4: a stopped resume is the fourth reply-less shape, in both directions."""
+
+    def test_a_stopped_resume_carries_no_reply_and_is_not_degraded(self) -> None:
+        """A resume whose control activation was stopped: its turn, and no answer."""
+        outcome = TurnOutcome(turn=_turn(), stopped=True)
+        assert outcome.reply is None
+        assert outcome.reply_degraded is False
+
+    def test_stopped_refuses_a_reply(self) -> None:
+        """A stopped resume composes nothing, and carries none even where one was composed."""
+        with pytest.raises(ValidationError, match="stopped resume composes nothing"):
+            TurnOutcome(turn=_turn(), stopped=True, reply="Done.")
+
+    def test_stopped_refuses_the_degraded_flag(self) -> None:
+        """§4:2's flag rule is untouched: ``reply_degraded`` is not set on the new shape."""
+        with pytest.raises(ValidationError, match="stopped resume composes nothing"):
+            TurnOutcome(turn=_turn(), stopped=True, reply_degraded=True)
+
+    def test_a_reply_less_turn_that_did_not_park_still_needs_one_of_the_three(self) -> None:
+        """The other direction: ``None`` and no flag on a turn that ran requires ``stopped``."""
+        with pytest.raises(ValidationError, match="set stopped to say the user stopped"):
+            TurnOutcome(turn=_turn())
+
+    def test_stopped_defaults_false_and_is_strict(self) -> None:
+        assert TurnOutcome(turn=_turn(), reply="x").stopped is False
+        with pytest.raises(ValidationError):
+            TurnOutcome(turn=_turn(), stopped=1)  # type: ignore[arg-type]  # strict
+
+
 class TestWhatIsDeliberatelyNotConstrained:
     """Two shapes ADR-0085 §4b rules **stay prose**, asserted so they stay that way.
 

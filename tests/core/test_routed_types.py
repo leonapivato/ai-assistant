@@ -866,6 +866,22 @@ def test_a_routed_pass_that_owed_an_answer_and_carries_none_is_refused() -> None
         )
 
 
+def test_a_stopped_routed_resume_carries_no_reply_and_is_admitted() -> None:
+    """ADR-0297 §4: the fourth reply-less shape reaches a routed resume too.
+
+    A resume answering a routed park whose control activation the user stopped composes
+    nothing, so the answer the routed pass would otherwise owe is withheld by the stop,
+    and ``stopped`` is what says so.
+    """
+    outcome = TurnOutcome(
+        turn=None,
+        stopped=True,
+        routed=RoutedOperation(operation=RoutableOperation.FORGET, outcome=RouteOutcome.PERFORMED),
+    )
+    assert outcome.reply is None
+    assert outcome.reply_degraded is False
+
+
 def test_a_recovered_park_still_refuses_a_reply() -> None:
     """§8's fourth case, and the one that pins the supersession as **narrow**.
 

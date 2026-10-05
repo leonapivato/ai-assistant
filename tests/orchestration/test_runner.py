@@ -21,6 +21,7 @@ from pydantic import ValidationError
 
 from ai_assistant.core.errors import (
     AuditError,
+    ClaimStopped,
     PermissionDeniedError,
     PlanningError,
 )
@@ -2774,3 +2775,71 @@ async def test_a_step_whose_dependency_is_still_pending_is_left_to_its_own_dispa
     )
 
     assert result.disposition is Disposition.EXECUTED
+
+
+# --- ADR-0297 §2: the claim names its activation ------------------------------------------
+
+_ACTIVATION = "0b8f8f0e-2a5c-4c55-9a6c-6a2c1f0b0d11"
+_OTHER_ACTIVATION = "5d1c7a3e-9b0f-4f6a-8c2d-1e3f5a7b9c0d"
+
+
+async def test_run_threads_its_activation_to_the_claim_and_a_stopped_one_is_refused() -> None:
+    """§2:9: passed through to the claim and read for nothing else; the store refuses it."""
+    harness = Harness(tools=(tool(),))
+    state = await an_execution(harness.plans, plan_step())
+    await harness.plans.record_stop(_ACTIVATION)
+
+    with pytest.raises(ClaimStopped):
+        await harness.runner.run(
+            state,
+            STEP,
+            attempt_id=ATTEMPT,
+            timeout=PATIENT,
+            origin=NOTHING_EXTERNAL,
+            activation_id=_ACTIVATION,
+        )
+
+    assert harness.invoker.invocations == []
+    assert (await stored_step(harness.plans, state)).status is StepStatus.PENDING
+
+
+async def test_run_under_another_activation_is_not_fenced_by_a_stop() -> None:
+    """§1:1, §2:5: a stop names one activation, and fences no other."""
+    harness = Harness(tools=(tool(),))
+    state = await an_execution(harness.plans, plan_step())
+    await harness.plans.record_stop(_ACTIVATION)
+
+    result = await harness.runner.run(
+        state,
+        STEP,
+        attempt_id=ATTEMPT,
+        timeout=PATIENT,
+        origin=NOTHING_EXTERNAL,
+        activation_id=_OTHER_ACTIVATION,
+    )
+
+    assert result.disposition is Disposition.EXECUTED
+
+
+async def test_resume_threads_its_activation_to_the_resumed_claim() -> None:
+    """§2:2: a resume's claim names the control activation that resolves the park."""
+    harness = Harness(tools=(confirmable(),))
+    state = await an_execution(harness.plans, plan_step())
+    parked = await harness.runner.run(
+        state, STEP, attempt_id=ATTEMPT, timeout=PATIENT, origin=NOTHING_EXTERNAL
+    )
+    await harness.plans.record_stop(_ACTIVATION)
+
+    with pytest.raises(ClaimStopped):
+        await harness.runner.resume(
+            parked.state,
+            STEP,
+            attempt_id=ATTEMPT,
+            confirmation_id=str(parked.decision_id),
+            approved=True,
+            timeout=PATIENT,
+            activation_id=_ACTIVATION,
+        )
+
+    assert harness.invoker.invocations == []
+    assert (await stored_step(harness.plans, state)).status is StepStatus.AWAITING_APPROVAL

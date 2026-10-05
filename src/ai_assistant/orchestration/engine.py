@@ -2724,7 +2724,11 @@ def _stopped_failure(
     ended on a raise and has none to return. A cancellation still propagates as
     itself, and a pass no stop reached is answered as it ended.
     """
-    if state is None or not state.stopped or isinstance(failure, asyncio.CancelledError):
+    if (
+        state is None
+        or not state.stopped
+        or isinstance(failure, asyncio.CancelledError | ActivationStoppedError)
+    ):
         return failure
     if failure is None and isinstance(state.trigger, RecordedResumeTrigger):
         return None
