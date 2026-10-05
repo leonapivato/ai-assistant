@@ -35,7 +35,7 @@ if TYPE_CHECKING:
     from collections.abc import Awaitable, Callable, Sequence
     from pathlib import Path
 
-    from ai_assistant.core.types import ConversationDigest, Identifier
+    from ai_assistant.core.types import ConversationDigest, Identifier, TranscriptPage
 
 HUB = ChatDevice(device_id="hub", access=DeviceAccess.READ_WRITE)
 PHONE = ChatDevice(device_id="phone", access=DeviceAccess.READ)
@@ -493,6 +493,54 @@ async def test_a_device_no_longer_shown_the_conversation_ends_the_chat(
     assert "This device is no longer shown this conversation." in output.getvalue()
 
 
+class _NarrowsBeforeTheSnapshot(FakeAssistantEngine):
+    """Another device makes this one write-only just before the snapshot is taken."""
+
+    async def transcript(
+        self,
+        conversation_id: Identifier,
+        *,
+        before: int | None = None,
+        limit: int = 50,
+    ) -> TranscriptPage | None:
+        if not _calls(self, "set_conversation_devices"):
+            await self.set_conversation_devices(
+                conversation_id,
+                devices=(ChatDevice(device_id="hub", access=DeviceAccess.WRITE),),
+            )
+        return await super().transcript(conversation_id, before=before, limit=limit)
+
+
+async def test_reading_taken_away_before_the_snapshot_shows_nothing(output: StringIO) -> None:
+    """The snapshot's cursor covers the change, so it is the devices read after it that tell."""
+    engine = _NarrowsBeforeTheSnapshot()
+    conversation = await _started(engine, HUB)
+    await engine.chat.append_message(
+        conversation, NewMessage(author=MessageAuthor.ASSISTANT, text="the secret plan")
+    )
+
+    code = await _chat(engine, conversation, _lines("hello"))
+
+    assert code == cli._EXIT_ERROR
+    assert "the secret plan" not in output.getvalue()
+    assert "no longer shown this conversation" in output.getvalue()
+    assert _calls(engine, "write_message") == []
+
+
+async def test_a_fresh_chat_space_is_not_shown_to_a_device_that_cannot_read(
+    output: StringIO,
+) -> None:
+    engine = FakeAssistantEngine()
+    conversation = await _started(engine, HUB)
+    await engine.set_conversation_devices(
+        conversation, devices=(ChatDevice(device_id="hub", access=DeviceAccess.WRITE),)
+    )
+    view = cli._ChatView(conversation, device_id="hub", cursor=10_000)
+
+    assert await cli._poll_chat(engine, view) is False
+    assert "no longer shown this conversation" in output.getvalue()
+
+
 class _HoldsTheSend(FakeAssistantEngine):
     """A hub that never answers a send, as one whose connection hangs."""
 
@@ -747,6 +795,24 @@ async def test_deleting_a_message_shows_it_then_deletes_it_alone(output: StringI
         "DeletedMessage",
         "TranscriptMessage",
     ]
+
+
+async def test_deleting_a_reply_shows_its_target_was_deleted(output: StringIO) -> None:
+    """§5:8, in the preview: the reply being deleted names a deleted message."""
+    engine = FakeAssistantEngine()
+    conversation = await _started(engine, HUB)
+    await engine.write_message(
+        conversation, message=UserMessage(device_id="hub", message_id="m-1", text="oops")
+    )
+    await engine.write_message(
+        conversation,
+        message=UserMessage(device_id="hub", message_id="m-2", text="fixed", replies_to=1),
+    )
+    await engine.delete_message(conversation, position=1)
+
+    await cli._drive_delete_message(engine, conversation, 2, confirm=lambda: False)
+
+    assert "replying to #1, a deleted message" in _flat(output.getvalue())
 
 
 async def test_deleting_a_message_declined_leaves_it(output: StringIO) -> None:
