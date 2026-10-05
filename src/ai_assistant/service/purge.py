@@ -677,8 +677,9 @@ def _live_enrolments(data_dir: Path) -> _Devices:
     itself as complete for every device it did not name".
 
     **And it never creates the record to report on it** (§7). ``EnrolmentStore``
-    creates the file it is pointed at, and every loopback-only hub — which is every
-    hub shipped so far — holds a full data directory and no ``devices.db``. So the
+    creates the file it is pointed at, and a data directory can hold a full store and
+    no ``devices.db`` — one last served by a hub that predates the device roster,
+    which created the record only where a remote listener was configured. So the
     entry is examined first, and only a regular file is opened.
 
     Args:
