@@ -8845,9 +8845,14 @@ const chat = {
   // Bumped whenever following starts or stops, so a read in flight across either
   // schedules nothing when it comes back.
   ticks: 0,
-  // Whether a read of the changes is out. One at a time: two reads overlapping would
-  // each answer from a cursor the other has moved.
-  reading: false,
+  // The `ticks` generation whose read of the changes is out, or `null`. One at a time
+  // within a generation: two reads overlapping would each answer from a cursor the other
+  // has moved. A read left over from an earlier generation blocks nothing: its answer is
+  // dropped when it comes back.
+  reading: null,
+  // Whether the state of the conversation on screen is owed a read, because the last one
+  // failed or following has just started again; the next read of the changes makes it.
+  digestDue: false,
   timer: null,
   quickUntil: 0,
   // `undefined` until read; `null` where the gateway cannot name this browser's device.
@@ -8867,6 +8872,11 @@ const chat = {
   devices: null,
   pending: [],
   replyTo: null,
+  // Whether an edit of "my devices", or of the conversation's devices, is out. One edit
+  // of a set at a time: each sends the whole set, so two built from the same set would
+  // each undo the other.
+  editingMine: false,
+  editingConversation: false,
 };
 
 function chatWasOpen() {
@@ -8950,8 +8960,8 @@ async function loadChat() {
   if (mine !== chat.era) {
     return;
   }
-  if (chat.selected !== null) {
-    await selectChat(chat.selected);
+  if (chat.selected !== null && !(await selectChat(chat.selected))) {
+    return;
   }
   if (mine === chat.era) {
     startFollowing(CHAT_FOLLOWING);
@@ -9037,6 +9047,9 @@ function startFollowing(said) {
   }
   chat.following = true;
   chat.ticks += 1;
+  // What the conversation's state was is not known across a stop or a pause, and a read
+  // of it may be what failed: the first read after starting makes it whatever changed.
+  chat.digestDue = true;
   sayFollowing(said);
   el("chat-follow-again").hidden = true;
   scheduleFollow(0);
@@ -9059,7 +9072,7 @@ function stopFollowing(said, offer) {
 
 function scheduleFollow(delay) {
   // The read in flight schedules the next one itself, when it is back.
-  if (chat.reading) {
+  if (chat.reading === chat.ticks) {
     return;
   }
   if (chat.timer !== null) {
@@ -9091,24 +9104,27 @@ function followAgain() {
 // at a time (`chat.reading`), so no answer is ever read against a cursor another read
 // has moved; whatever wanted a read meanwhile gets it when this one is back.
 async function followChat() {
-  if (chat.reading) {
+  const tick = chat.ticks;
+  if (chat.reading === tick) {
     return;
   }
-  chat.reading = true;
+  chat.reading = tick;
   let next = null;
   try {
-    next = await readChanges(chat.ticks);
+    next = await readChanges(tick);
   } finally {
-    chat.reading = false;
+    if (chat.reading === tick) {
+      chat.reading = null;
+    }
   }
-  if (next !== null && chat.following) {
+  if (next !== null && chat.following && tick === chat.ticks) {
     scheduleFollow(next);
   }
 }
 
-// The read itself. Answers the delay before the next read, or `null` where following
-// stopped — unless following was stopped and started again while this read was out, in
-// which case this read's answer is dropped and the next is due at once.
+// The read itself. Answers the delay before the next read, or `null` where there is none
+// for this read to schedule: following stopped, or it was stopped and started again while
+// this read was out — the new start scheduled its own read, and this answer is dropped.
 async function readChanges(tick) {
   const half = headerHalf();
   if (half === null) {
@@ -9125,7 +9141,7 @@ async function readChanges(tick) {
       return null;
     }
     if (tick !== chat.ticks) {
-      return 0;
+      return null;
     }
     stopFollowing(CHAT_STOPPED_GONE, true);
     fault(GATEWAY_GONE, "chat");
@@ -9135,7 +9151,7 @@ async function readChanges(tick) {
     return null;
   }
   if (tick !== chat.ticks) {
-    return 0;
+    return null;
   }
   if (body === null) {
     stopFollowing(CHAT_STOPPED_REFUSED, true);
@@ -9152,10 +9168,10 @@ async function readChanges(tick) {
   chat.cursor = body.next_after;
   // The state is read with the changes, and a failure of that read stops the following
   // exactly as a failure of the changes does: nothing is tried again of its own motion.
-  if (chat.selected !== null && (touched || followingQuickly())) {
+  if (chat.selected !== null && (touched || chat.digestDue || followingQuickly())) {
     const read = await readChatDigest(chat.selected, chat.chosen);
     if (tick !== chat.ticks) {
-      return 0;
+      return null;
     }
     if (!read) {
       stopFollowing(CHAT_STOPPED_REFUSED, true);
@@ -9341,6 +9357,7 @@ async function startChat() {
 }
 
 // Read one conversation: its recent transcript (§5:13), then its state and devices.
+// Answers `false` where the state could not be read, and following has stopped for it.
 async function selectChat(id) {
   chat.chosen += 1;
   const mine = chat.chosen;
@@ -9361,9 +9378,13 @@ async function selectChat(id) {
   renderChatState();
   renderConversationDevices();
   await readTranscript(id, mine, null);
-  if (mine === chat.chosen) {
-    await readChatDigest(id, mine);
+  // The state is read with the conversation; a failure of that read stops the following,
+  // which would otherwise read it again of its own motion (ADR-0182 §7).
+  if (mine === chat.chosen && chat.selected === id && !(await readChatDigest(id, mine))) {
+    stopFollowing(CHAT_STOPPED_REFUSED, true);
+    return false;
   }
+  return true;
 }
 
 // The conversation on screen is gone — deleted here, elsewhere, or never there.
@@ -9458,8 +9479,10 @@ async function readChatDigest(id, mine) {
       return true;
     }
     if (body === null) {
+      chat.digestDue = true;
       return false;
     }
+    chat.digestDue = false;
     chat.state = body.conversation.state;
     chat.devices = body.conversation.devices;
     renderChatState();
@@ -9470,6 +9493,7 @@ async function readChatDigest(id, mine) {
       return true;
     }
     if (mine === chat.chosen) {
+      chat.digestDue = true;
       fault(GATEWAY_GONE, "chat");
       return false;
     }
@@ -9867,7 +9891,7 @@ function deviceName(device) {
 
 // One device of a set, with its access and a way to take it out. `write` sends the whole
 // set the owner now wants (§3), since the surface replaces a set rather than editing it.
-function renderDevice(list, device, set, write) {
+function renderDevice(list, device, set, write, busy) {
   const item = document.createElement("li");
   item.className = "chat-device";
   const row = document.createElement("p");
@@ -9885,6 +9909,7 @@ function renderDevice(list, device, set, write) {
     access.appendChild(option);
   });
   access.value = device.access;
+  access.disabled = busy;
   access.addEventListener("change", () => {
     void write(
       set.map((one) =>
@@ -9893,9 +9918,10 @@ function renderDevice(list, device, set, write) {
     );
   });
   row.appendChild(access);
-  chatButton(row, "Remove", () => {
+  const remove = chatButton(row, "Remove", () => {
     void write(set.filter((one) => one.device_id !== device.device_id));
   });
+  remove.disabled = busy;
   item.appendChild(row);
   list.appendChild(item);
 }
@@ -9925,8 +9951,11 @@ function renderMyDevices() {
     none.textContent = "None yet, so a new conversation is shown on no device.";
     list.appendChild(none);
   }
-  chat.myDevices.forEach((device) => renderDevice(list, device, chat.myDevices, setMyDevices));
+  chat.myDevices.forEach((device) =>
+    renderDevice(list, device, chat.myDevices, setMyDevices, chat.editingMine)
+  );
   el("chat-add-device").hidden = typeof chat.thisDevice !== "string" || held;
+  el("chat-add-device").disabled = chat.editingMine;
 }
 
 function addThisDevice() {
@@ -9936,12 +9965,17 @@ function addThisDevice() {
 }
 
 async function setMyDevices(devices) {
+  if (chat.editingMine) {
+    return;
+  }
   const half = headerHalf();
   if (half === null) {
     showBootstrap();
     return;
   }
   const era = sessionEra;
+  chat.editingMine = true;
+  renderMyDevices();
   try {
     const body = await relay(half, "/chat/devices/set", { devices: devices }, "chat");
     if (!sameSession(half, era)) {
@@ -9951,13 +9985,16 @@ async function setMyDevices(devices) {
       return;
     }
     chat.myDevices = devices;
-    renderMyDevices();
-    renderConversationDevices();
   } catch (_) {
     if (!sameSession(half, era)) {
       return;
     }
     fault(GATEWAY_GONE, "chat");
+  } finally {
+    // The controls come back built from the set as it now stands, confirmed or not.
+    chat.editingMine = false;
+    renderMyDevices();
+    renderConversationDevices();
   }
 }
 
@@ -9976,7 +10013,7 @@ function renderConversationDevices() {
     list.appendChild(none);
   }
   chat.devices.forEach((device) =>
-    renderDevice(list, device, chat.devices, setConversationDevices)
+    renderDevice(list, device, chat.devices, setConversationDevices, chat.editingConversation)
   );
   const held = new Set(chat.devices.map((one) => one.device_id));
   const offered = chat.myDevices.map((one) => one.device_id);
@@ -9987,14 +10024,18 @@ function renderConversationDevices() {
     .filter((id) => !held.has(id))
     .forEach((id) => {
       const label = id === chat.thisDevice ? "Add this device" : `Add ${id}`;
-      chatButton(offers, label, () => {
+      const offer = chatButton(offers, label, () => {
         void setConversationDevices(chat.devices.concat([{ device_id: id, access: "read_write" }]));
       });
+      offer.disabled = chat.editingConversation;
     });
 }
 
 // Answers whether the set was written, so a send waiting on it knows to go ahead.
 async function setConversationDevices(devices) {
+  if (chat.editingConversation) {
+    return false;
+  }
   const id = chat.selected;
   const half = headerHalf();
   if (half === null) {
@@ -10002,6 +10043,8 @@ async function setConversationDevices(devices) {
     return false;
   }
   const era = sessionEra;
+  chat.editingConversation = true;
+  renderConversationDevices();
   try {
     const body = await relay(
       half,
@@ -10017,7 +10060,6 @@ async function setConversationDevices(devices) {
     }
     if (chat.selected === id) {
       chat.devices = devices;
-      renderConversationDevices();
     }
     return true;
   } catch (_) {
@@ -10026,6 +10068,9 @@ async function setConversationDevices(devices) {
     }
     fault(GATEWAY_GONE, "chat");
     return false;
+  } finally {
+    chat.editingConversation = false;
+    renderConversationDevices();
   }
 }
 

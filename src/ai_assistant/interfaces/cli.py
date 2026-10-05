@@ -374,6 +374,7 @@ from ai_assistant.core.types import (
     secret_value,
 )
 from ai_assistant.interfaces import episode_inspection, story_inspection
+from ai_assistant.interfaces.devices import this_device as _this_device
 from ai_assistant.interfaces.gateway import Disclosure, Note, run_gateway
 from ai_assistant.secret_store import KeyringSecretStore
 from ai_assistant.wire import (
@@ -2201,12 +2202,6 @@ async def _show_story(story_id: str) -> int:
 # until the change stream replaces it (§11:1, ADR-0296 §4). Forgetting is
 # ``forget-conversation``, offered beside deleting and never folded into it (§2:7).
 
-#: The device the hub's own machine is (ADR-0296 §1:7): a command line on the local
-#: socket is the user at that machine. The id itself is ADR-0298 §3's, which is still
-#: a proposal (#2698) and is followed here ahead of it — a stable name that does not
-#: change when the remote listener is turned on or off.
-_HUB_DEVICE: Final = "hub"
-
 #: How often a followed conversation is read again for its changes and its current
 #: state, in seconds. Polling is the first build's transport (ADR-0293 §11:1).
 _CHAT_POLL_SECONDS: Final = 1.0
@@ -2520,45 +2515,6 @@ async def _with_engine(drive: Callable[[AssistantEngine], Awaitable[int]]) -> in
     except (AssistantError, TransportError) as exc:
         _render_error(exc)
         return _EXIT_ERROR
-
-
-def _this_device(settings: Settings, *, named: str | None) -> str:
-    """The device this command line is, as ADR-0296 §1 counts devices: the machine.
-
-    On the hub's own machine it is :data:`_HUB_DEVICE`, whatever ``--device`` says
-    otherwise, since a command line there cannot be another machine. On another
-    machine it is that machine's overlay identity, which this command line has no
-    way to read for itself yet, so it is named with ``--device``.
-
-    Raises:
-        ConfigurationError: If the destination cannot be read from configuration, if
-            ``--device`` names another machine on the hub's own, or if it is missing
-            for a hub on another machine.
-    """
-    where = destination(
-        data_dir=settings.data_dir,
-        remote_address=settings.remote_hub_address,
-        remote_port=settings.remote_hub_port,
-    )
-    match where:
-        case LoopbackDestination():
-            if named is not None and named != _HUB_DEVICE:
-                msg = (
-                    f"on the hub's own machine this device is '{_HUB_DEVICE}', so --device "
-                    "cannot name another"
-                )
-                raise ConfigurationError(msg)
-            return _HUB_DEVICE
-        case RemoteDestination():
-            if named is None:
-                msg = (
-                    "the hub is on another machine, so name this device with --device: "
-                    "this machine's overlay identity, as the hub's enrolment of it shows"
-                )
-                raise ConfigurationError(msg)
-            return named
-        case _:  # pragma: no cover — the union is closed
-            assert_never(where)
 
 
 async def _chat(conversation_id: str | None, *, device: str | None) -> int:

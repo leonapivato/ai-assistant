@@ -230,6 +230,7 @@ from ai_assistant.core.types import (
     routed_listing_arm,
     secret_value,
 )
+from ai_assistant.interfaces.devices import this_device
 from ai_assistant.interfaces.gateway import streams
 from ai_assistant.interfaces.gateway.delivery import DeliveryFanOut, DeliveryStream, write_stream
 from ai_assistant.interfaces.gateway.http import (
@@ -389,12 +390,6 @@ _CHAT_DELETE_MESSAGE_PATH: Final = "/chat/message/delete"
 _CHAT_DELETE_CONVERSATION_PATH: Final = "/chat/conversation/delete"
 _CHAT_TRANSCRIPT_PATH: Final = "/chat/transcript"
 _CHAT_CHANGES_PATH: Final = "/chat/changes"
-
-#: The device id of the hub's own machine. ADR-0296 §1:7 makes a browser on the
-#: gateway's own machine "that machine's hub device", and the id ADR-0298 §3 (held,
-#: PR #2698) gives the hub's own machine is ``hub`` "in every configuration". So a
-#: loopback browser of a gateway whose hub is on the same machine is ``hub``.
-_HUB_DEVICE: Final = "hub"
 
 #: ADR-0177 §6's grant surface. **Five paths for five operations, and the two
 #: readings are two paths rather than one answered twice**: ADR-0139 §3's fourth
@@ -1340,6 +1335,13 @@ class Gateway:
         #: which implementation was injected, and the contract says nothing about a
         #: transport (ADR-0098 §5).
         self._hub_carries_connections = settings.remote_hub_address is None
+        #: This machine's device, for a browser on the loopback listener (ADR-0296
+        #: §1:7), or ``None`` where the hub is on another machine and nothing names
+        #: this one (:meth:`_browser_device`).
+        try:
+            self._own_device: str | None = this_device(settings, named=None)
+        except ConfigurationError:
+            self._own_device = None
         #: Read as a set, "compared for equality against the identity §3 obtained. A
         #: repeated element changes nothing and is not refused; order carries no
         #: meaning; and no element is matched by prefix, suffix, pattern or any form
@@ -2424,14 +2426,16 @@ class Gateway:
         * **On the remote listener**, the overlay identity ADR-0174 §3 obtained for the
           connection from the gateway's own agent — the browser device of §1:1.
         * **On the loopback listener**, the gateway's own machine, which §1:7 makes
-          that machine's hub device. Where the hub is on this machine too, that is
-          ``hub`` (:data:`_HUB_DEVICE`).
+          that machine's hub device — named by the rule the command line names its
+          machine by (:func:`~ai_assistant.interfaces.devices.this_device`): ``hub``
+          where the hub is on this machine too.
 
         **A loopback browser of a gateway whose hub is remote has no name here**, and
         ``None`` says so rather than inventing one: that machine's device id is its
-        overlay identity, and nothing in this process can learn its own. So a write
-        from it is refused as its own condition (:meth:`_write_message`) instead of
-        being recorded under an id the hub would not know the machine by.
+        overlay identity, which no adapter can read for itself yet and which this
+        gateway is not configured with. So a write from it is refused as its own
+        condition (:meth:`_write_message`) instead of being recorded under an id the
+        hub would not know the machine by.
 
         Args:
             connection: The connection the request arrived on.
@@ -2441,7 +2445,7 @@ class Gateway:
         """
         if connection.remote:
             return connection.device
-        return _HUB_DEVICE if self._hub_carries_connections else None
+        return self._own_device
 
     def _connections_refused(self, path: str, connection: _Connection) -> Response | None:
         """ADR-0177 §3's two refusals, decided from the listener and the shape alone.
