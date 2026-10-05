@@ -1,6 +1,6 @@
 # 292. A channel is the spokes facing one thing, and the assistant's edge is its own
 
-- Status: Proposed
+- Status: Accepted
 - Date: 2026-10-04
 - Scope: [#2578](https://github.com/leonapivato/ai-assistant/issues/2578), the channel redesign, rethought: the model the conversation channel ([#2680](https://github.com/leonapivato/ai-assistant/pull/2680)), the device session and stopping an activation apply, in place of ADR-0290 and ADR-0291.
 - Authorization: the owner accepted proposal #2682 on 2026-10-04, at `36031075`, after walking the model through item by item the same day, and the dispatcher assigned 0292. This ADR is that proposal converted under `docs/proposals/README.md` → "When it is decided".
