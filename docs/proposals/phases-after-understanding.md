@@ -1,354 +1,331 @@
 # The phases after understanding
 
-**The question.** How does an activation go from understood to done: what the
-assistant plans, how each action is checked and carried out, how it asks the user and
-how their answer becomes authority, and how the old turn loop gives way to it?
+**The question.** How does an activation go from understood to done: what the assistant
+plans, how each call is checked and carried out, how outside content becomes evidence, and
+how the old turn loop gives way to it?
 
 ## The baseline
 
-The wiki at [fba378d](https://github.com/leonapivato/ai-assistant/wiki) describes the
-design this proposal builds: [Controller](https://github.com/leonapivato/ai-assistant/wiki/Controller),
+The wiki at [b195f48](https://github.com/leonapivato/ai-assistant/wiki) describes the
+phases this proposal builds:
+[Controller](https://github.com/leonapivato/ai-assistant/wiki/Controller),
 [Recall](https://github.com/leonapivato/ai-assistant/wiki/Recall),
 [Understanding an activation](https://github.com/leonapivato/ai-assistant/wiki/Understanding-an-activation),
 [Planning](https://github.com/leonapivato/ai-assistant/wiki/Planning),
 [Authorizing](https://github.com/leonapivato/ai-assistant/wiki/Authorizing),
 [Acting](https://github.com/leonapivato/ai-assistant/wiki/Acting),
-[Digesting](https://github.com/leonapivato/ai-assistant/wiki/Digesting),
-[Stories](https://github.com/leonapivato/ai-assistant/wiki/Stories),
-[Concurrent activations](https://github.com/leonapivato/ai-assistant/wiki/Concurrent-activations)
-and [Model calls](https://github.com/leonapivato/ai-assistant/wiki/Model-calls). Those
-pages were brought in line with ADR-0292–ADR-0297 on 2026-10-05, in the owner's review
-of the earlier phase design ("pass 0"), and they carry the owner's rulings from it. This
-proposal does not reopen them; it turns them into a plan of work.
+[Digesting](https://github.com/leonapivato/ai-assistant/wiki/Digesting) and
+[Model calls](https://github.com/leonapivato/ai-assistant/wiki/Model-calls), as revised in
+the owner's review of 2026-10-05 against ADR-0292–ADR-0297. What the assistant keeps about
+a matter (a story's page, its tidy-up, linking and starting stories) is
+[#2747](https://github.com/leonapivato/ai-assistant/pull/2747)'s, and this proposal builds
+the parts of it #2747 declares for the phases.
 
-What is built at `8fe54b36`:
+What is built at `8fe54b36`: the controller (ADR-0280), recall once before understanding
+(ADR-0281), understanding (ADR-0276), the story store (ADR-0289), the conversation medium
+(ADR-0293) and stop (ADR-0295, ADR-0297). After understanding, the old machinery runs as
+controller stages: goal association and the turn loop (goals and attempts,
+ADR-0248–ADR-0273; the planner's read rounds, ADR-0226, ADR-0228, ADR-0251; the step
+runner), parked confirmations (ADR-0052, ADR-0148, ADR-0244), and a compose stage
+(ADR-0170).
 
-- **Before planning:** the controller (ADR-0280), recall once before understanding
-  (ADR-0281), understanding (ADR-0276), the story store with no producer (ADR-0289), the
-  conversation medium with its reader and writer (ADR-0293), and stop (ADR-0295,
-  ADR-0297).
-- **After understanding,** the old machinery runs as controller stages: goal
-  association and the turn loop (goals and attempts, ADR-0248–ADR-0273; the planner and
-  its read rounds, ADR-0226, ADR-0228, ADR-0251; the step runner), parked confirmations
-  answered through `answer` and `resume` (ADR-0052, ADR-0148, ADR-0244), and a compose
-  stage that writes the reply afterwards (ADR-0170).
-
-## The change, in short
-
-The old stages after understanding are replaced by the phases the wiki describes, built
-as separate controller stages and switched on in one cutover. Approvals become records
-stored when the user gives them, questions and answers are ordinary messages, stories
-start being produced, and closing is planning's last round.
+Every ruling below is the owner's, from the walk-through of 2026-10-05 to 2026-10-07.
 
 ```mermaid
 flowchart LR
-    R1["Recall<br/>the activation's words"] --> U["Understanding<br/>meaning, story, what it approves"]
+    R1["Recall<br/>your words"] --> U["Understanding<br/>meaning, story links"]
     U --> R2["Recall<br/>what understanding found"]
-    R2 --> P["Planning<br/>one round"]
-    P -->|"an action"| Z["Authorizing<br/>by rule"]
+    R2 --> P["Planning<br/>one round: a reply and tool calls"]
+    P -->|"calls"| Z["Authorizing<br/>by rule"]
     Z -->|"allowed"| X["Acting"]
-    Z -->|"needs the user"| P
-    X -->|"structured results, effects"| P
+    Z -->|"needs you"| P
+    X -->|"structured results, outcomes"| P
     X -->|"unstructured results"| D["Digesting"]
     D -->|"evidence"| P
-    P -->|"nothing left to do"| E["End<br/>the episode is recorded"]
+    P -->|"nothing left to do"| E["End"]
 ```
 
-Every arrow is a rule the controller applies to the episode's working set; no phase
-calls another.
+Every arrow is a rule the controller applies to the episode's working set; no phase calls
+another.
 
-## Scope: three milestones, this is the first
+## 0. The milestone
 
 | Milestone | What it builds |
 | --- | --- |
-| **The phases after understanding** (this proposal) | The phases, stories produced, approvals as records, questions as ordinary messages, the cutover. Approvals are **exact**: a yes approves exactly the actions and values the question showed. |
-| **Authority by outcome** (next) | Limits and conditions on the same approval record: "up to $40", "if the weekend is dry", each part spent by its own effect, conditions checked fresh when acting. |
-| **Timers, watches, events and concurrency** (later) | Timers and watches, events as activations, activations side by side with takeover, the lock and recheck. |
+| **What the assistant keeps about a matter** ([#2747](https://github.com/leonapivato/ai-assistant/pull/2747)), first | A story's page and its tidy-up, linking and starting stories, story candidates for understanding |
+| **The phases after understanding** (this proposal) | Planning, authorizing, acting and digesting, recall's second run, the cutover from the old turn loop |
+| **Authority** (next) | Approvals: reading your yes, storing it, matching it to a call, limits and conditions, memory the policy asks about |
+| **Timers, watches, events and concurrency** (later) | Things that fire later, events as their own spokes, activations side by side, writing into other places |
 
-So in this milestone, "book it if the weekend is dry" is asked again when the assistant
-is about to act; it cannot be approved ahead.
+**One cutover.** #2747, the phases and the authority milestone go live together, in one
+deploy on a fresh data directory. Until then the live hub keeps today's behaviour, and the
+new work runs on a test hub.
 
-## How the work is done
+**How it is built.**
 
-**Replace, don't adapt.** The new phases are built as new stages beside the old ones,
-in lanes that each merge on their own, with nothing switched on. A cutover lane then
-switches the controller's rules over and deletes the old path, on a fresh data
-directory, as the M36–M41 cutovers did. The hub is not redeployed until then.
+- **Replace, don't adapt.** The new phases are built as new controller stages beside the
+  old ones, in lanes that each merge with nothing switched on. The cutover switches the
+  controller's rules over and deletes the old path.
+- **One module per phase** in `orchestration/`, implementing ADR-0280's stage interface.
+  Phases never import each other; they meet only in the episode's working set
+  ([#2598](https://github.com/leonapivato/ai-assistant/issues/2598)), and an import-linter
+  contract forbids one phase module importing another. `engine.py` only builds the phases
+  and hands them to the controller; primitives inside `engine.py`, `loop.py` and
+  `runner.py` move into their own modules in the lanes that need them.
+- **One run of a phase is one short step**, such as one planning round or one digest, so a
+  stop lands after the current step (ADR-0297's stage boundary).
 
-What the phases reuse as they are: tool selection and the tool registry, the fetching
-inside read servicing, startup recovery of running steps, memory, recall, understanding,
-the controller, the story store and the conversation medium. What they reuse **reworked**,
-because each is scoped by goals today: the step executor and its claims (ADR-0192, with
-ADR-0297's stop refusal), which claim under an attempt and resolve a goal from the plan;
-and the permission policy, which reads goal authorizations and goal quotes. The survey
-below lists the rest.
+**Done**, on the test hub, when:
 
-What retires at the cutover is surveyed in full under [What retires](#what-retires).
+- a quick question ("what time is it?") is answered in two model calls;
+- a web lookup ("compare these two campsites") runs its searches in parallel, digests the
+  pages and answers from the evidence;
+- a task whose second call needs the first's result works across rounds;
+- a stop mid-task lands at the next step;
+- a follow-up days later is linked to its story and planning picks the matter up;
+- a call that needs your yes is declined plainly, saying it cannot be done yet;
+- recall's closeness threshold is measured and set for the default embedder
+  ([#2601](https://github.com/leonapivato/ai-assistant/issues/2601)).
 
-**One module per phase.** Each phase is its own module in `orchestration/`,
-implementing the controller's stage interface (ADR-0280). Phases never import each
-other; they meet only in the episode's working set
-([#2598](https://github.com/leonapivato/ai-assistant/issues/2598)), and the controller
-alone knows the order. `engine.py` only builds the phases and hands them to the
-controller. An import-linter contract forbids one phase module importing another.
-Primitives that live inside `engine.py`, `loop.py` and `runner.py` today move into
-their own modules as the phases need them, which is also what lets the cutover delete
-those files' old paths whole.
+## 1. Recall
 
-**One planning round per stage.** A phase run is one short step, so a stop lands after
-the current step and the controller decides every further round (ADR-0297's stage
-boundary, unchanged).
+- **Two runs, one after the other.** The first, before understanding, searches with your
+  words, as built. The second, once understanding has recorded what the input means,
+  searches with its meaning and with each phrase it placed or could not place, each as its
+  own cue, so a name finds its memory. Same closeness threshold and per-cue limit, a cap on
+  the total, and nothing the first run already found.
+- **Stories come with the finds.** For each episode recall finds, the story store's
+  `stories_of` says which stories it belongs to, by lookup, never by search; those stories
+  are understanding's candidates (#2747).
+- **What the second run finds** joins the working set for planning. Understanding does not
+  see it, so understanding never runs twice because of recall.
+- **Outside content still passes through a reader.** A fact stored word for word from
+  outside content reaches planning only through a digest (section 6).
+- **Failure-tolerant**, as built.
 
-## The pieces, in the order they are designed
+Deferred: recall running again on everything new, contesting a reference, a hook running
+alongside the phases ([#2591](https://github.com/leonapivato/ai-assistant/issues/2591)),
+and memories cited by a story's earlier episodes
+([#2528](https://github.com/leonapivato/ai-assistant/issues/2528)).
 
-Each piece becomes one ADR, in this order, each started once the one before it has
-merged. The order follows what each piece reads.
+## 2. Understanding
 
-### 1. The plan
+Unchanged in this milestone, and used as it is: one model call, nothing looked up, its
+record (meaning, references, relationships, grounds, unresolved matters). Linking an input
+to stories, and starting a story when it links to an earlier episode in none, are
+#2747's. Reading your yes as an approval is the authority milestone's; relating an input
+to activations still running is the concurrency milestone's.
 
-A plan is what one planning round proposes. It is a new record each round, naming the
-plan it replaces (as `supersedes` does today, ADR-0228).
+**Planning always runs after understanding.** There is no rule skipping it for outside
+content: deciding that nothing is due is planning's own judgment, and the saving is an
+optimisation a kind's push filter (ADR-0292 §6) or a cheaper model can make later.
 
-| Step | What it names |
+## 3. Planning
+
+**A round is the model's own response**, in its native tool-calling shape:
+
+| Part | What it is |
 | --- | --- |
-| **Read** | What to fetch and why: the kind (search, forecast, file, memory), its query, and the question a digest should answer. |
-| **Act** | A capability and its values, such as a booking with site, date and price. |
-| **Inside action** | An action on the assistant's own records: start or link a story, write or forget a memory (ADR-0292 §12:1–§12:2). |
-| **Message** | Its text and the place to write it in. A message that asks the user for approval also names the actions it asks about, with their values; that request is kept in the plan, beside the message, not in the message. |
+| **Its text** | The message, written into the place the input came from. Planning writes the words itself; no compose step follows it. Replies arrive whole, with no streaming for now. |
+| **Its tool calls** | What to do: searches, forecasts, bookings, emails, writing a note on a story's page, remembering something. Calls in one response run in parallel. |
+| **Scratch notes** | Notes for this activation only, read by its next round. |
 
-**Proposed: a round plans only what can run now.** Steps that need an earlier step's
-result are not planned ahead; the result brings the next round, and that round plans
-the next step. Rounds replace references between steps (ADR-0014 §7 and #2171–#2173's
-question), at the cost of one model call per dependent step.
+There are no kinds of step. What a call does is declared by its **capability** (section 5),
+and every rule reads that declaration.
 
-When there is nothing to do in the world, the plan is a single message: the reply.
+- **Calls that depend on each other go in different rounds.** A call needing another's
+  result, or its success, waits for the next round, which sees the result; no call ever
+  refers to another's output.
+- **The round is recorded in the episode**, naming the round it follows. Claims point at
+  it by id.
+- **The tidy-up**: for each story planning is handed with changes not yet tidied, the
+  planning phase's own code adds a tidy-up call to the round, by rule; the model never
+  decides it (#2747).
+- **Messages go only into the place the input came from** in this milestone; the hub
+  refuses any other. Writing into other places and starting conversations come with the
+  timers and proactivity milestone, with the audience rules they need
+  ([#2590](https://github.com/leonapivato/ai-assistant/issues/2590)).
 
-### 2. Understanding: stories and approvals
+**What it is given**: understanding's record and its story links; what both recall runs
+found, under the reader rule; for each story it belongs to, the full page, what is newer
+than it, the short views of the stories it is part of, where the matter stands and the
+latest episodes (#2747); the channel window and the episode window; the capability names;
+the channel kind's description (ADR-0292 §8); digested evidence; acting's outcomes; earlier
+rounds and their scratch notes; the current time.
 
-Understanding stays one model call and gains three things in its record:
+**What it may look up itself**, as calls on the assistant's own records: a memory search,
+any story's page, and pulls such as your calendar (a reader's context facet becomes a
+pull, ADR-0292 §13).
 
-- **The story it belongs to**, or none. The hub gives understanding candidate stories:
-  the stories of the episodes in its windows and of the episodes recall found.
-  Understanding picks one, several, or none; it never invents one. Finding none for a
-  short reply such as "yes" means it asks what the reply refers to.
-- **What an answer approves.** For a message answering a question, which question it
-  answers (the assistant's message), and which of the actions that question asked about
-  it approves, or that it is unclear. Unclear approves nothing. A narrowing beyond the
-  actions shown, such as a lower price, is recorded as not approving them in this
-  milestone, so the assistant asks again.
-- **What an instruction names.** For a direct instruction, the action it names with the
-  values the user stated, which becomes an approval in the same way.
+**Rounds** run one per stage, with a round limit, an end when no progress is made and the
+deadlines; the numbers are [#2589](https://github.com/leonapivato/ai-assistant/issues/2589)'s.
+When the calls are done, the next round's text is the **report**, written from acting's
+outcomes and claiming no more than they show. When processing cannot finish, the fixed
+*couldn't finish* message is written (ADR-0293 §10).
 
-Only input the channel kind declares able to carry authority can produce an approval
-(ADR-0292 §5); understanding's reading never makes other input authoritative.
+**Rules**: it proposes and never permits; it never reads raw outside content; it cites what
+it relies on; it never substitutes for what you asked; a call that comes back *needs you*
+is answered, in this milestone, by telling you plainly that it cannot be done yet.
 
-### 3. Starting and linking stories
+## 4. Authorizing
 
-A story starts when something is left pending: the plan asks the user a question, or
-starts an action whose result comes back later. Planning then includes an inside action
-that starts a story and links the activation's episode to it. Understanding links later
-input by judgment (piece 2). An action's effects point at the story they belong to
-(ADR-0289's store, unchanged).
+For each call, by rule, with no model:
 
-**Proposed:** a story is started only by an inside action in a plan, never by
-understanding, so a story always exists because the assistant left something open.
+1. **Policy.** The permission policy rules allow, confirm or deny; a standing grant you gave
+   counts. Deny runs nothing and asks nothing.
+2. **Where the values came from.** If outside content chose what, where or to whom, the call
+   needs you, with those values shown.
+3. **The message place.** Only the place the input came from.
+4. **Confirm means *needs you*.** In this milestone that goes back to planning, which tells
+   you it cannot be done yet; the authority milestone gives it an answer.
 
-### 4. Recall's second run
+Tool selection runs first, so authorizing rules on the actual call and its values. The
+decision is recorded and read back before anything runs.
 
-One controller rule: when understanding has recorded a version recall has not yet
-searched with, recall runs again with what understanding found (its meaning and the
-phrases it placed). Same thresholds and limits as the first run; what it finds joins the
-working set. Facts stored word for word from outside content reach planning only through
-digesting (piece 9).
+The permission policy loses its goal authorizations and goal quotes (ADR-0254) as inputs.
+Quotes, stated bounds and charges retire, and are redone as limits on approvals in the
+authority milestone; so is the recipient grant's establishing act, which rides recorded
+confirmations. **Memory the memory policy says to ask about is not written**, by planning
+or by consolidation, until the authority milestone.
 
-### 5. Acting's record
+## 5. Acting
 
-For each action, one outcome: **done**, **not done** with its reason, or **unknown**.
+Acting runs the round's allowed calls in parallel, with no model, and records each
+outcome: **done**, **not done** with its reason, or **unknown**.
 
-- **Reads** return their result. **Proposed:** each read kind declares whether its
-  result is structured, going straight to planning (a forecast, a calendar entry, the
-  user's own and the assistant's own memories), or unstructured, going to digesting
-  first (a web page, an email body, a memory fact stored from outside content).
-- **Acts** are claimed before they are invoked and spend their approval
-  (ADR-0192, reused); their effects are written durably the moment they happen, as their
-  own records pointing at the story.
-- **Messages** are written by the place's writer (ADR-0293), sent once the place has
-  recorded them.
-- **Unknown** is never retried and never done another way until a read checks it or the
-  user is asked.
+**What each capability declares**, set by the hub and never taken from a tool on trust
+(an MCP server's annotations are hints only); an undeclared property takes its most
+dangerous value:
 
-### 6. Approvals
+| Property | Values | What reads it |
+| --- | --- | --- |
+| **Effect** | none / the assistant's own records / the world | Claims, unknown outcomes and the report apply to effects in the world |
+| **Leaves the hub** | yes / no | Whether it goes out through a channel's actuator (ADR-0292 §7) or runs directly (§12) |
+| **Result** | structured / unstructured / none | Structured results go to planning; unstructured ones to digesting |
+| **Outcome can be unknown** | yes / no | An unknown outcome is never retried or done another way, and never reported as done |
+| **Safe to repeat** | yes / no | The duplicate backstop |
 
-An approval is a record stored when the user gives it, kept beside the claims that spend
-it.
+- **Effects in the world** are claimed before they run, so a stop refuses them (ADR-0297),
+  and written durably the moment they happen, pointing at the story where there is one.
+- **The duplicate backstop.** A call with the same capability and values as one already
+  done in the same story, or the same activation where there is no story, is refused as
+  *already done* unless planning marks it a deliberate repeat. It is ADR-0259 and
+  ADR-0265's effect key, scoped to the story instead of the goal.
+- **Memory search** returns a mix: your own records and the assistant's conclusions are
+  structured; a fact stored word for word from outside content is unstructured and goes
+  through a digest.
+- **The assistant's own records**: notes on a story's page, the tidy-up, remembering and
+  starting or linking a story are capabilities whose effect is the assistant's own records
+  (ADR-0292 §12), #2747's.
+- **What runs finishes** when a stop arrives; nothing new starts. No locks in this
+  milestone; they come with the concurrency milestone.
 
-| Field | What it holds |
-| --- | --- |
-| **What was asked** | The question message, and the actions with their values the plan asked approval for; none for a direct instruction. |
-| **What gave it** | The user's message: the answer or the instruction. |
-| **What it approves** | The actions, with their values, exactly as shown or stated. |
-| **When** | Given at; expires at. How long an approval lasts is one of the controller's numbers ([#2589](https://github.com/leonapivato/ai-assistant/issues/2589)). |
-| **Its state** | Open, spent (by which effect), withdrawn (by which message) or expired. |
+## 6. Digesting
 
-It is found through the activation's story. A later message may withdraw it, by
-understanding's judgment; nothing widens it.
+- **One model call per unstructured result**, in parallel, with no tools.
+- **Each digest answers a question.** The hub adds a required *looking for* argument to
+  every capability whose result is unstructured, so the call carries the question and the
+  digest answers it.
+- **A follow-up** is a call on the assistant's own records: ask again about a stored result,
+  with a new question. Nothing is remembered between calls.
+- **Long content** is split into parts digested in parallel, and their evidence merged; the
+  part size is a number for #2589.
+- **Evidence** is a list, each item its text, its source and a mark that it came from outside
+  content, and nothing more. It lives in the episode, and reaches a story's page only
+  through planning's notes, keeping its mark.
+- **A digest that fails** tells planning it could not read that result; planning never gets
+  the raw content.
 
-**Proposed:** the record lives in the plan store (`planning/`), where claims already
-spend authorisations (ADR-0192), rather than in a store of its own.
+It is not built on ADR-0252's evidence record, whose sufficiency tests serve the retiring
+goal model.
 
-### 7. Authorizing
+## 7. What retires, and the cutover
 
-For each action, by rule, with no model:
+From a read-only survey of `8fe54b36`, each confirmed by the lane that removes it.
 
-1. **Policy.** The existing permission policy rules allow, confirm or deny. Deny runs
-   nothing and asks nothing.
-2. **Where the values came from.** If outside content chose what, where or to whom, the
-   action needs the user with those values shown (outside-content lineage, unchanged).
-3. **The user's authority.** Where the policy says confirm, an open approval must match
-   the action and its values exactly. No match means back to planning, which asks.
+**Engine surface.** Retire: `converse`; `resume`, `pending_confirmations`, `cancel_read`;
+`goals`, `withdraw_clarification`, `abandon_goal`; `standing_authorizations`,
+`revoke_authorization`; and `answer` with `questions`, `interrupted_questions` and
+`forget_question` (ADR-0078's deferred memory questions, and the deferral store with them).
+`learn` and `converse_streaming` are already gone. Reworked: `converse_spoken`,
+`grantable_decisions`, `establish_recipient_grant`, `purge_expired`, `start`.
 
-**Proposed: tool selection runs before authorizing.** Planning names a capability and
-values; selection turns it into one concrete call; authorizing rules on that call, and a
-question shows its values. That keeps ADR-0148's whole-call ruling meaningful in this
-milestone, where an approval is exact.
+**`receive` stays.** ADR-0292 §13 retires a mechanism only when its replacement is built,
+and events' replacement, a spoke per source, is the events milestone's. Events run through
+the new phases like any activation; the event-summary stage retires because planning does
+that work; an event cannot message you in this milestone, but planning can write notes and
+memories from it. The notification route, the upcoming-events producer and the delivery
+outbox survive the cutover for the same reason.
 
-The decision is recorded and read back before the action runs, as today.
-
-### 8. Planning: what it is given, its rounds and the report
-
-**Given:** the latest understanding with its story links; what recall found, under the
-reader rule; the story's earlier episodes (their plans, questions and answers); the open
-approvals found through the story; the capability names; the channel kind's description
-(ADR-0292 §8); evidence from digesting; acting's outcomes so far; the current time.
-
-**Rounds:** one per stage, with a limit on rounds and an end when no progress is made
-(the same plan twice, or a set number of rounds with no new result); the numbers are
-[#2589](https://github.com/leonapivato/ai-assistant/issues/2589)'s. ADR-0251's four calls
-and three minutes are the nearest built bound.
-
-**The report:** when the plan's actions are done, the next round writes the report as a
-message, from acting's outcomes, and claims no more than they show. No separate closing
-call and no hub-enforced check of its wording (owner, 2026-10-05).
-
-**When processing cannot finish** where a reply is expected, the fixed *couldn't
-finish* message is written, listing effects (ADR-0293 §10, as built for the chat).
-
-### 9. Digesting
-
-One model call per unstructured result, run in parallel, each given the question the
-read was for. It returns evidence: what the content says that bears on the question,
-each item marked with its source. A follow-up question is another digest call on the
-same stored result; nothing is remembered between calls. **Proposed:** ADR-0252's
-evidence record is the starting point for its output.
-
-## What retires
-
-From a read-only survey of `8fe54b36` on 2026-10-05. Each is confirmed when the lane that
-removes it is written.
-
-**Engine surface.** Retires: `converse`, `converse_streaming`, `receive`,
-`receive_streaming`; `resume`, `pending_confirmations`, `cancel_read` (parked
-confirmations and parked reads, ADR-0052, ADR-0244); `goals`, `withdraw_clarification`,
-`abandon_goal`; `standing_authorizations` and `revoke_authorization` (goal
-authorizations, ADR-0254, which approval records replace); `learn`; and `answer` with
-`questions`, `interrupted_questions` and `forget_question`. **`answer` is ADR-0078's
-deferred memory question**, not the confirmation path, so retiring it takes the deferral
-store with it. Reworked: `converse_spoken`, `grantable_decisions` and
-`establish_recipient_grant` (they ride recorded confirmations), `purge_expired` and
-`start`. Unchanged: stories, episodes, beliefs and forgetting, the conversation medium,
-source and recipient grants, destination trust, connections, the trail's reads, spend
-totals and `stop_activation`.
-
-**Orchestration modules.** Retire: `loop`, `composing`, `goals`, `interpretation`,
-`questions`, `parked_reads`, `routing` (with `permissions/routing`), `reconciling`,
-`verification`, `charges`, `quotes`, `stated_bounds`, `validating`, and today's
-`authorizing` and `authorization_surface` (ADR-0254's goal authorizations, whose name the
-new phase module must not reuse); in `planning/`, `associator` and `goals`. Reworked:
-`engine`, `runner`, `executor`, `reads` (its parks and goal references), `writes` and
-`consolidation` (their deferral half), `recipient_grants`, `evidence` and `effects`
-(goal-scoped today), `disclosure` (it sits in front of today's planner), `chat` (its
-adapter writes the compose stage's reply), `conversations` (resume association),
-`activation_state` (parked binding), `speech` (the spoken park sentence), `controller`
-and `understanding`.
+**Orchestration.** Retire: `loop`, `composing`, `goals`, `interpretation`, `questions`,
+`parked_reads`, `routing` (with `permissions/routing`), `reconciling`, `verification`,
+`charges`, `quotes`, `stated_bounds`, `validating`, and today's `authorizing` and
+`authorization_surface` (whose name the new phase module must not reuse); in `planning/`,
+`associator` and `goals`. Reworked: `engine`, `runner`, `executor`, `reads`, `writes`,
+`consolidation`, `recipient_grants`, `effects`, `disclosure`, `chat`, `conversations`,
+`activation_state`, `speech`, `controller`, `understanding`.
 
 **Stores.** Retire: the deferral store; parked reads; goal authorizations, quotes and
-coverage (`permissions/goal_authorizations`, `_coverage`); the routing trail; the
-`PlanStore` goal, attempt, interpretation, intended-action, quote and question members.
-Reworked: `save_plan`, `get_plan`, `claim_effect`, `commit_transition` and `export`
-(each tied to a goal today), and the evidence members; the permission policy; the audit
-trail's goal fields.
+coverage; the routing trail; `PlanStore`'s goal, attempt, interpretation, intended-action,
+quote, question and evidence members. Reworked: `save_plan`, `get_plan`, `claim_effect`,
+`commit_transition`, `export`; the permission policy; the audit trail's goal fields.
 
-**Types.** The goal, attempt, intended-action, quote, goal-authorization, park,
-turn-outcome, routing, deferral-question and verification families in `core/types.py`,
-with their wire codecs and canonical fakes.
+**Types, interfaces.** The goal, attempt, intended-action, quote, goal-authorization, park,
+turn-outcome, routing, deferral-question and verification families, with their codecs and
+fakes. CLI: `ask`, `resume`, `cancel-read`, `goals`, `withdraw-clarification`,
+`abandon-goal`, `questions`, `answer`, `forget-question`, `authorizations`,
+`revoke-authorization`. Gateway: the Ask, What happened, confirmations, questions, goals and
+authorizations panels and their routes.
 
-**Interfaces.** CLI: `ask`, `resume`, `cancel-read`, `goals`, `withdraw-clarification`,
-`abandon-goal`, `learn`, `questions`, `answer`, `forget-question`, `authorizations`,
-`revoke-authorization`. Gateway: the Ask, What happened, confirmations, questions, goals
-and authorizations panels and their routes.
-
-**Decisions the survey raises** (taken in the walk-through):
-
-1. Where a deferred memory question goes once `answer` retires: the memory policy's
-   ask-the-user ruling has no destination. Proposed: it becomes an ordinary message, and
-   the user's reply is read like any answer.
-2. `ControllerStage` and `ControllerRule` are "added to and never renamed", and eight
-   stages with their rules go dead: kept as values nothing produces, or retired by an
-   explicit exception.
-3. What follows understanding on the event path, where `informational_events`' summary
-   stage runs today: proposed, events go to planning like any activation, which may
-   decide nothing is due.
-4. The notification route, the upcoming-events producer and the delivery outbox: they
-   retire only once their replacements exist (ADR-0292 §13), and the upcoming push needs
-   the timers milestone, so they **survive this cutover**.
-5. The recipient-grant establishing act, which rides recorded confirmations, against
-   approval records.
-6. Quotes, stated bounds and charges: retired now and redone with authority by outcome,
-   or carried until then.
+**The controller's dead members.** `ControllerStage` and `ControllerRule` are "added to and
+never renamed", but routing, event summary, goal association, disambiguation, reconcile,
+turn loop, drive and compose, with their rules, are **removed**, as a recorded exception:
+the data directory is fresh, so nothing stored names them.
 
 ## What it would supersede
 
-To be confirmed clause by clause when each piece becomes its ADR:
+To be confirmed clause by clause when each section becomes its ADR:
 
-- ADR-0170, "a reply is not a tool": the reply becomes a message step in the plan.
-- ADR-0052, ADR-0244 and ADR-0078 §8: parked questions, `resume` and `answer`, already
-  marked to retire by ADR-0292 §13 and ADR-0293 §11.
-- ADR-0293 §6, in its options on a question and an answer naming its question: questions
-  and answers are ordinary messages (owner, 2026-10-05).
-- ADR-0248–ADR-0273, the goal and attempt model, and ADR-0226, ADR-0228 and ADR-0251's
-  turn loop, as they reach the replaced stages.
-- ADR-0280 §1:4, `resume` keeping its own path outside the controller.
-- ADR-0148's parked call resumed on the answer; its whole-call ruling stays.
+- ADR-0170, "a reply is not a tool": the reply is planning's own text.
+- ADR-0052, ADR-0244 and ADR-0148's parked call resumed on the answer; ADR-0078's deferred
+  questions and `answer` (ADR-0293 §11 already retires `answer`).
+- ADR-0293 §6, its options on a question and an answer naming its question: questions and
+  answers are ordinary messages.
+- ADR-0248–ADR-0273, the goal and attempt model; ADR-0226, ADR-0228 and ADR-0251's turn
+  loop; ADR-0252's evidence record; ADR-0254's goal authorizations; ADR-0259 and
+  ADR-0265's effect key in its goal scope.
+- ADR-0197 and ADR-0198, routing; ADR-0274 §7's informational processing, in its summary
+  stage.
+- ADR-0280 §1:4, `resume` outside the controller, and the closed `ControllerStage` and
+  `ControllerRule` in the removal above.
 
 ## Options considered
 
-- **Adapting the turn loop step by step**, keeping it working throughout. Rejected: every
-  step would have to keep goals, attempts and parks consistent with the new pieces, the
-  kind of interaction that made the stop lane's review run nine rounds.
-- **Authority by outcome in this milestone.** Rejected for size: conditions bring the
-  hardest judgment, and are easier once exact approvals work end to end.
-- **Question messages with options**, binding an answer to its question exactly, as
-  ADR-0293 §6 decided. Set aside by the owner: ordinary messages and understanding's
-  reading are simpler and match how people talk.
-- **Deferring stories** to the timers milestone, linking an answer to its recent
-  question directly. Rejected: it would build a temporary path stories replace, and
-  short replies depend on stories.
+- **Kinds of step** (read, act, inside action, message). Rejected: every difference between
+  them is a property of the capability called, and the model's native tool calls express a
+  plan more reliably than a custom schema.
+- **Planning's intents**, turned into calls by the hub. Rejected: a second judgment, and
+  authorizing would check something planning never said.
+- **Adapting the turn loop step by step.** Rejected: every step would keep goals, attempts
+  and parks consistent with the new pieces.
+- **Authority in this milestone.** Moved to its own, next.
+- **Skipping planning for outside content that needs nothing.** Dropped: an optimisation
+  that moves planning's judgment into understanding.
+- **Writing into any place now.** Deferred: almost nothing needs it before timers, and it
+  needs audience rules at delivery.
+- **A separate writing step**, so replies stream. Not now: streaming is not needed, and a
+  writer can be added later without changing a round's shape.
 - **A separate closing phase.** Folded into planning's last round.
+- **Leaving duplicates to planning alone.** Rejected: a mistake costs money or sends
+  something twice.
 
 ## What it leaves open
 
-- The numbers: rounds, no progress, approval lifetime, deadlines
-  ([#2589](https://github.com/leonapivato/ai-assistant/issues/2589)).
-- Which read kinds survive, and the unbounded-audience gate on reads
+- The numbers: rounds, no progress, deadlines, digest part size, the second recall run's
+  total cap ([#2589](https://github.com/leonapivato/ai-assistant/issues/2589)).
+- Which read capabilities survive, and the unbounded-audience gate on reads
   ([#2593](https://github.com/leonapivato/ai-assistant/issues/2593)).
-- Whether standing grants (ADR-0193) and configured-provider allows keep their form, and
-  the web-search exemption (#2593).
 - Durability of effects and unknown outcomes in detail
   ([#2584](https://github.com/leonapivato/ai-assistant/issues/2584)).
-- Memories cited by a story's earlier episodes reaching planning, which needs citations
-  recorded as memory ids ([#2528](https://github.com/leonapivato/ai-assistant/issues/2528)).
-- Phase-level carry-overs: quoted text, forget over recalled copies, audience at
-  delivery ([#2590](https://github.com/leonapivato/ai-assistant/issues/2590)).
-- Which memory may fill in what, where or to whom
-  ([#2582](https://github.com/leonapivato/ai-assistant/issues/2582)), and actions with
-  nobody present ([#2583](https://github.com/leonapivato/ai-assistant/issues/2583)).
+- Phase-level carry-overs: quoted text, forget over recalled copies, audience at delivery
+  ([#2590](https://github.com/leonapivato/ai-assistant/issues/2590)).
