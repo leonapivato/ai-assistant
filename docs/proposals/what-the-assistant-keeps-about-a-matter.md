@@ -41,7 +41,7 @@ The owner's rulings, from the walk-through of 2026-10-06 and 2026-10-07:
   planning uses it**, in parallel, never making the user wait.
 - Forgetting and privacy can wait.
 - This work comes **before the phases**: this proposal declares what the phases are to do
-  with stories, and the phases build it.
+  with stories, and the phases build it. It goes live **together** with them, in one cutover.
 
 ## The design
 
@@ -243,9 +243,10 @@ This is its own milestone, built before the phases after understanding.
 - Open questions, next steps and who is doing what as planning's notes.
 - What was done, from acting's records.
 
-**Proposed:** it deploys on its own, without waiting for the phases' cutover. It touches
-none of the turn loop the cutover replaces, so stories would start forming from the owner's
-conversations on the live hub early.
+**It goes live with the phases** (owner, 2026-10-07): built first, merged as it lands, and
+deployed in the same cutover as the phases and the authority milestone. Until then it runs
+on a test hub, where the engine's interim use of the tidy-up operation is what exercises
+it.
 
 ## What it would change
 
@@ -292,4 +293,3 @@ conversations on the live hub early.
   view, a story's idle time before dissolving.
 - **Very long matters** ("my health", "the house"): whether the page's lines need ranking
   once it reaches its cap.
-- **Deploying on its own**, proposed above, to be confirmed.
