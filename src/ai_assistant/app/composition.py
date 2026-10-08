@@ -97,6 +97,8 @@ from ai_assistant.orchestration.payloads import ENVELOPE_RESERVE_BYTES
 from ai_assistant.orchestration.recall import RecallStage
 from ai_assistant.orchestration.reconciling import ReconciliationStage
 from ai_assistant.orchestration.story_links import StoryCandidates, StoryLinksStage
+from ai_assistant.orchestration.story_tidy_up import StoryTidyUp
+from ai_assistant.orchestration.story_tidy_up_interim import InterimTidyUp
 from ai_assistant.orchestration.understanding import (
     RecentEpisodes,
     UnderstandingStage,
@@ -311,6 +313,25 @@ UNDERSTANDING_STORY_CANDIDATES: Final = 5
 STORY_SHORT_VIEW_LINES: Final = 3
 STORY_SHORT_VIEW_NOTES: Final = 2
 STORY_SHORT_VIEW_EPISODES: Final = 2
+
+#: How many characters of each episode's input and reply a tidy-up renders (ADR-0300
+#: §5:3): the episode excerpt every other model-facing rendering of an episode is
+#: bounded by, ``UNDERSTANDING_EXCERPT_CHARS``, which is also what a note's own bound,
+#: ``STORY_NOTE_MAX_CHARS``, was chosen from.
+STORY_TIDY_UP_EXCERPT_CHARS: Final = UNDERSTANDING_EXCERPT_CHARS
+
+#: How many other stories a tidy-up shows for ADR-0300 §9:2's *like another story*
+#: flag: the stories the episodes it reads also belong to, each by its page's first
+#: line. Understanding's candidate count, so a tidy-up can name any story that
+#: understanding could have linked the same episode into beside this one.
+STORY_TIDY_UP_OTHER_STORIES: Final = UNDERSTANDING_STORY_CANDIDATES
+
+#: How long one tidy-up may take, its one completion included (ADR-0300 §5). Nobody
+#: waits for a run, so the bound is not latency: it is what frees the story for a
+#: later run when a completion hangs, since at most one runs on a story at a time.
+#: Consolidation's per-run budget is five minutes for a whole chunk of records; a
+#: tidy-up is one page, so two.
+STORY_TIDY_UP_BUDGET: Final = timedelta(minutes=2)
 
 #: How many long-term memories recall keeps for one activation at most (ADR-0281 §3).
 #: Thin on purpose: recall leaves the story-following and the understanding-cued
@@ -2274,6 +2295,24 @@ def build_composition(  # noqa: PLR0915 — one statement per resource this root
                 episodes=STORY_SHORT_VIEW_EPISODES,
             ),
             story_links=StoryLinksStage(stories=stories),
+            # ADR-0300 §5's interim run — test-hub scaffolding, removed at the cutover
+            # with `orchestration.story_tidy_up_interim`: after the story-links stage
+            # links an activation into a story, a tidy-up of that story is started and
+            # not awaited. The operation runs on **consolidation's route**, the one
+            # this deployment names for background work over the assistant's own
+            # records (ADR-0285 §5): a tidy-up is that kind of work, nobody waits on
+            # it, and one skipped or failed loses nothing (§5), so it needs no
+            # fallback route and takes no share of the conversational route's limits.
+            interim_tidy_up=InterimTidyUp(
+                tidy_up=StoryTidyUp(
+                    model=consolidation_model,
+                    stories=stories,
+                    memory=memory,
+                    excerpt_chars=STORY_TIDY_UP_EXCERPT_CHARS,
+                    other_stories=STORY_TIDY_UP_OTHER_STORIES,
+                    budget=STORY_TIDY_UP_BUDGET,
+                )
+            ),
             # ADR-0254 §11's two operations and the confirmation projection, over the
             # object built above.
             authorization_operations=authorization_operations,

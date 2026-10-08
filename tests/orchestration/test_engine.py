@@ -176,6 +176,7 @@ if TYPE_CHECKING:
     from ai_assistant.orchestration.recall import RecallStage
     from ai_assistant.orchestration.reconciling import ReconciliationStage
     from ai_assistant.orchestration.story_links import StoryCandidates, StoryLinksStage
+    from ai_assistant.orchestration.story_tidy_up_interim import InterimTidyUp
     from ai_assistant.orchestration.understanding import UnderstandingStage
     from ai_assistant.testing.invoker import FakeToolImplementation
 
@@ -708,6 +709,9 @@ class Harness:
         stories: StoryStore | None = None,
         story_candidates: StoryCandidates | None = None,
         story_links: StoryLinksStage | None = None,
+        # ADR-0300 §5's interim tidy-up run, test-hub scaffolding removed at the
+        # cutover. `None` is every other case's deployment: no tidy-up is started.
+        interim_tidy_up: InterimTidyUp | None = None,
         # ADR-0259 §4's turn-start pass and §3's check, wired **together or not at
         # all** — one object holds both. `None` is the default and is every other
         # case's deployment: no stage wired, so no goal's residual is repaired and the
@@ -1025,6 +1029,7 @@ class Harness:
             stories=stories,
             story_candidates=story_candidates,
             story_links=story_links,
+            interim_tidy_up=interim_tidy_up,
             # ADR-0244 §5, §6, §11: the enumeration, the answer and the cancellation,
             # over the store above. Wired unconditionally, exactly as the composition
             # root wires the operations object — what varies by deployment is the

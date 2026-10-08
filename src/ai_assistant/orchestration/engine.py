@@ -454,6 +454,7 @@ if TYPE_CHECKING:
         StoryCandidates,
         StoryLinksStage,
     )
+    from ai_assistant.orchestration.story_tidy_up_interim import InterimTidyUp
     from ai_assistant.orchestration.understanding import (
         Fetched,
         UnderstandingStage,
@@ -3022,6 +3023,7 @@ class Engine:
         stories: StoryStore | None = None,
         story_candidates: StoryCandidates | None = None,
         story_links: StoryLinksStage | None = None,
+        interim_tidy_up: InterimTidyUp | None = None,
         authorization_operations: AuthorizationOperations | None = None,
         authorizations: AuthorizationResolution | None = None,
         transcriber: SpeechTranscriber | None = None,
@@ -3420,6 +3422,11 @@ class Engine:
             story_links: ADR-0300 §6's story-links stage, which records the latest
                 recorded understanding's links in the story store — or ``None``, and
                 then the ``story_links_unrecorded`` rule never answers.
+            interim_tidy_up: ADR-0300 §5's interim run, test-hub scaffolding removed
+                at the cutover (:mod:`~ai_assistant.orchestration.story_tidy_up_interim`):
+                after the story-links stage decides, a tidy-up is started, and not
+                awaited, for each story it linked the activation into — or ``None``,
+                and then none is. Only beside ``story_links``.
             authorization_operations: ADR-0254 §11's read side — the confirmation
                 projection, the listing and the revocation — or ``None`` where this
                 deployment wired no authorization store. **Passed rather than
@@ -3798,6 +3805,14 @@ class Engine:
         self._recall = recall
         self._story_candidates = story_candidates
         self._story_links = story_links
+        if interim_tidy_up is not None and story_links is None:
+            msg = (
+                "the interim tidy-up runs after the story-links stage, so it is wired "
+                "only beside it (ADR-0300 §5)"
+            )
+            raise ConfigurationError(msg)
+        # ADR-0300 §5's interim run: test-hub scaffolding, removed at the cutover.
+        self._interim_tidy_up = interim_tidy_up
         if stage_record_limit < 2:  # noqa: PLR2004 — the first entry and the end entry
             msg = "a stage record keeps its first entry and its end entry (ADR-0280 §6)"
             raise ConfigurationError(msg)
@@ -12599,9 +12614,27 @@ class Engine:
                     raise
                 raise late from None
         working.story_links = decision
+        self._start_interim_tidy_ups(decision)
         if decision.outcome is StageOutcome.DONE:
             return StageResult(StageOutcome.DONE)
         return StageResult(decision.outcome, decision.error, tolerated=True)
+
+    def _start_interim_tidy_ups(self, decision: StoryLinksDecision) -> None:
+        """ADR-0300 §5's interim run: start each tidy-up the decision calls for, unawaited.
+
+        Test-hub scaffolding, removed at the cutover with
+        :mod:`~ai_assistant.orchestration.story_tidy_up_interim`. Each run is a task of
+        its own in a fresh context, as a chat read is (:meth:`_spawn_read`), so it
+        carries neither the activation's state nor its correlation scope, and is
+        tracked so :meth:`aclose` drains it (ADR-0042 §2). The pass does not wait for
+        it, and its finishing starts nothing (§5).
+        """
+        if self._interim_tidy_up is None:
+            return
+        for run in self._interim_tidy_up.runs(decision):
+            task = asyncio.get_running_loop().create_task(run, context=contextvars.Context())
+            self._inflight.add(task)
+            task.add_done_callback(self._inflight.discard)
 
     async def _understand_event(self, event: _EventPass) -> None:
         """The event path's understanding, mapped outward as the event stage maps its own.
