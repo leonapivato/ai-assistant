@@ -182,6 +182,35 @@ def test_an_item_names_what_found_it() -> None:
         _item(found_by=())
 
 
+def test_an_item_carries_no_stories_by_default() -> None:
+    """ADR-0300 §7:2, §12:1: empty by default."""
+    assert _item().stories == ()
+
+
+def test_an_episode_item_carries_its_stories_in_the_order_given() -> None:
+    """ADR-0300 §7:2: in the order the store returned them, never re-sorted."""
+    item = _item(kind=MemoryKind.EPISODIC, stories=("story:b", "story:a"))
+    assert item.stories == ("story:b", "story:a")
+
+
+def test_a_semantic_item_carries_no_stories() -> None:
+    """ADR-0300 §7:2: "A semantic item carries none, enforced by validator"."""
+    with pytest.raises(ValidationError, match="a semantic item carries no stories"):
+        _item(kind=MemoryKind.SEMANTIC, stories=("story:a",))
+
+
+def test_a_story_id_is_never_blank() -> None:
+    with pytest.raises(ValidationError):
+        _item(kind=MemoryKind.EPISODIC, stories=(" ",))
+
+
+def test_an_item_written_before_stories_validates_unchanged() -> None:
+    """ADR-0300 §12:1: the field defaults to empty, so an older record's JSON still reads."""
+    older = _item(kind=MemoryKind.EPISODIC).model_dump(mode="json")
+    del older["stories"]
+    assert RecalledItem.model_validate(older).stories == ()
+
+
 def test_an_item_forbids_extra_fields() -> None:
     with pytest.raises(ValidationError):
         _item(score=0.9)

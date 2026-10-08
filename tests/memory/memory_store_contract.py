@@ -1665,6 +1665,54 @@ class MemoryStoreContract:
         assert got.processing_record.recall == recall
         assert got.processing_record.recall.items[0].id == " fact "
 
+    async def test_a_recalled_episodes_stories_survive_the_round_trip(
+        self, store: MemoryStore
+    ) -> None:
+        """ADR-0300 §12:1 under ADR-0280 §7:4: the shape ``RecalledItem.stories`` adds.
+
+        The stories are pinned in an order that is not id-sorted, because §7:2 keeps the
+        order the story store returned them in, and beside a semantic item carrying none.
+        """
+        channel = _activation_episode("recalled-stories")
+        assert channel.processing_record is not None
+        found_by = (RecallCue.ACTIVATION_INPUT,)
+        recall = ActivationRecall(
+            outcome=RecallOutcome.FOUND,
+            cues=found_by,
+            items=(
+                RecalledItem(
+                    kind=MemoryKind.EPISODIC,
+                    id="activation:earlier",
+                    excerpt="The canoe is booked for Sunday.",
+                    provenance=RecallProvenance.USER,
+                    standing=BeliefBand.DERIVED,
+                    rests_on_recorded_external_content=False,
+                    found_by=found_by,
+                    stories=("story:b", "story:a"),
+                ),
+                RecalledItem(
+                    kind=MemoryKind.SEMANTIC,
+                    id="fact",
+                    excerpt="The campsite is booked.",
+                    provenance=RecallProvenance.USER,
+                    standing=BeliefBand.ASSERTED,
+                    rests_on_recorded_external_content=False,
+                    found_by=found_by,
+                ),
+            ),
+        )
+        record = channel.processing_record.model_copy(update={"recall": recall})
+        await store.add(channel.model_copy(update={"processing_record": record}))
+
+        got = await store.get("recalled-stories")
+        assert isinstance(got, EpisodicMemory)
+        assert got.processing_record is not None
+        assert got.processing_record.recall == recall
+        assert [item.stories for item in got.processing_record.recall.items] == [
+            ("story:b", "story:a"),
+            (),
+        ]
+
     async def test_an_episodes_capture_survives_the_round_trip(self, store: MemoryStore) -> None:
         """ADR-0221 §12.5, on the contract rather than on one store.
 
