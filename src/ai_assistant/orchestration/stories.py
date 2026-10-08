@@ -1,20 +1,25 @@
 """The engine's side of the story surface (ADR-0289 §4).
 
-Three things the engine adds to the story store, and nothing else:
+Four things the engine adds to the story store, and nothing else:
 
 * **The existence check** (:func:`unknown_activation`). Before a create or a link
   naming an activation member, each activation's record is read at
   ``activation:<activation_id>`` through ``MemoryStore.get``, and the write is
   refused where none is there. An open episode is a record there (ADR-0286 §6), so a
-  running activation can be linked. A merge or a split checks nothing: it moves
-  members a story already holds, so an activation whose episode has since been
-  forgotten moves with the rest. The story store itself reads no other store (§1).
+  running activation can be linked. A merge, a split or a move (ADR-0300 §3:14)
+  checks nothing: each moves members a story already holds, so an activation whose
+  episode has since been forgotten moves with the rest. The story store itself reads
+  no other store (§1).
 * **The resolved view** (:func:`resolved_view`). Each activation member is resolved
   to its episode's ``EpisodeSummary``, or marked forgotten where no record is there
   any more; each story member to its id and its current member count, one level deep.
 * **The payload fit** (:func:`fitted`). A page too large for the contract's payload
   limit is re-read at a smaller page size, so the caller gets the largest page that
   fits with a cursor resuming after it, rather than a refusal.
+* **The owner's page** (:func:`owner_page`, ADR-0300 §8:3). A story's current page
+  with what is pending on it, under §11's default for the owner as reader: decided by
+  :class:`~ai_assistant.orchestration.story_privacy.PageVisibility`, the one statement
+  of that rule, from the episodes the notes rest on.
 
 Shared by :class:`~ai_assistant.orchestration.engine.Engine` and the canonical fake
 engine, so the two cannot answer one call two ways. No stage, phase, rule or prompt
@@ -30,20 +35,24 @@ from typing import TYPE_CHECKING
 from ai_assistant.core.episode_encoding import summary_of
 from ai_assistant.core.errors import StoryStoreError
 from ai_assistant.core.types import (
+    MAX_STORY_PAGE,
     EpisodicMemory,
     StoryMember,
     StoryMemberKind,
     StoryMemberView,
+    StoryPageView,
     StoryRefusal,
     StoryRefusalReason,
     StoryView,
 )
 from ai_assistant.orchestration.payloads import canonical_payload, check_payload
+from ai_assistant.orchestration.story_privacy import PageVisibility
 
 if TYPE_CHECKING:
     from collections.abc import Awaitable, Callable, Sequence
 
     from ai_assistant.core.protocols import MemoryStore, StoryStore
+    from ai_assistant.core.types import StoryNote, StoryNoteId
 
 
 def episode_address(activation_id: str) -> str:
@@ -132,6 +141,91 @@ async def resolved_view(
         members=tuple(members),
         next_cursor=page.next_cursor,
     )
+
+
+async def owner_page(
+    stories: StoryStore, memory: MemoryStore, story_id: str
+) -> StoryPageView | None:
+    """Read a story's page as the owner is shown it (ADR-0300 §8:3, §11).
+
+    The current page and what is pending on it are one read of the story store. Then
+    the notes the page's lines cite that are no longer pending are read page by page,
+    and every episode a pending or cited note rests on is fetched with one
+    ``MemoryStore.get_many``. What is shown is decided by §11's default for the owner:
+    a note the owner wrote is shown, as a record placed for the owner alone may be
+    shown to the owner; a note resting on an activation is shown where the memory
+    store holds its episode, open or frozen, the owner's direct inspection reading
+    every record (ADR-0275 §7, §10) as :data:`~ai_assistant.orchestration.
+    story_standing.OWNER_READER` does; and a line is shown where every note it cites
+    is. A note resting on a forgotten episode, and a line citing one or citing a note
+    the story no longer holds, are withheld and counted.
+
+    Returns:
+        The page, or ``None`` where the store holds no such story. A merged story's
+        carries its header alone.
+
+    Raises:
+        StoryStoreError: If the story store cannot be read.
+        MemoryStoreError: If an episode a note rests on cannot be read.
+    """
+    state = await stories.current_page(story_id)
+    if state is None:
+        return None
+    if state.story.merged_into is not None:
+        return StoryPageView(story=state.story)
+    page = state.page
+    lines = () if page is None else page.lines
+    pending = {note.note_id: note for note in state.pending_notes}
+    wanted = {note_id for line in lines for note_id in line.cites}
+    cited = {note_id: pending[note_id] for note_id in wanted if note_id in pending}
+    cited |= await _held_notes(stories, story_id, wanted - cited.keys())
+    addresses = dict.fromkeys(
+        episode_address(note.rests_on)
+        for note in (*state.pending_notes, *cited.values())
+        if note.rests_on is not None
+    )
+    found = await memory.get_many(list(addresses)) if addresses else {}
+    visibility = PageVisibility.of(
+        (record for record in found.values() if isinstance(record, EpisodicMemory)),
+        owner_notes=True,
+    )
+    shown_lines = tuple(line for line in lines if visibility.line(line, cited))
+    shown_notes = tuple(note for note in state.pending_notes if visibility.note(note))
+    return StoryPageView(
+        story=state.story,
+        version=None if page is None else page.version,
+        tidied_at=None if page is None else page.written_at,
+        lines=shown_lines,
+        pending_notes=shown_notes,
+        pending_episodes=state.pending_episodes,
+        withheld_lines=len(lines) - len(shown_lines),
+        withheld_notes=len(state.pending_notes) - len(shown_notes),
+    )
+
+
+async def _held_notes(
+    stories: StoryStore, story_id: str, wanted: set[StoryNoteId]
+) -> dict[StoryNoteId, StoryNote]:
+    """The notes ``wanted`` names that the story holds, read page by page.
+
+    Notes are read in identity order, so the walk stops once it passes the largest
+    identity wanted. A note the story no longer holds is not found, and a line citing
+    it is then withheld (§11:1).
+    """
+    found: dict[StoryNoteId, StoryNote] = {}
+    if not wanted:
+        return found
+    last = max(wanted)
+    cursor: int | None = None
+    while True:
+        listed = await stories.notes(story_id, cursor=cursor, limit=MAX_STORY_PAGE)
+        if listed is None:
+            return found
+        found |= {note.note_id: note for note in listed.notes if note.note_id in wanted}
+        following = listed.next_cursor
+        if following is None or following == cursor or following >= last or found.keys() == wanted:
+            return found
+        cursor = following
 
 
 async def fitted[P](

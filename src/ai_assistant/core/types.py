@@ -33274,6 +33274,123 @@ class StoryPageOutcome(BaseModel):
         return self
 
 
+class StoryPageView(BaseModel):
+    """A story's page as one reader is shown it (ADR-0300 §8, §11).
+
+    What the story commands answer the owner: the current page's lines, the notes
+    and the episodes pending on it, and when it was last tidied (§8:3). ``version``
+    is the version that wrote the current page and ``tidied_at`` when, both ``None``
+    where no version has been written. ``lines`` are the current page's lines the
+    reader may be shown, in page order; ``pending_notes`` the pending notes it may
+    be shown, in the order they were written; ``pending_episodes`` the activation
+    members pending on the story, by activation id, in link order. Each line and
+    note carries its own ``outside`` mark, which every view shows (§8:4).
+
+    ``withheld_lines`` and ``withheld_notes`` count what ADR-0300 §11's default kept
+    back from this reader: a pending note resting on an episode it may not be shown,
+    and a line citing such a note or one the story no longer holds. A count, never
+    the text, so a reader knows the page it is shown is not the whole of it.
+
+    A merged story's page carries its header alone, naming where it went, as its
+    view and its standing do (ADR-0289 §3): its notes went with the merge.
+    """
+
+    model_config = ConfigDict(frozen=True, extra="forbid")
+    story: StoryHeader
+    version: int | None = Field(default=None, strict=True, ge=1, lt=_STORY_POSITION_BOUND)
+    tidied_at: UtcInstant | None = None
+    lines: tuple[StoryPageLine, ...] = ()
+    pending_notes: tuple[StoryNote, ...] = ()
+    pending_episodes: tuple[Identifier, ...] = ()
+    withheld_lines: int = Field(default=0, strict=True, ge=0, lt=_STORY_POSITION_BOUND)
+    withheld_notes: int = Field(default=0, strict=True, ge=0, lt=_STORY_POSITION_BOUND)
+
+    @model_validator(mode="after")
+    def _lines_only_where_a_page_was_written(self) -> Self:
+        if (self.version is None) != (self.tidied_at is None):
+            msg = "a page view names its version exactly when it says when it was tidied"
+            raise ValueError(msg)
+        if self.version is None and (self.lines or self.withheld_lines):
+            msg = "a story whose page was never written shows no line"
+            raise ValueError(msg)
+        return self
+
+    @model_validator(mode="after")
+    def _a_merged_story_shows_no_page(self) -> Self:
+        if self.story.merged_into is not None and (
+            self.version is not None
+            or self.pending_notes
+            or self.pending_episodes
+            or self.withheld_notes
+        ):
+            msg = "a merged story's page view carries its header and nothing else"
+            raise ValueError(msg)
+        return self
+
+
+#: The check a note's text passes: non-blank, encodable, within its bound (§3:1).
+_STORY_NOTE_TEXT: Final[TypeAdapter[str]] = TypeAdapter(_StoryPageText)
+
+
+def story_note_text(text: object) -> str:
+    """Refuse a note's text that no story page could hold (ADR-0300 §3:1).
+
+    Shared by every ``AssistantEngine`` implementation, so each refuses the same
+    text before any I/O (ADR-0085 §9); the story store refuses it again.
+
+    Args:
+        text: The text an owner's note carries.
+
+    Returns:
+        It, checked.
+
+    Raises:
+        ValueError: If it is not a string, or is blank, not encodable, or longer
+            than :data:`STORY_NOTE_MAX_CHARS`.
+    """
+    if not isinstance(text, str):
+        msg = f"a note's text must be a string, got {describe_untrusted(text)}"
+        raise ValueError(msg)
+    try:
+        return _STORY_NOTE_TEXT.validate_python(text)
+    except ValueError as exc:
+        msg = (
+            "a note's text must be non-blank, encodable and at most "
+            f"{STORY_NOTE_MAX_CHARS} characters"
+        )
+        raise ValueError(msg) from exc
+
+
+def story_move_members(story_id: str, to: str, members: object) -> tuple[StoryMember, ...]:
+    """Snapshot a move's members, refusing what no move takes (ADR-0300 §3:14).
+
+    Shared by every ``AssistantEngine`` implementation, so each refuses the same
+    move before any I/O (ADR-0085 §9): a move is between two stories and carries
+    activation members only. Whether it names any, and whether the first story
+    holds them, the store answers as a refusal.
+
+    Args:
+        story_id: The story moved from, already checked as an identifier.
+        to: The story moved to, already checked as an identifier.
+        members: The members the move names.
+
+    Returns:
+        The members, as a tuple of fresh values.
+
+    Raises:
+        ValueError: If the two stories are the same, or ``members`` is malformed or
+            names a story member.
+    """
+    if story_id == to:
+        msg = "a move is from one story to another"
+        raise ValueError(msg)
+    named = story_members(members)
+    if any(member.kind is not StoryMemberKind.ACTIVATION for member in named):
+        msg = "a move carries activation members only"
+        raise ValueError(msg)
+    return named
+
+
 def check_story_as_of(as_of: object) -> int:
     """Refuse an ``as_of`` no page read could have returned.
 

@@ -161,6 +161,7 @@ from ai_assistant.core.types import (
     StoryActor,
     StoryMember,
     StoryMemberKind,
+    StoryNoteAuthor,
     StoryOutcome,
     TextChannelPayload,
     TextChannelResult,
@@ -181,6 +182,8 @@ from ai_assistant.core.types import (
     rests_on_recorded_external_content,
     secret_value,
     story_members,
+    story_move_members,
+    story_note_text,
     user_message,
 )
 from ai_assistant.orchestration.authorization_surface import is_live, view_of
@@ -238,7 +241,14 @@ from ai_assistant.orchestration.recipient_grants import (
     rides_an_establishing_act,
 )
 from ai_assistant.orchestration.speech import SPOKEN_PARK_SENTENCE
-from ai_assistant.orchestration.stories import fitted, resolved_view, unknown_activation
+from ai_assistant.orchestration.stories import (
+    fitted,
+    owner_page,
+    resolved_view,
+    unknown_activation,
+)
+from ai_assistant.orchestration.story_standing import OWNER_READER
+from ai_assistant.orchestration.story_standing import story_standing as standing_of
 from ai_assistant.testing.activation import FakeActivation
 from ai_assistant.testing.connections import FakeConnectionProvisioner
 from ai_assistant.testing.conversations import FakeConversationStore
@@ -282,7 +292,10 @@ if TYPE_CHECKING:
         SourceReadRecord,
         StoryHeader,
         StoryLogPage,
+        StoryNoteOutcome,
         StoryPage,
+        StoryPageView,
+        StoryStanding,
         StoryView,
         TranscriptPage,
         UserMessage,
@@ -2972,6 +2985,61 @@ class FakeAssistantEngine:
         self.calls.append(("activation_stories", {"activation_id": named}))
         member = StoryMember(kind=StoryMemberKind.ACTIVATION, id=named)
         return self._checked(await self.story_store.stories_of(member), "activation_stories")
+
+    # --- the story commands (ADR-0300 §8) -----------------------------------
+    #
+    # The engine's four, over the same store and the same shared logic: the page read
+    # of `orchestration/stories.py` and the standing of
+    # `orchestration/story_standing.py`, each for the owner as reader.
+
+    async def story_page(self, story_id: Identifier) -> StoryPageView | None:
+        """Read a story's page as the owner is shown it (ADR-0300 §8:3, §11)."""
+        target = identifier(story_id, name="story_id")
+        check_arguments("story_page", max_bytes=self._max_payload_bytes, story_id=target)
+        self.calls.append(("story_page", {"story_id": target}))
+        page = await owner_page(self.story_store, self.episode_memory, target)
+        return self._checked(page, "story_page")
+
+    async def story_standing(self, story_id: Identifier) -> StoryStanding | None:
+        """Read where a story's matter stands, worked out for the owner (ADR-0300 §8:1)."""
+        target = identifier(story_id, name="story_id")
+        check_arguments("story_standing", max_bytes=self._max_payload_bytes, story_id=target)
+        self.calls.append(("story_standing", {"story_id": target}))
+        standing = await standing_of(
+            self.story_store, self.episode_memory, target, reader=OWNER_READER
+        )
+        return self._checked(standing, "story_standing")
+
+    async def add_story_note(self, story_id: Identifier, text: str) -> StoryNoteOutcome:
+        """Add a note to a story's page, written by the owner (ADR-0300 §8:3)."""
+        target = identifier(story_id, name="story_id")
+        written = story_note_text(text)
+        check_arguments(
+            "add_story_note", max_bytes=self._max_payload_bytes, story_id=target, text=written
+        )
+        self.calls.append(("add_story_note", {"story_id": target, "text": written}))
+        outcome = await self.story_store.append_note(target, written, author=StoryNoteAuthor.OWNER)
+        return self._checked(outcome, "add_story_note")
+
+    async def move_story_members(
+        self, story_id: Identifier, to: Identifier, members: Sequence[StoryMember]
+    ) -> StoryOutcome:
+        """Move activation members from one story to another, as the owner (ADR-0300 §3:14)."""
+        source = identifier(story_id, name="story_id")
+        target = identifier(to, name="to")
+        named = story_move_members(source, target, members)
+        check_arguments(
+            "move_story_members",
+            max_bytes=self._max_payload_bytes,
+            story_id=source,
+            to=target,
+            members=named,
+        )
+        self.calls.append(
+            ("move_story_members", {"story_id": source, "to": target, "members": named})
+        )
+        outcome = await self.story_store.move(source, target, named, actor=StoryActor.OWNER)
+        return self._checked(outcome, "move_story_members")
 
     async def beliefs(
         self,

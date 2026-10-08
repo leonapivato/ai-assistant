@@ -265,6 +265,8 @@ if TYPE_CHECKING:
         StoryPageOutcome,
         StoryPageState,
         StoryPageVersionList,
+        StoryPageView,
+        StoryStanding,
         StoryView,
         StoryViewPage,
         TimeWindow,
@@ -15069,6 +15071,94 @@ class AssistantEngine(Protocol):
         Raises:
             ValueError: If the id is malformed.
             StoryStoreError: If the story store cannot be read.
+        """
+        ...
+
+    # --- the story commands (ADR-0300 §8) -----------------------------------
+    #
+    # **Four more, over the story's page and where its matter stands.** Each names its
+    # story by id. The reads show the owner what ADR-0300 §11's default lets a reader
+    # be shown, with lines and notes resting on outside content marked (§8:4); the
+    # writes carry the owner as author or actor and no triggering activation (ADR-0289
+    # §4:4). A move, like a merge or a split, moves members a story already holds and
+    # checks no activation's record (ADR-0289 §4:3). A refusal is an outcome, never an
+    # exception.
+
+    async def story_page(self, story_id: Identifier) -> StoryPageView | None:
+        """Read a story's page as the owner is shown it (ADR-0300 §8:3, §11).
+
+        Its current page's lines, the notes and the episodes pending on it, and
+        when it was last tidied. A note is shown where the episode it rests on may
+        be shown to the owner, which is any episode the memory store still holds,
+        an open one included; a note the owner wrote is always shown; and a line
+        is shown where every note it cites is. What is withheld is counted.
+
+        Returns:
+            The page, or ``None`` where the store holds no such story. A merged
+            story's carries its header alone.
+
+        Raises:
+            ValueError: If the id is malformed.
+            StoryStoreError: If the story store cannot be read.
+            MemoryStoreError: If an episode a note rests on cannot be read.
+        """
+        ...
+
+    async def story_standing(self, story_id: Identifier) -> StoryStanding | None:
+        """Read where a story's matter stands, worked out for the owner (ADR-0300 §8:1).
+
+        Assembled from the records each time, never stored: what was done, the
+        timeline of its episodes, an open one marked in progress, and the related
+        matters.
+
+        Returns:
+            Where it stands, or ``None`` where the store holds no such story. A
+            merged story's carries its header alone.
+
+        Raises:
+            ValueError: If the id is malformed.
+            StoryStoreError: If the story store cannot be read.
+            MemoryStoreError: If an episode cannot be read.
+        """
+        ...
+
+    async def add_story_note(
+        self, story_id: Identifier, text: NonBlankEncodableText
+    ) -> StoryNoteOutcome:
+        """Add a note to a story's page, written by the owner (ADR-0300 §8:3).
+
+        The note rests on nothing and is never marked as fed by outside content
+        (§3:3-§3:4); it is pending on the story until a version of its page takes
+        it in.
+
+        Returns:
+            The note as written, or a refusal: ``unknown_story``, or
+            ``merged_story`` naming where the story went.
+
+        Raises:
+            ValueError: If an argument is malformed: a blank text, or one longer
+                than ``STORY_NOTE_MAX_CHARS``.
+            StoryStoreError: If the story store cannot be read or written.
+        """
+        ...
+
+    async def move_story_members(
+        self, story_id: Identifier, to: Identifier, members: Sequence[StoryMember]
+    ) -> StoryOutcome:
+        """Move activation members from one story to another, as the owner (ADR-0300 §3:14).
+
+        Every note resting on a moved activation goes with it, in one transaction.
+
+        Returns:
+            The second story's id with the count of lines appended, or a refusal:
+            ``no_members``; ``unknown_story`` or ``merged_story`` for either side,
+            the first story first; or ``not_a_member`` naming a member the first
+            story does not hold.
+
+        Raises:
+            ValueError: If an argument is malformed: a story member named, or the
+                two stories the same.
+            StoryStoreError: If the story store cannot be read or written.
         """
         ...
 

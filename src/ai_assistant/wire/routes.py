@@ -79,11 +79,18 @@ TARGETED: Final[frozenset[str]] = frozenset({"receive"})
 #: under ADR-0293 §11, and their names left this table with them, which the closure
 #: test asks of a removal. ``receive`` keeps the legacy-turn row for a spoken input to
 #: a conversation, the text combination being refused before any row is read.
+#:
+#: ADR-0300 §8's four story commands, ``story_page``, ``story_standing``,
+#: ``add_story_note`` and ``move_story_members``, postdate the table and are placed
+#: in the command-or-query row by their class, beside ADR-0289's nine story methods:
+#: each is a command or a query on the assistant's own records, and none is input to
+#: the assistant or traffic of a conversation's or a spoke's.
 ROWS: Final[Mapping[Route, frozenset[str]]] = {
     Route.COMMAND: frozenset(
         {
             "abandon_goal",
             "activation_stories",
+            "add_story_note",
             "belief",
             "beliefs",
             "cancel_read",
@@ -110,6 +117,7 @@ ROWS: Final[Mapping[Route, frozenset[str]]] = {
             "interrupted_questions",
             "link_story",
             "merge_stories",
+            "move_story_members",
             "my_devices",
             "notification_preferences",
             "notifications",
@@ -138,6 +146,8 @@ ROWS: Final[Mapping[Route, frozenset[str]]] = {
             "stories",
             "story",
             "story_log",
+            "story_page",
+            "story_standing",
             "unguard",
             "unlink_story",
             "withdraw_clarification",
