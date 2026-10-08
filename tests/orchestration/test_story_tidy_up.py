@@ -24,6 +24,7 @@ from ai_assistant.core.types import (
     StoryDraftLine,
     StoryFlag,
     StoryFlagKind,
+    StoryFlagName,
     StoryNoteAuthor,
     StoryPageDraft,
     StoryPageRefusalReason,
@@ -49,7 +50,12 @@ def _stories() -> FakeStoryStore:
 
 
 def _tidy_up(
-    model: Any, stories: StoryStore, memory: MemoryStore, *, budget: timedelta = _BUDGET
+    model: Any,
+    stories: StoryStore,
+    memory: MemoryStore,
+    *,
+    budget: timedelta = _BUDGET,
+    decisions: int = 5,
 ) -> StoryTidyUp:
     return StoryTidyUp(
         model=model,
@@ -57,7 +63,7 @@ def _tidy_up(
         memory=memory,
         excerpt_chars=2000,
         other_stories=5,
-        decisions=5,
+        decisions=decisions,
         budget=budget,
     )
 
@@ -507,6 +513,119 @@ async def test_flags_name_the_other_stories_shown_by_identity() -> None:
         StoryFlag(kind=StoryFlagKind.TWO_MATTERS),
         StoryFlag(kind=StoryFlagKind.LIKE_ANOTHER, story=other),
     )
+
+
+# --- ADR-0302 §6: the decisions recorded for its story ---------------------------
+
+
+async def _decided_trip() -> tuple[FakeStoryStore, FakeMemoryStore, str, str]:
+    """A trip whose two flags and an understanding flag were each decided ``left``.
+
+    The trip's first tidy-up raises ``two_matters`` and ``like_another`` naming
+    ``other``, which ``a-1`` also belongs to; then understanding links ``x-1`` into the
+    trip and into ``away``, a story no later tidy-up of the trip is shown. A new
+    episode ``a-2``, in both the trip and ``other``, and a new note are pending, so the
+    next tidy-up runs and is shown ``other``.
+    """
+    stories, _memory, trip = await _trip()
+    memory = await memory_of(episode("a-1", text=_USER_INPUT), episode("a-2"))
+    other = await _story(stories, "a-1")
+    away = await _story(stories, "z-1")
+    first = await _tidy_up(
+        FakeModelProvider(
+            _reply(
+                [("A camping trip.", ["N1"])],
+                flags=[{"kind": "two_matters"}, {"kind": "like_another", "story": "S1"}],
+            )
+        ),
+        stories,
+        memory,
+    ).run(trip)
+    assert first.version is not None
+    for flag in first.version.flags:
+        name = StoryFlagName(story=trip, version=first.version.version, flag=flag)
+        assert (await stories.leave_flag(name, actor=StoryActor.MATTERS_PASS)).refusal is None
+    for story_id in (trip, away):
+        await stories.link(
+            story_id, [activation("x-1")], actor=StoryActor.UNDERSTANDING, trigger="x-1"
+        )
+    understood = StoryFlagName(activation="x-1")
+    assert (await stories.leave_flag(understood, actor=StoryActor.MATTERS_PASS)).refusal is None
+    for story_id in (trip, other):
+        await stories.link(story_id, [activation("a-2")], actor=StoryActor.OWNER)
+    await _note(stories, trip, "Bring the canoe.")
+    return stories, memory, trip, other
+
+
+async def test_it_is_shown_the_decisions_recorded_for_its_story_newest_first() -> None:
+    stories, memory, trip, other = await _decided_trip()
+    model = FakeModelProvider(_reply([("A camping trip.", ["N1"])]))
+
+    outcome = await _tidy_up(model, stories, memory).run(trip)
+
+    assert outcome.result is TidyUpResult.WRITTEN
+    shown = _shown(model)
+    assert [entry["label"] for entry in shown["other_stories"]] == ["S1"]
+    assert [
+        (
+            decision["outcome"],
+            decision["flag"],
+            decision["stories_its_flag_concerns"],
+            decision["other_stories_its_flag_concerns"],
+        )
+        for decision in shown["decisions"]
+    ] == [
+        # Understanding's flag: the trip and `away`, which this run cannot name.
+        ("left", "one_input_in_several_stories", ["this story"], 1),
+        ("left", "like_another", ["this story", "S1"], 0),
+        ("left", "two_matters", ["this story"], 0),
+    ]
+    assert all(decision["recorded_at"] == AT.isoformat() for decision in shown["decisions"])
+    instruction = model.calls[0].messages[0].content
+    assert "is raised again only where what you take in now" in instruction
+    assert other != trip
+
+
+async def test_the_decisions_it_is_shown_are_bounded() -> None:
+    stories, memory, trip, _other = await _decided_trip()
+    model = FakeModelProvider(_reply([("A camping trip.", ["N1"])]))
+    none = FakeModelProvider(_reply([("A camping trip.", ["N1"])]))
+
+    await _tidy_up(model, stories, memory, decisions=1).run(trip)
+    await _note(stories, trip, "Bring the paddles.")
+    await _tidy_up(none, stories, memory, decisions=0).run(trip)
+
+    assert [decision["flag"] for decision in _shown(model)["decisions"]] == [
+        "one_input_in_several_stories"
+    ]
+    assert _shown(none)["decisions"] == []
+
+
+async def test_a_flag_raised_again_after_a_decision_is_written_as_a_new_flag() -> None:
+    stories, memory, trip, _other = await _decided_trip()
+    model = FakeModelProvider(
+        _reply([("A camping trip.", ["N1"])], flags=[{"kind": "two_matters"}])
+    )
+
+    outcome = await _tidy_up(model, stories, memory).run(trip)
+
+    # §6:3: no rule drops or refuses it; it is a new flag, which the pass decides.
+    assert outcome.version is not None
+    assert outcome.version.flags == (StoryFlag(kind=StoryFlagKind.TWO_MATTERS),)
+    again = StoryFlagName(
+        story=trip, version=outcome.version.version, flag=outcome.version.flags[0]
+    )
+    decided = await stories.leave_flag(again, actor=StoryActor.MATTERS_PASS)
+    assert decided.refusal is None, "a new flag, which no decision answers yet"
+
+
+async def test_a_story_with_no_decision_is_shown_none() -> None:
+    stories, memory, trip = await _trip()
+    model = FakeModelProvider(_reply([("A camping trip.", ["N1"])]))
+
+    await _tidy_up(model, stories, memory).run(trip)
+
+    assert _shown(model)["decisions"] == []
 
 
 # --- races, failures and one run at a time ---------------------------------------
