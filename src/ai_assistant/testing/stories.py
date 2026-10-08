@@ -4,8 +4,10 @@ The triad's third artifact. A non-persistent store over dictionaries, holding ev
 clause the SQLite store holds and refusing everything it refuses, so a consumer
 verified against this one is verified against the contract rather than against a
 convenience: the clean view and the change log, the five membership reads, merge,
-split and move with their exceptions, the loop refusal, and each story's page — its
-notes, its current page, its version log and what is pending on it.
+split and move with their exceptions, the loop refusal, each story's page — its
+notes, its current page, its version log and what is pending on it — and the
+decisions on flags, written as ``decided`` lines with the change they record
+(ADR-0302 §§2-4), and a page write refused over what its story does not hold (§7).
 
 **Atomic by construction.** Every write computes its refusal and applies its changes
 with no ``await`` in between, so on one event loop a write is never interleaved with
@@ -24,7 +26,7 @@ import copy
 from collections import deque
 from dataclasses import dataclass, field
 from datetime import UTC, datetime
-from typing import TYPE_CHECKING, final
+from typing import TYPE_CHECKING, Final, final
 from uuid import uuid4
 
 from pydantic import TypeAdapter
@@ -39,7 +41,9 @@ from ai_assistant.core.types import (
     StoryActor,
     StoryChange,
     StoryCurrentPage,
+    StoryDecision,
     StoryEntry,
+    StoryFlagName,
     StoryHeader,
     StoryLogLine,
     StoryLogPage,
@@ -97,8 +101,30 @@ def _checked_write(actor: object, trigger: object) -> tuple[StoryActor, str | No
     return StoryActor(actor), None if trigger is None else _checked_id(trigger)
 
 
+#: How many stories understanding's lines for one activation must stand on to make a
+#: flag (ADR-0302 §2:2).
+_TWO_STORIES: Final = 2
+
+
 def _unique[T](items: Sequence[T]) -> list[T]:
     return list(dict.fromkeys(items))
+
+
+def _answers(answers: object) -> StoryFlagName | None:
+    """Snapshot the flag a write answers by revalidation, or ``None`` for none."""
+    if answers is None:
+        return None
+    if not isinstance(answers, StoryFlagName):
+        msg = f"a write answers a StoryFlagName, got {type(answers).__name__}"
+        raise ValueError(msg)
+    return StoryFlagName.model_validate(answers.model_dump())
+
+
+def _grouping(members: Sequence[StoryMember], answers: StoryFlagName | None) -> None:
+    """Refuse an activation member on a create or a link answering a flag (ADR-0302 §4:3)."""
+    if answers is not None and any(m.kind is not StoryMemberKind.STORY for m in members):
+        msg = "a create or a link answering a flag names story members only"
+        raise ValueError(msg)
 
 
 # The page's argument checks and its cap rule, held here as the durable store holds
@@ -195,6 +221,30 @@ class _State:
     notes: dict[int, _Held] = field(default_factory=dict)
     pages: dict[str, StoryCurrentPage] = field(default_factory=dict)
     versions: list[tuple[str, StoryPageVersion]] = field(default_factory=list)
+
+
+def _not_held(state: _State, story_id: str, draft: StoryPageDraft) -> StoryPageRefusal | None:
+    """The first thing a draft rests on or takes in that its story does not hold (ADR-0302 §7).
+
+    The safety-net notes in the draft's order, then the episodes taken in, then the
+    notes taken in, each against what the story holds as the write runs.
+    """
+    entries = state.stories[story_id].entries
+    for activation in (
+        *(note.rests_on for note in draft.safety_net),
+        *draft.took_in_episodes,
+    ):
+        if StoryMember(kind=StoryMemberKind.ACTIVATION, id=activation) not in entries:
+            return StoryPageRefusal(
+                reason=StoryPageRefusalReason.NOT_HELD, story_id=story_id, activation=activation
+            )
+    for note_id in draft.took_in_notes:
+        held = state.notes.get(note_id)
+        if held is None or held.story_id != story_id:
+            return StoryPageRefusal(
+                reason=StoryPageRefusalReason.NOT_HELD, story_id=story_id, note=note_id
+            )
+    return None
 
 
 @dataclass(frozen=True)
@@ -310,6 +360,7 @@ class FakeStoryStore:
         *,
         member: StoryMember | None = None,
         other: str | None = None,
+        decision: tuple[StoryFlagName, StoryDecision] | None = None,
     ) -> int:
         state.sequence += 1
         state.log.append(
@@ -322,9 +373,77 @@ class FakeStoryStore:
                 actor=stamp.actor,
                 trigger=stamp.trigger,
                 at=stamp.at,
+                answers=None if decision is None else decision[0],
+                outcome=None if decision is None else decision[1],
             )
         )
         return state.sequence
+
+    # --- decisions on flags (ADR-0302 §§2-4) ---------------------------------
+
+    @staticmethod
+    def _followed(state: _State, story_id: str) -> str:
+        """The story ``story_id`` was merged into, through every merge, or itself."""
+        seen = {story_id}
+        while (onward := state.stories[story_id].merged_into) is not None:
+            if onward in seen:  # pragma: no cover — a merged story is never merged into
+                msg = f"story {story_id!r} is merged into a chain that loops"
+                raise StoryStoreError(msg)
+            seen.add(onward)
+            story_id = onward
+        return story_id
+
+    @staticmethod
+    def _raised_on(state: _State, activation: str) -> list[str]:
+        """The stories holding understanding's lines for ``activation``, by first line."""
+        member = StoryMember(kind=StoryMemberKind.ACTIVATION, id=activation)
+        return _unique(
+            [
+                line.story_id
+                for line in state.log
+                if line.change is StoryChange.ADDED
+                and line.member == member
+                and line.actor is StoryActor.UNDERSTANDING
+                and line.trigger == activation
+            ]
+        )
+
+    def _flag_refusal(self, state: _State, flag: StoryFlagName) -> StoryRefusal | None:
+        """``unknown_flag``, then ``already_decided`` (ADR-0302 §4:4, §4:5)."""
+        if flag.activation is not None:
+            held = len(self._raised_on(state, flag.activation)) >= _TWO_STORIES
+        else:
+            held = any(
+                story_id == flag.story
+                and version.version == flag.version
+                and flag.flag in version.flags
+                for story_id, version in state.versions
+            )
+        if not held:
+            return StoryRefusal(reason=StoryRefusalReason.UNKNOWN_FLAG, flag=flag)
+        if any(line.change is StoryChange.DECIDED and line.answers == flag for line in state.log):
+            return StoryRefusal(reason=StoryRefusalReason.ALREADY_DECIDED, flag=flag)
+        return None
+
+    def _concerned(self, state: _State, flag: StoryFlagName) -> list[str]:
+        """The stories a flag concerns, followed through merges, each once (§2:3)."""
+        if flag.activation is not None:
+            raised = self._raised_on(state, flag.activation)
+        else:
+            assert flag.story is not None  # noqa: S101 — the model's own rule
+            assert flag.flag is not None  # noqa: S101 — the model's own rule
+            raised = [flag.story] if flag.flag.story is None else [flag.story, flag.flag.story]
+        return _unique([self._followed(state, story_id) for story_id in raised])
+
+    def _decide(
+        self, state: _State, flag: StoryFlagName, outcome: StoryDecision, stamp: _Stamp
+    ) -> list[str]:
+        """Write one ``decided`` line on each story the flag concerns (§3:4)."""
+        decided = _Stamp(actor=stamp.actor, trigger=None, at=stamp.at)
+        concerned = self._concerned(state, flag)
+        for story_id in concerned:
+            self._append(state, story_id, StoryChange.DECIDED, decided, decision=(flag, outcome))
+        return concerned
 
     def _add(self, state: _State, story_id: str, member: StoryMember, stamp: _Stamp) -> None:
         position = self._append(state, story_id, StoryChange.ADDED, stamp, member=member)
@@ -379,21 +498,27 @@ class FakeStoryStore:
         *,
         actor: StoryActor,
         trigger: Identifier | None = None,
+        answers: StoryFlagName | None = None,
     ) -> StoryOutcome:
-        """Mint a story holding ``members`` (ADR-0289 §3)."""
+        """Mint a story holding ``members`` (ADR-0289 §3, ADR-0302 §4)."""
         named = story_members(members)
         checked_actor, checked_trigger = _checked_write(actor, trigger)
+        flag = _answers(answers)
+        _grouping(named, flag)
         if not named:
             return StoryOutcome(refusal=StoryRefusal(reason=StoryRefusalReason.NO_MEMBERS))
         state = self._state
         if refused := self._members_refusal(state, named):
+            return StoryOutcome(refusal=refused)
+        if flag is not None and (refused := self._flag_refusal(state, flag)):
             return StoryOutcome(refusal=refused)
         stamp = self._stamp(checked_actor, checked_trigger)
         story_id = self._mint(state, stamp)
         unique = _unique(named)
         for member in unique:
             self._add(state, story_id, member, stamp)
-        return StoryOutcome(story_id=story_id, logged=1 + len(unique))
+        decided = [] if flag is None else self._decide(state, flag, StoryDecision.GROUPED, stamp)
+        return StoryOutcome(story_id=story_id, logged=1 + len(unique) + len(decided))
 
     async def link(
         self,
@@ -402,11 +527,14 @@ class FakeStoryStore:
         *,
         actor: StoryActor,
         trigger: Identifier | None = None,
+        answers: StoryFlagName | None = None,
     ) -> StoryOutcome:
-        """Add ``members`` to a story (ADR-0289 §3)."""
+        """Add ``members`` to a story (ADR-0289 §3, ADR-0302 §4)."""
         target = _checked_id(story_id)
         named = story_members(members)
         checked_actor, checked_trigger = _checked_write(actor, trigger)
+        flag = _answers(answers)
+        _grouping(named, flag)
         if not named:
             return StoryOutcome(refusal=StoryRefusal(reason=StoryRefusalReason.NO_MEMBERS))
         state = self._state
@@ -425,10 +553,13 @@ class FakeStoryStore:
                             loop=(target, *chain[:-1]),
                         )
                     )
+        if flag is not None and (refused := self._flag_refusal(state, flag)):
+            return StoryOutcome(refusal=refused)
         stamp = self._stamp(checked_actor, checked_trigger)
         for member in fresh:
             self._add(state, target, member, stamp)
-        return StoryOutcome(story_id=target, logged=len(fresh))
+        decided = [] if flag is None else self._decide(state, flag, StoryDecision.GROUPED, stamp)
+        return StoryOutcome(story_id=target, logged=len(fresh) + len(decided))
 
     async def unlink(
         self,
@@ -461,11 +592,13 @@ class FakeStoryStore:
         *,
         actor: StoryActor,
         trigger: Identifier | None = None,
+        answers: StoryFlagName | None = None,
     ) -> StoryOutcome:
         """Merge story ``story_id`` into story ``into`` (ADR-0289 §3, ADR-0300 §3)."""
         absorbed = _checked_id(story_id)
         target = _checked_id(into)
         checked_actor, checked_trigger = _checked_write(actor, trigger)
+        flag = _answers(answers)
         if refused := self._story_refusal(self._state, absorbed) or self._story_refusal(
             self._state, target
         ):
@@ -474,6 +607,9 @@ class FakeStoryStore:
             return StoryOutcome(
                 refusal=StoryRefusal(reason=StoryRefusalReason.SELF_MERGE, story_id=absorbed)
             )
+        # The flag is read off the records before the merge writes anything, and
+        # reported only after the merge's own loop check (ADR-0302 §4:5).
+        flag_refused = None if flag is None else self._flag_refusal(self._state, flag)
         stamp = self._stamp(checked_actor, checked_trigger)
         # Applied to a copy and kept only if no loop closed, so a refusal writes nothing.
         state = copy.deepcopy(self._state)
@@ -481,6 +617,10 @@ class FakeStoryStore:
             logged = self._merge_writes(state, absorbed, target, stamp)
         except _Refused as refused_merge:
             return StoryOutcome(refusal=refused_merge.refusal)
+        if flag_refused is not None:
+            return StoryOutcome(refusal=flag_refused)
+        if flag is not None:
+            logged += len(self._decide(state, flag, StoryDecision.MERGED, stamp))
         self._state = state
         return StoryOutcome(story_id=target, logged=logged)
 
@@ -530,7 +670,7 @@ class FakeStoryStore:
                 )
         return logged
 
-    async def split(
+    async def split(  # noqa: PLR0913 — ADR-0302 §4:2 adds ``answers`` as a keyword to this operation
         self,
         story_id: Identifier,
         members: Sequence[StoryMember],
@@ -538,12 +678,14 @@ class FakeStoryStore:
         actor: StoryActor,
         trigger: Identifier | None = None,
         notes: Sequence[StoryNoteId] = (),
+        answers: StoryFlagName | None = None,
     ) -> StoryOutcome:
         """Move a non-empty subset of a story's members into a new story (ADR-0289 §3)."""
         source = _checked_id(story_id)
         named = story_members(members)
         checked_actor, checked_trigger = _checked_write(actor, trigger)
         named_notes = story_note_ids(notes)
+        flag = _answers(answers)
         if not named:
             return StoryOutcome(refusal=StoryRefusal(reason=StoryRefusalReason.NO_MEMBERS))
         state = self._state
@@ -569,6 +711,8 @@ class FakeStoryStore:
                 and note.note.author is StoryNoteAuthor.OWNER
             ):
                 carried.add(note_id)
+        if flag is not None and (refused := self._flag_refusal(state, flag)):
+            return StoryOutcome(refusal=refused)
         stamp = self._stamp(checked_actor, checked_trigger)
         split_off = self._mint(state, stamp)
         self._append(state, source, StoryChange.SPLIT_OFF, stamp, other=split_off)
@@ -577,9 +721,10 @@ class FakeStoryStore:
             self._remove(state, source, member, stamp)
             self._add(state, split_off, member, stamp)
         self._carry(state, sorted(carried), split_off)
-        return StoryOutcome(story_id=split_off, logged=3 + 2 * len(moved))
+        decided = [] if flag is None else self._decide(state, flag, StoryDecision.SPLIT, stamp)
+        return StoryOutcome(story_id=split_off, logged=3 + 2 * len(moved) + len(decided))
 
-    async def move(
+    async def move(  # noqa: PLR0913 — ADR-0302 §4:2 adds ``answers`` as a keyword to this operation
         self,
         story_id: Identifier,
         to: Identifier,
@@ -587,12 +732,14 @@ class FakeStoryStore:
         *,
         actor: StoryActor,
         trigger: Identifier | None = None,
+        answers: StoryFlagName | None = None,
     ) -> StoryOutcome:
         """Move activation members from one story to another (ADR-0300 §3)."""
         source = _checked_id(story_id)
         target = _checked_id(to)
         named = _move_members(source, target, members)
         checked_actor, checked_trigger = _checked_write(actor, trigger)
+        flag = _answers(answers)
         if not named:
             return StoryOutcome(refusal=StoryRefusal(reason=StoryRefusalReason.NO_MEMBERS))
         state = self._state
@@ -609,6 +756,8 @@ class FakeStoryStore:
         moving = set(named)
         moved = [member for member in held if member in moving]
         carried = self._notes_resting_on(state, source, {m.id for m in moved})
+        if flag is not None and (refused := self._flag_refusal(state, flag)):
+            return StoryOutcome(refusal=refused)
         stamp = self._stamp(checked_actor, checked_trigger)
         logged = 0
         for member in moved:
@@ -619,7 +768,22 @@ class FakeStoryStore:
             self._add(state, target, member, stamp)
             logged += 1
         self._carry(state, carried, target)
+        if flag is not None:
+            logged += len(self._decide(state, flag, StoryDecision.MOVED, stamp))
         return StoryOutcome(story_id=target, logged=logged)
+
+    async def leave_flag(self, flag: StoryFlagName, *, actor: StoryActor) -> StoryOutcome:
+        """Record a decision to leave the stories a flag concerns as they are (ADR-0302 §4:1)."""
+        checked = _answers(flag)
+        if checked is None:
+            msg = "leave_flag takes the flag it decides"
+            raise ValueError(msg)
+        checked_actor, _ = _checked_write(actor, None)
+        state = self._state
+        if refused := self._flag_refusal(state, checked):
+            return StoryOutcome(refusal=refused)
+        decided = self._decide(state, checked, StoryDecision.LEFT, self._stamp(checked_actor, None))
+        return StoryOutcome(story_id=decided[0], logged=len(decided))
 
     # --- the page: writes (ADR-0300 §3) --------------------------------------
 
@@ -708,6 +872,8 @@ class FakeStoryStore:
                 return StoryPageRefusal(
                     reason=StoryPageRefusalReason.UNKNOWN_STORY, story_id=flag.story
                 )
+        if refused := _not_held(state, story_id, draft):
+            return refused
         if _page_size(draft, owners) > STORY_PAGE_CAP_CHARS:
             return StoryPageRefusal(reason=StoryPageRefusalReason.OVER_CAP, story_id=story_id)
         return None

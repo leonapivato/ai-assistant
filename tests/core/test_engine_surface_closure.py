@@ -372,6 +372,12 @@ PROMOTED: Final[frozenset[str]] = frozenset(
         "StoryLogPage",
         "StoryLogLine",
         "StoryPage",
+        # ADR-0302 §3's ``decided`` line, which the story log carries: the flag it
+        # answers, by identity, and the outcome.
+        "StoryFlagName",
+        "StoryFlag",
+        "StoryFlagKind",
+        "StoryDecision",
         # ADR-0300 §8's four story commands, and the types they carry: the page as the
         # owner is shown it with its lines and notes, a note's outcome and its page
         # refusal, and where the matter stands. ``StoryPageState`` and the version log
@@ -1539,6 +1545,14 @@ def test_the_promoted_surface_and_the_protocol_version_are_both_pinned() -> None
     an operation a hub at 83 does not answer. The page's types and ``StoryStanding``
     first cross the wire with them (§12:2).
 
+    **85 is ADR-0302 §8:1, on wire-carried core types.** ``StoryChange`` gains
+    ``decided``, and ``StoryLogLine`` the flag and the outcome a ``decided`` line
+    carries, on the engine's story log; ``StoryRefusalReason`` gains ``unknown_flag``
+    and ``already_decided`` and ``StoryRefusal`` gains ``flag``, on its story writes;
+    and ``StoryPageRefusalReason`` gains ``not_held`` and ``StoryPageRefusal``
+    ``activation``, on the story commands. A peer at 84 refuses a line or a refusal a
+    hub at 85 may write. **The method set does not move and stays at 80.**
+
     **ADR-0124 §9 decides no mechanical check and creates none**, saying one is
     owed and leaving its shape open. This is not that check — it is a *pin*, and
     a deliberately crude one: it fails when either number moves, which is the
@@ -1547,7 +1561,7 @@ def test_the_promoted_surface_and_the_protocol_version_are_both_pinned() -> None
     """
     from ai_assistant.wire.envelope import PROTOCOL_VERSION  # noqa: PLC0415 — asserted about
 
-    assert (len(_method_names()), PROTOCOL_VERSION) == (80, 84), (
+    assert (len(_method_names()), PROTOCOL_VERSION) == (80, 85), (
         "the promoted method set and the protocol version are pinned together "
         "(ADR-0124 §9); move either and this pin makes you name the limb you are "
         "under — the method set, or a wire-carried core type"

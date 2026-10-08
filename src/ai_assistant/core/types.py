@@ -32594,6 +32594,35 @@ class StoryChange(StrEnum):
     SPLIT_OFF = "split_off"
     """A split moved members between this story and the one the line names."""
 
+    DECIDED = "decided"
+    """The matters pass decided a flag concerning this story (ADR-0302 §3); the line
+    names the flag it answers and the outcome, and no member or other story."""
+
+
+class StoryDecision(StrEnum):
+    """What a decision on a flag was (ADR-0302 §3:3), one for each of ADR-0300 §9:3's answers.
+
+    A **closed** enumeration, added to and never renamed. The outcome is tied to the
+    operation that makes the change (§4:2), so a line cannot record a merge where
+    nothing was merged.
+    """
+
+    MERGED = "merged"
+    """The stories were merged, by a merge answering the flag."""
+
+    SPLIT = "split"
+    """The story was split, by a split answering the flag."""
+
+    MOVED = "moved"
+    """Members were moved between stories, by a move answering the flag."""
+
+    GROUPED = "grouped"
+    """The stories were grouped under a larger one, by a create or a link answering
+    the flag."""
+
+    LEFT = "left"
+    """The decider changed no story (``StoryStore.leave_flag``)."""
+
 
 class StoryRefusalReason(StrEnum):
     """Why a write to the story store was refused (ADR-0289 §3).
@@ -32632,6 +32661,16 @@ class StoryRefusalReason(StrEnum):
     """A create or a link through the engine named an activation with no record at
     ``activation:<activation_id>`` (ADR-0289 §4). The refusal names the member.
     The store itself never answers this: it reads no other store (§1)."""
+
+    UNKNOWN_FLAG = "unknown_flag"
+    """A write answering a flag named no flag the store's records hold (ADR-0302
+    §4:4): no version of the story named recorded it, or no two stories hold
+    understanding's ``added`` lines for the activation named. The refusal names the
+    flag."""
+
+    ALREADY_DECIDED = "already_decided"
+    """A write answering a flag named one a ``decided`` line already answers
+    (ADR-0302 §4:4). The refusal names the flag."""
 
 
 class StoryHeader(BaseModel):
@@ -32684,14 +32723,90 @@ _STORY_OTHER_CHANGES: Final = frozenset(
 )
 
 
+# --- a flag, and the name a decision answers it by (ADR-0300 §9:2, ADR-0302 §2) ----
+#
+# :class:`StoryFlagKind` and :class:`StoryFlag` are declared here, ahead of
+# :class:`StoryLogLine`, because ADR-0302 §3 has a ``decided`` line name the flag it
+# answers. They used to sit in the page's section below; the rule above
+# :data:`Identifier` decides the move — a forward reference plus ``model_rebuild``
+# would have made a `core` type depend on an import-order side effect. Relocating a
+# type is not redefining it (ADR-0084 §4): nothing about either changed.
+
+
+class StoryFlagKind(StrEnum):
+    """What a tidy-up's flag says of the page it wrote (ADR-0300 §9:2).
+
+    A **closed** enumeration, added to and never renamed.
+    """
+
+    TWO_MATTERS = "two_matters"
+    """The page looks like two matters."""
+
+    LIKE_ANOTHER = "like_another"
+    """The page looks like another story, which the flag names."""
+
+
+class StoryFlag(BaseModel):
+    """A flag a tidy-up raised, by identity only (ADR-0300 §9:2).
+
+    ``story`` names the other story exactly on a ``like_another`` flag.
+    """
+
+    model_config = ConfigDict(frozen=True, extra="forbid")
+    kind: StoryFlagKind
+    story: Identifier | None = None
+
+    @model_validator(mode="after")
+    def _names_a_story_when_it_says_like_another(self) -> Self:
+        if (self.kind is StoryFlagKind.LIKE_ANOTHER) != (self.story is not None):
+            msg = "a flag names another story exactly when it says the page looks like one"
+            raise ValueError(msg)
+        return self
+
+
+class StoryFlagName(BaseModel):
+    """What names a flag, by identity only (ADR-0302 §2).
+
+    A flag a tidy-up raised is named by ``story``, the story whose page version
+    recorded it, ``version``, that version's number, and ``flag``, the flag as the
+    version records it. A flag understanding raised is named by ``activation``
+    alone: it exists where ``added`` lines naming that activation, with the actor
+    ``understanding`` and that activation as trigger, stand on two or more stories.
+    Exactly one of the two shapes is set. A flag raised in a later version is a
+    different flag from one raised in an earlier version, though its kind and the
+    story it names are the same (§2:4).
+    """
+
+    model_config = ConfigDict(frozen=True, extra="forbid")
+    story: Identifier | None = None
+    version: int | None = Field(default=None, strict=True, ge=1, lt=_STORY_POSITION_BOUND)
+    flag: StoryFlag | None = None
+    activation: Identifier | None = None
+
+    @model_validator(mode="after")
+    def _names_one_flag(self) -> Self:
+        tidy_up = (self.story, self.version, self.flag)
+        if self.activation is not None:
+            if any(part is not None for part in tidy_up):
+                msg = "a flag is named by its activation alone, or by its story's version"
+                raise ValueError(msg)
+        elif any(part is None for part in tidy_up):
+            msg = "a tidy-up's flag is named by its story, the version and the flag"
+            raise ValueError(msg)
+        return self
+
+
 class StoryLogLine(BaseModel):
     """One line of a story's change log: identities only (ADR-0289 §2).
 
     ``sequence`` is unique across the store. ``member`` is present exactly on an
     ``added`` or ``removed`` line, and ``other_story`` exactly on a ``merged_into``,
     ``absorbed`` or ``split_off`` line. ``trigger`` is the activation that
-    triggered the change, where there was one. No field holds free text, and no
-    line is ever rewritten or removed.
+    triggered the change, where there was one. ``answers`` and ``outcome`` are
+    present exactly on a ``decided`` line (ADR-0302 §3:2): the flag it answers, by
+    the name §2 gives it, and what the decision was; a ``decided`` line names no
+    member and no other story and carries no trigger. No field holds free text, and
+    no line is ever rewritten or removed.
     """
 
     model_config = ConfigDict(frozen=True, extra="forbid")
@@ -32703,6 +32818,8 @@ class StoryLogLine(BaseModel):
     actor: StoryActor
     trigger: Identifier | None
     at: UtcInstant
+    answers: StoryFlagName | None = None
+    outcome: StoryDecision | None = None
 
     @model_validator(mode="after")
     def _names_what_its_change_names(self) -> Self:
@@ -32711,6 +32828,13 @@ class StoryLogLine(BaseModel):
             raise ValueError(msg)
         if (self.other_story is not None) != (self.change in _STORY_OTHER_CHANGES):
             msg = "a story log line names another story exactly on a merge or a split"
+            raise ValueError(msg)
+        decided = self.change is StoryChange.DECIDED
+        if (self.answers is not None) != decided or (self.outcome is not None) != decided:
+            msg = "a story log line names a flag and an outcome exactly when it records a decision"
+            raise ValueError(msg)
+        if decided and self.trigger is not None:
+            msg = "a decision's line carries no trigger"
             raise ValueError(msg)
         return self
 
@@ -32745,6 +32869,8 @@ class StoryRefusal(BaseModel):
     names the member at fault for ``not_a_member`` and ``unknown_activation``.
     ``loop`` names the stories forming the loop, in containment order starting at
     the story that would have contained itself, and is empty for every other reason.
+    ``flag`` names the flag a write answering one was refused over, set exactly on
+    ``unknown_flag`` and ``already_decided`` (ADR-0302 §4:4).
     """
 
     model_config = ConfigDict(frozen=True, extra="forbid")
@@ -32753,6 +32879,7 @@ class StoryRefusal(BaseModel):
     merged_into: Identifier | None = None
     member: StoryMember | None = None
     loop: tuple[Identifier, ...] = ()
+    flag: StoryFlagName | None = None
 
     @model_validator(mode="after")
     def _names_what_its_reason_needs(self) -> Self:
@@ -32778,6 +32905,13 @@ class StoryRefusal(BaseModel):
         if needs_member != (self.member is not None):
             msg = "a story refusal names a member exactly when the member is at fault"
             raise ValueError(msg)
+        needs_flag = reason in {
+            StoryRefusalReason.UNKNOWN_FLAG,
+            StoryRefusalReason.ALREADY_DECIDED,
+        }
+        if needs_flag != (self.flag is not None):
+            msg = "a story refusal names a flag exactly when the flag is at fault"
+            raise ValueError(msg)
         return self
 
 
@@ -32789,7 +32923,9 @@ class StoryOutcome(BaseModel):
     written by a link or an unlink, the one merged into by a merge, and the one moved
     to by a move (ADR-0300 §3:14) — and says
     how many change-log lines it appended, which is ``0`` where every member it
-    named was passed over. A refused write appended nothing.
+    named was passed over. A write answering a flag counts its ``decided`` lines
+    among them, and a ``leave_flag`` names the first story it wrote a line on
+    (ADR-0302 §4:1). A refused write appended nothing.
     """
 
     model_config = ConfigDict(frozen=True, extra="forbid")
@@ -33022,37 +33158,6 @@ class StorySupersession(BaseModel):
     episode: Identifier
 
 
-class StoryFlagKind(StrEnum):
-    """What a tidy-up's flag says of the page it wrote (ADR-0300 §9:2).
-
-    A **closed** enumeration, added to and never renamed.
-    """
-
-    TWO_MATTERS = "two_matters"
-    """The page looks like two matters."""
-
-    LIKE_ANOTHER = "like_another"
-    """The page looks like another story, which the flag names."""
-
-
-class StoryFlag(BaseModel):
-    """A flag a tidy-up raised, by identity only (ADR-0300 §9:2).
-
-    ``story`` names the other story exactly on a ``like_another`` flag.
-    """
-
-    model_config = ConfigDict(frozen=True, extra="forbid")
-    kind: StoryFlagKind
-    story: Identifier | None = None
-
-    @model_validator(mode="after")
-    def _names_a_story_when_it_says_like_another(self) -> Self:
-        if (self.kind is StoryFlagKind.LIKE_ANOTHER) != (self.story is not None):
-            msg = "a flag names another story exactly when it says the page looks like one"
-            raise ValueError(msg)
-        return self
-
-
 class StoryPageVersion(BaseModel):
     """One version of a story's page, in the append-only version log (ADR-0300 §3:7).
 
@@ -33214,13 +33319,20 @@ class StoryPageRefusalReason(StrEnum):
     """The page's lines that are not the user's own notes exceed
     :data:`STORY_PAGE_CAP_CHARS`."""
 
+    NOT_HELD = "not_held"
+    """The write added a safety-net note resting on an activation the story does not
+    hold, or named as taken in an episode or a note the story does not hold, when
+    the write ran (ADR-0302 §7). The refusal names the activation or the note."""
+
 
 class StoryPageRefusal(BaseModel):
     """Why a write to a story's page was refused, and what over (ADR-0300 §3).
 
     ``story_id`` names the story the refusal is about: the story written to, or the
-    unknown story a flag names. ``merged_into`` is set exactly on ``merged_story``,
-    and ``note`` exactly on ``unknown_note``.
+    unknown story a flag names. ``merged_into`` is set exactly on ``merged_story``.
+    ``note`` is set on ``unknown_note`` and on a ``not_held`` naming a note, and
+    ``activation`` exactly on a ``not_held`` naming an activation; a ``not_held``
+    names one of the two, never both (ADR-0302 §7:3).
     """
 
     model_config = ConfigDict(frozen=True, extra="forbid")
@@ -33228,14 +33340,24 @@ class StoryPageRefusal(BaseModel):
     story_id: Identifier
     merged_into: Identifier | None = None
     note: StoryNoteId | None = None
+    activation: Identifier | None = None
 
     @model_validator(mode="after")
     def _names_what_its_reason_needs(self) -> Self:
-        if (self.reason is StoryPageRefusalReason.MERGED_STORY) != (self.merged_into is not None):
+        reason = self.reason
+        if (reason is StoryPageRefusalReason.MERGED_STORY) != (self.merged_into is not None):
             msg = "a page refusal names a merge target exactly when it refuses a merged story"
             raise ValueError(msg)
-        if (self.reason is StoryPageRefusalReason.UNKNOWN_NOTE) != (self.note is not None):
+        if reason is StoryPageRefusalReason.NOT_HELD:
+            if (self.note is None) == (self.activation is None):
+                msg = "a not_held refusal names the activation or the note, never both"
+                raise ValueError(msg)
+            return self
+        if (reason is StoryPageRefusalReason.UNKNOWN_NOTE) != (self.note is not None):
             msg = "a page refusal names a note exactly when it refuses an unknown one"
+            raise ValueError(msg)
+        if self.activation is not None:
+            msg = "a page refusal names an activation only when the story does not hold it"
             raise ValueError(msg)
         return self
 
