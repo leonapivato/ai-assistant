@@ -313,7 +313,7 @@ class TestHubEngineClientContract(AssistantEngineContract):
             tmp_path / "hub.sock",
             max_frame_bytes=STORY_LIMIT + ENVELOPE_RESERVE_BYTES,
         ) as client:
-            yield StorySurfaceSubject(engine=client, memory=memory)
+            yield StorySurfaceSubject(engine=client, memory=memory, stories=backing.story_store)
 
     @pytest.fixture
     async def episode_inspection(self, tmp_path: Path) -> AsyncIterator[EpisodeInspectionSubject]:
