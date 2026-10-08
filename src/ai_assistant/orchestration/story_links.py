@@ -111,9 +111,10 @@ class Candidates:
         views: The candidates' short views, in §6:1's order.
         unreadable: A story-store read raised ``StoryStoreError``, so there are no
             candidates and the section says the stories could not be read (§6:4).
-        fetched: The ids of the latest episodes the views were fetched for, in order,
-            each once (ADR-0282 §2:7). Each was admitted for the pass when it was
-            chosen, so no id the audience predicate refuses enters here (§2:8).
+        fetched: The ids the views were fetched for — the latest episodes chosen, then
+            the episodes the notes rest on — in order, each once (ADR-0282 §2:7). Each
+            was admitted for the pass when it was chosen, so no id the audience
+            predicate refuses enters here (§2:8).
         missing: The fetched ids that came back with no episode, an open one, or one
             the predicate refused on the second application (§2:6, §2:8).
     """
@@ -134,14 +135,17 @@ class _Read:
     notes: tuple[StoryNote, ...]
     members: tuple[str, ...]
 
-    def addresses(self) -> list[str]:
-        """The episodes this view's privacy and its choice of episodes read, in order."""
-        rests = [
-            note.rests_on
+    def supports(self) -> list[str]:
+        """The episodes this view's notes rest on, which decide what of it is shown."""
+        return [
+            episode_address(note.rests_on)
             for note in (*self.cited.values(), *self.notes)
             if note.rests_on is not None
         ]
-        return [episode_address(activation) for activation in (*rests, *self.members)]
+
+    def addresses(self) -> list[str]:
+        """The episodes this view's privacy and its choice of episodes read, in order."""
+        return [*self.supports(), *(episode_address(member) for member in self.members)]
 
     def latest(self, admitted: dict[str, EpisodicMemory], *, episodes: int) -> tuple[str, ...]:
         """The ids of the latest ``episodes`` members by occurrence, among those admitted.
@@ -251,17 +255,28 @@ class StoryCandidates:
             return Candidates(unreadable=True)
         # ADR-0282 §2:5, §2:8: the reads that choose, and only admitted ids chosen. The
         # episodes the notes rest on and every member are read once, through the audience
-        # predicate: what is admitted decides what of each page may be shown (§11:1) and
-        # which members are the latest; nothing refused is chosen or recorded.
-        admitted = await self._admitted(
+        # predicate, to choose which members are the latest and which supporting episodes
+        # may be relied on; nothing refused is chosen or recorded.
+        chosen_from = await self._admitted(
             dict.fromkeys(address for read in reads for address in read.addresses()), audience
         )
-        visibility = PageVisibility.of(admitted.values(), owner_notes=admits_owner_placed(audience))
-        latest = [read.latest(admitted, episodes=self._episodes) for read in reads]
-        # §2:6-§2:8: the chosen ids fetched for their current versions, the predicate
-        # applied again, and what came back missing recorded beside what was fetched.
-        fetched = tuple(dict.fromkeys(id_ for ids in latest for id_ in ids))
+        latest = [read.latest(chosen_from, episodes=self._episodes) for read in reads]
+        supports = [address for read in reads for address in read.supports()]
+        # §2:6-§2:8: the chosen ids — the latest episodes and the admitted episodes the
+        # notes rest on — fetched for their current versions, the predicate applied
+        # again, and what came back missing recorded beside what was fetched. What of each
+        # page may be shown (§11:1) is decided from this fetch, not the choice: an
+        # episode forgotten or narrowed between the two withholds what rests on it.
+        fetched = tuple(
+            dict.fromkeys(
+                (
+                    *(id_ for ids in latest for id_ in ids),
+                    *(address for address in supports if address in chosen_from),
+                )
+            )
+        )
         held = await self._admitted(fetched, audience)
+        visibility = PageVisibility.of(held.values(), owner_notes=admits_owner_placed(audience))
         views = tuple(
             read.view(visibility, ids, held) for read, ids in zip(reads, latest, strict=True)
         )
