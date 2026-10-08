@@ -40,6 +40,7 @@ from pydantic import (
     ConfigDict,
     Field,
     NonNegativeInt,
+    PositiveInt,
     SecretStr,
     SerializerFunctionWrapHandler,
     TypeAdapter,
@@ -32873,7 +32874,7 @@ STORY_NOTE_MAX_CHARS: Final[int] = 2_000
 #: counted.
 STORY_PAGE_CAP_CHARS: Final[int] = 8_000
 
-type StoryNoteId = Annotated[int, Field(strict=True, ge=1, lt=_STORY_POSITION_BOUND)]
+type StoryNoteId = Annotated[PositiveInt, Field(strict=True, lt=_STORY_POSITION_BOUND)]
 """A note's identity: a number the story store assigns, unique across the store and
 ascending in the order notes are written, so a story's notes in identity order are
 its notes in the order they were written (ADR-0300 §3:1)."""
@@ -33096,7 +33097,9 @@ class StoryDraftLine(BaseModel):
     model_config = ConfigDict(frozen=True, extra="forbid")
     text: _StoryPageText
     cites: tuple[StoryNoteId, ...] = ()
-    cites_new: tuple[Annotated[int, Field(strict=True, ge=0, lt=_STORY_POSITION_BOUND)], ...] = ()
+    cites_new: tuple[
+        Annotated[NonNegativeInt, Field(strict=True, lt=_STORY_POSITION_BOUND)], ...
+    ] = ()
     outside: bool = Field(strict=True)
 
     @model_validator(mode="after")
