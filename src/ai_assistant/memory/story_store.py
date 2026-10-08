@@ -95,16 +95,12 @@ from ai_assistant.core.types import (
     check_story_page,
     describe_untrusted,
     story_members,
-    story_move_members,
-    story_note_args,
     story_note_ids,
-    story_page_draft,
-    story_page_size,
 )
 from ai_assistant.memory._transactions import transaction
 
 if TYPE_CHECKING:
-    from collections.abc import Callable, Sequence
+    from collections.abc import Callable, Mapping, Sequence
     from contextlib import AbstractContextManager
 
     from ai_assistant.core.clock import Clock
@@ -329,6 +325,89 @@ def _checked_write(actor: object, trigger: object) -> tuple[StoryActor, str | No
 def _unique[T](items: Sequence[T]) -> list[T]:
     """The items in the order given, each once."""
     return list(dict.fromkeys(items))
+
+
+# The page's argument checks and its cap rule. Held by each implementation rather
+# than in ``core/types.py``: they are this contract's admission rules, not semantics
+# intrinsic to the types they read (ADR-0016 §2), and the canonical fake holds its
+# own copy, which the conformance suite keeps in step with this one.
+
+
+def _note_args(
+    text: object, *, author: object, rests_on: object, outside: object
+) -> tuple[str, StoryNoteAuthor, str | None, bool]:
+    """Check a note an append writes, as :class:`StoryNote` checks one it holds.
+
+    A tidy-up's notes are written with its page and never appended on their own
+    (ADR-0300 §5:4), so ``tidy_up`` is refused here.
+
+    Raises:
+        ValueError: If any of them is malformed, the author is ``tidy_up``, or the
+            resting or the mark is one the author does not admit.
+    """
+    if not isinstance(author, str):
+        msg = f"a note's author must be a StoryNoteAuthor, got {type(author).__name__}"
+        raise ValueError(msg)
+    if StoryNoteAuthor(author) is StoryNoteAuthor.TIDY_UP:
+        msg = "a tidy-up's notes are written with its page, never appended"
+        raise ValueError(msg)
+    checked = StoryNote(
+        note_id=1,
+        text=text,  # type: ignore[arg-type]  # validated by the model, which is the point
+        author=StoryNoteAuthor(author),
+        rests_on=rests_on,  # type: ignore[arg-type]  # validated by the model
+        outside=outside,  # type: ignore[arg-type]  # validated by the model
+        written_at=_EPOCH,
+    )
+    return checked.text, checked.author, checked.rests_on, checked.outside
+
+
+def _page_draft(story_id: str, draft: object) -> StoryPageDraft:
+    """Snapshot a page write's draft by revalidation, as :func:`story_members` does.
+
+    Raises:
+        ValueError: If it is not a :class:`StoryPageDraft`, or a flag names the
+            story written.
+    """
+    if not isinstance(draft, StoryPageDraft):
+        msg = f"a page write takes a StoryPageDraft, got {type(draft).__name__}"
+        raise ValueError(msg)
+    snapshot = StoryPageDraft.model_validate(draft.model_dump())
+    if any(flag.story == story_id for flag in snapshot.flags):
+        msg = "a flag names another story, never the one whose page it is raised on"
+        raise ValueError(msg)
+    return snapshot
+
+
+def _move_members(source: str, target: str, members: object) -> tuple[StoryMember, ...]:
+    """Snapshot a move's members, refusing what a move cannot carry (ADR-0300 §3:14).
+
+    Raises:
+        ValueError: If the two stories are the same, ``members`` is malformed, or a
+            member named is a story: a move carries activation members only.
+    """
+    if source == target:
+        msg = "a move is from one story to another"
+        raise ValueError(msg)
+    named = story_members(members)
+    if any(member.kind is not StoryMemberKind.ACTIVATION for member in named):
+        msg = "a move carries activation members only"
+        raise ValueError(msg)
+    return named
+
+
+def _page_size(draft: StoryPageDraft, owner_notes: Mapping[int, str]) -> int:
+    """The characters a draft's lines count against ``STORY_PAGE_CAP_CHARS``.
+
+    Every line counts except the user's own notes: a line citing a note ``owner``
+    wrote, given in ``owner_notes`` by identity with its text, whose text is that
+    note's unchanged (ADR-0300 §3:9, §3:17).
+    """
+    return sum(
+        len(line.text)
+        for line in draft.lines
+        if not any(owner_notes.get(note) == line.text for note in line.cites)
+    )
 
 
 class SqliteStoryStore:
@@ -930,7 +1009,7 @@ class SqliteStoryStore:
         """Move activation members from one story to another (ADR-0300 §3)."""
         source = _checked_id(story_id)
         target = _checked_id(to)
-        named = story_move_members(source, target, members)
+        named = _move_members(source, target, members)
         checked_actor, checked_trigger = _checked_write(actor, trigger)
         return await self._locked(
             self._move_sync, source, target, named, checked_actor, checked_trigger
@@ -986,7 +1065,7 @@ class SqliteStoryStore:
     ) -> StoryNoteOutcome:
         """Write a note to a story's page, pending there (ADR-0300 §3)."""
         target = _checked_id(story_id)
-        checked = story_note_args(text, author=author, rests_on=rests_on, outside=outside)
+        checked = _note_args(text, author=author, rests_on=rests_on, outside=outside)
         return await self._locked(self._append_note_sync, target, *checked)
 
     def _append_note_sync(
@@ -1056,7 +1135,7 @@ class SqliteStoryStore:
     ) -> StoryPageOutcome:
         """Write a new current page with its safety-net notes and its version."""
         target = _checked_id(story_id)
-        checked = story_page_draft(target, draft)
+        checked = _page_draft(target, draft)
         basis = check_story_as_of(as_of)
         return await self._locked(self._write_page_sync, target, checked, basis)
 
@@ -1100,7 +1179,7 @@ class SqliteStoryStore:
                 return StoryPageRefusal(
                     reason=StoryPageRefusalReason.UNKNOWN_STORY, story_id=flag.story
                 )
-        if story_page_size(draft, owners) > STORY_PAGE_CAP_CHARS:
+        if _page_size(draft, owners) > STORY_PAGE_CAP_CHARS:
             return StoryPageRefusal(reason=StoryPageRefusalReason.OVER_CAP, story_id=story_id)
         return None
 

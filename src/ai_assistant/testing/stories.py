@@ -66,15 +66,11 @@ from ai_assistant.core.types import (
     check_story_as_of,
     check_story_page,
     story_members,
-    story_move_members,
-    story_note_args,
     story_note_ids,
-    story_page_draft,
-    story_page_size,
 )
 
 if TYPE_CHECKING:
-    from collections.abc import Callable, Sequence
+    from collections.abc import Callable, Mapping, Sequence
 
     from ai_assistant.core.clock import Clock
 
@@ -103,6 +99,65 @@ def _checked_write(actor: object, trigger: object) -> tuple[StoryActor, str | No
 
 def _unique[T](items: Sequence[T]) -> list[T]:
     return list(dict.fromkeys(items))
+
+
+# The page's argument checks and its cap rule, held here as the durable store holds
+# its own: they are the contract's admission rules, not semantics intrinsic to the
+# types (ADR-0016 §2), and the conformance suite keeps the two copies in step.
+
+
+def _note_args(
+    text: object, *, author: object, rests_on: object, outside: object
+) -> tuple[str, StoryNoteAuthor, str | None, bool]:
+    """Check a note an append writes; a tidy-up's are never appended (ADR-0300 §5:4)."""
+    if not isinstance(author, str):
+        msg = f"a note's author must be a StoryNoteAuthor, got {type(author).__name__}"
+        raise ValueError(msg)
+    if StoryNoteAuthor(author) is StoryNoteAuthor.TIDY_UP:
+        msg = "a tidy-up's notes are written with its page, never appended"
+        raise ValueError(msg)
+    checked = StoryNote(
+        note_id=1,
+        text=text,  # type: ignore[arg-type]  # validated by the model, which is the point
+        author=StoryNoteAuthor(author),
+        rests_on=rests_on,  # type: ignore[arg-type]  # validated by the model
+        outside=outside,  # type: ignore[arg-type]  # validated by the model
+        written_at=datetime(1970, 1, 1, tzinfo=UTC),
+    )
+    return checked.text, checked.author, checked.rests_on, checked.outside
+
+
+def _page_draft(story_id: str, draft: object) -> StoryPageDraft:
+    """Snapshot a page write's draft by revalidation, refusing a flag on its own story."""
+    if not isinstance(draft, StoryPageDraft):
+        msg = f"a page write takes a StoryPageDraft, got {type(draft).__name__}"
+        raise ValueError(msg)
+    snapshot = StoryPageDraft.model_validate(draft.model_dump())
+    if any(flag.story == story_id for flag in snapshot.flags):
+        msg = "a flag names another story, never the one whose page it is raised on"
+        raise ValueError(msg)
+    return snapshot
+
+
+def _move_members(source: str, target: str, members: object) -> tuple[StoryMember, ...]:
+    """Snapshot a move's members: activation members, between two stories."""
+    if source == target:
+        msg = "a move is from one story to another"
+        raise ValueError(msg)
+    named = story_members(members)
+    if any(member.kind is not StoryMemberKind.ACTIVATION for member in named):
+        msg = "a move carries activation members only"
+        raise ValueError(msg)
+    return named
+
+
+def _page_size(draft: StoryPageDraft, owner_notes: Mapping[int, str]) -> int:
+    """The characters counted against the cap: every line but the user's own notes."""
+    return sum(
+        len(line.text)
+        for line in draft.lines
+        if not any(owner_notes.get(note) == line.text for note in line.cites)
+    )
 
 
 @dataclass
@@ -536,7 +591,7 @@ class FakeStoryStore:
         """Move activation members from one story to another (ADR-0300 §3)."""
         source = _checked_id(story_id)
         target = _checked_id(to)
-        named = story_move_members(source, target, members)
+        named = _move_members(source, target, members)
         checked_actor, checked_trigger = _checked_write(actor, trigger)
         if not named:
             return StoryOutcome(refusal=StoryRefusal(reason=StoryRefusalReason.NO_MEMBERS))
@@ -591,7 +646,7 @@ class FakeStoryStore:
     ) -> StoryNoteOutcome:
         """Write a note to a story's page, pending there (ADR-0300 §3)."""
         target = _checked_id(story_id)
-        checked_text, checked_author, checked_rests, checked_outside = story_note_args(
+        checked_text, checked_author, checked_rests, checked_outside = _note_args(
             text, author=author, rests_on=rests_on, outside=outside
         )
         if refused := self._page_refusal(target):
@@ -618,7 +673,7 @@ class FakeStoryStore:
     ) -> StoryPageOutcome:
         """Write a new current page with its safety-net notes and its version."""
         target = _checked_id(story_id)
-        checked = story_page_draft(target, draft)
+        checked = _page_draft(target, draft)
         basis = check_story_as_of(as_of)
         if refused := self._page_refusal(target):
             return StoryPageOutcome(refusal=refused)
@@ -653,7 +708,7 @@ class FakeStoryStore:
                 return StoryPageRefusal(
                     reason=StoryPageRefusalReason.UNKNOWN_STORY, story_id=flag.story
                 )
-        if story_page_size(draft, owners) > STORY_PAGE_CAP_CHARS:
+        if _page_size(draft, owners) > STORY_PAGE_CAP_CHARS:
             return StoryPageRefusal(reason=StoryPageRefusalReason.OVER_CAP, story_id=story_id)
         return None
 
