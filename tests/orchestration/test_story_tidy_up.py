@@ -425,6 +425,63 @@ async def test_a_users_note_is_superseded_only_by_an_episode_of_the_users_own_in
     assert (first["text"], "superseded" in first) == ("No Saturdays.", True)
 
 
+async def _superseding(stories: FakeStoryStore, memory: FakeMemoryStore, story_id: str) -> int:
+    """Write the user's "No Saturdays." on ``story_id`` and supersede it from ``a-1``."""
+    saturdays = await _note(stories, story_id, "No Saturdays.", author=StoryNoteAuthor.OWNER)
+    model = FakeModelProvider(
+        _reply(
+            [("Saturday's fine now.", ["T1"])],
+            safety_net=[("E1", "Saturday is fine now.")],
+            supersessions=[("N1", "E1")],
+        )
+    )
+    outcome = await _tidy_up(model, stories, memory).run(story_id)
+    assert outcome.version is not None
+    assert outcome.version.supersessions == (StorySupersession(note=saturdays, episode="a-1"),)
+    return saturdays
+
+
+async def test_a_note_superseded_before_a_merge_stays_superseded_after_it() -> None:
+    stories = _stories()
+    memory = await memory_of(episode("a-1", text="Saturday's fine now."))
+    absorbed = await _story(stories, "a-1")
+    into = await _story(stories, "a-1")
+    await _superseding(stories, memory, absorbed)
+    # The story merged into has already taken in the superseding episode.
+    first = FakeModelProvider(_reply([("A camping trip.", ["T1"])], safety_net=[("E1", "Trip.")]))
+    assert (await _tidy_up(first, stories, memory).run(into)).result is TidyUpResult.WRITTEN
+    await stories.merge(absorbed, into, actor=StoryActor.OWNER)
+    model = FakeModelProvider(_reply([("A camping trip.", ["N1"])]))
+
+    outcome = await _tidy_up(model, stories, memory).run(into)
+
+    assert outcome.result is TidyUpResult.WRITTEN
+    shown = {note["text"]: note for note in _shown(model)["notes"]}
+    assert "superseded" in shown["No Saturdays."]
+    assert _shown(model)["episodes"] == []
+
+
+async def test_a_note_superseded_before_a_split_stays_superseded_after_it() -> None:
+    stories = _stories()
+    memory = await memory_of(episode("a-1", text="Saturday's fine now."), episode("a-2"))
+    trip = await _story(stories, "a-1", "a-2")
+    # Take a-2 in first, so the superseding run reads a-1 alone, as E1.
+    await stories.unlink(trip, [activation("a-2")], actor=StoryActor.OWNER)
+    saturdays = await _superseding(stories, memory, trip)
+    await stories.link(trip, [activation("a-2")], actor=StoryActor.OWNER)
+    split = await stories.split(
+        trip, [activation("a-2")], actor=StoryActor.OWNER, notes=[saturdays]
+    )
+    assert split.story_id is not None
+    model = FakeModelProvider(_reply([("Riverside.", ["T1"])], safety_net=[("E1", "Riverside.")]))
+
+    outcome = await _tidy_up(model, stories, memory).run(split.story_id)
+
+    assert outcome.result is TidyUpResult.WRITTEN
+    (note,) = _shown(model)["notes"]
+    assert (note["text"], "superseded" in note) == ("No Saturdays.", True)
+
+
 async def test_flags_name_the_other_stories_shown_by_identity() -> None:
     stories, memory, trip = await _trip()
     other = await _story(stories, "a-1")

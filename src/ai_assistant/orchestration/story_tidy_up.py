@@ -75,6 +75,7 @@ from ai_assistant.core.types import (
     InputOrigin,
     Message,
     Role,
+    StoryChange,
     StoryDraftLine,
     StoryFlag,
     StoryFlagKind,
@@ -581,7 +582,10 @@ class StoryTidyUp:
                 f"S{index}": other
                 for index, other in enumerate(await self._others(story_id, episodes), start=1)
             },
-            superseded=await self._superseded(story_id),
+            superseded=await self._superseded(
+                story_id,
+                frozenset(n.note_id for n in ordered if n.author is StoryNoteAuthor.OWNER),
+            ),
         )
 
     async def _held(self, story_id: str, wanted: set[StoryNoteId]) -> dict[StoryNoteId, StoryNote]:
@@ -609,17 +613,63 @@ class StoryTidyUp:
                 return found
             cursor = page.next_cursor
 
-    async def _superseded(self, story_id: str) -> frozenset[StoryNoteId]:
-        """The notes an earlier version of this story's page marked superseded (§3:5)."""
+    async def _superseded(
+        self, story_id: str, owners: frozenset[StoryNoteId]
+    ) -> frozenset[StoryNoteId]:
+        """Which of the user's notes ``owners`` names a version has marked superseded.
+
+        A note is superseded from the version that marked it on (§3:5), whichever
+        story's page that version was of: a merge or a split moves a note, never the
+        version log that marked it. So the marks are read by the note's identity
+        from this story's version log, then, for any of ``owners`` still unmarked,
+        from the version logs of the stories this one's notes can have come from —
+        those its change log names on an ``absorbed`` or ``split_off`` line, and
+        theirs in turn — until every one is found marked or the lineage is walked.
+        A note only the user writes is moved only by a merge or a split (a move takes
+        only notes resting on an activation), so no other line can have brought one.
+        """
+        marked: set[StoryNoteId] = set()
+        seen: set[str] = set()
+        queue = [story_id]
+        while queue and not owners <= marked:
+            current = queue.pop(0)
+            if current in seen:
+                continue
+            seen.add(current)
+            marked |= await self._marks(current)
+            if not owners <= marked:
+                queue.extend(await self._lineage(current))
+        return frozenset(marked & owners)
+
+    async def _marks(self, story_id: str) -> set[StoryNoteId]:
+        """Every note a version of ``story_id``'s page marked superseded."""
         marked: set[StoryNoteId] = set()
         cursor: int | None = None
         while True:
             page = await self._stories.page_versions(story_id, cursor=cursor, limit=MAX_STORY_PAGE)
             if page is None:
-                return frozenset(marked)
+                return marked
             marked |= {mark.note for version in page.versions for mark in version.supersessions}
             if page.next_cursor is None or page.next_cursor == cursor:
-                return frozenset(marked)
+                return marked
+            cursor = page.next_cursor
+
+    async def _lineage(self, story_id: str) -> list[str]:
+        """The stories ``story_id``'s change log names as absorbed or split with it."""
+        named: dict[str, None] = {}
+        cursor: int | None = None
+        while True:
+            page = await self._stories.log(story_id, cursor=cursor, limit=MAX_STORY_PAGE)
+            if page is None:
+                return list(named)
+            named |= dict.fromkeys(
+                line.other_story
+                for line in page.lines
+                if line.other_story is not None
+                and line.change in {StoryChange.ABSORBED, StoryChange.SPLIT_OFF}
+            )
+            if page.next_cursor is None or page.next_cursor == cursor:
+                return list(named)
             cursor = page.next_cursor
 
     async def _others(self, story_id: str, episodes: Sequence[_Episode]) -> list[_Other]:
