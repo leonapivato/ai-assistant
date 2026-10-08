@@ -236,8 +236,9 @@ class StoryCandidates:
             audience: The pass's audience posture, which decides what of each view
                 may be shown (§6:3, §11:1).
             recalled: The stories recall's kept episodes belong to, already in §6:1's
-                order — the item with the higher recorded search score first. They
-                join after the window's (§7, built by the lane after this one).
+                order — the item with the higher recorded search score first, as
+                :meth:`~ai_assistant.orchestration.recall.Recalled.stories` gives them.
+                They join after the window's (§7).
 
         Returns:
             The candidates, or none with ``unreadable`` set where a story-store read

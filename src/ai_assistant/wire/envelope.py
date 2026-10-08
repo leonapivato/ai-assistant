@@ -2457,7 +2457,12 @@ from ai_assistant.wire.overlay import MAX_OVERLAY_IDENTITY_BYTES
 #:     which a peer at 81 refuses as unknown (ADR-0280 §7:4). The field defaults to
 #:     empty, so a record written before it validates unchanged: no ``schema_version``
 #:     moves and the episode-record format marker does not advance.
-PROTOCOL_VERSION: Final[int] = 82
+#: 83: ADR-0300 §12:1 adds ``stories`` to ``RecalledItem`` (§7:2), on the wire-carried
+#:     ``EpisodicMemory.processing_record``'s recall result, which a peer at 82 refuses
+#:     as unknown (ADR-0280 §7:4). The field defaults to empty, so a record written
+#:     before it validates unchanged: no ``schema_version`` moves and the
+#:     episode-record format marker does not advance.
+PROTOCOL_VERSION: Final[int] = 83
 
 #: ADR-0298 §7:11: the hub writes a heartbeat on a change stream whenever this long
 #: passes without a chunk. **A protocol constant, not a setting**: hub and client

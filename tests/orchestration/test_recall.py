@@ -53,7 +53,7 @@ from ai_assistant.orchestration.disclosure import (
     UnboundedAudienceSupply,
 )
 from ai_assistant.orchestration.recall import RecallStage
-from ai_assistant.testing import FakeMemoryStore
+from ai_assistant.testing import FakeMemoryStore, FakeStoryStore
 from ai_assistant.testing.activation import ended_pass
 
 if TYPE_CHECKING:
@@ -272,7 +272,9 @@ def _stage(
     limit: int = 3,
     budget: timedelta = BUDGET,
 ) -> RecallStage:
-    return RecallStage(memory=memory, threshold=threshold, limit=limit, budget=budget)
+    return RecallStage(
+        memory=memory, stories=FakeStoryStore(), threshold=threshold, limit=limit, budget=budget
+    )
 
 
 async def _recall(
@@ -593,4 +595,10 @@ def test_the_stage_refuses_a_value_outside_its_bounds(
     threshold: float, limit: int, budget: timedelta
 ) -> None:
     with pytest.raises(ValueError, match="ADR-0281"):
-        RecallStage(memory=FakeMemoryStore(), threshold=threshold, limit=limit, budget=budget)
+        RecallStage(
+            memory=FakeMemoryStore(),
+            stories=FakeStoryStore(),
+            threshold=threshold,
+            limit=limit,
+            budget=budget,
+        )
