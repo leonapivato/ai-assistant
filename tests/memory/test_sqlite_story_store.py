@@ -4,8 +4,9 @@ The suite is bound to the production store as well as to the canonical fake, bec
 a suite bound only to the double certifies the double while the real store drifts.
 Beside the binding are the properties of this backend alone: the owner-only file
 mode (ADR-0004 §4), durability across a reopen, the append-only log enforced by the
-database itself, the schema version, and a store fault surfacing as
-``StoryStoreError`` with nothing written.
+database itself, the schema version and its migrations, and a store fault surfacing as
+``StoryStoreError`` with nothing written — a decision's line included, which lands
+with the change it records or not at all (ADR-0302 §3:4).
 """
 
 from __future__ import annotations
@@ -27,6 +28,7 @@ from story_store_contract import (
     made,
     noted,
     notes_of,
+    raised,
     state_of,
     sub,
     versions_of,
@@ -34,7 +36,17 @@ from story_store_contract import (
 )
 
 from ai_assistant.core.errors import StoryStoreError
-from ai_assistant.core.types import StoryActor, StorySafetyNetNote
+from ai_assistant.core.types import (
+    StoryActor,
+    StoryChange,
+    StoryDecision,
+    StoryFlag,
+    StoryFlagKind,
+    StoryFlagName,
+    StoryOutcome,
+    StoryRefusalReason,
+    StorySafetyNetNote,
+)
 from ai_assistant.memory import SqliteStoryStore
 
 if TYPE_CHECKING:
@@ -248,7 +260,7 @@ async def test_a_schema_one_file_is_migrated_with_every_activation_member_pendin
         store.close()
     check = sqlite3.connect(path)
     try:
-        assert check.execute("PRAGMA user_version").fetchone()[0] == 2
+        assert check.execute("PRAGMA user_version").fetchone()[0] == 3
     finally:
         check.close()
 
@@ -470,5 +482,166 @@ async def test_a_corrupt_page_record_is_a_story_store_error(
     try:
         with pytest.raises(StoryStoreError):
             await reads[read]()
+    finally:
+        reopened.close()
+
+
+# --- decisions on flags (ADR-0302 §§3-4, §10) -----------------------------------
+
+#: ADR-0300's schema, version 2, as ``stories.db`` carried it before the decision
+#: lines: one story holding an activation, with a note and a page version raising a
+#: flag (the indexes and triggers this test does not need are left out).
+_SCHEMA_2 = (
+    "CREATE TABLE stories(id TEXT PRIMARY KEY, created_seq INTEGER NOT NULL UNIQUE, "
+    "created_at INTEGER NOT NULL, merged_into TEXT)",
+    "CREATE TABLE members(story_id TEXT NOT NULL, kind TEXT NOT NULL, "
+    "member_id TEXT NOT NULL, position INTEGER NOT NULL UNIQUE, linked_at INTEGER NOT NULL, "
+    "actor TEXT NOT NULL, pending_since INTEGER, PRIMARY KEY(story_id, kind, member_id))",
+    "CREATE TABLE log(sequence INTEGER PRIMARY KEY AUTOINCREMENT, story_id TEXT NOT NULL, "
+    "change TEXT NOT NULL, member_kind TEXT, member_id TEXT, other_story TEXT, "
+    "actor TEXT NOT NULL, trigger_id TEXT, at INTEGER NOT NULL)",
+    "CREATE TABLE ticks(only INTEGER PRIMARY KEY CHECK (only = 0), value INTEGER NOT NULL)",
+    "INSERT INTO ticks(only, value) VALUES(0, 3)",
+    "CREATE TABLE notes(id INTEGER PRIMARY KEY, story_id TEXT NOT NULL, text TEXT NOT NULL, "
+    "author TEXT NOT NULL, rests_on TEXT, outside INTEGER NOT NULL, "
+    "written_at INTEGER NOT NULL, pending_since INTEGER)",
+    "CREATE TABLE pages(story_id TEXT PRIMARY KEY, version INTEGER NOT NULL, "
+    "written_at INTEGER NOT NULL, lines TEXT NOT NULL)",
+    "CREATE TABLE versions(version INTEGER PRIMARY KEY, story_id TEXT NOT NULL, "
+    "written_at INTEGER NOT NULL, record TEXT NOT NULL)",
+    "INSERT INTO stories VALUES('story:old', 1, 0, NULL)",
+    "INSERT INTO log(sequence, story_id, change, actor, at) "
+    "VALUES(1, 'story:old', 'created', 'owner', 0)",
+    "INSERT INTO log(sequence, story_id, change, member_kind, member_id, actor, at) "
+    "VALUES(2, 'story:old', 'added', 'activation', 'a1', 'owner', 0)",
+    "INSERT INTO members VALUES('story:old', 'activation', 'a1', 2, 0, 'owner', 1)",
+    "INSERT INTO notes VALUES(2, 'story:old', 'Note.', 'planning', 'a1', 0, 0, NULL)",
+    "INSERT INTO pages VALUES('story:old', 3, 0, "
+    """'[{"text": "Line.", "cites": [2], "outside": false}]')""",
+    "INSERT INTO versions VALUES(3, 'story:old', 0, "
+    """'{"lines": [[2]], "took_in_notes": [2], "flags": [{"kind": "two_matters"}]}')""",
+    "PRAGMA user_version = 2",
+)
+
+
+async def test_a_schema_two_file_is_migrated_and_its_lines_stand_unchanged(
+    tmp_path: Path,
+) -> None:
+    path = tmp_path / "stories.db"
+    conn = sqlite3.connect(path)
+    for statement in _SCHEMA_2:
+        conn.execute(statement)
+    conn.commit()
+    conn.close()
+    store = SqliteStoryStore(path=path, now=lambda: STORY_AT)
+    try:
+        lines = await logged(store, "story:old")
+        assert [(line.change, line.answers, line.outcome) for line in lines] == [
+            (StoryChange.CREATED, None, None),
+            (StoryChange.ADDED, None, None),
+        ]
+        flag = StoryFlagName(
+            story="story:old", version=3, flag=StoryFlag(kind=StoryFlagKind.TWO_MATTERS)
+        )
+        outcome = await store.leave_flag(flag, actor=StoryActor.MATTERS_PASS)
+        assert outcome == StoryOutcome(story_id="story:old", logged=1)
+        after = await logged(store, "story:old")
+        assert after[:2] == lines
+        assert (after[-1].answers, after[-1].outcome) == (flag, StoryDecision.LEFT)
+    finally:
+        store.close()
+    check = sqlite3.connect(path)
+    try:
+        assert check.execute("PRAGMA user_version").fetchone()[0] == 3
+    finally:
+        check.close()
+
+
+async def test_a_decision_survives_a_reopen(tmp_path: Path) -> None:
+    path = tmp_path / "stories.db"
+    first = SqliteStoryStore(path=path, now=lambda: STORY_AT)
+    story_id = await made(first, act("a1"), act("a2"))
+    flag = await raised(first, story_id, StoryFlag(kind=StoryFlagKind.TWO_MATTERS))
+    await first.leave_flag(flag, actor=StoryActor.MATTERS_PASS)
+    lines = await logged(first, story_id)
+    first.close()
+    second = SqliteStoryStore(path=path, now=lambda: STORY_AT)
+    try:
+        assert await logged(second, story_id) == lines
+        outcome = await second.leave_flag(flag, actor=StoryActor.MATTERS_PASS)
+        assert outcome.refusal is not None
+        assert outcome.refusal.reason is StoryRefusalReason.ALREADY_DECIDED
+    finally:
+        second.close()
+
+
+@pytest.mark.parametrize("operation", ["create", "link", "merge", "split", "move", "leave"])
+async def test_a_decision_and_its_change_land_together_or_not_at_all(
+    tmp_path: Path, operation: str
+) -> None:
+    """A fault on the ``decided`` line rolls the change it records back with it.
+
+    The fault is injected by a trigger another connection installs on the log, firing
+    only on a ``decided`` line, so it fires inside the operation's transaction after
+    every line and row of the change itself is written — the point a store writing
+    the decision in a transaction of its own would leave the change made and the flag
+    open (ADR-0302 §3:4).
+    """
+    path = tmp_path / "stories.db"
+    store = SqliteStoryStore(path=path, now=lambda: STORY_AT)
+    pass_ = StoryActor.MATTERS_PASS
+    try:
+        other = await made(store, act("b1"))
+        story_id = await made(store, act("a1"), act("a2"))
+        larger = await made(store, act("z"))
+        await noted(store, story_id, "On a2.", on="a2")
+        flag = await raised(
+            store, story_id, StoryFlag(kind=StoryFlagKind.LIKE_ANOTHER, story=other)
+        )
+        before = await everything(store)
+        injector = sqlite3.connect(path)
+        injector.execute(
+            "CREATE TRIGGER injected BEFORE INSERT ON log WHEN NEW.change = 'decided' "
+            "BEGIN SELECT RAISE(ABORT, 'injected fault'); END"
+        )
+        injector.commit()
+        attempts: dict[str, Callable[[], Awaitable[StoryOutcome]]] = {
+            "create": lambda: store.create([sub(story_id), sub(other)], actor=pass_, answers=flag),
+            "link": lambda: store.link(
+                larger, [sub(story_id), sub(other)], actor=pass_, answers=flag
+            ),
+            "merge": lambda: store.merge(story_id, other, actor=pass_, answers=flag),
+            "split": lambda: store.split(story_id, [act("a2")], actor=pass_, answers=flag),
+            "move": lambda: store.move(story_id, other, [act("a2")], actor=pass_, answers=flag),
+            "leave": lambda: store.leave_flag(flag, actor=pass_),
+        }
+        with pytest.raises(StoryStoreError, match="injected fault"):
+            await attempts[operation]()
+        assert await everything(store) == before
+        injector.execute("DROP TRIGGER injected")
+        injector.commit()
+        injector.close()
+        outcome = await attempts[operation]()
+        assert outcome.refusal is None
+    finally:
+        store.close()
+
+
+async def test_a_corrupt_decision_is_a_story_store_error(tmp_path: Path) -> None:
+    path = tmp_path / "stories.db"
+    store = SqliteStoryStore(path=path, now=lambda: STORY_AT)
+    story_id = await made(store, act("a1"))
+    flag = await raised(store, story_id, StoryFlag(kind=StoryFlagKind.TWO_MATTERS))
+    await store.leave_flag(flag, actor=StoryActor.MATTERS_PASS)
+    store.close()
+    conn = sqlite3.connect(path)
+    conn.execute("DROP TRIGGER log_never_rewritten")
+    conn.execute("UPDATE log SET answers = '{\"story\": \"story:x\"}' WHERE change = 'decided'")
+    conn.commit()
+    conn.close()
+    reopened = SqliteStoryStore(path=path, now=lambda: STORY_AT)
+    try:
+        with pytest.raises(StoryStoreError, match="does not validate"):
+            await reopened.log(story_id)
     finally:
         reopened.close()

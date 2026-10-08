@@ -18,12 +18,20 @@ a merge, a split or a move brings; the page write refused when the version it wa
 built on is no longer current, writing nothing; the move; the notes merge, split
 and move carry; and the actors §3:15 adds.
 
+And ADR-0302: what names a flag and which stories it concerns (§2); the ``decided``
+line each decision writes, after its change's lines and on the stories as they stand
+once it is applied (§3); ``leave_flag``, the ``answers`` keyword and their refusals,
+checked after every check the operation makes and writing nothing when refused,
+one writer only answering a flag (§4); and the page write refused over what its
+story does not hold, in its fixed place in the order (§7).
+
 Named ``*_contract`` (not ``test_*``) so pytest collects it only via a
 ``Test``-prefixed subclass, never the abstract base directly.
 """
 
 from __future__ import annotations
 
+import asyncio
 from datetime import UTC, datetime
 from typing import TYPE_CHECKING, Any
 
@@ -36,9 +44,11 @@ from ai_assistant.core.types import (
     STORY_PAGE_CAP_CHARS,
     StoryActor,
     StoryChange,
+    StoryDecision,
     StoryDraftLine,
     StoryFlag,
     StoryFlagKind,
+    StoryFlagName,
     StoryLogLine,
     StoryMember,
     StoryMemberKind,
@@ -204,6 +214,30 @@ def page_refused(
     """Assert a page write or a note append was refused for ``reason``."""
     assert outcome.refusal is not None, outcome
     assert outcome.refusal.reason is reason
+
+
+_PASS = StoryActor.MATTERS_PASS
+
+
+async def raised(store: StoryStore, story_id: str, flag: StoryFlag) -> StoryFlagName:
+    """Write a page of ``story_id`` raising ``flag``, and return the flag's name (§2:1)."""
+    note = await noted(store, story_id, "Note.")
+    read = await state_of(store, story_id)
+    version = await written(
+        store, story_id, draft(line("Line.", note.note_id), flags=(flag,)), as_of=read.as_of
+    )
+    return StoryFlagName(story=story_id, version=version.version, flag=flag)
+
+
+async def linked_by_understanding(store: StoryStore, story_id: str | None, activation: str) -> str:
+    """Link ``activation`` as understanding does, into ``story_id`` or a story it starts."""
+    stamp: dict[str, Any] = {"actor": StoryActor.UNDERSTANDING, "trigger": activation}
+    if story_id is None:
+        outcome = await store.create([act(activation)], **stamp)
+    else:
+        outcome = await store.link(story_id, [act(activation)], **stamp)
+    assert outcome.story_id is not None, outcome
+    return outcome.story_id
 
 
 class StoryStoreContract:
@@ -1455,3 +1489,508 @@ class StoryStoreContract:
         state = await state_of(store, story_id)
         assert state.pending_notes == (note,)
         assert state.pending_episodes == ("y",)
+
+    # --- decisions on flags (ADR-0302 §§2-4) ---------------------------------
+
+    async def test_leave_flag_records_left_on_the_story_that_raised_it(
+        self, store: StoryStore
+    ) -> None:
+        story_id = await made(store, act("a1"), act("a2"))
+        flag = await raised(store, story_id, StoryFlag(kind=StoryFlagKind.TWO_MATTERS))
+        members = await held(store, story_id)
+        outcome = await store.leave_flag(flag, actor=_PASS)
+        assert outcome == StoryOutcome(story_id=story_id, logged=1)
+        last = (await logged(store, story_id))[-1]
+        assert last.change is StoryChange.DECIDED
+        assert last.answers == flag
+        assert last.outcome is StoryDecision.LEFT
+        assert last.actor is _PASS
+        assert (last.member, last.other_story, last.trigger) == (None, None, None)
+        assert last.at == STORY_AT
+        assert await held(store, story_id) == members
+
+    async def test_a_like_another_decision_is_written_on_both_stories_in_order(
+        self, store: StoryStore
+    ) -> None:
+        other = await made(store, act("b1"))
+        story_id = await made(store, act("a1"))
+        flag = await raised(
+            store, story_id, StoryFlag(kind=StoryFlagKind.LIKE_ANOTHER, story=other)
+        )
+        outcome = await store.leave_flag(flag, actor=_PASS)
+        assert outcome == StoryOutcome(story_id=story_id, logged=2)
+        first = (await logged(store, story_id))[-1]
+        second = (await logged(store, other))[-1]
+        assert first.sequence < second.sequence
+        assert [line.answers for line in (first, second)] == [flag, flag]
+        assert {line.outcome for line in (first, second)} == {StoryDecision.LEFT}
+
+    async def test_an_understanding_flag_concerns_each_story_holding_its_lines(
+        self, store: StoryStore
+    ) -> None:
+        """In the order of those lines' sequence numbers, not of the stories' creation."""
+        earlier = await made(store, act("x"))
+        later = await linked_by_understanding(store, None, "a1")
+        await linked_by_understanding(store, earlier, "a1")
+        flag = StoryFlagName(activation="a1")
+        outcome = await store.leave_flag(flag, actor=_PASS)
+        assert outcome == StoryOutcome(story_id=later, logged=2)
+        assert (await logged(store, later))[-1].answers == flag
+        assert (await logged(store, earlier))[-1].answers == flag
+
+    async def test_an_activation_understanding_linked_into_one_story_is_no_flag(
+        self, store: StoryStore
+    ) -> None:
+        """Only understanding's own lines, triggered by that activation, make the flag."""
+        story_id = await linked_by_understanding(store, None, "a1")
+        await store.link(await made(store, act("x")), [act("a1")], actor=_OWNER, trigger="a1")
+        await store.link(
+            await made(store, act("y")),
+            [act("a1")],
+            actor=StoryActor.UNDERSTANDING,
+            trigger="a2",
+        )
+        assert story_id
+        before = await everything(store)
+        flag = StoryFlagName(activation="a1")
+        outcome = await store.leave_flag(flag, actor=_PASS)
+        refused(outcome, StoryRefusalReason.UNKNOWN_FLAG)
+        assert outcome.refusal is not None
+        assert outcome.refusal.flag == flag
+        assert await everything(store) == before
+
+    async def test_a_flag_stays_a_flag_once_its_stories_no_longer_hold_it(
+        self, store: StoryStore
+    ) -> None:
+        """Its lines stand, so the pass can record it ``left`` (ADR-0302 §5:3)."""
+        first = await linked_by_understanding(store, None, "a1")
+        second = await linked_by_understanding(store, None, "a1")
+        await store.unlink(second, [act("a1")], actor=_OWNER)
+        outcome = await store.leave_flag(StoryFlagName(activation="a1"), actor=_PASS)
+        assert outcome == StoryOutcome(story_id=first, logged=2)
+
+    @pytest.mark.parametrize("wrong", ["version", "story", "kind", "named"])
+    async def test_a_flag_no_version_recorded_is_unknown(
+        self, store: StoryStore, wrong: str
+    ) -> None:
+        other = await made(store, act("b1"))
+        third = await made(store, act("c1"))
+        story_id = await made(store, act("a1"))
+        recorded = StoryFlag(kind=StoryFlagKind.LIKE_ANOTHER, story=other)
+        flag = await raised(store, story_id, recorded)
+        assert flag.version is not None
+        named = {
+            "version": flag.model_copy(update={"version": flag.version + 1}),
+            "story": flag.model_copy(update={"story": other}),
+            "kind": flag.model_copy(update={"flag": StoryFlag(kind=StoryFlagKind.TWO_MATTERS)}),
+            "named": flag.model_copy(
+                update={"flag": StoryFlag(kind=StoryFlagKind.LIKE_ANOTHER, story=third)}
+            ),
+        }[wrong]
+        before = await everything(store)
+        outcome = await store.leave_flag(named, actor=_PASS)
+        refused(outcome, StoryRefusalReason.UNKNOWN_FLAG)
+        assert outcome.refusal is not None
+        assert outcome.refusal.flag == named
+        assert await everything(store) == before
+
+    async def test_a_flag_answered_once_is_refused_as_already_decided(
+        self, store: StoryStore
+    ) -> None:
+        other = await made(store, act("b1"))
+        story_id = await made(store, act("a1"))
+        flag = await raised(
+            store, story_id, StoryFlag(kind=StoryFlagKind.LIKE_ANOTHER, story=other)
+        )
+        await store.leave_flag(flag, actor=_PASS)
+        before = await everything(store)
+        for attempt in (
+            store.leave_flag(flag, actor=_PASS),
+            store.merge(story_id, other, actor=_PASS, answers=flag),
+            store.link(other, [sub(story_id)], actor=_PASS, answers=flag),
+        ):
+            outcome = await attempt
+            refused(outcome, StoryRefusalReason.ALREADY_DECIDED)
+            assert outcome.refusal is not None
+            assert outcome.refusal.flag == flag
+        assert await everything(store) == before
+
+    async def test_a_flag_raised_in_a_later_version_is_another_flag(
+        self, store: StoryStore
+    ) -> None:
+        story_id = await made(store, act("a1"))
+        first = await raised(store, story_id, StoryFlag(kind=StoryFlagKind.TWO_MATTERS))
+        await store.leave_flag(first, actor=_PASS)
+        again = await raised(store, story_id, StoryFlag(kind=StoryFlagKind.TWO_MATTERS))
+        assert again != first
+        assert (await store.leave_flag(again, actor=_PASS)).refusal is None
+
+    async def test_two_writers_cannot_both_answer_one_flag(self, store: StoryStore) -> None:
+        story_id = await made(store, act("a1"), act("a2"))
+        flag = await raised(store, story_id, StoryFlag(kind=StoryFlagKind.TWO_MATTERS))
+        outcomes = await asyncio.gather(
+            store.leave_flag(flag, actor=_PASS),
+            store.split(story_id, [act("a2")], actor=_PASS, answers=flag),
+        )
+        reasons = sorted(
+            "applied" if outcome.refusal is None else outcome.refusal.reason.value
+            for outcome in outcomes
+        )
+        assert reasons == ["already_decided", "applied"]
+        decided = [line for line in await logged(store, story_id) if line.answers == flag]
+        assert len(decided) == 1
+
+    async def test_a_merge_answering_records_merged_on_the_story_merged_into_only(
+        self, store: StoryStore
+    ) -> None:
+        other = await made(store, act("b1"))
+        story_id = await made(store, act("a1"))
+        flag = await raised(
+            store, story_id, StoryFlag(kind=StoryFlagKind.LIKE_ANOTHER, story=other)
+        )
+        plain = max([(await logged(store, each))[-1].sequence for each in (story_id, other)])
+        outcome = await store.merge(story_id, other, actor=_PASS, trigger="t-1", answers=flag)
+        assert outcome.refusal is None
+        merged = [line for line in await logged(store, other) if line.sequence > plain]
+        assert [line.change for line in merged][-1] is StoryChange.DECIDED
+        assert StoryChange.DECIDED not in [line.change for line in merged[:-1]]
+        decision = merged[-1]
+        assert (decision.answers, decision.outcome) == (flag, StoryDecision.MERGED)
+        assert decision.actor is _PASS
+        assert decision.trigger is None
+        assert all(line.trigger == "t-1" for line in merged[:-1])
+        assert outcome.logged == len(
+            [line for line in await logged(store, story_id) if line.sequence > plain]
+        ) + len(merged)
+        assert StoryChange.DECIDED not in [line.change for line in await logged(store, story_id)]
+
+    async def test_a_split_answering_records_split_after_its_own_lines(
+        self, store: StoryStore
+    ) -> None:
+        story_id = await made(store, act("a1"), act("a2"))
+        flag = await raised(store, story_id, StoryFlag(kind=StoryFlagKind.TWO_MATTERS))
+        outcome = await store.split(story_id, [act("a2")], actor=_PASS, answers=flag)
+        assert outcome.story_id is not None
+        assert outcome.logged == 3 + 2 + 1
+        lines = await logged(store, story_id)
+        assert lines[-1].change is StoryChange.DECIDED
+        assert lines[-1].outcome is StoryDecision.SPLIT
+        assert lines[-1].sequence > max(
+            line.sequence for line in await logged(store, outcome.story_id)
+        )
+        assert StoryChange.DECIDED not in [
+            line.change for line in await logged(store, outcome.story_id)
+        ]
+
+    async def test_a_move_answering_records_moved_on_both_stories(self, store: StoryStore) -> None:
+        other = await made(store, act("b1"))
+        story_id = await made(store, act("a1"), act("a2"))
+        flag = await raised(
+            store, story_id, StoryFlag(kind=StoryFlagKind.LIKE_ANOTHER, story=other)
+        )
+        outcome = await store.move(story_id, other, [act("a2")], actor=_PASS, answers=flag)
+        assert outcome == StoryOutcome(story_id=other, logged=2 + 2)
+        for each in (story_id, other):
+            last = (await logged(store, each))[-1]
+            assert (last.change, last.outcome) == (StoryChange.DECIDED, StoryDecision.MOVED)
+
+    @pytest.mark.parametrize("operation", ["create", "link"])
+    async def test_a_grouping_answering_records_grouped(
+        self, store: StoryStore, operation: str
+    ) -> None:
+        other = await made(store, act("b1"))
+        story_id = await made(store, act("a1"))
+        larger = await made(store, act("z"))
+        flag = await raised(
+            store, story_id, StoryFlag(kind=StoryFlagKind.LIKE_ANOTHER, story=other)
+        )
+        members = [sub(story_id), sub(other)]
+        if operation == "create":
+            outcome = await store.create(members, actor=_PASS, answers=flag)
+            assert outcome.logged == 1 + 2 + 2
+        else:
+            outcome = await store.link(larger, members, actor=_PASS, answers=flag)
+            assert outcome == StoryOutcome(story_id=larger, logged=2 + 2)
+        assert outcome.story_id is not None
+        for each in (story_id, other):
+            last = (await logged(store, each))[-1]
+            assert (last.change, last.outcome) == (StoryChange.DECIDED, StoryDecision.GROUPED)
+        assert StoryChange.DECIDED not in [
+            line.change for line in await logged(store, outcome.story_id)
+        ]
+
+    @pytest.mark.parametrize("operation", ["create", "link"])
+    async def test_a_grouping_answering_with_an_activation_member_is_a_value_error(
+        self, store: StoryStore, operation: str
+    ) -> None:
+        story_id = await made(store, act("a1"))
+        flag = await raised(store, story_id, StoryFlag(kind=StoryFlagKind.TWO_MATTERS))
+        before = await everything(store)
+        attempt = (
+            store.create([sub(story_id), act("a9")], actor=_PASS, answers=flag)
+            if operation == "create"
+            else store.link(story_id, [act("a9")], actor=_PASS, answers=flag)
+        )
+        with pytest.raises(ValueError, match="story members only"):
+            await attempt
+        assert await everything(store) == before
+
+    async def test_a_decision_follows_merges_to_where_the_stories_now_stand(
+        self, store: StoryStore
+    ) -> None:
+        other = await made(store, act("b1"))
+        story_id = await made(store, act("a1"))
+        into = await made(store, act("c1"))
+        flag = await raised(
+            store, story_id, StoryFlag(kind=StoryFlagKind.LIKE_ANOTHER, story=other)
+        )
+        await store.merge(story_id, into, actor=_OWNER)
+        await store.merge(into, other, actor=_OWNER)
+        outcome = await store.leave_flag(flag, actor=_PASS)
+        assert outcome == StoryOutcome(story_id=other, logged=1)
+        for gone in (story_id, into):
+            assert StoryChange.DECIDED not in [line.change for line in await logged(store, gone)]
+
+    async def test_the_flag_is_checked_after_every_check_the_operation_makes(
+        self, store: StoryStore
+    ) -> None:
+        inner = await made(store, act("i"))
+        outer = await made(store, act("o"), sub(inner))
+        target = await made(store, act("t"))
+        deepest = await made(store, act("b"))
+        holds_x = await made(store, sub(await made(store, sub(deepest))))
+        unknown = StoryFlagName(activation="never-raised")
+        before = await everything(store)
+        for attempt, reason in [
+            (store.create([], actor=_PASS, answers=unknown), StoryRefusalReason.NO_MEMBERS),
+            (
+                store.link("story:nowhere", [sub(inner)], actor=_PASS, answers=unknown),
+                StoryRefusalReason.UNKNOWN_STORY,
+            ),
+            (
+                store.link(inner, [sub(outer)], actor=_PASS, answers=unknown),
+                StoryRefusalReason.LOOP,
+            ),
+            (
+                store.merge(target, target, actor=_PASS, answers=unknown),
+                StoryRefusalReason.SELF_MERGE,
+            ),
+            (
+                store.merge(holds_x, deepest, actor=_PASS, answers=unknown),
+                StoryRefusalReason.LOOP,
+            ),
+            (
+                store.split(target, [act("nope")], actor=_PASS, answers=unknown),
+                StoryRefusalReason.NOT_A_MEMBER,
+            ),
+            (
+                store.move(target, outer, [act("nope")], actor=_PASS, answers=unknown),
+                StoryRefusalReason.NOT_A_MEMBER,
+            ),
+            (
+                store.move(target, outer, [act("t")], actor=_PASS, answers=unknown),
+                StoryRefusalReason.UNKNOWN_FLAG,
+            ),
+        ]:
+            refused(await attempt, reason)
+        assert await everything(store) == before
+
+    async def test_a_change_refused_over_its_flag_writes_nothing_of_itself(
+        self, store: StoryStore
+    ) -> None:
+        other = await made(store, act("b1"))
+        story_id = await made(store, act("a1"), act("a2"))
+        flag = await raised(
+            store, story_id, StoryFlag(kind=StoryFlagKind.LIKE_ANOTHER, story=other)
+        )
+        await store.leave_flag(flag, actor=_PASS)
+        before = await everything(store)
+        for attempt in (
+            store.create([sub(story_id), sub(other)], actor=_PASS, answers=flag),
+            store.link(other, [sub(story_id)], actor=_PASS, answers=flag),
+            store.merge(story_id, other, actor=_PASS, answers=flag),
+            store.split(story_id, [act("a2")], actor=_PASS, answers=flag),
+            store.move(story_id, other, [act("a2")], actor=_PASS, answers=flag),
+        ):
+            refused(await attempt, StoryRefusalReason.ALREADY_DECIDED)
+        assert await everything(store) == before
+
+    async def test_a_change_its_own_rule_refuses_leaves_the_flag_open(
+        self, store: StoryStore
+    ) -> None:
+        deepest = await made(store, act("b"))
+        holds_x = await made(store, sub(await made(store, sub(deepest))))
+        flag = await raised(
+            store, holds_x, StoryFlag(kind=StoryFlagKind.LIKE_ANOTHER, story=deepest)
+        )
+        before = await everything(store)
+        refused(
+            await store.merge(holds_x, deepest, actor=_PASS, answers=flag),
+            StoryRefusalReason.LOOP,
+        )
+        assert await everything(store) == before
+        assert (await store.leave_flag(flag, actor=_PASS)).refusal is None
+
+    async def test_a_malformed_flag_is_a_value_error(self, store: StoryStore) -> None:
+        story_id = await made(store, act("a1"))
+        before = await everything(store)
+        with pytest.raises(ValueError, match="StoryFlagName"):
+            await store.leave_flag("a1", actor=_PASS)  # type: ignore[arg-type]
+        with pytest.raises(ValueError, match="StoryFlagName"):
+            await store.split(story_id, [act("a1")], actor=_PASS, answers="a1")  # type: ignore[arg-type]
+        with pytest.raises(ValueError, match="actor"):
+            await store.leave_flag(StoryFlagName(activation="a1"), actor=7)  # type: ignore[arg-type]
+        assert await everything(store) == before
+
+    # --- a page write refuses what its story does not hold (ADR-0302 §7) -----
+
+    async def test_a_page_built_before_a_split_took_its_episode_is_refused(
+        self, store: StoryStore
+    ) -> None:
+        """#2761's probe: the split lands while the tidy-up's model call is out."""
+        story_id = await made(store, act("a-1"), act("a-2"))
+        note = await noted(store, story_id, "On a-1.", on="a-1")
+        read = await state_of(store, story_id)
+        await store.split(story_id, [act("a-2")], actor=_OWNER)
+        before = await everything(store)
+        outcome = await store.write_page(
+            story_id,
+            draft(
+                line("The matter.", note.note_id, new=(0,)),
+                safety_net=(StorySafetyNetNote(text="On a-2.", rests_on="a-2", outside=False),),
+                took_in_notes=(note.note_id,),
+                took_in_episodes=("a-1", "a-2"),
+            ),
+            as_of=read.as_of,
+        )
+        page_refused(outcome, StoryPageRefusalReason.NOT_HELD)
+        assert outcome.refusal is not None
+        assert (outcome.refusal.activation, outcome.refusal.note) == ("a-2", None)
+        assert outcome.refusal.story_id == story_id
+        assert await everything(store) == before
+
+    async def test_an_episode_taken_in_that_a_move_took_away_is_refused(
+        self, store: StoryStore
+    ) -> None:
+        story_id = await made(store, act("a1"), act("a2"))
+        other = await made(store, act("b1"))
+        note = await noted(store, story_id, "On a1.")
+        read = await state_of(store, story_id)
+        await store.move(story_id, other, [act("a2")], actor=_OWNER)
+        before = await everything(store)
+        outcome = await store.write_page(
+            story_id,
+            draft(line("The matter.", note.note_id), took_in_episodes=("a1", "a2")),
+            as_of=read.as_of,
+        )
+        page_refused(outcome, StoryPageRefusalReason.NOT_HELD)
+        assert outcome.refusal is not None
+        assert outcome.refusal.activation == "a2"
+        assert await everything(store) == before
+
+    @pytest.mark.parametrize("where", ["moved", "elsewhere", "missing"])
+    async def test_a_note_taken_in_that_the_story_does_not_hold_is_refused(
+        self, store: StoryStore, where: str
+    ) -> None:
+        story_id = await made(store, act("a1"), act("a2"))
+        other = await made(store, act("b1"))
+        kept = await noted(store, story_id, "On a1.", on="a1")
+        moving = await noted(store, story_id, "On a2.", on="a2")
+        foreign = await noted(store, other, "Elsewhere.", on="b1")
+        read = await state_of(store, story_id)
+        if where == "moved":
+            await store.move(story_id, other, [act("a2")], actor=_OWNER)
+        named = {
+            "moved": moving.note_id,
+            "elsewhere": foreign.note_id,
+            "missing": foreign.note_id + 10_000,
+        }[where]
+        before = await everything(store)
+        outcome = await store.write_page(
+            story_id,
+            draft(line("The matter.", kept.note_id), took_in_notes=(kept.note_id, named)),
+            as_of=read.as_of,
+        )
+        page_refused(outcome, StoryPageRefusalReason.NOT_HELD)
+        assert outcome.refusal is not None
+        assert (outcome.refusal.note, outcome.refusal.activation) == (named, None)
+        assert await everything(store) == before
+
+    async def test_not_held_reports_the_first_in_the_drafts_order(self, store: StoryStore) -> None:
+        """The safety-net notes in order, then the episodes, then the notes taken in."""
+        story_id = await made(store, act("a1"))
+        note = await noted(store, story_id, "Note.")
+        read = await state_of(store, story_id)
+        missing = note.note_id + 10_000
+        net = (
+            StorySafetyNetNote(text="Held.", rests_on="a1", outside=False),
+            StorySafetyNetNote(text="Not held.", rests_on="n1", outside=False),
+            StorySafetyNetNote(text="Not held either.", rests_on="n2", outside=False),
+        )
+        cases: list[tuple[dict[str, Any], str | int]] = [
+            ({"safety_net": net, "took_in_episodes": ("n3",), "took_in_notes": (missing,)}, "n1"),
+            ({"took_in_episodes": ("a1", "n3", "n4"), "took_in_notes": (missing,)}, "n3"),
+            ({"took_in_episodes": ("a1",), "took_in_notes": (note.note_id, missing)}, missing),
+        ]
+        for rest, first in cases:
+            outcome = await store.write_page(
+                story_id, draft(line("Line.", note.note_id), **rest), as_of=read.as_of
+            )
+            page_refused(outcome, StoryPageRefusalReason.NOT_HELD)
+            assert outcome.refusal is not None
+            assert first in (outcome.refusal.activation, outcome.refusal.note)
+
+    async def test_not_held_comes_after_unknown_note_and_a_flags_story_and_before_the_cap(
+        self, store: StoryStore
+    ) -> None:
+        story_id = await made(store, act("a1"))
+        note = await noted(store, story_id, "Note.")
+        read = await state_of(store, story_id)
+        unheld = {"took_in_episodes": ("n1",)}
+        missing = note.note_id + 10_000
+        unknown_note = await store.write_page(
+            story_id, draft(line("Line.", missing), **unheld), as_of=read.as_of
+        )
+        page_refused(unknown_note, StoryPageRefusalReason.UNKNOWN_NOTE)
+        unknown_story = await store.write_page(
+            story_id,
+            draft(
+                line("Line.", note.note_id),
+                flags=(StoryFlag(kind=StoryFlagKind.LIKE_ANOTHER, story="story:nowhere"),),
+                **unheld,
+            ),
+            as_of=read.as_of,
+        )
+        page_refused(unknown_story, StoryPageRefusalReason.UNKNOWN_STORY)
+        budget = STORY_PAGE_CAP_CHARS // STORY_NOTE_MAX_CHARS
+        over = [line("y" * STORY_NOTE_MAX_CHARS, note.note_id) for _ in range(budget + 1)]
+        not_held = await store.write_page(story_id, draft(*over, **unheld), as_of=read.as_of)
+        page_refused(not_held, StoryPageRefusalReason.NOT_HELD)
+
+    async def test_a_page_resting_on_what_the_story_holds_but_took_in_is_written(
+        self, store: StoryStore
+    ) -> None:
+        """A name held but no longer pending is still passed over (ADR-0302 §7:5)."""
+        story_id = await made(store, act("a1"))
+        note = await noted(store, story_id, "Note.")
+        first = await state_of(store, story_id)
+        await written(
+            store,
+            story_id,
+            draft(line("Line.", note.note_id), took_in_notes=(note.note_id,)),
+            as_of=first.as_of,
+        )
+        again = await state_of(store, story_id)
+        version = await written(
+            store,
+            story_id,
+            draft(
+                line("Line.", note.note_id, new=(0,)),
+                safety_net=(StorySafetyNetNote(text="Net.", rests_on="a1", outside=False),),
+                took_in_notes=(note.note_id,),
+                took_in_episodes=("a1",),
+            ),
+            as_of=again.as_of,
+        )
+        assert version.took_in_notes == ()
+        assert version.took_in_episodes == ("a1",)
