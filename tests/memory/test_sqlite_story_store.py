@@ -20,6 +20,7 @@ from story_store_contract import (
     StoryStoreContract,
     act,
     draft,
+    everything,
     held,
     line,
     logged,
@@ -353,6 +354,47 @@ async def test_a_replaced_page_leaves_no_text_in_the_file(tmp_path: Path) -> Non
     finally:
         store.close()
     assert old.encode() not in path.read_bytes()
+
+
+@pytest.mark.parametrize("operation", ["merge", "split", "move"])
+async def test_a_backend_failure_carrying_notes_rolls_the_whole_operation_back(
+    tmp_path: Path, operation: str
+) -> None:
+    """A fault on the second note carried leaves members, log, notes and pending as they were.
+
+    The fault is injected by a trigger on the second note's move, so it fires inside
+    the operation's transaction after the membership writes and the first note's
+    move — the point a store carrying notes outside that transaction would leave the
+    membership moved and one note with it.
+    """
+    path = tmp_path / "stories.db"
+    store = SqliteStoryStore(path=path, now=lambda: STORY_AT)
+    try:
+        source = await made(store, act("a"), act("b"))
+        target = await made(store, act("c"))
+        await noted(store, source, "First on a.", on="a")
+        second = await noted(store, source, "Second on a.", on="a")
+        before = await everything(store)
+        injector = sqlite3.connect(path)
+        injector.execute(
+            "CREATE TRIGGER injected BEFORE UPDATE OF story_id ON notes "
+            f"WHEN NEW.id = {second.note_id} "
+            "BEGIN SELECT RAISE(ABORT, 'injected fault'); END"
+        )
+        injector.commit()
+        attempts = {
+            "merge": lambda: store.merge(source, target, actor=StoryActor.OWNER),
+            "split": lambda: store.split(source, [act("a")], actor=StoryActor.OWNER),
+            "move": lambda: store.move(source, target, [act("a")], actor=StoryActor.OWNER),
+        }
+        with pytest.raises(StoryStoreError, match="injected fault"):
+            await attempts[operation]()
+        assert await everything(store) == before
+        injector.execute("DROP TRIGGER injected")
+        injector.commit()
+        injector.close()
+    finally:
+        store.close()
 
 
 async def test_a_backend_failure_mid_page_write_writes_nothing(tmp_path: Path) -> None:
