@@ -371,6 +371,8 @@ from ai_assistant.core.types import (
     encodable_text,
     routed_listing_arm,
     secret_value,
+    story_move_members,
+    story_note_text,
 )
 from ai_assistant.interfaces import episode_inspection, story_inspection
 from ai_assistant.interfaces.devices import this_device as _this_device
@@ -1759,17 +1761,19 @@ async def _show_episode(episode_id: str, *, as_json: bool) -> int:
 
 # --- stories (ADR-0289 §5) -------------------------------------------------------
 
-#: The owner's story commands. **For testing**: no phase produces or reads a story
-#: yet (ADR-0289 §4), so this group is how the store's rules are exercised by hand,
-#: and its help says so (§5:1). Rendering and argument parsing only: what a write
-#: may do is the story store's and the engine's to decide.
+#: The owner's story commands. **For testing**: this group is how the store's rules
+#: and a story's page are exercised by hand, and its help says so (ADR-0289 §5:1),
+#: ADR-0300 §8:4 adding the story commands under that clause. Rendering and argument
+#: parsing only: what a write may do, what of a page the owner is shown and where a
+#: matter stands are the story store's and the engine's to decide.
 story_app = typer.Typer(
     name="story",
     help=(
         "For testing: create, link, unlink, merge, split, list and show stories by "
-        "hand. A story holds which experiences belong to the same matter; no part of "
-        "the assistant produces or reads one yet. Name a member with --activation "
-        "(an activation id) or --story (a story id)."
+        "hand; read a story's page and where its matter stands; add a note to its page; "
+        "and move activations between stories. A story holds which experiences belong "
+        "to the same matter. Name a member with --activation (an activation id) or "
+        "--story (a story id)."
     ),
     no_args_is_help=True,
 )
@@ -1941,13 +1945,26 @@ def story_show(story_id: str = _STORY_ID_ARGUMENT) -> None:
 
 
 async def _show_story(story_id: str) -> int:
+    return await _read_story(
+        story_id,
+        lambda engine: story_inspection.read_story(engine, story_id),
+        story_inspection.render_story,
+    )
+
+
+async def _read_story[T](
+    story_id: str,
+    read: Callable[[AssistantEngine], Awaitable[T | None]],
+    render: Callable[[Console, T], None],
+) -> int:
+    """Run one story read and render it; no such story exits non-zero."""
     try:
         engine = await _open_engine()
-        read = await story_inspection.read_story(engine, story_id)
+        result = await read(engine)
     except (AssistantError, TransportError) as exc:
         _render_error(exc)
         return _EXIT_ERROR
-    if read is None:
+    if result is None:
         console.print(
             f"No story {story_inspection.quoted(story_id)}.",
             markup=False,
@@ -1956,8 +1973,97 @@ async def _show_story(story_id: str) -> int:
             soft_wrap=True,
         )
         return _EXIT_ERROR
-    story_inspection.render_story(console, read)
+    render(console, result)
     return _EXIT_OK
+
+
+# --- the story commands (ADR-0300 §8) ---------------------------------------------
+
+
+@story_app.command("page")
+def story_page(story_id: str = _STORY_ID_ARGUMENT) -> None:
+    """Show a story's page: when it was last tidied, its lines, then what is pending.
+
+    A line or a note resting on outside content is labelled so. A note resting on an
+    episode no longer held, and a line citing one, are withheld and counted. A merged
+    story shows only the story it was merged into.
+    """
+    raise typer.Exit(
+        asyncio.run(
+            _read_story(
+                story_id,
+                lambda engine: engine.story_page(story_id),
+                story_inspection.render_page,
+            )
+        )
+    )
+
+
+@story_app.command("standing")
+def story_standing(story_id: str = _STORY_ID_ARGUMENT) -> None:
+    """Show where a story's matter stands, worked out from the records.
+
+    What was done, the timeline of its episodes, most recent first, and the related
+    matters: the stories it is part of and the stories it contains.
+    """
+    raise typer.Exit(
+        asyncio.run(
+            _read_story(
+                story_id,
+                lambda engine: engine.story_standing(story_id),
+                story_inspection.render_standing,
+            )
+        )
+    )
+
+
+@story_app.command("note")
+def story_note(
+    story_id: str = _STORY_ID_ARGUMENT,
+    text: str = typer.Argument(..., help="The note, as you would write it on the page."),
+) -> None:
+    """Add a note of your own to a story's page; it is pending until the page is tidied."""
+    try:
+        written = story_note_text(text)
+    except ValueError as exc:
+        raise typer.BadParameter(str(exc), param_hint="TEXT") from exc
+    raise typer.Exit(asyncio.run(_note_story(story_id, written)))
+
+
+async def _note_story(story_id: str, text: str) -> int:
+    try:
+        engine = await _open_engine()
+        outcome = await engine.add_story_note(story_id, text)
+    except (AssistantError, TransportError) as exc:
+        _render_error(exc)
+        return _EXIT_ERROR
+    written = story_inspection.render_note_outcome(console, story_id, outcome)
+    return _EXIT_OK if written else _EXIT_ERROR
+
+
+@story_app.command("move")
+def story_move(
+    story_id: str = typer.Argument(
+        ..., callback=_present_id, help="The story the activations are moved out of."
+    ),
+    to: str = typer.Option(
+        ..., "--to", callback=_present_id, help="The story they are moved into."
+    ),
+    activation: list[str] | None = _STORY_ACTIVATION_OPTION,
+) -> None:
+    """Move the activations named from one story to another, with the notes resting on them."""
+    try:
+        members = story_move_members(story_id, to, _story_members(activation, None))
+    except ValueError as exc:
+        raise typer.BadParameter(str(exc)) from exc
+    raise typer.Exit(
+        asyncio.run(
+            _write_story(
+                "Moved to story",
+                lambda engine: engine.move_story_members(story_id, to, members),
+            )
+        )
+    )
 
 
 # --- the chat space (ADR-0293 §2-§5, §8, §11; ADR-0296 §6) -------------------

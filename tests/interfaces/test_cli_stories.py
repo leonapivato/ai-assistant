@@ -19,6 +19,8 @@ from typer.testing import CliRunner
 from ai_assistant.core.config import Settings
 from ai_assistant.core.types import (
     MAX_STORY_PAGE,
+    STORY_PAGE_CAP_CHARS,
+    STORY_STANDING_RECENT,
     ChannelContext,
     ChannelIdentity,
     EpisodeProcessingRecord,
@@ -35,11 +37,23 @@ from ai_assistant.core.types import (
     RecordedTextInput,
     StoryActor,
     StoryChange,
+    StoryDraftLine,
+    StoryEffectState,
+    StoryHeader,
     StoryLogPage,
     StoryMember,
     StoryMemberKind,
+    StoryNoteAuthor,
+    StoryPageDraft,
+    StoryPageRefusal,
+    StoryPageRefusalReason,
     StoryRefusal,
     StoryRefusalReason,
+    StoryRelation,
+    StoryStanding,
+    StoryStandingEarlier,
+    StoryStandingEffect,
+    StoryStandingEpisode,
     StoryView,
     UnderstandingOmission,
 )
@@ -169,12 +183,24 @@ def _invoke(*arguments: str) -> tuple[int, str]:
 # --- the group ------------------------------------------------------------------
 
 
-def test_the_group_says_it_is_for_testing_and_lists_its_seven_commands() -> None:
-    """§5:1: create, link, unlink, merge, split, list and show; the help says testing."""
+def test_the_group_says_it_is_for_testing_and_lists_its_commands() -> None:
+    """§5:1's seven and ADR-0300 §8:4's four story commands; the help says testing."""
     group = next(group for group in cli.app.registered_groups if group.name == "story")
     assert group.typer_instance is not None
     names = {command.name for command in group.typer_instance.registered_commands}
-    assert names == {"create", "link", "unlink", "merge", "split", "list", "show"}
+    assert names == {
+        "create",
+        "link",
+        "unlink",
+        "merge",
+        "split",
+        "list",
+        "show",
+        "page",
+        "standing",
+        "note",
+        "move",
+    }
     code, text = _invoke("story", "--help")
     assert code == 0
     assert "For testing" in " ".join(text.split())
@@ -335,6 +361,14 @@ def test_a_refused_write_exits_non_zero_and_names_the_story_merged_into(
         ["list", "--limit", "0"],
         ["list", "--limit", str(MAX_STORY_PAGE + 1)],
         ["list", "--cursor", "-1"],
+        ["page", " "],
+        ["standing", ""],
+        ["note", "story:x", "   "],
+        ["note", "story:x", "x" * 2001],
+        ["note", " ", "a note"],
+        ["move", "story:x", "--to", " story:x ", "-a", _FROZEN],
+        ["move", "story:x", "--to", " ", "-a", _FROZEN],
+        ["move", "story:x", "--to", "story:y", "-a", " "],
     ],
 )
 def test_a_malformed_argument_is_a_usage_error_before_any_engine(
@@ -637,3 +671,296 @@ def test_the_json_detail_asks_for_no_stories(
     assert _invoke("episode", f"activation:{_FROZEN}", "--json")[0] == 0
     assert "activation_stories" not in {method for method, _ in engine.calls}
     assert "Stories:" not in output.getvalue()
+
+
+# --- the story commands (ADR-0300 §8) -----------------------------------------------
+
+
+def _clear(output: StringIO) -> None:
+    output.truncate(0)
+    output.seek(0)
+
+
+def test_note_adds_the_owners_note_and_page_shows_it_pending(
+    monkeypatch: pytest.MonkeyPatch, output: StringIO
+) -> None:
+    """§8:3: the note is the owner's, written as given, and the page shows it pending."""
+    engine = _engine(_episode(_FROZEN))
+    story = _create(engine, _activation(_FROZEN))
+    _wire(monkeypatch, engine)
+    code, _ = _invoke("story", "note", story, " Leaning against Saturday ")
+    assert code == 0, output.getvalue()
+    assert engine.calls[-1] == (
+        "add_story_note",
+        {"story_id": story, "text": " Leaning against Saturday "},
+    )
+    page = asyncio.run(engine.story_page(story))
+    assert page is not None
+    (note,) = page.pending_notes
+    assert output.getvalue() == (
+        f'Added note #{note.note_id} to story "{story}"; '
+        "it is pending until the page is next tidied.\n"
+    )
+    _clear(output)
+    assert _invoke("story", "page", story)[0] == 0
+    assert output.getvalue().splitlines() == [
+        f'Story "{story}"',
+        "Never tidied: no page has been written yet.",
+        "Pending notes: 1",
+        f'  #{note.note_id} {note.written_at.isoformat()} owner: " Leaning against Saturday "',
+        "Pending episodes: 1",
+        f'  Activation "{_FROZEN}"',
+    ]
+
+
+def test_a_refused_note_exits_non_zero_naming_where_the_story_went(
+    monkeypatch: pytest.MonkeyPatch, output: StringIO
+) -> None:
+    engine = _engine(_episode(_FROZEN))
+    absorbed = _create(engine, _activation(_FROZEN))
+    kept = _create(engine, _activation(_FROZEN))
+    assert asyncio.run(engine.merge_stories(absorbed, kept)).refusal is None
+    _wire(monkeypatch, engine)
+    assert _invoke("story", "note", absorbed, "a note")[0] == 1
+    assert output.getvalue() == (
+        f'Refused (merged_story): story "{absorbed}" was merged into story "{kept}".\n'
+    )
+
+
+def test_page_renders_the_tidied_page_marked_and_counts_what_is_withheld(
+    monkeypatch: pytest.MonkeyPatch, output: StringIO
+) -> None:
+    """§8:4: outside content is labelled; §11: what rests on the forgotten is counted."""
+    forgotten = "33333333-3333-4333-8333-333333333333"
+    engine = _engine(_episode(_FROZEN), _episode(_OPEN, open_=True), _episode(forgotten))
+    story = _create(engine, _activation(_FROZEN), _activation(_OPEN), _activation(forgotten))
+    stories = engine.story_store
+    emailed = asyncio.run(
+        stories.append_note(
+            story,
+            "Riverside, per the campground's email",
+            author=StoryNoteAuthor.PLANNING,
+            rests_on=_FROZEN,
+            outside=True,
+        )
+    )
+    booked = asyncio.run(
+        stories.append_note(
+            story, "Booked Sunday", author=StoryNoteAuthor.PLANNING, rests_on=forgotten
+        )
+    )
+    assert emailed.note is not None
+    assert booked.note is not None
+    state = asyncio.run(stories.current_page(story))
+    assert state is not None
+    written = asyncio.run(
+        stories.write_page(
+            story,
+            StoryPageDraft(
+                lines=(
+                    StoryDraftLine(
+                        text="A camping trip\nto Riverside",
+                        cites=(emailed.note.note_id,),
+                        outside=True,
+                    ),
+                    StoryDraftLine(
+                        text="Booked Sunday", cites=(booked.note.note_id,), outside=False
+                    ),
+                ),
+                took_in_notes=(emailed.note.note_id, booked.note.note_id),
+                took_in_episodes=(_FROZEN, forgotten),
+            ),
+            as_of=state.as_of,
+        )
+    )
+    assert written.version is not None
+    waiting = asyncio.run(
+        stories.append_note(
+            story,
+            "Waiting on the canoe",
+            author=StoryNoteAuthor.PLANNING,
+            rests_on=_OPEN,
+            outside=True,
+        )
+    )
+    asyncio.run(
+        stories.append_note(
+            story, "Dog policy?", author=StoryNoteAuthor.PLANNING, rests_on=forgotten
+        )
+    )
+    assert waiting.note is not None
+    assert asyncio.run(engine.episode_memory.delete(f"activation:{forgotten}"))
+    _wire(monkeypatch, engine)
+    assert _invoke("story", "page", story)[0] == 0, output.getvalue()
+    assert output.getvalue().splitlines() == [
+        f'Story "{story}"',
+        f"Last tidied: {written.version.written_at.isoformat()} "
+        f"(version {written.version.version})",
+        "Page:",
+        f'  [outside content] "A camping trip\\nto Riverside" (from #{emailed.note.note_id})',
+        "  1 line withheld: each cites a note whose episode is no longer held, "
+        "or one this story no longer holds.",
+        "Pending notes: 2",
+        f"  #{waiting.note.note_id} {waiting.note.written_at.isoformat()} planning "
+        f'on activation "{_OPEN}": [outside content] "Waiting on the canoe"',
+        "  1 note withheld: each rests on an episode that is no longer held.",
+        "Pending episodes: 1",
+        f'  Activation "{_OPEN}"',
+    ]
+    assert engine.calls[-1] == ("story_page", {"story_id": story})
+
+
+def test_standing_renders_the_timeline_and_the_related_matters(
+    monkeypatch: pytest.MonkeyPatch, output: StringIO
+) -> None:
+    engine = _engine(_episode(_FROZEN), _episode(_OPEN, open_=True))
+    inner = _create(engine, _activation(_OPEN))
+    outer = _create(engine, _story(inner), _activation(_FROZEN))
+    _wire(monkeypatch, engine)
+    assert _invoke("story", "standing", inner)[0] == 0, output.getvalue()
+    assert engine.calls[-1] == ("story_standing", {"story_id": inner})
+    assert output.getvalue().splitlines() == [
+        f'Story "{inner}"',
+        "What was done: nothing recorded.",
+        "Timeline, most recent first:",
+        f'  {_AT.isoformat()} activation "{_OPEN}" [in progress] [outside content]: '
+        "no meaning understood",
+        "Related matters:",
+        f'  part of story "{outer}": 2 members',
+    ]
+
+
+def test_standing_renders_what_was_done_and_the_earlier_episodes() -> None:
+    """What acting will fill (§8:1), rendered now so its shape is fixed."""
+    buffer = StringIO()
+    console = Console(file=buffer, force_terminal=False, width=400)
+    header = StoryHeader(story_id="story:a", created_at=_AT, merged_into=None)
+    standing = StoryStanding(
+        story=header,
+        done=(
+            StoryStandingEffect(activation_id="a1", state=StoryEffectState.UNKNOWN, at=_AT),
+            StoryStandingEffect(activation_id="a2", state=StoryEffectState.DONE, at=_AT),
+        ),
+        recent=tuple(
+            StoryStandingEpisode(
+                activation_id=f"r{index}",
+                occurred_at=_AT,
+                meaning="Asked about the canoe" if index == 0 else None,
+                in_progress=False,
+                outside=False,
+            )
+            for index in range(STORY_STANDING_RECENT)
+        ),
+        earlier=StoryStandingEarlier(episodes=1, first_at=_AT, last_at=_AT),
+    )
+    story_inspection.render_standing(console, standing)
+    lines = buffer.getvalue().splitlines()
+    assert lines[:6] == [
+        'Story "story:a"',
+        "What was done:",
+        f'  Activation "a1": not known whether it took effect ({_AT.isoformat()})',
+        f'  Activation "a2": took effect ({_AT.isoformat()})',
+        "Timeline, most recent first:",
+        f'  {_AT.isoformat()} activation "r0": "Asked about the canoe"',
+    ]
+    assert lines[6] == f'  {_AT.isoformat()} activation "r1": no meaning understood'
+    assert lines[-2:] == [
+        f"  Earlier: 1 episode, from {_AT.isoformat()} to {_AT.isoformat()}",
+        "Related matters: none.",
+    ]
+
+
+def test_a_merged_story_page_and_standing_show_only_where_it_went(
+    monkeypatch: pytest.MonkeyPatch, output: StringIO
+) -> None:
+    engine = _engine(_episode(_FROZEN))
+    absorbed = _create(engine, _activation(_FROZEN))
+    kept = _create(engine, _activation(_FROZEN))
+    assert asyncio.run(engine.merge_stories(absorbed, kept)).refusal is None
+    _wire(monkeypatch, engine)
+    merged = f'Story "{absorbed}" was merged into story "{kept}".\n'
+    assert _invoke("story", "page", absorbed)[0] == 0
+    assert output.getvalue() == merged
+    _clear(output)
+    assert _invoke("story", "standing", absorbed)[0] == 0
+    assert output.getvalue() == merged
+    _clear(output)
+    assert _invoke("story", "page", "story:absent")[0] == 1
+    assert output.getvalue() == 'No story "story:absent".\n'
+    _clear(output)
+    assert _invoke("story", "standing", "story:absent")[0] == 1
+    assert output.getvalue() == 'No story "story:absent".\n'
+
+
+def test_move_names_activations_only_and_says_where_they_went(
+    monkeypatch: pytest.MonkeyPatch, output: StringIO
+) -> None:
+    engine = _engine(_episode(_FROZEN), _episode(_OPEN, open_=True))
+    source = _create(engine, _activation(_FROZEN), _activation(_OPEN))
+    target = _create(engine, _activation(_OPEN))
+    _wire(monkeypatch, engine)
+    code, _ = _invoke("story", "move", f" {source} ", "--to", target, "-a", _FROZEN)
+    assert code == 0, output.getvalue()
+    assert engine.calls[-1] == (
+        "move_story_members",
+        {"story_id": source, "to": target, "members": (_activation(_FROZEN),)},
+    )
+    assert output.getvalue() == f'Moved to story "{target}"; 2 change-log lines appended.\n'
+    _clear(output)
+    assert _invoke("story", "move", source, "--to", target, "-a", _FROZEN)[0] == 1
+    assert output.getvalue() == (
+        f'Refused (not_a_member): activation "{_FROZEN}" is not a member of story "{source}".\n'
+    )
+    _clear(output)
+    assert _invoke("story", "move", source, "--to", target)[0] == 1
+    assert output.getvalue() == "Refused (no_members): no member was named.\n"
+
+
+def _page_refusals() -> list[tuple[StoryPageRefusal, str]]:
+    return [
+        (
+            StoryPageRefusal(reason=StoryPageRefusalReason.UNKNOWN_STORY, story_id="story:x"),
+            'there is no story "story:x"',
+        ),
+        (
+            StoryPageRefusal(
+                reason=StoryPageRefusalReason.MERGED_STORY,
+                story_id="story:x",
+                merged_into="story:y",
+            ),
+            'story "story:x" was merged into story "story:y"',
+        ),
+        (
+            StoryPageRefusal(reason=StoryPageRefusalReason.PAGE_MOVED_ON, story_id="story:x"),
+            'the page of story "story:x" was written again since it was read',
+        ),
+        (
+            StoryPageRefusal(
+                reason=StoryPageRefusalReason.UNKNOWN_NOTE, story_id="story:x", note=7
+            ),
+            "there is no note #7",
+        ),
+        (
+            StoryPageRefusal(reason=StoryPageRefusalReason.OVER_CAP, story_id="story:x"),
+            f'the page of story "story:x" is over its cap of {STORY_PAGE_CAP_CHARS} characters',
+        ),
+    ]
+
+
+def test_every_page_refusal_reason_has_a_rendering() -> None:
+    covered = {refusal.reason for refusal, _ in _page_refusals()}
+    assert covered == set(StoryPageRefusalReason)
+
+
+@pytest.mark.parametrize(("refusal", "detail"), _page_refusals())
+def test_a_page_refusal_names_its_reason_and_what_it_was_refused_over(
+    refusal: StoryPageRefusal, detail: str
+) -> None:
+    assert story_inspection.page_refusal_text(refusal) == (
+        f"Refused ({refusal.reason.value}): {detail}."
+    )
+
+
+def test_every_effect_state_and_relation_has_a_rendering() -> None:
+    assert set(story_inspection.EFFECT_TEXT) == set(StoryEffectState)
+    assert set(story_inspection.RELATION_TEXT) == set(StoryRelation)

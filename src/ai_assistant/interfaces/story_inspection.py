@@ -1,12 +1,16 @@
-"""Presentation for the owner's story commands (ADR-0289 §5).
+"""Presentation for the owner's story commands (ADR-0289 §5, ADR-0300 §8).
 
 Rendering and read assembly only. Which writes are allowed, what a loop is and
 whether a member exists are the story store's and the engine's to decide (ADR-0289
-§§3-4); this module states what they answered.
+§§3-4); what of a page the owner is shown, and where a matter stands, are the
+engine's to work out (ADR-0300 §8, §11). This module states what they answered.
 
 **Every value the engine supplies is quoted** by :func:`quoted`: JSON-escaped, and
 any character that is still not printable escaped as well, so an id carrying a line
-break, an ANSI escape or a C1 control cannot pose as a line this adapter wrote.
+break, an ANSI escape or a C1 control cannot pose as a line this adapter wrote. A
+page's lines, its notes and an episode's meaning are quoted the same way, and one
+resting on outside content is labelled so, never shown as the owner's own words
+(ADR-0300 §4, §8:4).
 """
 
 from __future__ import annotations
@@ -17,9 +21,13 @@ from typing import TYPE_CHECKING, assert_never
 
 from ai_assistant.core.types import (
     MAX_STORY_PAGE,
+    STORY_PAGE_CAP_CHARS,
     StoryChange,
+    StoryEffectState,
     StoryMemberKind,
+    StoryPageRefusalReason,
     StoryRefusalReason,
+    StoryRelation,
 )
 from ai_assistant.interfaces.episode_inspection import summary_fields
 from ai_assistant.wire.errors import ProtocolError
@@ -34,9 +42,16 @@ if TYPE_CHECKING:
         StoryLogPage,
         StoryMember,
         StoryMemberView,
+        StoryNote,
+        StoryNoteOutcome,
         StoryOutcome,
         StoryPage,
+        StoryPageLine,
+        StoryPageRefusal,
+        StoryPageView,
         StoryRefusal,
+        StoryStanding,
+        StoryStandingEpisode,
     )
 
 #: What each change-log line's change reads as. Spelled out per member so a member
@@ -49,6 +64,24 @@ CHANGE_TEXT: dict[StoryChange, str] = {
     StoryChange.ABSORBED: "absorbed",
     StoryChange.SPLIT_OFF: "split, the other side being",
 }
+
+#: What each state of a thing done reads as (ADR-0300 §8:1), spelled out per member
+#: for the same reason.
+EFFECT_TEXT: dict[StoryEffectState, str] = {
+    StoryEffectState.UNKNOWN: "not known whether it took effect",
+    StoryEffectState.NOT_DONE: "did not take effect",
+    StoryEffectState.DONE: "took effect",
+}
+
+#: What each relation of a related matter reads as (ADR-0300 §8:1).
+RELATION_TEXT: dict[StoryRelation, str] = {
+    StoryRelation.PART_OF: "part of",
+    StoryRelation.CONTAINS: "contains",
+}
+
+#: The label on a line, a note or an episode resting on outside content, so it is
+#: never read as the owner's own words (ADR-0300 §4:6, §8:4).
+OUTSIDE = "[outside content]"
 
 
 def escaped(value: str) -> str:
@@ -103,6 +136,55 @@ def refusal_text(refusal: StoryRefusal) -> str:
         case _:  # pragma: no cover — exhaustive over a closed enumeration
             assert_never(refusal.reason)
     return f"Refused ({refusal.reason.value}): {detail}."
+
+
+def page_refusal_text(refusal: StoryPageRefusal) -> str:
+    """Say why a write to a story's page was refused (ADR-0300 §3), as :func:`refusal_text`.
+
+    Matched over every member of the closed enumeration, though a note the owner
+    adds can earn only ``unknown_story`` and ``merged_story``: the rest answer a page
+    write, which no command makes, and are rendered so that a member added later
+    fails the coverage test rather than reaching the owner unrendered.
+    """
+    story = f"story {quoted(refusal.story_id)}"
+    match refusal.reason:
+        case StoryPageRefusalReason.UNKNOWN_STORY:
+            detail = f"there is no {story}"
+        case StoryPageRefusalReason.MERGED_STORY:
+            target = quoted(refusal.merged_into or "")
+            detail = f"{story} was merged into story {target}"
+        case StoryPageRefusalReason.PAGE_MOVED_ON:
+            detail = f"the page of {story} was written again since it was read"
+        case StoryPageRefusalReason.UNKNOWN_NOTE:
+            detail = f"there is no note #{refusal.note}"
+        case StoryPageRefusalReason.OVER_CAP:
+            detail = f"the page of {story} is over its cap of {STORY_PAGE_CAP_CHARS} characters"
+        case _:  # pragma: no cover — exhaustive over a closed enumeration
+            assert_never(refusal.reason)
+    return f"Refused ({refusal.reason.value}): {detail}."
+
+
+def render_note_outcome(console: Console, story_id: str, outcome: StoryNoteOutcome) -> bool:
+    """Render what adding a note did; return whether it was written.
+
+    Args:
+        console: Where to render.
+        story_id: The story the note was for.
+        outcome: The engine's answer.
+
+    Returns:
+        ``True`` where the note was written, ``False`` where it was refused.
+    """
+    if outcome.refusal is not None:
+        _print(console, page_refusal_text(outcome.refusal))
+        return False
+    note_id = 0 if outcome.note is None else outcome.note.note_id
+    _print(
+        console,
+        f"Added note #{note_id} to story {quoted(story_id)}; "
+        "it is pending until the page is next tidied.",
+    )
+    return True
 
 
 def render_outcome(console: Console, applied: str, outcome: StoryOutcome) -> bool:
@@ -307,4 +389,128 @@ def render_story(console: Console, read: StoryRead) -> None:
         "Change log, oldest first:",
         *(_log_line(line) for line in read.log),
     ]
+    _print(console, "\n".join(lines))
+
+
+# --- the story commands (ADR-0300 §8) ---------------------------------------------
+
+
+def _merged(header: StoryHeader) -> str:
+    target = quoted(header.merged_into or "")
+    return f"Story {quoted(header.story_id)} was merged into story {target}."
+
+
+def _counted(count: int, noun: str) -> str:
+    return f"{count} {noun}" if count == 1 else f"{count} {noun}s"
+
+
+def _page_line(line: StoryPageLine) -> str:
+    """One line of the current page: its text, quoted, and the notes it cites."""
+    cites = ", ".join(f"#{note_id}" for note_id in line.cites)
+    marked = f"{OUTSIDE} " if line.outside else ""
+    return f"  {marked}{quoted(line.text)} (from {cites})"
+
+
+def _note_line(note: StoryNote) -> str:
+    """One pending note: its id, when, who wrote it, what it rests on, and its text."""
+    rests = "" if note.rests_on is None else f" on activation {quoted(note.rests_on)}"
+    marked = f"{OUTSIDE} " if note.outside else ""
+    return (
+        f"  #{note.note_id} {note.written_at.isoformat()} {note.author.value}{rests}: "
+        f"{marked}{quoted(note.text)}"
+    )
+
+
+def render_page(console: Console, view: StoryPageView) -> None:
+    """Render a story's page as the owner is shown it (ADR-0300 §8:3).
+
+    When it was last tidied, then the current page's lines, then the notes and the
+    episodes pending on it. A line or a note resting on outside content is labelled
+    so (§8:4), and what ADR-0300 §11's default withheld is counted. A merged story
+    renders only the line naming the story it was merged into.
+    """
+    header = view.story
+    if header.merged_into is not None:
+        _print(console, _merged(header))
+        return
+    lines = [f"Story {quoted(header.story_id)}"]
+    if view.version is None or view.tidied_at is None:
+        lines.append("Never tidied: no page has been written yet.")
+    else:
+        lines.append(f"Last tidied: {view.tidied_at.isoformat()} (version {view.version})")
+        lines.append("Page:")
+        lines.extend(_page_line(line) for line in view.lines)
+        if view.withheld_lines:
+            lines.append(
+                f"  {_counted(view.withheld_lines, 'line')} withheld: each cites a note "
+                "whose episode is no longer held, or one this story no longer holds."
+            )
+    notes = len(view.pending_notes) + view.withheld_notes
+    lines.append(f"Pending notes: {notes}")
+    lines.extend(_note_line(note) for note in view.pending_notes)
+    if view.withheld_notes:
+        lines.append(
+            f"  {_counted(view.withheld_notes, 'note')} withheld: "
+            "each rests on an episode that is no longer held."
+        )
+    lines.append(f"Pending episodes: {len(view.pending_episodes)}")
+    lines.extend(f"  Activation {quoted(item)}" for item in view.pending_episodes)
+    _print(console, "\n".join(lines))
+
+
+def _moment(episode: StoryStandingEpisode) -> str:
+    """One episode on the timeline: when, which activation, its marks and its meaning."""
+    marks = "".join(
+        f" {mark}"
+        for mark, present in (("[in progress]", episode.in_progress), (OUTSIDE, episode.outside))
+        if present
+    )
+    meaning = "no meaning understood" if episode.meaning is None else quoted(episode.meaning)
+    return (
+        f"  {episode.occurred_at.isoformat()} activation {quoted(episode.activation_id)}"
+        f"{marks}: {meaning}"
+    )
+
+
+def render_standing(console: Console, standing: StoryStanding) -> None:
+    """Render where a story's matter stands, worked out from the records (ADR-0300 §8:1).
+
+    What was done, unknown first, then not done, then done; the timeline, most recent
+    first, its older episodes as counts; and the related matters. A merged story
+    renders only the line naming the story it was merged into.
+    """
+    header = standing.story
+    if header.merged_into is not None:
+        _print(console, _merged(header))
+        return
+    lines = [f"Story {quoted(header.story_id)}"]
+    if standing.done:
+        lines.append("What was done:")
+        lines.extend(
+            f"  Activation {quoted(effect.activation_id)}: {EFFECT_TEXT[effect.state]} "
+            f"({effect.at.isoformat()})"
+            for effect in standing.done
+        )
+    else:
+        lines.append("What was done: nothing recorded.")
+    if standing.recent:
+        lines.append("Timeline, most recent first:")
+        lines.extend(_moment(episode) for episode in standing.recent)
+    else:
+        lines.append("Timeline: no episode.")
+    if standing.earlier is not None:
+        earlier = standing.earlier
+        lines.append(
+            f"  Earlier: {_counted(earlier.episodes, 'episode')}, from "
+            f"{earlier.first_at.isoformat()} to {earlier.last_at.isoformat()}"
+        )
+    if standing.related:
+        lines.append("Related matters:")
+        lines.extend(
+            f"  {RELATION_TEXT[item.relation]} story {quoted(item.story_id)}: "
+            f"{_counted(item.member_count, 'member')}"
+            for item in standing.related
+        )
+    else:
+        lines.append("Related matters: none.")
     _print(console, "\n".join(lines))
