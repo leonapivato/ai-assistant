@@ -60,7 +60,7 @@ from ai_assistant.core.types import (
     StoryStandingEpisode,
     rests_on_recorded_external_content,
 )
-from ai_assistant.orchestration.disclosure import admitted_to_understanding
+from ai_assistant.orchestration.disclosure import TurnSupply, admitted_to_understanding
 from ai_assistant.orchestration.episode_reads import without_open_episodes
 from ai_assistant.orchestration.stories import episode_address
 
@@ -69,7 +69,6 @@ if TYPE_CHECKING:
 
     from ai_assistant.core.protocols import MemoryStore, StoryStore
     from ai_assistant.core.types import MemoryRecord, StoryHeader
-    from ai_assistant.orchestration.disclosure import TurnSupply
 
 
 @final
