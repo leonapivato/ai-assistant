@@ -773,14 +773,11 @@ class TestEngineContract(AssistantEngineContract):
     async def story_surface(self) -> AsyncIterator[StorySurfaceSubject]:
         """The production engine over an injected memory store and story store."""
         memory = FakeMemoryStore(now=lambda: STORY_SURFACE_AT)
-        built = _wire(
-            memory=memory,
-            max_payload_bytes=STORY_LIMIT,
-            stories=FakeStoryStore(now=lambda: STORY_SURFACE_AT),
-        )
+        stories = FakeStoryStore(now=lambda: STORY_SURFACE_AT)
+        built = _wire(memory=memory, max_payload_bytes=STORY_LIMIT, stories=stories)
         await built.start()
         try:
-            yield StorySurfaceSubject(engine=built, memory=memory)
+            yield StorySurfaceSubject(engine=built, memory=memory, stories=stories)
         finally:
             await built.aclose()
 
