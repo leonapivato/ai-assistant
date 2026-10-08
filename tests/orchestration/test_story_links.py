@@ -11,7 +11,7 @@ import asyncio
 import itertools
 from datetime import timedelta
 from itertools import count
-from typing import TYPE_CHECKING, Final
+from typing import TYPE_CHECKING, Any, Final
 
 import pytest
 from story_support import (
@@ -40,7 +40,9 @@ from ai_assistant.orchestration.story_links import StoryCandidates, StoryLinksSt
 from ai_assistant.testing import FakeMemoryStore, FakeStoryStore
 
 if TYPE_CHECKING:
-    from ai_assistant.core.types import StoryHeader, StoryMember, StoryViewPage
+    from collections.abc import Mapping, Sequence
+
+    from ai_assistant.core.types import MemoryRecord, StoryHeader, StoryMember, StoryViewPage
 
 BOUNDED: Final = BoundedAudienceSupply(speakable_attested_sources=frozenset())
 UNBOUNDED: Final = UnboundedAudienceSupply(speakable_attested_sources=frozenset())
@@ -198,6 +200,34 @@ async def test_the_latest_episodes_are_the_latest_by_occurrence_not_by_link_orde
     assert [record.id for record in view.episodes] == [address("r-2"), address("r-1")]
 
 
+async def test_a_member_relinked_while_the_members_are_read_is_shown_once() -> None:
+    """A member unlinked and linked again between two pages comes back on the later one."""
+    stories = _stories()
+    members = [activation(f"a-{index:03}") for index in range(101)]
+    trip = await _story(stories, *members)
+    pages = stories.view
+    calls = count()
+
+    async def relinking(story_id: str, **kwargs: Any) -> StoryViewPage | None:
+        page = await pages(story_id, **kwargs)
+        if not next(calls):
+            # After the first page: the newest episode's member moves to the end.
+            await stories.unlink(trip, [members[0]], actor=StoryActor.OWNER)
+            await stories.link(trip, [members[0]], actor=StoryActor.OWNER)
+        return page
+
+    stories.view = relinking  # type: ignore[method-assign]  # an interleaving point
+    records = [
+        episode(member.id, at=AT - timedelta(minutes=index)) for index, member in enumerate(members)
+    ]
+    window = (records[0],)
+    memory = await memory_of(*records)
+
+    (view,) = (await _candidates(stories, memory).assemble(window, audience=BOUNDED)).views
+
+    assert [record.id for record in view.episodes] == [address("a-000"), address("a-001")]
+
+
 async def test_a_story_with_no_page_shows_its_pending_notes_and_episodes() -> None:
     stories = _stories()
     trip = await _story(stories, activation("a-1"))
@@ -226,9 +256,33 @@ async def test_an_open_episode_is_neither_shown_nor_lets_its_notes_be() -> None:
     (view,) = candidates.views
     assert view.notes == ()
     assert [record.id for record in view.episodes] == [address("a-1")]
-    # ADR-0282 §2:7: what was fetched for the view, and what came back missing.
-    assert address("a-2") in candidates.fetched
-    assert address("a-2") in candidates.missing
+    # ADR-0282 §2:7-§2:8: only what was chosen, admitted, is fetched and recorded.
+    assert (candidates.fetched, candidates.missing) == ((address("a-1"),), ())
+
+
+async def test_a_chosen_episode_gone_by_the_fetch_is_recorded_missing_and_not_shown() -> None:
+    stories = _stories()
+    await _story(stories, activation("a-1"), activation("a-2"))
+    window = (episode("a-1"),)
+    memory = await memory_of(episode("a-1"), episode("a-2"))
+    reads = memory.get_many
+    calls = count()
+
+    async def forgetting(record_ids: Sequence[str]) -> Mapping[str, MemoryRecord]:
+        found = dict(await reads(record_ids))
+        if next(calls):
+            # The second read, the fetch: a-2 was forgotten after it was chosen.
+            found.pop(address("a-2"), None)
+        return found
+
+    memory.get_many = forgetting  # type: ignore[method-assign]  # an interleaving point
+
+    candidates = await _candidates(stories, memory).assemble(window, audience=BOUNDED)
+
+    (view,) = candidates.views
+    assert [record.id for record in view.episodes] == [address("a-1")]
+    assert candidates.fetched == (address("a-2"), address("a-1"))
+    assert candidates.missing == (address("a-2"),)
 
 
 # --- §11's default --------------------------------------------------------------------
@@ -253,6 +307,8 @@ async def test_an_unbounded_audience_is_shown_nothing_resting_on_an_owner_placed
     assert [line.text for line in seen.lines] == ["shared line", "another shared line"]
     assert seen.notes == ()
     assert [record.id for record in seen.episodes] == [address("a-1")]
+    # §6:3 with ADR-0282 §2:8: the refused episode is neither fetched nor recorded.
+    assert address("a-2") not in (*unbounded.fetched, *unbounded.missing)
     (whole,) = bounded.views
     assert [note.text for note in whole.notes] == ["about the private one"]
     assert [record.id for record in whole.episodes] == [address("a-2"), address("a-1")]
@@ -394,9 +450,12 @@ async def test_two_activations_linking_one_unstoried_episode_start_one_story() -
     reads = stories.stories_of
 
     async def yielding(member: StoryMember) -> tuple[StoryHeader, ...]:
-        # Hand the loop to the other activation between the read and the write.
+        # Read first, then hand the loop to the other activation: between this read
+        # and this run's create, the other reads the same "no story". Without the
+        # stage's serialization this starts two stories.
+        found = await reads(member)
         await asyncio.sleep(0)
-        return await reads(member)
+        return found
 
     stories.stories_of = yielding  # type: ignore[method-assign]  # an interleaving point
     stage = StoryLinksStage(stories=stories)
