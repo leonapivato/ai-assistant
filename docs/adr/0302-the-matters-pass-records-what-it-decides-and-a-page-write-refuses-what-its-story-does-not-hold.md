@@ -128,6 +128,16 @@ on each of them (§3).
 > a grouping included. A change's own lines say what changed, and its `decided` lines
 > say which flag it answered.
 
+> **Normative.** The decisions **recorded for** a story are the `decided` lines on its
+> own change log and on the change log of every story merged into it, directly or
+> through a chain of merges, as its `absorbed` lines and theirs name them. A reader
+> shows each with the stories its flag concerns followed through merges as they now
+> stand.
+
+A merge moves members and notes but no log line (ADR-0289 §2:4), so a decision recorded
+on a story later merged away would otherwise drop out of every read that is meant to
+remember it.
+
 **Why one uniform line.** A change line names a member or another story and has no room
 for a flag, a decision to leave writes no change line at all, and a reader of the log,
 the pass included, then asks one question of one kind of line: is there a `decided`
@@ -174,12 +184,24 @@ answer one flag, whatever their timing.
 > and writes each decision through `answers` or `leave_flag` with the actor
 > `matters_pass`.
 
+> **Normative.** The pass decides an understanding flag only once its activation's
+> episode is no longer open: frozen (ADR-0286), or no longer recorded. Until then the
+> flag is not decided, by rule or by a model, and nothing is written for it.
+
+The story-links stage writes an activation's links while the activation runs, each in
+its own transaction (ADR-0300 §6:12), so a flag that exists after its second link may
+gain a third before the stage finishes. Once the episode is frozen the stage has run, and
+no later write carries the actor `understanding` with that activation as trigger, so the
+flag's stories are all written. The tidy-up waits for the same boundary before it reads
+an episode (ADR-0300 §5:2). A tidy-up's flag needs no such wait: its version is written
+whole, in one transaction.
+
 > **Normative.** A flag whose stories have since come together is recorded `left` by
 > rule, without a model call: a `like_another` flag whose two stories are one, and an
 > understanding flag fewer than two of whose stories still hold its activation.
 
-> **Normative.** For each flag it decides, the pass is shown the `decided` lines on the
-> stories the flag concerns, and its instruction states that a flag raised again after
+> **Normative.** For each flag it decides, the pass is shown the decisions recorded for
+> each story the flag concerns (§3), and its instruction states that a flag raised again after
 > a decision is decided as before unless what came to those stories since bears on it.
 
 > **Normative.** Where the store refuses the change the pass chose for a reason other
@@ -193,10 +215,10 @@ the stories left as they were, and a later flag raised on something new reopens 
 
 ### 6. Something new
 
-> **Normative.** A tidy-up of a story also reads the `decided` lines on that story's
-> change log, newest first, up to a number the lane that builds it sets as a
-> composition-root constant, and renders each by its outcome, the flag it answers and
-> the story that flag names.
+> **Normative.** A tidy-up of a story also reads the decisions recorded for that story
+> (§3), newest first, up to a number the lane that builds it sets as a composition-root
+> constant, and renders each by its outcome, the flag it answers and the stories that
+> flag concerns.
 
 > **Normative.** The tidy-up's instruction states that a flag one of those decisions
 > answered is raised again only where what this run takes in bears on it.
@@ -371,6 +393,9 @@ the pass's by the decisions on each flag's stories.
 - **The decision written in its own transaction, after the change.** A pass that stops
   between the two leaves the flag open over a change already made, and the next run can
   make it again.
+- **Writing an activation's links in one transaction**, so an understanding flag is
+  whole when it first exists. It changes how ADR-0300 §6:12's stage writes and needs a
+  store operation of its own; waiting for the episode to freeze (§5) needs neither.
 - **One operation taking any outcome.** It could record `merged` where nothing was
   merged; tying the outcome to the operation that makes the change cannot.
 - **Dropping a re-raised flag where the run took in nothing.** Nearly every tidy-up takes
