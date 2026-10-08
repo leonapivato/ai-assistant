@@ -2,12 +2,13 @@
 
 - Status: Proposed
 - Date: 2026-10-08
-- Scope: [M42](https://github.com/leonapivato/ai-assistant/milestone/9): what the matters pass records of each flag it decides, and what a story's page write refuses ([#2761](https://github.com/leonapivato/ai-assistant/issues/2761)).
+- Scope: [M42](https://github.com/leonapivato/ai-assistant/milestone/9): what the matters pass records of each flag it decides, and what a story's page write refuses ([#2761](https://github.com/leonapivato/ai-assistant/issues/2761)), and which route-table row ADR-0300's story commands take.
 - Dependency: ADR-0300, whose §3 [#2750](https://github.com/leonapivato/ai-assistant/pull/2750) and §5 [#2758](https://github.com/leonapivato/ai-assistant/pull/2758) implemented; ADR-0289, implemented.
-- Authorization: on 2026-10-08 the owner ruled, choosing option 2 of the two the dispatcher put, that the matters pass records each decision in the story's change log, a decision to leave the stories as they are included, and that a decided flag is revisited only when something new suggests it. The same day the dispatcher ruled #2761 (the refusal belongs inside `StoryStore.write_page`) and assigned 0302. That authorizes drafting and numbering, not ratification or implementation.
+- Authorization: on 2026-10-08 the owner ruled, choosing option 2 of the two the dispatcher put, that the matters pass records each decision in the story's change log, a decision to leave the stories as they are included, and that a decided flag is revisited only when something new suggests it. The same day the dispatcher ruled #2761 (the refusal belongs inside `StoryStore.write_page`) and assigned 0302, and later added the classification of ADR-0300's four story commands in ADR-0298 §5's route table to its scope. That authorizes drafting and numbering, not ratification or implementation.
 - **Changes a `core` surface.** `StoryStore` gains an operation and a keyword on five, and `StoryChange`, `StoryLogLine`, `StoryRefusalReason`, `StoryRefusal`, `StoryPageRefusalReason` and `StoryPageRefusal` change (§§3, 4 and 7 below): a Protocol change under golden rule 5, merged ratified before anything implements it.
 - **Partially supersedes** [ADR-0300](0300-a-story-keeps-a-page-of-notes-and-where-its-matter-stands-is-worked-out-from-records.md) — **four scopes, each in the addition alone.** **§3:10's page write**: it is also refused where it rests on, or takes in, what its story does not hold (§7 below). **§5:2's reads**: a tidy-up also reads the decisions recorded on its story's change log (§6 below). **§5:6's instruction**: it also states when a decided flag is raised again (§6 below). **§9:3's matters pass**: it records each decision in the change log, decides each flag once, and is shown the decisions already recorded (§§3–5 below). Every other clause stands, §3:8, §3:12–§3:14, §5:4, §5:7, §5:8, §9:2, §9:5 and §9:6 included.
-- **Extends, and replaces no sentence of,** [ADR-0289](0289-a-story-store-holds-which-experiences-belong-to-the-same-matter.md). §2:5's enumeration of what happened gains `decided` under its own *"added to and never renamed"*, and a `decided` line carries two fields beside those §2:4 lists, which says what each line carries without closing the list, as §3:14's *"and no others"* does. §2:7 stands: the new fields hold identities and an enumeration, never free text.
+- **Partially supersedes** [ADR-0298](0298-the-gateway-names-a-browser-device-on-each-request-and-the-hub-checks-every-request-by-one-table.md) — **one scope.** **§5:1's table, in the addition alone**: its command-or-query row also names `story_page`, `story_standing`, `add_story_note` and `move_story_members`, the story commands ADR-0300 §8:3 adds to `AssistantEngine` (§9 below). No other row changes, and every other clause stands, §5:3 and §5:4 included.
+- **Extends, and replaces no sentence of,** [ADR-0289](0289-a-story-store-holds-which-experiences-belong-to-the-same-matter.md). §2:5's enumeration of what happened gains `decided` under its own *"added to and never renamed"*, and a `decided` line carries two fields beside those §2:4 lists, which says what each line carries without closing the list, unlike §3:14's *"and no others"*. §2:7 stands: the new fields hold identities and an enumeration, never free text.
 
 ## Context
 
@@ -48,8 +49,8 @@ written all the same.
 The tidy-up (#2758) narrows the window from its own side: it re-reads the story's
 members just before the write and writes nothing where an episode it took in, or a
 safety-net note rests on, has left or been linked again. The read and the write are two
-store calls, so the window is one round trip wide, and it is open to every other writer
-of a page.
+store calls, so the window is one round trip wide, and the guard is the tidy-up's own,
+not the store's.
 
 **The code at `c41cca1b`.** `StoryChange` has the six members ADR-0289 §2:5 lists.
 `StoryLogLine` carries `sequence`, `story_id`, `change`, `member`, `other_story`,
@@ -62,13 +63,14 @@ matches whose coverage tests fail on an unrendered member.
 ## Decision
 
 We will name every flag by identity, record each decision on it as a `decided` line in
-the change log of the stories it concerns, written in the same transaction as the
-change it decides, and have the matters pass decide only flags no such line answers.
-The tidy-up and the pass are shown the decisions already recorded, and a decided flag
-is raised again only on something new. And `StoryStore.write_page` refuses, inside its
-transaction, a page resting on or taking in what its story does not hold. Every clause
-below stands alongside ADR-0300 and ADR-0289 except where this decision's header names
-a scope it replaces.
+the change log of the stories it concerns, written in the same transaction as the change
+it decides, and have the matters pass decide only flags no such line answers. The
+tidy-up and the pass are shown the decisions already recorded, and a decided flag is
+raised again only on something new. And `StoryStore.write_page` refuses, inside its
+transaction, a page resting on or taking in what its story does not hold. ADR-0300's
+four story commands take ADR-0298's command-or-query row. Every clause below stands
+alongside ADR-0300, ADR-0298 and ADR-0289 except where this decision's header names a
+scope it replaces.
 
 ### 1. Status and scope
 
@@ -91,9 +93,10 @@ a scope it replaces.
 > and that activation as trigger, stand on two or more stories.
 
 > **Normative.** The stories a flag **concerns** are, for a tidy-up's flag, the story
-> that raised it and, on `like_another`, the story it names; for understanding's flag,
-> each story holding one of the lines that make it a flag. Each is followed through
-> merges to the story it was merged into, and each story is counted once.
+> that raised it and then, on `like_another`, the story it names; for understanding's
+> flag, each story holding one of the lines that make it a flag, in the order of those
+> lines' sequence numbers. Each is followed through merges to the story it was merged
+> into, and each story is counted once, at its first place in that order.
 
 > **Normative.** A flag raised in a later version is a different flag from one raised
 > in an earlier version, though its kind and the story it names are the same.
@@ -137,8 +140,8 @@ answered.
 
 > **Normative.** `StoryStore` gains `leave_flag(flag, *, actor)`, which writes a
 > decision with the outcome `left` and changes no story's members. An applied one
-> answers a `StoryOutcome` naming the first story it wrote a line on, in the order §2
-> gives the stories, and counting its lines.
+> answers a `StoryOutcome` naming the first story it wrote a line on, in the order
+> §2's stories a flag concerns are given, and counting its lines.
 
 > **Normative.** `create`, `link`, `merge`, `split` and `move` gain a keyword `answers`,
 > defaulting to none. Given a flag, the operation writes that decision in its own
@@ -180,9 +183,9 @@ answer one flag, whatever their timing.
 > a decision is decided as before unless what came to those stories since bears on it.
 
 > **Normative.** Where the store refuses the change the pass chose for a reason other
-> than `already_decided`, the stories stay as they are and the pass records the flag
-> `left`. Where it refuses with `already_decided`, the pass writes nothing more for
-> that flag.
+> than `unknown_flag` or `already_decided`, the stories stay as they are and the pass
+> records the flag `left`. Where it refuses with either of those two, the pass writes
+> nothing more for that flag.
 
 So a merge, a split, a move or a grouping that the store will not make, such as one that
 would form a loop, is not proposed again on every run: it is recorded as what happened,
@@ -218,11 +221,11 @@ is shown it, so neither raises the pair again on nothing new.
 
 > **Normative.** `StoryPageRefusalReason` gains `not_held`.
 
-> **Normative.** `StoryStore.write_page` refuses, inside its transaction, a draft with a
-> safety-net note resting on an activation the story does not hold as a member when the
-> write runs, or naming as taken in an episode the story does not hold as a member, or
-> a note the story does not hold, when the write runs. The refusal is `not_held` and
-> writes nothing.
+> **Normative.** `StoryStore.write_page` refuses, inside its transaction, a draft any of
+> whose safety-net notes rests on an activation that is not one of the story's members
+> when the write runs, or that names as taken in an episode that is not one of the
+> story's members, or a note the story does not hold, when the write runs. The refusal
+> is `not_held`, and the write writes nothing.
 
 > **Normative.** A `not_held` refusal names the activation or the note it was refused
 > over: the activation in a field `activation` of `StoryPageRefusal`, set exactly on a
@@ -254,15 +257,37 @@ records taking in what the story no longer holds.
 ### 8. The wire and the CLI
 
 > **Normative.** The store lane advances `PROTOCOL_VERSION`, on ADR-0300 §12:2: the
-> engine's story log carries `StoryLogLine`, and the engine's story writes carry
-> `StoryRefusal`, so a peer at the earlier version would refuse a `decided` line or a
-> new refusal.
+> engine's story log carries `StoryLogLine`, the engine's story writes carry
+> `StoryRefusal`, and the story commands carry `StoryPageRefusal`, so a peer at the
+> earlier version would refuse a `decided` line or a new refusal.
 
 > **Normative.** The CLI's `story show` renders a `decided` line with its outcome and
 > the flag it answers, by identity, and the CLI renders the new refusal reasons wherever
 > it renders their enumerations.
 
-### 9. Delivery
+### 9. The story commands' row in the route table
+
+ADR-0298 §5:1 classifies *"Every method on the promoted surface"* in exactly one row of
+its table, and the table names its methods one by one. ADR-0300 §8:3 adds four story
+commands to `AssistantEngine` after that table was written, and the table does not name
+them, so by ADR-0298 §5:3 they would be refused to every device but `hub`. The story
+commands' lane ([#2760](https://github.com/leonapivato/ai-assistant/pull/2760)) placed
+them, under the names below, in the command-or-query row of
+`ai_assistant.wire.routes.ROWS`, beside ADR-0289's nine story methods; this section is
+the decision that row needs.
+
+> **Normative.** `story_page`, `story_standing`, `add_story_note` and
+> `move_story_members` are classified in ADR-0298 §5:1's command-or-query row: the
+> requesting device must hold the role of source of commands and queries.
+
+They read and write the assistant's own story records for the owner, as the nine story
+methods already in that row do: `story_page` and `story_standing` read a story as
+`story` and `story_log` do, and `add_story_note` and `move_story_members` write one as
+`link_story` and `split_story` do. None is input to the assistant, a conversation's
+traffic or a spoke's, which the other rows hold. Nothing is left to build: the row
+already holds them.
+
+### 10. Delivery
 
 This section is guidance for the lanes, except where marked.
 
@@ -278,11 +303,14 @@ This section is guidance for the lanes, except where marked.
 > its coverage tests fail on any member it does not render; that is the whole of its
 > reach outside the triad, the SQLite store and `PROTOCOL_VERSION`.
 
+The SQLite store's file gains what a `decided` line carries under a new layout version,
+migrated in place as it was for ADR-0300's page; no line written before it changes.
+
 Until the store lane lands, the tidy-up's own re-read (#2758) is what narrows #2761's
 window, and nothing of either decision is live before the phases' cutover (ADR-0300
 §13).
 
-### 10. Relationship to earlier decisions
+### 11. Relationship to earlier decisions
 
 | Earlier decision | What changes |
 | --- | --- |
@@ -292,12 +320,14 @@ window, and nothing of either decision is live before the phases' cutover (ADR-0
 | ADR-0300 §9:2, §9:5, §9:6 | Nothing: flags are raised as before, wrong links are fixed by the same hands, and decisions are among the changes the story commands show on request |
 | ADR-0300 §12:2 | Nothing: §8 applies it |
 | ADR-0289 §2:4, §2:5 | Extended, no sentence replaced, as this ADR's header states |
+| ADR-0298 §5:1 | As this ADR's header states |
+| ADR-0298 §5:3, §5:4, §5:6 | Nothing: a method in no row is still refused, the closure test still binds, and the command role is still checked before dispatch |
 | ADR-0289 §1:3, §2:7, §2:8, §3:11, §4:4 | Nothing: the store reads only its own records, no field holds free text, a decision rides its change's transaction, no line is written on a merged story, and the engine still writes as `owner` |
 
-> **Normative.** This numbered draft records its replacements on ADR-0300's status
-> line and in a dated header note of ADR-0300, atomically with this ADR under ADR-0070
-> and ADR-0082, preserving its ratified body. The replacements take effect on this
-> ADR's ratification.
+> **Normative.** This numbered draft records its replacements on the status lines and
+> in a dated header note of ADR-0300 and ADR-0298, atomically with this ADR under
+> ADR-0070 and ADR-0082, preserving their ratified bodies. The replacements take effect
+> on this ADR's ratification.
 
 ## Consequences
 
