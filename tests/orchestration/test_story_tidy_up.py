@@ -302,6 +302,31 @@ async def test_the_current_pages_lines_are_shown_citing_by_label() -> None:
     assert shown["episodes"] == []
 
 
+async def test_a_line_citing_a_note_the_story_no_longer_holds_is_not_shown() -> None:
+    stories = _stories()
+    memory = await memory_of(episode("a-1"), episode("a-2", channel=EVENTS))
+    trip = await _story(stories, "a-1", "a-2")
+    await _note(stories, trip, "Camping at Riverside.")
+    await _note(
+        stories, trip, "The email says the gate code is 1234.", rests_on="a-2", outside=True
+    )
+    first = FakeModelProvider(
+        _reply([("Riverside.", ["N1"]), ("Riverside, gate code 1234 per the email.", ["N1", "N2"])])
+    )
+    assert (await _tidy_up(first, stories, memory).run(trip)).result is TidyUpResult.WRITTEN
+    # The outside note's activation is split away, and its note with it.
+    await stories.split(trip, [activation("a-2")], actor=StoryActor.OWNER)
+    await _note(stories, trip, "Next: pack.")
+    model = FakeModelProvider(_reply([("Riverside.", ["N1"]), ("Next: pack.", ["N2"])]))
+
+    await _tidy_up(model, stories, memory).run(trip)
+
+    shown = _shown(model)
+    # §4:4, §4:6: the line lost a citation, and with it its mark, so it is not carried.
+    assert [line["text"] for line in shown["current_page"]] == ["Riverside."]
+    assert [note["text"] for note in shown["notes"]] == ["Camping at Riverside.", "Next: pack."]
+
+
 # --- the hub's checks ---------------------------------------------------------------
 
 
@@ -333,6 +358,8 @@ async def _refused(reply: str, stories: FakeStoryStore, memory: FakeMemoryStore,
         _reply([("Trip.", ["N1"])], flags=[{"kind": "like_another", "story": "S1"}]),
         _reply([("Trip.", ["N1"])], flags=[{"kind": "two_matters", "story": "S1"}]),
         _reply([("Trip.", ["N1"])], flags=[{"kind": "like_another"}]),
+        _reply([("A label of any length is the model's string.", ["T" + "9" * 4301])]),
+        _reply([("Trip.", ["N1"]), ("Zero-padded.", ["T01"])], safety_net=[("E1", "Trip.")]),
     ],
 )
 async def test_an_output_that_fails_to_parse_or_a_check_is_refused_whole(reply: str) -> None:

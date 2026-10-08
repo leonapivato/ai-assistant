@@ -388,10 +388,13 @@ class _Reading:
         return {note.note_id: label for label, note in self.notes.items()}
 
     def lines(self) -> list[dict[str, object]] | str:
-        """The current page's lines, each citing by label the notes the story still holds.
+        """The current page's lines whose every note the story still holds, by label.
 
-        A line none of whose notes the story still holds (a split took them) cannot be
-        carried forward, since a line cites this story's notes, and is not shown.
+        A line citing a note the story no longer holds (a split or a move took it) is
+        not shown: its words would be carried forward without the citation that
+        carried their provenance, and possibly their mark (§4:4, §4:6). The notes it
+        cites that the story still holds are shown all the same, so what they say can
+        be rebuilt from them.
         """
         page = self.state.page
         if page is None:
@@ -399,15 +402,15 @@ class _Reading:
         labels = self.label_of()
         shown: list[dict[str, object]] = []
         for line in page.lines:
-            cites = [labels[note_id] for note_id in line.cites if note_id in labels]
-            if not cites:
+            if not all(note_id in labels for note_id in line.cites):
                 continue
+            cites = [labels[note_id] for note_id in line.cites]
             rendered: dict[str, object] = {
                 "written_by": _LINE_AUTHOR_TEXT,
                 "text": line.text,
                 "cites": cites,
             }
-            if any(self.notes[label].outside for label in cites):
+            if line.outside or any(self.notes[label].outside for label in cites):
                 rendered["outside_content"] = _OUTSIDE_TEXT
             shown.append(rendered)
         return shown or _NO_PAGE
@@ -734,11 +737,12 @@ def _line(
 
 
 def _new_index(label: str, added: int) -> int | None:
-    """The index a ``T`` label names among this run's safety-net notes, or ``None``."""
-    if not label.startswith("T") or not label[1:].isdecimal() or label[1:].startswith("0"):
-        return None
-    index = int(label[1:]) - 1
-    return index if 0 <= index < added else None
+    """The index a ``T`` label names among this run's safety-net notes, or ``None``.
+
+    Looked up among the labels this run's notes take, exactly, and never parsed: a
+    label is the model's string, of any length.
+    """
+    return {f"T{index}": index - 1 for index in range(1, added + 1)}.get(label)
 
 
 def _supersessions(proposal: _Proposed, reading: _Reading) -> tuple[StorySupersession, ...]:

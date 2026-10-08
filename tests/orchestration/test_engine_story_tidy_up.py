@@ -17,6 +17,7 @@ from typing import TYPE_CHECKING, Any, Final
 
 import pytest
 from story_support import AT, activation, episode, memory_of
+from structlog.testing import capture_logs
 from test_engine import Harness, NoStepPlanner
 from understanding_support import STATED_PROPOSAL, understanding_stage
 
@@ -193,10 +194,10 @@ async def test_the_runs_are_one_per_story_linked_or_started() -> None:
     assert interim.runs(StoryLinksDecision(outcome=StageOutcome.DONE)) == ()
 
 
-async def test_a_crashing_run_is_logged_and_never_raised() -> None:
+async def test_a_crashing_run_is_logged_by_its_class_alone_and_never_raised() -> None:
     class _Crashing(StoryTidyUp):
         async def run(self, story_id: str) -> Any:
-            msg = "a defect"
+            msg = "Bring the blue tent."  # what a note says: never logged
             raise RuntimeError(msg)
 
     memory = await memory_of()
@@ -212,7 +213,35 @@ async def test_a_crashing_run_is_logged_and_never_raised() -> None:
     (run,) = InterimTidyUp(tidy_up=crashing).runs(
         StoryLinksDecision(outcome=StageOutcome.DONE, linked=("story:1",))
     )
-    await run
+    with capture_logs() as logs:
+        await run
+
+    (event,) = logs
+    assert event == {
+        "event": "story_tidy_up_crashed",
+        "log_level": "error",
+        "stage": "tidy_up",
+        "error": "RuntimeError",
+    }
+
+
+async def test_no_tidy_up_is_started_once_shutdown_has_begun() -> None:
+    stories = _stories()
+    trip = (await stories.create([activation("a-1")], actor=StoryActor.OWNER)).story_id
+    assert trip is not None
+    memory = await memory_of(episode("a-1", at=AT), now=AT)
+    model = FakeModelProvider.scripted()
+    harness = _harness(memory, stories, _tidy_up(model, stories, memory), labels=["S1"])
+    before = set(harness.engine._inflight)
+
+    # A pass still running when `aclose` began: the drain has already looked.
+    harness.engine._closing = True
+    harness.engine._start_interim_tidy_ups(
+        StoryLinksDecision(outcome=StageOutcome.DONE, linked=(trip,))
+    )
+
+    assert harness.engine._inflight == before
+    assert model.calls == []
 
 
 async def test_the_interim_run_is_wired_only_beside_the_story_links_stage() -> None:
