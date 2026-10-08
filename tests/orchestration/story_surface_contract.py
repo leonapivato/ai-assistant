@@ -494,6 +494,32 @@ class StorySurfaceContract:
         assert withheld.withheld_notes == 1
         assert gone.note is not None
 
+    async def test_a_note_resting_on_an_episode_with_no_processing_record_is_shown(
+        self, story_surface: StorySurfaceSubject
+    ) -> None:
+        """Held at its address is enough for the owner: no field of the record decides."""
+        subject = story_surface
+        at = STORY_SURFACE_AT
+        await subject.memory.add(
+            EpisodicMemory(
+                id="activation:bare",
+                content="captured",
+                occurred_at=at,
+                provenance=Provenance(
+                    source=MemorySource.OBSERVED, confidence=0.9, last_updated=at
+                ),
+            )
+        )
+        story_id = await _created(subject, act("bare"))
+        written = await subject.stories.append_note(
+            story_id, "Rests on a bare record", author=StoryNoteAuthor.PLANNING, rests_on="bare"
+        )
+        assert written.note is not None
+        page = await subject.engine.story_page(story_id)
+        assert page is not None
+        assert page.pending_notes == (written.note,)
+        assert page.withheld_notes == 0
+
     async def test_a_merged_or_unknown_story_page_and_standing(
         self, story_surface: StorySurfaceSubject
     ) -> None:
