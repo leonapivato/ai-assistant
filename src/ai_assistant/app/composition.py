@@ -93,6 +93,7 @@ from ai_assistant.orchestration import (
     UpcomingEventStage,
 )
 from ai_assistant.orchestration.informational_events import InformationalEventStage
+from ai_assistant.orchestration.matters_pass import MattersPass
 from ai_assistant.orchestration.payloads import ENVELOPE_RESERVE_BYTES
 from ai_assistant.orchestration.recall import RecallStage
 from ai_assistant.orchestration.reconciling import ReconciliationStage
@@ -332,6 +333,31 @@ STORY_TIDY_UP_OTHER_STORIES: Final = UNDERSTANDING_STORY_CANDIDATES
 #: Consolidation's per-run budget is five minutes for a whole chunk of records; a
 #: tidy-up is one page, so two.
 STORY_TIDY_UP_BUDGET: Final = timedelta(minutes=2)
+
+#: How many decisions recorded for its story a tidy-up shows, newest first (ADR-0302
+#: §6:1). Its other-story count, so a decision on a pair with each story it can name
+#: fits, and a story with fewer decisions than that shows them all.
+STORY_TIDY_UP_DECISIONS: Final = STORY_TIDY_UP_OTHER_STORIES
+
+#: The matters pass's bounds (ADR-0300 §9:3, ADR-0302 §5), chosen here as §5:4 has the
+#: building lane choose them; none is measured yet, and the test hub is where to.
+#:
+#: **Decisions shown: 5** (§5:4), the tidy-up's figure: those on the same stories come
+#: first, and a pair of stories decided on more than a few times is the case the bound
+#: is there to cut. **Completions per run: 10**, so a backlog after a quiet spell
+#: drains over a few runs rather than in one long one; a flag decided by rule needs no
+#: completion and is not counted. **Episodes per story: 6**, its latest links, so a
+#: split or a move can name what came to the story most recently, which is where a
+#: page starts to look like two matters; the flag's own input is always shown besides.
+#: **Pending notes per story: 5**, its newest. **Excerpt: 1,000 characters**, half the
+#: tidy-up's, because a completion here is shown two or more stories' episodes and
+#: decides what they are about rather than folding in what was settled. A run's time
+#: is bounded by ``scheduler_run_budget``, consolidation's, on whose schedule it runs.
+MATTERS_PASS_DECISIONS: Final = 5
+MATTERS_PASS_FLAGS_PER_RUN: Final = 10
+MATTERS_PASS_EPISODES: Final = 6
+MATTERS_PASS_NOTES: Final = 5
+MATTERS_PASS_EXCERPT_CHARS: Final = 1000
 
 #: How many long-term memories recall keeps for one activation at most (ADR-0281 §3).
 #: Thin on purpose: recall leaves the story-following and the understanding-cued
@@ -2310,8 +2336,26 @@ def build_composition(  # noqa: PLR0915 — one statement per resource this root
                     memory=memory,
                     excerpt_chars=STORY_TIDY_UP_EXCERPT_CHARS,
                     other_stories=STORY_TIDY_UP_OTHER_STORIES,
+                    decisions=STORY_TIDY_UP_DECISIONS,
                     budget=STORY_TIDY_UP_BUDGET,
                 )
+            ),
+            # ADR-0300 §9:3's matters pass, as ADR-0302 §5 builds it, which the
+            # scheduler's `matters_pass` row runs on consolidation's interval. On
+            # **consolidation's route**, for the tidy-up's reason: background work over
+            # the assistant's own records that nobody waits on, and a flag whose
+            # completion fails is decided on a later run, so it needs no fallback. Over
+            # the same story store and memory store as every other story reader.
+            matters_pass=MattersPass(
+                model=consolidation_model,
+                stories=stories,
+                memory=memory,
+                excerpt_chars=MATTERS_PASS_EXCERPT_CHARS,
+                flags_per_run=MATTERS_PASS_FLAGS_PER_RUN,
+                decisions=MATTERS_PASS_DECISIONS,
+                episodes=MATTERS_PASS_EPISODES,
+                notes=MATTERS_PASS_NOTES,
+                budget=settings.scheduler_run_budget,
             ),
             # ADR-0254 §11's two operations and the confirmation projection, over the
             # object built above.

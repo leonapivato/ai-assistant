@@ -253,6 +253,18 @@ def jobs_for(engine: Engine, settings: Settings) -> tuple[Job, ...]:
       **The whole of the chunking stays below the façade**, where ADR-0111 §1 put
       the cursor: ``Engine.consolidate`` takes no argument, and this row holds a
       bound method and neither reads the cursor, writes it, nor passes it.
+    * **The matters pass** — ADR-0300 §9:3's background pass deciding the flags on
+      the stories, as ADR-0302 §5 builds it. §9:3 runs it "on the schedule of the
+      background memory work, consolidation", so the row reads
+      ``consolidation_interval`` and nothing of its own: armed exactly where
+      consolidation is, at the same interval, and disabled with it. **A row of its
+      own rather than a step inside** ``Engine.consolidate``, so each job's failure
+      is its own log line and its own trace, a provider error in one never costs
+      the other its run, and ``ConsolidationReport`` stays the report of the walk
+      it describes. It is the same kind of row as the two above it — a bound public
+      engine method holding no store (ADR-0083 §8) — and the last, for
+      consolidation's reason: its run is bounded by ``scheduler_run_budget`` rather
+      than by its backlog, so a sibling waits behind it at most that long.
 
     **No reader ingests on this table** (ADR-0294 §1). The calendar's and the email
     source's scheduled ingestion rows are retired and nothing replaces them here: a
@@ -290,6 +302,7 @@ def jobs_for(engine: Engine, settings: Settings) -> tuple[Job, ...]:
             engine.notice_upcoming_events,
         ),
         ("consolidation", settings.consolidation_interval, engine.consolidate),
+        ("matters_pass", settings.consolidation_interval, engine.decide_story_flags),
     )
     return tuple(
         Job(name=name, interval=interval, run=run)

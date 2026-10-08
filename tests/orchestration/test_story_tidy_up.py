@@ -57,6 +57,7 @@ def _tidy_up(
         memory=memory,
         excerpt_chars=2000,
         other_stories=5,
+        decisions=5,
         budget=budget,
     )
 
@@ -637,5 +638,6 @@ def test_its_bounds_are_positive() -> None:
             memory=None,  # type: ignore[arg-type]  # never reached: the bound refuses first
             excerpt_chars=0,
             other_stories=5,
+            decisions=5,
             budget=_BUDGET,
         )

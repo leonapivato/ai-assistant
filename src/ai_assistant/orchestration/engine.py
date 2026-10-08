@@ -451,6 +451,7 @@ if TYPE_CHECKING:
         RecordedGoal,
         RespondedTurn,
     )
+    from ai_assistant.orchestration.matters_pass import MattersPass, MattersPassReport
     from ai_assistant.orchestration.parked_reads import ParkedReadOperations
     from ai_assistant.orchestration.questions import QuestionStage
     from ai_assistant.orchestration.recall import RecallStage
@@ -855,6 +856,31 @@ def _noticed(count: int) -> Observation:
         The count, keyed by a literal written here (§2's second clause).
     """
     return Observation(metrics={"noticed": count})
+
+
+def _matters_decided(report: MattersPassReport) -> Observation:
+    """Read one matters-pass run onto its own ``OPERATION`` trace (ADR-0119 §8).
+
+    Code-owned counts only: no story id and nothing of any page (ADR-0004 §5).
+
+    Args:
+        report: What the run found and decided.
+
+    Returns:
+        The run's counters, keyed by literals written here (§2's second clause).
+    """
+    return Observation(
+        metrics={
+            "flags": report.flags,
+            "waiting": report.waiting,
+            "left_by_rule": report.left_by_rule,
+            "decided": report.decided,
+            "left_after_refusal": report.left_after_refusal,
+            "refused": report.refused,
+            "raced": report.raced,
+            "exhausted": report.exhausted,
+        }
+    )
 
 
 def _ruled(count: int) -> Observation:
@@ -2510,14 +2536,25 @@ def _windows_expired(working: _ActivationPass) -> Exception | None:
     return ModelTimeoutError(_WINDOWS_EXPIRED)
 
 
-def _check_story_wiring(*, candidates: bool, links: bool, understanding: bool) -> None:
+def _check_story_wiring(
+    *, candidates: bool, links: bool, understanding: bool, matters_pass: bool, stories: bool
+) -> None:
     """ADR-0300 §6's two pieces are wired together or not at all, and only beside understanding.
+
+    And §9:3's matters pass only beside the story store whose records it decides.
 
     Raises:
         ConfigurationError: If one is wired without the other — links proposed against
             no candidates, or candidates whose links nothing records — or either without
-            the understanding stage whose links they are.
+            the understanding stage whose links they are; or the matters pass without
+            the story store.
     """
+    if matters_pass and not stories:
+        msg = (
+            "the matters pass decides flags on the story store's records, so it is wired "
+            "only beside that store (ADR-0300 §9:3)"
+        )
+        raise ConfigurationError(msg)
     if candidates != links:
         msg = (
             "the story candidates and the story-links stage are wired together or not "
@@ -3037,6 +3074,7 @@ class Engine:
         story_candidates: StoryCandidates | None = None,
         story_links: StoryLinksStage | None = None,
         interim_tidy_up: InterimTidyUp | None = None,
+        matters_pass: MattersPass | None = None,
         authorization_operations: AuthorizationOperations | None = None,
         authorizations: AuthorizationResolution | None = None,
         transcriber: SpeechTranscriber | None = None,
@@ -3440,6 +3478,9 @@ class Engine:
                 after the story-links stage decides, a tidy-up is started, and not
                 awaited, for each story it linked the activation into — or ``None``,
                 and then none is. Only beside ``story_links``.
+            matters_pass: ADR-0300 §9:3's matters pass, which
+                :meth:`decide_story_flags` runs — or ``None``, and then that operation
+                refuses. Only beside ``stories``, the store it reads and writes.
             authorization_operations: ADR-0254 §11's read side — the confirmation
                 projection, the listing and the revocation — or ``None`` where this
                 deployment wired no authorization store. **Passed rather than
@@ -3811,6 +3852,8 @@ class Engine:
             candidates=story_candidates is not None,
             links=story_links is not None,
             understanding=understanding is not None,
+            matters_pass=matters_pass is not None,
+            stories=stories is not None,
         )
         self._understanding = understanding
         self._understanding_version_limit = understanding_version_limit or 2
@@ -3826,6 +3869,7 @@ class Engine:
             raise ConfigurationError(msg)
         # ADR-0300 §5's interim run: test-hub scaffolding, removed at the cutover.
         self._interim_tidy_up = interim_tidy_up
+        self._matters_pass = matters_pass
         if stage_record_limit < 2:  # noqa: PLR2004 — the first entry and the end entry
             msg = "a stage record keeps its first entry and its end entry (ADR-0280 §6)"
             raise ConfigurationError(msg)
@@ -4442,6 +4486,49 @@ class Engine:
             )
             raise ConfigurationError(msg)
         return await self._tracked(self._consolidation.run(), "consolidate", _consolidated)
+
+    async def decide_story_flags(self) -> MattersPassReport:
+        """Decide the flags on the stories, one bounded run (ADR-0300 §9:3, ADR-0302 §5).
+
+        The **maintenance surface**'s scheduled run of the matters pass, on
+        :meth:`consolidate`'s shape: concrete surface on this class and not
+        ``AssistantEngine``'s (ADR-0083 §8, ADR-0302 §4:6's *"AssistantEngine gains
+        nothing"*), taking no argument so it is a legal ``JobBody``, and driven by the
+        scheduler's ``matters_pass`` row on consolidation's interval, the schedule of
+        the background memory work §9:3 names.
+
+        **The engine decides nothing itself.** It delegates to
+        :class:`~ai_assistant.orchestration.matters_pass.MattersPass`, which writes
+        each decision through the story store with the actor ``matters_pass``. Its
+        changes are background maintenance, not actions under ADR-0292 §12:1-§12:2,
+        in the scope ADR-0300's header gives.
+
+        Tracked like every other public method, so shutdown drains the write it is in
+        the middle of before closing the stores it writes through (ADR-0042 §2).
+
+        Returns:
+            What the run found and decided. Every count zero is a **successful** pass
+            over a store with no undecided flag.
+
+        Raises:
+            RuntimeError: If the engine is shutting down. The scheduler treats this
+                as *stop* rather than as a job failure (ADR-0083 §8).
+            ConfigurationError: If this engine was built with no matters pass, for
+                :meth:`consolidate`'s reason: an empty report would be
+                indistinguishable from a store with no flag on it (ADR-0022 §4a).
+            StoryStoreError: If the story store could not be read or written. What
+                the run wrote before it stands, each decision in its own transaction.
+            MemoryStoreError: If the memory store could not be read.
+            ModelError: Propagated unwrapped from the provider (ADR-0013 §5).
+        """
+        self._reject_if_closing()
+        if self._matters_pass is None:
+            msg = (
+                "no matters pass is wired, so there is no flag to decide; it needs a "
+                "model provider, the story store and the memory store (ADR-0300 §9:3)"
+            )
+            raise ConfigurationError(msg)
+        return await self._tracked(self._matters_pass.run(), "decide_story_flags", _matters_decided)
 
     async def receive(
         self,
