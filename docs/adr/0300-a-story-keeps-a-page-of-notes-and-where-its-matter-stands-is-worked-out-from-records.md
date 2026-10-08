@@ -1,6 +1,6 @@
 # 300. A story keeps a page of notes, and where its matter stands is worked out from records
 
-- Status: Proposed
+- Status: Accepted
 - Date: 2026-10-08
 - Scope: what the assistant keeps about a matter: a story's page and its tidy-up, understanding linking an activation to stories, recall bringing the stories of what it finds, the views, the matters pass and the story commands. Its own milestone, built before the phases after understanding ([#2723](https://github.com/leonapivato/ai-assistant/pull/2723)) and live with them.
 - Dependency: ADR-0289, ADR-0276, ADR-0280, ADR-0281 and ADR-0282, all implemented at `04df86c0`.
