@@ -1,10 +1,17 @@
 # 298. The gateway names a browser device on each request, and the hub checks every request by one table
 
-- Status: Accepted
+- Status: Partially superseded by ADR-0302 (§5:1's table, in the addition alone)
 - Date: 2026-10-05
 - Scope: [#2578](https://github.com/leonapivato/ai-assistant/issues/2578), the channel redesign: how the device session ADR-0296 decides is built — the browser device's name on the wire, the requesting device inside the hub, registration, the route table, the refusal, the change stream's membership and heartbeat, the trust boundary and the cutover.
 - Dependency: ADR-0296, ratified.
 - Authorization: the dispatcher, under the owner's standing direction that mechanism design is the lanes' (ADR-0296 decides what a device session is; this ADR decides how it is built). The dispatcher assigned 0298.
+- Partially superseded: 2026-10-08 by ADR-0302 — one scope. §5:1's table, in the
+  addition alone: its command-or-query row also names `story_page`,
+  `story_standing`, `add_story_note` and `move_story_members`, the story commands
+  ADR-0300 §8:3 adds to `AssistantEngine`. No other row changes, and every other
+  clause stands. This scoped replacement takes effect on ratification of ADR-0302.
+  This reciprocal header record accompanies the numbered draft under ADR-0070 and
+  ADR-0082; the ratified body below is preserved.
 - **Partially supersedes** [ADR-0296](0296-a-device-has-one-session-and-a-browser-is-a-device-of-its-own.md) — **one scope.** **§1:5's *"the hub accepts the name only for a browser device registered under that gateway"*, read with the sentence under it that the gateway "is not trusted to act as any other device", as they reach a machine a gateway names for the first time**: that naming is the listing reaching the hub and registers the machine under that gateway (§4 below), so the hub refuses a gateway's name only for a registration the owner revoked under it, for the hub's own machine, or beyond the gateway's bound; and a gateway is trusted for its listing, so it can act as any device it names that the hub accepts, with that device's roles (§8 below). §1:3 and §1:4, the owner's rulings, stand as written, as does every other clause.
 - **Partially supersedes** [ADR-0085](0085-the-promoted-engine-surface.md) — **one scope.** **§8a's *"these members, and no others"*, in the addition alone**: a `request` frame may carry one more member, `acting_for`, the name of the browser device the request is relayed for (§1 below); and §8b's worst case, which that member raises from 110 bytes to 261 inside the unchanged 512-byte reserve. §8a's correlation-id bound, §8b's reserve, §8c's limit and §8d's floor stand, and every earlier partial supersession stands.
 
