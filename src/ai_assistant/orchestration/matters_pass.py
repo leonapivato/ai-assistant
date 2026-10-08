@@ -22,11 +22,15 @@ model. The episodes are checked after the run first reads the store, and where a
 frozen the change logs are read again, so the stories such a flag concerns are read
 after its episode froze, when the story-links stage has written every line of it.
 
-**Its stories as they now stand.** Each flag's stories are followed through merges by
-reading the store's headers when the flag is decided, not from the run's first read,
-so a merge landing meanwhile neither joins two stories nor parts one in the pass's
-eyes. A merge landing between that read and the write is the store's to place: a
-decision's lines go on the stories as they stand in its own transaction (§3:4).
+**Its stories as they now stand.** Each flag's stories, and the stories of the
+decisions it is shown, are followed through merges by every story's header read when
+the flag is decided, not by the run's first read, so a merge landing meanwhile neither
+joins two stories nor parts one in the pass's eyes. Where §5:3's rule for an
+understanding flag answers, the headers are read again after the membership lookup it
+was judged on, and a merge between the two defers the flag to a later run. A change
+landing after that is later than the decision, as any change after one is, and the
+store places the decision's lines on the stories as they stand in its own transaction
+(§3:4).
 
 **By rule** (§5:3). A ``like_another`` flag whose two stories have since become one,
 and an understanding flag fewer than two of whose stories still hold its activation,
@@ -89,7 +93,7 @@ from ai_assistant.orchestration.episode_reads import is_open_episode
 from ai_assistant.orchestration.stories import episode_address
 from ai_assistant.orchestration.story_flags import (
     StoryRecords,
-    followed_now,
+    read_headers,
     read_records,
     reread,
 )
@@ -667,7 +671,8 @@ class MattersPass:
             ModelError: Propagated unwrapped from the provider.
         """
         records = await read_records(self._stories, versions=True)
-        found = [flag.name for flag in records.flags() if flag.name not in records.decided()]
+        answered = records.decided()
+        found = [flag.name for flag in records.flags() if flag.name not in answered]
         frozen = await self._frozen(
             [name.activation for name in found if name.activation is not None]
         )
@@ -713,21 +718,26 @@ class MattersPass:
     async def _one(self, run: _Run, flag: RaisedFlag) -> None:
         """Decide one flag, by rule or by a completion, or leave it for a later run.
 
-        Its stories are followed through merges as the store holds them now, not as
-        the run's discovery read them, so a merge since does not make two stories
-        look like one, or one look like two (§5:3).
+        Its stories are followed through merges by every story's header as the store
+        holds it now, not as the run's discovery read it, so a merge since does not
+        make two stories look like one, or one look like two (§5:3), and the decisions
+        it is shown are placed by the same headers (§3:6). Where §5:3's rule for
+        understanding's flag answers, the headers are read once more after the
+        membership it was judged on: a merge landing between the two reads means the
+        comparison was not of one state of the store, so nothing is written for the
+        flag this run.
         """
         tally = run.tally
         if flag.name.activation is not None and flag.name.activation not in run.frozen:
             tally.waiting += 1
             return
-        concerned = tuple(
-            dict.fromkeys([await followed_now(self._stories, raised) for raised in flag.raised])
-        )
+        concerned = await self._concerned(run, flag)
         if await self._together(flag.name, concerned):
+            if flag.name.activation is not None and await self._concerned(run, flag) != concerned:
+                tally.count(_Result.RACED)
+                return
             left = await self._stories.leave_flag(flag.name, actor=_ACTOR)
             tally.count(_Result.LEFT_BY_RULE if left.refusal is None else _Result.RACED)
-            run.records = await reread(run.records, self._stories, concerned)
             return
         if run.calls >= self._flags_per_run:
             tally.exhausted = False
@@ -743,6 +753,15 @@ class MattersPass:
             self._failures.pop(flag.name, None)
         if touched:
             run.records = await reread(run.records, self._stories, touched)
+
+    async def _concerned(self, run: _Run, flag: RaisedFlag) -> tuple[str, ...]:
+        """The stories ``flag`` concerns, through every merge as the headers now stand.
+
+        Every header is read again, a page at a time, and the run's records take them,
+        so whatever else this flag's decision reads of where a story went agrees.
+        """
+        run.records = run.records.with_headers(await read_headers(self._stories))
+        return tuple(dict.fromkeys(run.records.followed(raised) for raised in flag.raised))
 
     async def _frozen(self, activations: Sequence[str]) -> frozenset[str]:
         """§5:2: which of ``activations`` have an episode recorded, and recorded frozen."""
