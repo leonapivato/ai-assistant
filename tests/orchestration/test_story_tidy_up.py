@@ -572,25 +572,25 @@ async def test_a_run_that_lost_a_race_is_refused_by_the_store_and_writes_nothing
     assert [line.text for line in state.page.lines] == ["Rival."]
 
 
-@pytest.mark.parametrize("how", ["split", "move"])
-async def test_an_episode_leaving_the_story_while_the_completion_is_out_writes_nothing(
-    how: str,
-) -> None:
+@pytest.mark.parametrize("how", ["split", "move", "relink"])
+async def test_an_episode_relinked_while_the_completion_is_out_writes_nothing(how: str) -> None:
     stories = _stories()
     memory = await memory_of(episode("a-1"), episode("a-2"))
     trip = await _story(stories, "a-1", "a-2")
     elsewhere = await _story(stories, "a-1") if how == "move" else None
-    moved: list[str] = []
+    where: list[str] = []
 
     async def away() -> None:
-        if elsewhere is None:
-            outcome = await stories.split(trip, [activation("a-2")], actor=StoryActor.OWNER)
+        moved = [activation("a-2")]
+        if how == "split":
+            outcome = await stories.split(trip, moved, actor=StoryActor.OWNER)
+        elif elsewhere is not None:
+            outcome = await stories.move(trip, elsewhere, moved, actor=StoryActor.OWNER)
         else:
-            outcome = await stories.move(
-                trip, elsewhere, [activation("a-2")], actor=StoryActor.OWNER
-            )
+            await stories.unlink(trip, moved, actor=StoryActor.OWNER)
+            outcome = await stories.link(trip, moved, actor=StoryActor.OWNER)
         assert outcome.story_id is not None
-        moved.append(outcome.story_id)
+        where.append(outcome.story_id)
 
     model = _Gated(
         _reply([("A camping trip.", ["T1"])], safety_net=[("E2", "Settled in a-2.")]),
@@ -600,17 +600,17 @@ async def test_an_episode_leaving_the_story_while_the_completion_is_out_writes_n
 
     outcome = await _tidy_up(model, stories, memory).run(trip)
 
-    # #2761's race, narrowed: no safety-net note is left resting on an episode the
-    # story no longer holds, and the moved episode is still pending where it went.
+    # #2761's race, narrowed: no safety-net note is written resting on an episode the
+    # write would not take in, and the episode is still pending wherever it now is.
     assert outcome.result is TidyUpResult.MEMBERS_MOVED
     listed = await stories.notes(trip)
     assert listed is not None
     assert listed.notes == ()
     state = await stories.current_page(trip)
     assert state is not None
-    assert (state.page, state.pending_episodes) == (None, ("a-1",))
-    (destination,) = moved
-    there = await stories.current_page(destination)
+    assert state.page is None
+    (now,) = where
+    there = await stories.current_page(now)
     assert there is not None
     assert "a-2" in there.pending_episodes
 
