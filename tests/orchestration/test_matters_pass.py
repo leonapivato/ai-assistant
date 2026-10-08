@@ -8,6 +8,7 @@ store and what its report says. The engine's method and the scheduler's row are 
 
 from __future__ import annotations
 
+import asyncio
 import json
 from datetime import timedelta
 from itertools import count
@@ -531,17 +532,87 @@ async def test_a_run_makes_at_most_its_bound_of_completions() -> None:
     assert len(model.calls) == 1
 
 
-async def test_a_spent_budget_starts_no_flag() -> None:
+async def test_a_run_whose_reading_outlasts_its_budget_still_decides_one_flag() -> None:
     stories = _stories()
-    await _raise(stories, await _story(stories, "a-1"), _TWO)
+    memory = await memory_of(episode("a-1"), episode("b-1"))
+    for activation_id in ("a-1", "b-1"):
+        await _raise(stories, await _story(stories, activation_id), _TWO)
+    read = stories.stories
+
+    async def slow(**kwargs: Any) -> Any:
+        await asyncio.sleep(0.01)
+        return await read(**kwargs)
+
+    stories.stories = slow  # type: ignore[method-assign]  # the store's reading, slowed
+    model = FakeModelProvider(_LEAVE)
+    matters = _pass(model, stories, memory, budget=timedelta(microseconds=1))
+
+    first = await matters.run()
+    second = await matters.run()
+
+    # The budget starts once the flags are found, and the first is always started.
+    assert (first.flags, first.decided, first.exhausted) == (2, 1, False)
+    assert (second.flags, second.decided, second.exhausted) == (1, 1, True)
+    assert len(model.calls) == 2
+
+
+async def test_a_merge_after_the_runs_reading_is_followed_before_the_rule() -> None:
+    stories = _stories()
+    memory = await memory_of(episode("a-1"), episode("b-1"), episode("c-1"), episode("x-1"))
+    trip = await _story(stories, "a-1")
+    other = await _story(stories, "b-1")
+    third = await _story(stories, "c-1")
+    await _linked_twice(stories, "x-1", trip, other)
+    header = stories.header
+    merged = False
+
+    async def merging_first(story_id: str) -> Any:
+        nonlocal merged
+        if not merged:
+            merged = True
+            assert (await stories.merge(trip, third, actor=StoryActor.OWNER)).refusal is None
+        return await header(story_id)
+
+    stories.header = merging_first  # type: ignore[method-assign]  # a merge lands meanwhile
     model = FakeModelProvider(_LEAVE)
 
-    report = await _pass(
-        model, stories, await memory_of(episode("a-1")), budget=timedelta(microseconds=1)
-    ).run()
+    report = await _pass(model, stories, memory).run()
 
-    assert (report.flags, report.decided, report.exhausted) == (1, 0, False)
-    assert model.calls == []
+    # `other` and `third` both hold x-1 now: the flag's stories did not come together.
+    assert merged
+    assert (report.left_by_rule, report.decided) == (0, 1)
+    assert [story["label"] for story in _shown(model)["stories"]] == ["S1", "S2"]
+
+
+async def test_an_understanding_flags_stories_are_read_after_its_episode_froze() -> None:
+    stories = _stories()
+    trip = await _story(stories, "a-1")
+    other = await _story(stories, "b-1")
+    third = await _story(stories, "c-1")
+    await _linked_twice(stories, "x-1", trip, other)
+    memory = await memory_of(episode("a-1"), episode("b-1"), episode("c-1"), episode("x-1"))
+    get_many = memory.get_many
+    linked = False
+
+    async def linking_first(record_ids: Sequence[str]) -> Any:
+        # The story-links stage writes its third line, and the episode freezes, while
+        # the pass checks whether the episode is frozen.
+        nonlocal linked
+        if not linked:
+            linked = True
+            await _linked_twice(stories, "x-1", third)
+        return await get_many(record_ids)
+
+    memory.get_many = linking_first  # type: ignore[method-assign]
+    model = FakeModelProvider(_LEAVE)
+
+    report = await _pass(model, stories, memory).run()
+
+    assert linked
+    assert report.decided == 1
+    assert [story["label"] for story in _shown(model)["stories"]] == ["S1", "S2", "S3"]
+    for story_id in (trip, other, third):
+        assert len(await _decisions(stories, story_id)) == 1
 
 
 @pytest.mark.parametrize(

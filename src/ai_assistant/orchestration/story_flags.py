@@ -59,6 +59,7 @@ __all__ = [
     "RecordedDecision",
     "StoryRecords",
     "decisions_of",
+    "followed_now",
     "read_records",
     "recorded_decisions",
     "reread",
@@ -349,6 +350,27 @@ async def reread(
         logs[story_id] = await read_log(stories, story_id)
         versions.setdefault(story_id, ())
     return StoryRecords(headers=headers, logs=logs, versions=versions)
+
+
+async def followed_now(stories: StoryStore, story_id: str) -> str:
+    """The story ``story_id`` is merged into now, through every merge, or itself.
+
+    Read from the store's headers as they stand, not from a :class:`StoryRecords`
+    read earlier, so a merge since is followed. A story the store does not hold is
+    answered as itself.
+
+    Raises:
+        StoryStoreError: If the store cannot be read.
+    """
+    seen = {story_id}
+    while (header := await stories.header(story_id)) is not None and (
+        onward := header.merged_into
+    ) is not None:
+        if onward in seen:  # pragma: no cover — a merged story is never merged into
+            return story_id
+        seen.add(onward)
+        story_id = onward
+    return story_id
 
 
 async def recorded_decisions(stories: StoryStore, story_id: str) -> list[RecordedDecision]:
