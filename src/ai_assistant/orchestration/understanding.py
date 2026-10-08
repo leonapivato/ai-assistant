@@ -9,7 +9,8 @@ window as ids, and the understanding phase fetches them (ADR-0282 §3, §5). It 
 no goal, no candidate goal, no attempt, no plan, no retrieved memory and no
 context-provider state, and its prompt
 renders none of them — it reads the activation's input and the two windows §3 and §4
-define, and nothing else, save what recall kept for the pass.
+define, and nothing else, save what recall kept for the pass and the short views of
+the candidate stories (ADR-0300 §6, superseding ADR-0276 §1:5 for those alone).
 
 **What recall kept** (ADR-0281 §7) renders as a third section, ``recalled``, labelled
 ``M1``, ``M2``… in recall's order, only where recall made a decision for the pass: its
@@ -19,6 +20,19 @@ takes the episode window's projection; a recalled semantic record renders its fa
 cut with the cut disclosed, its last update and an attribution by band, and its label
 resolves to a ``memory`` referent. Where recall kept nothing, or failed, the section
 says so.
+
+**The candidate stories** (ADR-0300 §6) render as a fourth section, ``stories``,
+labelled ``S1``, ``S2``… in the candidates' order, only where the understanding phase
+assembled candidates for the pass: each story's short view — the first lines of its
+page, its newest pending notes and its latest episodes, which take no label — as
+:class:`~ai_assistant.orchestration.story_links.StoryCandidates` read it, under ADR-0300
+§11's default. Every line and note is quoted source data attributed by its record, who
+wrote it and whether it is marked, and a marked one as outside content, never as the
+user's words (§4:6). The proposal's ``story_labels`` name the matters the input belongs
+with: an ``S`` label resolves to its story, and a ``P`` or ``M`` label naming an episode
+to that episode's activation. A story label resolving to nothing, to a channel item or
+to a semantic record is a label defect, repaired once and then dropped and counted
+(§6:8). Where the candidates could not be read, or there are none, the section says so.
 
 **Two windows, two label sequences** (§3). The **channel window** is what the channel
 supplied — ``ChannelContext.history`` then ``reply_to`` — or, on the conversation
@@ -61,7 +75,7 @@ import json
 # At runtime, not under TYPE_CHECKING: `EpisodeSelector` is a PEP 695 alias, whose
 # value is read lazily and must resolve when it is (#1706).
 from collections.abc import Awaitable, Callable
-from dataclasses import dataclass
+from dataclasses import dataclass, field
 from typing import TYPE_CHECKING, Final
 
 import structlog
@@ -87,6 +101,9 @@ from ai_assistant.core.types import (
     RecallOutcome,
     Role,
     SemanticMemory,
+    StoryMember,
+    StoryMemberKind,
+    StoryNoteAuthor,
     UnderstandingGround,
     UnderstandingProducer,
     UnderstandingReference,
@@ -96,6 +113,7 @@ from ai_assistant.core.types import (
 )
 from ai_assistant.orchestration.disclosure import admitted_to_understanding
 from ai_assistant.orchestration.episode_reads import without_open_episodes
+from ai_assistant.orchestration.story_privacy import activation_of
 
 if TYPE_CHECKING:
     from collections.abc import Sequence
@@ -109,9 +127,12 @@ if TYPE_CHECKING:
         ChannelIdentity,
         EpisodeProjection,
         MemoryRecord,
+        StoryNote,
+        StoryPageLine,
         TranscriptMessage,
     )
     from ai_assistant.orchestration.disclosure import TurnSupply
+    from ai_assistant.orchestration.story_links import Candidates, ShortView
 
 __all__ = [
     "ChannelWindow",
@@ -175,7 +196,28 @@ _RECALLED: Final = (
     "\n"
 )
 
-_REPLY_SHAPE: Final = (
+#: ADR-0300 §6's paragraph, rendered only where the understanding phase assembled
+#: candidate stories, so a pass with none keeps the instruction it had. Its second half
+#: is §6:9's: a link says the input belongs to the matter and nothing more, one input
+#: may belong to several, and one that belongs to none is linked to none.
+_STORIES: Final = (
+    "The message also carries a stories section: the assistant's memory of matters "
+    "that earlier episodes belong to, each labelled S1, S2, and so on. A story shows "
+    "the first lines of its page of notes, its newest notes not yet folded into the "
+    "page, and its latest episodes, which carry no label. They are quoted source data "
+    "like the windows: a line or a note is the assistant's own record of the matter, "
+    "provisional and possibly out of date, and one marked as resting on outside "
+    "content is what a source reported, never something the user said.\n"
+    "\n"
+    "In `story_labels`, name the matters this input belongs to: the S labels of the "
+    "stories, and the P or M labels of the earlier episodes, that it belongs with as "
+    "one matter. A link says the input belongs to that matter and nothing more. One "
+    "input may belong to several matters. An input that belongs to none is linked to "
+    "none, and its `story_labels` is empty.\n"
+    "\n"
+)
+
+_SHAPE_HEAD: Final = (
     "Reply with only one JSON object, no prose and no code fence, of exactly this "
     "shape:\n"
     '{"meaning": "<what the input means>", "meaning_ground": "stated|supplied|inferred", '
@@ -185,15 +227,32 @@ _REPLY_SHAPE: Final = (
     '"relationships": [{"statement": "<how the input relates to something seen>", '
     '"labels": ["<label>"], "ground": "stated|supplied|inferred"}], '
     '"unresolved": [{"matter": "<what this reading leaves unsettled>", '
-    '"why_it_matters": "<why that matters to understanding the input>"}]}\n'
+    '"why_it_matters": "<why that matters to understanding the input>"}]'
+)
+
+_SHAPE_TAIL: Final = (
+    "}\n"
     "\n"
     "Every list may be empty. A reference whose phrase you cannot place names no "
     "label. An unresolved matter states what is unsettled and why it matters, and "
     "carries no recommended lookup, question, action or routing."
 )
 
-_INSTRUCTION: Final = _READING + _REPLY_SHAPE
-_RECALL_INSTRUCTION: Final = _READING + _RECALLED + _REPLY_SHAPE
+_REPLY_SHAPE: Final = _SHAPE_HEAD + _SHAPE_TAIL
+_STORY_REPLY_SHAPE: Final = (
+    _SHAPE_HEAD + ', "story_labels": ["<label of a story or an earlier episode>"]' + _SHAPE_TAIL
+)
+
+
+def _instruction(*, recalled: bool, stories: bool) -> str:
+    """The system message: the reading, each section's paragraph, then the shape."""
+    return (
+        _READING
+        + (_RECALLED if recalled else "")
+        + (_STORIES if stories else "")
+        + (_STORY_REPLY_SHAPE if stories else _REPLY_SHAPE)
+    )
+
 
 #: How a recalled semantic record is attributed, by its band (ADR-0281 §7).
 _BAND_ATTRIBUTION: Final = {
@@ -209,6 +268,29 @@ _NOTHING_RECALLED: Final = "missing: nothing was recalled for this input"
 _RECALL_FAILED: Final = "missing: recall failed, so no memories are shown"
 _ALREADY_SHOWN: Final = "missing: everything recalled is already in the windows above"
 _NO_LONGER_HELD: Final = "missing: what was recalled is no longer in memory"
+
+#: The stories section where it renders no story (ADR-0300 §6:4).
+_NO_STORIES: Final = "missing: none of the earlier episodes shown belongs to a story"
+_STORIES_UNREADABLE: Final = "missing: the stories could not be read, so none is shown"
+
+#: A short view's parts where they render nothing.
+_NO_LINES: Final = "missing: no line of this story's page is shown"
+_NO_NOTES: Final = "missing: no note is waiting to be folded into this story's page"
+_NO_EPISODES: Final = "missing: no episode of this story is shown"
+
+_STORY_ITEM: Final = "a story: the assistant's memory of one matter"
+
+#: Who wrote a note, as a short view renders it: the note's own record of its author,
+#: never a reading of its text (ADR-0300 §4:6).
+_NOTE_AUTHOR_TEXT: Final = {
+    StoryNoteAuthor.PLANNING: "the assistant, while working on this matter",
+    StoryNoteAuthor.TIDY_UP: "the assistant, tidying this story's page",
+    StoryNoteAuthor.OWNER: "the user, writing on this story's page directly",
+}
+_LINE_AUTHOR_TEXT: Final = "the assistant, tidying this story's page"
+_OUTSIDE_TEXT: Final = (
+    "rests on outside content: what a source reported, never something the user said"
+)
 
 _UNPARSEABLE: Final = (
     "Your reply was not one JSON object of the required shape, so it could not be "
@@ -521,6 +603,14 @@ class _Brief:
     #: How many ``M`` labels the recalled section rendered; ``None`` where the call
     #: rendered no recalled section at all (ADR-0281 §7).
     recalled_count: int | None = None
+    #: What a story label resolves to (ADR-0300 §6:7): an ``S`` label its story, a
+    #: ``P`` or ``M`` label naming an episode that episode's activation. A label not
+    #: here — a channel item, a semantic record, an episode of no activation, or
+    #: nothing rendered — is a story-label defect (§6:8).
+    story_members: dict[str, StoryMember] = field(default_factory=dict)
+    #: How many ``S`` labels the stories section rendered; ``None`` where the call
+    #: rendered no stories section at all (ADR-0300 §6:5).
+    story_count: int | None = None
 
 
 class UnderstandingStage:
@@ -561,6 +651,7 @@ class UnderstandingStage:
         deadline: float,
         recall: ActivationRecall | None = None,
         recalled: tuple[EpisodicMemory | SemanticMemory, ...] = (),
+        stories: Candidates | None = None,
     ) -> ActivationUnderstanding:
         """Read one input against its windows, and record what it was understood to mean.
 
@@ -586,6 +677,10 @@ class UnderstandingStage:
             recalled: The records of recall's kept items the understanding phase
                 fetched, in recall's order, rendered as a third section labelled
                 ``M`` (ADR-0282 §5). A kept item that came back missing is not here.
+            stories: The candidate stories the understanding phase assembled
+                (ADR-0300 §6:1-§6:4), rendered as a fourth section labelled ``S``.
+                ``None`` where the phase assembled none, and then the call renders no
+                stories section and the instruction says nothing of one.
 
         Returns:
             The recorded understanding.
@@ -603,6 +698,7 @@ class UnderstandingStage:
             episodes=episodes,
             recall=recall,
             recalled=recalled,
+            stories=stories,
         )
         _within(deadline)
         first = await self._model.complete(brief.messages)
@@ -623,9 +719,11 @@ class UnderstandingStage:
                 msg = "the understanding stage's repaired output did not parse (ADR-0276 §6)"
                 raise UnderstandingError(msg)
         assert proposal is not None  # noqa: S101 — a first output with no problem parsed
-        return _resolved(proposal, brief.labels, version=version, recorded_at=now())
+        return _resolved(
+            proposal, brief.labels, brief.story_members, version=version, recorded_at=now()
+        )
 
-    def _brief(  # noqa: PLR0913 — the input, its channel, its window, the audience, the window's episodes, and what recall found
+    def _brief(  # noqa: PLR0913 — the input, its channel, its window, the audience, the window's episodes, what recall found and the candidate stories
         self,
         text: str,
         *,
@@ -635,6 +733,7 @@ class UnderstandingStage:
         episodes: tuple[EpisodicMemory, ...] | None,
         recall: ActivationRecall | None,
         recalled: tuple[EpisodicMemory | SemanticMemory, ...],
+        stories: Candidates | None,
     ) -> _Brief:
         """Render the prompt, filtering each window's stored records first (§3, §4)."""
         items = _channel_items(window, audience)
@@ -644,6 +743,7 @@ class UnderstandingStage:
             window_episodes = admitted_to_understanding(audience, episodes)
         merged = {record.id: record for record in window_episodes if record.id in shared}
         labels: dict[str, UnderstandingReferent] = {}
+        story_members: dict[str, StoryMember] = {}
         rendered_items: list[dict[str, object]] = []
         for index, item in enumerate(items, start=1):
             label = f"H{index}"
@@ -660,6 +760,7 @@ class UnderstandingStage:
             )
             rendered_episodes.append(projected.rendering(label))
             labels[label] = projected.referent()
+            _member_of(record, label, story_members)
         received = _input_rendering(text, channel)
         if isinstance(window, TranscriptWindow) and window.input_messages:
             received["messages"] = [_input_message(one) for one in window.input_messages]
@@ -673,21 +774,69 @@ class UnderstandingStage:
             if episodes is not None
             else "not provided for input on this channel",
         }
-        instruction = _INSTRUCTION
         recalled_count: int | None = None
         if recall is not None:
             # ADR-0281 §7: a record either window already rendered stays there only.
             rendered = shared | {record.id for record in window_episodes}
             section, recalled_count = self._recalled_section(
-                recall.outcome, recalled, rendered, labels
+                recall.outcome, recalled, rendered, labels, story_members
             )
             payload["recalled"] = section
-            instruction = _RECALL_INSTRUCTION
+        story_count: int | None = None
+        if stories is not None:
+            payload["stories"], story_count = self._stories_section(stories, story_members)
+        instruction = _instruction(recalled=recall is not None, stories=stories is not None)
         messages = (
             Message(role=Role.SYSTEM, content=instruction),
             Message(role=Role.USER, content=json.dumps(payload, ensure_ascii=True)),
         )
-        return _Brief(messages, labels, len(rendered_items), len(rendered_episodes), recalled_count)
+        return _Brief(
+            messages,
+            labels,
+            len(rendered_items),
+            len(rendered_episodes),
+            recalled_count,
+            story_members,
+            story_count,
+        )
+
+    def _stories_section(
+        self, stories: Candidates, story_members: dict[str, StoryMember]
+    ) -> tuple[list[dict[str, object]] | str, int]:
+        """ADR-0300 §6:5's fourth section, labelled ``S`` in the candidates' order."""
+        if stories.unreadable:
+            return _STORIES_UNREADABLE, 0
+        section: list[dict[str, object]] = []
+        for view in stories.views:
+            label = f"S{len(section) + 1}"
+            section.append(self._short_view(label, view))
+            story_members[label] = StoryMember(kind=StoryMemberKind.STORY, id=view.story_id)
+        if section:
+            return section, len(section)
+        return _NO_STORIES, 0
+
+    def _short_view(self, label: str, view: ShortView) -> dict[str, object]:
+        """One candidate under its label: page lines, newest notes, latest episodes (§6:2).
+
+        Each line and note is attributed by its record — who wrote it and whether it is
+        marked — and never by its text (ADR-0300 §4:6). The episodes take no label
+        (§6:5), and render through the projection with an outside input's text not
+        admitted: ADR-0284 §8:5 admits it in the episode window and the recalled
+        section alone.
+        """
+        episodes = [
+            _ProjectedEpisode.of(
+                record, excerpt_chars=self._excerpt_chars, admit_outside_input=False
+            ).described()
+            for record in view.episodes
+        ]
+        return {
+            "label": label,
+            "item": _STORY_ITEM,
+            "page": [_page_line(line) for line in view.lines] or _NO_LINES,
+            "newest_notes": [_page_note(note) for note in view.notes] or _NO_NOTES,
+            "latest_episodes": episodes or _NO_EPISODES,
+        }
 
     def _recalled_section(
         self,
@@ -695,6 +844,7 @@ class UnderstandingStage:
         recalled: tuple[EpisodicMemory | SemanticMemory, ...],
         rendered: frozenset[str],
         labels: dict[str, UnderstandingReferent],
+        story_members: dict[str, StoryMember],
     ) -> tuple[list[dict[str, object]] | str, int]:
         """ADR-0281 §7's third section, labelled ``M`` in recall's order, and its count."""
         if outcome in {RecallOutcome.FAILED, RecallOutcome.TIMED_OUT}:
@@ -712,6 +862,7 @@ class UnderstandingStage:
                 )
                 section.append(projected.rendering(label))
                 labels[label] = projected.referent()
+                _member_of(record, label, story_members)
             else:
                 memory = _RecalledFact.of(record, excerpt_chars=self._excerpt_chars)
                 section.append(memory.rendering(label))
@@ -731,9 +882,14 @@ class UnderstandingStage:
             return None, _Problem("unparseable", _UNPARSEABLE)
         unresolved = [label for label in _labels_of(proposal) if label not in brief.labels]
         unnamed = _unnamed_supplied(proposal)
-        if not unresolved and not unnamed:
+        # ADR-0300 §6:8: a story label naming nothing a link can be made to is a label
+        # defect, and takes part in the one repair completion.
+        unlinkable = [label for label in proposal.story_labels if label not in brief.story_members]
+        if not unresolved and not unnamed and not unlinkable:
             return proposal, None
-        return proposal, _Problem("labels", _label_statement(unresolved, unnamed, brief))
+        return proposal, _Problem(
+            "labels", _label_statement(unresolved, unnamed, brief, unlinkable=unlinkable)
+        )
 
 
 @dataclass(frozen=True, slots=True)
@@ -966,9 +1122,12 @@ class _ProjectedEpisode:
 
     def rendering(self, label: str) -> dict[str, object]:
         """The episode under its label, attributed from its origin (§4, ADR-0284 §2:3)."""
+        return {"label": label, **self.described()}
+
+    def described(self) -> dict[str, object]:
+        """The episode with no label, attributed from its origin, as a short view shows it."""
         report = self.projection.origin is InputOrigin.OUTSIDE
         return {
-            "label": label,
             "item": (
                 f"a report received on {self.source}, never something the user said"
                 if report
@@ -1118,18 +1277,27 @@ def _unnamed_supplied(proposal: ProposedActivationUnderstanding) -> list[str]:
     return unnamed
 
 
-def _label_statement(unresolved: Sequence[str], unnamed: Sequence[str], brief: _Brief) -> str:
+def _label_statement(
+    unresolved: Sequence[str],
+    unnamed: Sequence[str],
+    brief: _Brief,
+    *,
+    unlinkable: Sequence[str] = (),
+) -> str:
     """The code-owned statement of which labels resolved to nothing and what was rendered."""
     parts: list[str] = []
     if unresolved:
-        shown = ", ".join(
-            json.dumps(label[:_REPAIR_LABEL_CHARS], ensure_ascii=True)
-            for label in unresolved[:_REPAIR_LABELS_SHOWN]
-        )
-        parts.append(f"These labels resolve to nothing in the message: {shown}.")
+        parts.append(f"These labels resolve to nothing in the message: {_shown(unresolved)}.")
     if unnamed:
         parts.append(
             f"These elements are grounded `supplied` but name no label: {', '.join(unnamed)}."
+        )
+    if unlinkable:
+        # ADR-0300 §6:8: a story label resolves to a story, or to an episode's
+        # activation; a channel item and a semantic record are neither.
+        parts.append(
+            "These story labels name no story and no earlier episode in the episode "
+            f"window or the recalled section: {_shown(unlinkable)}."
         )
     rendered = [
         _sequence("H", brief.channel_count, "channel window"),
@@ -1137,12 +1305,24 @@ def _label_statement(unresolved: Sequence[str], unnamed: Sequence[str], brief: _
     ]
     if brief.recalled_count is not None:
         rendered.append(_sequence("M", brief.recalled_count, "recalled section"))
+    if brief.story_count is not None:
+        rendered.append(_sequence("S", brief.story_count, "stories section"))
     parts.append(f"The message rendered {', '.join(rendered[:-1])} and {rendered[-1]}.")
+    if brief.story_count is not None:
+        parts.append("An S label names a story and is cited in `story_labels` alone.")
     parts.append(
         "Reply again with only the corrected JSON object. Name only labels that were "
         "rendered, and ground a reading no labelled item supports as `inferred`."
     )
     return " ".join(parts)
+
+
+def _shown(labels: Sequence[str]) -> str:
+    """The model's own label strings, bounded in number and length rather than echoed."""
+    return ", ".join(
+        json.dumps(label[:_REPAIR_LABEL_CHARS], ensure_ascii=True)
+        for label in labels[:_REPAIR_LABELS_SHOWN]
+    )
 
 
 def _sequence(prefix: str, count: int, name: str) -> str:
@@ -1189,6 +1369,7 @@ class _Resolution:
 def _resolved(
     proposal: ProposedActivationUnderstanding,
     labels: dict[str, UnderstandingReferent],
+    story_members: dict[str, StoryMember],
     *,
     version: int,
     recorded_at: datetime,
@@ -1198,8 +1379,21 @@ def _resolved(
     No dropped or absent label becomes a grounded claim: a referent is recorded only for
     a label that resolved, and ``supplied`` survives only on an element still naming a
     referent. Texts and every other ground are copied unchanged.
+
+    A story label resolves to a story member (ADR-0300 §6:7): the links keep proposal
+    order with no member twice, and a story label naming nothing a link can be made to
+    is dropped and counted in ``grounding_dropped`` (§6:8).
     """
+    links: dict[StoryMember, None] = {}
+    unlinked = 0
+    for label in proposal.story_labels:
+        member = story_members.get(label)
+        if member is None:
+            unlinked += 1
+            continue
+        links.setdefault(member)
     resolution = _Resolution(labels)
+    resolution.dropped = unlinked
     meaning_referents = resolution.referents(proposal.meaning_labels)
     meaning_ground = resolution.ground(
         proposal.meaning_ground, proposal.meaning_labels, meaning_referents
@@ -1231,10 +1425,42 @@ def _resolved(
         relationships=tuple(relationships),
         unresolved=proposal.unresolved,
         grounding_dropped=resolution.dropped,
+        story_links=tuple(links),
     )
 
 
 # --- rendering helpers -------------------------------------------------------------
+
+
+def _member_of(record: EpisodicMemory, label: str, story_members: dict[str, StoryMember]) -> None:
+    """Record what a ``P`` or ``M`` label names as a story label: the episode's activation.
+
+    An episode that records no activation is the episode of nothing a story can hold, so
+    its label is not a story label at all, and naming it as one is a defect (ADR-0300
+    §6:8).
+    """
+    if (activation := activation_of(record)) is not None:
+        story_members[label] = StoryMember(kind=StoryMemberKind.ACTIVATION, id=activation)
+
+
+def _page_line(line: StoryPageLine) -> dict[str, object]:
+    """One line of a story's page, attributed by its record and never by its text."""
+    rendered: dict[str, object] = {"written_by": _LINE_AUTHOR_TEXT, "text": line.text}
+    if line.outside:
+        rendered["outside_content"] = _OUTSIDE_TEXT
+    return rendered
+
+
+def _page_note(note: StoryNote) -> dict[str, object]:
+    """One pending note, attributed by who wrote it and its mark, never by its text."""
+    rendered: dict[str, object] = {
+        "written_by": _NOTE_AUTHOR_TEXT[note.author],
+        "written_at": note.written_at.isoformat(),
+        "text": note.text,
+    }
+    if note.outside:
+        rendered["outside_content"] = _OUTSIDE_TEXT
+    return rendered
 
 
 def _within(deadline: float) -> None:
