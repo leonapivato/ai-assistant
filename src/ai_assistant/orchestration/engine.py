@@ -12542,14 +12542,21 @@ class Engine:
         """ADR-0300 §6:1-§6:4: the candidate stories, written on the working episode.
 
         The window's stories are looked up from the episodes the fetch admitted, in the
-        window's order; a pass that takes no episode window has none of its own. What
-        the assembly fetched and what came back missing ride on the decision (ADR-0282
-        §2:7). ``None`` where no assembler is wired, and then no section is rendered.
+        window's order; a pass that takes no episode window has none of its own. Then
+        recall's (§7): the stories its kept episodes belong to, as its decision recorded
+        them, the item with the higher search score first, from the items whose records
+        the same fetch admitted. What the assembly fetched and what came back missing
+        ride on the decision (ADR-0282 §2:7). ``None`` where no assembler is wired, and
+        then no section is rendered.
         """
         if self._story_candidates is None:
             return None
+        recalled = working.recalled
+        admitted = frozenset(record.id for record in fetched.recalled)
         candidates = await self._story_candidates.assemble(
-            fetched.episodes or (), audience=working.supply
+            fetched.episodes or (),
+            audience=working.supply,
+            recalled=() if recalled is None else recalled.stories(admitted),
         )
         working.story_candidates = candidates
         return candidates

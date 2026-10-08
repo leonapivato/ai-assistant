@@ -3761,6 +3761,11 @@ class RecalledItem(BaseModel):
     gives. ``standing``, ``rests_on_recorded_external_content`` and
     ``attestation`` are the record's structured origin as it holds them, which
     ADR-0189 §1 requires of a projection shown to the owner.
+
+    ``stories`` are the stories the item's episode belongs to directly, in the order
+    the story store returned them (ADR-0300 §7:2). A semantic item carries none,
+    enforced here. It defaults to empty, so a record written before it validates
+    unchanged (§12:1).
     """
 
     model_config = ConfigDict(frozen=True, extra="forbid")
@@ -3772,11 +3777,20 @@ class RecalledItem(BaseModel):
     rests_on_recorded_external_content: bool
     attestation: Attestation | None = None
     found_by: tuple[RecallCue, ...] = Field(min_length=1)
+    stories: tuple[Identifier, ...] = ()
 
     @model_validator(mode="after")
     def _recallable_kind(self) -> Self:
         if self.kind not in _RECALLABLE_KINDS:
             msg = "recall keeps episodic and semantic records only"
+            raise ValueError(msg)
+        return self
+
+    @model_validator(mode="after")
+    def _no_stories_on_a_semantic_item(self) -> Self:
+        # ADR-0300 §7:2: only an episode belongs to a story.
+        if self.kind is MemoryKind.SEMANTIC and self.stories:
+            msg = "a semantic item carries no stories"
             raise ValueError(msg)
         return self
 

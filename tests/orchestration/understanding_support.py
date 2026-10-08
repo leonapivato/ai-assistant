@@ -12,10 +12,10 @@ from ai_assistant.orchestration.understanding import (
     UnderstandingStage,
     WindowsStage,
 )
-from ai_assistant.testing import FakeModelProvider
+from ai_assistant.testing import FakeModelProvider, FakeStoryStore
 
 if TYPE_CHECKING:
-    from ai_assistant.core.protocols import MemoryStore, ModelProvider
+    from ai_assistant.core.protocols import MemoryStore, ModelProvider, StoryStore
 
 #: The composition root's three values (ADR-0276 §4, §7), restated for the suites that
 #: build an engine without it; ``tests/app`` pins that the root wires these same ones.
@@ -54,6 +54,20 @@ def windows_stage(memory: MemoryStore) -> WindowsStage:
     return WindowsStage(episodes=RecentEpisodes(memory=memory, limit=EPISODE_LIMIT))
 
 
-def recall_stage(memory: MemoryStore, *, threshold: float = FAKE_RECALL_THRESHOLD) -> RecallStage:
-    """The recall stage the composition root builds, over ``memory``."""
-    return RecallStage(memory=memory, threshold=threshold, limit=RECALL_LIMIT, budget=RECALL_BUDGET)
+def recall_stage(
+    memory: MemoryStore,
+    *,
+    threshold: float = FAKE_RECALL_THRESHOLD,
+    stories: StoryStore | None = None,
+) -> RecallStage:
+    """The recall stage the composition root builds, over ``memory`` and ``stories``.
+
+    An empty story store where none is named, so every kept episode belongs to no story.
+    """
+    return RecallStage(
+        memory=memory,
+        stories=FakeStoryStore() if stories is None else stories,
+        threshold=threshold,
+        limit=RECALL_LIMIT,
+        budget=RECALL_BUDGET,
+    )

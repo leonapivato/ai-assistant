@@ -2,11 +2,11 @@
 
 One orchestration-local stage, of the kind
 :class:`~ai_assistant.orchestration.understanding.UnderstandingStage` is: it holds an
-injected ``MemoryStore`` and the composition root's threshold, limit and budget, and it
-is **not a Protocol**. It calls no model and interprets nothing — it does not decide
-that a memory answers anything, is out of date, is relevant or settles a reference
-(§3). What it keeps it holds as ids, and the understanding phase fetches them in the
-same pass (ADR-0282 §4, §5).
+injected ``MemoryStore`` and ``StoryStore`` and the composition root's threshold, limit
+and budget, and it is **not a Protocol**. It calls no model and interprets nothing — it
+does not decide that a memory answers anything, is out of date, is relevant or settles
+a reference (§3). What it keeps it holds as ids, and the understanding phase fetches
+them in the same pass (ADR-0282 §4, §5).
 
 **One cue, per band** (§3). The activation's input text, exactly as the pass holds it,
 is the query of one :meth:`~ai_assistant.core.protocols.MemoryStore.search` per band —
@@ -28,11 +28,19 @@ on a pass whose audience posture is unbounded the searches ask for semantic reco
 alone, so no episode reaches the pass through recall. The posture is read off the
 pass's :data:`~ai_assistant.orchestration.disclosure.TurnSupply` and nothing else.
 
-**Failure-tolerant** (§5). The searches run under recall's budget — the smaller of the
-composition root's budget and the time left before the pass's deadline. A
-``MemoryStoreError`` is a ``failed`` decision and a spent budget a ``timed_out`` one,
-each returned with its error rather than raised, so the pass goes on to understanding.
-Any other error escapes. The controller that applies §5's continuation is step 3's.
+**The stories of what it keeps** (ADR-0300 §7). For each episode it keeps whose stored
+id is an activation's episode, recall reads ``StoryStore.stories_of`` for that
+activation — a lookup by identity, never a search — and the item carries those stories
+in the order the store returned them. A semantic record belongs to no story. The
+understanding phase hands them to the candidate stories, the item with the higher
+search score first (§6:1, :meth:`Recalled.stories`).
+
+**Failure-tolerant** (§5). The searches and the story lookups run under recall's
+budget — the smaller of the composition root's budget and the time left before the
+pass's deadline. A ``MemoryStoreError``, and a ``StoryStoreError`` the same way
+(ADR-0300 §7:3), is a ``failed`` decision and a spent budget a ``timed_out`` one, each
+returned with its error rather than raised, so the pass goes on to understanding. Any
+other error escapes. The controller that applies §5's continuation is step 3's.
 
 **It logs stage and code-owned reason only** — no input, no memory content and no
 exception content (ADR-0275 §8).
@@ -47,7 +55,7 @@ from typing import TYPE_CHECKING, Final
 
 import structlog
 
-from ai_assistant.core.errors import MemoryStoreError
+from ai_assistant.core.errors import MemoryStoreError, StoryStoreError
 from ai_assistant.core.types import (
     RECALLED_ITEMS_MAX,
     UNDERSTANDING_REFERENT_EXCERPT_CHARS,
@@ -63,6 +71,8 @@ from ai_assistant.core.types import (
     RecordedChannelTrigger,
     RecordedTextInput,
     SemanticMemory,
+    StoryMember,
+    StoryMemberKind,
     band_of,
     rests_on_recorded_external_content,
 )
@@ -70,11 +80,14 @@ from ai_assistant.orchestration.disclosure import (
     UnboundedAudienceSupply,
     admitted_to_understanding,
 )
+from ai_assistant.orchestration.stories import episode_address
+from ai_assistant.orchestration.story_privacy import activation_of
 
 if TYPE_CHECKING:
+    from collections.abc import Container
     from datetime import timedelta
 
-    from ai_assistant.core.protocols import MemoryStore
+    from ai_assistant.core.protocols import MemoryStore, StoryStore
     from ai_assistant.orchestration.disclosure import TurnSupply
 
 __all__ = ["RecallStage", "Recalled", "RecalledRecord"]
@@ -102,26 +115,60 @@ class Recalled:
             records by id, in recall's order.
         scores: Each kept item's search score, in the items' order; empty unless
             ``result``'s outcome is ``found``.
-        error: The ``MemoryStoreError`` or ``TimeoutError`` a ``failed`` or
-            ``timed_out`` decision carries, for the controller's stage result
-            (ADR-0281 §5).
+        error: The ``MemoryStoreError``, ``StoryStoreError`` or ``TimeoutError`` a
+            ``failed`` or ``timed_out`` decision carries, for the controller's stage
+            result (ADR-0281 §5, ADR-0300 §7:3).
     """
 
     result: ActivationRecall
     scores: tuple[float, ...] = ()
     error: Exception | None = None
 
+    def stories(self, held: Container[str]) -> tuple[str, ...]:
+        """The stories the kept episodes belong to, in ADR-0300 §6:1's order, each once.
+
+        The items are taken the one with the higher search score first, ties in
+        recall's own order, and each item's stories in the order it recorded them. Only
+        an item ``held`` names contributes: the understanding phase passes the ids its
+        fetch admitted, so an episode forgotten or refused by the audience predicate
+        since recall kept it brings no candidate, as the window's episodes do not.
+
+        Args:
+            held: The kept ids whose records the understanding phase's fetch admitted.
+
+        Returns:
+            The story ids, each once, in the order they join the candidates.
+        """
+        ranked = sorted(
+            zip(self.result.items, self.scores, strict=True),
+            key=lambda pair: pair[1],
+            reverse=True,
+        )
+        return tuple(
+            dict.fromkeys(
+                story_id for item, _ in ranked if item.id in held for story_id in item.stories
+            )
+        )
+
 
 class RecallStage:
     """Search long-term memory with the activation's input (ADR-0281 §3, §4, §5)."""
 
     def __init__(
-        self, *, memory: MemoryStore, threshold: float, limit: int, budget: timedelta
+        self,
+        *,
+        memory: MemoryStore,
+        stories: StoryStore,
+        threshold: float,
+        limit: int,
+        budget: timedelta,
     ) -> None:
-        """Wire the stage to its store, and to the values the composition root sets.
+        """Wire the stage to its stores, and to the values the composition root sets.
 
         Args:
             memory: The store recall searches.
+            stories: The story store the kept episodes' stories are looked up in
+                (ADR-0300 §7:1).
             threshold: The recall threshold, set for the embedder the composition
                 root wires, because a score's scale belongs to its embedder (§3).
             limit: ``RECALL_ITEM_LIMIT``: how many records recall keeps at most.
@@ -142,6 +189,7 @@ class RecallStage:
             msg = "recall's budget must be positive (ADR-0281 §5)"
             raise ValueError(msg)
         self._memory = memory
+        self._stories = stories
         self._threshold = threshold
         self._limit = limit
         self._budget = budget.total_seconds()
@@ -182,8 +230,13 @@ class RecallStage:
         try:
             async with budget:
                 kept = await self._search(text, audience, shown)
+                stories = [await self._stories_of(record) for record in kept]
         except MemoryStoreError as error:
             _log.warning("recall_failed", stage="recall", reason="memory_store_error")
+            return Recalled(_decision(RecallOutcome.FAILED), error=error)
+        except StoryStoreError as error:
+            # ADR-0300 §7:3: handled as a MemoryStoreError is.
+            _log.warning("recall_failed", stage="recall", reason="story_store_error")
             return Recalled(_decision(RecallOutcome.FAILED), error=error)
         except TimeoutError as error:
             if not budget.expired():
@@ -193,7 +246,7 @@ class RecallStage:
             return Recalled(_decision(RecallOutcome.TIMED_OUT), error=error)
         if not kept:
             return Recalled(_decision(RecallOutcome.NOTHING_FOUND))
-        items = tuple(_item(record) for record in kept)
+        items = tuple(_item(record, of) for record, of in zip(kept, stories, strict=True))
         # Kept only with a score (§3), so each has one.
         scores = tuple(record.score for record in kept if record.score is not None)
         return Recalled(_decision(RecallOutcome.FOUND, items), scores=scores)
@@ -232,13 +285,30 @@ class RecallStage:
                     return tuple(kept.values())
         return tuple(kept.values())
 
+    async def _stories_of(self, record: RecalledRecord) -> tuple[str, ...]:
+        """The stories a kept episode belongs to directly, as the store returns them.
+
+        ADR-0300 §7:1: read only for an episode whose stored id is its activation's
+        episode — the activation read off its processing record and its address
+        compared with the id, never parsed out of it. A semantic record, and an
+        episode recording no activation or stored at another address, belong to no story,
+        so nothing is read for them.
+        """
+        if not isinstance(record, EpisodicMemory):
+            return ()
+        activation = activation_of(record)
+        if activation is None or record.id != episode_address(activation):
+            return ()
+        member = StoryMember(kind=StoryMemberKind.ACTIVATION, id=activation)
+        return tuple(header.story_id for header in await self._stories.stories_of(member))
+
 
 def _decision(outcome: RecallOutcome, items: tuple[RecalledItem, ...] = ()) -> ActivationRecall:
     return ActivationRecall(outcome=outcome, cues=_CUES, items=items)
 
 
-def _item(record: RecalledRecord) -> RecalledItem:
-    """One kept record as the processing record carries it (§6)."""
+def _item(record: RecalledRecord, stories: tuple[str, ...]) -> RecalledItem:
+    """One kept record as the processing record carries it (§6, ADR-0300 §7:2)."""
     provenance = record.provenance
     return RecalledItem(
         kind=MemoryKind(record.kind),
@@ -249,6 +319,7 @@ def _item(record: RecalledRecord) -> RecalledItem:
         rests_on_recorded_external_content=rests_on_recorded_external_content(provenance),
         attestation=provenance.attestation,
         found_by=_CUES,
+        stories=stories,
     )
 
 

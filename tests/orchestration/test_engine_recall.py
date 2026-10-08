@@ -65,6 +65,7 @@ from ai_assistant.testing import (
     FakeMemoryStore,
     FakeModelProvider,
     FakeRoutingRecorder,
+    FakeStoryStore,
     FakeStreamingCompleter,
     FakeTraceSink,
 )
@@ -238,7 +239,13 @@ async def test_a_store_failure_is_tolerated_and_understanding_runs() -> None:
 
 
 async def test_recalls_own_budget_running_out_is_tolerated_and_understanding_runs() -> None:
-    recall = RecallStage(memory=_Slow(), threshold=0.5, limit=3, budget=timedelta(milliseconds=20))
+    recall = RecallStage(
+        memory=_Slow(),
+        stories=FakeStoryStore(),
+        threshold=0.5,
+        limit=3,
+        budget=timedelta(milliseconds=20),
+    )
     harness = _harness(recall=recall)
     await harness.engine.converse(_TURN, timeout=_BUDGET)
     record = await _record(harness)
@@ -476,7 +483,11 @@ async def test_an_understood_event_is_found_by_a_later_activation_that_shares_it
             if isinstance(episode, EpisodicMemory) and episode.processing_record is not None
         }
         recall = RecallStage(
-            memory=store, threshold=ON_DEVICE_RECALL_THRESHOLD, limit=3, budget=_BUDGET
+            memory=store,
+            stories=FakeStoryStore(),
+            threshold=ON_DEVICE_RECALL_THRESHOLD,
+            limit=3,
+            budget=_BUDGET,
         )
         later = await recall.recall(
             "Is the north trail at Pine Flat open again?",

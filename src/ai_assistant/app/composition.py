@@ -990,7 +990,7 @@ def build_composition(  # noqa: PLR0915 — one statement per resource this root
         # **ADR-0289 §1's story store, on its own file.** It reads no other store and
         # no store reads it. The engine surface writes it as the owner (§4), and since
         # ADR-0300 §6 understanding's candidates read it and the story-links stage
-        # writes it, each handed this same object below. Its records
+        # writes it, and since §7 recall reads it, each handed this same object below. Its records
         # are identities and instants only (§2), but which activations belong
         # together is a fact about the owner's life, so it is owner-only like every
         # other file here. Deploying it adds the file and changes no existing record
@@ -2242,9 +2242,12 @@ def build_composition(  # noqa: PLR0915 — one statement per resource this root
                 episodes=RecentEpisodes(memory=memory, limit=UNDERSTANDING_EPISODE_LIMIT)
             ),
             # ADR-0281's recall stage, over the same memory store, with the threshold
-            # chosen for the embedder that store was built with.
+            # chosen for the embedder that store was built with, and the one story
+            # store, where it looks up the stories of the episodes it keeps (ADR-0300
+            # §7).
             recall=RecallStage(
                 memory=memory,
+                stories=stories,
                 threshold=RECALL_THRESHOLDS[settings.embedder],
                 limit=RECALL_ITEM_LIMIT,
                 budget=RECALL_BUDGET,
