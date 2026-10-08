@@ -252,6 +252,7 @@ if TYPE_CHECKING:
         SpokenTurn,
         StepTransition,
         StoryActor,
+        StoryFlagName,
         StoryHeader,
         StoryLogPage,
         StoryMember,
@@ -12579,8 +12580,37 @@ class StoryStore(Protocol):
     moves every note resting on an activation it moves, and the notes ``owner``
     wrote that it names; a move of activation members moves every note resting on a
     moved activation. The store still reads no other store (ADR-0289 §1:3), and
-    refuses a page write only on what ADR-0300 §3 states and on an identity naming
-    nothing it holds: the hub's checks on a tidy-up's output (§5) are the hub's.
+    refuses a page write only on what ADR-0300 §3 and ADR-0302 §7 state and on an
+    identity naming nothing it holds: the hub's checks on a tidy-up's output (§5)
+    are the hub's.
+
+    **A decision on a flag is a line in the change log** (ADR-0302 §§2-4). A flag is
+    named by identity, as :class:`~ai_assistant.core.types.StoryFlagName` gives it:
+    a tidy-up's by the story whose version recorded it, that version's number and
+    the flag as recorded; understanding's by its activation, a flag where ``added``
+    lines naming that activation, with the actor ``understanding`` and that
+    activation as trigger, stand on two or more stories. The stories a flag
+    **concerns** are, for a tidy-up's, the story that raised it and then, on
+    ``like_another``, the story it names; for understanding's, each story holding
+    one of those lines, in the order of their sequence numbers; each followed
+    through merges to the story it was merged into, and each counted once, at its
+    first place. A write answering a flag — :meth:`leave_flag`, or ``create``,
+    ``link``, ``merge``, ``split`` or ``move`` given ``answers`` — writes one
+    ``decided`` line on each story the flag concerns, as they stand once its change
+    is applied, after the change's own lines and in the same transaction, carrying
+    the flag, the outcome its operation gives and the deciding actor, and no
+    trigger. It checks the flag after every check the operation already makes:
+    ``unknown_flag`` where the store's records hold no such flag, then
+    ``already_decided`` where a ``decided`` line already answers it; a refused write
+    writes nothing, its change included. The store reads only its own records for
+    these checks — the version log and the change log — and makes them inside the
+    deciding write's transaction, so two writers cannot both answer one flag.
+
+    The decisions **recorded for** a story (ADR-0302 §3:6) are the ``decided`` lines
+    on its own change log and on the change log of every story merged into it,
+    directly or through a chain of merges, as its ``absorbed`` lines and theirs name
+    them: a reader composes them from :meth:`log`, whose lines this contract leaves
+    as they are.
     """
 
     async def create(
@@ -12589,6 +12619,7 @@ class StoryStore(Protocol):
         *,
         actor: StoryActor,
         trigger: Identifier | None = None,
+        answers: StoryFlagName | None = None,
     ) -> StoryOutcome:
         """Mint a story holding ``members`` (ADR-0289 §3).
 
@@ -12596,18 +12627,24 @@ class StoryStore(Protocol):
         named twice is added once. The store does not require two members: whether
         something connects moments is the linker's judgment.
 
+        Given ``answers``, it groups the stories it names under the one it mints and
+        records the decision ``grouped`` on the stories the flag concerns (ADR-0302
+        §4:2), in its own transaction.
+
         Args:
             members: The story's first members, at least one.
             actor: Who is creating it.
             trigger: The activation that triggered it, where there was one.
+            answers: The flag this create decides, where it decides one.
 
         Returns:
             The minted story's id, or a refusal: ``no_members`` for an empty list,
             ``unknown_story`` or ``merged_story`` for a story member that is not one
-            the store can hold.
+            the store can hold, then ``unknown_flag`` or ``already_decided``.
 
         Raises:
-            ValueError: If an argument is malformed.
+            ValueError: If an argument is malformed, including an activation member
+                named by a create answering a flag (ADR-0302 §4:3).
             StoryStoreError: If the store cannot be read or written.
         """
         ...
@@ -12619,27 +12656,31 @@ class StoryStore(Protocol):
         *,
         actor: StoryActor,
         trigger: Identifier | None = None,
+        answers: StoryFlagName | None = None,
     ) -> StoryOutcome:
         """Add ``members`` to a story, each logged as ``added`` (ADR-0289 §3).
 
         A member already in the story is passed over, with no log line, and keeps its
-        entry as it was.
+        entry as it was. Given ``answers``, it records the decision ``grouped`` on the
+        stories the flag concerns (ADR-0302 §4:2), in its own transaction.
 
         Args:
             story_id: The story to add to.
             members: The members to add, at least one.
             actor: Who is linking.
             trigger: The activation that triggered it, where there was one.
+            answers: The flag this link decides, where it decides one.
 
         Returns:
             The story's id with the count of lines appended, or a refusal:
             ``no_members``, ``unknown_story``, ``merged_story``, or ``loop`` where a
             story member would make some story contain itself, naming the stories
-            forming the loop. The store never merges, re-links or drops a link to
-            resolve a loop.
+            forming the loop, then ``unknown_flag`` or ``already_decided``. The store
+            never merges, re-links or drops a link to resolve a loop.
 
         Raises:
-            ValueError: If an argument is malformed.
+            ValueError: If an argument is malformed, including an activation member
+                named by a link answering a flag (ADR-0302 §4:3).
             StoryStoreError: If the store cannot be read or written.
         """
         ...
@@ -12681,6 +12722,7 @@ class StoryStore(Protocol):
         *,
         actor: StoryActor,
         trigger: Identifier | None = None,
+        answers: StoryFlagName | None = None,
     ) -> StoryOutcome:
         """Merge story A (``story_id``) into story B (``into``) (ADR-0289 §3).
 
@@ -12694,17 +12736,21 @@ class StoryStore(Protocol):
         logged ``added``. A is left with no members, and records B as the story it
         was merged into. Every note A holds moves to B, in the same transaction, and
         is pending on B, as is each activation member added to B (ADR-0300 §3).
+        Given ``answers``, it records the decision ``merged`` on the stories the flag
+        concerns as they stand after the merge, so never on A (ADR-0302 §3:4).
 
         Args:
             story_id: The story absorbed, A.
             into: The story it is merged into, B.
             actor: Who is merging.
             trigger: The activation that triggered it, where there was one.
+            answers: The flag this merge decides, where it decides one.
 
         Returns:
             B's id with the count of lines appended, or a refusal: ``unknown_story``
             or ``merged_story`` for either side, ``self_merge`` where A is B, or
-            ``loop`` where the result would leave some story containing itself.
+            ``loop`` where the result would leave some story containing itself, then
+            ``unknown_flag`` or ``already_decided``.
 
         Raises:
             ValueError: If an argument is malformed.
@@ -12712,7 +12758,7 @@ class StoryStore(Protocol):
         """
         ...
 
-    async def split(
+    async def split(  # noqa: PLR0913 — ADR-0302 §4:2 adds ``answers`` as a keyword to this operation
         self,
         story_id: Identifier,
         members: Sequence[StoryMember],
@@ -12720,6 +12766,7 @@ class StoryStore(Protocol):
         actor: StoryActor,
         trigger: Identifier | None = None,
         notes: Sequence[StoryNoteId] = (),
+        answers: StoryFlagName | None = None,
     ) -> StoryOutcome:
         """Move a non-empty subset of a story's members into a new story (ADR-0289 §3).
 
@@ -12732,7 +12779,8 @@ class StoryStore(Protocol):
         activation it moves, and each note named in ``notes`` that A holds and
         ``owner`` wrote; a note named that is not one of those is passed over, as a
         member not held is by an unlink. Every other note stays on A. What C
-        receives is pending on C (ADR-0300 §3).
+        receives is pending on C (ADR-0300 §3). Given ``answers``, it records the
+        decision ``split`` on the stories the flag concerns (ADR-0302 §4:2).
 
         Args:
             story_id: The story split, A.
@@ -12740,10 +12788,12 @@ class StoryStore(Protocol):
             actor: Who is splitting.
             trigger: The activation that triggered it, where there was one.
             notes: The notes the user wrote directly that go with the split.
+            answers: The flag this split decides, where it decides one.
 
         Returns:
             C's id, or a refusal: ``no_members``, ``unknown_story``,
-            ``merged_story``, or ``not_a_member`` naming a member A does not hold.
+            ``merged_story``, or ``not_a_member`` naming a member A does not hold,
+            then ``unknown_flag`` or ``already_decided``.
 
         Raises:
             ValueError: If an argument is malformed.
@@ -12751,7 +12801,7 @@ class StoryStore(Protocol):
         """
         ...
 
-    async def move(
+    async def move(  # noqa: PLR0913 — ADR-0302 §4:2 adds ``answers`` as a keyword to this operation
         self,
         story_id: Identifier,
         to: Identifier,
@@ -12759,6 +12809,7 @@ class StoryStore(Protocol):
         *,
         actor: StoryActor,
         trigger: Identifier | None = None,
+        answers: StoryFlagName | None = None,
     ) -> StoryOutcome:
         """Move activation members from one story to another (ADR-0300 §3).
 
@@ -12767,7 +12818,8 @@ class StoryStore(Protocol):
         ``added`` there; one the second already holds keeps its entry as it was.
         Every note the first story holds resting on a moved activation moves to the
         second. All of it is one transaction, and what the second story receives is
-        pending there.
+        pending there. Given ``answers``, it records the decision ``moved`` on the
+        stories the flag concerns (ADR-0302 §4:2).
 
         Args:
             story_id: The story moved from.
@@ -12776,16 +12828,39 @@ class StoryStore(Protocol):
                 the first story.
             actor: Who is moving.
             trigger: The activation that triggered it, where there was one.
+            answers: The flag this move decides, where it decides one.
 
         Returns:
             The second story's id with the count of lines appended, or a refusal:
             ``no_members``; ``unknown_story`` or ``merged_story`` for either side,
             the first story first; or ``not_a_member`` naming a member the first
-            story does not hold.
+            story does not hold; then ``unknown_flag`` or ``already_decided``.
 
         Raises:
             ValueError: If an argument is malformed: a story member named, or the
                 two stories the same.
+            StoryStoreError: If the store cannot be read or written.
+        """
+        ...
+
+    async def leave_flag(self, flag: StoryFlagName, *, actor: StoryActor) -> StoryOutcome:
+        """Record a decision to leave the stories a flag concerns as they are.
+
+        ADR-0302 §4:1. Writes one ``decided`` line with the outcome ``left`` on each
+        story the flag concerns, in one transaction, and changes no story's members.
+
+        Args:
+            flag: The flag decided.
+            actor: Who decided.
+
+        Returns:
+            The first story it wrote a line on, in the order the stories a flag
+            concerns are given, with the count of its lines, or a refusal:
+            ``unknown_flag`` where the store's records hold no such flag, or
+            ``already_decided`` where a ``decided`` line already answers it.
+
+        Raises:
+            ValueError: If an argument is malformed.
             StoryStoreError: If the store cannot be read or written.
         """
         ...
@@ -12933,9 +13008,10 @@ class StoryStore(Protocol):
         discarded; and the version is appended, recording the notes each line
         cites, the safety-net notes, what it took in, its supersession marks and
         its flags. It takes in exactly the notes and episodes the draft names that
-        were pending on the story at ``as_of``; a name that was not is not recorded
-        as taken in, and stays pending where it is pending. A refused write writes
-        nothing.
+        were pending on the story at ``as_of``; a name the story holds that was not
+        is not recorded as taken in, and stays pending where it is pending. A draft
+        resting on, or taking in, what the story does not hold when the write runs
+        is refused (ADR-0302 §7). A refused write writes nothing.
 
         Args:
             story_id: The story whose page is written.
@@ -12949,9 +13025,12 @@ class StoryStore(Protocol):
             has been written since ``as_of``, so the version the page was built on
             is no longer the current one; ``unknown_note`` for a note a line cites
             or a mark names that the store does not hold; ``unknown_story`` for a
-            flag naming a story the store does not hold; and ``over_cap`` where the
-            lines that are not the user's own notes exceed
-            ``STORY_PAGE_CAP_CHARS``.
+            flag naming a story the store does not hold; ``not_held`` for the first,
+            in this order, of a safety-net note resting on an activation the story
+            does not hold, an episode named as taken in that is not one of its
+            activation members, and a note named as taken in that it does not hold,
+            naming that activation or note; and ``over_cap`` where the lines that
+            are not the user's own notes exceed ``STORY_PAGE_CAP_CHARS``.
 
         Raises:
             ValueError: If an argument is malformed, including an ``as_of`` the

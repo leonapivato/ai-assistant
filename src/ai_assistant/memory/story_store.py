@@ -36,6 +36,14 @@ append-only by trigger, and the current page is the one record of the page kept 
 text, replaced whole by each write under ``secure_delete``, so the replaced page's
 text is overwritten rather than left in a freed page of the file.
 
+**A decision on a flag is a log line** (ADR-0302 §3). A ``decided`` line carries the
+flag it answers, as canonical JSON text of its identity in ``answers``, and the
+outcome in ``outcome``; it is written in the same transaction as the change it
+records, after that change's lines, so the two stand or fall together. The checks a
+write answering a flag makes — that the flag is one the version log or the change
+log holds, and that no ``decided`` line answers it yet — are made inside that
+transaction, so two writers cannot both answer one flag.
+
 The file is created owner-only (ADR-0004 §4). The membership records hold
 identities and instants only (ADR-0289 §2:7); the notes and the current page hold
 the text ADR-0300 §3 gives them, which is a fact about the owner's life as well.
@@ -67,7 +75,9 @@ from ai_assistant.core.types import (
     StoryActor,
     StoryChange,
     StoryCurrentPage,
+    StoryDecision,
     StoryEntry,
+    StoryFlagName,
     StoryHeader,
     StoryLogLine,
     StoryLogPage,
@@ -113,8 +123,9 @@ _SIDECARS = ("-journal", "-wal", "-shm")
 
 #: The schema this module writes, held in ``PRAGMA user_version``. A file carrying
 #: another version is refused at open rather than read under the wrong layout, except
-#: version 1, ADR-0289's layout, which is migrated in place (see :data:`_MIGRATE_1`).
-_SCHEMA_VERSION: Final = 2
+#: version 1, ADR-0289's layout, and version 2, ADR-0300's, which are migrated in
+#: place (see :data:`_MIGRATE_1` and :data:`_MIGRATE_2`).
+_SCHEMA_VERSION: Final = 3
 
 _EPOCH = datetime(1970, 1, 1, tzinfo=UTC)
 
@@ -134,8 +145,13 @@ _SCHEMA: Final = (
     "CREATE TABLE IF NOT EXISTS log("
     "sequence INTEGER PRIMARY KEY AUTOINCREMENT, story_id TEXT NOT NULL, "
     "change TEXT NOT NULL, member_kind TEXT, member_id TEXT, other_story TEXT, "
-    "actor TEXT NOT NULL, trigger_id TEXT, at INTEGER NOT NULL)",
+    "actor TEXT NOT NULL, trigger_id TEXT, at INTEGER NOT NULL, "
+    "answers TEXT, outcome TEXT)",
     "CREATE INDEX IF NOT EXISTS log_story ON log(story_id, sequence)",
+    # What a write answering a flag checks (ADR-0302 §4): understanding's lines for an
+    # activation, and a ``decided`` line answering the flag.
+    "CREATE INDEX IF NOT EXISTS log_member ON log(member_kind, member_id)",
+    "CREATE INDEX IF NOT EXISTS log_answers ON log(answers) WHERE answers IS NOT NULL",
     "CREATE TRIGGER IF NOT EXISTS log_never_rewritten BEFORE UPDATE ON log "
     "BEGIN SELECT RAISE(ABORT, 'the story change log is append-only'); END",
     "CREATE TRIGGER IF NOT EXISTS log_never_removed BEFORE DELETE ON log "
@@ -175,6 +191,16 @@ _SCHEMA: Final = (
 _MIGRATE_1: Final = (
     "ALTER TABLE members ADD COLUMN pending_since INTEGER",
     "UPDATE members SET pending_since = 0 WHERE kind = 'activation'",
+)
+
+#: ADR-0300's layout, version 2, to this one (ADR-0302 §10). The log gains what a
+#: ``decided`` line carries; every line written before it carries neither, as no
+#: line but a ``decided`` one does, so none is rewritten — which the log's own
+#: triggers would refuse in any case. The indexes are then created by
+#: :data:`_SCHEMA`.
+_MIGRATE_2: Final = (
+    "ALTER TABLE log ADD COLUMN answers TEXT",
+    "ALTER TABLE log ADD COLUMN outcome TEXT",
 )
 
 _ACTIVATION = StoryMemberKind.ACTIVATION.value
@@ -322,6 +348,11 @@ def _checked_write(actor: object, trigger: object) -> tuple[StoryActor, str | No
     return checked_actor, checked_trigger
 
 
+#: How many stories understanding's lines for one activation must stand on to make a
+#: flag (ADR-0302 §2:2).
+_TWO_STORIES: Final = 2
+
+
 def _unique[T](items: Sequence[T]) -> list[T]:
     """The items in the order given, each once."""
     return list(dict.fromkeys(items))
@@ -360,6 +391,38 @@ def _note_args(
         written_at=_EPOCH,
     )
     return checked.text, checked.author, checked.rests_on, checked.outside
+
+
+def _answers(answers: object) -> StoryFlagName | None:
+    """Snapshot the flag a write answers by revalidation, or ``None`` for none.
+
+    Raises:
+        ValueError: If it is neither ``None`` nor a :class:`StoryFlagName`.
+    """
+    if answers is None:
+        return None
+    if not isinstance(answers, StoryFlagName):
+        msg = f"a write answers a StoryFlagName, got {type(answers).__name__}"
+        raise ValueError(msg)
+    return StoryFlagName.model_validate(answers.model_dump())
+
+
+def _grouping(members: Sequence[StoryMember], answers: StoryFlagName | None) -> None:
+    """Refuse an activation member on a create or a link answering a flag.
+
+    ADR-0302 §4:3: grouping stories under a larger one names stories only.
+
+    Raises:
+        ValueError: If a flag is answered and a member named is an activation.
+    """
+    if answers is not None and any(m.kind is not StoryMemberKind.STORY for m in members):
+        msg = "a create or a link answering a flag names story members only"
+        raise ValueError(msg)
+
+
+def _flag_text(flag: StoryFlagName) -> str:
+    """A flag's identity as the canonical JSON text ``log.answers`` holds and is matched on."""
+    return json.dumps(flag.model_dump(mode="json"), sort_keys=True, separators=(",", ":"))
 
 
 def _page_draft(story_id: str, draft: object) -> StoryPageDraft:
@@ -460,7 +523,7 @@ class SqliteStoryStore:
             self._restrict_permissions()
             with transaction(conn, "prepare the story store", error=StoryStoreError):
                 version = conn.execute("PRAGMA user_version").fetchone()[0]
-                if version not in {0, 1, _SCHEMA_VERSION}:
+                if version not in {0, 1, 2, _SCHEMA_VERSION}:
                     msg = (
                         f"the story store at {self._path!r} carries schema version "
                         f"{version}, and this build writes {_SCHEMA_VERSION}"
@@ -468,6 +531,9 @@ class SqliteStoryStore:
                     raise StoryStoreError(msg)
                 if version == 1:
                     for statement in _MIGRATE_1:
+                        conn.execute(statement)
+                if version in {1, 2}:
+                    for statement in _MIGRATE_2:
                         conn.execute(statement)
                 for statement in _SCHEMA:
                     conn.execute(statement)
@@ -624,10 +690,11 @@ class SqliteStoryStore:
         *,
         member: StoryMember | None = None,
         other: str | None = None,
+        decision: tuple[StoryFlagName, StoryDecision] | None = None,
     ) -> int:
         cursor = conn.execute(
             "INSERT INTO log(story_id, change, member_kind, member_id, other_story, actor, "
-            "trigger_id, at) VALUES(?, ?, ?, ?, ?, ?, ?, ?)",
+            "trigger_id, at, answers, outcome) VALUES(?, ?, ?, ?, ?, ?, ?, ?, ?, ?)",
             (
                 story_id,
                 change.value,
@@ -637,6 +704,8 @@ class SqliteStoryStore:
                 stamp.actor.value,
                 stamp.trigger,
                 stamp.at,
+                None if decision is None else _flag_text(decision[0]),
+                None if decision is None else decision[1].value,
             ),
         )
         sequence = cursor.lastrowid
@@ -644,6 +713,88 @@ class SqliteStoryStore:
             msg = "the story log did not report the sequence it assigned"
             raise StoryStoreError(msg)
         return sequence
+
+    # --- decisions on flags (ADR-0302 §§2-4) ---------------------------------
+
+    def _followed(self, conn: sqlite3.Connection, story_id: str) -> str:
+        """The story ``story_id`` was merged into, through every merge, or itself."""
+        seen = {story_id}
+        while True:
+            header = self._header(conn, story_id)
+            if header is None:
+                msg = f"the story store has no story {story_id!r} that its records name"
+                raise StoryStoreError(msg)
+            onward = header.merged_into
+            if onward is None:
+                return story_id
+            if onward in seen:
+                msg = f"story {story_id!r} is merged into a chain that loops"
+                raise StoryStoreError(msg)
+            seen.add(onward)
+            story_id = onward
+
+    @staticmethod
+    def _raised_on(conn: sqlite3.Connection, activation: str) -> list[str]:
+        """The stories holding understanding's lines for ``activation``, by first line (§2:2)."""
+        rows = conn.execute(
+            "SELECT story_id, MIN(sequence) AS first FROM log "
+            "WHERE member_kind = ? AND member_id = ? AND change = ? AND actor = ? "
+            "AND trigger_id = ? GROUP BY story_id ORDER BY first",
+            (
+                _ACTIVATION,
+                activation,
+                StoryChange.ADDED.value,
+                StoryActor.UNDERSTANDING.value,
+                activation,
+            ),
+        ).fetchall()
+        return [row[0] for row in rows]
+
+    def _flag_refusal(self, conn: sqlite3.Connection, flag: StoryFlagName) -> StoryRefusal | None:
+        """``unknown_flag``, then ``already_decided``, read off the store's own records."""
+        if flag.activation is not None:
+            held = len(self._raised_on(conn, flag.activation)) >= _TWO_STORIES
+        else:
+            row = conn.execute(
+                "SELECT version, written_at, record FROM versions WHERE version = ? "
+                "AND story_id = ?",
+                (flag.version, flag.story),
+            ).fetchone()
+            held = row is not None and flag.flag in _decoded(_version_from, row).flags
+        if not held:
+            return StoryRefusal(reason=StoryRefusalReason.UNKNOWN_FLAG, flag=flag)
+        answered = conn.execute(
+            "SELECT 1 FROM log WHERE answers = ? AND change = ? LIMIT 1",
+            (_flag_text(flag), StoryChange.DECIDED.value),
+        ).fetchone()
+        if answered is not None:
+            return StoryRefusal(reason=StoryRefusalReason.ALREADY_DECIDED, flag=flag)
+        return None
+
+    def _concerned(self, conn: sqlite3.Connection, flag: StoryFlagName) -> list[str]:
+        """The stories a flag concerns, followed through merges, each once (§2:3)."""
+        if flag.activation is not None:
+            raised = self._raised_on(conn, flag.activation)
+        elif flag.story is None or flag.flag is None:  # pragma: no cover — the model's rule
+            msg = "a tidy-up's flag names its story and the flag"
+            raise ValueError(msg)
+        else:
+            raised = [flag.story] if flag.flag.story is None else [flag.story, flag.flag.story]
+        return _unique([self._followed(conn, story_id) for story_id in raised])
+
+    def _decide(
+        self,
+        conn: sqlite3.Connection,
+        flag: StoryFlagName,
+        outcome: StoryDecision,
+        stamp: _Stamp,
+    ) -> list[str]:
+        """Write one ``decided`` line on each story the flag concerns, as they now stand."""
+        decided = _Stamp(actor=stamp.actor, trigger=None, at=stamp.at)
+        concerned = self._concerned(conn, flag)
+        for story_id in concerned:
+            self._append(conn, story_id, StoryChange.DECIDED, decided, decision=(flag, outcome))
+        return concerned
 
     def _add(
         self, conn: sqlite3.Connection, story_id: str, member: StoryMember, stamp: _Stamp
@@ -726,14 +877,21 @@ class SqliteStoryStore:
         *,
         actor: StoryActor,
         trigger: Identifier | None = None,
+        answers: StoryFlagName | None = None,
     ) -> StoryOutcome:
-        """Mint a story holding ``members`` (ADR-0289 §3)."""
+        """Mint a story holding ``members`` (ADR-0289 §3, ADR-0302 §4)."""
         named = story_members(members)
         checked_actor, checked_trigger = _checked_write(actor, trigger)
-        return await self._locked(self._create_sync, named, checked_actor, checked_trigger)
+        flag = _answers(answers)
+        _grouping(named, flag)
+        return await self._locked(self._create_sync, named, checked_actor, checked_trigger, flag)
 
     def _create_sync(
-        self, members: tuple[StoryMember, ...], actor: StoryActor, trigger: str | None
+        self,
+        members: tuple[StoryMember, ...],
+        actor: StoryActor,
+        trigger: str | None,
+        flag: StoryFlagName | None,
     ) -> StoryOutcome:
         if not members:
             return StoryOutcome(refusal=StoryRefusal(reason=StoryRefusalReason.NO_MEMBERS))
@@ -741,11 +899,14 @@ class SqliteStoryStore:
         with self._transaction("create a story") as conn:
             if refused := self._members_refusal(conn, members):
                 return StoryOutcome(refusal=refused)
+            if flag is not None and (refused := self._flag_refusal(conn, flag)):
+                return StoryOutcome(refusal=refused)
             story_id = self._mint(conn, stamp)
             unique = _unique(members)
             for member in unique:
                 self._add(conn, story_id, member, stamp)
-        return StoryOutcome(story_id=story_id, logged=1 + len(unique))
+            decided = [] if flag is None else self._decide(conn, flag, StoryDecision.GROUPED, stamp)
+        return StoryOutcome(story_id=story_id, logged=1 + len(unique) + len(decided))
 
     async def link(
         self,
@@ -754,12 +915,17 @@ class SqliteStoryStore:
         *,
         actor: StoryActor,
         trigger: Identifier | None = None,
+        answers: StoryFlagName | None = None,
     ) -> StoryOutcome:
-        """Add ``members`` to a story (ADR-0289 §3)."""
+        """Add ``members`` to a story (ADR-0289 §3, ADR-0302 §4)."""
         target = _checked_id(story_id)
         named = story_members(members)
         checked_actor, checked_trigger = _checked_write(actor, trigger)
-        return await self._locked(self._link_sync, target, named, checked_actor, checked_trigger)
+        flag = _answers(answers)
+        _grouping(named, flag)
+        return await self._locked(
+            self._link_sync, target, named, checked_actor, checked_trigger, flag
+        )
 
     def _link_sync(
         self,
@@ -767,6 +933,7 @@ class SqliteStoryStore:
         members: tuple[StoryMember, ...],
         actor: StoryActor,
         trigger: str | None,
+        flag: StoryFlagName | None,
     ) -> StoryOutcome:
         if not members:
             return StoryOutcome(refusal=StoryRefusal(reason=StoryRefusalReason.NO_MEMBERS))
@@ -792,9 +959,12 @@ class SqliteStoryStore:
                             loop=(story_id, *chain[:-1]),
                         )
                     )
+            if flag is not None and (refused := self._flag_refusal(conn, flag)):
+                return StoryOutcome(refusal=refused)
             for member in fresh:
                 self._add(conn, story_id, member, stamp)
-        return StoryOutcome(story_id=story_id, logged=len(fresh))
+            decided = [] if flag is None else self._decide(conn, flag, StoryDecision.GROUPED, stamp)
+        return StoryOutcome(story_id=story_id, logged=len(fresh) + len(decided))
 
     async def unlink(
         self,
@@ -837,17 +1007,24 @@ class SqliteStoryStore:
         *,
         actor: StoryActor,
         trigger: Identifier | None = None,
+        answers: StoryFlagName | None = None,
     ) -> StoryOutcome:
         """Merge story ``story_id`` into story ``into`` (ADR-0289 §3, ADR-0300 §3)."""
         absorbed = _checked_id(story_id)
         target = _checked_id(into)
         checked_actor, checked_trigger = _checked_write(actor, trigger)
+        flag = _answers(answers)
         return await self._locked(
-            self._merge_sync, absorbed, target, checked_actor, checked_trigger
+            self._merge_sync, absorbed, target, checked_actor, checked_trigger, flag
         )
 
     def _merge_sync(
-        self, absorbed: str, target: str, actor: StoryActor, trigger: str | None
+        self,
+        absorbed: str,
+        target: str,
+        actor: StoryActor,
+        trigger: str | None,
+        flag: StoryFlagName | None,
     ) -> StoryOutcome:
         stamp = self._stamp(actor, trigger)
         try:
@@ -862,6 +1039,9 @@ class SqliteStoryStore:
                             reason=StoryRefusalReason.SELF_MERGE, story_id=absorbed
                         )
                     )
+                # The flag is read off the records before the merge writes anything,
+                # and reported only after the merge's own loop check (ADR-0302 §4:5).
+                flag_refused = None if flag is None else self._flag_refusal(conn, flag)
                 logged = self._merge_writes(conn, absorbed, target, stamp)
                 # Every edge the merge added touches the target — it gained the
                 # absorbed story's members, and the absorbed story's holders gained
@@ -876,6 +1056,10 @@ class SqliteStoryStore:
                                 loop=(target, *chain[:-1]),
                             )
                         )
+                if flag_refused is not None:
+                    raise _Refused(flag_refused)
+                if flag is not None:
+                    logged += len(self._decide(conn, flag, StoryDecision.MERGED, stamp))
         except _Refused as refused:
             return StoryOutcome(refusal=refused.refusal)
         return StoryOutcome(story_id=target, logged=logged)
@@ -919,7 +1103,7 @@ class SqliteStoryStore:
         self._carry_notes(conn, [row[0] for row in rows], target)
         return logged
 
-    async def split(
+    async def split(  # noqa: PLR0913 — ADR-0302 §4:2 adds ``answers`` as a keyword to this operation
         self,
         story_id: Identifier,
         members: Sequence[StoryMember],
@@ -927,23 +1111,26 @@ class SqliteStoryStore:
         actor: StoryActor,
         trigger: Identifier | None = None,
         notes: Sequence[StoryNoteId] = (),
+        answers: StoryFlagName | None = None,
     ) -> StoryOutcome:
         """Move a non-empty subset of a story's members into a new story (ADR-0289 §3)."""
         source = _checked_id(story_id)
         named = story_members(members)
         checked_actor, checked_trigger = _checked_write(actor, trigger)
         named_notes = story_note_ids(notes)
+        flag = _answers(answers)
         return await self._locked(
-            self._split_sync, source, named, checked_actor, checked_trigger, named_notes
+            self._split_sync, source, named, checked_actor, checked_trigger, named_notes, flag
         )
 
-    def _split_sync(
+    def _split_sync(  # noqa: PLR0913 — the story, its members, the stamp's parts, notes, flag
         self,
         story_id: str,
         members: tuple[StoryMember, ...],
         actor: StoryActor,
         trigger: str | None,
         notes: tuple[int, ...],
+        flag: StoryFlagName | None,
     ) -> StoryOutcome:
         if not members:
             return StoryOutcome(refusal=StoryRefusal(reason=StoryRefusalReason.NO_MEMBERS))
@@ -965,6 +1152,8 @@ class SqliteStoryStore:
             moving = set(members)
             moved = [m for m in self._member_rows(conn, story_id) if m in moving]
             carried = self._split_notes(conn, story_id, moved, notes)
+            if flag is not None and (refused := self._flag_refusal(conn, flag)):
+                return StoryOutcome(refusal=refused)
             split_off = self._mint(conn, stamp)
             self._append(conn, story_id, StoryChange.SPLIT_OFF, stamp, other=split_off)
             self._append(conn, split_off, StoryChange.SPLIT_OFF, stamp, other=story_id)
@@ -972,7 +1161,8 @@ class SqliteStoryStore:
                 self._remove(conn, story_id, member, stamp)
                 self._add(conn, split_off, member, stamp)
             self._carry_notes(conn, carried, split_off)
-        return StoryOutcome(story_id=split_off, logged=3 + 2 * len(moved))
+            decided = [] if flag is None else self._decide(conn, flag, StoryDecision.SPLIT, stamp)
+        return StoryOutcome(story_id=split_off, logged=3 + 2 * len(moved) + len(decided))
 
     def _split_notes(
         self,
@@ -997,7 +1187,7 @@ class SqliteStoryStore:
                 carried.add(note_id)
         return sorted(carried)
 
-    async def move(
+    async def move(  # noqa: PLR0913 — ADR-0302 §4:2 adds ``answers`` as a keyword to this operation
         self,
         story_id: Identifier,
         to: Identifier,
@@ -1005,23 +1195,26 @@ class SqliteStoryStore:
         *,
         actor: StoryActor,
         trigger: Identifier | None = None,
+        answers: StoryFlagName | None = None,
     ) -> StoryOutcome:
         """Move activation members from one story to another (ADR-0300 §3)."""
         source = _checked_id(story_id)
         target = _checked_id(to)
         named = _move_members(source, target, members)
         checked_actor, checked_trigger = _checked_write(actor, trigger)
+        flag = _answers(answers)
         return await self._locked(
-            self._move_sync, source, target, named, checked_actor, checked_trigger
+            self._move_sync, source, target, named, checked_actor, checked_trigger, flag
         )
 
-    def _move_sync(
+    def _move_sync(  # noqa: PLR0913 — both stories, the members, the stamp's parts, the flag
         self,
         source: str,
         target: str,
         members: tuple[StoryMember, ...],
         actor: StoryActor,
         trigger: str | None,
+        flag: StoryFlagName | None,
     ) -> StoryOutcome:
         if not members:
             return StoryOutcome(refusal=StoryRefusal(reason=StoryRefusalReason.NO_MEMBERS))
@@ -1041,6 +1234,8 @@ class SqliteStoryStore:
             moving = set(members)
             moved = [m for m in self._member_rows(conn, source) if m in moving]
             carried = self._notes_resting_on(conn, source, {m.id for m in moved})
+            if flag is not None and (refused := self._flag_refusal(conn, flag)):
+                return StoryOutcome(refusal=refused)
             logged = 0
             for member in moved:
                 self._remove(conn, source, member, stamp)
@@ -1050,7 +1245,26 @@ class SqliteStoryStore:
                 self._add(conn, target, member, stamp)
                 logged += 1
             self._carry_notes(conn, carried, target)
+            if flag is not None:
+                logged += len(self._decide(conn, flag, StoryDecision.MOVED, stamp))
         return StoryOutcome(story_id=target, logged=logged)
+
+    async def leave_flag(self, flag: StoryFlagName, *, actor: StoryActor) -> StoryOutcome:
+        """Record a decision to leave the stories a flag concerns as they are (ADR-0302 §4:1)."""
+        checked = _answers(flag)
+        if checked is None:
+            msg = "leave_flag takes the flag it decides"
+            raise ValueError(msg)
+        checked_actor, _ = _checked_write(actor, None)
+        return await self._locked(self._leave_flag_sync, checked, checked_actor)
+
+    def _leave_flag_sync(self, flag: StoryFlagName, actor: StoryActor) -> StoryOutcome:
+        stamp = self._stamp(actor, None)
+        with self._transaction("leave a flag") as conn:
+            if refused := self._flag_refusal(conn, flag):
+                return StoryOutcome(refusal=refused)
+            decided = self._decide(conn, flag, StoryDecision.LEFT, stamp)
+        return StoryOutcome(story_id=decided[0], logged=len(decided))
 
     # --- the page: writes (ADR-0300 §3) --------------------------------------
 
@@ -1179,8 +1393,40 @@ class SqliteStoryStore:
                 return StoryPageRefusal(
                     reason=StoryPageRefusalReason.UNKNOWN_STORY, story_id=flag.story
                 )
+        if refused := self._not_held(conn, story_id, draft):
+            return refused
         if _page_size(draft, owners) > STORY_PAGE_CAP_CHARS:
             return StoryPageRefusal(reason=StoryPageRefusalReason.OVER_CAP, story_id=story_id)
+        return None
+
+    def _not_held(
+        self, conn: sqlite3.Connection, story_id: str, draft: StoryPageDraft
+    ) -> StoryPageRefusal | None:
+        """The first thing a draft rests on or takes in that its story does not hold.
+
+        ADR-0302 §7: the safety-net notes in the draft's order, then the episodes
+        taken in, then the notes taken in, each against what the story holds inside
+        the write's own transaction.
+        """
+        for activation in (
+            *(note.rests_on for note in draft.safety_net),
+            *draft.took_in_episodes,
+        ):
+            member = StoryMember(kind=StoryMemberKind.ACTIVATION, id=activation)
+            if not self._holds(conn, story_id, member):
+                return StoryPageRefusal(
+                    reason=StoryPageRefusalReason.NOT_HELD,
+                    story_id=story_id,
+                    activation=activation,
+                )
+        for note_id in draft.took_in_notes:
+            row = conn.execute(
+                "SELECT 1 FROM notes WHERE id = ? AND story_id = ?", (note_id, story_id)
+            ).fetchone()
+            if row is None:
+                return StoryPageRefusal(
+                    reason=StoryPageRefusalReason.NOT_HELD, story_id=story_id, note=note_id
+                )
         return None
 
     def _page_writes(
@@ -1327,7 +1573,7 @@ class SqliteStoryStore:
                 return None
             rows = conn.execute(
                 "SELECT sequence, story_id, change, member_kind, member_id, other_story, "
-                "actor, trigger_id, at FROM log "
+                "actor, trigger_id, at, answers, outcome FROM log "
                 "WHERE story_id = ? AND sequence > ? ORDER BY sequence LIMIT ?",
                 (story_id, -1 if cursor is None else cursor, limit + 1),
             ).fetchall()
@@ -1494,8 +1740,9 @@ class SqliteStoryStore:
 
 
 def _line_from(row: Sequence[Any]) -> StoryLogLine:
-    """Decode one stored log row."""
+    """Decode one stored log row, a ``decided`` line's flag and outcome included."""
     member = None if row[3] is None and row[4] is None else StoryMember(kind=row[3], id=row[4])
+    answers = None if row[9] is None else StoryFlagName.model_validate(_json_from(row[9]))
     return StoryLogLine(
         sequence=row[0],
         story_id=row[1],
@@ -1505,6 +1752,8 @@ def _line_from(row: Sequence[Any]) -> StoryLogLine:
         actor=row[6],
         trigger=row[7],
         at=_instant_from(row[8]),
+        answers=answers,
+        outcome=row[10],
     )
 
 

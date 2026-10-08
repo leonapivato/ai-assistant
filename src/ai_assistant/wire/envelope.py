@@ -2466,7 +2466,14 @@ from ai_assistant.wire.overlay import MAX_OVERLAY_IDENTITY_BYTES
 #:     method set — ``story_page``, ``story_standing``, ``add_story_note`` and
 #:     ``move_story_members`` — and the page's types and ``StoryStanding`` with the
 #:     types they carry, which first reach an engine method here (§12:2).
-PROTOCOL_VERSION: Final[int] = 84
+#: 85: ADR-0302 §8:1 adds ``decided`` to ``StoryChange`` and the flag and outcome it
+#:     carries to ``StoryLogLine`` (``StoryFlagName`` and ``StoryDecision``), which the
+#:     engine's story log carries; ``unknown_flag`` and ``already_decided`` to
+#:     ``StoryRefusalReason`` and ``flag`` to ``StoryRefusal``, which the engine's story
+#:     writes carry; and ``not_held`` to ``StoryPageRefusalReason`` and ``activation`` to
+#:     ``StoryPageRefusal``, which the story commands carry. A peer at 84 would refuse a
+#:     ``decided`` line or a new refusal (ADR-0300 §12:2, ADR-0124 §9:2).
+PROTOCOL_VERSION: Final[int] = 85
 
 #: ADR-0298 §7:11: the hub writes a heartbeat on a change stream whenever this long
 #: passes without a chunk. **A protocol constant, not a setting**: hub and client

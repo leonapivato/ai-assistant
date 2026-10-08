@@ -937,7 +937,7 @@ class StoryStoreContract:
             draft(
                 line("The matter.", note.note_id),
                 took_in_notes=(note.note_id, note.note_id),
-                took_in_episodes=("a1", "never-a-member"),
+                took_in_episodes=("a1", "a1"),
             ),
             as_of=read.as_of,
         )

@@ -1,4 +1,4 @@
-"""Presentation for the owner's story commands (ADR-0289 §5, ADR-0300 §8).
+"""Presentation for the owner's story commands (ADR-0289 §5, ADR-0300 §8, ADR-0302 §8).
 
 Rendering and read assembly only. Which writes are allowed, what a loop is and
 whether a member exists are the story store's and the engine's to decide (ADR-0289
@@ -23,6 +23,7 @@ from ai_assistant.core.types import (
     MAX_STORY_PAGE,
     STORY_PAGE_CAP_CHARS,
     StoryChange,
+    StoryDecision,
     StoryEffectState,
     StoryMemberKind,
     StoryPageRefusalReason,
@@ -37,6 +38,7 @@ if TYPE_CHECKING:
 
     from ai_assistant.core.protocols import AssistantEngine
     from ai_assistant.core.types import (
+        StoryFlagName,
         StoryHeader,
         StoryLogLine,
         StoryLogPage,
@@ -63,6 +65,17 @@ CHANGE_TEXT: dict[StoryChange, str] = {
     StoryChange.MERGED_INTO: "merged into",
     StoryChange.ABSORBED: "absorbed",
     StoryChange.SPLIT_OFF: "split, the other side being",
+    StoryChange.DECIDED: "decided",
+}
+
+#: What each decision on a flag reads as (ADR-0302 §3:3, §8:2), spelled out per
+#: member for the same reason.
+DECISION_TEXT: dict[StoryDecision, str] = {
+    StoryDecision.MERGED: "merged",
+    StoryDecision.SPLIT: "split",
+    StoryDecision.MOVED: "moved members",
+    StoryDecision.GROUPED: "grouped under a larger story",
+    StoryDecision.LEFT: "left as they were",
 }
 
 #: What each state of a thing done reads as (ADR-0300 §8:1), spelled out per member
@@ -111,6 +124,16 @@ def member_text(member: StoryMember) -> str:
     return f"{member.kind.value} {quoted(member.id)}"
 
 
+def flag_text(flag: StoryFlagName) -> str:
+    """A flag by identity (ADR-0302 §2, §8:2): its version and kind, or its activation."""
+    if flag.activation is not None:
+        return f"the flag on activation {quoted(flag.activation)} linking it into several stories"
+    kind = "a flag" if flag.flag is None else f"flag {flag.flag.kind.value}"
+    if flag.flag is not None and flag.flag.story is not None:
+        kind += f" naming story {quoted(flag.flag.story)}"
+    return f"{kind} raised by version {flag.version} of story {quoted(flag.story or '')}"
+
+
 def refusal_text(refusal: StoryRefusal) -> str:
     """Say why a write was refused, naming the reason and what it was refused over."""
     story = "the story" if refusal.story_id is None else f"story {quoted(refusal.story_id)}"
@@ -133,6 +156,12 @@ def refusal_text(refusal: StoryRefusal) -> str:
         case StoryRefusalReason.UNKNOWN_ACTIVATION:
             member = "an activation" if refusal.member is None else member_text(refusal.member)
             detail = f"{member} has no episode record"
+        case StoryRefusalReason.UNKNOWN_FLAG:
+            flag = "the flag" if refusal.flag is None else flag_text(refusal.flag)
+            detail = f"no record holds {flag}"
+        case StoryRefusalReason.ALREADY_DECIDED:
+            flag = "the flag" if refusal.flag is None else flag_text(refusal.flag)
+            detail = f"{flag} was already decided"
         case _:  # pragma: no cover — exhaustive over a closed enumeration
             assert_never(refusal.reason)
     return f"Refused ({refusal.reason.value}): {detail}."
@@ -159,6 +188,13 @@ def page_refusal_text(refusal: StoryPageRefusal) -> str:
             detail = f"there is no note #{refusal.note}"
         case StoryPageRefusalReason.OVER_CAP:
             detail = f"the page of {story} is over its cap of {STORY_PAGE_CAP_CHARS} characters"
+        case StoryPageRefusalReason.NOT_HELD:
+            held = (
+                f"activation {quoted(refusal.activation)}"
+                if refusal.activation is not None
+                else f"note #{refusal.note}"
+            )
+            detail = f"{story} does not hold {held}"
         case _:  # pragma: no cover — exhaustive over a closed enumeration
             assert_never(refusal.reason)
     return f"Refused ({refusal.reason.value}): {detail}."
@@ -354,10 +390,18 @@ def _member_line(view: StoryMemberView) -> str:
 
 
 def _log_line(line: StoryLogLine) -> str:
-    """One change-log line: its sequence, instant, actor, change and what it names."""
+    """One change-log line: its sequence, instant, actor, change and what it names.
+
+    A ``decided`` line names its outcome and the flag it answers, by identity
+    (ADR-0302 §8:2).
+    """
     text = (
         f"  #{line.sequence} {line.at.isoformat()} {line.actor.value}: {CHANGE_TEXT[line.change]}"
     )
+    if line.outcome is not None:
+        text += f" {DECISION_TEXT[line.outcome]}"
+    if line.answers is not None:
+        text += f", answering {flag_text(line.answers)}"
     if line.member is not None:
         text += f" {member_text(line.member)}"
     if line.other_story is not None:
