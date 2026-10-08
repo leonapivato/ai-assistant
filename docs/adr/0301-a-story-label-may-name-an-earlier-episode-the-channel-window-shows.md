@@ -1,6 +1,6 @@
 # 301. A story label may name an earlier episode the channel window shows
 
-- Status: Proposed
+- Status: Accepted
 - Date: 2026-10-08
 - Scope: [M42](https://github.com/leonapivato/ai-assistant/milestone/9), [#2753](https://github.com/leonapivato/ai-assistant/issues/2753): which labels understanding's story links may cite.
 - Dependency: ADR-0300, whose §6 [#2752](https://github.com/leonapivato/ai-assistant/pull/2752) implemented; ADR-0276 and ADR-0282, implemented.
