@@ -75,10 +75,11 @@ class InterimTidyUp:
         """Run one tidy-up, logging rather than raising whatever escapes it.
 
         Nobody awaits this coroutine's result, so an unexpected error is logged here
-        rather than left for the event loop to report as never retrieved.
+        rather than left for the event loop to report as never retrieved. It is
+        logged by its class alone, with no message and no traceback: either could
+        carry a note's or an episode's words (ADR-0275 §8).
         """
         try:
             await self._tidy_up.run(story_id)
-        except Exception:
-            # A background run with no awaiter: logged here, never lost.
-            _log.exception("story_tidy_up_crashed", stage="tidy_up")
+        except Exception as exc:
+            _log.error("story_tidy_up_crashed", stage="tidy_up", error=type(exc).__name__)

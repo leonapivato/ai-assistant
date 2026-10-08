@@ -12628,8 +12628,14 @@ class Engine:
         carries neither the activation's state nor its correlation scope, and is
         tracked so :meth:`aclose` drains it (ADR-0042 §2). The pass does not wait for
         it, and its finishing starts nothing (§5).
+
+        **None is started once shutdown has begun.** The drain awaits the tasks it
+        found when it started, and ``_closing`` is set before it looks; a pass still
+        running then would otherwise start a task the drain never awaits, over stores
+        about to close. A tidy-up not started loses nothing: what it would have taken
+        in stays pending for a later run (§5).
         """
-        if self._interim_tidy_up is None:
+        if self._interim_tidy_up is None or self._closing:
             return
         for run in self._interim_tidy_up.runs(decision):
             task = asyncio.get_running_loop().create_task(run, context=contextvars.Context())
