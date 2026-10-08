@@ -13,6 +13,13 @@ page cites that the story still holds, and the supersession marks earlier versio
 this story's page made. To make §9:2's *like another story* flag possible it reads,
 by identity and never by search, the other stories the episodes it read also belong
 to, each with its current page's first line (the line saying what the matter is).
+And it reads the decisions recorded for the story (ADR-0302 §6:1): the ``decided``
+lines on its change log and on the change logs of the stories merged into it, newest
+first and up to its bound, each rendered by its outcome, the flag it answers and the
+stories that flag concerns, followed through merges as they now stand
+(:mod:`~ai_assistant.orchestration.story_flags`). Its instruction raises such a flag
+again only where what the run takes in bears on it (§6:2), and no rule drops or
+refuses a flag raised again: it is a new flag, which the matters pass decides (§6:3).
 
 **How it renders** (§5:3, §4:6). Each episode through ``core``'s one projection
 (ADR-0284 §8) with outside input withheld, so the user's own input is shown as
@@ -88,6 +95,12 @@ from ai_assistant.core.types import (
 )
 from ai_assistant.orchestration.episode_reads import without_open_episodes
 from ai_assistant.orchestration.stories import episode_address
+from ai_assistant.orchestration.story_flags import (
+    StoryRecords,
+    read_headers,
+    read_records,
+    recorded_decisions,
+)
 from ai_assistant.orchestration.story_privacy import activation_of
 
 if TYPE_CHECKING:
@@ -104,6 +117,7 @@ if TYPE_CHECKING:
         StoryPageState,
         StoryPageVersion,
     )
+    from ai_assistant.orchestration.story_flags import RecordedDecision
 
 __all__ = ["StoryTidyUp", "TidyUpOutcome", "TidyUpResult"]
 
@@ -219,6 +233,12 @@ _INSTRUCTION: Final = (
     "flag of kind `like_another` naming an S label when it looks like the same matter "
     "as that other story. Raise none otherwise.\n"
     "\n"
+    "The decisions already recorded on flags about this story are listed under "
+    "`decisions`, newest first: what was decided, the kind of flag it answered, and "
+    "the stories that flag concerned. A flag one of those decisions answered, of the "
+    "same kind about the same stories, is raised again only where what you take in "
+    "now, the notes not yet on the page and the episodes, bears on it.\n"
+    "\n"
     "Reply with only one JSON object, no prose and no code fence, of exactly this "
     "shape:\n"
     '{"safety_net": [{"episode": "<E label>", "text": "<the note>"}], '
@@ -245,6 +265,7 @@ _OUTSIDE_TEXT: Final = (
 _SUPERSEDED_TEXT: Final = "superseded by the user's own later words: it need not be kept"
 _NO_PAGE: Final = "missing: no page has been written for this story yet"
 _NO_OTHER_LINE: Final = "missing: no page has been written for this story yet"
+_THIS_STORY: Final = "this story"
 
 
 # --- the reply -----------------------------------------------------------------------
@@ -385,11 +406,13 @@ class _Other:
 class _Reading:
     """Everything one run read, under the labels it renders."""
 
+    story_id: str
     state: StoryPageState
     notes: dict[str, StoryNote]
     episodes: dict[str, _Episode]
     others: dict[str, _Other]
     superseded: frozenset[StoryNoteId]
+    decisions: tuple[tuple[RecordedDecision, tuple[str, ...]], ...] = ()
 
     def label_of(self) -> dict[StoryNoteId, str]:
         """Each note's label, by its identity."""
@@ -445,6 +468,32 @@ class _Reading:
             "notes": notes,
             "episodes": [episode.rendering(label) for label, episode in self.episodes.items()],
             "other_stories": [other.rendering(label) for label, other in self.others.items()],
+            "decisions": [
+                self._decision(decision, concerns) for decision, concerns in self.decisions
+            ],
+        }
+
+    def _decision(self, decision: RecordedDecision, concerns: tuple[str, ...]) -> dict[str, object]:
+        """One decision recorded for the story, by identity only (ADR-0302 §6:1).
+
+        Its outcome, the kind of flag it answered, when it was recorded, and the stories
+        that flag concerns: this story, another story shown under its label, or, for
+        one not shown, only a count, since the run cannot name it.
+        """
+        labels = {other.story_id: label for label, other in self.others.items()}
+        shown: list[str] = []
+        for story_id in concerns:
+            if story_id == self.story_id:
+                shown.append(_THIS_STORY)
+            elif (label := labels.get(story_id)) is not None:
+                shown.append(label)
+        name = decision.flag
+        return {
+            "outcome": decision.outcome.value,
+            "flag": "one_input_in_several_stories" if name.flag is None else name.flag.kind.value,
+            "stories_its_flag_concerns": shown,
+            "other_stories_its_flag_concerns": len(concerns) - len(shown),
+            "recorded_at": decision.at.isoformat(),
         }
 
 
@@ -458,7 +507,7 @@ class StoryTidyUp:
     is not a Protocol (§5:1).
     """
 
-    def __init__(  # noqa: PLR0913 — the three injected seams and the three bounds
+    def __init__(  # noqa: PLR0913 — the three injected seams and the four bounds
         self,
         *,
         model: ModelProvider,
@@ -466,6 +515,7 @@ class StoryTidyUp:
         memory: MemoryStore,
         excerpt_chars: int,
         other_stories: int,
+        decisions: int,
         budget: timedelta,
     ) -> None:
         """Wire the operation to its seams and its bounds.
@@ -476,6 +526,8 @@ class StoryTidyUp:
             memory: The store its pending episodes are fetched from.
             excerpt_chars: The bound, in characters, on each episode's input and reply.
             other_stories: The most other stories it shows for §9:2's flag.
+            decisions: The most decisions recorded for the story it shows, newest
+                first (ADR-0302 §6:1).
             budget: How long one run may take, its completion included; a run past it
                 writes nothing and answers ``failed``, so a hung run does not hold
                 its story for ever.
@@ -483,7 +535,7 @@ class StoryTidyUp:
         Raises:
             ValueError: If a bound is not positive.
         """
-        if excerpt_chars < 1 or other_stories < 0 or budget.total_seconds() <= 0:
+        if excerpt_chars < 1 or other_stories < 0 or decisions < 0 or budget.total_seconds() <= 0:
             msg = "the tidy-up's bounds are positive"
             raise ValueError(msg)
         self._model = model
@@ -491,6 +543,7 @@ class StoryTidyUp:
         self._memory = memory
         self._excerpt_chars = excerpt_chars
         self._other_stories = other_stories
+        self._decisions = decisions
         self._budget = budget
         self._running: set[str] = set()
 
@@ -637,6 +690,7 @@ class StoryTidyUp:
         held |= await self._held(story_id, cited - held.keys())
         ordered = sorted(held.values(), key=lambda note: note.note_id)
         return _Reading(
+            story_id=story_id,
             state=state,
             notes={f"N{index}": note for index, note in enumerate(ordered, start=1)},
             episodes={f"E{index}": episode for index, episode in enumerate(episodes, start=1)},
@@ -648,7 +702,29 @@ class StoryTidyUp:
                 story_id,
                 frozenset(n.note_id for n in ordered if n.author is StoryNoteAuthor.OWNER),
             ),
+            decisions=await self._recorded(story_id),
         )
+
+    async def _recorded(
+        self, story_id: str
+    ) -> tuple[tuple[RecordedDecision, tuple[str, ...]], ...]:
+        """ADR-0302 §6:1: the decisions recorded for the story, newest first, with their stories.
+
+        Read from the story's change log and those of the stories merged into it, and
+        only where one is found is anything more read: the headers, to follow each
+        flag's stories through merges, and, where a decision answers understanding's
+        flag, every change log, since only those say which stories hold its lines.
+        """
+        if self._decisions == 0:
+            return ()
+        decisions = (await recorded_decisions(self._stories, story_id))[: self._decisions]
+        if not decisions:
+            return ()
+        if any(decision.flag.activation is not None for decision in decisions):
+            records = await read_records(self._stories, versions=False)
+        else:
+            records = StoryRecords(headers=await read_headers(self._stories), logs={})
+        return tuple((decision, records.concerned(decision.flag)) for decision in decisions)
 
     async def _held(self, story_id: str, wanted: set[StoryNoteId]) -> dict[StoryNoteId, StoryNote]:
         """The notes ``wanted`` names that the story still holds, read page by page.

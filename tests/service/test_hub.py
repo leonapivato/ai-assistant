@@ -89,6 +89,7 @@ class FakeEngine:
         self.closed = 0
         self.purged = 0
         self.consolidated = 0
+        self.decided_flags = 0
         self.reconsidered = 0
         self.noticed = 0
         self.removed: list[str] = []
@@ -129,6 +130,13 @@ class FakeEngine:
         # would have armed.
         self.consolidated += 1
         _marker.info("fake_engine_consolidated")
+
+    async def decide_story_flags(self) -> None:
+        # ADR-0300 §9:3's matters pass, on consolidation's interval. Present for
+        # ``consolidate``'s reason exactly: `jobs_for` builds the whole table before
+        # filtering it by interval.
+        self.decided_flags += 1
+        _marker.info("fake_engine_decided_story_flags")
 
     async def notice_upcoming_events(self) -> int:
         # ADR-0132's upcoming-event producer. Present for ``consolidate``'s reason

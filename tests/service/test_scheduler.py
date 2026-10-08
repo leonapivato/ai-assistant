@@ -43,6 +43,7 @@ from ai_assistant.core.protocols import AssistantEngine
 from ai_assistant.core.types import GrantScope
 from ai_assistant.orchestration.consolidation import ConsolidationReport
 from ai_assistant.orchestration.engine import ENGINE_SHUTTING_DOWN, Engine
+from ai_assistant.orchestration.matters_pass import MattersPassReport
 from ai_assistant.readers import CALENDAR_READER_NAME
 from ai_assistant.service.scheduler import Job, Scheduler, jobs_for
 
@@ -974,12 +975,45 @@ async def test_the_consolidation_job_is_absent_until_an_operator_arms_it(
             "conversation_sweep",
             "notification_reconsider",
             "consolidation",
+            "matters_pass",
         ]
-        assert armed[-1].interval == timedelta(hours=6)
+        consolidation = armed[-2]
+        assert consolidation.interval == timedelta(hours=6)
         # By identity, not by name: ADR-0083 §8's "every job is a bound public
         # engine method", and ADR-0111 §1's cursor stays below the façade because
         # the body takes no argument and this row neither reads it nor passes it.
-        assert armed[-1].run == engine.consolidate
+        assert consolidation.run == engine.consolidate
+    finally:
+        await engine.aclose()
+
+
+async def test_the_matters_pass_runs_on_consolidations_schedule_and_only_with_it(
+    tmp_path: Path,
+) -> None:
+    """ADR-0300 §9:3: the matters pass runs "on the schedule of the background memory
+    work, consolidation".
+
+    So its row reads ``consolidation_interval`` and nothing of its own: absent where
+    consolidation is, armed at the same interval where it is, and last, behind the one
+    other row bounded by a run budget rather than a backlog. Bound by identity to the
+    engine's concrete maintenance method (ADR-0083 §8), which takes no argument.
+    """
+    engine = build_engine(Settings(embedder=EmbedderKind.HASHING), data_dir=tmp_path)
+    try:
+        unarmed = jobs_for(engine, Settings())
+        assert "matters_pass" not in {job.name for job in unarmed}
+
+        armed = jobs_for(engine, Settings(consolidation_interval=timedelta(hours=6)))
+        matters = armed[-1]
+        assert matters.name == "matters_pass"
+        assert matters.interval == timedelta(hours=6)
+        assert matters.run == engine.decide_story_flags
+        # The production composition wires the pass, so the row's body runs rather
+        # than refusing as an engine with none would: over an empty store it finds
+        # no flag and makes no model call.
+        report = await matters.run()
+        assert isinstance(report, MattersPassReport)
+        assert (report.flags, report.exhausted) == (0, True)
     finally:
         await engine.aclose()
 

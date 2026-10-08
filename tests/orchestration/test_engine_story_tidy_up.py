@@ -78,6 +78,7 @@ def _tidy_up(model: Any, stories: FakeStoryStore, memory: FakeMemoryStore) -> St
         memory=memory,
         excerpt_chars=2000,
         other_stories=5,
+        decisions=5,
         budget=_BUDGET,
     )
 
@@ -208,6 +209,7 @@ async def test_a_crashing_run_is_logged_by_its_class_alone_and_never_raised() ->
         memory=memory,
         excerpt_chars=1,
         other_stories=0,
+        decisions=0,
         budget=_BUDGET,
     )
     (run,) = InterimTidyUp(tidy_up=crashing).runs(
