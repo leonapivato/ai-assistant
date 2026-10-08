@@ -22,6 +22,8 @@ from ai_assistant.core.types import (
     ProposedRelationship,
     RecordedChannelTrigger,
     RecordedTextInput,
+    StoryMember,
+    StoryMemberKind,
     UnderstandingGround,
     UnderstandingOmission,
     UnderstandingProducer,
@@ -132,7 +134,10 @@ def test_a_proposal_carries_labels_and_no_identity() -> None:
         "references",
         "relationships",
         "unresolved",
+        # ADR-0300 §6:6: the labels of the matters the input belongs with.
+        "story_labels",
     }
+    assert proposal.story_labels == ()
     assert proposal.references[0].labels == ("H1", "P2")
     for forbidden in ("version", "recorded_at", "producer", "id"):
         with pytest.raises(ValidationError):
@@ -221,10 +226,32 @@ def test_a_recorded_understanding_carries_no_label() -> None:
         "relationships",
         "unresolved",
         "grounding_dropped",
+        # ADR-0300 §6:7: the story labels, resolved to story members.
+        "story_links",
     }
     for model in (ActivationUnderstanding, UnderstandingReference, UnderstandingRelationship):
         assert "labels" not in model.model_fields
         assert "meaning_labels" not in model.model_fields
+        assert "story_labels" not in model.model_fields
+
+
+def test_story_links_default_to_none_and_name_each_member_once() -> None:
+    """ADR-0300 §6:7, §12:1: empty by default, in proposal order, no member twice."""
+    story = StoryMember(kind=StoryMemberKind.STORY, id="story:1")
+    earlier = StoryMember(kind=StoryMemberKind.ACTIVATION, id="a-1")
+
+    assert _understanding().story_links == ()
+    assert _understanding(story_links=(earlier, story)).story_links == (earlier, story)
+    with pytest.raises(ValidationError, match="at most once"):
+        _understanding(story_links=(story, earlier, story))
+
+
+def test_a_record_written_before_story_links_validates_unchanged() -> None:
+    """ADR-0300 §12:1: the field defaults to empty, so an older record's JSON still reads."""
+    older = _understanding().model_dump(mode="json")
+    del older["story_links"]
+
+    assert ActivationUnderstanding.model_validate(older).story_links == ()
 
 
 def test_referent_kinds_and_the_exactly_as_stored_episode_id() -> None:

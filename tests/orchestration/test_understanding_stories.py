@@ -1,0 +1,289 @@
+"""ADR-0300 §6:5-§6:9: the understanding stage renders the candidate stories and links them.
+
+The stage alone, over a scripted model and hand-built short views: the fourth section,
+its ``S`` labels and the instruction (§6:5, §6:9), ``story_labels`` resolved into
+``story_links`` (§6:6, §6:7), and a defective story label repaired once and then
+dropped and counted (§6:8). Which candidates are assembled is ``test_story_links.py``'s.
+"""
+
+from __future__ import annotations
+
+import asyncio
+import json
+from typing import TYPE_CHECKING, Any, Final
+
+import pytest
+from story_support import AT, EVENTS, activation, episode, story
+
+from ai_assistant.core.types import (
+    ActivationRecall,
+    BeliefBand,
+    ChannelContext,
+    ChannelContextItem,
+    MemoryKind,
+    MemorySource,
+    Provenance,
+    RecallCue,
+    RecalledItem,
+    RecallOutcome,
+    RecallProvenance,
+    SemanticMemory,
+    StoryNote,
+    StoryNoteAuthor,
+    StoryPageLine,
+)
+from ai_assistant.orchestration.disclosure import BoundedAudienceSupply
+from ai_assistant.orchestration.story_links import Candidates, ShortView
+from ai_assistant.orchestration.understanding import SuppliedWindow, UnderstandingStage
+from ai_assistant.testing import FakeModelProvider
+
+if TYPE_CHECKING:
+    from ai_assistant.core.types import ActivationUnderstanding, EpisodicMemory
+
+BOUNDED: Final = BoundedAudienceSupply(speakable_attested_sources=frozenset())
+WINDOW: Final = SuppliedWindow(
+    ChannelContext(history=(ChannelContextItem(text="Trip plans", item_id="item-1"),))
+)
+
+
+def _proposal(**fields: Any) -> str:
+    return json.dumps({"meaning": "The canoe is booked.", "meaning_ground": "stated"} | fields)
+
+
+def _note(note_id: int, text: str, **fields: Any) -> StoryNote:
+    values: dict[str, Any] = {
+        "note_id": note_id,
+        "text": text,
+        "author": StoryNoteAuthor.PLANNING,
+        "rests_on": "a-1",
+        "outside": False,
+        "written_at": AT,
+    }
+    return StoryNote.model_validate(values | fields)
+
+
+_TRIP: Final = ShortView(
+    story_id="story:trip",
+    lines=(
+        StoryPageLine(text="A camping trip to Riverside.", cites=(1,), outside=False),
+        StoryPageLine(text="The park says the lake is closed.", cites=(2,), outside=True),
+    ),
+    notes=(
+        _note(
+            4,
+            "Waiting on your answer about the canoe.",
+            author=StoryNoteAuthor.OWNER,
+            rests_on=None,
+        ),
+        _note(3, "The campground emailed a new rate.", outside=True),
+    ),
+    episodes=(episode("a-1", text="Book the canoe for Sunday."),),
+)
+_RUNNING: Final = ShortView(story_id="story:running", lines=(), notes=(), episodes=())
+
+
+async def _understand(
+    model: FakeModelProvider,
+    *,
+    stories: Candidates | None,
+    episodes: tuple[EpisodicMemory, ...] = (),
+    recalled: tuple[EpisodicMemory | SemanticMemory, ...] = (),
+) -> ActivationUnderstanding:
+    recall = None
+    if recalled:
+        recall = ActivationRecall(
+            outcome=RecallOutcome.FOUND,
+            cues=(RecallCue.ACTIVATION_INPUT,),
+            items=tuple(_item(record.id, MemoryKind(record.kind)) for record in recalled),
+        )
+    return await UnderstandingStage(model=model, excerpt_chars=2000).understand(
+        "The canoe is booked.",
+        channel=EVENTS,
+        window=WINDOW,
+        audience=BOUNDED,
+        episodes=episodes,
+        version=1,
+        now=lambda: AT,
+        deadline=asyncio.get_running_loop().time() + 60,
+        recall=recall,
+        recalled=recalled,
+        stories=stories,
+    )
+
+
+def _item(record_id: str, kind: MemoryKind) -> RecalledItem:
+    return RecalledItem(
+        kind=kind,
+        id=record_id,
+        excerpt="x",
+        provenance=RecallProvenance.USER,
+        standing=BeliefBand.DERIVED,
+        rests_on_recorded_external_content=False,
+        found_by=(RecallCue.ACTIVATION_INPUT,),
+    )
+
+
+_FACT: Final = SemanticMemory(
+    id="fact-1",
+    content="The canoe holds two.",
+    fact="The canoe holds two.",
+    provenance=Provenance(source=MemorySource.OBSERVED, confidence=0.9, last_updated=AT),
+)
+
+
+def _payload(model: FakeModelProvider, call: int = 0) -> dict[str, Any]:
+    loaded: dict[str, Any] = json.loads(model.calls[call].messages[1].content)
+    return loaded
+
+
+def _instruction(model: FakeModelProvider) -> str:
+    return model.calls[0].messages[0].content
+
+
+# --- §6:5, §6:9: the fourth section and its instruction ------------------------------
+
+
+async def test_no_candidates_render_no_section_and_leave_the_instruction_alone() -> None:
+    model = FakeModelProvider(_proposal())
+
+    understood = await _understand(model, stories=None)
+
+    assert "stories" not in _payload(model)
+    assert "story_labels" not in _instruction(model)
+    assert "S1" not in _instruction(model)
+    assert understood.story_links == ()
+
+
+async def test_the_candidates_render_under_s_labels_attributed_by_their_records() -> None:
+    model = FakeModelProvider(_proposal())
+
+    await _understand(model, stories=Candidates(views=(_TRIP, _RUNNING)))
+
+    first, second = _payload(model)["stories"]
+    assert (first["label"], second["label"]) == ("S1", "S2")
+    assert [line["text"] for line in first["page"]] == [
+        "A camping trip to Riverside.",
+        "The park says the lake is closed.",
+    ]
+    # §4:6: a marked line or note is shown as outside content, never as the user's words.
+    assert "outside_content" not in first["page"][0]
+    assert "never something the user said" in first["page"][1]["outside_content"]
+    owner, outside = first["newest_notes"]
+    assert owner["written_by"] == "the user, writing on this story's page directly"
+    assert "outside_content" not in owner
+    assert "never something the user said" in outside["outside_content"]
+    # §6:5: the episodes inside a short view take no label.
+    (shown,) = first["latest_episodes"]
+    assert "label" not in shown
+    assert shown["input"] == "Book the canoe for Sunday."
+    assert second["page"].startswith("missing:")
+    assert second["newest_notes"].startswith("missing:")
+    assert second["latest_episodes"].startswith("missing:")
+
+
+async def test_the_instruction_states_what_a_link_says_and_asks_for_story_labels() -> None:
+    model = FakeModelProvider(_proposal())
+
+    await _understand(model, stories=Candidates(views=(_TRIP,)))
+
+    instruction = _instruction(model)
+    # §6:9's three statements.
+    assert "A link says the input belongs to that matter and nothing more." in instruction
+    assert "One input may belong to several matters." in instruction
+    assert "An input that belongs to none is linked to none" in instruction
+    assert '"story_labels"' in instruction
+
+
+@pytest.mark.parametrize(
+    ("candidates", "said"),
+    [
+        (Candidates(unreadable=True), "the stories could not be read"),
+        (Candidates(), "belongs to a story"),
+    ],
+)
+async def test_a_section_with_no_story_says_why(candidates: Candidates, said: str) -> None:
+    model = FakeModelProvider(_proposal())
+
+    await _understand(model, stories=candidates)
+
+    section = _payload(model)["stories"]
+    assert isinstance(section, str)
+    assert section.startswith("missing:")
+    assert said in section
+
+
+# --- §6:6, §6:7: story labels resolved -------------------------------------------------
+
+
+async def test_story_labels_resolve_to_stories_and_earlier_activations_in_order_once() -> None:
+    model = FakeModelProvider(_proposal(story_labels=["S2", "P1", "M1", "S2"]))
+    recalled = episode("a-7")
+
+    understood = await _understand(
+        model,
+        stories=Candidates(views=(_TRIP, _RUNNING)),
+        episodes=(episode("a-2"),),
+        recalled=(recalled,),
+    )
+
+    assert understood.story_links == (story("story:running"), activation("a-2"), activation("a-7"))
+    assert understood.grounding_dropped == 0
+    assert len(model.calls) == 1
+
+
+# --- §6:8: a defective story label ------------------------------------------------------
+
+
+@pytest.mark.parametrize("label", ["H1", "S3", "M1", "P9", "trip"])
+async def test_a_defective_story_label_is_repaired_once_then_dropped_and_counted(
+    label: str,
+) -> None:
+    bad = _proposal(story_labels=["S1", label])
+    model = FakeModelProvider.scripted(bad, bad)
+
+    understood = await _understand(
+        model, stories=Candidates(views=(_TRIP,)), episodes=(episode("a-2"),), recalled=(_FACT,)
+    )
+
+    assert len(model.calls) == 2
+    statement = model.calls[1].messages[-1].content
+    assert "story labels name no story and no earlier episode" in statement
+    assert "S1 (the stories section)" in statement
+    assert understood.story_links == (story("story:trip"),)
+    assert understood.grounding_dropped == 1
+
+
+async def test_a_repaired_story_label_is_recorded() -> None:
+    model = FakeModelProvider.scripted(
+        _proposal(story_labels=["H1"]), _proposal(story_labels=["S1"])
+    )
+
+    understood = await _understand(model, stories=Candidates(views=(_TRIP,)))
+
+    assert understood.story_links == (story("story:trip"),)
+    assert understood.grounding_dropped == 0
+
+
+async def test_an_episode_of_no_activation_is_not_a_story_label() -> None:
+    legacy = episode("a-2").model_copy(update={"processing_record": None})
+    model = FakeModelProvider.scripted(
+        _proposal(story_labels=["P1"]), _proposal(story_labels=["P1"])
+    )
+
+    understood = await _understand(model, stories=Candidates(views=()), episodes=(legacy,))
+
+    assert understood.story_links == ()
+    assert understood.grounding_dropped == 1
+
+
+async def test_an_s_label_cited_as_a_referent_resolves_to_nothing() -> None:
+    model = FakeModelProvider.scripted(
+        _proposal(meaning_ground="supplied", meaning_labels=["S1"]),
+        _proposal(meaning_ground="supplied", meaning_labels=["S1"]),
+    )
+
+    understood = await _understand(model, stories=Candidates(views=(_TRIP,)))
+
+    statement = model.calls[1].messages[-1].content
+    assert "An S label names a story and is cited in `story_labels` alone." in statement
+    assert understood.meaning_referents == ()
